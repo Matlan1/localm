@@ -650,10 +650,16 @@ def tool_generate_image(cwd: Path, prompt: str, output_path: str = "output.png")
             f"{wf_path}"
         )
 
-    # 6. Randomise KSampler seed so every run is unique
+    # 6. Randomise seed so every run is unique.
+    #    Handles both KSampler-style and SamplerCustomAdvanced-style (RandomNoise node).
+    seed = random.randint(1, 10 ** 12)
     for node in workflow.values():
-        if node.get("class_type") in ("KSampler", "KSamplerAdvanced"):
-            node["inputs"]["seed"] = random.randint(1, 10 ** 12)
+        cls = node.get("class_type", "")
+        if cls in ("KSampler", "KSamplerAdvanced"):
+            node["inputs"]["seed"] = seed
+            break
+        if cls == "RandomNoise":
+            node["inputs"]["noise_seed"] = seed
             break
 
     # 7. Queue the prompt in ComfyUI
