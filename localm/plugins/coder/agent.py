@@ -31,10 +31,12 @@ from .memory import load_memory, remember, forget
 from .parser import ToolCall, parse_tool_calls, split_response
 from .tools import TOOL_REGISTRY, ToolResult
 from .display import (
-    console,
     confirm,
+    confirm_diff,
+    console,
     print_assistant_label,
     print_assistant_response,
+    print_diff_preview,
     print_info,
     print_streaming_done,
     print_streaming_token,
@@ -413,9 +415,10 @@ class Agent:
         if interactive:
             print_tool_call(call.name, call.args)
 
-        # Confirmation for destructive tools
+        # Confirmation for destructive tools — with diff preview for write_file
         if tool_def.destructive and not self.auto_approve and interactive:
-            if not confirm(f"  Allow {call.name}?"):
+            approved = self._confirm_tool(call)
+            if not approved:
                 result = ToolResult.error("Rejected by user.")
                 print_tool_result(call.name, result, verbose=False)
                 return result
@@ -441,6 +444,32 @@ class Agent:
             self._refresh_map_for_tool(call)
 
         return result
+
+    def _confirm_tool(self, call: ToolCall) -> bool:
+        """
+        Ask the user to approve a destructive tool call.
+
+        For *write_file*, shows a coloured unified diff of the proposed change
+        before the prompt so the user can see exactly what will happen.
+        For all other destructive tools, falls back to a plain y/N prompt.
+        """
+        if call.name == "write_file":
+            path_arg = call.args.get("path", "")
+            new_content = call.args.get("content", "")
+            abs_path = (self.cwd / path_arg).resolve() if path_arg else None
+
+            # Read current content (empty string if file doesn't exist)
+            old_content = ""
+            if abs_path and abs_path.is_file():
+                try:
+                    old_content = abs_path.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    pass
+
+            print_diff_preview(old_content, new_content, path_label=path_arg)
+            return confirm_diff(path_arg or "file")
+
+        return confirm(f"  Allow {call.name}?")
 
     def _refresh_map_for_tool(self, call: ToolCall) -> None:
         """Update the project map for files touched by a write/edit tool call."""

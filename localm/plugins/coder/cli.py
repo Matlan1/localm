@@ -22,6 +22,7 @@ from rich.console import Console
 
 from .backends.http import HTTPBackend, make_localm_backend, make_openai_backend
 from .agent import Agent
+from .project_config import load_project_config
 from .display import (
     confirm,
     console,
@@ -57,12 +58,12 @@ if sys.platform == "win32":
               help="Working directory [default: current directory].")
 @click.option("--no-server",        is_flag=True,
               help="Don't start localm serve — assume server is already running.")
-@click.option("--max-turns",        default=40,    type=int,
-              help="Max agent iterations per task [default: 40].")
+@click.option("--max-turns",        default=None,  type=int,
+              help="Max agent iterations per task [default: 40, or from .localcoder/config.toml].")
 @click.option("--temperature",      default=None,  type=float,
               help="Sampling temperature.")
-@click.option("--max-tokens",       default=2048,  type=int,
-              help="Max tokens per LLM response [default: 2048].")
+@click.option("--max-tokens",       default=None,  type=int,
+              help="Max tokens per LLM response [default: 2048, or from .localcoder/config.toml].")
 @click.option("--verbose",          is_flag=True,
               help="Print full tool outputs.")
 @click.option("--yes", "-y",        is_flag=True,
@@ -94,6 +95,23 @@ def main(
       localcoder --anthropic --model claude-opus-4-5 "add tests"
     """
     work_dir = Path(cwd).resolve() if cwd else Path.cwd()
+
+    # ------------------------------------------------------------------ #
+    #  Project-level config (.localcoder/config.toml) — CLI flags override
+    # ------------------------------------------------------------------ #
+    proj_cfg = load_project_config(work_dir)
+    if model is None:
+        model = proj_cfg.get("model")
+    if max_turns is None:
+        max_turns = int(proj_cfg.get("max_turns", 40))
+    if max_tokens is None:
+        max_tokens = int(proj_cfg.get("max_tokens", 2048))
+    if temperature is None and "temperature" in proj_cfg:
+        temperature = float(proj_cfg["temperature"])
+    # auto_approve: config applies only when --yes flag was NOT passed
+    if not yes and proj_cfg.get("auto_approve"):
+        yes = True
+
     gen_kw   = {k: v for k, v in [
         ("temperature", temperature),
         ("max_tokens",  max_tokens),

@@ -6,6 +6,7 @@ Keeps all formatting in one place so the Agent class stays clean.
 
 from __future__ import annotations
 
+import difflib
 from pathlib import Path
 from typing import Optional
 
@@ -152,6 +153,62 @@ def print_server_ready(port: int) -> None:
 
 def print_server_timeout() -> None:
     console.print("[red]Server did not start in time. Is localm installed?[/red]")
+
+
+# ---------------------------------------------------------------------------
+#  Diff preview
+# ---------------------------------------------------------------------------
+
+def print_diff_preview(
+    old_text: str,
+    new_text: str,
+    path_label: str = "",
+    max_lines: int = 200,
+) -> None:
+    """
+    Print a coloured unified diff between *old_text* and *new_text*.
+
+    Parameters
+    ----------
+    old_text:
+        Current file content (empty string if the file doesn't exist yet).
+    new_text:
+        Proposed new content.
+    path_label:
+        Shown in the diff header (e.g. "src/main.py").
+    max_lines:
+        Truncate the displayed diff at this many lines.
+    """
+    from_label = f"a/{path_label}" if path_label else "a/current"
+    to_label   = f"b/{path_label}" if path_label else "b/proposed"
+
+    diff_lines = list(difflib.unified_diff(
+        old_text.splitlines(keepends=True),
+        new_text.splitlines(keepends=True),
+        fromfile=from_label,
+        tofile=to_label,
+    ))
+
+    if not diff_lines:
+        console.print("[dim]  (no changes)[/dim]")
+        return
+
+    diff_text = "".join(diff_lines[:max_lines])
+    if len(diff_lines) > max_lines:
+        diff_text += f"\n... ({len(diff_lines) - max_lines} more lines truncated)\n"
+
+    console.print()
+    console.print(Syntax(diff_text, "diff", theme="monokai", line_numbers=False))
+
+
+def confirm_diff(path_label: str) -> bool:
+    """Prompt 'Apply changes to <path>? [y/N]' and return True on yes."""
+    try:
+        prompt = f"Apply changes to [bold]{path_label}[/bold]? [y/N] "
+        answer = console.input(f"[yellow]{prompt}[/yellow]").strip().lower()
+        return answer in ("y", "yes")
+    except (KeyboardInterrupt, EOFError):
+        return False
 
 
 # ---------------------------------------------------------------------------
