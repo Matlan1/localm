@@ -1,0 +1,69 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "localm"
+version = "0.1.0"
+description = "Run local LLMs offline — HuggingFace and GGUF, multimodal, AMD/NVIDIA/CPU"
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.1",
+    "rich>=13.0",
+    "requests>=2.31",
+    "huggingface-hub>=0.23",
+    "pydantic>=2.0",
+    "fastapi>=0.111",
+    "uvicorn>=0.30",
+]
+
+[project.optional-dependencies]
+# AMD RDNA2 (RX 6xxx) GPU stack — ROCm 7.13.0, Python 3.12, Windows
+# Install with:  uv pip install -e ".[gpu]"  (requires Python 3.12 venv)
+gpu = [
+    "transformers[kernels]~=5.10",
+    "accelerate>=1.0",
+    "pillow>=10.0",
+    "torch==2.9.1+rocm7.13.0; sys_platform == 'win32'",
+    "torchvision==0.24.0+rocm7.13.0; sys_platform == 'win32'",
+    "rocm; sys_platform == 'win32'",
+    "rocm-sdk-core; sys_platform == 'win32'",
+    "rocm-sdk-libraries-gfx103x-all; sys_platform == 'win32'",
+]
+# In-process GGUF inference — AMD GPU build:
+#   pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/rocm602
+gguf = [
+    "llama-cpp-python>=0.2.90",
+]
+# Audio multimodal (Gemma4 unified audio)
+audio = [
+    "soundfile>=0.12",
+]
+
+[project.scripts]
+localm = "localm.cli:main"
+
+[tool.uv]
+exclude-newer-package = { rocm = false, rocm-sdk-core = false, rocm-sdk-libraries-gfx103x-all = false, torch = false, torchvision = false, transformers = false }
+
+[[tool.uv.index]]
+name = "rocm-gfx1030"
+url = "https://repo.amd.com/rocm/whl/gfx103X-all/"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+  { url = "https://repo.amd.com/rocm/whl/gfx103X-all/torch-2.9.1%2Brocm7.13.0-cp312-cp312-win_amd64.whl", marker = "sys_platform == 'win32' and python_version == '3.12'" },
+]
+torchvision = [
+  { url = "https://repo.amd.com/rocm/whl/gfx103X-all/torchvision-0.24.0%2Brocm7.13.0-cp312-cp312-win_amd64.whl", marker = "sys_platform == 'win32' and python_version == '3.12'" },
+]
+rocm = [
+  { index = "rocm-gfx1030", marker = "sys_platform == 'win32'" },
+]
+rocm-sdk-core = [
+  { index = "rocm-gfx1030", marker = "sys_platform == 'win32'" },
+]
+rocm-sdk-libraries-gfx103x-all = [
+  { index = "rocm-gfx1030", marker = "sys_platform == 'win32'" },
+]

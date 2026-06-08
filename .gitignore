@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+.uv/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Test artefacts
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Secrets / local state
+*.env
+.env.local
+
+# localm user data (downloaded models, config — not source)
+# (these live in ~/.localm/, not in the repo)
+registry.json
+config.json
