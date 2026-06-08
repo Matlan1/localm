@@ -298,6 +298,7 @@ class LlamaCpp:
         cp = api.llama_context_default_params()
         cp.n_ctx             = n_ctx
         cp.n_batch           = min(n_ctx, 2048)
+        cp.n_ubatch          = cp.n_batch   # match micro-batch to batch
         cp.offload_kqv       = True
         cp.flash_attn_type   = -1  # keep default (unspecified)
         if n_threads is not None:
@@ -378,6 +379,7 @@ class LlamaCpp:
         cp = api.llama_context_default_params()
         cp.n_ctx       = max(self._n_ctx, len(prompt_tokens) + max_new_tokens + 64)
         cp.n_batch     = min(cp.n_ctx, 2048)
+        cp.n_ubatch    = cp.n_batch   # micro-batch must match so prefill fits in one call
         cp.offload_kqv = True
 
         self._ctx_ptr = api.llama_init_from_model(self._model_ptr, cp)
