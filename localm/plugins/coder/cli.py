@@ -23,7 +23,11 @@ from rich.console import Console
 from .backends.http import HTTPBackend, make_localm_backend, make_openai_backend
 from .agent import Agent
 from .audit import SessionMode, parse_mode
-from .privacy import suppress_readline_history, warn_external_provider
+from .privacy import (
+    clear_shell_history_traces,
+    suppress_readline_history,
+    warn_external_provider,
+)
 from .project_config import load_project_config
 from .display import (
     confirm,
@@ -218,6 +222,8 @@ def main(
         md_path = agent.close()
         if md_path:
             print_info(f"Session transcript saved → {md_path}")
+        if session_mode == SessionMode.PRIVACY:
+            clear_shell_history_traces()
         if server_ctx:
             server_ctx.stop()
 
@@ -360,7 +366,11 @@ def _handle_command(raw: str, agent: Agent) -> bool:
             # Show current mode
             m = agent.mode.value
             notes = {
-                "privacy": "nothing is saved automatically (/save still works)",
+                "privacy": (
+                    "nothing saved; readline + shell history scrubbed on exit. "
+                    "cmd.exe: no history anyway. "
+                    "Online providers are explicit opt-in — warning shown if active."
+                ),
                 "log":     "JSONL audit trail → ~/.localm/sessions/",
                 "full":    "JSONL audit trail + markdown transcript on exit",
             }
