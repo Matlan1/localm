@@ -425,10 +425,12 @@ class Agent:
                 print_tool_result(call.name, result, verbose=False)
                 return result
 
-        # Inject parent agent reference for spawn_agent
+        # Inject hidden runtime args into specific tools
         args = dict(call.args)
         if call.name == "spawn_agent":
             args["_parent_agent"] = self
+        if call.name == "run_shell" and self.mode == SessionMode.PRIVACY:
+            args["_privacy"] = True
 
         try:
             result = tool_def.fn(self.cwd, **args)

@@ -209,13 +209,29 @@ def tool_patch_file(cwd: Path, path: str, diff: str) -> ToolResult:
     )
 
 
-def tool_run_shell(cwd: Path, command: str, timeout: int = 30) -> ToolResult:
-    """Execute a shell command.  Uses the system shell via a list invocation."""
+def tool_run_shell(
+    cwd: Path,
+    command: str,
+    timeout: int = 30,
+    _privacy: bool = False,
+) -> ToolResult:
+    """
+    Execute a shell command.  Uses the system shell via a list invocation.
+
+    In privacy mode (``_privacy=True``, injected by the agent) the subprocess
+    environment has shell-history variables zeroed so that the command cannot
+    be persisted to bash/sh/zsh history files.
+    """
     shell_cmd: list[str]
     if sys.platform == "win32":
         shell_cmd = ["cmd", "/C", command]
     else:
         shell_cmd = ["/bin/sh", "-c", command]
+
+    env: dict | None = None
+    if _privacy:
+        from .privacy import subprocess_privacy_env
+        env = subprocess_privacy_env()
 
     try:
         proc = subprocess.run(
@@ -226,6 +242,7 @@ def tool_run_shell(cwd: Path, command: str, timeout: int = 30) -> ToolResult:
             timeout=timeout,
             encoding="utf-8",
             errors="replace",
+            env=env,
         )
     except subprocess.TimeoutExpired:
         return ToolResult.error(f"Command timed out after {timeout}s")
@@ -410,6 +427,9 @@ def tool_spawn_agent(
     if preload_text:
         full_task = f"Context files:\n{preload_text}\n\nTask:\n{task}"
 
+    from .audit import SessionMode as _SessionMode
+    inherited_mode = getattr(_parent_agent, "mode", _SessionMode.PRIVACY)
+
     child = Agent(
         backend=backend,
         cwd=cwd,
@@ -418,6 +438,7 @@ def tool_spawn_agent(
         verbose=False,
         auto_approve=True,
         parent=_parent_agent,
+        mode=inherited_mode,
     )
     result_text = child.run_task(full_task)
     turns_used  = child.turns

@@ -258,8 +258,13 @@ HELP_TEXT = """\
 
 [dim]Session modes (set with --mode at startup or mode = "..." in .localcoder/config.toml):
   privacy  nothing saved automatically (default)
+             - readline history suppressed (REPL input not written to ~/.python_history)
+             - subprocess shell history vars zeroed (HISTFILE, HISTSIZE, …)
+             - /save requires explicit confirmation
   log      JSONL audit trail → ~/.localm/sessions/
-  full     JSONL audit trail + markdown transcript → .localcoder/sessions/[/dim]
+  full     JSONL audit trail + markdown transcript → .localcoder/sessions/
+  Note: privacy mode cannot suppress your terminal's own history (PSReadLine /
+  bash), OS process logs, or prompts sent to external API providers.[/dim]
 """
 
 def print_help() -> None:

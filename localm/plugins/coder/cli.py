@@ -23,6 +23,7 @@ from rich.console import Console
 from .backends.http import HTTPBackend, make_localm_backend, make_openai_backend
 from .agent import Agent
 from .audit import SessionMode, parse_mode
+from .privacy import suppress_readline_history, warn_external_provider
 from .project_config import load_project_config
 from .display import (
     confirm,
@@ -128,6 +129,13 @@ def main(
     except ValueError as exc:
         print_error(str(exc))
         sys.exit(1)
+
+    # Privacy-mode setup — suppress readline history as early as possible
+    if session_mode == SessionMode.PRIVACY:
+        suppress_readline_history()
+    # Warn when privacy mode is requested but prompts leave the machine
+    if session_mode == SessionMode.PRIVACY and provider in ("openai", "anthropic"):
+        warn_external_provider(provider)
 
     gen_kw   = {k: v for k, v in [
         ("temperature", temperature),
@@ -366,6 +374,14 @@ def _handle_command(raw: str, agent: Agent) -> bool:
 
     elif cmd == "save":
         filepath = Path(arg) if arg else Path("conversation.json")
+        if agent.mode == SessionMode.PRIVACY:
+            console.print(
+                "[yellow]⚠  Privacy mode is active. "
+                "This will write the conversation to disk.[/yellow]"
+            )
+            if not confirm(f"  Save to {filepath}?"):
+                print_info("Cancelled.")
+                return False
         try:
             agent.save_history(filepath)
             print_success(f"Saved to {filepath}")
