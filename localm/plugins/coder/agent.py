@@ -102,10 +102,15 @@ class Agent:
         self._messages: list[dict] = []
         self._turns: int = 0
         self._total_tokens: int = 0
+        self._model_name: str = getattr(backend, "model_id", "")
         self._project_map: ProjectMap = ProjectMap.build(cwd)
         self._memory: str = load_memory(cwd)
         self._system_prompt: str = build_system_prompt(
-            cwd, agent_name=name, project_map=self._project_map, memory=self._memory
+            cwd,
+            agent_name=name,
+            project_map=self._project_map,
+            memory=self._memory,
+            model_name=self._model_name,
         )
 
     @property
@@ -132,14 +137,22 @@ class Agent:
         self._project_map = ProjectMap.build(cwd)
         self._memory = load_memory(cwd)
         self._system_prompt = build_system_prompt(
-            cwd, agent_name=self.name, project_map=self._project_map, memory=self._memory
+            cwd,
+            agent_name=self.name,
+            project_map=self._project_map,
+            memory=self._memory,
+            model_name=self._model_name,
         )
 
     def reindex(self) -> int:
         """Rebuild the full project map and regenerate the system prompt."""
         self._project_map = ProjectMap.build(self.cwd)
         self._system_prompt = build_system_prompt(
-            self.cwd, agent_name=self.name, project_map=self._project_map, memory=self._memory
+            self.cwd,
+            agent_name=self.name,
+            project_map=self._project_map,
+            memory=self._memory,
+            model_name=self._model_name,
         )
         return self._project_map.file_count()
 
@@ -147,7 +160,11 @@ class Agent:
         """Re-read the memory file from disk and rebuild the system prompt."""
         self._memory = load_memory(self.cwd)
         self._system_prompt = build_system_prompt(
-            self.cwd, agent_name=self.name, project_map=self._project_map, memory=self._memory
+            self.cwd,
+            agent_name=self.name,
+            project_map=self._project_map,
+            memory=self._memory,
+            model_name=self._model_name,
         )
         return self._memory
 
@@ -332,7 +349,11 @@ class Agent:
             self._project_map.refresh_file(abs_path)
             # Regenerate system prompt with updated map
             self._system_prompt = build_system_prompt(
-                self.cwd, agent_name=self.name, project_map=self._project_map
+                self.cwd,
+                agent_name=self.name,
+                project_map=self._project_map,
+                memory=self._memory,
+                model_name=self._model_name,
             )
 
     # ------------------------------------------------------------------ #
