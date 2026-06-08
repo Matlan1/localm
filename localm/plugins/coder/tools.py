@@ -373,77 +373,121 @@ def tool_spawn_agent(
     )
 
 
+def _localm_unload() -> None:
+    """
+    Ask localm to release its model from GPU memory so FLUX can use the VRAM.
+
+    Reads LOCALM_URL (set by ManagedServer when it starts localm serve).
+    Silent no-op if the env var isn't set (external server, not our problem)
+    or if the request fails for any reason.
+    """
+    import os, urllib.request, urllib.error
+    localm_url = os.environ.get("LOCALM_URL", "").rstrip("/")
+    if not localm_url:
+        return
+    try:
+        req = urllib.request.Request(
+            f"{localm_url}/models/unload",
+            data=b"",
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10):
+            pass
+    except Exception:
+        pass  # best-effort; don't block image generation if this fails
+
+
 def tool_generate_image(cwd: Path, prompt: str, output_path: str = "output.png") -> ToolResult:
     """
     Generate an image from a text prompt using a local ComfyUI FLUX GGUF setup.
     Connects to ComfyUI (via FLUX_API_URL or default http://127.0.0.1:8188).
+
+    Before queuing the image, the localm inference model is unloaded from GPU
+    memory so ComfyUI has the full VRAM budget for FLUX.  The model reloads
+    automatically on the next chat turn.
     """
-    import os
     import json
+    import os
+    import random
     import time
-    import urllib.request
     import urllib.error
     import urllib.parse
+    import urllib.request
+
+    from rich.console import Console as _Console
+    from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+
+    _con = _Console()
 
     # 1. Resolve output path
     out_p = _resolve(cwd, output_path)
 
-    # 2. Get API URL
+    # 2. API URL
     api_url = os.environ.get("FLUX_API_URL", "http://127.0.0.1:8188")
 
-    # 3. Load default workflow template
+    # 3. Unload LLM to free VRAM before FLUX loads
+    _localm_unload()
+
+    # 4. Load workflow template
     try:
         wf_path = Path(__file__).parent / "flux_workflow.json"
         workflow = json.loads(wf_path.read_text(encoding="utf-8"))
     except Exception as e:
         return ToolResult.error(f"Failed to load FLUX workflow template: {e}")
 
-    # 4. Inject prompt (Node "6" text)
-    if "6" in workflow and "inputs" in workflow["6"]:
+    # 5. Inject prompt — try node "6" first (default template), then scan for
+    #    any CLIPTextEncode node with a PROMPT_PLACEHOLDER value.
+    injected = False
+    if "6" in workflow and workflow["6"].get("inputs", {}).get("text") is not None:
         workflow["6"]["inputs"]["text"] = prompt
-    else:
-        # Fallback: search for any CLIPTextEncode and replace placeholder or inject
-        for nid, node in workflow.items():
+        injected = True
+    if not injected:
+        for node in workflow.values():
             if node.get("class_type") == "CLIPTextEncode":
-                if node.get("inputs", {}).get("text") == "PROMPT_PLACEHOLDER":
-                    node["inputs"]["text"] = prompt
-                    break
-        else:
-            return ToolResult.error("Invalid workflow template: Could not find prompt input node.")
+                node["inputs"]["text"] = prompt
+                injected = True
+                break
+    if not injected:
+        return ToolResult.error(
+            "Could not find a text-prompt node in the workflow template.\n"
+            "Export a fresh workflow from ComfyUI (Save → API format) and replace\n"
+            f"{wf_path}"
+        )
 
-    # Randomize seed in node "3" (KSampler) if present
-    if "3" in workflow and "inputs" in workflow["3"]:
-        import random
-        workflow["3"]["inputs"]["seed"] = random.randint(1, 10**12)
+    # 6. Randomise KSampler seed so every run is unique
+    for node in workflow.values():
+        if node.get("class_type") in ("KSampler", "KSamplerAdvanced"):
+            node["inputs"]["seed"] = random.randint(1, 10 ** 12)
+            break
 
-    # 5. Connect to ComfyUI
+    # 7. Queue the prompt in ComfyUI
     try:
-        # Queue the prompt
         req_data = json.dumps({"prompt": workflow}).encode("utf-8")
         req = urllib.request.Request(
             f"{api_url}/prompt",
             data=req_data,
-            headers={"Content-Type": "application/json"}
+            headers={"Content-Type": "application/json"},
         )
-
-        with urllib.request.urlopen(req, timeout=5) as response:
+        with urllib.request.urlopen(req, timeout=10) as response:
             res = json.loads(response.read().decode("utf-8"))
             prompt_id = res.get("prompt_id")
 
         if not prompt_id:
-            return ToolResult.error("Failed to queue prompt in ComfyUI: No prompt_id returned.")
+            return ToolResult.error(
+                "ComfyUI accepted the request but returned no prompt_id.\n"
+                "Check the ComfyUI console for workflow validation errors."
+            )
 
     except urllib.error.URLError as e:
         return ToolResult.error(
             f"Could not connect to ComfyUI at {api_url}.\n"
             f"Error: {e}\n"
-            f"Please verify that ComfyUI is running locally. For installation instructions, "
-            f"refer to your local setup guide at: brain/2b5d43e7-98db-4797-8471-07e63a748b60/flux_local_setup_guide.md"
+            "Make sure ComfyUI is running.  Setup guide: flux_local_setup_guide.md"
         )
     except Exception as e:
-        return ToolResult.error(f"Error calling ComfyUI API: {e}")
+        return ToolResult.error(f"Error queuing prompt in ComfyUI: {e}")
 
-    # 6. Poll the /history endpoint until finished
+    # 8. Poll /history with a visible progress spinner
     start_time = time.time()
     max_poll_time = 600
     finished = False
@@ -451,39 +495,53 @@ def tool_generate_image(cwd: Path, prompt: str, output_path: str = "output.png")
     subfolder = ""
     img_type = "output"
 
-    while time.time() - start_time < max_poll_time:
-        try:
-            hist_req = urllib.request.Request(f"{api_url}/history/{prompt_id}")
-            with urllib.request.urlopen(hist_req, timeout=5) as response:
-                history = json.loads(response.read().decode("utf-8"))
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[dim]{task.description}[/dim]"),
+        TimeElapsedColumn(),
+        transient=True,
+        console=_con,
+    ) as progress:
+        task_id = progress.add_task("Generating image…", total=None)
 
-            if prompt_id in history:
-                finished = True
-                outputs = history[prompt_id].get("outputs", {})
-                image_info = None
-                for node_id, node_output in outputs.items():
-                    if "images" in node_output:
-                        image_info = node_output["images"][0]
-                        break
+        while time.time() - start_time < max_poll_time:
+            elapsed = int(time.time() - start_time)
+            progress.update(task_id, description=f"Generating image… ({elapsed}s)")
 
-                if image_info:
-                    filename = image_info.get("filename")
-                    subfolder = image_info.get("subfolder", "")
-                    img_type = image_info.get("type", "output")
-                break
+            try:
+                hist_req = urllib.request.Request(
+                    f"{api_url}/history/{prompt_id}"
+                )
+                with urllib.request.urlopen(hist_req, timeout=5) as response:
+                    history = json.loads(response.read().decode("utf-8"))
 
-        except Exception:
-            pass
+                if prompt_id in history:
+                    finished = True
+                    outputs = history[prompt_id].get("outputs", {})
+                    for node_output in outputs.values():
+                        if "images" in node_output:
+                            img_info = node_output["images"][0]
+                            filename = img_info.get("filename")
+                            subfolder = img_info.get("subfolder", "")
+                            img_type  = img_info.get("type", "output")
+                            break
+                    break
 
-        time.sleep(2)
+            except Exception:
+                pass
+
+            time.sleep(2)
 
     if not finished:
         return ToolResult.error("Image generation timed out after 10 minutes.")
 
     if not filename:
-        return ToolResult.error("Image generation finished, but no output image filename was found.")
+        return ToolResult.error(
+            "Generation finished but no output image was found in ComfyUI history.\n"
+            "Check the ComfyUI console — a SaveImage node error is likely."
+        )
 
-    # 7. Fetch the image from ComfyUI /view endpoint and save it locally
+    # 9. Fetch the image from ComfyUI /view endpoint and save it locally
     try:
         params = urllib.parse.urlencode({
             "filename": filename,

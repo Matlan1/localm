@@ -110,7 +110,13 @@ class Engine:
             device=device,
         )
 
+    @property
+    def loaded(self) -> bool:
+        return self._backend.loaded
+
     def load(self) -> None:
+        if self._backend.loaded:
+            return
         backend_type = type(self._backend).__name__.replace("Backend", "")
         console.print(
             f"Loading [bold cyan]{self.display_name}[/bold cyan] "
@@ -131,6 +137,13 @@ class Engine:
         top_k: Optional[int] = None,
         repeat_penalty: Optional[float] = None,
     ) -> Iterator[str]:
+        # Auto-reload if the model was unloaded (e.g. to free VRAM for image gen)
+        if not self._backend.loaded:
+            console.print(
+                f"[dim]Reloading [bold]{self.display_name}[/bold]…[/dim]"
+            )
+            self._backend.load()
+
         cfg = load_config()
         return self._backend.chat_stream(
             messages,

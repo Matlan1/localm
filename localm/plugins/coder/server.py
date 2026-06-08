@@ -10,6 +10,7 @@ responds, and stopped when localcoder exits.
 
 from __future__ import annotations
 
+import os
 import socket
 import subprocess
 import sys
@@ -100,6 +101,9 @@ class ManagedServer:
         while time.monotonic() < deadline:
             if _port_open(self.host, self.port):
                 print_server_ready(self.port)
+                # Expose the server URL so tools (e.g. generate_image) can call
+                # /v1/models/unload before handing VRAM to an external process.
+                os.environ["LOCALM_URL"] = f"http://{self.host}:{self.port}/v1"
                 return True
             if self._proc.poll() is not None:
                 print_warning(f"localm serve exited early (code {self._proc.returncode})")

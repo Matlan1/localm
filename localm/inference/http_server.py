@@ -65,9 +65,13 @@ def create_app(engine: Engine) -> FastAPI:
 
     @app.get("/health")
     async def health():
-        if _engine is None or not _engine._backend.loaded:
-            raise HTTPException(503, "Model not loaded")
-        return {"status": "ok", "model": _engine.display_name}
+        if _engine is None:
+            raise HTTPException(503, "No engine initialised")
+        return {
+            "status": "ok",
+            "model":  _engine.display_name,
+            "loaded": _engine.loaded,
+        }
 
     # ---------------------------------------------------------------- #
     #  Models list                                                       #
@@ -79,13 +83,52 @@ def create_app(engine: Engine) -> FastAPI:
             "object": "list",
             "data": [
                 {
-                    "id": _engine.display_name,
-                    "object": "model",
-                    "created": int(time.time()),
+                    "id":       _engine.display_name,
+                    "object":   "model",
+                    "created":  int(time.time()),
                     "owned_by": "localm",
+                    "loaded":   _engine.loaded,
                 }
             ],
         }
+
+    # ---------------------------------------------------------------- #
+    #  Model lifecycle — unload / load                                   #
+    # ---------------------------------------------------------------- #
+
+    @app.post("/v1/models/unload")
+    async def unload_model():
+        """
+        Release the model from GPU/CPU memory.
+
+        Call this before starting a VRAM-intensive task (e.g. ComfyUI FLUX
+        generation) so the GPU memory is fully available.  The next call to
+        /v1/chat/completions will reload the model automatically.
+        """
+        if _engine is None:
+            raise HTTPException(503, "No engine initialised")
+        if not _engine.loaded:
+            return {"status": "already_unloaded", "model": _engine.display_name}
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, _engine.unload)
+        return {"status": "unloaded", "model": _engine.display_name}
+
+    @app.post("/v1/models/load")
+    async def load_model():
+        """
+        Explicitly reload the model into memory.
+
+        Normally you don't need this — /v1/chat/completions reloads
+        automatically if the model was unloaded.  Use this endpoint if you
+        want to pre-warm the model before the first inference request.
+        """
+        if _engine is None:
+            raise HTTPException(503, "No engine initialised")
+        if _engine.loaded:
+            return {"status": "already_loaded", "model": _engine.display_name}
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, _engine.load)
+        return {"status": "loaded", "model": _engine.display_name}
 
     # ---------------------------------------------------------------- #
     #  Chat completions                                                  #
