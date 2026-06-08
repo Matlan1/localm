@@ -154,6 +154,61 @@ def tool_edit_file(cwd: Path, path: str, old: str, new: str) -> ToolResult:
     )
 
 
+def tool_patch_file(cwd: Path, path: str, diff: str) -> ToolResult:
+    """
+    Apply a unified diff to a file.
+
+    The diff must be in standard ``patch -u`` format::
+
+        --- a/path/to/file.py
+        +++ b/path/to/file.py
+        @@ -10,4 +10,5 @@
+         context line
+        -old line
+        +new line
+        +added line
+
+    File-header lines (``---``/``+++``) are optional but recommended.
+    Line numbers in ``@@`` headers are used as hints only — minor off-by-one
+    errors are tolerated.  Always read the file before generating the diff.
+    """
+    from ._patch import apply_diff, PatchError
+
+    p = _resolve(cwd, path)
+    if not p.exists():
+        return ToolResult.error(f"File not found: {p}")
+    if not p.is_file():
+        return ToolResult.error(f"Not a file: {p}")
+
+    try:
+        original = p.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        return ToolResult.error(str(e))
+
+    try:
+        patched = apply_diff(original, diff)
+    except PatchError as e:
+        return ToolResult.error(str(e))
+    except Exception as e:
+        return ToolResult.error(f"Unexpected patch error: {e}")
+
+    try:
+        p.write_text(patched, encoding="utf-8")
+    except Exception as e:
+        return ToolResult.error(str(e))
+
+    rel = p.relative_to(cwd) if p.is_relative_to(cwd) else p
+    # Count changed lines for summary
+    orig_lines  = set(original.splitlines())
+    patch_lines = set(patched.splitlines())
+    added   = len(patch_lines - orig_lines)
+    removed = len(orig_lines - patch_lines)
+    return ToolResult.success(
+        f"Patched {rel} (+{added} / -{removed} lines)",
+        summary=f"patched {rel} (+{added} / -{removed})",
+    )
+
+
 def tool_run_shell(cwd: Path, command: str, timeout: int = 30) -> ToolResult:
     """Execute a shell command.  Uses the system shell via a list invocation."""
     shell_cmd: list[str]
@@ -602,6 +657,20 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
             "path": {"type": "string", "description": "File path",            "required": True},
             "old":  {"type": "string", "description": "Exact text to replace","required": True},
             "new":  {"type": "string", "description": "Replacement text",     "required": True},
+        },
+        destructive=True,
+    ),
+    "patch_file": ToolDef(
+        name="patch_file",
+        fn=tool_patch_file,
+        description=(
+            "Apply a unified diff (patch -u format) to a file. "
+            "More reliable than edit_file for multi-hunk or large changes. "
+            "Always read_file first so line numbers are accurate."
+        ),
+        params={
+            "path": {"type": "string", "description": "File path (relative to cwd)",              "required": True},
+            "diff": {"type": "string", "description": "Unified diff string (patch -u format)",    "required": True},
         },
         destructive=True,
     ),

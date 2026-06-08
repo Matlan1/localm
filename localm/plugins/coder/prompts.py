@@ -25,6 +25,9 @@ def build_system_prompt(
 ## edit_file — Replace exact text in a file (read it first!)
 {"name": "edit_file", "args": {"path": "src/main.py", "old": "def foo():", "new": "def foo(x: int):"}}
 
+## patch_file — Apply a unified diff to a file (read it first; more reliable than edit_file for multi-hunk changes)
+{"name": "patch_file", "args": {"path": "src/main.py", "diff": "--- a/src/main.py\n+++ b/src/main.py\n@@ -10,4 +10,5 @@\n context line\n-old line\n+new line\n+added line\n"}}
+
 ## run_shell — Execute a shell command
 {"name": "run_shell", "args": {"command": "python -m pytest tests/ -x"}}
 
@@ -78,7 +81,7 @@ RULES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 1. Always read_file before edit_file — you need the exact text.
 2. Use relative paths unless an absolute path is necessary.
-3. Prefer edit_file for small changes; write_file for new files or complete rewrites.
+3. Prefer edit_file for single small changes; patch_file for multi-hunk edits; write_file for new files or complete rewrites.
 4. Run tests after code changes (run_shell: pytest / cargo test / npm test / …).
 5. For complex tasks, use spawn_agent to delegate focused sub-tasks.
 6. When you are done, give a concise summary of what you changed and why.
