@@ -84,6 +84,6 @@ This pulls PyTorch built against ROCm 7.13.0 from AMD's wheel index. Requires Py
 GPU is selected automatically if available. Override with:
 
 ```bash
-localm run google/gemma-3-4b-it --device cuda   # HIP maps to "cuda" in PyTorch
-localm run google/gemma-3-4b-it --device cpu
+localm run owner/model-name --device cuda   # HIP maps to "cuda" in PyTorch
+localm run owner/model-name --device cpu
 ```

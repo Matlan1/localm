@@ -3,9 +3,9 @@
 **Run local LLMs offline.** GGUF models via a pure-Python ctypes binding to `llama.dll`, HuggingFace Transformers models, an OpenAI-compatible HTTP server, and an interactive chat shell — all from one CLI.
 
 ```
-localm run gemma4-4b --prompt "Explain RDNA2 in one sentence."
-echo "Write me a haiku." | localm run gemma4-4b
-localm serve gemma4-4b --port 8080
+localm run mymodel --prompt "Explain RDNA2 in one sentence."
+echo "Write me a haiku." | localm run mymodel
+localm serve mymodel --port 8080
 ```
 
 ---
@@ -16,7 +16,7 @@ localm serve gemma4-4b --port 8080
 |---|---|
 | **GGUF inference** | Pure-Python ctypes wrapper around `llama.dll` — no llama-cpp-python required |
 | **GPU support** | AMD (ROCm / HIP), NVIDIA (CUDA), CPU — auto-detected from DLL loading order |
-| **HF Transformers** | Full HuggingFace model directories (Gemma4, Phi4, Qwen, …) |
+| **HF Transformers** | Full HuggingFace model directories |
 | **OpenAI-compatible server** | `/v1/chat/completions`, `/v1/models`, `/health` — streaming SSE + JSON |
 | **Interactive chat** | Multi-turn shell with `/clear`, `/image`, `/system`, `/temp`, `/save` |
 | **Model registry** | Pull from HuggingFace, register local paths, manage aliases |
@@ -30,7 +30,7 @@ localm serve gemma4-4b --port 8080
 
 - Python 3.10+
 - For GGUF GPU inference: a compiled `llama.dll` + GPU runtime DLLs  
-  - AMD: ROCm `ggml-hip.dll` (gfx1030 prebuilt available separately)
+  - AMD: ROCm `ggml-hip.dll`
   - NVIDIA: CUDA `ggml-cuda.dll`
   - CPU: only `llama.dll` + `ggml*.dll`
 
@@ -48,7 +48,7 @@ pip install -e .
 
 For HuggingFace Transformers models (full-precision, multimodal):
 ```bash
-uv tool install -e ".[gpu]"    # AMD ROCm — gfx1030 (RX 6000 series)
+uv tool install -e ".[gpu]"    # AMD ROCm
 ```
 
 ---
@@ -58,52 +58,52 @@ uv tool install -e ".[gpu]"    # AMD ROCm — gfx1030 (RX 6000 series)
 ### Pull a model
 
 ```bash
-# Named GGUF shortcut
-localm pull llama3.2-3b
+# Named shortcut (if registered)
+localm pull mymodel
 
-# Specific quantisation from any HF repo
-localm pull bartowski/Qwen2.5-7B-Instruct-GGUF:Qwen2.5-7B-Instruct-Q4_K_M.gguf
+# Specific GGUF from any HF repo
+localm pull owner/repo:model-Q4_K_M.gguf
 
 # Full HuggingFace model directory (transformers format)
-localm pull google/gemma-3-4b-it
+localm pull owner/model-name
 ```
 
 ### Register an existing model
 
 ```bash
 # Local GGUF file
-localm add C:\models\llama3.gguf
+localm add C:\models\mymodel.gguf
 
 # Ollama model (resolves manifest → GGUF blob automatically)
-localm add D:\ollamma\manifests\registry.ollama.ai\library\gemma3\12b
+localm add D:\ollama\manifests\registry.ollama.ai\library\<model>\<tag>
 
 # HuggingFace directory
-localm add D:\projects\gemma-4-12B-it --name gemma4-12b
+localm add D:\models\my-hf-model --name mymodel
 ```
 
 ### Run inference
 
 ```bash
 # Single prompt
-localm run gemma4-4b --prompt "What is 42?"
+localm run mymodel --prompt "What is 42?"
 
 # Stdin pipe
-echo "Translate 'hello' to Japanese." | localm run gemma4-4b
+echo "Translate 'hello' to Japanese." | localm run mymodel
 
 # Interactive chat (TTY)
-localm run gemma4-4b
+localm run mymodel
 
 # With a system prompt
-localm run gemma4-4b --system "You are a terse assistant." --prompt "How does TCP work?"
+localm run mymodel --system "You are a terse assistant." --prompt "How does TCP work?"
 
 # With an image (multimodal)
-localm run gemma4-12b --prompt "Describe this image." --image photo.jpg --mmproj mmproj.gguf
+localm run mymodel --prompt "Describe this image." --image photo.jpg --mmproj mmproj.gguf
 ```
 
 ### Start the inference server
 
 ```bash
-localm serve gemma4-4b --port 8080
+localm serve mymodel --port 8080
 
 # OpenAI-compatible endpoints:
 curl http://localhost:8080/health
@@ -111,7 +111,7 @@ curl http://localhost:8080/v1/models
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gemma4-4b",
+    "model": "mymodel",
     "messages": [{"role": "user", "content": "Hello!"}],
     "stream": true
   }'
@@ -122,7 +122,7 @@ Use it with any OpenAI client:
 from openai import OpenAI
 client = OpenAI(base_url="http://localhost:8080/v1", api_key="localm")
 resp = client.chat.completions.create(
-    model="gemma4-4b",
+    model="mymodel",
     messages=[{"role": "user", "content": "Hello!"}],
     stream=True,
 )
@@ -180,8 +180,7 @@ Options:
 ### Model management
 
 ```bash
-localm pull llama3.2-3b              # download by shortcut
-localm pull owner/repo:file.gguf     # specific GGUF
+localm pull owner/repo:file.gguf     # specific GGUF from HuggingFace
 localm pull owner/repo               # full HF model directory
 localm pull https://example.com/m.gguf  # direct URL
 

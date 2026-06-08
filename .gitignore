@@ -36,3 +36,9 @@ htmlcov/
 # (these live in ~/.localm/, not in the repo)
 registry.json
 config.json
+
+# Internal development / planning docs — not public documentation
+task.md
+walkthrough.md
+implementation_plan.md
+flux_local_setup_guide.md
