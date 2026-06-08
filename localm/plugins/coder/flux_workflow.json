@@ -28,7 +28,7 @@
   },
   "11": {
     "inputs": {
-      "clip_name1": "clip_l.safetensors",
+      "clip_name1": "ViT-L-14-TEXT-detail-improved-hiT-GmP-TE-only-HF.safetensors",
       "clip_name2": "t5xxl_fp8_e4m3fn.safetensors",
       "type": "flux",
       "device": "default"
