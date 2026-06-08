@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "localm"
 version = "0.1.0"
-description = "Run local LLMs offline — HuggingFace and GGUF, multimodal, AMD/NVIDIA/CPU"
+description = "Local AI platform — offline LLM inference, model management, and extensible agent plugins"
 requires-python = ">=3.10"
 dependencies = [
     "click>=8.1",
@@ -18,6 +18,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# AI coding agent — offline agentic loop, tool use, project map
+# Install with:  pip install "localm[coder]"
+# Invoke via:    localm coder --model <name>  OR  localcoder --model <name>
+coder = [
+    # requests is already a core dep; listed here for explicit plugin opt-in
+    "requests>=2.31",
+]
+
 # AMD RDNA2 (RX 6xxx) GPU stack — ROCm 7.13.0, Python 3.12, Windows
 # Install with:  uv pip install -e ".[gpu]"  (requires Python 3.12 venv)
 gpu = [
@@ -41,7 +49,11 @@ audio = [
 ]
 
 [project.scripts]
-localm = "localm.cli:main"
+localm    = "localm.cli:main"
+# backward-compat alias — installed only when the [coder] extra is present.
+# pip/uv honours this because the package is installed; the command always
+# works as long as localm[coder] was requested.
+localcoder = "localm.plugins.coder.cli:main"
 
 [tool.uv]
 exclude-newer-package = { rocm = false, rocm-sdk-core = false, rocm-sdk-libraries-gfx103x-all = false, torch = false, torchvision = false, transformers = false }

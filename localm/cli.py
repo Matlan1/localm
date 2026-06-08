@@ -505,3 +505,25 @@ def config_cmd(key, value):
     cfg[key] = coerced
     save_config(cfg)
     console.print(f"[green]✓[/green] {key} = {coerced}")
+
+
+# ------------------------------------------------------------------ #
+#  Plugin: coder (optional extra)                                      #
+# ------------------------------------------------------------------ #
+
+# Register ``localm coder`` when the coder plugin is installed.
+# The plugin is gated behind ``pip install "localm[coder]"`` so the import
+# is wrapped in a try/except — the base localm install keeps working fine
+# if the extra was never requested.
+try:
+    from .plugins.coder.cli import main as _coder_main
+    main.add_command(_coder_main, name="coder")
+except ImportError:
+    @main.command("coder", context_settings={"ignore_unknown_options": True})
+    def _coder_stub(**_):
+        """Offline AI coding agent (run: pip install "localm[coder]" to enable)."""
+        console.print(
+            '[yellow]The coder plugin is not installed.[/yellow]\n'
+            'Enable it with:  [bold]pip install "localm[coder]"[/bold]\n'
+            '  or (editable):  [bold]pip install -e ".[coder]"[/bold]'
+        )
