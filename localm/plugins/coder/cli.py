@@ -22,6 +22,7 @@ from rich.console import Console
 
 from .backends.http import HTTPBackend, make_localm_backend, make_openai_backend
 from .agent import Agent
+from .audit import SessionMode, parse_mode
 from .project_config import load_project_config
 from .display import (
     confirm,
@@ -72,10 +73,18 @@ if sys.platform == "win32":
               help="Use OpenAI API instead of local model.")
 @click.option("--anthropic",        "provider", flag_value="anthropic",
               help="Use Anthropic API (via ANTHROPIC_API_KEY).")
+@click.option("--mode",             default=None,
+              type=click.Choice(["privacy", "log", "full"], case_sensitive=False),
+              help=(
+                  "Session persistence mode [default: privacy]. "
+                  "privacy = nothing saved automatically; "
+                  "log = JSONL audit trail to ~/.localm/sessions/; "
+                  "full = log + markdown transcript in .localcoder/sessions/."
+              ))
 def main(
     task, model, url, api_key, port, cwd,
     no_server, max_turns, temperature, max_tokens,
-    verbose, yes, provider,
+    verbose, yes, provider, mode,
 ):
     """
     Offline AI coding agent powered by local LLMs.
@@ -111,6 +120,14 @@ def main(
     # auto_approve: config applies only when --yes flag was NOT passed
     if not yes and proj_cfg.get("auto_approve"):
         yes = True
+    # mode: CLI > config > default (privacy)
+    if mode is None:
+        mode = proj_cfg.get("mode", "privacy")
+    try:
+        session_mode = parse_mode(mode)
+    except ValueError as exc:
+        print_error(str(exc))
+        sys.exit(1)
 
     gen_kw   = {k: v for k, v in [
         ("temperature", temperature),
@@ -171,6 +188,7 @@ def main(
         max_turns=max_turns,
         verbose=verbose,
         auto_approve=yes or (task != ""),
+        mode=session_mode,
         **gen_kw,
     )
 
@@ -183,10 +201,15 @@ def main(
                 pass
         else:
             # Interactive REPL
-            print_banner(backend.model_id, work_dir, file_count=agent._project_map.file_count())
+            print_banner(backend.model_id, work_dir,
+                         file_count=agent._project_map.file_count(),
+                         session_mode=session_mode)
             _repl(agent)
 
     finally:
+        md_path = agent.close()
+        if md_path:
+            print_info(f"Session transcript saved → {md_path}")
         if server_ctx:
             server_ctx.stop()
 
@@ -323,6 +346,23 @@ def _handle_command(raw: str, agent: Agent) -> bool:
             console.print(f"[dim]{mem}[/dim]")
         else:
             print_info("No memory file. Use /remember <text> to create one.")
+
+    elif cmd == "mode":
+        if not arg:
+            # Show current mode
+            m = agent.mode.value
+            notes = {
+                "privacy": "nothing is saved automatically (/save still works)",
+                "log":     "JSONL audit trail → ~/.localm/sessions/",
+                "full":    "JSONL audit trail + markdown transcript on exit",
+            }
+            print_info(f"Session mode: {m}  — {notes.get(m, '')}")
+        else:
+            print_info(
+                "Session mode cannot be changed mid-session "
+                "(audit log is already open or closed). "
+                "Start a new session with --mode <privacy|log|full>."
+            )
 
     elif cmd == "save":
         filepath = Path(arg) if arg else Path("conversation.json")

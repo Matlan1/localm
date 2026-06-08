@@ -25,13 +25,22 @@ console = Console(highlight=False)
 # ---------------------------------------------------------------------------
 
 def print_banner(
-    model: str, cwd: Path, agent_name: str = "localcoder", file_count: int = 0
+    model: str,
+    cwd: Path,
+    agent_name: str = "localcoder",
+    file_count: int = 0,
+    session_mode: "str | None" = None,
 ) -> None:
-    map_info = f"  ·  [dim]indexed:[/dim] [dim]{file_count} files[/dim]" if file_count else ""
+    map_info  = f"  ·  [dim]indexed:[/dim] [dim]{file_count} files[/dim]" if file_count else ""
+    mode_colours = {"privacy": "dim", "log": "yellow", "full": "green"}
+    mode_info = ""
+    if session_mode:
+        colour   = mode_colours.get(str(session_mode).lower(), "dim")
+        mode_info = f"  ·  [{colour}]mode: {session_mode}[/{colour}]"
     console.print(Panel(
         f"[bold cyan]{agent_name}[/bold cyan]  ·  "
         f"[dim]model:[/dim] [bold]{model}[/bold]  ·  "
-        f"[dim]cwd:[/dim] [dim]{cwd}[/dim]{map_info}\n"
+        f"[dim]cwd:[/dim] [dim]{cwd}[/dim]{map_info}{mode_info}\n"
         "[dim]Type your task, or [bold]/help[/bold] for commands. "
         "Ctrl+C or [bold]/exit[/bold] to quit.[/dim]",
         border_style="dim cyan",
@@ -234,6 +243,7 @@ HELP_TEXT = """\
   [bold]/exit[/bold]                 quit (also: exit, quit, q)
   [bold]/clear[/bold]                clear conversation history
   [bold]/model[/bold]                show current model
+  [bold]/mode[/bold]                 show session persistence mode (privacy/log/full)
   [bold]/cwd[/bold]                  show working directory
   [bold]/cd <path>[/bold]            change working directory
   [bold]/reindex[/bold]              rebuild the codebase index
@@ -245,6 +255,11 @@ HELP_TEXT = """\
   [bold]/remember <text>[/bold]      append a note to LOCALCODER.md
   [bold]/forget <pattern>[/bold]     remove memory bullets matching pattern
   [bold]/save[/bold]                 save conversation to JSON
+
+[dim]Session modes (set with --mode at startup or mode = "..." in .localcoder/config.toml):
+  privacy  nothing saved automatically (default)
+  log      JSONL audit trail → ~/.localm/sessions/
+  full     JSONL audit trail + markdown transcript → .localcoder/sessions/[/dim]
 """
 
 def print_help() -> None:

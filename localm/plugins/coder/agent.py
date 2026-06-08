@@ -47,7 +47,7 @@ from .display import (
     print_turn_divider,
     print_warning,
 )
-from .audit import AuditLog
+from .audit import AuditLog, AuditLogT, NullAuditLog, SessionMode, make_audit_log
 from .prompts import build_system_prompt
 
 # Tools that mutate files — trigger a project map refresh after they run
@@ -96,6 +96,7 @@ class Agent:
         verbose: bool = False,
         auto_approve: bool = True,
         parent: Optional["Agent"] = None,
+        mode: SessionMode = SessionMode.PRIVACY,
         **gen_kwargs,
     ) -> None:
         self.backend      = backend
@@ -105,6 +106,7 @@ class Agent:
         self.verbose      = verbose
         self.auto_approve = auto_approve
         self.parent       = parent
+        self.mode         = mode
         self.gen_kwargs   = gen_kwargs
 
         self._messages: list[dict] = []
@@ -112,7 +114,7 @@ class Agent:
         self._total_tokens: int = 0
         self._compact_warned: bool = False
         self._model_name: str = getattr(backend, "model_id", "")
-        self._audit: AuditLog = AuditLog(label=name)
+        self._audit: AuditLogT = make_audit_log(mode, label=name)
         self._project_map: ProjectMap = ProjectMap.build(cwd)
         self._memory: str = load_memory(cwd)
         self._system_prompt: str = build_system_prompt(
@@ -523,3 +525,115 @@ class Agent:
             _json.dumps(self._messages, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
+
+    def close(self) -> Path | None:
+        """
+        Finalise the session.
+
+        - Closes the audit log (``log`` and ``full`` modes).
+        - Writes a Markdown transcript to ``.localcoder/sessions/`` in
+          ``full`` mode.
+
+        Returns the path of the Markdown file, or None.
+        Called automatically by the CLI's ``finally`` block.
+        """
+        self._audit.close()
+        if self.mode == SessionMode.FULL:
+            return self._write_session_markdown()
+        return None
+
+    def _write_session_markdown(self) -> Path:
+        """
+        Write a human-readable Markdown transcript of the session to
+        ``.localcoder/sessions/<YYYY-MM-DD_HHMMSS>.md`` inside the project
+        working directory.
+
+        Tool-result messages (which are large XML blobs) are skipped.
+        Tool calls embedded in assistant messages are extracted and listed
+        as bullet points.
+        """
+        import re as _re
+        import time as _time
+
+        ts_label = _time.strftime("%Y-%m-%d_%H%M%S")
+        ts_human = _time.strftime("%Y-%m-%d %H:%M:%S")
+
+        out_dir = self.cwd / ".localcoder" / "sessions"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"{ts_label}.md"
+
+        tokens_line = (
+            f"**Tokens (billed est.)**: ~{self._total_tokens:,}  "
+            if self._total_tokens
+            else ""
+        )
+
+        lines: list[str] = [
+            f"# localcoder Session — {ts_human}",
+            "",
+            f"**Model**: {self._model_name or 'unknown'}  ",
+            f"**Working directory**: {self.cwd}  ",
+            f"**Turns**: {self._turns}  ",
+        ]
+        if tokens_line:
+            lines.append(tokens_line)
+        lines += ["", "---", ""]
+
+        _TC_RE = _re.compile(
+            r"<tool_call>\s*(.*?)\s*</tool_call>", _re.DOTALL
+        )
+
+        for msg in self._messages:
+            role    = msg.get("role", "")
+            content = msg.get("content", "")
+            if not isinstance(content, str):
+                # multipart — join text parts
+                content = " ".join(
+                    p.get("text", "")
+                    for p in content
+                    if isinstance(p, dict)
+                )
+
+            # Skip tool-result feed-backs (huge XML blobs)
+            if content.lstrip().startswith("<tool_result"):
+                continue
+
+            if role == "user":
+                lines.append(f"**You**: {content[:2000]}")
+                lines.append("")
+
+            elif role == "assistant":
+                # Strip tool_call blocks and extract summaries
+                call_matches = _TC_RE.findall(content)
+                clean = _TC_RE.sub("", content).strip()
+
+                if clean:
+                    lines.append(f"**{self.name}**: {clean[:2000]}")
+                elif call_matches:
+                    lines.append(f"**{self.name}**:")
+
+                for raw_json in call_matches:
+                    try:
+                        import json as _json
+                        obj  = _json.loads(raw_json)
+                        tool = obj.get("name", "?")
+                        args = obj.get("args", {})
+                        # Show path/command arg if present, else first arg value
+                        hint = (
+                            args.get("path")
+                            or args.get("command")
+                            or args.get("url")
+                            or (next(iter(args.values()), None) if args else None)
+                        )
+                        hint_str = f" `{str(hint)[:60]}`" if hint else ""
+                        lines.append(f"  - `{tool}`{hint_str}")
+                    except Exception:
+                        lines.append(f"  - (tool call)")
+
+                lines.append("")
+
+            lines.append("---")
+            lines.append("")
+
+        out_path.write_text("\n".join(lines), encoding="utf-8")
+        return out_path

@@ -12,6 +12,7 @@ auto_approve = false
 memory_file  = ".localcoder/memory.md"   # overrides default search order
 max_tokens   = 2048
 temperature  = 0.7
+mode         = "privacy"                  # privacy | log | full
 
 The file is optional; absent keys fall through to CLI defaults.
 """
@@ -65,5 +66,5 @@ def load_project_config(cwd: Path) -> dict[str, Any]:
         return {}
 
     _KNOWN = {"model", "max_turns", "auto_approve", "memory_file",
-              "max_tokens", "temperature"}
+              "max_tokens", "temperature", "mode"}
     return {k: v for k, v in raw.items() if k in _KNOWN}
