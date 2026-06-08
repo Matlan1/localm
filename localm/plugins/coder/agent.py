@@ -45,10 +45,16 @@ from .display import (
     print_turn_divider,
     print_warning,
 )
+from .audit import AuditLog
 from .prompts import build_system_prompt
 
 # Tools that mutate files — trigger a project map refresh after they run
 _MUTATING_TOOLS: frozenset[str] = frozenset({"write_file", "edit_file", "run_shell"})
+
+# Fraction of estimated context window at which compaction is triggered
+_COMPACT_WARN_RATIO  = 0.70   # warn user in interactive mode
+_COMPACT_AUTO_RATIO  = 0.90   # silently compact in non-interactive mode
+_DEFAULT_CTX_TOKENS  = 4096   # fallback when n_ctx is unknown
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +108,9 @@ class Agent:
         self._messages: list[dict] = []
         self._turns: int = 0
         self._total_tokens: int = 0
+        self._compact_warned: bool = False
         self._model_name: str = getattr(backend, "model_id", "")
+        self._audit: AuditLog = AuditLog(label=name)
         self._project_map: ProjectMap = ProjectMap.build(cwd)
         self._memory: str = load_memory(cwd)
         self._system_prompt: str = build_system_prompt(
@@ -131,6 +139,7 @@ class Agent:
         self._messages = []
         self._turns = 0
         self._total_tokens = 0
+        self._compact_warned = False
 
     def set_cwd(self, cwd: Path) -> None:
         self.cwd = cwd
@@ -218,6 +227,11 @@ class Agent:
             if interactive:
                 print_turn_divider(self._turns, self._total_tokens)
 
+            self._audit.set_turn(self._turns)
+
+            # ---- context-budget check --------------------------------
+            self._maybe_compact(interactive=interactive)
+
             # ---- call LLM -------------------------------------------
             messages = self._build_messages()
             response = self._call_llm(messages, interactive=interactive)
@@ -264,6 +278,89 @@ class Agent:
         return final_response
 
     # ------------------------------------------------------------------ #
+    #  Compaction
+    # ------------------------------------------------------------------ #
+
+    def _ctx_window_tokens(self) -> int:
+        """Estimated context window size in tokens."""
+        try:
+            from localm.config import load_config
+            return load_config().get("n_ctx", _DEFAULT_CTX_TOKENS)
+        except Exception:
+            return _DEFAULT_CTX_TOKENS
+
+    def _fill_ratio(self) -> float:
+        """Fraction of estimated context window currently consumed (0.0 – 1.0+)."""
+        estimated = self.context_chars() // 4
+        return estimated / max(1, self._ctx_window_tokens())
+
+    def compact(self) -> bool:
+        """
+        Summarise old conversation history into a single condensed exchange.
+
+        Keeps the 4 most recent messages verbatim (= last 2 full turns) so
+        the agent retains immediate context.  Everything older is replaced by
+        a summary produced by a direct backend call (no tools, no loop).
+
+        Returns True if compaction happened, False if there was nothing to compact.
+        """
+        return self._compact_history()
+
+    def _compact_history(self) -> bool:
+        keep_n = 4   # last 4 messages kept verbatim (~2 turns)
+        if len(self._messages) <= keep_n:
+            return False   # not enough history to compact
+
+        older  = self._messages[:-keep_n]
+        recent = self._messages[-keep_n:]
+
+        # Build a concise conversation excerpt for the summariser
+        excerpt_parts = []
+        for m in older:
+            role    = m["role"].upper()
+            content = m.get("content", "")
+            if isinstance(content, list):          # multipart messages
+                content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
+            excerpt_parts.append(f"{role}: {content[:600]}")
+        excerpt = "\n\n".join(excerpt_parts)
+
+        summary_prompt = (
+            "Produce a concise summary (≤300 words) of the following coding session. "
+            "Focus on: decisions made, files created or edited, errors and fixes, "
+            "and any open problems or next steps.\n\n"
+            f"{excerpt}"
+        )
+        try:
+            summary = self.backend.chat(
+                [{"role": "user", "content": summary_prompt}],
+                max_tokens=400,
+            )
+        except Exception:
+            return False   # best-effort; don't crash on summary failure
+
+        self._messages = [
+            {"role": "user",      "content": f"[Session summary]\n{summary}"},
+            {"role": "assistant", "content": "Understood. Continuing from this context."},
+            *recent,
+        ]
+        return True
+
+    def _maybe_compact(self, interactive: bool) -> None:
+        """Check fill ratio and warn or auto-compact as appropriate."""
+        ratio = self._fill_ratio()
+        if interactive:
+            if ratio >= _COMPACT_WARN_RATIO and not getattr(self, "_compact_warned", False):
+                print_warning(
+                    f"Context is ~{ratio:.0%} full. "
+                    "Use [bold]/compact[/bold] to summarise old turns."
+                )
+                self._compact_warned = True   # warn once per session
+        else:
+            # Non-interactive (run_task): auto-compact silently at 90%
+            if ratio >= _COMPACT_AUTO_RATIO:
+                self._compact_history()
+
+    # ------------------------------------------------------------------ #
     #  LLM call
     # ------------------------------------------------------------------ #
 
@@ -281,11 +378,13 @@ class Agent:
                 print_streaming_done()
                 print_info("(interrupted)")
             self._accumulate_usage()
+            self._audit.llm(full, tokens=self._total_tokens)
             return full
         else:
             # Silent call — used by sub-agents and non-interactive mode
             result = self.backend.chat(messages, **self.gen_kwargs)
             self._accumulate_usage()
+            self._audit.llm(result, tokens=self._total_tokens)
             return result
 
     def _accumulate_usage(self) -> None:
@@ -310,6 +409,7 @@ class Agent:
                 print_tool_error(call.name, result.output)
             return result
 
+        self._audit.tool_call(call.name, call.args)
         if interactive:
             print_tool_call(call.name, call.args)
 
@@ -332,6 +432,7 @@ class Agent:
         except Exception as e:
             result = ToolResult.error(f"Tool error: {e}")
 
+        self._audit.tool_result(call.name, result.ok, result.summary)
         if interactive:
             print_tool_result(call.name, result, verbose=self.verbose)
 
@@ -369,6 +470,9 @@ class Agent:
 
     def _add_user(self, content: str) -> None:
         self._messages.append({"role": "user", "content": content})
+        # Only log human-originating messages (skip tool results, which are very long)
+        if not content.startswith("<tool_result"):
+            self._audit.user(content)
 
     def _add_assistant(self, content: str) -> None:
         self._messages.append({"role": "assistant", "content": content})

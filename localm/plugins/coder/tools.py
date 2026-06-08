@@ -428,6 +428,126 @@ def tool_spawn_agent(
     )
 
 
+def tool_fetch_url(cwd: Path, url: str, max_chars: int = 8000) -> ToolResult:
+    """
+    Fetch a URL and return its plain-text content (HTML tags stripped).
+
+    Useful for documentation pages, GitHub raw files, Stack Overflow answers,
+    and package changelogs.  Content is truncated to ``max_chars`` to avoid
+    flooding the context window.
+    """
+    import html.parser
+    import urllib.error
+    import urllib.request
+
+    class _HTMLStripper(html.parser.HTMLParser):
+        _SKIP = {"script", "style", "head", "meta", "link", "noscript"}
+
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self._buf: list[str] = []
+            self._skip = 0
+
+        def handle_starttag(self, tag, attrs):
+            if tag.lower() in self._SKIP:
+                self._skip += 1
+
+        def handle_endtag(self, tag):
+            if tag.lower() in self._SKIP and self._skip:
+                self._skip -= 1
+
+        def handle_data(self, data):
+            if not self._skip:
+                self._buf.append(data)
+
+        def get_text(self) -> str:
+            import re
+            raw = "".join(self._buf)
+            # Collapse excessive blank lines
+            return re.sub(r"\n{3,}", "\n\n", raw).strip()
+
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "localm/0.1 (fetch_url tool)"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            content_type = resp.headers.get("Content-Type", "")
+            raw = resp.read(1_000_000).decode("utf-8", errors="replace")
+    except urllib.error.URLError as e:
+        return ToolResult.error(f"Could not fetch {url}: {e}")
+    except Exception as e:
+        return ToolResult.error(str(e))
+
+    if "html" in content_type.lower():
+        stripper = _HTMLStripper()
+        stripper.feed(raw)
+        text = stripper.get_text()
+    else:
+        text = raw.strip()
+
+    output, trunc = _truncate(text, max_chars)
+    return ToolResult(
+        ok=True,
+        output=f"<url>{url}</url>\n<content>\n{output}\n</content>",
+        summary=f"fetched {url[:60]} ({len(text):,} chars{', truncated' if trunc else ''})",
+        truncated=trunc,
+    )
+
+
+def _git(cwd: Path, *args: str, timeout: int = 10) -> tuple[str, bool]:
+    """Run a git command and return (output, ok)."""
+    try:
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=str(cwd),
+            capture_output=True, text=True,
+            timeout=timeout, encoding="utf-8", errors="replace",
+        )
+        out = (proc.stdout + proc.stderr).strip() or "(no output)"
+        return out, proc.returncode == 0
+    except FileNotFoundError:
+        return "git not found in PATH", False
+    except subprocess.TimeoutExpired:
+        return f"git {args[0]} timed out", False
+    except Exception as e:
+        return str(e), False
+
+
+def tool_git_status(cwd: Path) -> ToolResult:
+    """Return the output of `git status --short` in the working directory."""
+    out, ok = _git(cwd, "status", "--short", "--branch")
+    return ToolResult(ok=ok, output=out, summary=f"git status ({len(out.splitlines())} lines)")
+
+
+def tool_git_diff(cwd: Path, path: str = "", staged: bool = False) -> ToolResult:
+    """
+    Return `git diff` output.
+
+    Parameters
+    ----------
+    path   : limit diff to this file or directory (optional)
+    staged : if True, show staged changes (`git diff --cached`)
+    """
+    args = ["diff", "--stat", "-p"]
+    if staged:
+        args.append("--cached")
+    if path:
+        args += ["--", path]
+    out, ok = _git(cwd, *args, timeout=15)
+    out, trunc = _truncate(out)
+    return ToolResult(ok=ok, output=out, summary="git diff" + (" --cached" if staged else ""), truncated=trunc)
+
+
+def tool_git_log(cwd: Path, n: int = 10, path: str = "") -> ToolResult:
+    """Return the last n commits as a compact log."""
+    args = ["log", f"--max-count={n}", "--oneline", "--decorate"]
+    if path:
+        args += ["--", path]
+    out, ok = _git(cwd, *args)
+    return ToolResult(ok=ok, output=out, summary=f"git log -{n}")
+
+
 def _localm_unload() -> None:
     """
     Ask localm to release its model from GPU memory so FLUX can use the VRAM.
@@ -708,6 +828,39 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
             "path":    {"type": "string", "description": "File or directory to search",   "required": False},
             "glob":    {"type": "string", "description": "File filter, e.g. **/*.py",     "required": False},
             "context": {"type": "int",    "description": "Lines of context (default 2)",  "required": False},
+        },
+    ),
+    "git_status": ToolDef(
+        name="git_status",
+        fn=tool_git_status,
+        description="Show working-tree status (git status --short --branch).",
+        params={},
+    ),
+    "git_diff": ToolDef(
+        name="git_diff",
+        fn=tool_git_diff,
+        description="Show git diff (unstaged by default; pass staged=true for staged changes).",
+        params={
+            "path":   {"type": "string", "description": "Limit to this file/dir",    "required": False},
+            "staged": {"type": "bool",   "description": "Show staged diff (default false)", "required": False},
+        },
+    ),
+    "git_log": ToolDef(
+        name="git_log",
+        fn=tool_git_log,
+        description="Show recent commits (oneline format).",
+        params={
+            "n":    {"type": "int",    "description": "Number of commits (default 10)", "required": False},
+            "path": {"type": "string", "description": "Limit to this file/dir",         "required": False},
+        },
+    ),
+    "fetch_url": ToolDef(
+        name="fetch_url",
+        fn=tool_fetch_url,
+        description="Fetch a URL and return its plain-text content (HTML stripped).",
+        params={
+            "url":       {"type": "string", "description": "Full URL to fetch",               "required": True},
+            "max_chars": {"type": "int",    "description": "Truncate output (default 8000)",  "required": False},
         },
     ),
     "spawn_agent": ToolDef(

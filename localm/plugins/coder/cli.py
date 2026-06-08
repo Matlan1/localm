@@ -266,6 +266,17 @@ def _handle_command(raw: str, agent: Agent) -> bool:
             f"Map: {agent._project_map.file_count()} files[/dim]"
         )
 
+    elif cmd == "compact":
+        ratio = agent._fill_ratio()
+        did_compact = agent.compact()
+        if did_compact:
+            new_ratio = agent._fill_ratio()
+            print_success(
+                f"Compacted history. Context: {ratio:.0%} → {new_ratio:.0%} full."
+            )
+        else:
+            print_info("Nothing to compact (too few turns).")
+
     elif cmd == "remember":
         if not arg:
             print_info("Usage: /remember <text>")

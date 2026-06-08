@@ -85,6 +85,18 @@ _TOOL_DOCS_FULL = """\
 ## grep — Regex-search file contents
 {"name": "grep", "args": {"pattern": "def authenticate", "path": "src/", "glob": "**/*.py"}}
 
+## git_status — Show working-tree status
+{"name": "git_status", "args": {}}
+
+## git_diff — Show unstaged (or staged) changes
+{"name": "git_diff", "args": {"staged": false}}
+
+## git_log — Show recent commits
+{"name": "git_log", "args": {"n": 10}}
+
+## fetch_url — Fetch a URL and return plain-text content (HTML stripped)
+{"name": "fetch_url", "args": {"url": "https://docs.python.org/3/library/pathlib.html"}}
+
 ## spawn_agent — Delegate a focused task to a sub-agent
 {"name": "spawn_agent", "args": {"task": "Analyse auth.py for SQL injection", "files": ["src/auth.py"], "name": "security-reviewer"}}
 
@@ -101,6 +113,7 @@ run_shell(command, [timeout])         — run a shell command
 list_dir([path])                      — list a directory
 search_files(pattern, [path])         — glob-search for files
 grep(pattern, [path], [glob])         — regex-search file contents
+fetch_url(url)                        — fetch a URL as plain text
 spawn_agent(task, [files], [name])    — delegate a sub-task"""
 
 
