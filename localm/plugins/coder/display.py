@@ -173,17 +173,20 @@ def confirm(prompt: str) -> bool:
 HELP_TEXT = """\
 [bold cyan]localcoder commands[/bold cyan]
 
-  [bold]/help[/bold]            this message
-  [bold]/exit[/bold]            quit (also: exit, quit, q)
-  [bold]/clear[/bold]           clear conversation history
-  [bold]/model[/bold]           show current model
-  [bold]/cwd[/bold]             show working directory
-  [bold]/cd <path>[/bold]       change working directory
-  [bold]/reindex[/bold]         rebuild the codebase index
-  [bold]/verbose[/bold]         toggle verbose tool output
-  [bold]/approve[/bold]         toggle auto-approve for destructive tools
-  [bold]/history[/bold]         show turn count, context usage, and index size
-  [bold]/save[/bold]            save conversation to JSON
+  [bold]/help[/bold]                 this message
+  [bold]/exit[/bold]                 quit (also: exit, quit, q)
+  [bold]/clear[/bold]                clear conversation history
+  [bold]/model[/bold]                show current model
+  [bold]/cwd[/bold]                  show working directory
+  [bold]/cd <path>[/bold]            change working directory
+  [bold]/reindex[/bold]              rebuild the codebase index
+  [bold]/verbose[/bold]              toggle verbose tool output
+  [bold]/approve[/bold]              toggle auto-approve for destructive tools
+  [bold]/history[/bold]              show turn count, context usage, and index size
+  [bold]/memory[/bold]               show current project memory
+  [bold]/remember <text>[/bold]      append a note to LOCALCODER.md
+  [bold]/forget <pattern>[/bold]     remove memory bullets matching pattern
+  [bold]/save[/bold]                 save conversation to JSON
 """
 
 def print_help() -> None:

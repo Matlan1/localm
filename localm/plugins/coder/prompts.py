@@ -13,6 +13,7 @@ def build_system_prompt(
     cwd: Path,
     agent_name: str = "localcoder",
     project_map: "ProjectMap | None" = None,
+    memory: str = "",
 ) -> str:
     tool_docs = """\
 ## read_file — Read a file
@@ -46,11 +47,15 @@ def build_system_prompt(
     if project_map is not None and project_map.file_count() > 0:
         map_section = f"\n{project_map.to_context_string()}\n"
 
+    memory_section = ""
+    if memory:
+        memory_section = f"\n## Project Memory\n\n{memory}\n"
+
     return f"""\
 You are {agent_name}, an expert AI coding assistant running fully offline.
 You help the user write, debug, refactor, and understand code.
 
-Working directory: {cwd}{map_section}
+Working directory: {cwd}{map_section}{memory_section}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 TOOL USE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

@@ -27,6 +27,7 @@ from typing import Optional
 
 from .backends.base import BaseLLMBackend
 from .indexer import ProjectMap
+from .memory import load_memory, remember, forget
 from .parser import ToolCall, parse_tool_calls, split_response
 from .tools import TOOL_REGISTRY, ToolResult
 from .display import (
@@ -102,8 +103,9 @@ class Agent:
         self._turns: int = 0
         self._total_tokens: int = 0
         self._project_map: ProjectMap = ProjectMap.build(cwd)
+        self._memory: str = load_memory(cwd)
         self._system_prompt: str = build_system_prompt(
-            cwd, agent_name=name, project_map=self._project_map
+            cwd, agent_name=name, project_map=self._project_map, memory=self._memory
         )
 
     @property
@@ -128,17 +130,39 @@ class Agent:
     def set_cwd(self, cwd: Path) -> None:
         self.cwd = cwd
         self._project_map = ProjectMap.build(cwd)
+        self._memory = load_memory(cwd)
         self._system_prompt = build_system_prompt(
-            cwd, agent_name=self.name, project_map=self._project_map
+            cwd, agent_name=self.name, project_map=self._project_map, memory=self._memory
         )
 
     def reindex(self) -> int:
         """Rebuild the full project map and regenerate the system prompt."""
         self._project_map = ProjectMap.build(self.cwd)
         self._system_prompt = build_system_prompt(
-            self.cwd, agent_name=self.name, project_map=self._project_map
+            self.cwd, agent_name=self.name, project_map=self._project_map, memory=self._memory
         )
         return self._project_map.file_count()
+
+    def reload_memory(self) -> str:
+        """Re-read the memory file from disk and rebuild the system prompt."""
+        self._memory = load_memory(self.cwd)
+        self._system_prompt = build_system_prompt(
+            self.cwd, agent_name=self.name, project_map=self._project_map, memory=self._memory
+        )
+        return self._memory
+
+    def remember(self, text: str) -> Path:
+        """Append a bullet to the memory file and refresh the system prompt."""
+        p = remember(self.cwd, text)
+        self.reload_memory()
+        return p
+
+    def forget(self, pattern: str) -> tuple:
+        """Remove matching bullets from the memory file and refresh the system prompt."""
+        p, n = forget(self.cwd, pattern)
+        if n:
+            self.reload_memory()
+        return p, n
 
     def run_task(self, task: str) -> str:
         """

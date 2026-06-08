@@ -266,6 +266,35 @@ def _handle_command(raw: str, agent: Agent) -> bool:
             f"Map: {agent._project_map.file_count()} files[/dim]"
         )
 
+    elif cmd == "remember":
+        if not arg:
+            print_info("Usage: /remember <text>")
+        else:
+            try:
+                p = agent.remember(arg)
+                print_success(f"Remembered → {p}")
+            except Exception as e:
+                print_error(f"remember failed: {e}")
+
+    elif cmd == "forget":
+        if not arg:
+            print_info("Usage: /forget <pattern>")
+        else:
+            p, n = agent.forget(arg)
+            if p is None:
+                print_info("No memory file found.")
+            elif n == 0:
+                print_info(f"No entries matching '{arg}'.")
+            else:
+                print_success(f"Removed {n} entr{'y' if n == 1 else 'ies'} from {p}.")
+
+    elif cmd == "memory":
+        mem = agent._memory
+        if mem:
+            console.print(f"[dim]{mem}[/dim]")
+        else:
+            print_info("No memory file. Use /remember <text> to create one.")
+
     elif cmd == "save":
         filepath = Path(arg) if arg else Path("conversation.json")
         try:
