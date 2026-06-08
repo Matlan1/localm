@@ -11,13 +11,36 @@ Implements only the subset used by GgufBackend:
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
+import os
 import time
 import uuid
 from typing import Dict, Generator, Iterable, Iterator, List, Optional
 
 from . import _api as api
 from ._structs import llama_token, LlamaChatMessage, LlamaContextParams, LlamaModelParams
+
+
+@contextlib.contextmanager
+def _quiet_stderr():
+    """
+    Redirect fd 2 (stderr) to /dev/null for the duration of the block.
+
+    llama.cpp writes model-loading noise (create_tensor, llama_kv_cache,
+    sched_reserve, …) directly via fprintf(stderr, …), bypassing Python's
+    logging system entirely.  The only reliable way to silence it is to
+    redirect the file descriptor at the OS level.
+    """
+    devnull_fd = os.open(os.devnull, os.O_WRONLY)
+    saved_fd   = os.dup(2)
+    os.dup2(devnull_fd, 2)
+    os.close(devnull_fd)
+    try:
+        yield
+    finally:
+        os.dup2(saved_fd, 2)
+        os.close(saved_fd)
 
 # LLAMA_DEFAULT_SEED from llama.h
 _DEFAULT_SEED = 0xFFFF_FFFF
@@ -274,23 +297,17 @@ class LlamaCpp:
         self._ctx_ptr     = None   # type: ignore[assignment]
         self._tokenizer   = None   # type: ignore[assignment]
 
-        # Suppress llama.cpp stderr noise unless verbose
-        if not verbose:
-            import os
-            os.environ.setdefault("LLAMA_LOG_LEVEL", "4")  # WARN
+        _ctx = _quiet_stderr if not verbose else contextlib.nullcontext
 
-        api.llama_backend_init()
+        with _ctx():
+            api.llama_backend_init()
 
         # --- load model ---
         mp = api.llama_model_default_params()
         mp.n_gpu_layers = n_gpu_layers
 
-        if verbose:
-            print(f"[llamacpp] loading {model_path}")
-            print(f"[llamacpp]   n_gpu_layers = {n_gpu_layers}")
-            print(f"[llamacpp]   n_ctx        = {n_ctx}")
-
-        self._model_ptr = api.llama_load_model_from_file(model_path, mp)
+        with _ctx():
+            self._model_ptr = api.llama_load_model_from_file(model_path, mp)
         if not self._model_ptr:
             raise RuntimeError(f"Failed to load model: {model_path}")
 
@@ -305,15 +322,13 @@ class LlamaCpp:
             cp.n_threads       = n_threads
             cp.n_threads_batch = n_threads
 
-        self._ctx_ptr = api.llama_init_from_model(self._model_ptr, cp)
+        with _ctx():
+            self._ctx_ptr = api.llama_init_from_model(self._model_ptr, cp)
         if not self._ctx_ptr:
             api.llama_free_model(self._model_ptr)
             raise RuntimeError("Failed to create llama context")
 
         self._tokenizer = _Tokenizer(self._model_ptr, self._ctx_ptr)
-
-        if verbose:
-            print(f"[llamacpp] model loaded, n_ctx_train={api.llama_model_n_ctx_train(self._model_ptr)}")
 
     # ------------------------------------------------------------------ #
     #  Lifecycle                                                           #
@@ -382,20 +397,30 @@ class LlamaCpp:
         cp.n_ubatch    = cp.n_batch   # micro-batch must match so prefill fits in one call
         cp.offload_kqv = True
 
-        self._ctx_ptr = api.llama_init_from_model(self._model_ptr, cp)
-        if not self._ctx_ptr:
-            raise RuntimeError("Failed to (re)create llama context")
-        # Update the tokenizer's ctx reference
-        self._tokenizer._ctx = self._ctx_ptr
-
         n_prompt = len(prompt_tokens)
         if n_prompt == 0:
             return
 
-        # --- prefill prompt ---
-        tok_arr = (llama_token * n_prompt)(*prompt_tokens)
-        batch = api.llama_batch_get_one(tok_arr, n_prompt)
-        ret = api.llama_decode(self._ctx_ptr, batch)
+        _ctx = _quiet_stderr if not self._verbose else contextlib.nullcontext
+
+        # One contiguous suppression scope covering both context creation and
+        # prefill.  The ROCm lazy-buffer verification messages
+        # ("~llama_context: ROCm0 compute buffer size …") fire asynchronously
+        # after llama_init_from_model returns but before the first llama_decode
+        # completes, so separate per-call windows leave a gap.  Bridging them
+        # into a single scope closes it.
+        with _ctx():
+            self._ctx_ptr = api.llama_init_from_model(self._model_ptr, cp)
+            if not self._ctx_ptr:
+                raise RuntimeError("Failed to (re)create llama context")
+            # Update the tokenizer's ctx reference
+            self._tokenizer._ctx = self._ctx_ptr
+
+            # --- prefill prompt ---
+            tok_arr = (llama_token * n_prompt)(*prompt_tokens)
+            batch = api.llama_batch_get_one(tok_arr, n_prompt)
+            ret = api.llama_decode(self._ctx_ptr, batch)
+
         if ret != 0:
             raise RuntimeError(f"llama_decode failed during prefill (code {ret})")
 
@@ -422,7 +447,8 @@ class LlamaCpp:
                 # Feed the new token back for next step
                 tok_one = (llama_token * 1)(token)
                 batch = api.llama_batch_get_one(tok_one, 1)
-                ret = api.llama_decode(self._ctx_ptr, batch)
+                with _ctx():
+                    ret = api.llama_decode(self._ctx_ptr, batch)
                 if ret != 0:
                     # KV cache full or error
                     break

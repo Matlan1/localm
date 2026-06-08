@@ -64,18 +64,28 @@ class GgufBackend(BaseBackend):
         load_lib()   # ensure DLLs are loaded before importing the class
 
         from localm.inference.backends.llamacpp import LlamaCpp
+        from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
-        console.print(f"[dim]  n_ctx       : {self.n_ctx}[/dim]")
-        console.print(f"[dim]  n_gpu_layers: {self.n_gpu_layers}[/dim]")
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[dim]{task.description}[/dim]"),
+            TimeElapsedColumn(),
+            transient=True,
+            console=console,
+        ) as progress:
+            progress.add_task(
+                f"Loading model  (ctx={self.n_ctx}, gpu_layers={self.n_gpu_layers})",
+                total=None,
+            )
+            self._llm = LlamaCpp(
+                model_path=self.model_path,
+                n_ctx=self.n_ctx,
+                n_gpu_layers=self.n_gpu_layers,
+                verbose=False,
+            )
 
-        self._llm = LlamaCpp(
-            model_path=self.model_path,
-            n_ctx=self.n_ctx,
-            n_gpu_layers=self.n_gpu_layers,
-            verbose=False,
-        )
         self._loaded = True
-        console.print("[green]✓[/green] GGUF model loaded (native ctypes)")
+        console.print("[green]✓[/green] Model loaded")
 
     def unload(self) -> None:
         self._llm = None
