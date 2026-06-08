@@ -348,12 +348,9 @@ understood and the per-inference overhead is measured.
 
 ## GitHub / housekeeping
 
-- **Repo rename pending:** Proposed name is `localforge` — keeps the `local*`
-  brand, adds "forge" (crafting, tooling, plugin system). Run to apply:
-  ```bash
-  gh repo rename localforge --repo Matlan1/localm --yes
-  ```
+- **Repo renamed:** `Matlan1/localm` → **`Matlan1/hearth`**
   GitHub auto-redirects old clone URLs so existing installs keep working.
+  Local remote updated: `git remote set-url origin https://github.com/Matlan1/hearth.git`
 
 - **`localllm-coder`:** README replaced with migration guide pointing to localm.
   Recommend archiving on GitHub: Settings → "Archive this repository".
