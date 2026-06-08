@@ -79,3 +79,9 @@ rocm-sdk-core = [
 rocm-sdk-libraries-gfx103x-all = [
   { index = "rocm-gfx1030", marker = "sys_platform == 'win32'" },
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: marks tests that require external tools (git, network) to be present",
+]
