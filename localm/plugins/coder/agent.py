@@ -100,6 +100,7 @@ class Agent:
 
         self._messages: list[dict] = []
         self._turns: int = 0
+        self._total_tokens: int = 0
         self._project_map: ProjectMap = ProjectMap.build(cwd)
         self._system_prompt: str = build_system_prompt(
             cwd, agent_name=name, project_map=self._project_map
@@ -109,6 +110,11 @@ class Agent:
     def turns(self) -> int:
         return self._turns
 
+    @property
+    def total_tokens(self) -> int:
+        """Cumulative token count across all LLM calls in this session (server estimate)."""
+        return self._total_tokens
+
     # ------------------------------------------------------------------ #
     #  Public API
     # ------------------------------------------------------------------ #
@@ -117,6 +123,7 @@ class Agent:
         """Clear conversation history."""
         self._messages = []
         self._turns = 0
+        self._total_tokens = 0
 
     def set_cwd(self, cwd: Path) -> None:
         self.cwd = cwd
@@ -168,7 +175,7 @@ class Agent:
             self._turns += 1
 
             if interactive:
-                print_turn_divider(self._turns)
+                print_turn_divider(self._turns, self._total_tokens)
 
             # ---- call LLM -------------------------------------------
             messages = self._build_messages()
@@ -232,10 +239,19 @@ class Agent:
             except KeyboardInterrupt:
                 print_streaming_done()
                 print_info("(interrupted)")
+            self._accumulate_usage()
             return full
         else:
             # Silent call — used by sub-agents and non-interactive mode
-            return self.backend.chat(messages, **self.gen_kwargs)
+            result = self.backend.chat(messages, **self.gen_kwargs)
+            self._accumulate_usage()
+            return result
+
+    def _accumulate_usage(self) -> None:
+        """Pull token counts from the backend's last call and add to the session total."""
+        usage = getattr(self.backend, "last_usage", {})
+        if usage.get("total_tokens"):
+            self._total_tokens += usage["total_tokens"]
 
     # ------------------------------------------------------------------ #
     #  Tool execution

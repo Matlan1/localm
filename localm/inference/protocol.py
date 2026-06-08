@@ -109,12 +109,19 @@ class StreamChoice(BaseModel):
     finish_reason: Optional[str] = None
 
 
+class UsageInfo(BaseModel):
+    prompt_tokens:     int = 0
+    completion_tokens: int = 0
+    total_tokens:      int = 0
+
+
 class ChatChunk(BaseModel):
     id: str
     object: str = "chat.completion.chunk"
     created: int
     model: str
     choices: List[StreamChoice]
+    usage: Optional[UsageInfo] = None
 
     @classmethod
     def token(cls, token: str, model: str, chunk_id: str, ts: int) -> "ChatChunk":
@@ -126,12 +133,19 @@ class ChatChunk(BaseModel):
         )
 
     @classmethod
-    def done(cls, model: str, chunk_id: str, ts: int) -> "ChatChunk":
+    def done(
+        cls,
+        model: str,
+        chunk_id: str,
+        ts: int,
+        usage: Optional["UsageInfo"] = None,
+    ) -> "ChatChunk":
         return cls(
             id=chunk_id,
             created=ts,
             model=model,
             choices=[StreamChoice(delta=ChoiceDelta(), finish_reason="stop")],
+            usage=usage,
         )
 
 
@@ -147,6 +161,7 @@ class ChatResponse(BaseModel):
     created: int
     model: str
     choices: List[FullChoice]
+    usage: Optional[UsageInfo] = None
 
 
 def make_chunk_id() -> str:

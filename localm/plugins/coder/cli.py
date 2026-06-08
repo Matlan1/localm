@@ -257,10 +257,12 @@ def _handle_command(raw: str, agent: Agent) -> bool:
 
     elif cmd == "history":
         chars = agent.context_chars()
-        tokens_est = chars // 4
+        ctx_tokens_est = chars // 4
+        billed = agent.total_tokens
+        billed_str = f"  ·  billed: ~{billed:,} tokens" if billed else ""
         console.print(
             f"[dim]Turns: {agent.turns}  ·  "
-            f"Context: ~{tokens_est:,} tokens ({chars:,} chars)  ·  "
+            f"Context: ~{ctx_tokens_est:,} tokens ({chars:,} chars){billed_str}  ·  "
             f"Map: {agent._project_map.file_count()} files[/dim]"
         )
 

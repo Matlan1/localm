@@ -113,8 +113,9 @@ def print_streaming_done() -> None:
 #  Turn divider
 # ---------------------------------------------------------------------------
 
-def print_turn_divider(turn: int) -> None:
-    console.print(f"\n[dim]── turn {turn} ──────────────────────────────────────────────[/dim]")
+def print_turn_divider(turn: int, total_tokens: int = 0) -> None:
+    tokens_str = f"  ·  ~{total_tokens:,} tokens" if total_tokens else ""
+    console.print(f"\n[dim]── turn {turn}{tokens_str} ──────────────────────────────────────[/dim]")
 
 
 # ---------------------------------------------------------------------------

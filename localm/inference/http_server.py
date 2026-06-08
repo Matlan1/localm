@@ -26,7 +26,7 @@ from pydantic import BaseModel
 
 from localm.inference.engine import Engine
 from localm.inference.protocol import (
-    ChatChunk, ChatRequest, ChatResponse, FullChoice, Message,
+    ChatChunk, ChatRequest, ChatResponse, FullChoice, Message, UsageInfo,
     make_chunk_id,
 )
 
@@ -208,14 +208,31 @@ async def _stream_sse(
     t = threading.Thread(target=_generate, daemon=True)
     t.start()
 
+    # Estimate prompt token count from input message lengths (chars // 4)
+    prompt_chars = sum(
+        len(m.get("content") if isinstance(m.get("content"), str)
+            else " ".join(p.get("text", "") for p in (m.get("content") or [])
+                          if p.get("type") == "text"))
+        for m in messages
+    )
+    prompt_tokens = max(1, prompt_chars // 4)
+    completion_chars = 0
+
     while True:
         token = await token_queue.get()
         if token is None:
             break
+        completion_chars += len(token)
         chunk = ChatChunk.token(token, model_id, chunk_id, ts)
         yield f"data: {chunk.model_dump_json()}\n\n"
 
-    done = ChatChunk.done(model_id, chunk_id, ts)
+    completion_tokens = max(0, completion_chars // 4)
+    usage = UsageInfo(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=prompt_tokens + completion_tokens,
+    )
+    done = ChatChunk.done(model_id, chunk_id, ts, usage=usage)
     yield f"data: {done.model_dump_json()}\n\n"
     yield "data: [DONE]\n\n"
 
@@ -234,6 +251,19 @@ async def _complete(engine: Engine, messages: list, model_id: str, **gen_kwargs)
 
     text = await loop.run_in_executor(None, _run)
 
+    # Estimate token counts from character lengths (chars // 4)
+    prompt_chars = sum(
+        len(m.get("content") if isinstance(m.get("content"), str)
+            else " ".join(p.get("text", "") for p in (m.get("content") or [])
+                          if p.get("type") == "text"))
+        for m in messages
+    )
+    usage = UsageInfo(
+        prompt_tokens=max(1, prompt_chars // 4),
+        completion_tokens=max(0, len(text) // 4),
+        total_tokens=max(1, prompt_chars // 4) + max(0, len(text) // 4),
+    )
+
     response = ChatResponse(
         id=make_chunk_id(),
         created=int(time.time()),
@@ -244,6 +274,7 @@ async def _complete(engine: Engine, messages: list, model_id: str, **gen_kwargs)
                 finish_reason="stop",
             )
         ],
+        usage=usage,
     )
     return JSONResponse(response.model_dump())
 

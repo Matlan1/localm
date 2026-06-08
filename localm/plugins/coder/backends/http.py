@@ -45,15 +45,21 @@ class HTTPBackend(BaseLLMBackend):
         timeout: int = 300,
         **extra_params,
     ) -> None:
-        self._base_url = base_url.rstrip("/")
-        self._model    = model
-        self._api_key  = api_key
-        self._timeout  = timeout
-        self._extra    = extra_params
+        self._base_url   = base_url.rstrip("/")
+        self._model      = model
+        self._api_key    = api_key
+        self._timeout    = timeout
+        self._extra      = extra_params
+        self._last_usage: dict = {}
 
     @property
     def model_id(self) -> str:
         return self._model
+
+    @property
+    def last_usage(self) -> dict:
+        """Usage dict from the most recent call: {prompt_tokens, completion_tokens, total_tokens}."""
+        return dict(self._last_usage)
 
     # ------------------------------------------------------------------ #
 
@@ -76,6 +82,7 @@ class HTTPBackend(BaseLLMBackend):
     # ------------------------------------------------------------------ #
 
     def chat(self, messages: list[dict], **kwargs) -> str:
+        self._last_usage = {}
         resp = requests.post(
             f"{self._base_url}/chat/completions",
             headers=self._headers(),
@@ -84,9 +91,13 @@ class HTTPBackend(BaseLLMBackend):
         )
         resp.raise_for_status()
         data = resp.json()
+        if data.get("usage"):
+            self._last_usage = data["usage"]
         return data["choices"][0]["message"]["content"]
 
     def chat_stream(self, messages: list[dict], **kwargs) -> Iterator[str]:
+        import json as _json
+        self._last_usage = {}
         with requests.post(
             f"{self._base_url}/chat/completions",
             headers=self._headers(),
@@ -103,11 +114,13 @@ class HTTPBackend(BaseLLMBackend):
                     text = text[6:]
                 if text in ("[DONE]", ""):
                     break
-                import json
                 try:
-                    chunk = json.loads(text)
+                    chunk = _json.loads(text)
                 except Exception:
                     continue
+                # Capture usage from the final stop chunk (sent by localm server)
+                if chunk.get("usage"):
+                    self._last_usage = chunk["usage"]
                 delta = chunk.get("choices", [{}])[0].get("delta", {})
                 piece = delta.get("content") or ""
                 if piece:
