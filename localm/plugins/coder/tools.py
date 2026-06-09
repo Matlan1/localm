@@ -576,6 +576,8 @@ def tool_generate_image(
     guidance: Optional[float] = None,
     lora_name: Optional[str] = None,
     lora_strength: float = 1.0,
+    input_image: Optional[str] = None,
+    denoise: Optional[float] = None,
 ) -> ToolResult:
     """Thin wrapper — delegates to localm.image_gen.comfy.generate_image."""
     import os
@@ -583,12 +585,15 @@ def tool_generate_image(
 
     out_p = _resolve(cwd, output_path)
     api_url = os.environ.get("FLUX_API_URL", "http://127.0.0.1:8188")
+    input_p = _resolve(cwd, input_image) if input_image else None
     ok, message = generate_image(
         prompt, out_p,
         api_url=api_url,
         guidance=guidance,
         lora_name=lora_name,
         lora_strength=lora_strength,
+        input_image=input_p,
+        denoise=denoise,
     )
     if ok:
         rel = out_p.relative_to(cwd) if out_p.is_relative_to(cwd) else out_p
@@ -735,13 +740,19 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
     "generate_image": ToolDef(
         name="generate_image",
         fn=tool_generate_image,
-        description="Generate a high-quality image from a detailed text prompt using the local FLUX model.",
+        description=(
+            "Generate or refine an image using the local FLUX model. "
+            "Without input_image: generates from scratch (txt2img). "
+            "With input_image: refines an existing image guided by the prompt (img2img)."
+        ),
         params={
-            "prompt":      {"type": "string", "description": "Descriptive prompt detailing styles, objects, and composition.", "required": True},
-            "output_path": {"type": "string", "description": "Path to save the generated image file (default: output.png)", "required": False},
-            "guidance":    {"type": "float",  "description": "Guidance scale (default: 3.5). Lower (2.5-3.0) improves photorealism.", "required": False},
-            "lora_name":   {"type": "string", "description": "LoRA filename to load (optional).", "required": False},
-            "lora_strength": {"type": "float", "description": "Strength of the LoRA model (default: 1.0).", "required": False},
+            "prompt":       {"type": "string", "description": "What to generate. For img2img, describe what to change rather than the full scene.", "required": True},
+            "output_path":  {"type": "string", "description": "Path to save the result (default: output.png)", "required": False},
+            "input_image":  {"type": "string", "description": "Path to an existing image to use as the starting point (img2img mode).", "required": False},
+            "denoise":      {"type": "float",  "description": "img2img only — how much to change the input (0.0=no change, 1.0=completely new). Default 0.75.", "required": False},
+            "guidance":     {"type": "float",  "description": "Guidance scale (default: 3.5). Lower values (2.5-3.0) improve photorealism.", "required": False},
+            "lora_name":    {"type": "string", "description": "LoRA filename to load (optional).", "required": False},
+            "lora_strength":{"type": "float",  "description": "LoRA strength (default: 1.0).", "required": False},
         },
     ),
 }

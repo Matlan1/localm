@@ -45,6 +45,67 @@ def _localm_unload(localm_url: Optional[str] = None) -> None:
 
 
 # ---------------------------------------------------------------------------
+#  Helpers
+# ---------------------------------------------------------------------------
+
+def _image_dimensions(path: Path) -> tuple[int, int]:
+    """Return (width, height) from a PNG or JPEG without any external libs."""
+    try:
+        data = path.read_bytes(32)
+        if data[:8] == b"\x89PNG\r\n\x1a\n":
+            return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+        if data[:2] == b"\xff\xd8":
+            # JPEG — scan for SOF0/SOF2 markers
+            full = path.read_bytes()
+            i = 2
+            while i < len(full) - 8:
+                if full[i] != 0xFF:
+                    break
+                marker = full[i + 1]
+                length = int.from_bytes(full[i + 2:i + 4], "big")
+                if marker in (0xC0, 0xC2):
+                    h = int.from_bytes(full[i + 5:i + 7], "big")
+                    w = int.from_bytes(full[i + 7:i + 9], "big")
+                    return w, h
+                i += 2 + length
+    except Exception:
+        pass
+    return 1024, 1024
+
+
+def _upload_image(image_path: Path, api_url: str) -> str:
+    """
+    Upload a local image to ComfyUI via POST /upload/image.
+
+    Returns the filename ComfyUI assigned (used in the LoadImage node).
+    Raises on failure.
+    """
+    boundary = "LocalcoderUploadBoundary"
+    img_bytes = image_path.read_bytes()
+    content_type = "image/jpeg" if image_path.suffix.lower() in (".jpg", ".jpeg") else "image/png"
+
+    body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="image"; filename="{image_path.name}"\r\n'
+        f"Content-Type: {content_type}\r\n"
+        f"\r\n"
+    ).encode() + img_bytes + f"\r\n--{boundary}--\r\n".encode()
+
+    req = urllib.request.Request(
+        f"{api_url}/upload/image",
+        data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        result = json.loads(resp.read().decode())
+    name = result.get("name")
+    if not name:
+        raise RuntimeError(f"ComfyUI upload returned no filename: {result}")
+    return name
+
+
+# ---------------------------------------------------------------------------
 #  Image generation
 # ---------------------------------------------------------------------------
 
@@ -56,6 +117,8 @@ def generate_image(
     guidance: Optional[float] = None,
     lora_name: Optional[str] = None,
     lora_strength: float = 1.0,
+    input_image: Optional[Path] = None,
+    denoise: Optional[float] = None,
     localm_url: Optional[str] = None,
     max_poll_seconds: int = 600,
 ) -> tuple[bool, str]:
@@ -65,7 +128,8 @@ def generate_image(
     Parameters
     ----------
     prompt
-        Descriptive text prompt.
+        Descriptive text prompt.  For img2img, describe what to *change*
+        rather than the full scene — the base image already provides structure.
     output_path
         Destination file (PNG).  Parent directories are created if needed.
     api_url
@@ -77,6 +141,15 @@ def generate_image(
         LoRA filename to inject (optional).
     lora_strength
         Strength applied to both model and clip (default 1.0).
+    input_image
+        Path to an existing image to use as the starting point (img2img mode).
+        When provided, FLUX refines this image guided by *prompt* instead of
+        generating from noise.  Output dimensions match the input image.
+    denoise
+        How much to change the input image (img2img only).
+        0.0 = no change, 1.0 = completely new image.
+        Defaults to 0.75 when *input_image* is set and not explicitly given.
+        Ignored in txt2img mode.
     localm_url
         localm server URL (e.g. ``http://127.0.0.1:8080/v1``) to unload
         before generation so FLUX gets the full VRAM budget.
@@ -103,7 +176,38 @@ def generate_image(
     except Exception as e:
         return False, f"Failed to load FLUX workflow template: {e}"
 
-    # 3. Inject prompt — node "6" first (default template), then scan
+    # 3. img2img: upload input image, add LoadImage + VAEEncode, redirect latent
+    if input_image is not None:
+        if not input_image.is_file():
+            return False, f"Input image not found: {input_image}"
+        try:
+            uploaded_name = _upload_image(input_image, api_url)
+        except Exception as e:
+            return False, f"Failed to upload input image to ComfyUI: {e}"
+
+        w, h = _image_dimensions(input_image)
+
+        # LoadImage node — ComfyUI loads from its own input/ dir by filename
+        workflow["40"] = {
+            "inputs": {"image": uploaded_name, "upload": "image"},
+            "class_type": "LoadImage",
+        }
+        # VAEEncode — encode the loaded image into latent space
+        workflow["41"] = {
+            "inputs": {"pixels": ["40", 0], "vae": ["10", 0]},
+            "class_type": "VAEEncode",
+        }
+        # Redirect SamplerCustomAdvanced latent input from EmptyLatentImage to encoded image
+        workflow["13"]["inputs"]["latent_image"] = ["41", 0]
+
+        # Update ModelSamplingFlux dimensions so RoPE embeddings match the image
+        workflow["28"]["inputs"]["width"]  = w
+        workflow["28"]["inputs"]["height"] = h
+
+        # Set denoise on the scheduler
+        workflow["17"]["inputs"]["denoise"] = denoise if denoise is not None else 0.75
+
+    # 4. Inject prompt — node "6" first (default template), then scan
     injected = False
     if "6" in workflow and workflow["6"].get("inputs", {}).get("text") is not None:
         workflow["6"]["inputs"]["text"] = prompt
@@ -121,7 +225,7 @@ def generate_image(
             f"{_WORKFLOW_PATH}"
         )
 
-    # 4. Inject guidance
+    # 5. Inject guidance
     if guidance is not None:
         if "26" in workflow and workflow["26"].get("class_type") == "FluxGuidance":
             workflow["26"]["inputs"]["guidance"] = guidance
@@ -131,7 +235,7 @@ def generate_image(
                     node["inputs"]["guidance"] = guidance
                     break
 
-    # 5. Inject LoRA
+    # 6. Inject LoRA
     if lora_name:
         workflow["100"] = {
             "inputs": {
@@ -148,7 +252,7 @@ def generate_image(
         if "6" in workflow:
             workflow["6"]["inputs"]["clip"] = ["100", 1]
 
-    # 6. Randomise seed
+    # 7. Randomise seed
     seed = random.randint(1, 10 ** 12)
     for node in workflow.values():
         cls = node.get("class_type", "")
@@ -159,7 +263,7 @@ def generate_image(
             node["inputs"]["noise_seed"] = seed
             break
 
-    # 7. Queue the prompt in ComfyUI
+    # 8. Queue the prompt in ComfyUI
     try:
         req_data = json.dumps({"prompt": workflow}).encode("utf-8")
         req = urllib.request.Request(
@@ -186,7 +290,7 @@ def generate_image(
     except Exception as e:
         return False, f"Error queuing prompt in ComfyUI: {e}"
 
-    # 8. Poll /history with a visible progress spinner
+    # 9. Poll /history with a visible progress spinner
     start_time = time.time()
     finished = False
     filename = None
@@ -236,7 +340,7 @@ def generate_image(
             "Check the ComfyUI console — a SaveImage node error is likely."
         )
 
-    # 9. Fetch image from ComfyUI /view, save locally, strip metadata
+    # 10. Fetch image from ComfyUI /view, save locally, strip metadata
     try:
         params = urllib.parse.urlencode(
             {"filename": filename, "subfolder": subfolder, "type": img_type}
