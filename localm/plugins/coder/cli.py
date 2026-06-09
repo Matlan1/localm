@@ -74,6 +74,8 @@ if sys.platform == "win32":
               help="Print full tool outputs.")
 @click.option("--yes", "-y",        is_flag=True,
               help="Auto-approve all destructive tool calls.")
+@click.option("--dry-run",          is_flag=True,
+              help="Show what the agent would do without executing destructive tools.")
 @click.option("--online", "provider", flag_value="openai",  default=None,
               help="Use OpenAI API instead of local model.")
 @click.option("--anthropic",        "provider", flag_value="anthropic",
@@ -89,7 +91,7 @@ if sys.platform == "win32":
 def main(
     task, model, url, api_key, port, cwd,
     no_server, max_turns, temperature, max_tokens,
-    verbose, yes, provider, mode,
+    verbose, yes, dry_run, provider, mode,
 ):
     """
     Offline AI coding agent powered by local LLMs.
@@ -200,6 +202,7 @@ def main(
         max_turns=max_turns,
         verbose=verbose,
         auto_approve=yes or (task != ""),
+        dry_run=dry_run,
         mode=session_mode,
         **gen_kw,
     )
@@ -232,10 +235,34 @@ def main(
 #  Interactive REPL
 # ---------------------------------------------------------------------------
 
+def _read_multiline() -> str:
+    """
+    Read one user message, supporting backslash line continuation.
+
+    End a line with \\ to keep typing on the next line.  The backslash is
+    stripped and the lines are joined with a newline before being sent.
+    """
+    lines: list[str] = []
+    first = True
+    while True:
+        prompt = "\n[bold green]You[/bold green]: " if first else "[dim]...[/dim] "
+        try:
+            line = console.input(prompt)
+        except (KeyboardInterrupt, EOFError):
+            raise
+        if line.endswith("\\"):
+            lines.append(line[:-1])
+            first = False
+        else:
+            lines.append(line)
+            break
+    return "\n".join(lines)
+
+
 def _repl(agent: Agent) -> None:
     while True:
         try:
-            user_input = console.input("\n[bold green]You[/bold green]: ").strip()
+            user_input = _read_multiline().strip()
         except (KeyboardInterrupt, EOFError):
             console.print("\n[dim]Bye.[/dim]")
             break
@@ -320,6 +347,13 @@ def _handle_command(raw: str, agent: Agent) -> bool:
             f"Context: ~{ctx_tokens_est:,} tokens ({chars:,} chars){billed_str}  ·  "
             f"Map: {agent._project_map.file_count()} files[/dim]"
         )
+
+    elif cmd == "undo":
+        msg = agent.undo()
+        if msg is None:
+            print_info("Nothing to undo.")
+        else:
+            print_success(msg)
 
     elif cmd == "compact":
         ratio = agent._fill_ratio()

@@ -53,6 +53,9 @@ from .prompts import build_system_prompt
 # Tools that mutate files — trigger a project map refresh after they run
 _MUTATING_TOOLS: frozenset[str] = frozenset({"write_file", "edit_file", "run_shell"})
 
+# Tools whose file changes can be undone (we snapshot before they run)
+_UNDOABLE_TOOLS: frozenset[str] = frozenset({"write_file", "edit_file", "patch_file"})
+
 # Fraction of estimated context window at which compaction is triggered
 _COMPACT_WARN_RATIO  = 0.70   # warn user in interactive mode
 _COMPACT_AUTO_RATIO  = 0.90   # silently compact in non-interactive mode
@@ -95,6 +98,7 @@ class Agent:
         max_turns: int = 40,
         verbose: bool = False,
         auto_approve: bool = True,
+        dry_run: bool = False,
         parent: Optional["Agent"] = None,
         mode: SessionMode = SessionMode.PRIVACY,
         **gen_kwargs,
@@ -105,6 +109,7 @@ class Agent:
         self.max_turns    = max_turns
         self.verbose      = verbose
         self.auto_approve = auto_approve
+        self.dry_run      = dry_run
         self.parent       = parent
         self.mode         = mode
         self.gen_kwargs   = gen_kwargs
@@ -113,6 +118,7 @@ class Agent:
         self._turns: int = 0
         self._total_tokens: int = 0
         self._compact_warned: bool = False
+        self._undo_stack: list[dict] = []
         self._model_name: str = getattr(backend, "model_id", "")
         self._audit: AuditLogT = make_audit_log(mode, label=name)
         self._project_map: ProjectMap = ProjectMap.build(cwd)
@@ -298,6 +304,33 @@ class Agent:
         estimated = self.context_chars() // 4
         return estimated / max(1, self._ctx_window_tokens())
 
+    def undo(self) -> str | None:
+        """
+        Revert the last undoable file operation (write_file, edit_file, patch_file).
+
+        Returns a human-readable summary of what was restored, or None if the
+        undo stack is empty.
+        """
+        if not self._undo_stack:
+            return None
+        entry = self._undo_stack.pop()
+        path: Path    = entry["path"]
+        old: bytes | None = entry["old_content"]
+        tool: str     = entry["tool"]
+        try:
+            if old is None:
+                # File didn't exist before — delete it
+                if path.exists():
+                    path.unlink()
+                return f"Undid {tool}: deleted {path} (file was new)"
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(old)
+                lines = old.count(b"\n") + 1
+                return f"Undid {tool}: restored {path} ({lines} lines)"
+        except Exception as e:
+            return f"Undo failed: {e}"
+
     def compact(self) -> bool:
         """
         Summarise old conversation history into a single condensed exchange.
@@ -417,6 +450,16 @@ class Agent:
         if interactive:
             print_tool_call(call.name, call.args)
 
+        # Dry-run: show destructive calls but don't execute them
+        if self.dry_run and tool_def.destructive:
+            result = ToolResult.success(
+                f"[dry-run] {call.name} — skipped",
+                summary=f"[dry-run] {call.name}",
+            )
+            if interactive:
+                console.print("    [dim yellow][dry-run] skipped[/dim yellow]")
+            return result
+
         # Confirmation for destructive tools — with diff preview for write_file
         if tool_def.destructive and not self.auto_approve and interactive:
             approved = self._confirm_tool(call)
@@ -424,6 +467,21 @@ class Agent:
                 result = ToolResult.error("Rejected by user.")
                 print_tool_result(call.name, result, verbose=False)
                 return result
+
+        # Snapshot file content before undoable writes so /undo can restore it
+        if call.name in _UNDOABLE_TOOLS:
+            path_arg = call.args.get("path", "")
+            if path_arg:
+                abs_path = (self.cwd / path_arg).resolve()
+                try:
+                    old_content = abs_path.read_bytes() if abs_path.is_file() else None
+                except Exception:
+                    old_content = None
+                self._undo_stack.append({
+                    "path": abs_path,
+                    "old_content": old_content,
+                    "tool": call.name,
+                })
 
         # Inject hidden runtime args into specific tools
         args = dict(call.args)

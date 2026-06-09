@@ -18,7 +18,7 @@ Gaps identified by comparing against Claude Code, Aider, Cursor, Copilot.
 ## Tool Depth
 
 - [x] `patch_file` — unified diff application via `_patch.py`
-- [ ] `undo_last_write` — single-step rollback; destructive writes currently have no undo
+- [x] `undo_last_write` — `/undo` REPL command + `Agent.undo()` with file snapshot stack
 - [x] `fetch_url` — fetches URL, strips HTML tags, truncates to context budget
 - [ ] `tree` tool — recursive directory tree with file sizes (richer than `list_dir`)
 - [x] Multi-file grep with context lines — `tool_grep` supports `context=N` and `glob=` filter
@@ -41,7 +41,7 @@ Gaps identified by comparing against Claude Code, Aider, Cursor, Copilot.
 
 - [ ] Cost / token tracking display — show `~2,400 tokens` in the footer each turn
 - [x] Turn replay / audit log — `audit.py`; LOG mode = JSONL, FULL mode = JSONL + markdown transcript
-- [ ] `--dry-run` flag — show what the agent *would* do without executing anything
+- [x] `--dry-run` flag — destructive tools report skipped; read-only tools still run
 
 ---
 
@@ -50,7 +50,7 @@ Gaps identified by comparing against Claude Code, Aider, Cursor, Copilot.
 - [ ] `--interactive-confirm` granularity — approve writes but auto-approve reads, etc.
 - [ ] Diff preview before write — show a coloured diff and prompt "apply?" instead of writing silently
 - [ ] `/undo` REPL command — revert the last `write_file` / `edit_file`
-- [ ] Multiline input in REPL — paste blocks of code as context
+- [x] Multiline input in REPL — backslash continuation (end line with \\ to keep typing)
 - [x] `/compact` REPL command — implemented in cli.py
 - [ ] Shell autocomplete for `--model` sourced from `localm list`
 

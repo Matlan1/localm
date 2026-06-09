@@ -250,6 +250,7 @@ HELP_TEXT = """\
   [bold]/verbose[/bold]              toggle verbose tool output
   [bold]/approve[/bold]              toggle auto-approve for destructive tools
   [bold]/history[/bold]              show turn count, context usage, and index size
+  [bold]/undo[/bold]                 revert the last file write or edit
   [bold]/compact[/bold]              summarise old turns to free context space
   [bold]/memory[/bold]               show current project memory
   [bold]/remember <text>[/bold]      append a note to LOCALCODER.md
