@@ -6,9 +6,9 @@ def main():
     output_file = "a_geralt.png"
     guidance = 3.0  # Set your guidance scale here (e.g., 2.5 - 3.0 for photorealism, 3.5 for default)
     
-    # Optional: set to a LoRA filename present in your ComfyUI loras directory
-    lora_name = None   # e.g. "my_lora.safetensors"
-    lora_strength = 1.0
+    # LoRA settings — place file in your ComfyUI loras directory
+    lora_name = "aidmaNSFWunlock-FLUX-V0.2.safetensors"
+    lora_strength = 0.6
     
     print("Connecting to ComfyUI and generating image...")
     print(f"Prompt: {prompt}")
