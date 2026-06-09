@@ -42,3 +42,6 @@ task.md
 walkthrough.md
 implementation_plan.md
 flux_local_setup_guide.md
+
+# Local integration tests — contain environment-specific paths and filenames
+tests/test_flux_generation.py
