@@ -575,7 +575,8 @@ def tool_generate_image(
     output_path: str = "output.png",
     guidance: Optional[float] = None,
     lora_name: Optional[str] = None,
-    lora_strength: float = 1.0,
+    lora_strength_model: float = 1.0,
+    lora_strength_clip: float = 0.5,
     input_image: Optional[str] = None,
     denoise: Optional[float] = None,
 ) -> ToolResult:
@@ -591,7 +592,8 @@ def tool_generate_image(
         api_url=api_url,
         guidance=guidance,
         lora_name=lora_name,
-        lora_strength=lora_strength,
+        lora_strength_model=lora_strength_model,
+        lora_strength_clip=lora_strength_clip,
         input_image=input_p,
         denoise=denoise,
     )
@@ -751,8 +753,9 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
             "input_image":  {"type": "string", "description": "Path to an existing image to use as the starting point (img2img mode).", "required": False},
             "denoise":      {"type": "float",  "description": "img2img only — how much to change the input (0.0=no change, 1.0=completely new). Default 0.75.", "required": False},
             "guidance":     {"type": "float",  "description": "Guidance scale (default: 3.5). Lower values (2.5-3.0) improve photorealism.", "required": False},
-            "lora_name":    {"type": "string", "description": "LoRA filename to load (optional).", "required": False},
-            "lora_strength":{"type": "float",  "description": "LoRA strength (default: 1.0).", "required": False},
+            "lora_name":          {"type": "string", "description": "LoRA filename to load (optional).", "required": False},
+            "lora_strength_model":{"type": "float",  "description": "LoRA strength on the UNet (default: 1.0). Main lever for unlock/style LoRAs.", "required": False},
+            "lora_strength_clip": {"type": "float",  "description": "LoRA strength on the text encoder (default: 0.5).", "required": False},
         },
     ),
 }

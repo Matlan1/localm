@@ -116,7 +116,8 @@ def generate_image(
     api_url: str = "http://127.0.0.1:8188",
     guidance: Optional[float] = None,
     lora_name: Optional[str] = None,
-    lora_strength: float = 1.0,
+    lora_strength_model: float = 1.0,
+    lora_strength_clip: float = 0.5,
     input_image: Optional[Path] = None,
     denoise: Optional[float] = None,
     localm_url: Optional[str] = None,
@@ -139,8 +140,13 @@ def generate_image(
         FluxGuidance scale.  None keeps the workflow's own default (~3.5).
     lora_name
         LoRA filename to inject (optional).
-    lora_strength
-        Strength applied to both model and clip (default 1.0).
+    lora_strength_model
+        How strongly the LoRA patches the UNet weights (default 1.0).
+        This is the main lever for unlock/style LoRAs.
+    lora_strength_clip
+        How strongly the LoRA patches the text encoder (default 0.5).
+        Lower than model strength is usually correct for unlock LoRAs —
+        the base CLIP already understands the vocabulary.
     input_image
         Path to an existing image to use as the starting point (img2img mode).
         When provided, FLUX refines this image guided by *prompt* instead of
@@ -242,8 +248,8 @@ def generate_image(
                 "model": ["30", 0],
                 "clip": ["31", 0],
                 "lora_name": lora_name,
-                "strength_model": lora_strength,
-                "strength_clip": lora_strength,
+                "strength_model": lora_strength_model,
+                "strength_clip": lora_strength_clip,
             },
             "class_type": "LoraLoader",
         }
