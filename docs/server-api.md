@@ -88,6 +88,36 @@ data: {"id":"chatcmpl-abc123","object":"chat.completion.chunk","created":1749000
 data: [DONE]
 ```
 
+### `POST /v1/models/unload`
+
+Unloads the current model from GPU memory without stopping the server. Returns 200 immediately; the model is released asynchronously.
+
+```json
+{}
+```
+
+**Response:**
+```json
+{"status": "unloaded"}
+```
+
+Useful before running FLUX image generation so ComfyUI has the full VRAM budget. The model reloads automatically on the next `/v1/chat/completions` request (see `engine.py` — `chat_stream` calls `backend.load()` if the backend is unloaded).
+
+### `POST /v1/models/load`
+
+Reloads the previously-unloaded model. Blocks until the model is ready.
+
+```json
+{}
+```
+
+**Response:**
+```json
+{"status": "loaded"}
+```
+
+---
+
 ## Multimodal (image input)
 
 Pass images as base64 data-URIs in the multipart content format:

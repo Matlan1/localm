@@ -34,7 +34,20 @@ This document serves as a reference report and hand-off guide for setting up hig
 2.  **Fooocus** or **Stable Diffusion WebUI Forge** (for a more direct user interface that hides node complexity).
 3.  **Stability Matrix** (to manage local installations of these interfaces in one place).
 
+
+### Native Windows ROCm Environment (Configured)
+We have successfully configured a dedicated, native Windows ROCm environment for ComfyUI at `D:\stablematrix\Data\Packages\ComfyUI-Zluda`:
+*   **Virtual Environment**: `venv-rocm` (Python 3.12.13)
+*   **Key Packages**:
+    *   `torch==2.9.1+rocm7.13.0` (Native AMD Windows wheel)
+    *   `torchvision==0.24.0+rocm7.13.0`
+    *   `torchaudio==2.9.0+rocm7.13.0`
+    *   `rocm`, `rocm-sdk-core`, `rocm-sdk-libraries-gfx103x-all` (ROCm SDK 7.13)
+    *   `onnxruntime`, `einops`, `transformers`, `torchsde`, and all other ComfyUI requirements.
+*   **Launch Script**: [comfyui-rocm.bat](file:///D:/stablematrix/Data/Packages/ComfyUI-Zluda/comfyui-rocm.bat) has been created. Running this script bypasses ZLUDA entirely, running the server natively on ROCm.
+
 ---
+
 
 ## Action Plan for the Next Agent / Next Step
 

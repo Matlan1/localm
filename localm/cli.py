@@ -52,7 +52,7 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
     \b
     MODEL can be a registered name OR a direct path:
       localm run gemma4-12b
-      localm run D:\\models\\llama3.gguf
+      localm run D:\\models\\mymodel.gguf
       localm run D:\\hf-models\\gemma-3-4b-it
 
     \b
@@ -66,7 +66,7 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
 
     \b
     Pipe a prompt from stdin:
-      echo "Explain RDNA2" | localm run qwen2.5-7b
+      echo "Explain RDNA2" | localm run gemma4-12b
     """
     info = get_model_info(model)
     if info is None:
@@ -410,8 +410,8 @@ def pull(model_spec, name):
 
     \b
     Single GGUF file (quantized, lighter, works with GGUF backend):
-      localm pull llama3.2-3b
-      localm pull bartowski/Qwen2.5-7B-Instruct-GGUF:Qwen2.5-7B-Instruct-Q4_K_M.gguf
+      localm pull gemma3-4b
+      localm pull bartowski/gemma-3-4b-it-GGUF:gemma-3-4b-it-Q4_K_M.gguf
 
     \b
     Direct URL:
