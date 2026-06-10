@@ -421,6 +421,37 @@ def llama_sampler_init_temp(temp: float) -> ctypes.c_void_p:
     return _bind("llama_sampler_init_temp", LlamaSampler, ctypes.c_float)(temp)
 
 
+def llama_sampler_init_grammar(
+    vocab: ctypes.c_void_p,
+    grammar_str: bytes,
+    grammar_root: bytes,
+) -> ctypes.c_void_p:
+    """
+    Create a grammar sampler that constrains token selection to outputs
+    matching the given GBNF grammar.
+
+    The sampler masks logits for tokens that would violate the grammar at the
+    current parse position, so only structurally valid continuations survive
+    into the temperature / dist stage.
+
+    Parameters
+    ----------
+    vocab:
+        Vocabulary pointer from ``llama_model_get_vocab()``.
+    grammar_str:
+        GBNF grammar source, UTF-8 encoded.
+    grammar_root:
+        Name of the root rule, e.g. ``b"root"``.
+    """
+    return _bind(
+        "llama_sampler_init_grammar",
+        LlamaSampler,
+        LlamaVocab,
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+    )(vocab, grammar_str, grammar_root)
+
+
 # ---------------------------------------------------------------------------
 #  System info (useful for diagnostics)
 # ---------------------------------------------------------------------------

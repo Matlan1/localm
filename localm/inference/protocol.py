@@ -92,6 +92,7 @@ class ChatRequest(BaseModel):
     top_p: Optional[float] = None
     top_k: Optional[int] = None
     repeat_penalty: Optional[float] = None
+    grammar: Optional[str] = None  # GBNF grammar string for constrained sampling
 
 
 # ------------------------------------------------------------------ #

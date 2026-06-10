@@ -136,6 +136,7 @@ class Engine:
         top_p: Optional[float] = None,
         top_k: Optional[int] = None,
         repeat_penalty: Optional[float] = None,
+        grammar: Optional[str] = None,
     ) -> Iterator[str]:
         # Auto-reload if the model was unloaded (e.g. to free VRAM for image gen)
         if not self._backend.loaded:
@@ -152,6 +153,7 @@ class Engine:
             top_p=top_p or cfg["top_p"],
             top_k=top_k or cfg["top_k"],
             repeat_penalty=repeat_penalty or cfg["repeat_penalty"],
+            grammar=grammar,
         )
 
     def __enter__(self) -> "Engine":

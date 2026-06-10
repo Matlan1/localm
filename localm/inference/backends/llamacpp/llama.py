@@ -240,21 +240,42 @@ def _filtered_stream(pieces: Iterator[str]) -> Iterator[str]:
 # ---------------------------------------------------------------------------
 
 def _build_sampler(
+    vocab: int,
     temperature: float = 0.8,
     top_k: int = 40,
     top_p: float = 0.95,
     min_p: float = 0.05,
     seed: int = _DEFAULT_SEED,
+    grammar: Optional[str] = None,
 ) -> int:
     """
     Construct a sampler chain:
-        top_k → top_p → min_p → temperature → dist (random draw)
+        [grammar] → top_k → top_p → min_p → temperature → dist (random draw)
 
-    For temperature ≤ 0 we use greedy sampling instead.
+    The optional grammar sampler sits first so it masks invalid tokens before
+    any scoring or sampling stage sees them.  For temperature ≤ 0 greedy
+    sampling replaces the stochastic stages.
+
+    Parameters
+    ----------
+    vocab:
+        Vocabulary pointer from ``llama_model_get_vocab()``.  Required when
+        *grammar* is provided; unused otherwise.
+    grammar:
+        GBNF grammar string.  When supplied, only token sequences that match
+        this grammar at the current parse position are eligible for sampling.
+        Pass ``None`` (the default) to skip grammar-constrained sampling.
     """
     chain_params = api.llama_sampler_chain_default_params()
     chain_params.no_perf = True
     chain = api.llama_sampler_chain_init(chain_params)
+
+    # Grammar sampler masks logits before any scoring stage touches them
+    if grammar:
+        api.llama_sampler_chain_add(
+            chain,
+            api.llama_sampler_init_grammar(vocab, grammar.encode(), b"root"),
+        )
 
     if temperature <= 0.0:
         api.llama_sampler_chain_add(chain, api.llama_sampler_init_greedy())
@@ -371,6 +392,7 @@ class LlamaCpp:
         top_k: int,
         top_p: float,
         repeat_penalty: float,
+        grammar: Optional[str] = None,
     ) -> Iterator[int]:
         """
         Yield generated token ids one at a time.
@@ -426,10 +448,12 @@ class LlamaCpp:
 
         # Build sampler
         sampler = _build_sampler(
+            vocab=self._tokenizer._vocab,
             temperature=temperature,
             top_k=top_k,
             top_p=top_p,
             seed=self._seed,
+            grammar=grammar,
         )
 
         pos = n_prompt
@@ -469,6 +493,7 @@ class LlamaCpp:
         top_k: int = 40,
         repeat_penalty: float = 1.1,
         stream: bool = False,
+        grammar: Optional[str] = None,
         **_ignored,
     ):
         """
@@ -499,6 +524,7 @@ class LlamaCpp:
             top_k=top_k,
             top_p=top_p,
             repeat_penalty=repeat_penalty,
+            grammar=grammar,
         )
 
         if stream:

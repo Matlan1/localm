@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Iterator, List
+from typing import Iterator, List, Optional
 
 
 class BaseBackend(ABC):
@@ -27,8 +27,19 @@ class BaseBackend(ABC):
         top_p: float = 0.95,
         top_k: int = 40,
         repeat_penalty: float = 1.1,
+        grammar: Optional[str] = None,
     ) -> Iterator[str]:
-        """Yield text tokens one at a time."""
+        """
+        Yield text tokens one at a time.
+
+        Parameters
+        ----------
+        grammar:
+            Optional GBNF grammar string.  When provided (GGUF backend only),
+            the sampler masks tokens that would violate the grammar at the
+            current parse position.  Use ``localm.inference.gbnf`` for
+            pre-built grammars.  Ignored by backends that do not support it.
+        """
 
     @property
     @abstractmethod

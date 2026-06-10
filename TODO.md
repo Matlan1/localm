@@ -32,7 +32,8 @@ Gaps identified by comparing against Claude Code, Aider, Cursor, Copilot.
 - [x] Interruption / resume — Ctrl+C saves .localcoder/checkpoint.json; /resume restores state and continues
 - [x] Token budget tracking — `_fill_ratio()` + `_total_tokens` in agent.py; warns at 70%, compacts at 90%
 - [x] Retry / error recovery strategy — consecutive failure streak tracker; escalating hints injected at 2× and 3× failures
-- [x] Structured output enforcement — OpenAI backend uses native tools API (schema-validated calls); local backends retain text parsing
+- [x] Structured output enforcement — online providers use native tools API; local backends retain text parsing
+- [x] Grammar-constrained sampling for local models — GBNF grammar threaded through `llama_sampler_init_grammar` → `LlamaCpp` → `GgufBackend` → `Engine` → HTTP server; pre-built grammars in `localm/inference/gbnf.py`; HF backend accepts and ignores the param
 - [x] Tool call streaming — tool_call XML blocks suppressed from stream display; full parse-on-arrival refactor deferred
 
 ---

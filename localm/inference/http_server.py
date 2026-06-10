@@ -148,6 +148,7 @@ def create_app(engine: Engine) -> FastAPI:
             top_p=req.top_p,
             top_k=req.top_k,
             repeat_penalty=req.repeat_penalty,
+            grammar=req.grammar,
         )
         # Strip None so Engine uses its config defaults
         gen_kwargs = {k: v for k, v in gen_kwargs.items() if v is not None}

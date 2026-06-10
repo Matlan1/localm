@@ -160,6 +160,7 @@ class HFBackend(BaseBackend):
         top_p: float = 0.95,
         top_k: int = 40,
         repeat_penalty: float = 1.1,
+        grammar: Optional[str] = None,   # accepted but ignored — HF has no GBNF sampler
     ) -> Iterator[str]:
         from transformers import TextIteratorStreamer
 

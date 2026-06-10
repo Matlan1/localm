@@ -108,6 +108,7 @@ class GgufBackend(BaseBackend):
         top_p: float = 0.95,
         top_k: int = 40,
         repeat_penalty: float = 1.1,
+        grammar: Optional[str] = None,
     ) -> Iterator[str]:
         if self._use_subprocess:
             yield from self._subprocess_stream(messages, max_tokens, temperature)
@@ -121,6 +122,7 @@ class GgufBackend(BaseBackend):
             top_p=top_p,
             top_k=top_k,
             repeat_penalty=repeat_penalty,
+            grammar=grammar,
             stream=True,
         ):
             token = chunk["choices"][0].get("delta", {}).get("content", "")
