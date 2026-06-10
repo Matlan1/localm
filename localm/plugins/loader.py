@@ -63,7 +63,7 @@ class PluginError(Exception):
 
 _RESERVED_NAMES = {
     "pull", "run", "serve", "list", "remove", "info", "config",
-    "doctor", "coder", "plugin", "imagine",
+    "doctor", "coder", "plugin", "imagine", "mcp", "alias", "completion",
 }
 
 

@@ -811,6 +811,13 @@ def doctor():
 # The plugin is gated behind ``pip install "localm[coder]"`` so the import
 # is wrapped in a try/except — the base localm install keeps working fine
 # if the extra was never requested.
+# MCP server plugin — expose localm to MCP clients (Claude Desktop, etc.)
+try:
+    from .plugins.mcpserver.cli import main as _mcp_main
+    main.add_command(_mcp_main, name="mcp")
+except ImportError:
+    pass
+
 try:
     from .plugins.coder.cli import main as _coder_main
     main.add_command(_coder_main, name="coder")
