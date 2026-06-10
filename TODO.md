@@ -1,6 +1,7 @@
-# localllm-coder — TODO / Feature Roadmap
+# localm — TODO / Feature Roadmap
 
-Gaps identified by comparing against Claude Code, Aider, Cursor, Copilot.
+Coder gaps identified by comparing against Claude Code, Aider, Cursor, Copilot.
+GUI gaps identified by comparing against LM Studio, Jan, Open WebUI.
 
 ---
 
@@ -74,7 +75,8 @@ Gaps identified by comparing against Claude Code, Aider, Cursor, Copilot.
 - [x] New coder tools: `run_tests`, `git_commit`, `git_push`, `git_create_branch`, `search_replace` — all registered in TOOL_REGISTRY
 - [x] Path confinement for file tools — `_confine()` helper raises PermissionError on path traversal
 - [x] Syntax verification after writes — `_verify_syntax()` auto-runs after write/edit/patch; warns agent on failure
-- [ ] MCP server support — let third-party tools register themselves (static `TOOL_REGISTRY` → dynamic)
+- [x] MCP client support — external MCP servers from `.localcoder/config.toml` register tools dynamically as `mcp_<server>_<tool>`; untrusted servers gated as destructive
+- [x] MCP server — `localm mcp` exposes chat/list_models/embed/generate_image to any MCP client (Claude Desktop etc.); `--print-config` emits the client JSON
 - [ ] VS Code / Neovim extension — terminal integration so the agent sees the file you have open
 - [x] GitHub Actions / CI mode — `--ci` flag: auto-approve, plain-text output, exit 0/1/2; `--output-format json` for machine-readable results
 - [x] `--patch-mode FILE` — captures write/edit/patch calls as unified diffs; writes to FILE or stdout ('-')
@@ -86,6 +88,65 @@ Gaps identified by comparing against Claude Code, Aider, Cursor, Copilot.
 - [x] Per-model-family system prompt variants — `detect_model_family()` in prompts.py: gemma / thinking / small / default
 - [x] Native function-calling API mode — enabled for OpenAI and Anthropic automatically; --native-tools flag for --url servers (Ollama etc.)
 - [x] Thinking / scratchpad budget — thinking hints injected for deepseek-r1, qwq, qwen3 in prompts.py
+
+---
+
+## Web GUI (`localm gui`)
+
+### Done
+
+- [x] Chat: streaming, markdown + highlighted code, copy buttons (message + code block)
+- [x] Chat parameters: temperature, top-p, max tokens, seed, system prompt
+- [x] Conversation history in localStorage: list, switch, delete, auto-title
+- [x] Stop generation mid-stream
+- [x] Usage stats per reply: total tokens, TTFT, tok/s
+- [x] Model selector with live engine switching (waits for in-flight inference)
+- [x] Coder sessions: cwd input, persistence mode, auto-approve toggle
+- [x] Coder feed: streaming reasoning, expandable tool-call cards with args/output
+- [x] Browser approval flow for destructive tools with unified diff preview (10 min timeout)
+- [x] Coder stop / end session; busy-state handling; turn + token counter
+- [x] Bearer auth (`LOCALM_API_KEY`) honoured on all /api routes; key prompted once and kept in localStorage
+- [x] Port auto-pick in the localm range; `--no-browser` flag
+
+### Missing — chat
+
+- [ ] Image attachment (multimodal) — CLI has `--image`, the GUI composer has no attach button
+- [ ] top-k and repeat-penalty in the parameters drawer (server already accepts them)
+- [ ] GBNF grammar field (server already accepts `grammar`)
+- [ ] Regenerate last reply / edit a sent message
+- [ ] Rename and export conversations (markdown/JSON)
+
+### Missing — coder
+
+- [ ] Session reattach after page reload — needs `GET /api/coder/sessions` (list) so the UI can reconnect to a live session instead of orphaning it
+- [ ] Rendered diff in tool cards when auto-approve is on (currently raw args JSON; diffs only show in approval cards)
+- [ ] Expose max-turns and temperature in the session setup form (API already accepts both)
+- [ ] Per-session model choice (sessions always use the active chat model)
+- [ ] Undo / compact / scope — REPL commands with no GUI equivalent
+- [ ] Session audit-log viewer (JSONL from log/full modes)
+- [ ] Multiple concurrent sessions in the UI (backend already supports it)
+
+### Missing — pages
+
+- [ ] Model management page: pull with progress, remove, aliases (registry list exists; mutations are CLI-only)
+- [ ] Plugin manager page (needs `/v1/plugins` endpoints)
+- [ ] Settings page: server config editing (needs `/v1/config` GET/PATCH)
+- [ ] Image generation panel (ComfyUI at 8188)
+- [ ] Light theme toggle (dark only today)
+- [ ] Tauri 2 native shell wrapping this frontend (window, sidecar lifecycle, tray)
+
+---
+
+## Server / platform (open)
+
+- [ ] `GET /v1/models/{id}` — model detail endpoint with registry metadata
+- [ ] `localm benchmark <model>` — standard prompt, TTFT, tok/s at multiple context lengths
+- [ ] 429 retry/backoff for cloud coder backends (OpenAI/Anthropic opt-ins)
+- [ ] Tool result compression — summarise large tool outputs when context fill > 50%
+- [ ] `read_env` coder tool — reads `.env` and active env vars with secrets stripped
+- [ ] `--estimate` flag — one planning turn without execution, prints expected token usage
+- [ ] PyPI packaging polish — classifiers, `localm[gpu]`/`localm[cpu]` extras, publish workflow
+- [ ] TLS / reverse-proxy guide for LAN serving
 
 ---
 
