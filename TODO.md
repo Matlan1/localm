@@ -60,15 +60,15 @@ Gaps identified by comparing against Claude Code, Aider, Cursor, Copilot.
 
 - [ ] MCP server support — let third-party tools register themselves (static `TOOL_REGISTRY` → dynamic)
 - [ ] VS Code / Neovim extension — terminal integration so the agent sees the file you have open
-- [ ] GitHub Actions / CI mode — `localcoder --ci "run tests and fix failures"` with structured exit codes
-- [ ] `--patch-mode` — output a `.patch` file instead of modifying files directly
+- [x] GitHub Actions / CI mode — `--ci` flag: auto-approve, plain-text output, exit 0/1/2; `--output-format json` for machine-readable results
+- [x] `--patch-mode FILE` — captures write/edit/patch calls as unified diffs; writes to FILE or stdout ('-')
 
 ---
 
 ## Model Quality Workarounds
 
 - [x] Per-model-family system prompt variants — `detect_model_family()` in prompts.py: gemma / thinking / small / default
-- [ ] Native function-calling API mode — when the server supports it (OpenAI, Anthropic), use it instead of text-format tool calls
+- [x] Native function-calling API mode — enabled for OpenAI and Anthropic automatically; --native-tools flag for --url servers (Ollama etc.)
 - [x] Thinking / scratchpad budget — thinking hints injected for deepseek-r1, qwq, qwen3 in prompts.py
 
 ---

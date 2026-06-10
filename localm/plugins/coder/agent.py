@@ -159,6 +159,8 @@ class Agent:
         self.auto_approve   = auto_approve
         self.always_confirm = always_confirm or set()
         self.dry_run        = dry_run
+        self.patch_mode     = False        # set via Agent.enable_patch_mode()
+        self._patch_chunks: list[str] = [] # accumulated diffs when patch_mode=True
         self.parent         = parent
         self.mode           = mode
         self.gen_kwargs     = gen_kwargs
@@ -169,6 +171,7 @@ class Agent:
         self._last_turn_tokens: int = 0   # tokens used in the most recently completed turn
         self._consecutive_errors: dict[str, int] = {}  # tool_name → failure streak
         self._compact_warned: bool = False
+        self._last_run_ok: bool = True    # False when the last _loop hit max_turns
         self._undo_stack: list[dict] = []
         self._model_name: str = getattr(backend, "model_id", "")
         self._audit: AuditLogT = make_audit_log(mode, label=name)
@@ -189,6 +192,11 @@ class Agent:
     @property
     def turns(self) -> int:
         return self._turns
+
+    @property
+    def last_run_ok(self) -> bool:
+        """False if the last run ended by hitting max_turns rather than completing normally."""
+        return self._last_run_ok
 
     @property
     def total_tokens(self) -> int:
@@ -263,6 +271,7 @@ class Agent:
         self._last_turn_tokens = 0
         self._compact_warned = False
         self._consecutive_errors.clear()
+        self._last_run_ok = True
 
     def set_cwd(self, cwd: Path) -> None:
         self.cwd = cwd
@@ -397,6 +406,7 @@ class Agent:
                 msg = f"[max_turns={self.max_turns} reached]"
                 print_warning(msg)
                 final_response = msg
+                self._last_run_ok = False
 
         except KeyboardInterrupt:
             if interactive and self._messages:
@@ -625,6 +635,19 @@ class Agent:
         if interactive:
             print_tool_call(call.name, call.args)
 
+        # Patch-mode: intercept write tools, accumulate diffs, don't touch disk
+        if self.patch_mode and call.name in _UNDOABLE_TOOLS:
+            chunk = self._patch_mode_intercept(call)
+            if chunk is not None:
+                self._patch_chunks.append(chunk)
+                result = ToolResult.success(
+                    f"[patch-mode] diff captured for {call.args.get('path', '?')}",
+                    summary=f"[patch-mode] {call.name}",
+                )
+                if interactive:
+                    console.print("    [dim cyan][patch-mode] diff captured[/dim cyan]")
+                return result
+
         # Dry-run: show destructive calls but don't execute them
         if self.dry_run and tool_def.destructive:
             result = ToolResult.success(
@@ -707,6 +730,57 @@ class Agent:
             self._refresh_map_for_tool(call)
 
         return result
+
+    def _patch_mode_intercept(self, call: ToolCall) -> Optional[str]:
+        """
+        Compute a unified diff for a write/edit/patch call without touching disk.
+
+        Returns the diff string, or None if the diff cannot be computed.
+        """
+        import difflib as _difflib
+
+        path_arg = call.args.get("path", "")
+        abs_path = (self.cwd / path_arg).resolve() if path_arg else None
+        old_text = ""
+        if abs_path and abs_path.is_file():
+            try:
+                old_text = abs_path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+        if call.name == "write_file":
+            new_text = call.args.get("content", "")
+        elif call.name == "edit_file":
+            old_str = call.args.get("old_string", "")
+            new_str = call.args.get("new_string", "")
+            new_text = old_text.replace(old_str, new_str, 1)
+        elif call.name == "patch_file":
+            # patch is already a diff — wrap it as-is
+            patch = call.args.get("patch", "")
+            return patch if patch else None
+        else:
+            return None
+
+        diff_lines = list(_difflib.unified_diff(
+            old_text.splitlines(keepends=True),
+            new_text.splitlines(keepends=True),
+            fromfile=f"a/{path_arg}",
+            tofile=f"b/{path_arg}",
+        ))
+        return "".join(diff_lines) if diff_lines else None
+
+    def flush_patch(self, output_path: Optional[Path] = None) -> str:
+        """
+        Return the accumulated unified diff (and optionally write it to a file).
+
+        Clears the internal patch buffer.
+        """
+        content = "\n".join(c for c in self._patch_chunks if c)
+        self._patch_chunks.clear()
+        if output_path is not None:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(content, encoding="utf-8")
+        return content
 
     def _confirm_tool(self, call: ToolCall) -> bool:
         """

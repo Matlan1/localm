@@ -92,10 +92,30 @@ def _complete_model(ctx, param, incomplete):
               help="Auto-approve file writes but still prompt before shell commands.")
 @click.option("--dry-run",          is_flag=True,
               help="Show what the agent would do without executing destructive tools.")
+@click.option("--patch-mode",       "patch_mode", default=None,
+              metavar="FILE",
+              help=(
+                  "Capture all file writes as a unified diff instead of modifying files. "
+                  "Writes the .patch to FILE (use '-' for stdout)."
+              ))
+@click.option("--native-tools",     "native_tools", is_flag=True,
+              help=(
+                  "Use the OpenAI-compatible native tools API for structured tool calls "
+                  "(enabled automatically for --online and --anthropic; "
+                  "use this flag with --url for servers that support it, e.g. Ollama)."
+              ))
 @click.option("--online", "provider", flag_value="openai",  default=None,
               help="Use OpenAI API instead of local model.")
 @click.option("--anthropic",        "provider", flag_value="anthropic",
               help="Use Anthropic API (via ANTHROPIC_API_KEY).")
+@click.option("--ci",               is_flag=True,
+              help=(
+                  "CI mode: auto-approve all, no colors, structured exit codes. "
+                  "Exit 0 = success, 1 = task incomplete (max turns), 2 = startup error."
+              ))
+@click.option("--output-format",    "output_format", default="text",
+              type=click.Choice(["text", "json"], case_sensitive=False),
+              help="Output format for non-interactive runs (text or json).")
 @click.option("--mode",             default=None,
               type=click.Choice(["privacy", "log", "full"], case_sensitive=False),
               help=(
@@ -107,7 +127,8 @@ def _complete_model(ctx, param, incomplete):
 def main(
     task, model, url, api_key, port, cwd,
     no_server, max_turns, temperature, max_tokens,
-    verbose, yes, interactive_confirm, dry_run, provider, mode,
+    verbose, yes, interactive_confirm, dry_run, patch_mode, ci, output_format,
+    native_tools, provider, mode,
 ):
     """
     Offline AI coding agent powered by local LLMs.
@@ -127,6 +148,18 @@ def main(
       localcoder --anthropic --model claude-opus-4-5 "add tests"
     """
     work_dir = Path(cwd).resolve() if cwd else Path.cwd()
+
+    # ------------------------------------------------------------------ #
+    #  CI mode setup
+    # ------------------------------------------------------------------ #
+    if ci:
+        yes = True          # never prompt
+        if mode is None:
+            mode = "log"    # always leave an audit trail in CI
+        # Strip Rich colors so log output is plain text
+        import os as _os
+        _os.environ.setdefault("NO_COLOR", "1")
+        _os.environ.setdefault("TERM", "dumb")
 
     # ------------------------------------------------------------------ #
     #  Project-level config (.localcoder/config.toml) — CLI flags override
@@ -158,7 +191,7 @@ def main(
         session_mode = parse_mode(mode)
     except ValueError as exc:
         print_error(str(exc))
-        sys.exit(1)
+        sys.exit(2 if ci else 1)
 
     # Privacy-mode setup — suppress readline history as early as possible
     if session_mode == SessionMode.PRIVACY:
@@ -187,14 +220,17 @@ def main(
             model = "claude-opus-4-5"
         import os
         key = os.environ.get("ANTHROPIC_API_KEY", "")
-        backend = HTTPBackend("https://api.anthropic.com/v1", model, api_key=key)
+        backend = HTTPBackend(
+            "https://api.anthropic.com/v1", model, api_key=key, native_tools=True
+        )
 
     elif url:
         # Explicit URL — no server management
         if not model:
             print_error("--url requires --model")
-            sys.exit(1)
-        backend = HTTPBackend(url.rstrip("/"), model, api_key=api_key)
+            sys.exit(2 if ci else 1)
+        backend = HTTPBackend(url.rstrip("/"), model, api_key=api_key,
+                              native_tools=native_tools)
 
     else:
         # Offline path — localm backend
@@ -204,7 +240,7 @@ def main(
                 "  localcoder --model gemma4-4b\n"
                 "Run `localm list` to see registered models."
             )
-            sys.exit(1)
+            sys.exit(2 if ci else 1)
 
         srv_port = port or find_free_port()
 
@@ -213,7 +249,7 @@ def main(
         else:
             server_ctx = ManagedServer(model, port=srv_port)
             if not server_ctx.start():
-                sys.exit(1)
+                sys.exit(2 if ci else 1)
             backend = make_localm_backend(model, port=srv_port)
 
     # ------------------------------------------------------------------ #
@@ -232,13 +268,27 @@ def main(
         **gen_kw,
     )
 
+    if patch_mode:
+        agent.patch_mode = True
+
     try:
         if task:
             # Non-interactive single-task mode
             response = agent.run_task(task)
-            if not verbose:
-                # In non-interactive mode the loop already printed the answer
-                pass
+            success  = agent.last_run_ok
+
+            if output_format == "json":
+                import json as _json
+                result = {
+                    "success":      success,
+                    "response":     response,
+                    "turns":        agent.turns,
+                    "total_tokens": agent.total_tokens,
+                }
+                sys.stdout.write(_json.dumps(result, indent=2) + "\n")
+
+            if ci and not success:
+                sys.exit(1)
         else:
             # Interactive REPL
             print_banner(backend.model_id, work_dir,
@@ -256,6 +306,17 @@ def main(
             _repl(agent)
 
     finally:
+        # Flush patch output before closing
+        if patch_mode and agent._patch_chunks:
+            patch_content = agent.flush_patch()
+            if patch_mode == "-":
+                sys.stdout.write(patch_content)
+            else:
+                out = Path(patch_mode)
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_text(patch_content, encoding="utf-8")
+                print_info(f"Patch written to {out}")
+
         md_path = agent.close()
         if md_path:
             print_info(f"Session transcript saved → {md_path}")
