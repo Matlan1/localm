@@ -236,6 +236,23 @@ def _filtered_stream(pieces: Iterator[str]) -> Iterator[str]:
 
 
 # ---------------------------------------------------------------------------
+#  KV cache helpers
+# ---------------------------------------------------------------------------
+
+# Suffix tokens are prefilled in chunks of this size (matches n_batch ceiling)
+_PREFILL_CHUNK = 2048
+
+
+def _common_prefix_len(a: List[int], b: List[int]) -> int:
+    """Length of the longest common prefix of two token lists."""
+    n = min(len(a), len(b))
+    for i in range(n):
+        if a[i] != b[i]:
+            return i
+    return n
+
+
+# ---------------------------------------------------------------------------
 #  Sampler chain builder
 # ---------------------------------------------------------------------------
 
@@ -317,6 +334,10 @@ class LlamaCpp:
         self._model_ptr   = None   # type: ignore[assignment]
         self._ctx_ptr     = None   # type: ignore[assignment]
         self._tokenizer   = None   # type: ignore[assignment]
+        # Persistent KV cache bookkeeping (prefix reuse across calls)
+        self._cached_tokens: List[int] = []   # tokens currently in the KV cache
+        self._ctx_capacity  = n_ctx           # n_ctx of the live context
+        self._kv_supported: Optional[bool] = None   # lazy llama_memory_* probe
 
         _ctx = _quiet_stderr if not verbose else contextlib.nullcontext
 
@@ -357,6 +378,7 @@ class LlamaCpp:
 
     def close(self) -> None:
         """Release GPU/CPU memory held by this instance."""
+        self._cached_tokens = []
         if self._ctx_ptr:
             api.llama_free(self._ctx_ptr)
             self._ctx_ptr = None
@@ -397,54 +419,32 @@ class LlamaCpp:
         """
         Yield generated token ids one at a time.
 
-        The prompt is fed in a single prefill batch; then tokens are generated
-        one-by-one in decode mode using the sampler chain.
-
-        Note: this implementation creates a fresh context for each call by
-        re-using the same context handle.  Since there are no kv_cache_clear
-        functions in this build, we reconstruct the context before each run.
-        The cost is a small (~ms) context reinitialisation.
+        KV cache strategy: when this llama.cpp build exports the
+        llama_memory_* API and the request fits in the live context, the
+        common token prefix shared with the previous call is kept in the KV
+        cache and only the new suffix is prefilled (fast follow-up turns in
+        a chat).  Otherwise the context is recreated from scratch — the
+        behaviour of older builds without KV-management functions.
         """
         if not self._model_ptr:
             raise RuntimeError("Model not loaded")
-
-        # Re-create a fresh context so the KV cache is empty
-        # (llama_kv_self_clear is not present in this build)
-        if self._ctx_ptr:
-            api.llama_free(self._ctx_ptr)
-
-        cp = api.llama_context_default_params()
-        cp.n_ctx       = max(self._n_ctx, len(prompt_tokens) + max_new_tokens + 64)
-        cp.n_batch     = min(cp.n_ctx, 2048)
-        cp.n_ubatch    = cp.n_batch   # micro-batch must match so prefill fits in one call
-        cp.offload_kqv = True
 
         n_prompt = len(prompt_tokens)
         if n_prompt == 0:
             return
 
         _ctx = _quiet_stderr if not self._verbose else contextlib.nullcontext
+        needed = n_prompt + max_new_tokens + 64
 
-        # One contiguous suppression scope covering both context creation and
-        # prefill.  The ROCm lazy-buffer verification messages
-        # ("~llama_context: ROCm0 compute buffer size …") fire asynchronously
-        # after llama_init_from_model returns but before the first llama_decode
-        # completes, so separate per-call windows leave a gap.  Bridging them
-        # into a single scope closes it.
+        # One contiguous suppression scope covering context work and prefill.
+        # The ROCm lazy-buffer verification messages fire asynchronously
+        # after llama_init_from_model returns but before the first
+        # llama_decode completes, so separate windows leave a gap.
         with _ctx():
-            self._ctx_ptr = api.llama_init_from_model(self._model_ptr, cp)
-            if not self._ctx_ptr:
-                raise RuntimeError("Failed to (re)create llama context")
-            # Update the tokenizer's ctx reference
-            self._tokenizer._ctx = self._ctx_ptr
-
-            # --- prefill prompt ---
-            tok_arr = (llama_token * n_prompt)(*prompt_tokens)
-            batch = api.llama_batch_get_one(tok_arr, n_prompt)
-            ret = api.llama_decode(self._ctx_ptr, batch)
-
-        if ret != 0:
-            raise RuntimeError(f"llama_decode failed during prefill (code {ret})")
+            if self._can_reuse_kv(needed):
+                self._prefill_with_reuse(prompt_tokens)
+            else:
+                self._prefill_fresh_context(prompt_tokens, needed)
 
         # Build sampler
         sampler = _build_sampler(
@@ -476,9 +476,98 @@ class LlamaCpp:
                 if ret != 0:
                     # KV cache full or error
                     break
+                self._cached_tokens.append(token)
                 pos += 1
         finally:
             api.llama_sampler_free(sampler)
+
+    # ------------------------------------------------------------------ #
+    #  KV cache management                                                 #
+    # ------------------------------------------------------------------ #
+
+    def _memory_api_available(self) -> bool:
+        """Probe once for the llama_memory_* function family."""
+        if self._kv_supported is None:
+            try:
+                self._kv_supported = api.has_memory_api()
+            except Exception:
+                self._kv_supported = False
+        return self._kv_supported
+
+    def _can_reuse_kv(self, needed_tokens: int) -> bool:
+        """True when the live context and its KV cache can serve this call."""
+        return (
+            self._ctx_ptr is not None
+            and needed_tokens <= self._ctx_capacity
+            and self._memory_api_available()
+        )
+
+    def _prefill_with_reuse(self, prompt_tokens: List[int]) -> None:
+        """
+        Prefill keeping the common prefix with the previous call in the KV
+        cache: remove diverging cached tokens, decode only the new suffix.
+        """
+        mem = api.llama_get_memory(self._ctx_ptr)
+
+        prefix = _common_prefix_len(self._cached_tokens, prompt_tokens)
+        # The model must decode at least the final prompt token so the
+        # logits for sampling position -1 are fresh.
+        if prefix == len(prompt_tokens):
+            prefix -= 1
+
+        if prefix < len(self._cached_tokens):
+            # Drop cached tokens past the common prefix
+            if not api.llama_memory_seq_rm(mem, 0, prefix, -1):
+                # Partial removal unsupported (e.g. SWA cache) — start over
+                api.llama_memory_clear(mem, True)
+                prefix = 0
+
+        suffix = prompt_tokens[prefix:]
+        for i in range(0, len(suffix), _PREFILL_CHUNK):
+            chunk = suffix[i:i + _PREFILL_CHUNK]
+            tok_arr = (llama_token * len(chunk))(*chunk)
+            batch = api.llama_batch_get_one(tok_arr, len(chunk))
+            ret = api.llama_decode(self._ctx_ptr, batch)
+            if ret != 0:
+                # Cache state is now unknown — wipe it so the next call
+                # starts clean rather than trusting a half-decoded prefix
+                self._cached_tokens = []
+                try:
+                    api.llama_memory_clear(mem, True)
+                except Exception:
+                    pass
+                raise RuntimeError(f"llama_decode failed during prefill (code {ret})")
+
+        self._cached_tokens = list(prompt_tokens)
+
+    def _prefill_fresh_context(self, prompt_tokens: List[int], needed: int) -> None:
+        """Recreate the context (empty KV cache) and prefill the full prompt."""
+        if self._ctx_ptr:
+            api.llama_free(self._ctx_ptr)
+            self._ctx_ptr = None
+        self._cached_tokens = []
+
+        cp = api.llama_context_default_params()
+        cp.n_ctx       = max(self._n_ctx, needed)
+        cp.n_batch     = min(cp.n_ctx, 2048)
+        cp.n_ubatch    = cp.n_batch   # micro-batch must match so prefill fits in one call
+        cp.offload_kqv = True
+
+        self._ctx_ptr = api.llama_init_from_model(self._model_ptr, cp)
+        if not self._ctx_ptr:
+            raise RuntimeError("Failed to (re)create llama context")
+        self._ctx_capacity = cp.n_ctx
+        # Update the tokenizer's ctx reference
+        self._tokenizer._ctx = self._ctx_ptr
+
+        n_prompt = len(prompt_tokens)
+        tok_arr = (llama_token * n_prompt)(*prompt_tokens)
+        batch = api.llama_batch_get_one(tok_arr, n_prompt)
+        ret = api.llama_decode(self._ctx_ptr, batch)
+        if ret != 0:
+            raise RuntimeError(f"llama_decode failed during prefill (code {ret})")
+
+        self._cached_tokens = list(prompt_tokens)
 
     # ------------------------------------------------------------------ #
     #  Public API compatible with llama-cpp-python                        #

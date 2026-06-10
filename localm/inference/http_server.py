@@ -281,6 +281,24 @@ def create_app(engine: Engine) -> FastAPI:
 
 
 # ------------------------------------------------------------------ #
+#  Performance metric helpers                                          #
+# ------------------------------------------------------------------ #
+
+def _ttft_ms(gen_start: float, first_token_at: Optional[float]) -> Optional[float]:
+    """Time to first token in milliseconds, or None if nothing was generated."""
+    if first_token_at is None:
+        return None
+    return round((first_token_at - gen_start) * 1000, 1)
+
+
+def _tokens_per_sec(completion_tokens: int, elapsed: float) -> Optional[float]:
+    """Generation throughput, or None when not measurable."""
+    if not completion_tokens or elapsed <= 0:
+        return None
+    return round(completion_tokens / elapsed, 2)
+
+
+# ------------------------------------------------------------------ #
 #  SSE streaming                                                       #
 # ------------------------------------------------------------------ #
 
@@ -329,6 +347,8 @@ async def _stream_sse(
 
     # Serialise inference — only one request runs at a time
     async with sem:
+        gen_start = time.perf_counter()
+        first_token_at: float | None = None
         t = threading.Thread(target=_generate, daemon=True)
         t.start()
 
@@ -337,11 +357,14 @@ async def _stream_sse(
             token = await token_queue.get()
             if token is None:
                 break
+            if first_token_at is None:
+                first_token_at = time.perf_counter()
             completion_parts.append(token)
             chunk = ChatChunk.token(token, model_id, chunk_id, ts)
             yield f"data: {chunk.model_dump_json()}\n\n"
 
         t.join()
+        gen_elapsed = time.perf_counter() - gen_start
 
     # Count tokens on the full completion text — more accurate and efficient
     completion_tokens = engine.count_tokens("".join(completion_parts))
@@ -350,6 +373,8 @@ async def _stream_sse(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         total_tokens=prompt_tokens + completion_tokens,
+        ttft_ms=_ttft_ms(gen_start, first_token_at),
+        tokens_per_sec=_tokens_per_sec(completion_tokens, gen_elapsed),
     )
     done = ChatChunk.done(model_id, chunk_id, ts, usage=usage)
     yield f"data: {done.model_dump_json()}\n\n"
@@ -385,6 +410,8 @@ async def _stream_sse_completion(
     import threading
 
     async with sem:
+        gen_start = time.perf_counter()
+        first_token_at: float | None = None
         t = threading.Thread(target=_generate, daemon=True)
         t.start()
 
@@ -393,6 +420,8 @@ async def _stream_sse_completion(
             token = await token_queue.get()
             if token is None:
                 break
+            if first_token_at is None:
+                first_token_at = time.perf_counter()
             completion_parts.append(token)
             chunk = {
                 "id": chunk_id, "object": "text_completion.chunk",
@@ -402,6 +431,7 @@ async def _stream_sse_completion(
             yield f"data: {json.dumps(chunk)}\n\n"
 
         t.join()
+        gen_elapsed = time.perf_counter() - gen_start
 
     completion_tokens = engine.count_tokens("".join(completion_parts))
     done = {
@@ -412,6 +442,8 @@ async def _stream_sse_completion(
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": prompt_tokens + completion_tokens,
+            "ttft_ms": _ttft_ms(gen_start, first_token_at),
+            "tokens_per_sec": _tokens_per_sec(completion_tokens, gen_elapsed),
         },
     }
     yield f"data: {json.dumps(done)}\n\n"
@@ -445,13 +477,16 @@ async def _complete(
 
     # Serialise inference — only one request runs at a time
     async with sem:
+        gen_start = time.perf_counter()
         text = await loop.run_in_executor(None, _run)
+        gen_elapsed = time.perf_counter() - gen_start
 
     completion_tokens = engine.count_tokens(text)
     usage = UsageInfo(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         total_tokens=prompt_tokens + completion_tokens,
+        tokens_per_sec=_tokens_per_sec(completion_tokens, gen_elapsed),
     )
 
     response = ChatResponse(

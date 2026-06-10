@@ -136,6 +136,9 @@ class UsageInfo(BaseModel):
     prompt_tokens:     int = 0
     completion_tokens: int = 0
     total_tokens:      int = 0
+    # localm extensions — OpenAI clients ignore unknown fields
+    ttft_ms:        Optional[float] = None   # time to first generated token
+    tokens_per_sec: Optional[float] = None   # completion tokens / generation time
 
 
 class ChatChunk(BaseModel):

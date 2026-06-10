@@ -453,6 +453,55 @@ def llama_sampler_init_grammar(
 
 
 # ---------------------------------------------------------------------------
+#  KV cache / memory management (newer builds only — probe before use)
+# ---------------------------------------------------------------------------
+
+LlamaMemory = ctypes.c_void_p   # llama_memory_t
+
+
+def has_memory_api() -> bool:
+    """
+    True when this llama.cpp build exports the llama_memory_* family
+    (introduced mid-2025). Older DLLs lack it — callers must fall back to
+    recreating the context to clear the KV cache.
+    """
+    lib = load_lib()
+    return all(
+        hasattr(lib, fn)
+        for fn in ("llama_get_memory", "llama_memory_clear", "llama_memory_seq_rm")
+    )
+
+
+def llama_get_memory(ctx: ctypes.c_void_p) -> ctypes.c_void_p:
+    """Return the memory (KV cache) handle for a context."""
+    return _bind("llama_get_memory", LlamaMemory, LlamaContext)(ctx)
+
+
+def llama_memory_clear(mem: ctypes.c_void_p, data: bool = True) -> None:
+    """Clear the KV cache. data=True also zeroes the buffers."""
+    _bind("llama_memory_clear", None, LlamaMemory, ctypes.c_bool)(mem, data)
+
+
+def llama_memory_seq_rm(
+    mem: ctypes.c_void_p, seq_id: int, p0: int, p1: int
+) -> bool:
+    """
+    Remove cached tokens of sequence *seq_id* in position range [p0, p1).
+    p0 < 0 means from the start; p1 < 0 means to the end.
+    Returns False when a partial removal is not possible.
+    """
+    fn = _bind(
+        "llama_memory_seq_rm",
+        ctypes.c_bool,
+        LlamaMemory,
+        ctypes.c_int32,   # llama_seq_id
+        ctypes.c_int32,   # llama_pos p0
+        ctypes.c_int32,   # llama_pos p1
+    )
+    return bool(fn(mem, seq_id, p0, p1))
+
+
+# ---------------------------------------------------------------------------
 #  System info (useful for diagnostics)
 # ---------------------------------------------------------------------------
 
