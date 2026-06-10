@@ -20,10 +20,6 @@
 - Agent event hooks (`on_event`, `confirm_handler`, `request_stop`) usable by any future frontend, including a Tauri shell
 - Bearer auth honoured when `LOCALM_API_KEY` is set; CORS stays localhost-locked
 
-## Later (in rough order)
+## What's next
 
-- [ ] Plugin and skills manager pages (needs `/v1/plugins` endpoints)
-- [ ] Settings page (server config editing via `/v1/config` GET/PATCH)
-- [ ] Image generation panel (ComfyUI at 8188)
-- [ ] Coder session log viewer (JSONL audit trail)
-- [ ] Tauri 2 shell wrapping this frontend: native window, sidecar lifecycle, tray icon, window-state persistence
+Open GUI work is tracked in one place: the **Web GUI** section of [TODO.md](../TODO.md) (missing chat features, coder features, and pages, including the eventual Tauri 2 shell). This file only records the architecture decision and its rationale.
