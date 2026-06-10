@@ -69,6 +69,37 @@ def _truncate(text: str, max_chars: int = _MAX_OUTPUT) -> tuple[str, bool]:
     )
 
 
+def _render_notebook(nb: dict) -> str:
+    """Convert a parsed .ipynb dict to a human-readable text representation."""
+    cells = nb.get("cells", [])
+    parts: list[str] = []
+    for i, cell in enumerate(cells):
+        ctype  = cell.get("cell_type", "code")
+        source = "".join(cell.get("source", []))
+        header = f"[Cell {i} | {ctype}]"
+        parts.append(header)
+        parts.append(source)
+        if ctype == "code":
+            outputs = cell.get("outputs", [])
+            if outputs:
+                out_lines: list[str] = []
+                for out in outputs:
+                    otype = out.get("output_type", "")
+                    if otype in ("stream",):
+                        out_lines.extend(out.get("text", []))
+                    elif otype in ("execute_result", "display_data"):
+                        data = out.get("data", {})
+                        if "text/plain" in data:
+                            out_lines.extend(data["text/plain"])
+                    elif otype == "error":
+                        out_lines.append(f"{out.get('ename')}: {out.get('evalue')}")
+                if out_lines:
+                    parts.append("--- output ---")
+                    parts.append("".join(out_lines).rstrip())
+        parts.append("")
+    return "\n".join(parts)
+
+
 def _resolve(cwd: Path, path: str) -> Path:
     """Resolve a possibly-relative path against cwd."""
     p = Path(path)
@@ -90,12 +121,30 @@ def tool_read_file(cwd: Path, path: str) -> ToolResult:
     if not p.is_file():
         return ToolResult.error(f"Not a file: {p}")
     try:
-        text = p.read_text(encoding="utf-8", errors="replace")
+        raw = p.read_text(encoding="utf-8", errors="replace")
     except Exception as e:
         return ToolResult.error(str(e))
+
     rel = p.relative_to(cwd) if p.is_relative_to(cwd) else p
-    lines = _line_count(text)
-    output, trunc = _truncate(text)
+
+    # Render Jupyter notebooks as readable text rather than raw JSON
+    if p.suffix == ".ipynb":
+        try:
+            nb   = json.loads(raw)
+            text = _render_notebook(nb)
+            n    = len(nb.get("cells", []))
+            output, trunc = _truncate(text)
+            return ToolResult(
+                ok=True,
+                output=f"<path>{rel}</path>\n<cells>{n}</cells>\n<content>\n{output}\n</content>",
+                summary=f"{rel} — {n} cells{' (truncated)' if trunc else ''}",
+                truncated=trunc,
+            )
+        except Exception:
+            pass  # fall through to plain-text read if JSON is malformed
+
+    lines = _line_count(raw)
+    output, trunc = _truncate(raw)
     return ToolResult(
         ok=True,
         output=f"<path>{rel}</path>\n<lines>{lines}</lines>\n<content>\n{output}\n</content>",
@@ -290,6 +339,121 @@ def tool_list_dir(cwd: Path, path: str = ".") -> ToolResult:
     if len(entries) > 200:
         output += f"\n  ... ({len(entries) - 200} more entries)"
     return ToolResult.success(output, summary=f"{rel}/ — {len(entries)} entries")
+
+
+def tool_tree(
+    cwd: Path,
+    path: str = ".",
+    max_depth: int = 3,
+    max_files: int = 300,
+) -> ToolResult:
+    """Recursive directory tree with file sizes."""
+    root = _resolve(cwd, path)
+    if not root.exists():
+        return ToolResult.error(f"Path not found: {root}")
+    if not root.is_dir():
+        return ToolResult.error(f"Not a directory: {root}")
+
+    _IGNORE = {
+        ".git", "__pycache__", ".mypy_cache", ".pytest_cache",
+        "node_modules", ".venv", "venv", ".tox", "dist", "build",
+        "*.egg-info", ".localcoder",
+    }
+
+    lines: list[str] = []
+    total = 0
+
+    def _fmt_size(n: int) -> str:
+        if n >= 1_000_000:
+            return f"{n/1e6:.1f}M"
+        if n >= 1_000:
+            return f"{n/1e3:.0f}k"
+        return f"{n}B"
+
+    def _walk(dirpath: Path, prefix: str, depth: int) -> None:
+        nonlocal total
+        if depth > max_depth or total >= max_files:
+            return
+        try:
+            entries = sorted(dirpath.iterdir(), key=lambda e: (e.is_file(), e.name.lower()))
+        except PermissionError:
+            return
+        entries = [e for e in entries if e.name not in _IGNORE and not e.name.endswith(".egg-info")]
+        for i, entry in enumerate(entries):
+            if total >= max_files:
+                lines.append(f"{prefix}    ... (limit reached)")
+                return
+            connector = "└── " if i == len(entries) - 1 else "├── "
+            if entry.is_dir():
+                lines.append(f"{prefix}{connector}{entry.name}/")
+                extension = "    " if i == len(entries) - 1 else "│   "
+                _walk(entry, prefix + extension, depth + 1)
+            else:
+                total += 1
+                try:
+                    sz = _fmt_size(entry.stat().st_size)
+                except OSError:
+                    sz = "?"
+                lines.append(f"{prefix}{connector}{entry.name}  [{sz}]")
+
+    rel = root.relative_to(cwd) if root.is_relative_to(cwd) else root
+    lines.append(f"{rel}/")
+    _walk(root, "", 1)
+    return ToolResult.success(
+        "\n".join(lines),
+        summary=f"tree {rel}/ ({total} files)",
+    )
+
+
+def tool_edit_notebook_cell(
+    cwd: Path,
+    path: str,
+    cell_index: int,
+    source: str,
+    cell_type: Optional[str] = None,
+) -> ToolResult:
+    """Replace the source of a single notebook cell."""
+    p = _resolve(cwd, path)
+    if not p.exists():
+        return ToolResult.error(f"File not found: {p}")
+    if p.suffix != ".ipynb":
+        return ToolResult.error(f"Not a notebook: {p}")
+    try:
+        nb = json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:
+        return ToolResult.error(f"Failed to parse notebook: {e}")
+
+    cells = nb.get("cells", [])
+    if not (0 <= cell_index < len(cells)):
+        return ToolResult.error(
+            f"Cell index {cell_index} out of range (notebook has {len(cells)} cells)"
+        )
+
+    cell = cells[cell_index]
+    # source is stored as a list of lines in the format
+    cell["source"] = [line if line.endswith("\n") else line + "\n"
+                      for line in source.splitlines()]
+    # strip trailing newline from the last line (notebook convention)
+    if cell["source"]:
+        cell["source"][-1] = cell["source"][-1].rstrip("\n")
+    if cell_type is not None:
+        if cell_type not in ("code", "markdown", "raw"):
+            return ToolResult.error(f"Invalid cell_type: {cell_type!r}  (use code/markdown/raw)")
+        cell["cell_type"] = cell_type
+        if cell_type == "code":
+            cell.setdefault("outputs", [])
+            cell.setdefault("execution_count", None)
+
+    try:
+        p.write_text(json.dumps(nb, indent=1, ensure_ascii=False), encoding="utf-8")
+    except Exception as e:
+        return ToolResult.error(f"Failed to write notebook: {e}")
+
+    rel = p.relative_to(cwd) if p.is_relative_to(cwd) else p
+    return ToolResult.success(
+        f"Updated cell {cell_index} in {rel}",
+        summary=f"edited cell {cell_index} in {rel}",
+    )
 
 
 def tool_search_files(cwd: Path, pattern: str, path: str = ".") -> ToolResult:
@@ -574,6 +738,7 @@ def tool_generate_image(
     prompt: str,
     output_path: str = "output.png",
     guidance: Optional[float] = None,
+    negative_prompt: Optional[str] = None,
     lora_name: Optional[str] = None,
     lora_strength_model: float = 1.0,
     lora_strength_clip: float = 0.5,
@@ -591,6 +756,7 @@ def tool_generate_image(
         prompt, out_p,
         api_url=api_url,
         guidance=guidance,
+        negative_prompt=negative_prompt,
         lora_name=lora_name,
         lora_strength_model=lora_strength_model,
         lora_strength_clip=lora_strength_clip,
@@ -674,6 +840,28 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
         description="List the contents of a directory.",
         params={"path": {"type": "string", "description": "Directory path (default: .)", "required": False}},
     ),
+    "tree": ToolDef(
+        name="tree",
+        fn=tool_tree,
+        description="Recursive directory tree with file sizes. Skips common noise dirs (.git, __pycache__, node_modules, etc.).",
+        params={
+            "path":      {"type": "string", "description": "Root directory (default: .)", "required": False},
+            "max_depth": {"type": "int",    "description": "How many levels deep to recurse (default: 3)", "required": False},
+            "max_files": {"type": "int",    "description": "Stop after this many files (default: 300)", "required": False},
+        },
+    ),
+    "edit_notebook_cell": ToolDef(
+        name="edit_notebook_cell",
+        fn=tool_edit_notebook_cell,
+        description="Replace the source of a single cell in a Jupyter notebook (.ipynb). Use read_file first to see cell indices.",
+        params={
+            "path":       {"type": "string", "description": "Path to the .ipynb file.", "required": True},
+            "cell_index": {"type": "int",    "description": "Zero-based index of the cell to edit.", "required": True},
+            "source":     {"type": "string", "description": "New source code or markdown text for the cell.", "required": True},
+            "cell_type":  {"type": "string", "description": "Override cell type: code, markdown, or raw (optional).", "required": False},
+        },
+        destructive=True,
+    ),
     "search_files": ToolDef(
         name="search_files",
         fn=tool_search_files,
@@ -752,7 +940,8 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
             "output_path":  {"type": "string", "description": "Path to save the result (default: output.png)", "required": False},
             "input_image":  {"type": "string", "description": "Path to an existing image to use as the starting point (img2img mode).", "required": False},
             "denoise":      {"type": "float",  "description": "img2img only — how much to change the input (0.0=no change, 1.0=completely new). Default 0.75.", "required": False},
-            "guidance":     {"type": "float",  "description": "Guidance scale (default: 3.5). Lower values (2.5-3.0) improve photorealism.", "required": False},
+            "guidance":        {"type": "float",  "description": "Guidance scale (default: 3.5). Lower values (2.5-3.0) improve photorealism.", "required": False},
+            "negative_prompt": {"type": "string", "description": "Things to steer away from, e.g. 'old, mature, middle-aged'. Applied via ConditioningConcat.", "required": False},
             "lora_name":          {"type": "string", "description": "LoRA filename to load (optional).", "required": False},
             "lora_strength_model":{"type": "float",  "description": "LoRA strength on the UNet (default: 1.0). Main lever for unlock/style LoRAs.", "required": False},
             "lora_strength_clip": {"type": "float",  "description": "LoRA strength on the text encoder (default: 0.5).", "required": False},

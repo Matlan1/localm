@@ -6,13 +6,14 @@ Values are merged under CLI options — CLI flags always win.
 
 Supported keys
 --------------
-model        = "gemma4-4b"
-max_turns    = 20
-auto_approve = false
-memory_file  = ".localcoder/memory.md"   # overrides default search order
-max_tokens   = 2048
-temperature  = 0.7
-mode         = "privacy"                  # privacy | log | full
+model           = "gemma4-4b"
+max_turns       = 20
+auto_approve    = false
+always_confirm  = ["run_shell"]           # prompt for these even under auto_approve
+memory_file     = ".localcoder/memory.md" # overrides default search order
+max_tokens      = 2048
+temperature     = 0.7
+mode            = "privacy"               # privacy | log | full
 
 The file is optional; absent keys fall through to CLI defaults.
 """
@@ -65,6 +66,6 @@ def load_project_config(cwd: Path) -> dict[str, Any]:
     except Exception:
         return {}
 
-    _KNOWN = {"model", "max_turns", "auto_approve", "memory_file",
-              "max_tokens", "temperature", "mode"}
+    _KNOWN = {"model", "max_turns", "auto_approve", "always_confirm",
+              "memory_file", "max_tokens", "temperature", "mode"}
     return {k: v for k, v in raw.items() if k in _KNOWN}

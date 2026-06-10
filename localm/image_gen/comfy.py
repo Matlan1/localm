@@ -115,6 +115,10 @@ def generate_image(
     *,
     api_url: str = "http://127.0.0.1:8188",
     guidance: Optional[float] = None,
+    negative_prompt: Optional[str] = None,
+    seed: Optional[int] = None,
+    clip_name1: Optional[str] = None,
+    clip_name2: Optional[str] = None,
     lora_name: Optional[str] = None,
     lora_strength_model: float = 1.0,
     lora_strength_clip: float = 0.5,
@@ -138,6 +142,18 @@ def generate_image(
         Override with the ``FLUX_API_URL`` environment variable before calling.
     guidance
         FluxGuidance scale.  None keeps the workflow's own default (~3.5).
+    negative_prompt
+        Things to steer away from (e.g. ``"old, mature, middle-aged"``).
+        Injected via ConditioningConcat — no CFG mode change, stays on the
+        distilled flow-match path.  Effect is softer than CFG negatives.
+    seed
+        Noise seed for reproducible outputs.  Randomised if not given.
+    clip_name1
+        Override the CLIP-L encoder filename in the workflow.
+        Useful for comparing encoder variants without editing the workflow JSON.
+    clip_name2
+        Override the T5 encoder filename.  If the name ends in ``.gguf``,
+        the node is automatically switched to ``DualCLIPLoaderGGUF``.
     lora_name
         LoRA filename to inject (optional).
     lora_strength_model
@@ -182,7 +198,28 @@ def generate_image(
     except Exception as e:
         return False, f"Failed to load FLUX workflow template: {e}"
 
-    # 3. img2img: upload input image, add LoadImage + VAEEncode, redirect latent
+    # 3. Override text encoder models if requested
+    if clip_name1 is not None or clip_name2 is not None:
+        loader_node = None
+        if "31" in workflow:
+            loader_node = workflow["31"]
+        else:
+            for node in workflow.values():
+                if node.get("class_type") in ("DualCLIPLoader", "DualCLIPLoaderGGUF"):
+                    loader_node = node
+                    break
+        if loader_node is not None:
+            if clip_name1 is not None:
+                loader_node["inputs"]["clip_name1"] = clip_name1
+            if clip_name2 is not None:
+                loader_node["inputs"]["clip_name2"] = clip_name2
+                # GGUF T5 needs a different loader node
+                if clip_name2.lower().endswith(".gguf"):
+                    loader_node["class_type"] = "DualCLIPLoaderGGUF"
+                else:
+                    loader_node["class_type"] = "DualCLIPLoader"
+
+    # 4. img2img: upload input image, add LoadImage + VAEEncode, redirect latent
     if input_image is not None:
         if not input_image.is_file():
             return False, f"Input image not found: {input_image}"
@@ -213,7 +250,7 @@ def generate_image(
         # Set denoise on the scheduler
         workflow["17"]["inputs"]["denoise"] = denoise if denoise is not None else 0.75
 
-    # 4. Inject prompt — node "6" first (default template), then scan
+    # 5. Inject prompt — node "6" first (default template), then scan
     injected = False
     if "6" in workflow and workflow["6"].get("inputs", {}).get("text") is not None:
         workflow["6"]["inputs"]["text"] = prompt
@@ -231,7 +268,7 @@ def generate_image(
             f"{_WORKFLOW_PATH}"
         )
 
-    # 5. Inject guidance
+    # 6. Inject guidance
     if guidance is not None:
         if "26" in workflow and workflow["26"].get("class_type") == "FluxGuidance":
             workflow["26"]["inputs"]["guidance"] = guidance
@@ -241,7 +278,7 @@ def generate_image(
                     node["inputs"]["guidance"] = guidance
                     break
 
-    # 6. Inject LoRA
+    # 7. Inject LoRA
     if lora_name:
         workflow["100"] = {
             "inputs": {
@@ -258,8 +295,32 @@ def generate_image(
         if "6" in workflow:
             workflow["6"]["inputs"]["clip"] = ["100", 1]
 
-    # 7. Randomise seed
-    seed = random.randint(1, 10 ** 12)
+    # 8. Inject negative prompt via ConditioningConcat (no CFG mode change)
+    if negative_prompt:
+        # Use the LoRA-patched CLIP if a LoRA was injected, otherwise raw DualCLIPLoader
+        clip_source = ["100", 1] if lora_name else ["31", 0]
+        workflow["50"] = {
+            "inputs": {"text": negative_prompt, "clip": clip_source},
+            "class_type": "CLIPTextEncode",
+        }
+        workflow["51"] = {
+            "inputs": {
+                "conditioning_to": ["6", 0],
+                "conditioning_from": ["50", 0],
+            },
+            "class_type": "ConditioningConcat",
+        }
+        # Redirect FluxGuidance to receive the concatenated conditioning
+        if "26" in workflow:
+            workflow["26"]["inputs"]["conditioning"] = ["51", 0]
+        else:
+            for node in workflow.values():
+                if node.get("class_type") == "FluxGuidance":
+                    node["inputs"]["conditioning"] = ["51", 0]
+                    break
+
+    # 9. Set seed (use provided value or randomise)
+    seed = seed if seed is not None else random.randint(1, 10 ** 12)
     for node in workflow.values():
         cls = node.get("class_type", "")
         if cls in ("KSampler", "KSamplerAdvanced"):
@@ -269,7 +330,7 @@ def generate_image(
             node["inputs"]["noise_seed"] = seed
             break
 
-    # 8. Queue the prompt in ComfyUI
+    # 9. Queue the prompt in ComfyUI
     try:
         req_data = json.dumps({"prompt": workflow}).encode("utf-8")
         req = urllib.request.Request(
@@ -296,7 +357,7 @@ def generate_image(
     except Exception as e:
         return False, f"Error queuing prompt in ComfyUI: {e}"
 
-    # 9. Poll /history with a visible progress spinner
+    # 10. Poll /history with a visible progress spinner
     start_time = time.time()
     finished = False
     filename = None
@@ -346,7 +407,7 @@ def generate_image(
             "Check the ComfyUI console — a SaveImage node error is likely."
         )
 
-    # 10. Fetch image from ComfyUI /view, save locally, strip metadata
+    # 11. Fetch image from ComfyUI /view, save locally, strip metadata
     try:
         params = urllib.parse.urlencode(
             {"filename": filename, "subfolder": subfolder, "type": img_type}

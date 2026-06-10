@@ -50,9 +50,23 @@ if sys.platform == "win32":
 #  CLI definition
 # ---------------------------------------------------------------------------
 
+def _complete_model(ctx, param, incomplete):
+    """Shell completion callback: suggest registered localm model names."""
+    try:
+        from localm.model_manager import load_registry
+        return [
+            click.shell_completion.CompletionItem(name)
+            for name in load_registry()
+            if name.startswith(incomplete)
+        ]
+    except Exception:
+        return []
+
+
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
 @click.argument("task", default="", required=False, metavar="[TASK]")
 @click.option("-m", "--model",      default=None,  envvar="LOCALCODER_MODEL",
+              shell_complete=_complete_model,
               help="Model name (must be registered in localm).")
 @click.option("-u", "--url",        default=None,  envvar="LOCALCODER_URL",
               help="OpenAI-compat base URL, e.g. http://127.0.0.1:8080/v1.")
@@ -74,6 +88,8 @@ if sys.platform == "win32":
               help="Print full tool outputs.")
 @click.option("--yes", "-y",        is_flag=True,
               help="Auto-approve all destructive tool calls.")
+@click.option("--interactive-confirm", "interactive_confirm", is_flag=True,
+              help="Auto-approve file writes but still prompt before shell commands.")
 @click.option("--dry-run",          is_flag=True,
               help="Show what the agent would do without executing destructive tools.")
 @click.option("--online", "provider", flag_value="openai",  default=None,
@@ -91,7 +107,7 @@ if sys.platform == "win32":
 def main(
     task, model, url, api_key, port, cwd,
     no_server, max_turns, temperature, max_tokens,
-    verbose, yes, dry_run, provider, mode,
+    verbose, yes, interactive_confirm, dry_run, provider, mode,
 ):
     """
     Offline AI coding agent powered by local LLMs.
@@ -127,6 +143,14 @@ def main(
     # auto_approve: config applies only when --yes flag was NOT passed
     if not yes and proj_cfg.get("auto_approve"):
         yes = True
+    # always_confirm: tools that prompt even under --yes
+    # --interactive-confirm sets {"run_shell"}; config can extend the list
+    always_confirm: set[str] = set()
+    if interactive_confirm:
+        always_confirm.add("run_shell")
+    cfg_confirm = proj_cfg.get("always_confirm", [])
+    if isinstance(cfg_confirm, list):
+        always_confirm.update(cfg_confirm)
     # mode: CLI > config > default (privacy)
     if mode is None:
         mode = proj_cfg.get("mode", "privacy")
@@ -202,6 +226,7 @@ def main(
         max_turns=max_turns,
         verbose=verbose,
         auto_approve=yes or (task != ""),
+        always_confirm=always_confirm,
         dry_run=dry_run,
         mode=session_mode,
         **gen_kw,
@@ -219,6 +244,15 @@ def main(
             print_banner(backend.model_id, work_dir,
                          file_count=agent._project_map.file_count(),
                          session_mode=session_mode)
+            # Notify if an interrupted session is waiting
+            ckpt = agent.load_checkpoint()
+            if ckpt:
+                ts = ckpt.get("interrupted_at", "unknown time")
+                turns = ckpt.get("turns", "?")
+                print_warning(
+                    f"Interrupted session found ({turns} turns, {ts}). "
+                    "Type /resume to continue."
+                )
             _repl(agent)
 
     finally:
@@ -281,9 +315,12 @@ def _repl(agent: Agent) -> None:
             continue
 
         try:
+            # Starting a fresh task — discard any stale checkpoint
+            agent.clear_checkpoint()
             agent.chat(user_input)
         except KeyboardInterrupt:
-            console.print("\n[dim](interrupted)[/dim]")
+            # Checkpoint was already saved inside _loop; just swallow here
+            pass
         except Exception as e:
             print_error(f"Agent error: {e}")
             import traceback
@@ -347,6 +384,23 @@ def _handle_command(raw: str, agent: Agent) -> bool:
             f"Context: ~{ctx_tokens_est:,} tokens ({chars:,} chars){billed_str}  ·  "
             f"Map: {agent._project_map.file_count()} files[/dim]"
         )
+
+    elif cmd == "resume":
+        ckpt = agent.load_checkpoint()
+        if ckpt is None:
+            print_info("No interrupted session found.")
+        else:
+            agent.resume_checkpoint(ckpt)
+            agent.clear_checkpoint()
+            ts    = ckpt.get("interrupted_at", "unknown time")
+            turns = ckpt.get("turns", "?")
+            print_success(f"Resumed session ({turns} turns, interrupted {ts}).")
+            try:
+                agent.chat("Continue from where we left off.")
+            except KeyboardInterrupt:
+                pass
+            except Exception as e:
+                print_error(f"Agent error: {e}")
 
     elif cmd == "undo":
         msg = agent.undo()

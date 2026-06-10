@@ -123,9 +123,14 @@ def print_streaming_done() -> None:
 #  Turn divider
 # ---------------------------------------------------------------------------
 
-def print_turn_divider(turn: int, total_tokens: int = 0) -> None:
-    tokens_str = f"  ·  ~{total_tokens:,} tokens" if total_tokens else ""
-    console.print(f"\n[dim]── turn {turn}{tokens_str} ──────────────────────────────────────[/dim]")
+def print_turn_divider(turn: int, total_tokens: int = 0, turn_tokens: int = 0) -> None:
+    parts = [f"── turn {turn}"]
+    if turn_tokens:
+        parts.append(f"~{turn_tokens:,} tok this turn")
+    if total_tokens:
+        parts.append(f"~{total_tokens:,} total")
+    body = "  ·  ".join(parts)
+    console.print(f"\n[dim]{body} ──────────────────────────────────────[/dim]")
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +256,7 @@ HELP_TEXT = """\
   [bold]/approve[/bold]              toggle auto-approve for destructive tools
   [bold]/history[/bold]              show turn count, context usage, and index size
   [bold]/undo[/bold]                 revert the last file write or edit
+  [bold]/resume[/bold]               resume an interrupted session
   [bold]/compact[/bold]              summarise old turns to free context space
   [bold]/memory[/bold]               show current project memory
   [bold]/remember <text>[/bold]      append a note to LOCALCODER.md

@@ -20,6 +20,7 @@ The Agent class is used by:
 
 from __future__ import annotations
 
+import datetime
 import json
 import time
 from pathlib import Path
@@ -63,6 +64,48 @@ _DEFAULT_CTX_TOKENS  = 4096   # fallback when n_ctx is unknown
 
 
 # ---------------------------------------------------------------------------
+#  Native tool-calling helpers
+# ---------------------------------------------------------------------------
+
+def _build_openai_tool_defs() -> list:
+    """
+    Convert TOOL_REGISTRY into the OpenAI /v1/chat/completions ``tools`` format.
+
+    Used when the backend has ``native_tools=True`` (e.g. the OpenAI API),
+    so the model receives a validated schema instead of relying on text parsing.
+    """
+    defs = []
+    for tool in TOOL_REGISTRY.values():
+        properties: dict = {}
+        required:   list = []
+        for param_name, meta in tool.params.items():
+            prop: dict = {"description": meta.get("description", "")}
+            raw_type = meta.get("type", "string")
+            # Map our shorthand types to JSON Schema types
+            prop["type"] = {
+                "int":   "integer",
+                "float": "number",
+                "bool":  "boolean",
+            }.get(raw_type, "string")
+            properties[param_name] = prop
+            if meta.get("required"):
+                required.append(param_name)
+        defs.append({
+            "type": "function",
+            "function": {
+                "name":        tool.name,
+                "description": tool.description,
+                "parameters": {
+                    "type":       "object",
+                    "properties": properties,
+                    "required":   required,
+                },
+            },
+        })
+    return defs
+
+
+# ---------------------------------------------------------------------------
 #  Agent
 # ---------------------------------------------------------------------------
 
@@ -84,6 +127,10 @@ class Agent:
         Print full tool outputs (not just summaries).
     auto_approve:
         Skip confirmation prompts for destructive tools.
+    always_confirm:
+        Set of tool names that always prompt for confirmation, even when
+        ``auto_approve=True``.  Typical use: ``{"run_shell"}`` to auto-approve
+        file writes but still gate shell execution.
     parent:
         Parent Agent when this instance is a sub-agent.
     gen_kwargs:
@@ -98,25 +145,29 @@ class Agent:
         max_turns: int = 40,
         verbose: bool = False,
         auto_approve: bool = True,
+        always_confirm: Optional[set] = None,
         dry_run: bool = False,
         parent: Optional["Agent"] = None,
         mode: SessionMode = SessionMode.PRIVACY,
         **gen_kwargs,
     ) -> None:
-        self.backend      = backend
-        self.cwd          = cwd
-        self.name         = name
-        self.max_turns    = max_turns
-        self.verbose      = verbose
-        self.auto_approve = auto_approve
-        self.dry_run      = dry_run
-        self.parent       = parent
-        self.mode         = mode
-        self.gen_kwargs   = gen_kwargs
+        self.backend        = backend
+        self.cwd            = cwd
+        self.name           = name
+        self.max_turns      = max_turns
+        self.verbose        = verbose
+        self.auto_approve   = auto_approve
+        self.always_confirm = always_confirm or set()
+        self.dry_run        = dry_run
+        self.parent         = parent
+        self.mode           = mode
+        self.gen_kwargs     = gen_kwargs
 
         self._messages: list[dict] = []
         self._turns: int = 0
         self._total_tokens: int = 0
+        self._last_turn_tokens: int = 0   # tokens used in the most recently completed turn
+        self._consecutive_errors: dict[str, int] = {}  # tool_name → failure streak
         self._compact_warned: bool = False
         self._undo_stack: list[dict] = []
         self._model_name: str = getattr(backend, "model_id", "")
@@ -131,6 +182,10 @@ class Agent:
             model_name=self._model_name,
         )
 
+        # Register OpenAI-format tool definitions when the backend supports it
+        if getattr(backend, "native_tools", False):
+            backend.set_tools(_build_openai_tool_defs())
+
     @property
     def turns(self) -> int:
         return self._turns
@@ -144,12 +199,70 @@ class Agent:
     #  Public API
     # ------------------------------------------------------------------ #
 
+    # ------------------------------------------------------------------ #
+    #  Checkpoint (interruption / resume)
+    # ------------------------------------------------------------------ #
+
+    @property
+    def _checkpoint_path(self) -> Path:
+        return self.cwd / ".localcoder" / "checkpoint.json"
+
+    def save_checkpoint(self) -> None:
+        """Persist current conversation state so it can be resumed later."""
+        data = {
+            "version": 1,
+            "interrupted_at": datetime.datetime.now().isoformat(timespec="seconds"),
+            "turns": self._turns,
+            "total_tokens": self._total_tokens,
+            "messages": self._messages,
+        }
+        p = self._checkpoint_path
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass  # never let checkpoint failure crash the session
+
+    def clear_checkpoint(self) -> None:
+        """Remove any saved checkpoint for this working directory."""
+        try:
+            self._checkpoint_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    def load_checkpoint(self) -> dict | None:
+        """
+        Read the checkpoint file if it exists and is valid.
+
+        Returns the parsed dict, or None if no checkpoint is found.
+        """
+        p = self._checkpoint_path
+        if not p.is_file():
+            return None
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if data.get("version") == 1 and isinstance(data.get("messages"), list):
+                return data
+        except Exception:
+            pass
+        return None
+
+    def resume_checkpoint(self, data: dict) -> None:
+        """Restore agent state from a checkpoint dict."""
+        self._messages     = data["messages"]
+        self._turns        = data.get("turns", len(self._messages))
+        self._total_tokens = data.get("total_tokens", 0)
+
+    # ------------------------------------------------------------------ #
+
     def reset(self) -> None:
         """Clear conversation history."""
         self._messages = []
         self._turns = 0
         self._total_tokens = 0
+        self._last_turn_tokens = 0
         self._compact_warned = False
+        self._consecutive_errors.clear()
 
     def set_cwd(self, cwd: Path) -> None:
         self.cwd = cwd
@@ -231,59 +344,72 @@ class Agent:
         """
         final_response = ""
 
-        while self._turns < self.max_turns:
-            self._turns += 1
+        try:
+            while self._turns < self.max_turns:
+                self._turns += 1
+                prev_turn_tokens = self._last_turn_tokens
+                self._last_turn_tokens = 0   # reset counter for this turn
 
-            if interactive:
-                print_turn_divider(self._turns, self._total_tokens)
-
-            self._audit.set_turn(self._turns)
-
-            # ---- context-budget check --------------------------------
-            self._maybe_compact(interactive=interactive)
-
-            # ---- call LLM -------------------------------------------
-            messages = self._build_messages()
-            response = self._call_llm(messages, interactive=interactive)
-
-            # ---- parse tool calls ------------------------------------
-            calls = parse_tool_calls(response)
-
-            if not calls:
-                # No tool calls → this is the final answer
                 if interactive:
-                    # response was already streamed; just ensure newline
-                    pass
-                else:
-                    print_assistant_response(response, name=self.name)
-                final_response = response
+                    print_turn_divider(self._turns, self._total_tokens, prev_turn_tokens)
+
+                self._audit.set_turn(self._turns)
+
+                # ---- context-budget check --------------------------------
+                self._maybe_compact(interactive=interactive)
+
+                # ---- call LLM -------------------------------------------
+                messages = self._build_messages()
+                response = self._call_llm(messages, interactive=interactive)
+
+                # ---- parse tool calls ------------------------------------
+                calls = parse_tool_calls(response)
+
+                if not calls:
+                    # No tool calls → this is the final answer
+                    if not interactive:
+                        print_assistant_response(response, name=self.name)
+                    final_response = response
+                    self._add_assistant(response)
+                    break
+
+                # ---- there are tool calls --------------------------------
+                # Show the non-tool-call text parts first
+                if interactive:
+                    segments = split_response(response, calls)
+                    for seg in segments:
+                        if isinstance(seg, str) and seg.strip():
+                            console.print(seg.strip())
+
                 self._add_assistant(response)
-                break
 
-            # ---- there are tool calls --------------------------------
-            # Show the non-tool-call text parts first
-            if interactive:
-                segments = split_response(response, calls)
-                for seg in segments:
-                    if isinstance(seg, str) and seg.strip():
-                        console.print(seg.strip())
+                # Execute each tool and collect results
+                result_blocks: list[str] = []
+                for call in calls:
+                    result = self._execute_tool(call, interactive=interactive)
+                    result_blocks.append(result.to_xml(call.name))
 
-            self._add_assistant(response)
+                # Feed all results back as a user message
+                combined = "\n\n".join(result_blocks)
+                self._add_user(combined)
 
-            # Execute each tool and collect results
-            result_blocks: list[str] = []
-            for call in calls:
-                result = self._execute_tool(call, interactive=interactive)
-                result_blocks.append(result.to_xml(call.name))
+            else:
+                msg = f"[max_turns={self.max_turns} reached]"
+                print_warning(msg)
+                final_response = msg
 
-            # Feed all results back as a user message
-            combined = "\n\n".join(result_blocks)
-            self._add_user(combined)
+        except KeyboardInterrupt:
+            if interactive and self._messages:
+                self.save_checkpoint()
+                print_info(
+                    "(interrupted — progress saved. "
+                    "Type /resume to continue or start a new task.)"
+                )
+            raise
 
         else:
-            msg = f"[max_turns={self.max_turns} reached]"
-            print_warning(msg)
-            final_response = msg
+            # Clean finish — discard any stale checkpoint
+            self.clear_checkpoint()
 
         return final_response
 
@@ -401,15 +527,62 @@ class Agent:
     #  LLM call
     # ------------------------------------------------------------------ #
 
+    @staticmethod
+    def _stream_hiding_tool_calls(pieces):
+        """
+        Yield displayable text tokens from a stream, silently buffering
+        <tool_call>...</tool_call> blocks so raw XML never hits the terminal.
+
+        Yields (token, is_hidden) pairs where is_hidden=True means the
+        token belongs to a tool-call block and should not be displayed.
+        The full accumulated string (including hidden parts) is the return value.
+        """
+        buf = ""
+        in_call = False
+        for piece in pieces:
+            buf += piece
+            # Simple state machine: track whether we're inside a tool_call block
+            while True:
+                if not in_call:
+                    start = buf.find("<tool_call")
+                    if start == -1:
+                        # No tool_call in buffer — yield everything
+                        yield buf, False
+                        buf = ""
+                        break
+                    else:
+                        # Yield text before the tag, then enter buffering mode
+                        if start > 0:
+                            yield buf[:start], False
+                        buf = buf[start:]
+                        in_call = True
+                else:
+                    end = buf.find("</tool_call>")
+                    if end == -1:
+                        # Still accumulating the block — hold the buffer
+                        break
+                    else:
+                        # Complete block: yield it as hidden
+                        end += len("</tool_call>")
+                        yield buf[:end], True
+                        buf = buf[end:]
+                        in_call = False
+        # Flush any remainder
+        if buf:
+            yield buf, in_call   # in_call=True means an unclosed tag — display as-is
+
     def _call_llm(self, messages: list[dict], interactive: bool) -> str:
         if interactive:
             print_thinking()
             print_assistant_label(self.name)
             full = ""
             try:
-                for piece in self.backend.chat_stream(messages, **self.gen_kwargs):
-                    print_streaming_token(piece)
+                for piece, hidden in self._stream_hiding_tool_calls(
+                    self.backend.chat_stream(messages, **self.gen_kwargs)
+                ):
                     full += piece
+                    if not hidden:
+                        print_streaming_token(piece)
                 print_streaming_done()
             except KeyboardInterrupt:
                 print_streaming_done()
@@ -427,8 +600,10 @@ class Agent:
     def _accumulate_usage(self) -> None:
         """Pull token counts from the backend's last call and add to the session total."""
         usage = getattr(self.backend, "last_usage", {})
-        if usage.get("total_tokens"):
-            self._total_tokens += usage["total_tokens"]
+        n = usage.get("total_tokens", 0)
+        if n:
+            self._total_tokens += n
+            self._last_turn_tokens += n
 
     # ------------------------------------------------------------------ #
     #  Tool execution
@@ -461,7 +636,12 @@ class Agent:
             return result
 
         # Confirmation for destructive tools — with diff preview for write_file
-        if tool_def.destructive and not self.auto_approve and interactive:
+        needs_confirm = (
+            tool_def.destructive and (
+                not self.auto_approve or call.name in self.always_confirm
+            )
+        )
+        if needs_confirm and interactive:
             approved = self._confirm_tool(call)
             if not approved:
                 result = ToolResult.error("Rejected by user.")
@@ -497,6 +677,27 @@ class Agent:
         except Exception as e:
             result = ToolResult.error(f"Tool error: {e}")
 
+        # Track consecutive failures and inject escalating recovery hints
+        if not result.ok:
+            streak = self._consecutive_errors.get(call.name, 0) + 1
+            self._consecutive_errors[call.name] = streak
+            if streak == 2:
+                result = ToolResult.error(
+                    result.output
+                    + "\n\n[Hint: this tool has failed twice in a row. "
+                    "Try a different approach — check paths, arguments, or preconditions.]"
+                )
+            elif streak >= 3:
+                result = ToolResult.error(
+                    result.output
+                    + f"\n\n[Warning: {call.name} has failed {streak} times consecutively. "
+                    "Step back and reconsider your strategy. "
+                    "Consider reading the relevant files first, "
+                    "or breaking the task into smaller steps.]"
+                )
+        else:
+            self._consecutive_errors.pop(call.name, None)
+
         self._audit.tool_result(call.name, result.ok, result.summary)
         if interactive:
             print_tool_result(call.name, result, verbose=self.verbose)
@@ -519,16 +720,38 @@ class Agent:
             path_arg = call.args.get("path", "")
             new_content = call.args.get("content", "")
             abs_path = (self.cwd / path_arg).resolve() if path_arg else None
-
-            # Read current content (empty string if file doesn't exist)
             old_content = ""
             if abs_path and abs_path.is_file():
                 try:
                     old_content = abs_path.read_text(encoding="utf-8", errors="replace")
                 except Exception:
                     pass
-
             print_diff_preview(old_content, new_content, path_label=path_arg)
+            return confirm_diff(path_arg or "file")
+
+        if call.name == "edit_file":
+            path_arg    = call.args.get("path", "")
+            old_string  = call.args.get("old_string", "")
+            new_string  = call.args.get("new_string", "")
+            abs_path    = (self.cwd / path_arg).resolve() if path_arg else None
+            old_content = ""
+            if abs_path and abs_path.is_file():
+                try:
+                    old_content = abs_path.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    pass
+            new_content = old_content.replace(old_string, new_string, 1)
+            print_diff_preview(old_content, new_content, path_label=path_arg)
+            return confirm_diff(path_arg or "file")
+
+        if call.name == "patch_file":
+            path_arg = call.args.get("path", "")
+            patch    = call.args.get("patch", "")
+            # The patch is already a unified diff — display it directly
+            from .display import console as _con
+            from rich.syntax import Syntax
+            _con.print()
+            _con.print(Syntax(patch, "diff", theme="monokai", line_numbers=False))
             return confirm_diff(path_arg or "file")
 
         return confirm(f"  Allow {call.name}?")

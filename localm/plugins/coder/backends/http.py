@@ -43,14 +43,17 @@ class HTTPBackend(BaseLLMBackend):
         model: str,
         api_key: str = "localm",
         timeout: int = 300,
+        native_tools: bool = False,
         **extra_params,
     ) -> None:
-        self._base_url   = base_url.rstrip("/")
-        self._model      = model
-        self._api_key    = api_key
-        self._timeout    = timeout
-        self._extra      = extra_params
+        self._base_url     = base_url.rstrip("/")
+        self._model        = model
+        self._api_key      = api_key
+        self._timeout      = timeout
+        self._extra        = extra_params
         self._last_usage: dict = {}
+        self.native_tools  = native_tools
+        self._tool_defs: list = []   # OpenAI-format tool definitions
 
     @property
     def model_id(self) -> str:
@@ -60,6 +63,40 @@ class HTTPBackend(BaseLLMBackend):
     def last_usage(self) -> dict:
         """Usage dict from the most recent call: {prompt_tokens, completion_tokens, total_tokens}."""
         return dict(self._last_usage)
+
+    def set_tools(self, tool_defs: list) -> None:
+        """
+        Register OpenAI-format tool definitions for native function calling.
+
+        Each entry should be a dict of the form::
+
+            {
+                "type": "function",
+                "function": {
+                    "name": "...",
+                    "description": "...",
+                    "parameters": {"type": "object", "properties": {...}, "required": [...]}
+                }
+            }
+        """
+        self._tool_defs = tool_defs
+
+    @staticmethod
+    def _tool_calls_to_xml(tool_calls: list) -> str:
+        """Convert an OpenAI tool_calls list to our internal XML format."""
+        import json as _json
+        parts = []
+        for tc in tool_calls:
+            fn   = tc.get("function", {})
+            name = fn.get("name", "")
+            try:
+                args = _json.loads(fn.get("arguments", "{}") or "{}")
+            except Exception:
+                args = {}
+            parts.append(
+                f'<tool_call>\n{_json.dumps({"name": name, "args": args})}\n</tool_call>'
+            )
+        return "\n".join(parts)
 
     # ------------------------------------------------------------------ #
 
@@ -77,6 +114,9 @@ class HTTPBackend(BaseLLMBackend):
             **self._extra,
             **kwargs,
         }
+        if self.native_tools and self._tool_defs:
+            body["tools"] = self._tool_defs
+            body["tool_choice"] = "auto"
         return {k: v for k, v in body.items() if v is not None}
 
     # ------------------------------------------------------------------ #
@@ -93,11 +133,21 @@ class HTTPBackend(BaseLLMBackend):
         data = resp.json()
         if data.get("usage"):
             self._last_usage = data["usage"]
-        return data["choices"][0]["message"]["content"]
+        message = data["choices"][0]["message"]
+        text    = message.get("content") or ""
+        # Native tool calls: convert to our XML format and append
+        tool_calls = message.get("tool_calls") or []
+        if tool_calls:
+            xml = self._tool_calls_to_xml(tool_calls)
+            text = (text + "\n" + xml).strip() if text else xml
+        return text
 
     def chat_stream(self, messages: list[dict], **kwargs) -> Iterator[str]:
         import json as _json
         self._last_usage = {}
+        # Accumulate streaming native tool_calls: index → {name, arguments_buf}
+        _tc_buf: dict[int, dict] = {}
+
         with requests.post(
             f"{self._base_url}/chat/completions",
             headers=self._headers(),
@@ -122,9 +172,29 @@ class HTTPBackend(BaseLLMBackend):
                 if chunk.get("usage"):
                     self._last_usage = chunk["usage"]
                 delta = chunk.get("choices", [{}])[0].get("delta", {})
+                # Regular content tokens
                 piece = delta.get("content") or ""
                 if piece:
                     yield piece
+                # Accumulate native tool_call chunks
+                for tc_delta in delta.get("tool_calls") or []:
+                    idx = tc_delta.get("index", 0)
+                    if idx not in _tc_buf:
+                        _tc_buf[idx] = {"name": "", "arguments": ""}
+                    fn = tc_delta.get("function") or {}
+                    if fn.get("name"):
+                        _tc_buf[idx]["name"] += fn["name"]
+                    if fn.get("arguments"):
+                        _tc_buf[idx]["arguments"] += fn["arguments"]
+
+        # Emit accumulated tool calls as XML after the stream ends
+        if _tc_buf:
+            ordered = [_tc_buf[i] for i in sorted(_tc_buf)]
+            xml = self._tool_calls_to_xml([
+                {"function": {"name": t["name"], "arguments": t["arguments"]}}
+                for t in ordered
+            ])
+            yield "\n" + xml
 
 
 # ------------------------------------------------------------------ #
@@ -137,7 +207,7 @@ def make_localm_backend(model: str, port: int = 8080, **kw) -> HTTPBackend:
 
 def make_openai_backend(model: str = "gpt-4o", **kw) -> HTTPBackend:
     key = os.environ.get("OPENAI_API_KEY", "")
-    return HTTPBackend("https://api.openai.com/v1", model, api_key=key, **kw)
+    return HTTPBackend("https://api.openai.com/v1", model, api_key=key, native_tools=True, **kw)
 
 
 def make_anthropic_backend(model: str = "claude-opus-4-5", **kw) -> HTTPBackend:

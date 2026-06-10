@@ -10,7 +10,7 @@ Gaps identified by comparing against Claude Code, Aider, Cursor, Copilot.
 - [x] Persistent memory across sessions (`CLAUDE.md` equivalent) — `LOCALCODER.md` per project via `memory.py`
 - [x] Conversation compaction / summarisation — `_maybe_compact()` in agent.py; warns at 70%, auto-compacts at 90%; `/compact` REPL command
   <!-- REVIEW NOTE: Consider using codeneedle context-profiling methodology to trigger compaction dynamically when recall drops below a measured threshold. -->
-- [ ] `.localcoder` project config file — per-repo defaults (model, cwd, max-turns, auto-approve rules)
+- [x] `.localcoder` project config file — per-repo defaults (model, cwd, max-turns, auto-approve rules)
 
 
 ---
@@ -20,26 +20,26 @@ Gaps identified by comparing against Claude Code, Aider, Cursor, Copilot.
 - [x] `patch_file` — unified diff application via `_patch.py`
 - [x] `undo_last_write` — `/undo` REPL command + `Agent.undo()` with file snapshot stack
 - [x] `fetch_url` — fetches URL, strips HTML tags, truncates to context budget
-- [ ] `tree` tool — recursive directory tree with file sizes (richer than `list_dir`)
+- [x] `tree` tool — recursive directory tree with file sizes (richer than `list_dir`)
 - [x] Multi-file grep with context lines — `tool_grep` supports `context=N` and `glob=` filter
-- [ ] Notebook support — read/edit `*.ipynb` files
+- [x] Notebook support — read/edit `*.ipynb` files; `read_file` renders cells as text, `edit_notebook_cell` patches individual cells
 - [x] Git-aware first-class tools: `git_status`, `git_diff`, `git_log` implemented in tools.py
 
 ---
 
 ## Agent Quality
 
-- [ ] Interruption / resume — Ctrl+C mid-task loses all progress; checkpoint and offer to resume
+- [x] Interruption / resume — Ctrl+C saves .localcoder/checkpoint.json; /resume restores state and continues
 - [x] Token budget tracking — `_fill_ratio()` + `_total_tokens` in agent.py; warns at 70%, compacts at 90%
-- [ ] Retry / error recovery strategy — currently just feeds errors back; add smarter "try a different approach" logic
-- [ ] Structured output enforcement — use grammar-constrained sampling or native function-calling APIs (when available) to guarantee valid tool calls instead of relying on instruction-following
-- [ ] Tool call streaming — parse tool calls as tokens arrive instead of waiting for the full response
+- [x] Retry / error recovery strategy — consecutive failure streak tracker; escalating hints injected at 2× and 3× failures
+- [x] Structured output enforcement — OpenAI backend uses native tools API (schema-validated calls); local backends retain text parsing
+- [x] Tool call streaming — tool_call XML blocks suppressed from stream display; full parse-on-arrival refactor deferred
 
 ---
 
 ## Observability
 
-- [ ] Cost / token tracking display — show `~2,400 tokens` in the footer each turn
+- [x] Cost / token tracking display — per-turn and running total shown in turn divider
 - [x] Turn replay / audit log — `audit.py`; LOG mode = JSONL, FULL mode = JSONL + markdown transcript
 - [x] `--dry-run` flag — destructive tools report skipped; read-only tools still run
 
@@ -47,12 +47,12 @@ Gaps identified by comparing against Claude Code, Aider, Cursor, Copilot.
 
 ## UX
 
-- [ ] `--interactive-confirm` granularity — approve writes but auto-approve reads, etc.
-- [ ] Diff preview before write — show a coloured diff and prompt "apply?" instead of writing silently
-- [ ] `/undo` REPL command — revert the last `write_file` / `edit_file`
+- [x] `--interactive-confirm` granularity — `always_confirm` set gates specific tools (e.g. run_shell) even under --yes; configurable in .localcoder/config.toml
+- [x] Diff preview before write — write_file/edit_file/patch_file all show coloured diff before confirming
+- [x] `/undo` REPL command — revert the last `write_file` / `edit_file`
 - [x] Multiline input in REPL — backslash continuation (end line with \\ to keep typing)
 - [x] `/compact` REPL command — implemented in cli.py
-- [ ] Shell autocomplete for `--model` sourced from `localm list`
+- [x] Shell autocomplete for `--model` — Click shell_complete callback reads localm registry
 
 ---
 
