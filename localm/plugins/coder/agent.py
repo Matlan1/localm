@@ -172,6 +172,8 @@ class Agent:
         scope: Optional[str] = None,
         self_verify: bool = True,
         turn_budget: Optional[int] = None,
+        on_event=None,
+        confirm_handler=None,
         **gen_kwargs,
     ) -> None:
         self.backend        = backend
@@ -190,6 +192,14 @@ class Agent:
         self.self_verify    = self_verify  # nudge agent to verify code changes before finishing
         # Per-task turn budget for uncertainty escalation. None → 2/3 of max_turns.
         self.turn_budget    = turn_budget if turn_budget is not None else max(3, (max_turns * 2) // 3)
+        # Structured event sink (GUI/web sessions). Called with a dict per event:
+        # token, tool_call, tool_result, turn, info. None → terminal-only display.
+        self.on_event       = on_event
+        # External approval hook: Callable[[ToolCall], bool]. When set it is used
+        # for destructive-tool confirmation instead of the terminal prompt, in
+        # both interactive and non-interactive runs.
+        self.confirm_handler = confirm_handler
+        self._stop_requested = False
         self.gen_kwargs     = gen_kwargs
 
         self._messages: list[dict] = []
@@ -253,6 +263,19 @@ class Agent:
     def total_tokens(self) -> int:
         """Cumulative token count across all LLM calls in this session (server estimate)."""
         return self._total_tokens
+
+    def _emit(self, event_type: str, **data) -> None:
+        """Send a structured event to the registered sink. Never raises."""
+        if self.on_event is None:
+            return
+        try:
+            self.on_event({"type": event_type, **data})
+        except Exception:
+            pass  # a broken sink must not kill the agent loop
+
+    def request_stop(self) -> None:
+        """Ask the loop to stop at the next safe point (turn or token boundary)."""
+        self._stop_requested = True
 
     # ------------------------------------------------------------------ #
     #  Public API
@@ -407,18 +430,25 @@ class Agent:
         Returns the final response text.
         """
         final_response = ""
+        self._stop_requested = False       # a stale stop must not kill a new task
         start_turns = self._turns          # turns used by *this* task only
         verify_nudged = False              # self-verification fires at most once per task
         budget_escalated = False           # uncertainty escalation fires at most once per task
 
         try:
             while self._turns < self.max_turns:
+                if self._stop_requested:
+                    self._stop_requested = False
+                    final_response = "[stopped by user]"
+                    self._last_run_ok = False
+                    break
                 self._turns += 1
                 prev_turn_tokens = self._last_turn_tokens
                 self._last_turn_tokens = 0   # reset counter for this turn
 
                 if interactive:
                     print_turn_divider(self._turns, self._total_tokens, prev_turn_tokens)
+                self._emit("turn", turn=self._turns, total_tokens=self._total_tokens)
 
                 self._audit.set_turn(self._turns)
 
@@ -442,6 +472,11 @@ class Agent:
                             self._last_run_ok = False
                             break
                     else:
+                        self._emit(
+                            "info",
+                            text=f"Turn budget exceeded ({task_turns}/{self.turn_budget}) — "
+                                 "asking the agent to surface blockers instead of guessing.",
+                        )
                         self._add_user(
                             f"[turn budget] You have used {task_turns} turns on this "
                             f"task (budget: {self.turn_budget}). If you are stuck or "
@@ -457,6 +492,14 @@ class Agent:
                 # ---- call LLM -------------------------------------------
                 messages = self._build_messages()
                 response = self._call_llm(messages, interactive=interactive)
+
+                if self._stop_requested:
+                    # Stopped mid-generation: keep the partial text, run nothing
+                    self._stop_requested = False
+                    self._add_assistant(response)
+                    final_response = response or "[stopped by user]"
+                    self._last_run_ok = False
+                    break
 
                 # ---- parse tool calls ------------------------------------
                 calls = parse_tool_calls(response)
@@ -489,7 +532,7 @@ class Agent:
                         continue
 
                     # No tool calls → this is the final answer
-                    if not interactive:
+                    if not interactive and self.on_event is None:
                         print_assistant_response(response, name=self.name)
                     final_response = response
                     self._add_assistant(response)
@@ -798,6 +841,21 @@ ws     ::= [ \t\n\r]*
             yield buf, in_call   # in_call=True means an unclosed tag — display as-is
 
     def _call_llm(self, messages: list[dict], interactive: bool) -> str:
+        if self.on_event is not None:
+            # Event-sink mode (GUI/web session): stream tokens to the sink,
+            # keep the server terminal quiet.
+            full = ""
+            for piece, hidden in self._stream_hiding_tool_calls(
+                self.backend.chat_stream(messages, **self.gen_kwargs)
+            ):
+                full += piece
+                if not hidden:
+                    self._emit("token", text=piece)
+                if self._stop_requested:
+                    break
+            self._accumulate_usage()
+            self._audit.llm(full, tokens=self._total_tokens)
+            return full
         if interactive:
             print_thinking()
             print_assistant_label(self.name)
@@ -850,6 +908,7 @@ ws     ::= [ \t\n\r]*
         self._audit.tool_call(call.name, call.args)
         if interactive:
             print_tool_call(call.name, call.args)
+        self._emit("tool_call", tool=call.name, args=call.args)
 
         # Patch-mode: intercept write tools, accumulate diffs, don't touch disk
         if self.patch_mode and call.name in _UNDOABLE_TOOLS:
@@ -895,11 +954,17 @@ ws     ::= [ \t\n\r]*
                 not self.auto_approve or call.name in self.always_confirm
             )
         )
-        if needs_confirm and interactive:
-            approved = self._confirm_tool(call)
+        if needs_confirm and (interactive or self.confirm_handler is not None):
+            if self.confirm_handler is not None:
+                approved = self.confirm_handler(call)
+            else:
+                approved = self._confirm_tool(call)
             if not approved:
                 result = ToolResult.error("Rejected by user.")
-                print_tool_result(call.name, result, verbose=False)
+                if interactive:
+                    print_tool_result(call.name, result, verbose=False)
+                self._emit("tool_result", tool=call.name, ok=False,
+                           summary="rejected by user")
                 return result
 
         # Snapshot file content before undoable writes so /undo can restore it
@@ -955,6 +1020,8 @@ ws     ::= [ \t\n\r]*
         self._audit.tool_result(call.name, result.ok, result.summary)
         if interactive:
             print_tool_result(call.name, result, verbose=self.verbose)
+        self._emit("tool_result", tool=call.name, ok=result.ok,
+                   summary=result.summary, output=result.output[:4000])
 
         # Incremental map refresh after file-mutating tools
         if result.ok and call.name in _MUTATING_TOOLS:

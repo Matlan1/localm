@@ -1,12 +1,15 @@
 # localm
 
-**Run local LLMs offline.** GGUF models via a pure-Python ctypes binding to `llama.dll`, HuggingFace Transformers models, an OpenAI-compatible HTTP server, and an interactive chat shell — all from one CLI.
+**Run local LLMs offline.** GGUF models via a pure-Python ctypes binding to `llama.dll`, HuggingFace Transformers models, an OpenAI-compatible HTTP server, a browser GUI, an AI coding agent, and MCP support in both directions. One CLI, no cloud required.
 
 ```
 localm run mymodel --prompt "Explain RDNA2 in one sentence."
-echo "Write me a haiku." | localm run mymodel
-localm serve mymodel --port 8080
+localm gui
+localm coder "add type hints to utils.py"
+localm serve mymodel
 ```
+
+Everything that does not strictly need the internet works fully offline. Online providers (OpenAI, Anthropic) exist as explicit opt-ins for the coder agent and are never a default.
 
 ---
 
@@ -14,14 +17,19 @@ localm serve mymodel --port 8080
 
 | Feature | Details |
 |---|---|
-| **GGUF inference** | Pure-Python ctypes wrapper around `llama.dll` — no llama-cpp-python required |
-| **GPU support** | AMD (ROCm / HIP), NVIDIA (CUDA), CPU — auto-detected from DLL loading order |
+| **GGUF inference** | Pure-Python ctypes wrapper around `llama.dll`, no llama-cpp-python required |
+| **GPU support** | AMD (ROCm / HIP), NVIDIA (CUDA), CPU. Auto-detected from DLL loading order |
 | **HF Transformers** | Full HuggingFace model directories |
-| **OpenAI-compatible server** | `/v1/chat/completions`, `/v1/models`, `/health` — streaming SSE + JSON |
+| **OpenAI-compatible server** | `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`, streaming SSE, TTFT and tok/s in usage |
+| **Web GUI** | `localm gui`: browser chat + coder agent, zero build step, fully offline ([guide](docs/gui.md)) |
+| **Coding agent** | `localm coder` / `localcoder`: agentic loop with file, shell, search, test, and image tools |
+| **MCP client** | The coder consumes external MCP tool servers from `.localcoder/config.toml` |
+| **MCP server** | `localm mcp` exposes your local models to Claude Desktop and other MCP clients ([guide](docs/mcp.md)) |
 | **Interactive chat** | Multi-turn shell with `/clear`, `/image`, `/system`, `/temp`, `/save` |
-| **Model registry** | Pull from HuggingFace, register local paths, manage aliases |
-| **Stdin pipe** | `echo "prompt" \| localm run model` |
-| **Multimodal** | Image attachment via `--image` or `/image` command (requires mmproj GGUF) |
+| **Model registry** | Pull from HuggingFace (split GGUF supported), aliases, SHA256 dedup, tab completion |
+| **Image generation** | `generate_image` tool drives a local ComfyUI FLUX pipeline with VRAM handover |
+| **Plugins** | Drop a folder with `plugin.toml` into `~/.localm/plugins/` to add CLI commands and agent tools |
+| **Multimodal** | Image attachment via `--image` or `/image` (requires mmproj GGUF) |
 | **Ollama interop** | Register Ollama blobs directly via `localm add <manifest-dir>` |
 
 ---
@@ -29,7 +37,7 @@ localm serve mymodel --port 8080
 ## Requirements
 
 - Python 3.10+
-- For GGUF GPU inference: a compiled `llama.dll` + GPU runtime DLLs  
+- For GGUF GPU inference: a compiled `llama.dll` + GPU runtime DLLs
   - AMD: ROCm `ggml-hip.dll`
   - NVIDIA: CUDA `ggml-cuda.dll`
   - CPU: only `llama.dll` + `ggml*.dll`
@@ -51,6 +59,8 @@ For HuggingFace Transformers models (full-precision, multimodal):
 uv tool install -e ".[gpu]"    # AMD ROCm
 ```
 
+On Windows you can also double-click `localm.bat` in the repo root to start chatting with the first registered model.
+
 ---
 
 ## Quick Start
@@ -58,69 +68,66 @@ uv tool install -e ".[gpu]"    # AMD ROCm
 ### Pull a model
 
 ```bash
-# Named shortcut (if registered)
-localm pull mymodel
-
-# Specific GGUF from any HF repo
+# Specific GGUF from any HF repo (split files are handled automatically)
 localm pull owner/repo:model-Q4_K_M.gguf
 
 # Full HuggingFace model directory (transformers format)
 localm pull owner/model-name
+
+# Direct URL, with optional integrity check
+localm pull https://example.com/m.gguf --sha256 <hash>
 ```
+
+Duplicate downloads are detected by path and SHA256. When you add or pull something already registered, localm offers alias / copy / move / skip instead of silently duplicating gigabytes.
 
 ### Register an existing model
 
 ```bash
-# Local GGUF file
 localm add C:\models\mymodel.gguf
-
-# Ollama model (resolves manifest → GGUF blob automatically)
 localm add D:\ollama\manifests\registry.ollama.ai\library\<model>\<tag>
-
-# HuggingFace directory
 localm add D:\models\my-hf-model --name mymodel
+localm alias mymodel short                # second name for the same file
 ```
 
 ### Run inference
 
 ```bash
-# Single prompt
 localm run mymodel --prompt "What is 42?"
-
-# Stdin pipe
 echo "Translate 'hello' to Japanese." | localm run mymodel
-
-# Interactive chat (TTY)
-localm run mymodel
-
-# With a system prompt
-localm run mymodel --system "You are a terse assistant." --prompt "How does TCP work?"
-
-# With an image (multimodal)
-localm run mymodel --prompt "Describe this image." --image photo.jpg --mmproj mmproj.gguf
+localm run mymodel                        # interactive chat
+localm run mymodel --system "You are terse." --prompt "How does TCP work?"
+localm run mymodel --prompt "Describe this." --image photo.jpg --mmproj mmproj.gguf
 ```
+
+### Open the GUI
+
+```bash
+localm gui                # picks the first registered model, opens your browser
+localm gui mymodel        # or name one
+```
+
+Chat and the coder agent in one page. See [docs/gui.md](docs/gui.md).
 
 ### Start the inference server
 
 ```bash
-localm serve mymodel --port 8080
+localm serve mymodel
+```
 
-# OpenAI-compatible endpoints:
-curl http://localhost:8080/health
-curl http://localhost:8080/v1/models
-curl -X POST http://localhost:8080/v1/chat/completions \
+localm owns the port range 8642-8741: the default is 8642 and the server bumps to the next free port automatically when it is taken. This range deliberately avoids ComfyUI (8188), A1111 (7860), and the usual dev-server ports.
+
+```bash
+curl http://localhost:8642/health
+curl http://localhost:8642/v1/models
+curl -X POST http://localhost:8642/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{
-    "model": "mymodel",
-    "messages": [{"role": "user", "content": "Hello!"}],
-    "stream": true
-  }'
+  -d '{"model": "mymodel", "messages": [{"role": "user", "content": "Hello!"}], "stream": true}'
 ```
 
 Use it with any OpenAI client:
 ```python
 from openai import OpenAI
-client = OpenAI(base_url="http://localhost:8080/v1", api_key="localm")
+client = OpenAI(base_url="http://localhost:8642/v1", api_key="localm")
 resp = client.chat.completions.create(
     model="mymodel",
     messages=[{"role": "user", "content": "Hello!"}],
@@ -130,79 +137,86 @@ for chunk in resp:
     print(chunk.choices[0].delta.content or "", end="", flush=True)
 ```
 
+The final usage block includes `ttft_ms` and `tokens_per_sec`. `/v1/embeddings` and `/v1/completions` are also available, and per-request `seed` makes sampling reproducible.
+
+### Run the coding agent
+
+```bash
+localm coder --model mymodel              # interactive session in the current repo
+localm coder "fix the failing test"       # single task
+localcoder --model mymodel                # same thing, standalone command
+```
+
+The agent auto-starts `localm serve` when needed, plans with tool calls (read, write, edit, patch, shell, search, tests, image generation), asks before destructive actions, tracks a turn budget so it asks for help instead of guessing forever, and verifies its own code changes before answering. Privacy mode is the default: nothing is persisted unless you opt into `--mode log` or `--mode full`.
+
+### Serve your models over MCP
+
+```bash
+localm mcp --print-config     # JSON block for Claude Desktop and friends
+```
+
+See [docs/mcp.md](docs/mcp.md) for both directions: localm as an MCP server, and the coder consuming external MCP tool servers.
+
 ---
 
 ## CLI Reference
 
-### `localm run`
+### Core commands
 
-```
-localm run MODEL [OPTIONS]
-
-Options:
-  -p, --prompt TEXT       Single prompt (non-interactive)
-  -s, --system TEXT       System prompt
-  -m, --max-tokens INT    Maximum tokens to generate  [default: 1024]
-  -t, --temperature FLOAT Sampling temperature        [default: 0.8]
-  -c, --ctx INT           Context window size (GGUF)  [default: 4096]
-  -g, --gpu-layers INT    GPU layers, 99=all (GGUF)   [default: 99]
-  --mmproj PATH           Multimodal projection GGUF
-  --image PATH            Image to attach (repeatable)
-  --output-dir PATH       Save model-generated images here
-```
-
-### Interactive chat commands
-
-| Command | Effect |
-|---|---|
-| `/help` | Show all commands |
-| `/clear` | Clear conversation history |
-| `/image <path>` | Queue a local image for the next message |
-| `/images` | List queued images |
-| `/system <text>` | Set or replace the system prompt |
-| `/save [file]` | Save conversation to JSON |
-| `/temp <float>` | Adjust sampling temperature live |
-| `/tokens <int>` | Adjust max tokens live |
-| `/exit` or `exit` | Quit |
-
-### `localm serve`
-
-```
-localm serve MODEL [OPTIONS]
-
-Options:
-  -H, --host TEXT      Bind address  [default: 127.0.0.1]
-  -p, --port INT       Port          [default: 8080]
-  -c, --ctx INT        Context window size
-  -g, --gpu-layers INT GPU layers
+```bash
+localm run MODEL [opts]          # chat or single prompt
+localm gui [MODEL] [opts]        # browser GUI (chat + coder)
+localm serve MODEL [opts]        # OpenAI-compatible server
+localm coder [TASK] [opts]       # AI coding agent
+localm mcp [opts]                # MCP stdio server
+localm imagine "prompt"          # image generation via ComfyUI
 ```
 
 ### Model management
 
 ```bash
-localm pull owner/repo:file.gguf     # specific GGUF from HuggingFace
+localm pull owner/repo:file.gguf     # specific GGUF (multi-part handled)
 localm pull owner/repo               # full HF model directory
-localm pull https://example.com/m.gguf  # direct URL
-
+localm pull https://...gguf          # direct URL (--sha256 optional)
 localm add /path/to/model.gguf       # register local file
-localm add /path/to/hf-dir           # register HF directory
-localm add /ollama/manifests/...     # register Ollama blob
-
-localm list                          # show registered models
-localm models                        # show available shortcuts
-localm rm MODEL [--yes]              # remove (deletes file if in ~/.localm)
+localm alias MODEL NEWNAME           # add a second name
+localm list                          # registered models
+localm models                        # available shortcuts
+localm rm MODEL [--yes]              # alias-aware removal
+localm info                          # paths + current config
 ```
+
+`localm rm` only deletes the file when the last alias pointing at it is removed, and the confirmation prompt states exactly what will happen.
 
 ### Configuration
 
 ```bash
-localm info                          # paths + current config
-localm config temperature 0.7        # set a config value
+localm config temperature 0.7
 localm config n_gpu_layers 99
 localm config n_ctx 8192
+localm config port 8650
+localm config confirm_remove false
 ```
 
-Config is stored at `~/.localm/config.json`.
+Config lives at `~/.localm/config.json`. Set `LOCALM_API_KEY` to require bearer auth on the HTTP API (recommended before binding to anything other than 127.0.0.1; the CLI warns you about exposed unauthenticated binds). CORS is locked to localhost by default and can be widened with the `cors_origins` config key.
+
+### Shell completion
+
+```bash
+localm completion powershell   # also: bash, zsh, fish
+```
+
+Model names complete everywhere a model argument is expected.
+
+### Plugins
+
+```bash
+localm plugin list
+localm plugin install /path/to/plugin-folder
+localm plugin remove NAME
+```
+
+A plugin is a folder with a `plugin.toml` manifest and Python files. It can add a CLI command (`localm <name>`) and export tools into the coder agent. Installation is a local directory copy, fully offline.
 
 ---
 
@@ -216,6 +230,8 @@ localm auto-detects the GPU DLL directory by scanning:
 
 The DLL loading order is: `ggml.dll` → `ggml-base.dll` → `ggml-cpu.dll` → `ggml-hip.dll` → `llama.dll`.
 
+Before loading a model, localm checks free VRAM against the model size and warns when it will not fit, instead of crashing mid-load. KV cache prefix reuse keeps multi-turn chat fast by only prefilling the new suffix of the conversation.
+
 To use a custom build:
 ```bash
 set LLAMA_CPP_LIB=C:\path\to\llama.dll
@@ -228,24 +244,24 @@ localm run mymodel --prompt "..."
 
 ```
 localm/
-├── cli.py                    # Click commands: run, serve, pull, add, list, rm, info, config
-├── config.py                 # ~/.localm/ paths, load/save config
-├── model_manager.py          # registry, pull (HF + URL), Ollama manifest resolution
-└── inference/
-    ├── engine.py             # unified Engine — detects GGUF vs HF, context manager
-    ├── http_server.py        # FastAPI app: /health, /v1/models, /v1/chat/completions
-    ├── protocol.py           # Pydantic request/response models (OpenAI wire format)
-    ├── media.py              # image → data-URI, PIL helper
-    └── backends/
-        ├── base.py           # BaseBackend ABC
-        ├── gguf.py           # GgufBackend — wraps LlamaCpp, subprocess fallback
-        ├── hf.py             # HFBackend — HuggingFace Transformers
-        └── llamacpp/         # Pure-Python ctypes llama.cpp binding
-            ├── __init__.py   # exports LlamaCpp
-            ├── _loader.py    # DLL loading, dependency order, PATH extension
-            ├── _structs.py   # ctypes Structures: LlamaModelParams, LlamaContextParams, …
-            ├── _api.py       # low-level C API bindings (llama_load_model, llama_decode, …)
-            └── llama.py      # LlamaCpp class — tokenizer, sampler chain, generate loop
+├── cli.py                    # Click commands
+├── config.py                 # ~/.localm/ paths, config, port range
+├── model_manager.py          # registry, pull, dedup, aliases, Ollama manifests
+├── image_gen/
+│   └── comfy.py              # ComfyUI FLUX pipeline driver
+├── inference/
+│   ├── engine.py             # unified Engine: GGUF vs HF detection
+│   ├── http_server.py        # FastAPI app: /v1/* endpoints
+│   ├── protocol.py           # Pydantic models (OpenAI wire format)
+│   └── backends/
+│       ├── gguf.py           # GgufBackend + VRAM pre-flight
+│       ├── hf.py             # HFBackend (Transformers)
+│       └── llamacpp/         # pure-Python ctypes llama.cpp binding
+└── plugins/
+    ├── loader.py             # external plugin discovery (~/.localm/plugins/)
+    ├── coder/                # the coding agent (agent loop, tools, MCP client)
+    ├── gui/                  # web GUI (FastAPI routes + static frontend)
+    └── mcpserver/            # `localm mcp` stdio server
 ```
 
 ### The ctypes llama.cpp binding
@@ -254,13 +270,26 @@ localm/
 
 - **No C compiler** needed at install time
 - **No Python wheel** tied to a specific Python/CUDA version
-- Any prebuilt `llama.dll` works — Ollama's DLL, a custom build, any binary
+- Any prebuilt `llama.dll` works: Ollama's DLL, a custom build, any binary
 - The struct layouts in `_structs.py` were derived by probing `llama_model_default_params()` / `llama_context_default_params()` against known default values and cross-referenced with `llama.h`
 
 The generation loop (`LlamaCpp._generate`) implements the full sampler chain:
 `top_k → top_p → min_p → temperature → dist (random draw)`, or `greedy` when `temperature=0`.
 
 Stop strings (`<|im_end|>`, `<end_of_turn>`, etc.) are filtered via a streaming buffer that watches for multi-token sequences across piece boundaries.
+
+---
+
+## Documentation
+
+| Doc | Contents |
+|---|---|
+| [docs/gui.md](docs/gui.md) | The web GUI: chat, coder sessions, approvals, security notes |
+| [docs/mcp.md](docs/mcp.md) | MCP in both directions: serving models, consuming tool servers |
+| [docs/server-api.md](docs/server-api.md) | HTTP API details |
+| [docs/architecture.md](docs/architecture.md) | Design notes |
+| [docs/gpu-setup.md](docs/gpu-setup.md) | GPU/DLL setup |
+| [docs/flux-setup.md](docs/flux-setup.md) | ComfyUI FLUX image pipeline |
 
 ---
 

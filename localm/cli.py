@@ -818,6 +818,13 @@ try:
 except ImportError:
     pass
 
+# GUI plugin — browser interface for chat and the coder agent
+try:
+    from .plugins.gui.cli import main as _gui_main
+    main.add_command(_gui_main, name="gui")
+except ImportError:
+    pass
+
 try:
     from .plugins.coder.cli import main as _coder_main
     main.add_command(_coder_main, name="coder")
