@@ -55,6 +55,13 @@ class HTTPBackend(BaseLLMBackend):
         self.native_tools  = native_tools
         self._tool_defs: list = []   # OpenAI-format tool definitions
 
+        # GBNF grammar sampling is only supported by our own local server.
+        # Passing grammar= to external APIs (OpenAI, Anthropic) causes errors.
+        _external_prefixes = ("https://api.openai.com", "https://api.anthropic.com")
+        self.supports_grammar = not any(
+            base_url.startswith(p) for p in _external_prefixes
+        )
+
     @property
     def model_id(self) -> str:
         return self._model

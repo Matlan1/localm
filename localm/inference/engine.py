@@ -127,6 +127,14 @@ class Engine:
     def unload(self) -> None:
         self._backend.unload()
 
+    def count_tokens(self, text: str) -> int:
+        """
+        Return the number of tokens in *text* using the loaded backend's
+        tokenizer.  Falls back to a chars-÷-4 heuristic when the model is
+        not yet loaded.
+        """
+        return self._backend.count_tokens(text)
+
     def chat_stream(
         self,
         messages: List[dict],

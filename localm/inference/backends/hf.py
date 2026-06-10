@@ -128,6 +128,20 @@ class HFBackend(BaseBackend):
 
         self._loaded = True
         mm_note = " (multimodal)" if self._is_multimodal else ""
+
+        # VRAM usage after load
+        if device == "cuda":
+            try:
+                for i in range(torch.cuda.device_count()):
+                    allocated = torch.cuda.memory_allocated(i) / 1e9
+                    reserved  = torch.cuda.memory_reserved(i)  / 1e9
+                    console.print(
+                        f"[dim]  vram     : {allocated:.2f} GB allocated / "
+                        f"{reserved:.2f} GB reserved (device {i})[/dim]"
+                    )
+            except Exception:
+                pass
+
         console.print(f"[green]✓[/green] Model loaded{mm_note}")
 
     def unload(self) -> None:
@@ -146,6 +160,20 @@ class HFBackend(BaseBackend):
     @property
     def loaded(self) -> bool:
         return self._loaded
+
+    # ------------------------------------------------------------------ #
+    #  Tokenisation                                                        #
+    # ------------------------------------------------------------------ #
+
+    def count_tokens(self, text: str) -> int:
+        """Return exact token count using the loaded HF tokenizer."""
+        if self._tokenizer is not None:
+            try:
+                ids = self._tokenizer.encode(text, add_special_tokens=False)
+                return max(1, len(ids))
+            except Exception:
+                pass
+        return max(1, len(text) // 4)
 
     # ------------------------------------------------------------------ #
     #  Inference                                                           #

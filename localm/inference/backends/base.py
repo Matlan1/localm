@@ -45,3 +45,14 @@ class BaseBackend(ABC):
     @abstractmethod
     def loaded(self) -> bool:
         """True once load() has completed successfully."""
+
+    def count_tokens(self, text: str) -> int:
+        """
+        Return the number of tokens in *text* as tokenised by this model.
+
+        The base implementation uses a chars-÷-4 heuristic when the backend
+        has not overridden this method (e.g. subprocess fallback or when the
+        model is not yet loaded).  Concrete backends should override this with
+        their actual tokenizer for precise counts.
+        """
+        return max(1, len(text) // 4)

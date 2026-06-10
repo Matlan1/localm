@@ -14,15 +14,15 @@ Start programmatically:
 from __future__ import annotations
 
 import asyncio
-import json
+import os
 import time
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, List
+from typing import AsyncIterator, List, Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from localm.inference.engine import Engine
 from localm.inference.protocol import (
@@ -32,6 +32,29 @@ from localm.inference.protocol import (
 
 # Global engine reference set by serve()
 _engine: Engine | None = None
+
+# Inference serialisation — only one request runs inference at a time.
+# Additional requests queue behind this semaphore.
+_inference_sem: asyncio.Semaphore | None = None
+
+# Optional bearer-token auth — enabled when LOCALM_API_KEY is set.
+_bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def _require_auth(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
+) -> None:
+    """Validate the Bearer token when LOCALM_API_KEY is set in the environment.
+
+    If the env var is absent the server runs in open/dev mode (no auth check).
+    If the env var is set, every request to a protected endpoint must supply a
+    matching ``Authorization: Bearer <token>`` header.
+    """
+    api_key = os.environ.get("LOCALM_API_KEY")
+    if not api_key:
+        return  # no key configured — dev/local mode, skip auth
+    if credentials is None or credentials.credentials != api_key:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 
 # ------------------------------------------------------------------ #
@@ -44,7 +67,10 @@ def create_app(engine: Engine) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        yield  # model is already loaded before we're called
+        global _inference_sem
+        # Semaphore created inside the running event loop — Python 3.10+ safe
+        _inference_sem = asyncio.Semaphore(1)
+        yield
 
     app = FastAPI(
         title="localm inference server",
@@ -96,7 +122,7 @@ def create_app(engine: Engine) -> FastAPI:
     #  Model lifecycle — unload / load                                   #
     # ---------------------------------------------------------------- #
 
-    @app.post("/v1/models/unload")
+    @app.post("/v1/models/unload", dependencies=[Depends(_require_auth)])
     async def unload_model():
         """
         Release the model from GPU/CPU memory.
@@ -113,7 +139,7 @@ def create_app(engine: Engine) -> FastAPI:
         await loop.run_in_executor(None, _engine.unload)
         return {"status": "unloaded", "model": _engine.display_name}
 
-    @app.post("/v1/models/load")
+    @app.post("/v1/models/load", dependencies=[Depends(_require_auth)])
     async def load_model():
         """
         Explicitly reload the model into memory.
@@ -134,7 +160,7 @@ def create_app(engine: Engine) -> FastAPI:
     #  Chat completions                                                  #
     # ---------------------------------------------------------------- #
 
-    @app.post("/v1/chat/completions")
+    @app.post("/v1/chat/completions", dependencies=[Depends(_require_auth)])
     async def chat_completions(req: ChatRequest):
         if _engine is None:
             raise HTTPException(503, "No model loaded")
@@ -155,7 +181,7 @@ def create_app(engine: Engine) -> FastAPI:
 
         if req.stream:
             return StreamingResponse(
-                _stream_sse(_engine, messages, req.model, **gen_kwargs),
+                _stream_sse(_engine, messages, req.model, _inference_sem, **gen_kwargs),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
@@ -163,7 +189,7 @@ def create_app(engine: Engine) -> FastAPI:
                 },
             )
         else:
-            return await _complete(_engine, messages, req.model, **gen_kwargs)
+            return await _complete(_engine, messages, req.model, _inference_sem, **gen_kwargs)
 
     return app
 
@@ -176,21 +202,29 @@ async def _stream_sse(
     engine: Engine,
     messages: list,
     model_id: str,
+    sem: asyncio.Semaphore,
     **gen_kwargs,
 ) -> AsyncIterator[str]:
+    from localm.inference.protocol import ChoiceDelta, StreamChoice
+
     chunk_id = make_chunk_id()
     ts = int(time.time())
+
+    # Exact prompt token count from the backend tokenizer
+    prompt_text = " ".join(
+        m.get("content") if isinstance(m.get("content"), str)
+        else " ".join(p.get("text", "") for p in (m.get("content") or [])
+                      if p.get("type") == "text")
+        for m in messages
+    )
+    prompt_tokens = engine.count_tokens(prompt_text)
 
     # Role announcement
     role_chunk = ChatChunk(
         id=chunk_id,
         created=ts,
         model=model_id,
-        choices=[
-            __import__("localm.inference.protocol", fromlist=["StreamChoice"]).StreamChoice(
-                delta=__import__("localm.inference.protocol", fromlist=["ChoiceDelta"]).ChoiceDelta(role="assistant")
-            )
-        ],
+        choices=[StreamChoice(delta=ChoiceDelta(role="assistant"))],
     )
     yield f"data: {role_chunk.model_dump_json()}\n\n"
 
@@ -206,28 +240,23 @@ async def _stream_sse(
             loop.call_soon_threadsafe(token_queue.put_nowait, None)
 
     import threading
-    t = threading.Thread(target=_generate, daemon=True)
-    t.start()
 
-    # Estimate prompt token count from input message lengths (chars // 4)
-    prompt_chars = sum(
-        len(m.get("content") if isinstance(m.get("content"), str)
-            else " ".join(p.get("text", "") for p in (m.get("content") or [])
-                          if p.get("type") == "text"))
-        for m in messages
-    )
-    prompt_tokens = max(1, prompt_chars // 4)
-    completion_chars = 0
+    # Serialise inference — only one request runs at a time
+    async with sem:
+        t = threading.Thread(target=_generate, daemon=True)
+        t.start()
 
-    while True:
-        token = await token_queue.get()
-        if token is None:
-            break
-        completion_chars += len(token)
-        chunk = ChatChunk.token(token, model_id, chunk_id, ts)
-        yield f"data: {chunk.model_dump_json()}\n\n"
+        completion_tokens = 0
+        while True:
+            token = await token_queue.get()
+            if token is None:
+                break
+            completion_tokens += engine.count_tokens(token)
+            chunk = ChatChunk.token(token, model_id, chunk_id, ts)
+            yield f"data: {chunk.model_dump_json()}\n\n"
 
-    completion_tokens = max(0, completion_chars // 4)
+        t.join()
+
     usage = UsageInfo(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
@@ -237,32 +266,41 @@ async def _stream_sse(
     yield f"data: {done.model_dump_json()}\n\n"
     yield "data: [DONE]\n\n"
 
-    t.join()
-
 
 # ------------------------------------------------------------------ #
 #  Non-streaming completion                                            #
 # ------------------------------------------------------------------ #
 
-async def _complete(engine: Engine, messages: list, model_id: str, **gen_kwargs):
+async def _complete(
+    engine: Engine,
+    messages: list,
+    model_id: str,
+    sem: asyncio.Semaphore,
+    **gen_kwargs,
+):
     loop = asyncio.get_running_loop()
+
+    # Exact prompt token count before running inference
+    prompt_text = " ".join(
+        m.get("content") if isinstance(m.get("content"), str)
+        else " ".join(p.get("text", "") for p in (m.get("content") or [])
+                      if p.get("type") == "text")
+        for m in messages
+    )
+    prompt_tokens = engine.count_tokens(prompt_text)
 
     def _run():
         return "".join(engine.chat_stream(messages, **gen_kwargs))
 
-    text = await loop.run_in_executor(None, _run)
+    # Serialise inference — only one request runs at a time
+    async with sem:
+        text = await loop.run_in_executor(None, _run)
 
-    # Estimate token counts from character lengths (chars // 4)
-    prompt_chars = sum(
-        len(m.get("content") if isinstance(m.get("content"), str)
-            else " ".join(p.get("text", "") for p in (m.get("content") or [])
-                          if p.get("type") == "text"))
-        for m in messages
-    )
+    completion_tokens = engine.count_tokens(text)
     usage = UsageInfo(
-        prompt_tokens=max(1, prompt_chars // 4),
-        completion_tokens=max(0, len(text) // 4),
-        total_tokens=max(1, prompt_chars // 4) + max(0, len(text) // 4),
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=prompt_tokens + completion_tokens,
     )
 
     response = ChatResponse(

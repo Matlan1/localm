@@ -262,6 +262,9 @@ HELP_TEXT = """\
   [bold]/remember <text>[/bold]      append a note to LOCALCODER.md
   [bold]/forget <pattern>[/bold]     remove memory bullets matching pattern
   [bold]/save[/bold]                 save conversation to JSON
+  [bold]/export [path][/bold]        export session transcript to Markdown
+  [bold]/scope [glob][/bold]         show or set the file-access scope (e.g. src/**/*.py)
+  [bold]/scope clear[/bold]          remove the active scope restriction
 
 [dim]Session modes (set with --mode at startup or mode = "..." in .localcoder/config.toml):
   privacy  nothing saved automatically (default)

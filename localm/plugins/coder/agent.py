@@ -21,8 +21,10 @@ The Agent class is used by:
 from __future__ import annotations
 
 import datetime
+import fnmatch
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
@@ -56,6 +58,12 @@ _MUTATING_TOOLS: frozenset[str] = frozenset({"write_file", "edit_file", "run_she
 
 # Tools whose file changes can be undone (we snapshot before they run)
 _UNDOABLE_TOOLS: frozenset[str] = frozenset({"write_file", "edit_file", "patch_file"})
+
+# File-access tools whose `path` argument must match the active scope glob
+_SCOPED_TOOLS: frozenset[str] = frozenset({
+    "read_file", "write_file", "edit_file", "patch_file",
+    "list_dir", "tree",
+})
 
 # Fraction of estimated context window at which compaction is triggered
 _COMPACT_WARN_RATIO  = 0.70   # warn user in interactive mode
@@ -149,6 +157,7 @@ class Agent:
         dry_run: bool = False,
         parent: Optional["Agent"] = None,
         mode: SessionMode = SessionMode.PRIVACY,
+        scope: Optional[str] = None,
         **gen_kwargs,
     ) -> None:
         self.backend        = backend
@@ -163,6 +172,7 @@ class Agent:
         self._patch_chunks: list[str] = [] # accumulated diffs when patch_mode=True
         self.parent         = parent
         self.mode           = mode
+        self.scope          = scope        # optional glob filter on file-access tools
         self.gen_kwargs     = gen_kwargs
 
         self._messages: list[dict] = []
@@ -392,11 +402,8 @@ class Agent:
 
                 self._add_assistant(response)
 
-                # Execute each tool and collect results
-                result_blocks: list[str] = []
-                for call in calls:
-                    result = self._execute_tool(call, interactive=interactive)
-                    result_blocks.append(result.to_xml(call.name))
+                # Execute tools — run non-destructive batches in parallel
+                result_blocks = self._execute_tools(calls, interactive=interactive)
 
                 # Feed all results back as a user message
                 combined = "\n\n".join(result_blocks)
@@ -422,6 +429,66 @@ class Agent:
             self.clear_checkpoint()
 
         return final_response
+
+    # ------------------------------------------------------------------ #
+    #  Parallel tool dispatch
+    # ------------------------------------------------------------------ #
+
+    def _execute_tools(self, calls: list, interactive: bool) -> list[str]:
+        """
+        Execute a list of tool calls and return their XML result blocks.
+
+        Groups consecutive non-destructive calls and runs each group in parallel
+        with a ``ThreadPoolExecutor``.  Destructive calls are always run alone,
+        in order, to avoid unintended interactions (file corruption, overlapping
+        shell commands, etc.).
+
+        The grouping strategy preserves the original ordering of destructive
+        calls relative to non-destructive ones: given [read, read, write, read],
+        the two leading reads run in parallel, then the write runs alone, then
+        the final read runs alone.  This is conservative but safe.
+        """
+        result_blocks: list[str] = []
+
+        # Split into segments: each segment is (is_destructive, [calls])
+        segments: list[tuple[bool, list]] = []
+        for call in calls:
+            td = TOOL_REGISTRY.get(call.name)
+            destructive = td.destructive if td else True
+            if segments and segments[-1][0] == destructive:
+                segments[-1][1].append(call)
+            else:
+                segments.append((destructive, [call]))
+
+        for destructive, group in segments:
+            if destructive or len(group) == 1:
+                # Serial execution
+                for call in group:
+                    result = self._execute_tool(call, interactive=interactive)
+                    result_blocks.append(result.to_xml(call.name))
+            else:
+                # Parallel execution for non-destructive batch
+                ordered: dict[int, str] = {}
+                with ThreadPoolExecutor(max_workers=min(len(group), 8)) as pool:
+                    futures = {
+                        pool.submit(self._execute_tool, call, False): (i, call)
+                        for i, call in enumerate(group)
+                    }
+                    for fut in as_completed(futures):
+                        i, call = futures[fut]
+                        try:
+                            result = fut.result()
+                        except Exception as exc:
+                            result = ToolResult.error(f"Parallel execution error: {exc}")
+                        # Print results in original order when interactive
+                        ordered[i] = result.to_xml(call.name)
+                        if interactive:
+                            print_tool_call(call.name, call.args)
+                            print_tool_result(call.name, result, verbose=self.verbose)
+                for i in range(len(group)):
+                    result_blocks.append(ordered[i])
+
+        return result_blocks
 
     # ------------------------------------------------------------------ #
     #  Compaction
@@ -479,6 +546,16 @@ class Agent:
         """
         return self._compact_history()
 
+    # GBNF grammar for structured compaction output.
+    # Produces: {"summary":"...","changed_files":["..."],"open_tasks":["..."]}
+    _COMPACT_GRAMMAR = r"""
+root   ::= "{" ws "\"summary\"" ws ":" ws string ws "," ws "\"changed_files\"" ws ":" ws str-array ws "," ws "\"open_tasks\"" ws ":" ws str-array ws "}"
+str-array ::= "[" ws (string ("," ws string)*)? ws "]"
+string ::= "\"" char* "\""
+char   ::= [^"\\] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F]{4})
+ws     ::= [ \t\n\r]*
+"""
+
     def _compact_history(self) -> bool:
         keep_n = 4   # last 4 messages kept verbatim (~2 turns)
         if len(self._messages) <= keep_n:
@@ -497,19 +574,55 @@ class Agent:
             excerpt_parts.append(f"{role}: {content[:600]}")
         excerpt = "\n\n".join(excerpt_parts)
 
-        summary_prompt = (
-            "Produce a concise summary (≤300 words) of the following coding session. "
-            "Focus on: decisions made, files created or edited, errors and fixes, "
-            "and any open problems or next steps.\n\n"
-            f"{excerpt}"
-        )
+        # When the backend supports GBNF grammar sampling, request a structured
+        # JSON summary so the compacted message is always machine-parseable.
+        use_json = getattr(self.backend, "supports_grammar", False)
+
+        if use_json:
+            summary_prompt = (
+                "Summarise the following coding session as JSON with exactly three fields:\n"
+                '  "summary": a concise narrative (≤200 words) of decisions, edits, and fixes\n'
+                '  "changed_files": list of file paths that were created or modified\n'
+                '  "open_tasks": list of tasks or problems still unresolved\n\n'
+                "Respond with valid JSON only — no prose outside the JSON object.\n\n"
+                f"{excerpt}"
+            )
+        else:
+            summary_prompt = (
+                "Produce a concise summary (≤300 words) of the following coding session. "
+                "Focus on: decisions made, files created or edited, errors and fixes, "
+                "and any open problems or next steps.\n\n"
+                f"{excerpt}"
+            )
+
         try:
-            summary = self.backend.chat(
+            call_kwargs: dict = {"max_tokens": 400}
+            if use_json:
+                call_kwargs["grammar"] = self._COMPACT_GRAMMAR.strip()
+            raw = self.backend.chat(
                 [{"role": "user", "content": summary_prompt}],
-                max_tokens=400,
+                **call_kwargs,
             )
         except Exception:
             return False   # best-effort; don't crash on summary failure
+
+        # Parse structured output if we requested JSON
+        if use_json:
+            try:
+                data = json.loads(raw)
+                summary_text = data.get("summary", raw)
+                changed = data.get("changed_files", [])
+                tasks   = data.get("open_tasks", [])
+                summary_lines = [summary_text]
+                if changed:
+                    summary_lines.append("\nChanged files: " + ", ".join(changed))
+                if tasks:
+                    summary_lines.append("\nOpen tasks:\n" + "\n".join(f"- {t}" for t in tasks))
+                summary = "\n".join(summary_lines)
+            except Exception:
+                summary = raw   # fall back to raw text on parse failure
+        else:
+            summary = raw
 
         self._messages = [
             {"role": "user",      "content": f"[Session summary]\n{summary}"},
@@ -647,6 +760,21 @@ class Agent:
                 if interactive:
                     console.print("    [dim cyan][patch-mode] diff captured[/dim cyan]")
                 return result
+
+        # Scope check — reject file operations that fall outside the active glob
+        if self.scope and call.name in _SCOPED_TOOLS:
+            path_arg = call.args.get("path", "")
+            if path_arg:
+                # Normalise to forward slashes for cross-platform glob matching
+                normalised = str(Path(path_arg)).replace("\\", "/")
+                if not fnmatch.fnmatch(normalised, self.scope):
+                    result = ToolResult.error(
+                        f"'{path_arg}' is outside the active scope '{self.scope}'. "
+                        "Only files matching this glob pattern can be accessed."
+                    )
+                    if interactive:
+                        print_tool_error(call.name, result.output)
+                    return result
 
         # Dry-run: show destructive calls but don't execute them
         if self.dry_run and tool_def.destructive:

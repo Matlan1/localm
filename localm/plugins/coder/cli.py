@@ -124,11 +124,17 @@ def _complete_model(ctx, param, incomplete):
                   "log = JSONL audit trail to ~/.localm/sessions/; "
                   "full = log + markdown transcript in .localcoder/sessions/."
               ))
+@click.option("--scope",            default=None,
+              help=(
+                  "Restrict all file-access tools to paths matching this glob, "
+                  "e.g. 'src/**/*.py'.  Requests touching files outside the "
+                  "scope are rejected."
+              ))
 def main(
     task, model, url, api_key, port, cwd,
     no_server, max_turns, temperature, max_tokens,
     verbose, yes, interactive_confirm, dry_run, patch_mode, ci, output_format,
-    native_tools, provider, mode,
+    native_tools, provider, mode, scope,
 ):
     """
     Offline AI coding agent powered by local LLMs.
@@ -265,6 +271,7 @@ def main(
         always_confirm=always_confirm,
         dry_run=dry_run,
         mode=session_mode,
+        scope=scope,
         **gen_kw,
     )
 
@@ -546,6 +553,49 @@ def _handle_command(raw: str, agent: Agent) -> bool:
             print_success(f"Saved to {filepath}")
         except Exception as e:
             print_error(f"Save failed: {e}")
+
+    elif cmd == "export":
+        import time as _time
+
+        if agent.mode == SessionMode.PRIVACY and not arg:
+            console.print(
+                "[yellow]⚠  Privacy mode is active. "
+                "This will write the session transcript to disk.[/yellow]"
+            )
+            if not confirm("  Export session?"):
+                print_info("Cancelled.")
+                return False
+
+        if arg:
+            out_path = Path(arg)
+        else:
+            ts_label = _time.strftime("%Y-%m-%d_%H%M%S")
+            out_path = agent.cwd / ".localcoder" / "sessions" / f"{ts_label}.md"
+
+        try:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            # Force a write via the agent's session-markdown writer
+            agent._audit.close()   # flush any pending audit writes
+            md_path = agent._write_session_markdown()
+            if arg:
+                # Move to the requested path
+                import shutil as _shutil
+                _shutil.move(str(md_path), str(out_path))
+                md_path = out_path
+            print_success(f"Session exported → {md_path}")
+        except Exception as e:
+            print_error(f"Export failed: {e}")
+
+    elif cmd == "scope":
+        if not arg:
+            current = agent.scope or "(none)"
+            print_info(f"Scope: {current}")
+        else:
+            agent.scope = arg if arg != "clear" else None
+            if agent.scope:
+                print_success(f"Scope set to '{agent.scope}'")
+            else:
+                print_info("Scope cleared — all files accessible.")
 
     else:
         print_info(f"Unknown command: /{cmd}  (try /help)")

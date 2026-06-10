@@ -149,10 +149,34 @@ def _stem_from_url(url: str) -> str:
     return url.split("/")[-1].split("?")[0].removesuffix(".gguf")
 
 
+def _check_disk_space(dest_dir: Path, required_bytes: int) -> bool:
+    """
+    Verify there is at least *required_bytes* of free space on the volume that
+    holds *dest_dir*.  Prints a warning and returns False when space is
+    insufficient; returns True when fine or when the check is skipped
+    (e.g. ``required_bytes == 0``).
+    """
+    if not required_bytes:
+        return True
+    try:
+        usage = shutil.disk_usage(dest_dir)
+        if usage.free < required_bytes:
+            need_gb  = required_bytes / 1e9
+            free_gb  = usage.free / 1e9
+            console.print(
+                f"[red]Not enough disk space.[/red] "
+                f"Need {need_gb:.1f} GB, have {free_gb:.1f} GB free on {dest_dir}"
+            )
+            return False
+    except Exception:
+        pass   # disk_usage failure is non-fatal; proceed with the download
+    return True
+
+
 def _pull_gguf_file(spec: str, name: Optional[str]) -> None:
     """Download a single .gguf file from a HuggingFace repo."""
     try:
-        from huggingface_hub import hf_hub_download
+        from huggingface_hub import hf_hub_download, hf_hub_url
     except ImportError:
         console.print("[red]Missing:[/red] huggingface-hub  (run: uv pip install huggingface-hub)")
         return
@@ -172,6 +196,19 @@ def _pull_gguf_file(spec: str, name: Optional[str]) -> None:
         return
 
     ensure_dirs()
+
+    # Disk space pre-flight — HEAD the CDN URL to get Content-Length
+    try:
+        import requests as _req
+        cdn_url  = hf_hub_url(repo_id, filename)
+        head     = _req.head(cdn_url, allow_redirects=True, timeout=10)
+        file_size = int(head.headers.get("content-length", 0))
+    except Exception:
+        file_size = 0
+
+    if not _check_disk_space(MODELS_DIR, file_size):
+        return
+
     console.print(f"Pulling [bold cyan]{repo_id}[/bold cyan] / [bold]{filename}[/bold]")
 
     try:
@@ -230,10 +267,12 @@ def _pull_hf_snapshot(repo_id: str, name: Optional[str]) -> None:
 
 
 def _pull_url(url: str, name: str) -> None:
+    """Download a model from a direct URL with resumable .part file support."""
     import requests
 
     filename = _stem_from_url(url) + ".gguf"
-    dest = MODELS_DIR / filename
+    dest      = MODELS_DIR / filename
+    part_file = MODELS_DIR / (filename + ".part")
 
     if dest.exists():
         console.print(f"[yellow]Already downloaded:[/yellow] {name}")
@@ -241,11 +280,42 @@ def _pull_url(url: str, name: str) -> None:
         return
 
     ensure_dirs()
-    console.print(f"Downloading [bold cyan]{url}[/bold cyan]")
 
-    r = requests.get(url, stream=True, timeout=30)
+    # Determine how much we already have (from a prior interrupted download)
+    already_have = part_file.stat().st_size if part_file.exists() else 0
+
+    # HEAD request to get total file size for the disk space check
+    try:
+        head  = requests.head(url, allow_redirects=True, timeout=10)
+        total = int(head.headers.get("content-length", 0))
+    except Exception:
+        total = 0
+
+    remaining = max(0, total - already_have)
+    if not _check_disk_space(MODELS_DIR, remaining):
+        return
+
+    # Build request — try to resume from where we left off
+    headers: dict = {}
+    if already_have:
+        headers["Range"] = f"bytes={already_have}-"
+        console.print(
+            f"Resuming [bold cyan]{url}[/bold cyan] "
+            f"[dim](skipping first {already_have / 1e6:.1f} MB)[/dim]"
+        )
+    else:
+        console.print(f"Downloading [bold cyan]{url}[/bold cyan]")
+
+    r = requests.get(url, headers=headers, stream=True, timeout=30)
     r.raise_for_status()
-    total = int(r.headers.get("content-length", 0))
+
+    # Server may ignore the Range header — detect and reset if needed
+    if already_have and r.status_code == 200:
+        # Server returned the full file despite Range request
+        already_have = 0
+
+    content_length = int(r.headers.get("content-length", 0))
+    total_display  = (already_have + content_length) or None
 
     with Progress(
         TextColumn("[bold blue]{task.description}"),
@@ -255,12 +325,15 @@ def _pull_url(url: str, name: str) -> None:
         TimeRemainingColumn(),
         console=console,
     ) as prog:
-        task = prog.add_task(filename, total=total or None)
-        with open(dest, "wb") as f:
-            for chunk in r.iter_content(8192):
+        task = prog.add_task(filename, total=total_display, completed=already_have)
+        mode = "ab" if already_have else "wb"
+        with open(part_file, mode) as f:
+            for chunk in r.iter_content(65536):
                 f.write(chunk)
                 prog.update(task, advance=len(chunk))
 
+    # Atomically rename on successful completion
+    part_file.rename(dest)
     _register(name, dest, url)
     console.print(f"[green]✓[/green] [bold]{name}[/bold] is ready")
 

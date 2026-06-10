@@ -11,11 +11,13 @@ Tools are registered in the TOOL_REGISTRY dict at the bottom of this file.
 from __future__ import annotations
 
 import glob as _glob
+import json
 import os
 import re
 import subprocess
 import sys
 import textwrap
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional
@@ -106,6 +108,24 @@ def _resolve(cwd: Path, path: str) -> Path:
     return p if p.is_absolute() else cwd / p
 
 
+def _confine(cwd: Path, path: str) -> Path:
+    """
+    Resolve *path* against *cwd* and verify it stays inside *cwd*.
+
+    Raises ``PermissionError`` with a clear message if the resolved path
+    escapes the working directory (path traversal attempt or accidental
+    absolute path outside the project root).
+    """
+    resolved = (cwd / path).resolve() if not Path(path).is_absolute() else Path(path).resolve()
+    cwd_resolved = cwd.resolve()
+    if not resolved.is_relative_to(cwd_resolved):
+        raise PermissionError(
+            f"'{path}' resolves outside the working directory '{cwd_resolved}'. "
+            "All file operations must stay within the project root."
+        )
+    return resolved
+
+
 def _line_count(text: str) -> int:
     return text.count("\n") + 1
 
@@ -115,7 +135,10 @@ def _line_count(text: str) -> int:
 # ---------------------------------------------------------------------------
 
 def tool_read_file(cwd: Path, path: str) -> ToolResult:
-    p = _resolve(cwd, path)
+    try:
+        p = _confine(cwd, path)
+    except PermissionError as e:
+        return ToolResult.error(str(e))
     if not p.exists():
         return ToolResult.error(f"File not found: {p}")
     if not p.is_file():
@@ -154,7 +177,10 @@ def tool_read_file(cwd: Path, path: str) -> ToolResult:
 
 
 def tool_write_file(cwd: Path, path: str, content: str) -> ToolResult:
-    p = _resolve(cwd, path)
+    try:
+        p = _confine(cwd, path)
+    except PermissionError as e:
+        return ToolResult.error(str(e))
     existed = p.exists()
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -164,15 +190,64 @@ def tool_write_file(cwd: Path, path: str, content: str) -> ToolResult:
     rel  = p.relative_to(cwd) if p.is_relative_to(cwd) else p
     verb = "updated" if existed else "created"
     lines = _line_count(content)
-    return ToolResult.success(
+    result = ToolResult.success(
         f"{verb} {rel} ({lines} lines)",
         summary=f"{verb} {rel} ({lines} lines)",
     )
+    # Soft syntax check — surface obvious errors immediately
+    warn = _verify_syntax(p, content)
+    if warn:
+        result = ToolResult.success(
+            result.output + f"\n\n[syntax check] {warn}",
+            summary=result.summary + " ⚠ syntax error",
+        )
+    return result
+
+
+def _verify_syntax(path: Path, content: str) -> Optional[str]:
+    """
+    Quick offline syntax check for common file types.
+
+    Returns a short warning string on failure, or None if everything looks fine.
+    Does not raise — always safe to call after a write.
+    """
+    suffix = path.suffix.lower()
+    if suffix == ".py":
+        import py_compile, tempfile, os as _os
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".py", delete=False, mode="w",
+                                             encoding="utf-8") as tmp:
+                tmp.write(content)
+                tmp_path = tmp.name
+            py_compile.compile(tmp_path, doraise=True)
+        except py_compile.PyCompileError as e:
+            msg = str(e).replace(tmp_path, str(path))
+            return f"Python syntax error: {msg}"
+        finally:
+            try:
+                _os.unlink(tmp_path)
+            except Exception:
+                pass
+    elif suffix == ".json":
+        try:
+            json.loads(content)
+        except json.JSONDecodeError as e:
+            return f"JSON syntax error: {e}"
+    elif suffix == ".toml":
+        try:
+            import tomllib  # type: ignore[import]
+            tomllib.loads(content)
+        except Exception as e:
+            return f"TOML syntax error: {e}"
+    return None
 
 
 def tool_edit_file(cwd: Path, path: str, old: str, new: str) -> ToolResult:
     """Replace the first occurrence of `old` with `new` in `path`."""
-    p = _resolve(cwd, path)
+    try:
+        p = _confine(cwd, path)
+    except PermissionError as e:
+        return ToolResult.error(str(e))
     if not p.exists():
         return ToolResult.error(f"File not found: {p}")
     try:
@@ -197,10 +272,17 @@ def tool_edit_file(cwd: Path, path: str, old: str, new: str) -> ToolResult:
 
     rel = p.relative_to(cwd) if p.is_relative_to(cwd) else p
     note = f" ({count - 1} more occurrence(s) unchanged)" if count > 1 else ""
-    return ToolResult.success(
+    result = ToolResult.success(
         f"Replaced 1 occurrence in {rel}{note}",
         summary=f"edited {rel}{note}",
     )
+    warn = _verify_syntax(p, new_text)
+    if warn:
+        result = ToolResult.success(
+            result.output + f"\n\n[syntax check] {warn}",
+            summary=result.summary + " ⚠ syntax error",
+        )
+    return result
 
 
 def tool_patch_file(cwd: Path, path: str, diff: str) -> ToolResult:
@@ -223,7 +305,10 @@ def tool_patch_file(cwd: Path, path: str, diff: str) -> ToolResult:
     """
     from ._patch import apply_diff, PatchError
 
-    p = _resolve(cwd, path)
+    try:
+        p = _confine(cwd, path)
+    except PermissionError as e:
+        return ToolResult.error(str(e))
     if not p.exists():
         return ToolResult.error(f"File not found: {p}")
     if not p.is_file():
@@ -252,10 +337,17 @@ def tool_patch_file(cwd: Path, path: str, diff: str) -> ToolResult:
     patch_lines = set(patched.splitlines())
     added   = len(patch_lines - orig_lines)
     removed = len(orig_lines - patch_lines)
-    return ToolResult.success(
+    result = ToolResult.success(
         f"Patched {rel} (+{added} / -{removed} lines)",
         summary=f"patched {rel} (+{added} / -{removed})",
     )
+    warn = _verify_syntax(p, patched)
+    if warn:
+        result = ToolResult.success(
+            result.output + f"\n\n[syntax check] {warn}",
+            summary=result.summary + " ⚠ syntax error",
+        )
+    return result
 
 
 def tool_run_shell(
@@ -318,7 +410,10 @@ def tool_run_shell(
 
 
 def tool_list_dir(cwd: Path, path: str = ".") -> ToolResult:
-    p = _resolve(cwd, path)
+    try:
+        p = _confine(cwd, path)
+    except PermissionError as e:
+        return ToolResult.error(str(e))
     if not p.exists():
         return ToolResult.error(f"Path not found: {p}")
     if not p.is_dir():
@@ -348,7 +443,10 @@ def tool_tree(
     max_files: int = 300,
 ) -> ToolResult:
     """Recursive directory tree with file sizes."""
-    root = _resolve(cwd, path)
+    try:
+        root = _confine(cwd, path)
+    except PermissionError as e:
+        return ToolResult.error(str(e))
     if not root.exists():
         return ToolResult.error(f"Path not found: {root}")
     if not root.is_dir():
@@ -413,7 +511,10 @@ def tool_edit_notebook_cell(
     cell_type: Optional[str] = None,
 ) -> ToolResult:
     """Replace the source of a single notebook cell."""
-    p = _resolve(cwd, path)
+    try:
+        p = _confine(cwd, path)
+    except PermissionError as e:
+        return ToolResult.error(str(e))
     if not p.exists():
         return ToolResult.error(f"File not found: {p}")
     if p.suffix != ".ipynb":
@@ -770,6 +871,257 @@ def tool_generate_image(
 
 
 # ---------------------------------------------------------------------------
+#  New tools: test runner, git write ops, search-replace
+# ---------------------------------------------------------------------------
+
+def _detect_test_runner(cwd: Path) -> list[str]:
+    """Return the command list for the most appropriate test runner in *cwd*."""
+    if (cwd / "Cargo.toml").exists():
+        return ["cargo", "test", "--color=never"]
+    if (cwd / "go.mod").exists():
+        return ["go", "test", "./..."]
+    if (cwd / "package.json").exists():
+        lock = "yarn" if (cwd / "yarn.lock").exists() else "npm"
+        return [lock, "test", "--passWithNoTests"]
+    # Python — prefer pytest; fall back to unittest
+    return ["python", "-m", "pytest", "--tb=short", "-q", "--no-header"]
+
+
+def tool_run_tests(
+    cwd: Path,
+    runner: str = "auto",
+    path: str = ".",
+    extra_args: str = "",
+) -> ToolResult:
+    """
+    Run the project's test suite and return the result.
+
+    Parameters
+    ----------
+    runner:
+        ``auto`` (default) detects from project files; or specify
+        ``pytest``, ``cargo``, ``go``, ``npm``, ``yarn`` explicitly.
+    path:
+        Subdirectory or file to limit the test run (default: whole project).
+    extra_args:
+        Additional arguments appended verbatim to the test command.
+    """
+    if runner == "auto":
+        cmd = _detect_test_runner(cwd)
+    elif runner == "pytest":
+        cmd = ["python", "-m", "pytest", "--tb=short", "-q", "--no-header"]
+    elif runner == "cargo":
+        cmd = ["cargo", "test", "--color=never"]
+    elif runner == "go":
+        cmd = ["go", "test", "./..."]
+    elif runner in ("npm", "yarn"):
+        cmd = [runner, "test", "--passWithNoTests"]
+    else:
+        return ToolResult.error(
+            f"Unknown runner '{runner}'. Use: auto, pytest, cargo, go, npm, yarn"
+        )
+
+    if path and path != ".":
+        cmd.append(path)
+    if extra_args:
+        cmd.extend(extra_args.split())
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=120,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except FileNotFoundError:
+        return ToolResult.error(
+            f"Test runner not found: {cmd[0]}. "
+            "Make sure it is installed and on PATH."
+        )
+    except subprocess.TimeoutExpired:
+        return ToolResult.error("Test run timed out after 120s")
+    except Exception as e:
+        return ToolResult.error(str(e))
+
+    combined = ""
+    if proc.stdout:
+        combined += proc.stdout
+    if proc.stderr:
+        combined += ("\n" if combined else "") + proc.stderr
+    combined = combined.strip() or "(no output)"
+    output, trunc = _truncate(combined)
+
+    ok = proc.returncode == 0
+    status = "passed" if ok else f"failed (exit {proc.returncode})"
+    return ToolResult(
+        ok=ok,
+        output=f"<runner>{' '.join(cmd[:2])}</runner>\n"
+               f"<status>{status}</status>\n"
+               f"<output>\n{output}\n</output>",
+        summary=f"tests {status}",
+        truncated=trunc,
+    )
+
+
+def tool_git_commit(
+    cwd: Path,
+    message: str,
+    files: Optional[list] = None,
+) -> ToolResult:
+    """
+    Stage files and create a git commit.
+
+    Parameters
+    ----------
+    message:
+        Commit message.
+    files:
+        List of file paths to stage.  When omitted, stages all tracked
+        modifications (``git add -A``).
+    """
+    # Stage
+    if files:
+        for f in files:
+            out, ok = _git(cwd, "add", "--", f)
+            if not ok:
+                return ToolResult.error(f"Failed to stage '{f}': {out}")
+    else:
+        out, ok = _git(cwd, "add", "-A")
+        if not ok:
+            return ToolResult.error(f"Failed to stage changes: {out}")
+
+    # Commit
+    out, ok = _git(cwd, "commit", "-m", message, timeout=30)
+    if not ok:
+        if "nothing to commit" in out.lower():
+            return ToolResult.success(
+                "Nothing to commit, working tree clean.",
+                summary="git commit — nothing to commit",
+            )
+        return ToolResult.error(f"git commit failed: {out}")
+
+    return ToolResult.success(out, summary=f"git commit: {message[:60]}")
+
+
+def tool_git_push(
+    cwd: Path,
+    remote: str = "origin",
+    branch: str = "",
+) -> ToolResult:
+    """Push the current branch to a remote."""
+    args = ["push", remote]
+    if branch:
+        args.append(branch)
+    out, ok = _git(cwd, *args, timeout=60)
+    if not ok:
+        return ToolResult.error(f"git push failed: {out}")
+    return ToolResult.success(out, summary=f"git push {remote}")
+
+
+def tool_git_create_branch(
+    cwd: Path,
+    name: str,
+    checkout: bool = True,
+) -> ToolResult:
+    """
+    Create a new git branch.
+
+    Parameters
+    ----------
+    name:
+        Branch name, e.g. ``feat/my-feature``.
+    checkout:
+        Switch to the new branch after creating it (default: True).
+    """
+    if checkout:
+        out, ok = _git(cwd, "checkout", "-b", name)
+    else:
+        out, ok = _git(cwd, "branch", name)
+    if not ok:
+        return ToolResult.error(f"git branch failed: {out}")
+    action = "created and checked out" if checkout else "created"
+    return ToolResult.success(out or f"Branch '{name}' {action}.", summary=f"git branch {name}")
+
+
+def tool_search_replace(
+    cwd: Path,
+    pattern: str,
+    replacement: str,
+    glob: str = "**/*",
+    dry_run: bool = False,
+) -> ToolResult:
+    """
+    Search for *pattern* across files and replace all matches.
+
+    Parameters
+    ----------
+    pattern:
+        Python regex.  Applied with ``re.MULTILINE``.
+    replacement:
+        Replacement string (supports ``\\1`` back-references).
+    glob:
+        File filter applied relative to *cwd* (default: all files).
+    dry_run:
+        When True, report what would change without modifying anything.
+    """
+    try:
+        rx = re.compile(pattern, re.MULTILINE)
+    except re.error as e:
+        return ToolResult.error(f"Invalid regex: {e}")
+
+    candidates = sorted(p for p in cwd.glob(glob) if p.is_file())
+    changes: list[tuple[Path, Path, str, int]] = []  # (abs, rel, new_text, count)
+
+    for fp in candidates:
+        try:
+            text = fp.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        matches = rx.findall(text)
+        if not matches:
+            continue
+        new_text = rx.sub(replacement, text)
+        try:
+            rel = fp.relative_to(cwd)
+        except ValueError:
+            rel = fp
+        changes.append((fp, rel, new_text, len(matches)))
+
+    if not changes:
+        return ToolResult.success(
+            f"No matches for pattern '{pattern}'.",
+            summary="search_replace — 0 matches",
+        )
+
+    total = sum(n for _, _, _, n in changes)
+    summary_lines = [
+        f"  {rel}  ({n} match{'es' if n != 1 else ''})"
+        for _, rel, _, n in changes
+    ]
+    report = "\n".join(summary_lines)
+
+    if dry_run:
+        return ToolResult.success(
+            f"[dry-run] Would replace {total} match(es) in {len(changes)} file(s):\n{report}",
+            summary=f"[dry-run] {total} replacement(s) in {len(changes)} file(s)",
+        )
+
+    for fp, rel, new_text, _ in changes:
+        try:
+            fp.write_text(new_text, encoding="utf-8")
+        except Exception as e:
+            return ToolResult.error(f"Failed to write {rel}: {e}")
+
+    return ToolResult.success(
+        f"Replaced {total} match(es) in {len(changes)} file(s):\n{report}",
+        summary=f"search_replace: {total} replacement(s) in {len(changes)} file(s)",
+    )
+
+
+# ---------------------------------------------------------------------------
 #  Tool registry
 # ---------------------------------------------------------------------------
 
@@ -946,6 +1298,64 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
             "lora_strength_model":{"type": "float",  "description": "LoRA strength on the UNet (default: 1.0). Main lever for unlock/style LoRAs.", "required": False},
             "lora_strength_clip": {"type": "float",  "description": "LoRA strength on the text encoder (default: 0.5).", "required": False},
         },
+    ),
+    "run_tests": ToolDef(
+        name="run_tests",
+        fn=tool_run_tests,
+        description=(
+            "Run the project test suite. Auto-detects pytest, cargo test, go test, or npm/yarn test "
+            "from project files. Returns pass/fail counts and failure output."
+        ),
+        params={
+            "runner":     {"type": "string", "description": "Test runner: auto (default), pytest, cargo, go, npm, yarn", "required": False},
+            "path":       {"type": "string", "description": "Limit run to a file or directory (default: whole project)", "required": False},
+            "extra_args": {"type": "string", "description": "Extra arguments appended to the test command", "required": False},
+        },
+    ),
+    "git_commit": ToolDef(
+        name="git_commit",
+        fn=tool_git_commit,
+        description="Stage files and create a git commit. Stages all tracked changes when files is omitted.",
+        params={
+            "message": {"type": "string", "description": "Commit message", "required": True},
+            "files":   {"type": "array",  "description": "Specific files to stage (omit to stage all changes)", "required": False},
+        },
+        destructive=True,
+    ),
+    "git_push": ToolDef(
+        name="git_push",
+        fn=tool_git_push,
+        description="Push the current branch to a remote (default: origin).",
+        params={
+            "remote": {"type": "string", "description": "Remote name (default: origin)", "required": False},
+            "branch": {"type": "string", "description": "Branch name (default: current branch)", "required": False},
+        },
+        destructive=True,
+    ),
+    "git_create_branch": ToolDef(
+        name="git_create_branch",
+        fn=tool_git_create_branch,
+        description="Create a new git branch and optionally check it out.",
+        params={
+            "name":     {"type": "string", "description": "Branch name, e.g. feat/my-feature", "required": True},
+            "checkout": {"type": "bool",   "description": "Switch to the new branch (default: true)", "required": False},
+        },
+        destructive=True,
+    ),
+    "search_replace": ToolDef(
+        name="search_replace",
+        fn=tool_search_replace,
+        description=(
+            "Search for a regex pattern across multiple files and replace all matches atomically. "
+            "Use dry_run=true to preview changes before committing."
+        ),
+        params={
+            "pattern":     {"type": "string", "description": "Python regex pattern (re.MULTILINE)", "required": True},
+            "replacement": {"type": "string", "description": "Replacement string (supports \\1 back-references)", "required": True},
+            "glob":        {"type": "string", "description": "File filter relative to cwd, e.g. **/*.py (default: all files)", "required": False},
+            "dry_run":     {"type": "bool",   "description": "Preview without modifying (default: false)", "required": False},
+        },
+        destructive=True,
     ),
 }
 

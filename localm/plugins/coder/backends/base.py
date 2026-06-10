@@ -14,6 +14,9 @@ class BaseLLMBackend(ABC):
     ``chat_stream()`` (for the final response shown to the user).
     """
 
+    # Subclasses pointing at a local GBNF-capable server set this to True
+    supports_grammar: bool = False
+
     @abstractmethod
     def chat(self, messages: list[dict], **kwargs) -> str:
         """Send messages, return the complete response string."""

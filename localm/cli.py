@@ -154,12 +154,22 @@ def _file_to_data_uri(path: str) -> str:
 
 
 def _stream_once(engine, messages: list, **kwargs) -> str:
-    """Stream response to stdout and return the full text."""
+    """Stream response to stdout, print tok/s on completion, and return the full text."""
+    import time as _time
     full = ""
+    n_tokens = 0
+    t0 = _time.monotonic()
     for token in engine.chat_stream(messages, **kwargs):
         print(token, end="", flush=True)
         full += token
+        n_tokens += engine.count_tokens(token) if token else 0
+    elapsed = _time.monotonic() - t0
     print()
+    if elapsed > 0.5 and n_tokens:
+        console.print(
+            f"[dim]{n_tokens} tokens  {n_tokens / elapsed:.1f} tok/s  "
+            f"({elapsed:.1f}s)[/dim]"
+        )
     return full
 
 
@@ -184,7 +194,7 @@ def _handle_image_output(response: str, out_dir: Path) -> None:
 
 
 def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
-                 out_dir: Optional[Path] = None) -> None:
+                 out_dir: Optional[Path] = None) -> None:  # noqa: C901
     console.print(Panel(
         f"[bold cyan]localm[/bold cyan] — {engine.display_name}\n"
         "[dim]Ctrl+C or [bold]/exit[/bold] to quit  ·  "
@@ -228,11 +238,15 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
         messages.append(msg)
         console.print("\n[bold blue]Assistant[/bold blue]: ", end="")
 
-        response = ""
+        response  = ""
+        n_tokens  = 0
+        import time as _time
+        t0 = _time.monotonic()
         try:
             for token in engine.chat_stream(messages, **gen_opts):
                 print(token, end="", flush=True)
                 response += token
+                n_tokens += engine.count_tokens(token) if token else 0
         except KeyboardInterrupt:
             console.print("\n[dim](interrupted)[/dim]")
             response = response or "(interrupted)"
@@ -240,7 +254,13 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
             console.print(f"\n[red]Inference error: {e}[/red]")
             continue
 
+        elapsed = _time.monotonic() - t0
         print()
+        if elapsed > 0.5 and n_tokens:
+            console.print(
+                f"[dim]{n_tokens} tokens  {n_tokens / elapsed:.1f} tok/s  "
+                f"({elapsed:.1f}s)[/dim]"
+            )
         if response:
             messages.append({"role": "assistant", "content": response})
             if out_dir:
@@ -505,6 +525,121 @@ def config_cmd(key, value):
     cfg[key] = coerced
     save_config(cfg)
     console.print(f"[green]✓[/green] {key} = {coerced}")
+
+
+# ------------------------------------------------------------------ #
+#  Doctor                                                              #
+# ------------------------------------------------------------------ #
+
+@main.command()
+def doctor():
+    """Check system requirements and report any issues.
+
+    \b
+    Verifies:
+      - Python version (3.10+ required)
+      - llama.dll / llama.so available on PATH or in expected locations
+      - CUDA / ROCm GPU driver
+      - Available VRAM
+      - Required Python packages (huggingface-hub, torch, uvicorn, fastapi)
+    """
+    import importlib
+    import subprocess
+    import sys as _sys
+
+    ok_sym    = "[green]✓[/green]"
+    warn_sym  = "[yellow]![/yellow]"
+    fail_sym  = "[red]✗[/red]"
+
+    # ----- Python version -----
+    major, minor = _sys.version_info[:2]
+    if (major, minor) >= (3, 10):
+        console.print(f"  {ok_sym}  Python {major}.{minor}")
+    else:
+        console.print(f"  {fail_sym}  Python {major}.{minor} — 3.10+ required")
+
+    # ----- llama.dll / llama.so -----
+    binary_dir = find_binary_dir()
+    if binary_dir:
+        dll_names = ["llama.dll", "llama.so", "libllama.so", "llama"]
+        found_dll = next(
+            (binary_dir / d for d in dll_names if (binary_dir / d).exists()),
+            None,
+        )
+        if found_dll:
+            console.print(f"  {ok_sym}  {found_dll.name} found in {binary_dir}")
+        else:
+            files = [f.name for f in binary_dir.iterdir() if f.is_file()][:8]
+            console.print(
+                f"  {warn_sym}  binary dir found ({binary_dir}) but no llama .dll/.so — "
+                f"contents: {files}"
+            )
+    else:
+        console.print(f"  {fail_sym}  llama binary dir not found — GGUF backend unavailable")
+
+    # ----- GPU driver (CUDA / ROCm) -----
+    gpu_found = False
+    for cmd, label in [
+        (["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
+         "NVIDIA"),
+        (["rocm-smi", "--showproductname"],
+         "AMD ROCm"),
+    ]:
+        try:
+            out = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=5
+            ).stdout.strip()
+            if out:
+                first_line = out.splitlines()[0]
+                console.print(f"  {ok_sym}  {label} GPU: {first_line}")
+                gpu_found = True
+                break
+        except Exception:
+            continue
+
+    if not gpu_found:
+        console.print(f"  {warn_sym}  No GPU driver found (nvidia-smi / rocm-smi) — CPU mode only")
+
+    # ----- VRAM via torch -----
+    try:
+        import torch
+        if torch.cuda.is_available():
+            for i in range(torch.cuda.device_count()):
+                props   = torch.cuda.get_device_properties(i)
+                total   = props.total_memory / 1e9
+                free    = (props.total_memory - torch.cuda.memory_allocated(i)) / 1e9
+                console.print(
+                    f"  {ok_sym}  GPU {i}: {props.name}  "
+                    f"{free:.1f} GB free / {total:.1f} GB total"
+                )
+        else:
+            console.print(f"  {warn_sym}  torch available but torch.cuda.is_available() = False")
+    except ImportError:
+        console.print(f"  {warn_sym}  torch not installed — GPU VRAM check skipped")
+
+    # ----- Required Python packages -----
+    packages = [
+        ("fastapi",           "FastAPI (HTTP server)"),
+        ("uvicorn",           "uvicorn (ASGI server)"),
+        ("huggingface_hub",   "huggingface-hub (model downloads)"),
+        ("requests",          "requests (HTTP client)"),
+        ("rich",              "rich (terminal output)"),
+        ("click",             "click (CLI)"),
+    ]
+    optional_pkgs = [
+        ("torch",             "torch (HF backend / GPU info)"),
+        ("transformers",      "transformers (HF backend)"),
+    ]
+    for mod, label in packages + optional_pkgs:
+        try:
+            m = importlib.import_module(mod)
+            ver = getattr(m, "__version__", "")
+            sym = ok_sym
+            ver_str = f" {ver}" if ver else ""
+        except ImportError:
+            sym     = warn_sym if (mod, label) in optional_pkgs else fail_sym
+            ver_str = " — not installed"
+        console.print(f"  {sym}  {label}{ver_str}")
 
 
 # ------------------------------------------------------------------ #
