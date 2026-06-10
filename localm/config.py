@@ -24,7 +24,36 @@ DEFAULT_CONFIG: dict = {
     "repeat_penalty": 1.1,
     "max_tokens": 1024,
     "confirm_remove": True,   # ask before localm rm deletes files
+    "port": 8642,             # default inference server port (auto-bumps if busy)
 }
+
+# localm claims 8642-8741 — far from ComfyUI (8188), A1111 (7860),
+# Ollama (11434), and the 8000/8080/8888 dev-server crowd.
+PORT_RANGE = (8642, 8741)
+
+
+def port_in_use(port: int, host: str = "127.0.0.1") -> bool:
+    """True when something is already listening on host:port."""
+    with socket.socket() as s:
+        s.settimeout(0.2)
+        return s.connect_ex((host, port)) == 0
+
+
+def pick_port(requested: Optional[int] = None, host: str = "127.0.0.1"):
+    """
+    Resolve the port to serve on.
+
+    Returns (port, requested_port_was_busy). Tries the requested port (or the
+    configured default), then walks the localm range for a free one, and as a
+    last resort lets the OS assign any free port.
+    """
+    start = requested if requested is not None else load_config().get("port", PORT_RANGE[0])
+    if not port_in_use(start, host):
+        return start, False
+    for candidate in range(PORT_RANGE[0], PORT_RANGE[1] + 1):
+        if candidate != start and not port_in_use(candidate, host):
+            return candidate, True
+    return get_free_port(), True
 
 
 def ensure_dirs() -> None:

@@ -715,11 +715,11 @@ def tool_spawn_agent(
     backend = _parent_agent.backend
     if model and model != backend.model_id:
         from .backends.http import make_localm_backend
-        raw_url = getattr(backend, "_base_url", "http://127.0.0.1:8080/v1")
+        raw_url = getattr(backend, "_base_url", "http://127.0.0.1:8642/v1")
         try:
             port = int(raw_url.split(":")[-1].split("/")[0])
         except Exception:
-            port = 8080
+            port = 8642
         try:
             backend = make_localm_backend(model, port=port)
         except Exception:

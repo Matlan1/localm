@@ -208,7 +208,7 @@ class HTTPBackend(BaseLLMBackend):
 #  Convenience constructors
 # ------------------------------------------------------------------ #
 
-def make_localm_backend(model: str, port: int = 8080, **kw) -> HTTPBackend:
+def make_localm_backend(model: str, port: int = 8642, **kw) -> HTTPBackend:
     return HTTPBackend(f"http://127.0.0.1:{port}/v1", model, api_key="localm", **kw)
 
 

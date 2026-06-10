@@ -69,11 +69,11 @@ def _complete_model(ctx, param, incomplete):
               shell_complete=_complete_model,
               help="Model name (must be registered in localm).")
 @click.option("-u", "--url",        default=None,  envvar="LOCALCODER_URL",
-              help="OpenAI-compat base URL, e.g. http://127.0.0.1:8080/v1.")
+              help="OpenAI-compat base URL, e.g. http://127.0.0.1:8642/v1.")
 @click.option("-k", "--api-key",    default="localm",
               help="API key (use any string for local servers).")
 @click.option("-p", "--port",       default=None,  type=int,
-              help="Port for the auto-started localm serve [default: first free in 8080–8199].")
+              help="Port for the auto-started localm serve [default: first free in 8642–8741].")
 @click.option("-c", "--cwd",        default=None,  type=click.Path(exists=True, file_okay=False),
               help="Working directory [default: current directory].")
 @click.option("--no-server",        is_flag=True,

@@ -8,7 +8,7 @@ Endpoints:
 
 Start programmatically:
     from localm.inference.http_server import serve
-    serve(engine, host="127.0.0.1", port=8080)
+    serve(engine, host="127.0.0.1", port=8642)
 """
 
 from __future__ import annotations
@@ -540,7 +540,7 @@ def _protocol_messages_to_dicts(messages: List[Message]) -> list:
 #  Entry point                                                         #
 # ------------------------------------------------------------------ #
 
-def serve(engine: Engine, host: str = "127.0.0.1", port: int = 8080) -> None:
+def serve(engine: Engine, host: str = "127.0.0.1", port: int = 8642) -> None:
     """Start the server — blocks until Ctrl+C."""
     import uvicorn
 

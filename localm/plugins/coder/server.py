@@ -27,7 +27,10 @@ from .display import (
 )
 
 
-_DEFAULT_PORT = 8080
+# localm's claimed range (see localm.config.PORT_RANGE) — stays clear of
+# ComfyUI (8188), A1111 (7860), and the 8000/8080/8888 dev-server crowd.
+_DEFAULT_PORT = 8642
+_PORT_RANGE_END = 8741
 _STARTUP_TIMEOUT = 90     # seconds to wait for the server to come up
 _POLL_INTERVAL   = 0.5    # seconds between port probes
 
@@ -46,7 +49,7 @@ class ManagedServer:
 
     Use as a context manager:
 
-        with ManagedServer("gemma4-4b", port=8080) as srv:
+        with ManagedServer("gemma4-4b", port=8642) as srv:
             backend = make_localm_backend("gemma4-4b", port=srv.port)
     """
 
@@ -133,7 +136,7 @@ class ManagedServer:
         self.stop()
 
 
-def find_free_port(start: int = 8080, end: int = 8199) -> int:
+def find_free_port(start: int = _DEFAULT_PORT, end: int = _PORT_RANGE_END) -> int:
     """Find the first free TCP port in [start, end]."""
     for port in range(start, end):
         if not _port_open("127.0.0.1", port):

@@ -379,6 +379,20 @@ class LlamaCpp:
     def close(self) -> None:
         """Release GPU/CPU memory held by this instance."""
         self._cached_tokens = []
+        if not (self._ctx_ptr or self._model_ptr):
+            return
+        # Suppress the ROCm lazy-buffer verification chatter the native
+        # destructors write to stderr ("~llama_context: ... compute buffer
+        # size ... matches expectation") — internal noise, not user output.
+        try:
+            _ctx = _quiet_stderr if not self._verbose else contextlib.nullcontext
+            with _ctx():
+                self._free_native()
+        except Exception:
+            # Interpreter shutdown can break the fd redirection — free anyway
+            self._free_native()
+
+    def _free_native(self) -> None:
         if self._ctx_ptr:
             api.llama_free(self._ctx_ptr)
             self._ctx_ptr = None

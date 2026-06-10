@@ -173,7 +173,7 @@ def generate_image(
         Defaults to 0.75 when *input_image* is set and not explicitly given.
         Ignored in txt2img mode.
     localm_url
-        localm server URL (e.g. ``http://127.0.0.1:8080/v1``) to unload
+        localm server URL (e.g. ``http://127.0.0.1:8642/v1``) to unload
         before generation so FLUX gets the full VRAM budget.
         Reads ``LOCALM_URL`` env var if None.  Skipped silently when unset.
     max_poll_seconds

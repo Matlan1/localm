@@ -369,7 +369,8 @@ def _save_chat(messages: list, filepath: str) -> None:
 @main.command()
 @click.argument("model", shell_complete=_complete_model_name)
 @click.option("-H", "--host",        default="127.0.0.1", help="Bind address (0.0.0.0 for LAN).")
-@click.option("-p", "--port",        default=8080,        type=int)
+@click.option("-p", "--port",        default=None,        type=int,
+              help="Port [default: config 'port' (8642); auto-bumps when busy].")
 @click.option("-c", "--ctx",         default=None,        type=int)
 @click.option("-g", "--gpu-layers",  default=None,        type=int)
 @click.option("--mmproj",            default=None)
@@ -396,6 +397,15 @@ def serve(model, host, port, ctx, gpu_layers, mmproj, device):
     from .model_manager import load_registry as _reg
 
     display_name = model if model in _reg() else _display_hint
+
+    from .config import pick_port
+    requested = port
+    port, was_busy = pick_port(requested, host="127.0.0.1" if host == "0.0.0.0" else host)
+    if was_busy:
+        console.print(
+            f"[yellow]Port {requested if requested is not None else load_config().get('port', 8642)} "
+            f"is in use — serving on {port} instead.[/yellow]"
+        )
 
     engine = Engine(
         str(model_path),

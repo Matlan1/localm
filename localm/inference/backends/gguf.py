@@ -113,6 +113,13 @@ class GgufBackend(BaseBackend):
         console.print("[green]✓[/green] Model loaded")
 
     def unload(self) -> None:
+        # Close explicitly so native teardown (and its stderr suppression)
+        # happens now, not whenever the garbage collector gets around to it
+        if self._llm is not None and hasattr(self._llm, "close"):
+            try:
+                self._llm.close()
+            except Exception:
+                pass
         self._llm = None
         self._loaded = False
 
