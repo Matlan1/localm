@@ -79,11 +79,26 @@ def create_app(engine: Engine) -> FastAPI:
         lifespan=lifespan,
     )
 
+    # CORS: localhost-only by default. A wildcard here would let ANY website
+    # the user visits call this API from browser JS and read the responses
+    # (drive-by GPU use, response exfiltration, /v1/models/unload abuse).
+    # Override with config "cors_origins": ["https://app.example"] or "*".
+    from localm.config import load_config
+    cors_cfg = load_config().get("cors_origins")
+    cors_kwargs: dict
+    if cors_cfg == "*":
+        cors_kwargs = {"allow_origins": ["*"]}
+    elif isinstance(cors_cfg, list) and cors_cfg:
+        cors_kwargs = {"allow_origins": cors_cfg}
+    else:
+        cors_kwargs = {
+            "allow_origin_regex": r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
+        }
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
         allow_methods=["*"],
         allow_headers=["*"],
+        **cors_kwargs,
     )
 
     # ---------------------------------------------------------------- #

@@ -25,6 +25,7 @@ DEFAULT_CONFIG: dict = {
     "max_tokens": 1024,
     "confirm_remove": True,   # ask before localm rm deletes files
     "port": 8642,             # default inference server port (auto-bumps if busy)
+    "cors_origins": None,     # None = localhost only; list of origins; or "*"
 }
 
 # localm claims 8642-8741 — far from ComfyUI (8188), A1111 (7860),

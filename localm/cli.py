@@ -21,6 +21,26 @@ from .model_manager import (
 console = Console()
 
 
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def _exposed_bind_warning(host: str) -> Optional[str]:
+    """
+    Warning text when binding beyond loopback without an API key set —
+    that combination serves an unauthenticated LLM API to the whole network.
+    Returns None when the configuration is safe.
+    """
+    import os
+    if host in _LOOPBACK_HOSTS or os.environ.get("LOCALM_API_KEY"):
+        return None
+    return (
+        f"⚠ Binding to {host} WITHOUT authentication — anyone on the network "
+        f"can use this server, unload your model, and read every response.\n"
+        f"  Set an API key first:  $env:LOCALM_API_KEY = \"<secret>\"  "
+        f"(clients send it as a Bearer token)"
+    )
+
+
 def _complete_model_name(ctx, param, incomplete):
     """Shell-completion callback: registered model names matching the prefix."""
     try:
@@ -397,6 +417,10 @@ def serve(model, host, port, ctx, gpu_layers, mmproj, device):
     from .model_manager import load_registry as _reg
 
     display_name = model if model in _reg() else _display_hint
+
+    warning = _exposed_bind_warning(host)
+    if warning:
+        console.print(f"[bold yellow]{warning}[/bold yellow]")
 
     from .config import pick_port
     requested = port
