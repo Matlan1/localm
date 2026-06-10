@@ -209,3 +209,28 @@ class TestSummary:
             result = _call()
         # summary should mention how many chars
         assert "chars" in result.summary or any(c.isdigit() for c in result.summary)
+
+
+# ---------------------------------------------------------------------------
+#  Privacy mode audit log
+# ---------------------------------------------------------------------------
+
+class TestPrivacyAuditLog:
+    def test_prints_url_to_stderr_in_privacy_mode(self, capsys):
+        with patch("urllib.request.urlopen",
+                   return_value=_fake_response("<p>ok</p>")):
+            result = tool_fetch_url(
+                Path("/tmp"), "http://example.com/secret",
+                _privacy=True,
+            )
+        assert result.ok
+        err = capsys.readouterr().err
+        assert "http://example.com/secret" in err
+        assert "privacy" in err.lower() or "fetch_url" in err.lower()
+
+    def test_no_stderr_without_privacy_mode(self, capsys):
+        with patch("urllib.request.urlopen",
+                   return_value=_fake_response("<p>ok</p>")):
+            tool_fetch_url(Path("/tmp"), "http://example.com/page")
+        err = capsys.readouterr().err
+        assert "http://example.com/page" not in err

@@ -28,6 +28,7 @@ class BaseBackend(ABC):
         top_k: int = 40,
         repeat_penalty: float = 1.1,
         grammar: Optional[str] = None,
+        seed: Optional[int] = None,
     ) -> Iterator[str]:
         """
         Yield text tokens one at a time.
@@ -39,6 +40,9 @@ class BaseBackend(ABC):
             the sampler masks tokens that would violate the grammar at the
             current parse position.  Use ``localm.inference.gbnf`` for
             pre-built grammars.  Ignored by backends that do not support it.
+        seed:
+            RNG seed for reproducible generation.  GGUF: passed to the sampler.
+            HF: sets ``torch.manual_seed`` before generating.
         """
 
     @property
@@ -56,3 +60,16 @@ class BaseBackend(ABC):
         their actual tokenizer for precise counts.
         """
         return max(1, len(text) // 4)
+
+    def embed(self, texts: List[str]) -> List[List[float]]:
+        """
+        Return embedding vectors for a list of texts.
+
+        Raises ``NotImplementedError`` by default — not all models support
+        embedding.  For quality embeddings, use a dedicated embedding model
+        (nomic-embed, bge-*, e5-*) rather than a chat/instruct model.
+        """
+        raise NotImplementedError(
+            "This backend does not support embedding.  "
+            "Load a dedicated embedding model (e.g. nomic-embed-text)."
+        )

@@ -135,6 +135,17 @@ class Engine:
         """
         return self._backend.count_tokens(text)
 
+    def embed(self, texts: List[str]) -> List[List[float]]:
+        """
+        Return embedding vectors for a list of texts.
+
+        Delegates to the backend.  Raises ``NotImplementedError`` when the
+        loaded model does not support embeddings.
+        """
+        if not self._backend.loaded:
+            self._backend.load()
+        return self._backend.embed(texts)
+
     def chat_stream(
         self,
         messages: List[dict],
@@ -145,6 +156,7 @@ class Engine:
         top_k: Optional[int] = None,
         repeat_penalty: Optional[float] = None,
         grammar: Optional[str] = None,
+        seed: Optional[int] = None,
     ) -> Iterator[str]:
         # Auto-reload if the model was unloaded (e.g. to free VRAM for image gen)
         if not self._backend.loaded:
@@ -156,12 +168,13 @@ class Engine:
         cfg = load_config()
         return self._backend.chat_stream(
             messages,
-            max_tokens=max_tokens or cfg["max_tokens"],
+            max_tokens=max_tokens if max_tokens is not None else cfg["max_tokens"],
             temperature=temperature if temperature is not None else cfg["temperature"],
-            top_p=top_p or cfg["top_p"],
-            top_k=top_k or cfg["top_k"],
-            repeat_penalty=repeat_penalty or cfg["repeat_penalty"],
+            top_p=top_p if top_p is not None else cfg["top_p"],
+            top_k=top_k if top_k is not None else cfg["top_k"],
+            repeat_penalty=repeat_penalty if repeat_penalty is not None else cfg["repeat_penalty"],
             grammar=grammar,
+            seed=seed,
         )
 
     def __enter__(self) -> "Engine":

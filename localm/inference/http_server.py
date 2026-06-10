@@ -14,6 +14,7 @@ Start programmatically:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 from contextlib import asynccontextmanager
@@ -26,8 +27,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from localm.inference.engine import Engine
 from localm.inference.protocol import (
-    ChatChunk, ChatRequest, ChatResponse, FullChoice, Message, UsageInfo,
-    make_chunk_id,
+    ChatChunk, ChatRequest, ChatResponse, CompletionRequest, EmbeddingRequest,
+    FullChoice, Message, UsageInfo, make_chunk_id,
 )
 
 # Global engine reference set by serve()
@@ -175,6 +176,7 @@ def create_app(engine: Engine) -> FastAPI:
             top_k=req.top_k,
             repeat_penalty=req.repeat_penalty,
             grammar=req.grammar,
+            seed=req.seed,
         )
         # Strip None so Engine uses its config defaults
         gen_kwargs = {k: v for k, v in gen_kwargs.items() if v is not None}
@@ -190,6 +192,90 @@ def create_app(engine: Engine) -> FastAPI:
             )
         else:
             return await _complete(_engine, messages, req.model, _inference_sem, **gen_kwargs)
+
+    # ---------------------------------------------------------------- #
+    #  Embeddings  (/v1/embeddings)                                     #
+    # ---------------------------------------------------------------- #
+
+    @app.post("/v1/embeddings", dependencies=[Depends(_require_auth)])
+    async def embeddings(req: EmbeddingRequest):
+        if _engine is None:
+            raise HTTPException(503, "No model loaded")
+
+        texts = [req.input] if isinstance(req.input, str) else req.input
+
+        loop = asyncio.get_running_loop()
+        try:
+            async with _inference_sem:
+                vecs = await loop.run_in_executor(None, lambda: _engine.embed(texts))
+        except NotImplementedError as e:
+            raise HTTPException(422, str(e))
+
+        total_tokens = sum(_engine.count_tokens(t) for t in texts)
+        return {
+            "object": "list",
+            "data": [
+                {"object": "embedding", "index": i, "embedding": vec}
+                for i, vec in enumerate(vecs)
+            ],
+            "model": req.model,
+            "usage": {"prompt_tokens": total_tokens, "total_tokens": total_tokens},
+        }
+
+    # ---------------------------------------------------------------- #
+    #  Raw text completions  (/v1/completions)                          #
+    # ---------------------------------------------------------------- #
+
+    @app.post("/v1/completions", dependencies=[Depends(_require_auth)])
+    async def completions(req: CompletionRequest):
+        if _engine is None:
+            raise HTTPException(503, "No model loaded")
+
+        # Wrap the prompt as a single user message so the chat backend handles it
+        messages = [{"role": "user", "content": req.prompt}]
+
+        gen_kwargs = dict(
+            max_tokens=req.max_tokens,
+            temperature=req.temperature,
+            top_p=req.top_p,
+            top_k=req.top_k,
+            repeat_penalty=req.repeat_penalty,
+            grammar=req.grammar,
+            seed=req.seed,
+        )
+        gen_kwargs = {k: v for k, v in gen_kwargs.items() if v is not None}
+
+        if req.stream:
+            return StreamingResponse(
+                _stream_sse_completion(_engine, req.prompt, req.model, _inference_sem, **gen_kwargs),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+
+        loop = asyncio.get_running_loop()
+        prompt_tokens = _engine.count_tokens(req.prompt)
+
+        def _run():
+            return "".join(_engine.chat_stream(messages, **gen_kwargs))
+
+        async with _inference_sem:
+            text = await loop.run_in_executor(None, _run)
+
+        completion_tokens = _engine.count_tokens(text)
+        ts  = int(time.time())
+        cid = make_chunk_id()
+        return {
+            "id": cid,
+            "object": "text_completion",
+            "created": ts,
+            "model": req.model,
+            "choices": [{"text": text, "index": 0, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+            },
+        }
 
     return app
 
@@ -246,16 +332,19 @@ async def _stream_sse(
         t = threading.Thread(target=_generate, daemon=True)
         t.start()
 
-        completion_tokens = 0
+        completion_parts: list[str] = []
         while True:
             token = await token_queue.get()
             if token is None:
                 break
-            completion_tokens += engine.count_tokens(token)
+            completion_parts.append(token)
             chunk = ChatChunk.token(token, model_id, chunk_id, ts)
             yield f"data: {chunk.model_dump_json()}\n\n"
 
         t.join()
+
+    # Count tokens on the full completion text — more accurate and efficient
+    completion_tokens = engine.count_tokens("".join(completion_parts))
 
     usage = UsageInfo(
         prompt_tokens=prompt_tokens,
@@ -264,6 +353,68 @@ async def _stream_sse(
     )
     done = ChatChunk.done(model_id, chunk_id, ts, usage=usage)
     yield f"data: {done.model_dump_json()}\n\n"
+    yield "data: [DONE]\n\n"
+
+
+# ------------------------------------------------------------------ #
+#  SSE streaming for /v1/completions                                   #
+# ------------------------------------------------------------------ #
+
+async def _stream_sse_completion(
+    engine: Engine,
+    prompt: str,
+    model_id: str,
+    sem: asyncio.Semaphore,
+    **gen_kwargs,
+) -> AsyncIterator[str]:
+    messages = [{"role": "user", "content": prompt}]
+    chunk_id = make_chunk_id()
+    ts = int(time.time())
+    prompt_tokens = engine.count_tokens(prompt)
+
+    loop = asyncio.get_running_loop()
+    token_queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+    def _generate():
+        try:
+            for token in engine.chat_stream(messages, **gen_kwargs):
+                loop.call_soon_threadsafe(token_queue.put_nowait, token)
+        finally:
+            loop.call_soon_threadsafe(token_queue.put_nowait, None)
+
+    import threading
+
+    async with sem:
+        t = threading.Thread(target=_generate, daemon=True)
+        t.start()
+
+        completion_parts: list[str] = []
+        while True:
+            token = await token_queue.get()
+            if token is None:
+                break
+            completion_parts.append(token)
+            chunk = {
+                "id": chunk_id, "object": "text_completion.chunk",
+                "created": ts, "model": model_id,
+                "choices": [{"text": token, "index": 0, "finish_reason": None}],
+            }
+            yield f"data: {json.dumps(chunk)}\n\n"
+
+        t.join()
+
+    completion_tokens = engine.count_tokens("".join(completion_parts))
+    done = {
+        "id": chunk_id, "object": "text_completion.chunk",
+        "created": ts, "model": model_id,
+        "choices": [{"text": "", "index": 0, "finish_reason": "stop"}],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        },
+    }
+    yield f"data: {json.dumps(done)}\n\n"
     yield "data: [DONE]\n\n"
 
 

@@ -83,6 +83,27 @@ class Message(BaseModel):
 #  Chat completion request                                             #
 # ------------------------------------------------------------------ #
 
+class EmbeddingRequest(BaseModel):
+    """OpenAI /v1/embeddings request."""
+    model: str = "localm"
+    input: Union[str, List[str]]      # single text or batch
+    encoding_format: str = "float"    # "float" or "base64" (only float supported)
+
+
+class CompletionRequest(BaseModel):
+    """OpenAI /v1/completions (raw text completion) request."""
+    model: str = "localm"
+    prompt: str
+    stream: bool = False
+    max_tokens: Optional[int] = None
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    top_k: Optional[int] = None
+    repeat_penalty: Optional[float] = None
+    grammar: Optional[str] = None
+    seed: Optional[int] = None
+
+
 class ChatRequest(BaseModel):
     model: str = "localm"
     messages: List[Message]
@@ -93,6 +114,7 @@ class ChatRequest(BaseModel):
     top_k: Optional[int] = None
     repeat_penalty: Optional[float] = None
     grammar: Optional[str] = None  # GBNF grammar string for constrained sampling
+    seed: Optional[int] = None     # RNG seed for reproducible generation
 
 
 # ------------------------------------------------------------------ #

@@ -176,6 +176,48 @@ class HFBackend(BaseBackend):
         return max(1, len(text) // 4)
 
     # ------------------------------------------------------------------ #
+    #  Embeddings                                                          #
+    # ------------------------------------------------------------------ #
+
+    def embed(self, texts: List[str]) -> List[List[float]]:
+        """
+        Return embedding vectors via mean-pooling of the last hidden states.
+
+        Works for any AutoModelForCausalLM or AutoModel that outputs hidden
+        states.  For dedicated sentence-transformer models that expose
+        `.encode()`, that method is preferred.
+        """
+        import torch
+        tokenizer = self._tokenizer
+        model = self._model
+
+        if tokenizer is None or model is None:
+            raise RuntimeError("Model not loaded — call load() first")
+
+        # Sentence-transformer style models (e.g. nomic-embed, bge)
+        if hasattr(model, "encode"):
+            vecs = model.encode(texts, convert_to_tensor=False)
+            return [v.tolist() for v in vecs]
+
+        embeddings: list[list[float]] = []
+        model.train(False)
+        with torch.no_grad():
+            for text in texts:
+                enc = tokenizer(
+                    text,
+                    return_tensors="pt",
+                    truncation=True,
+                    max_length=512,
+                ).to(model.device)
+                out = model(**enc, output_hidden_states=True)
+                # Mean-pool the last hidden state over non-padding tokens
+                hidden = out.hidden_states[-1]          # (1, seq, dim)
+                mask   = enc["attention_mask"].unsqueeze(-1).float()
+                vec    = (hidden * mask).sum(1) / mask.sum(1)
+                embeddings.append(vec[0].cpu().tolist())
+        return embeddings
+
+    # ------------------------------------------------------------------ #
     #  Inference                                                           #
     # ------------------------------------------------------------------ #
 
@@ -189,6 +231,7 @@ class HFBackend(BaseBackend):
         top_k: int = 40,
         repeat_penalty: float = 1.1,
         grammar: Optional[str] = None,   # accepted but ignored — HF has no GBNF sampler
+        seed: Optional[int] = None,
     ) -> Iterator[str]:
         from transformers import TextIteratorStreamer
 
@@ -250,6 +293,10 @@ class HFBackend(BaseBackend):
         streamer = TextIteratorStreamer(
             tokenizer, skip_special_tokens=True, skip_prompt=True
         )
+
+        if seed is not None:
+            import torch as _torch
+            _torch.manual_seed(seed)
 
         gen_kwargs: dict = {
             **inputs,

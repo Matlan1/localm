@@ -156,16 +156,16 @@ def _file_to_data_uri(path: str) -> str:
 def _stream_once(engine, messages: list, **kwargs) -> str:
     """Stream response to stdout, print tok/s on completion, and return the full text."""
     import time as _time
-    full = ""
-    n_tokens = 0
+    parts: list[str] = []
     t0 = _time.monotonic()
     for token in engine.chat_stream(messages, **kwargs):
         print(token, end="", flush=True)
-        full += token
-        n_tokens += engine.count_tokens(token) if token else 0
+        parts.append(token)
     elapsed = _time.monotonic() - t0
     print()
-    if elapsed > 0.5 and n_tokens:
+    full = "".join(parts)
+    if elapsed > 0.5 and full:
+        n_tokens = engine.count_tokens(full)
         console.print(
             f"[dim]{n_tokens} tokens  {n_tokens / elapsed:.1f} tok/s  "
             f"({elapsed:.1f}s)[/dim]"
@@ -238,25 +238,24 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
         messages.append(msg)
         console.print("\n[bold blue]Assistant[/bold blue]: ", end="")
 
-        response  = ""
-        n_tokens  = 0
+        parts: list[str] = []
         import time as _time
         t0 = _time.monotonic()
         try:
             for token in engine.chat_stream(messages, **gen_opts):
                 print(token, end="", flush=True)
-                response += token
-                n_tokens += engine.count_tokens(token) if token else 0
+                parts.append(token)
         except KeyboardInterrupt:
             console.print("\n[dim](interrupted)[/dim]")
-            response = response or "(interrupted)"
         except Exception as e:
             console.print(f"\n[red]Inference error: {e}[/red]")
             continue
 
+        response = "".join(parts) or "(interrupted)"
         elapsed = _time.monotonic() - t0
         print()
-        if elapsed > 0.5 and n_tokens:
+        if elapsed > 0.5 and parts:
+            n_tokens = engine.count_tokens(response)
             console.print(
                 f"[dim]{n_tokens} tokens  {n_tokens / elapsed:.1f} tok/s  "
                 f"({elapsed:.1f}s)[/dim]"
@@ -420,7 +419,9 @@ def serve(model, host, port, ctx, gpu_layers, mmproj, device):
 @main.command()
 @click.argument("model_spec")
 @click.option("-n", "--name", default=None, help="Alias for the downloaded model.")
-def pull(model_spec, name):
+@click.option("--sha256", default=None, metavar="HASH",
+              help="Expected SHA256 hex digest (URL downloads only). Download is deleted on mismatch.")
+def pull(model_spec, name, sha256):
     """Download a model from HuggingFace or a URL.
 
     \b
@@ -439,7 +440,7 @@ def pull(model_spec, name):
 
     Models are stored in ~/.localm/models/ and registered automatically.
     """
-    pull_model(model_spec, name)
+    pull_model(model_spec, name, expected_sha256=sha256)
 
 
 @main.command("list")

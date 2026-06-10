@@ -122,6 +122,18 @@ class GgufBackend(BaseBackend):
         return max(1, len(text) // 4)
 
     # ------------------------------------------------------------------ #
+    #  Embeddings                                                          #
+    # ------------------------------------------------------------------ #
+
+    def embed(self, texts: List[str]) -> List[List[float]]:
+        if not self._llm:
+            raise RuntimeError("Model not loaded — call load() first")
+        result = self._llm.create_embedding(texts)
+        # create_embedding returns {"data": [{"embedding": [...], "index": N}, ...]}
+        data = result.get("data", result) if isinstance(result, dict) else result
+        return [item["embedding"] for item in data]
+
+    # ------------------------------------------------------------------ #
     #  Inference                                                           #
     # ------------------------------------------------------------------ #
 
@@ -135,13 +147,13 @@ class GgufBackend(BaseBackend):
         top_k: int = 40,
         repeat_penalty: float = 1.1,
         grammar: Optional[str] = None,
+        seed: Optional[int] = None,
     ) -> Iterator[str]:
         if self._use_subprocess:
             yield from self._subprocess_stream(messages, max_tokens, temperature)
             return
 
-        # native ctypes path (LlamaCpp)
-        for chunk in self._llm.create_chat_completion(
+        kwargs: dict = dict(
             messages=messages,
             max_tokens=max_tokens,
             temperature=temperature,
@@ -150,7 +162,12 @@ class GgufBackend(BaseBackend):
             repeat_penalty=repeat_penalty,
             grammar=grammar,
             stream=True,
-        ):
+        )
+        if seed is not None:
+            kwargs["seed"] = seed
+
+        # native ctypes path (LlamaCpp)
+        for chunk in self._llm.create_chat_completion(**kwargs):
             token = chunk["choices"][0].get("delta", {}).get("content", "")
             if token:
                 yield token

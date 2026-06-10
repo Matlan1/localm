@@ -94,7 +94,10 @@ def _build_openai_tool_defs() -> list:
                 "int":   "integer",
                 "float": "number",
                 "bool":  "boolean",
+                "array": "array",
             }.get(raw_type, "string")
+            if raw_type == "array":
+                prop["items"] = {"type": "string"}
             properties[param_name] = prop
             if meta.get("required"):
                 required.append(param_name)
@@ -818,7 +821,7 @@ ws     ::= [ \t\n\r]*
         args = dict(call.args)
         if call.name == "spawn_agent":
             args["_parent_agent"] = self
-        if call.name == "run_shell" and self.mode == SessionMode.PRIVACY:
+        if call.name in ("run_shell", "fetch_url") and self.mode == SessionMode.PRIVACY:
             args["_privacy"] = True
 
         try:
@@ -879,13 +882,13 @@ ws     ::= [ \t\n\r]*
         if call.name == "write_file":
             new_text = call.args.get("content", "")
         elif call.name == "edit_file":
-            old_str = call.args.get("old_string", "")
-            new_str = call.args.get("new_string", "")
+            old_str = call.args.get("old", "")
+            new_str = call.args.get("new", "")
             new_text = old_text.replace(old_str, new_str, 1)
         elif call.name == "patch_file":
-            # patch is already a diff — wrap it as-is
-            patch = call.args.get("patch", "")
-            return patch if patch else None
+            # diff is already a unified diff — wrap it as-is
+            diff = call.args.get("diff", "")
+            return diff if diff else None
         else:
             return None
 
@@ -933,8 +936,8 @@ ws     ::= [ \t\n\r]*
 
         if call.name == "edit_file":
             path_arg    = call.args.get("path", "")
-            old_string  = call.args.get("old_string", "")
-            new_string  = call.args.get("new_string", "")
+            old_string  = call.args.get("old", "")
+            new_string  = call.args.get("new", "")
             abs_path    = (self.cwd / path_arg).resolve() if path_arg else None
             old_content = ""
             if abs_path and abs_path.is_file():
@@ -948,7 +951,7 @@ ws     ::= [ \t\n\r]*
 
         if call.name == "patch_file":
             path_arg = call.args.get("path", "")
-            patch    = call.args.get("patch", "")
+            patch    = call.args.get("diff", "")
             # The patch is already a unified diff — display it directly
             from .display import console as _con
             from rich.syntax import Syntax
@@ -1001,7 +1004,11 @@ ws     ::= [ \t\n\r]*
         """Rough estimate of total characters in the current context."""
         total = len(self._system_prompt)
         for m in self._messages:
-            total += len(m.get("content", ""))
+            content = m.get("content", "")
+            if isinstance(content, list):
+                total += sum(len(p.get("text", "")) for p in content if isinstance(p, dict))
+            else:
+                total += len(content)
         return total
 
     def save_history(self, path: Path) -> None:

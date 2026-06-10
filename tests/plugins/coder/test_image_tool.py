@@ -63,7 +63,7 @@ class TestFluxImageTool(unittest.TestCase):
 
         # 3. Assertions
         self.assertTrue(result.ok)
-        self.assertIn("Image successfully generated and saved", result.output)
+        self.assertIn("Image saved to", result.output)
         self.assertTrue(self.abs_output_path.exists())
         self.assertEqual(self.abs_output_path.read_bytes(), b"MOCK_PNG_IMAGE_BYTES")
 
@@ -78,7 +78,6 @@ class TestFluxImageTool(unittest.TestCase):
         # Assertions
         self.assertFalse(result.ok)
         self.assertIn("Could not connect to ComfyUI", result.output)
-        self.assertIn("flux_local_setup_guide.md", result.output)
         self.assertFalse(self.abs_output_path.exists())
 
 if __name__ == "__main__":

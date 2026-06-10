@@ -350,6 +350,22 @@ def tool_patch_file(cwd: Path, path: str, diff: str) -> ToolResult:
     return result
 
 
+def _needs_shell(command: str) -> bool:
+    """Return True when the command uses shell operators that require a real shell."""
+    # Characters that only mean something inside a shell
+    shell_chars = {"&", "|", ";", "<", ">", "$", "`", "~", "(", ")", "{", "}", "!", "\\", "*", "?"}
+    in_single = False
+    in_double = False
+    for ch in command:
+        if ch == "'" and not in_double:
+            in_single = not in_single
+        elif ch == '"' and not in_single:
+            in_double = not in_double
+        elif not in_single and not in_double and ch in shell_chars:
+            return True
+    return False
+
+
 def tool_run_shell(
     cwd: Path,
     command: str,
@@ -357,17 +373,34 @@ def tool_run_shell(
     _privacy: bool = False,
 ) -> ToolResult:
     """
-    Execute a shell command.  Uses the system shell via a list invocation.
+    Execute a shell command.
 
-    In privacy mode (``_privacy=True``, injected by the agent) the subprocess
-    environment has shell-history variables zeroed so that the command cannot
-    be persisted to bash/sh/zsh history files.
+    When the command contains no shell operators (pipes, redirects, globs,
+    variable expansion, etc.) it is parsed with ``shlex.split`` and run as
+    a plain argument list — no shell injection possible.  Otherwise it falls
+    back to the system shell (cmd /C on Windows, /bin/sh -c elsewhere).
+
+    In privacy mode (``_privacy=True``) the subprocess environment has
+    shell-history variables zeroed.
     """
+    import shlex
+
     shell_cmd: list[str]
-    if sys.platform == "win32":
-        shell_cmd = ["cmd", "/C", command]
+    if _needs_shell(command):
+        # Complex command — must go through a shell
+        if sys.platform == "win32":
+            shell_cmd = ["cmd", "/C", command]
+        else:
+            shell_cmd = ["/bin/sh", "-c", command]
     else:
-        shell_cmd = ["/bin/sh", "-c", command]
+        try:
+            shell_cmd = shlex.split(command, posix=(sys.platform != "win32"))
+        except ValueError:
+            # Malformed quoting — fall back to shell
+            if sys.platform == "win32":
+                shell_cmd = ["cmd", "/C", command]
+            else:
+                shell_cmd = ["/bin/sh", "-c", command]
 
     env: dict | None = None
     if _privacy:
@@ -558,12 +591,19 @@ def tool_edit_notebook_cell(
 
 
 def tool_search_files(cwd: Path, pattern: str, path: str = ".") -> ToolResult:
-    base = _resolve(cwd, path)
+    try:
+        base = _confine(cwd, path)
+    except PermissionError as e:
+        return ToolResult.error(str(e))
     full_pattern = str(base / pattern) if not Path(pattern).is_absolute() else pattern
     try:
         matches = sorted(_glob.glob(full_pattern, recursive=True))
     except Exception as e:
         return ToolResult.error(str(e))
+
+    # Filter results that escaped cwd via pattern traversal (e.g. ../../etc/*)
+    cwd_resolved = cwd.resolve()
+    matches = [m for m in matches if Path(m).resolve().is_relative_to(cwd_resolved)]
 
     if not matches:
         return ToolResult.success("No files matched.", summary="0 matches")
@@ -589,7 +629,10 @@ def tool_search_files(cwd: Path, pattern: str, path: str = ".") -> ToolResult:
 
 def tool_grep(cwd: Path, pattern: str, path: str = ".", glob: str = "", context: int = 2) -> ToolResult:
     """Search file contents with a regex pattern (pure Python, no external tools)."""
-    base = _resolve(cwd, path)
+    try:
+        base = _confine(cwd, path)
+    except PermissionError as e:
+        return ToolResult.error(str(e))
     file_glob = glob or "**/*"
     files = sorted(base.glob(file_glob)) if base.is_dir() else [base]
 
@@ -714,17 +757,29 @@ def tool_spawn_agent(
     )
 
 
-def tool_fetch_url(cwd: Path, url: str, max_chars: int = 8000) -> ToolResult:
+def tool_fetch_url(
+    cwd: Path,
+    url: str,
+    max_chars: int = 8000,
+    _privacy: bool = False,
+) -> ToolResult:
     """
     Fetch a URL and return its plain-text content (HTML tags stripped).
 
     Useful for documentation pages, GitHub raw files, Stack Overflow answers,
     and package changelogs.  Content is truncated to ``max_chars`` to avoid
     flooding the context window.
+
+    In privacy mode (``_privacy=True``) a one-line network audit message is
+    emitted to stderr before the request so the user can see outbound URLs.
     """
     import html.parser
     import urllib.error
     import urllib.request
+
+    if _privacy:
+        import sys as _sys
+        print(f"[localm privacy] fetch_url: {url}", file=_sys.stderr, flush=True)
 
     class _HTMLStripper(html.parser.HTMLParser):
         _SKIP = {"script", "style", "head", "meta", "link", "noscript"}

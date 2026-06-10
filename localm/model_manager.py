@@ -125,10 +125,14 @@ def list_models() -> None:
     console.print(table)
 
 
-def pull_model(model_spec: str, name: Optional[str] = None) -> None:
+def pull_model(
+    model_spec: str,
+    name: Optional[str] = None,
+    expected_sha256: Optional[str] = None,
+) -> None:
     spec = resolve_spec(model_spec)
     if spec.startswith("http://") or spec.startswith("https://"):
-        _pull_url(spec, name or _stem_from_url(spec))
+        _pull_url(spec, name or _stem_from_url(spec), expected_sha256=expected_sha256)
     elif "/" in spec:
         if ":" in spec or spec.rsplit("/", 1)[-1].endswith(".gguf"):
             # owner/repo:file.gguf  or  owner/repo/file.gguf  -> single GGUF file
@@ -266,7 +270,17 @@ def _pull_hf_snapshot(repo_id: str, name: Optional[str]) -> None:
     console.print(f"[green]✓[/green] [bold]{model_name}[/bold] downloaded to {dest}")
 
 
-def _pull_url(url: str, name: str) -> None:
+def _sha256_file(path: Path) -> str:
+    """Return the hex SHA256 digest of a file."""
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(65536), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _pull_url(url: str, name: str, expected_sha256: Optional[str] = None) -> None:
     """Download a model from a direct URL with resumable .part file support."""
     import requests
 
@@ -334,6 +348,22 @@ def _pull_url(url: str, name: str) -> None:
 
     # Atomically rename on successful completion
     part_file.rename(dest)
+
+    # SHA256 verification
+    actual = _sha256_file(dest)
+    if expected_sha256:
+        if actual.lower() == expected_sha256.lower():
+            console.print(f"[green]✓[/green] SHA256 verified: {actual[:16]}…")
+        else:
+            console.print(
+                f"[red]SHA256 mismatch![/red] Expected {expected_sha256[:16]}…, "
+                f"got {actual[:16]}… — deleting corrupted file"
+            )
+            dest.unlink()
+            return
+    else:
+        console.print(f"[dim]SHA256: {actual}[/dim]")
+
     _register(name, dest, url)
     console.print(f"[green]✓[/green] [bold]{name}[/bold] is ready")
 
