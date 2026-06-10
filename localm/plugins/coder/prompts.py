@@ -221,6 +221,7 @@ def build_system_prompt(
     project_map: "ProjectMap | None" = None,
     memory: str = "",
     model_name: str = "",
+    extra_tool_docs: str = "",
 ) -> str:
     """
     Build the system prompt for the main agent.
@@ -237,6 +238,9 @@ def build_system_prompt(
         Content of LOCALCODER.md; injected under "## Project Memory".
     model_name:
         Used to select per-family prompt tuning (Gemma / thinking / small / default).
+    extra_tool_docs:
+        Additional tool documentation appended after the built-in tool list
+        (e.g. dynamically registered MCP tools).
     """
     family = detect_model_family(model_name) if model_name else "default"
 
@@ -266,6 +270,8 @@ def build_system_prompt(
             f"Working directory: {cwd}"
         )
 
+    extra_section = f"\n{extra_tool_docs}\n" if extra_tool_docs else ""
+
     return (
         f"{identity}"
         f"{map_section}"
@@ -274,7 +280,8 @@ def build_system_prompt(
         f"{tool_block}\n\n"
         f"AVAILABLE TOOLS\n"
         f"━━━━━━━━━━━━━━━\n\n"
-        f"{tool_docs}\n\n"
+        f"{tool_docs}\n"
+        f"{extra_section}\n"
         f"{rules}\n"
     )
 

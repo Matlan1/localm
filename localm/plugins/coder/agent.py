@@ -205,12 +205,35 @@ class Agent:
         self._audit: AuditLogT = make_audit_log(mode, label=name)
         self._project_map: ProjectMap = ProjectMap.build(cwd)
         self._memory: str = load_memory(cwd)
+
+        # MCP: start configured servers and register their tools BEFORE the
+        # system prompt is built so the model learns about them. Failures
+        # warn and continue — external servers must never break the agent.
+        self._mcp_docs: str = ""
+        try:
+            from .mcp import register_mcp_tools
+            mcp_names, mcp_warnings = register_mcp_tools(cwd)
+            for w in mcp_warnings:
+                print_warning(w)
+            if mcp_names:
+                lines = [
+                    f"- {n}: {TOOL_REGISTRY[n].description}"
+                    for n in mcp_names if n in TOOL_REGISTRY
+                ]
+                self._mcp_docs = (
+                    "EXTERNAL MCP TOOLS (call exactly like built-in tools)\n"
+                    + "\n".join(lines)
+                )
+        except Exception as e:
+            print_warning(f"MCP setup failed: {e}")
+
         self._system_prompt: str = build_system_prompt(
             cwd,
             agent_name=name,
             project_map=self._project_map,
             memory=self._memory,
             model_name=self._model_name,
+            extra_tool_docs=self._mcp_docs,
         )
 
         # Register OpenAI-format tool definitions when the backend supports it
@@ -312,6 +335,7 @@ class Agent:
             project_map=self._project_map,
             memory=self._memory,
             model_name=self._model_name,
+            extra_tool_docs=self._mcp_docs,
         )
 
     def reindex(self) -> int:
@@ -323,6 +347,7 @@ class Agent:
             project_map=self._project_map,
             memory=self._memory,
             model_name=self._model_name,
+            extra_tool_docs=self._mcp_docs,
         )
         return self._project_map.file_count()
 
@@ -335,6 +360,7 @@ class Agent:
             project_map=self._project_map,
             memory=self._memory,
             model_name=self._model_name,
+            extra_tool_docs=self._mcp_docs,
         )
         return self._memory
 
