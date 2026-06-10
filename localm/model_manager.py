@@ -181,17 +181,19 @@ def pull_model(
     model_spec: str,
     name: Optional[str] = None,
     expected_sha256: Optional[str] = None,
+    redownload: bool = False,
 ) -> None:
     spec = resolve_spec(model_spec)
     if spec.startswith("http://") or spec.startswith("https://"):
-        _pull_url(spec, name or _stem_from_url(spec), expected_sha256=expected_sha256)
+        _pull_url(spec, name or _stem_from_url(spec),
+                  expected_sha256=expected_sha256, redownload=redownload)
     elif "/" in spec:
         if ":" in spec or spec.rsplit("/", 1)[-1].endswith(".gguf"):
             # owner/repo:file.gguf  or  owner/repo/file.gguf  -> single GGUF file
-            _pull_gguf_file(spec, name)
+            _pull_gguf_file(spec, name, redownload=redownload)
         else:
             # owner/repo  (no filename) -> full HuggingFace snapshot
-            _pull_hf_snapshot(spec, name)
+            _pull_hf_snapshot(spec, name, redownload=redownload)
     else:
         console.print(f"[red]Unknown spec:[/red] {model_spec}")
         console.print("Formats:")
@@ -229,7 +231,49 @@ def _check_disk_space(dest_dir: Path, required_bytes: int) -> bool:
     return True
 
 
-def _pull_gguf_file(spec: str, name: Optional[str]) -> None:
+def _hf_file_sha256(repo_id: str, filename: str) -> Optional[str]:
+    """
+    Ask the HuggingFace API for a file's LFS sha256 without downloading it.
+    Returns None when offline, on any API error, or for non-LFS files.
+    """
+    try:
+        from huggingface_hub import HfApi
+        info = HfApi().get_paths_info(repo_id, [filename])
+        if info:
+            lfs = getattr(info[0], "lfs", None)
+            digest = getattr(lfs, "sha256", None) if lfs else None
+            return digest.lower() if digest else None
+    except Exception:
+        pass
+    return None
+
+
+def _prompt_predownload_dup(dup_names: List[str], model_name: str) -> str:
+    """
+    The exact file about to be downloaded already exists locally.
+    Returns "alias", "download", or "skip". No TTY → "skip".
+    """
+    import click
+
+    names = ", ".join(f"'{n}'" for n in dup_names)
+    console.print(
+        f"[yellow]You already have this exact file — registered as "
+        f"{names}[/yellow] [dim](sha256 match via HF metadata)[/dim]"
+    )
+    if not sys.stdin.isatty():
+        console.print("[dim]Non-interactive session — skipping download. "
+                      "Use --redownload to force.[/dim]")
+        return "skip"
+    choice = click.prompt(
+        f"  [a]lias as '{model_name}'  [d]ownload anyway  [s]kip",
+        type=click.Choice(["a", "d", "s"], case_sensitive=False),
+        default="a",
+        show_choices=False,
+    )
+    return {"a": "alias", "d": "download", "s": "skip"}[choice.lower()]
+
+
+def _pull_gguf_file(spec: str, name: Optional[str], redownload: bool = False) -> None:
     """Download a single .gguf file from a HuggingFace repo."""
     try:
         from huggingface_hub import hf_hub_download, hf_hub_url
@@ -251,11 +295,27 @@ def _pull_gguf_file(spec: str, name: Optional[str]) -> None:
     model_name = name or filename.removesuffix(".gguf")
     dest = MODELS_DIR / filename
 
+    # Expected digest from HF metadata — free, no download needed.
+    # (Only identifies the first part of a split GGUF, which is enough.)
+    expected = _hf_file_sha256(repo_id, filename)
+
     missing = [p for p in all_parts if not (MODELS_DIR / p).exists()]
     if not missing:
-        console.print(f"[yellow]Already downloaded:[/yellow] {model_name}")
-        _register(model_name, dest, f"hf:{repo_id}")
+        console.print(f"[yellow]Already downloaded:[/yellow] {filename}")
+        _register_with_dedup(model_name, dest, f"hf:{repo_id}", digest=expected)
         return
+
+    # Pre-download duplicate check: same bytes already on disk elsewhere?
+    if expected and not redownload:
+        dups = find_by_sha256(expected)
+        if dups:
+            action = _prompt_predownload_dup(dups, model_name)
+            if action == "skip":
+                return
+            if action == "alias":
+                alias_model(dups[0], model_name)
+                return
+            # "download" falls through
 
     ensure_dirs()
 
@@ -297,11 +357,11 @@ def _pull_gguf_file(spec: str, name: Optional[str]) -> None:
             console.print(f"[red]Download failed[/red] ({part}): {e}")
             return
 
-    _register(model_name, MODELS_DIR / filename, f"hf:{repo_id}")
+    _register(model_name, MODELS_DIR / filename, f"hf:{repo_id}", sha256=expected)
     console.print(f"[green]✓[/green] [bold]{model_name}[/bold] is ready")
 
 
-def _pull_hf_snapshot(repo_id: str, name: Optional[str]) -> None:
+def _pull_hf_snapshot(repo_id: str, name: Optional[str], redownload: bool = False) -> None:
     """Download a complete HuggingFace model repo (for transformers/HF format models)."""
     try:
         from huggingface_hub import snapshot_download
@@ -314,8 +374,36 @@ def _pull_hf_snapshot(repo_id: str, name: Optional[str]) -> None:
 
     if dest.exists() and (dest / "config.json").exists():
         console.print(f"[yellow]Already downloaded:[/yellow] {model_name}")
-        _register(model_name, dest, f"hf:{repo_id}")
+        _register_with_dedup(model_name, dest, f"hf:{repo_id}")
         return
+
+    # Same repo already pulled under a different name?
+    if not redownload:
+        reg = load_registry()
+        same_source = sorted(
+            n for n, info in reg.items()
+            if info.get("source") == f"hf:{repo_id}" and Path(info.get("path", "")).is_dir()
+        )
+        if same_source:
+            console.print(
+                f"[yellow]This repo is already downloaded — registered as "
+                f"{', '.join(repr(n) for n in same_source)}[/yellow]"
+            )
+            if not sys.stdin.isatty():
+                console.print("[dim]Non-interactive session — skipping. "
+                              "Use --redownload to force.[/dim]")
+                return
+            import click
+            choice = click.prompt(
+                f"  [a]lias as '{model_name}'  [d]ownload anyway  [s]kip",
+                type=click.Choice(["a", "d", "s"], case_sensitive=False),
+                default="a", show_choices=False,
+            )
+            if choice.lower() == "s":
+                return
+            if choice.lower() == "a":
+                alias_model(same_source[0], model_name)
+                return
 
     ensure_dirs()
     console.print(
@@ -348,7 +436,107 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def _pull_url(url: str, name: str, expected_sha256: Optional[str] = None) -> None:
+# ------------------------------------------------------------------ #
+#  Model identity — duplicate detection (two-tier: path, then sha256)  #
+# ------------------------------------------------------------------ #
+
+def find_aliases_by_path(path: Path, reg: Optional[dict] = None) -> List[str]:
+    """Registered names whose path resolves to the same file/dir as *path*."""
+    reg = reg if reg is not None else load_registry()
+    target = str(Path(path).resolve())
+    return sorted(
+        name for name, info in reg.items()
+        if str(Path(info.get("path", "")).resolve()) == target
+    )
+
+
+def find_by_sha256(digest: str, reg: Optional[dict] = None) -> List[str]:
+    """Registered names whose stored sha256 matches *digest* (case-insensitive)."""
+    if not digest:
+        return []
+    reg = reg if reg is not None else load_registry()
+    d = digest.lower()
+    return sorted(
+        name for name, info in reg.items()
+        if info.get("sha256", "").lower() == d
+    )
+
+
+def _hash_with_notice(path: Path) -> Optional[str]:
+    """
+    SHA256 a model file, telling the user why the wait is happening.
+    Returns None for directories (HF models are identified by path only).
+    """
+    if not path.is_file():
+        return None
+    size_gb = path.stat().st_size / 1e9
+    if size_gb > 0.5:
+        console.print(
+            f"[dim]Hashing {path.name} ({size_gb:.1f} GB) for duplicate "
+            f"detection — one-time cost, stored in the registry…[/dim]"
+        )
+    return _sha256_file(path)
+
+
+def alias_model(existing: str, new_name: str) -> bool:
+    """
+    Register *new_name* as an additional name for *existing* (same file,
+    same source, same digest). Returns False when *existing* is unknown
+    or *new_name* is already taken.
+    """
+    reg = load_registry()
+    if existing not in reg:
+        console.print(f"[red]Not found:[/red] {existing}")
+        return False
+    if new_name in reg:
+        console.print(f"[red]Name already in use:[/red] {new_name}")
+        return False
+    reg[new_name] = dict(reg[existing])
+    save_registry(reg)
+    console.print(
+        f"[green]✓[/green] [bold]{new_name}[/bold] is now an alias of "
+        f"[bold]{existing}[/bold]"
+    )
+    return True
+
+
+def _prompt_duplicate_action(existing_names: List[str], reason: str) -> str:
+    """
+    Ask the user what to do about a duplicate model.
+
+    Returns one of: "alias", "copy", "move", "register", "skip".
+    Non-interactive sessions (no TTY) default to "skip" so scripts never
+    silently create duplicate entries.
+    """
+    import click
+
+    names = ", ".join(f"'{n}'" for n in existing_names)
+    console.print(
+        f"[yellow]This model is already registered as {names}[/yellow] "
+        f"[dim]({reason})[/dim]"
+    )
+    if not sys.stdin.isatty():
+        console.print("[dim]Non-interactive session — skipping. "
+                      "Use 'localm alias' to add a name for it.[/dim]")
+        return "skip"
+
+    choice = click.prompt(
+        "  [a]lias (new name, same file)  [c]opy into ~/.localm/models  "
+        "[m]ove into ~/.localm/models  [r]egister anyway  [s]kip",
+        type=click.Choice(["a", "c", "m", "r", "s"], case_sensitive=False),
+        default="a",
+        show_choices=False,
+    )
+    return {"a": "alias", "c": "copy", "m": "move",
+            "r": "register", "s": "skip"}[choice.lower()]
+
+
+def _pull_url(
+    url: str,
+    name: str,
+    expected_sha256: Optional[str] = None,
+    redownload: bool = False,
+) -> None:
     """Download a model from a direct URL with resumable .part file support."""
     import requests
 
@@ -357,9 +545,20 @@ def _pull_url(url: str, name: str, expected_sha256: Optional[str] = None) -> Non
     part_file = MODELS_DIR / (filename + ".part")
 
     if dest.exists():
-        console.print(f"[yellow]Already downloaded:[/yellow] {name}")
-        _register(name, dest, url)
+        console.print(f"[yellow]Already downloaded:[/yellow] {filename}")
+        _register_with_dedup(name, dest, url)
         return
+
+    # Pre-download check by user-supplied hash (URL servers can't tell us one)
+    if expected_sha256 and not redownload:
+        dups = find_by_sha256(expected_sha256)
+        if dups:
+            action = _prompt_predownload_dup(dups, name)
+            if action == "skip":
+                return
+            if action == "alias":
+                alias_model(dups[0], name)
+                return
 
     ensure_dirs()
 
@@ -432,14 +631,141 @@ def _pull_url(url: str, name: str, expected_sha256: Optional[str] = None) -> Non
     else:
         console.print(f"[dim]SHA256: {actual}[/dim]")
 
-    _register(name, dest, url)
+    # Post-download identity check: did we just download a byte-identical
+    # copy of something already registered? (URL downloads can't know the
+    # hash up front, so this is the earliest possible detection point.)
+    dups = [n for n in find_by_sha256(actual) if n != name]
+    if dups and not redownload:
+        names = ", ".join(f"'{n}'" for n in dups)
+        console.print(
+            f"[yellow]Downloaded file is byte-identical to {names}[/yellow]"
+        )
+        if sys.stdin.isatty():
+            import click
+            choice = click.prompt(
+                f"  [a]lias as '{name}' and delete the duplicate file  "
+                "[k]eep both copies",
+                type=click.Choice(["a", "k"], case_sensitive=False),
+                default="a", show_choices=False,
+            )
+            if choice.lower() == "a":
+                existing_path = Path(load_registry()[dups[0]]["path"])
+                if dest.resolve() != existing_path.resolve():
+                    dest.unlink()
+                alias_model(dups[0], name)
+                return
+
+    _register(name, dest, url, sha256=actual)
     console.print(f"[green]✓[/green] [bold]{name}[/bold] is ready")
 
 
-def _register(name: str, path: Path, source: str = "local") -> None:
+def _register(
+    name: str,
+    path: Path,
+    source: str = "local",
+    sha256: Optional[str] = None,
+) -> None:
     reg = load_registry()
-    reg[name] = {"path": str(path.resolve()), "source": source}
+    entry = {"path": str(path.resolve()), "source": source}
+    if sha256:
+        entry["sha256"] = sha256.lower()
+    reg[name] = entry
     save_registry(reg)
+
+
+def _register_with_dedup(
+    model_name: str,
+    p: Path,
+    source: str,
+    *,
+    on_duplicate: str = "ask",
+    digest: Optional[str] = None,
+) -> None:
+    """
+    Register a model, detecting duplicates first.
+
+    Two-tier identity: resolved path (instant), then stored sha256 when a
+    *digest* for the new file is known. ``on_duplicate`` is one of
+    "ask" / "alias" / "copy" / "move" / "register" / "skip" — "ask" prompts
+    interactively and degrades to "skip" without a TTY.
+    """
+    import click
+
+    reg = load_registry()
+    aliases = find_aliases_by_path(p, reg)
+
+    # Same name, same file — true no-op (but backfill a fresh digest)
+    if model_name in aliases:
+        console.print(
+            f"[yellow]'{model_name}' is already registered for this exact "
+            f"file[/yellow] [dim]({p})[/dim]"
+        )
+        if digest and not reg[model_name].get("sha256"):
+            reg[model_name]["sha256"] = digest.lower()
+            save_registry(reg)
+        others = [a for a in aliases if a != model_name]
+        if others:
+            console.print(f"[dim]Also registered as: {', '.join(others)}[/dim]")
+        return
+
+    # Same name, DIFFERENT file — real conflict, never overwrite silently
+    if model_name in reg:
+        old_path = reg[model_name].get("path", "?")
+        console.print(
+            f"[yellow]'{model_name}' already points to a different file:"
+            f"[/yellow] {old_path}"
+        )
+        if sys.stdin.isatty():
+            if not click.confirm(f"  Overwrite '{model_name}' with {p}?"):
+                console.print("[dim]Skipped.[/dim]")
+                return
+        else:
+            console.print("[dim]Non-interactive session — skipped. "
+                          "Pick another name with -n.[/dim]")
+            return
+
+    # Duplicate content under other names? (path tier, then hash tier)
+    dup_names, reason = aliases, "same file"
+    if not dup_names and digest:
+        dup_names = find_by_sha256(digest, reg)
+        reason = "byte-identical content"
+
+    if dup_names:
+        action = (
+            _prompt_duplicate_action(dup_names, reason)
+            if on_duplicate == "ask" else on_duplicate
+        )
+        if action == "skip":
+            console.print("[dim]Skipped.[/dim]")
+            return
+        if action == "alias":
+            alias_model(dup_names[0], model_name)
+            return
+        if action in ("copy", "move"):
+            ensure_dirs()
+            dest = MODELS_DIR / p.name
+            if dest.exists() and dest.resolve() != p.resolve():
+                console.print(
+                    f"[red]Cannot {action}:[/red] {dest} already exists"
+                )
+                return
+            if action == "copy":
+                console.print(f"[dim]Copying to {dest}…[/dim]")
+                shutil.copy2(p, dest)
+            else:
+                console.print(f"[dim]Moving to {dest}…[/dim]")
+                shutil.move(str(p), str(dest))
+                # Keep other aliases of the old path working
+                moved_from = str(p.resolve())
+                for alias_name in dup_names:
+                    if reg.get(alias_name, {}).get("path") == moved_from:
+                        reg[alias_name]["path"] = str(dest.resolve())
+                save_registry(reg)
+            p = dest
+        # action == "register" falls through unchanged
+
+    _register(model_name, p, source, sha256=digest)
+    console.print(f"[green]✓[/green] Registered [bold]{model_name}[/bold]")
 
 
 def remove_model(name: str) -> None:
@@ -448,6 +774,20 @@ def remove_model(name: str) -> None:
         console.print(f"[red]Not found:[/red] {name}")
         return
     path = Path(reg[name]["path"])
+
+    # Alias-aware: if other names still point at this file, only unregister
+    # this name — never delete a file out from under another alias.
+    other_aliases = [a for a in find_aliases_by_path(path, reg) if a != name]
+    if other_aliases:
+        del reg[name]
+        save_registry(reg)
+        console.print(
+            f"[green]✓[/green] Removed [bold]{name}[/bold] "
+            f"[dim](file kept — still registered as: "
+            f"{', '.join(other_aliases)})[/dim]"
+        )
+        return
+
     # Only delete files that live inside ~/.localm/models/ — never touch
     # externally registered paths (Ollama blobs, user model dirs, etc.)
     owned = path.is_relative_to(MODELS_DIR) if hasattr(path, "is_relative_to") else \
@@ -527,7 +867,12 @@ def _resolve_ollama_manifest(p: Path):
     return None
 
 
-def add_local(path_str: str, name: Optional[str] = None) -> None:
+def add_local(
+    path_str: str,
+    name: Optional[str] = None,
+    on_duplicate: str = "ask",
+    no_hash: bool = False,
+) -> None:
     p = Path(path_str).resolve()
     if not p.exists():
         console.print(f"[red]Not found:[/red] {path_str}")
@@ -538,12 +883,12 @@ def add_local(path_str: str, name: Optional[str] = None) -> None:
     if ollama is not None:
         blob_path, suggested = ollama
         model_name = name or suggested
-        b = blob_path.stat().st_size
-        size = f"{b/1e9:.2f} GB" if b >= 1e9 else f"{b/1e6:.0f} MB"
-        _register(model_name, blob_path, "ollama")
-        console.print(
-            f"[green]✓[/green] Registered [bold]{model_name}[/bold] "
-            f"[dim](Ollama GGUF blob, {size})[/dim]"
+        # Ollama blob filenames already ARE the sha256 digest — store it free
+        digest = blob_path.name.removeprefix("sha256-") \
+            if blob_path.name.startswith("sha256-") else None
+        _register_with_dedup(
+            model_name, blob_path, "ollama",
+            on_duplicate=on_duplicate, digest=digest,
         )
         return
 
@@ -559,9 +904,26 @@ def add_local(path_str: str, name: Optional[str] = None) -> None:
 
     model_name = name or p.stem
     kind = "hf" if is_hf else "local"
-    _register(model_name, p, kind)
-    tag = " [dim](HF format)[/dim]" if is_hf else ""
-    console.print(f"[green]✓[/green] Registered [bold]{model_name}[/bold]{tag}")
+
+    if is_blob:
+        digest = p.name.removeprefix("sha256-")
+    elif no_hash or p.is_dir():
+        digest = None   # HF dirs are identified by path only
+    else:
+        # Hash when it can change the outcome: unknown path (content-tier
+        # check) or known path missing its digest (lazy backfill)
+        reg = load_registry()
+        already_known = find_aliases_by_path(p, reg)
+        needs_backfill = any(
+            not reg[n].get("sha256") for n in already_known
+        )
+        digest = None
+        if not already_known or needs_backfill:
+            digest = _hash_with_notice(p)
+
+    _register_with_dedup(
+        model_name, p, kind, on_duplicate=on_duplicate, digest=digest,
+    )
 
 
 def show_shortcuts() -> None:

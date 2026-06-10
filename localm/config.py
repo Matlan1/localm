@@ -23,6 +23,7 @@ DEFAULT_CONFIG: dict = {
     "top_k": 40,
     "repeat_penalty": 1.1,
     "max_tokens": 1024,
+    "confirm_remove": True,   # ask before localm rm deletes files
 }
 
 

@@ -21,6 +21,15 @@ from .model_manager import (
 console = Console()
 
 
+def _complete_model_name(ctx, param, incomplete):
+    """Shell-completion callback: registered model names matching the prefix."""
+    try:
+        from .config import load_registry as _lr
+        return sorted(n for n in _lr() if n.startswith(incomplete))
+    except Exception:
+        return []
+
+
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 @click.version_option("0.1.0", prog_name="localm")
 def main() -> None:
@@ -32,7 +41,7 @@ def main() -> None:
 # ------------------------------------------------------------------ #
 
 @main.command()
-@click.argument("model")
+@click.argument("model", shell_complete=_complete_model_name)
 @click.option("-p", "--prompt",       default=None,  help="Single prompt (non-interactive).")
 @click.option("-s", "--system",       default=None,  help="System prompt.")
 @click.option("-m", "--max-tokens",   default=None,  type=int,   help="Max tokens to generate.")
@@ -358,7 +367,7 @@ def _save_chat(messages: list, filepath: str) -> None:
 # ------------------------------------------------------------------ #
 
 @main.command()
-@click.argument("model")
+@click.argument("model", shell_complete=_complete_model_name)
 @click.option("-H", "--host",        default="127.0.0.1", help="Bind address (0.0.0.0 for LAN).")
 @click.option("-p", "--port",        default=8080,        type=int)
 @click.option("-c", "--ctx",         default=None,        type=int)
@@ -421,7 +430,9 @@ def serve(model, host, port, ctx, gpu_layers, mmproj, device):
 @click.option("-n", "--name", default=None, help="Alias for the downloaded model.")
 @click.option("--sha256", default=None, metavar="HASH",
               help="Expected SHA256 hex digest (URL downloads only). Download is deleted on mismatch.")
-def pull(model_spec, name, sha256):
+@click.option("--redownload", is_flag=True,
+              help="Download even when an identical model is already registered.")
+def pull(model_spec, name, sha256, redownload):
     """Download a model from HuggingFace or a URL.
 
     \b
@@ -440,7 +451,7 @@ def pull(model_spec, name, sha256):
 
     Models are stored in ~/.localm/models/ and registered automatically.
     """
-    pull_model(model_spec, name, expected_sha256=sha256)
+    pull_model(model_spec, name, expected_sha256=sha256, redownload=redownload)
 
 
 @main.command("list")
@@ -450,27 +461,142 @@ def list_cmd():
 
 
 @main.command()
-@click.argument("model")
+@click.argument("model", shell_complete=_complete_model_name)
 @click.option("-y", "--yes", is_flag=True, help="Skip confirmation.")
 def rm(model, yes):
-    """Remove a model from the registry (and delete the file if it's in ~/.localm)."""
-    if not yes:
-        click.confirm(f"Remove '{model}'?", abort=True)
+    """Remove a model from the registry (and delete the file if it's in ~/.localm).
+
+    The confirmation prompt describes exactly what will happen (delete vs
+    unregister-only). Disable it permanently with:
+    localm config confirm_remove false
+    """
+    from .config import MODELS_DIR, load_registry
+    from .model_manager import find_aliases_by_path
+
+    cfg = load_config()
+    if not yes and cfg.get("confirm_remove", True):
+        reg = load_registry()
+        if model in reg:
+            path = Path(reg[model]["path"])
+            others = [a for a in find_aliases_by_path(path, reg) if a != model]
+            if others:
+                detail = (f"unregisters the name only — file kept, "
+                          f"still registered as: {', '.join(others)}")
+            elif str(path).startswith(str(MODELS_DIR)) and path.exists():
+                size = path.stat().st_size / 1e9 if path.is_file() else None
+                size_s = f" ({size:.1f} GB)" if size else ""
+                detail = f"PERMANENTLY deletes {path}{size_s}"
+            else:
+                detail = "unregisters the name only (file is outside ~/.localm/models)"
+            click.confirm(f"Remove '{model}'? This {detail}. Continue?", abort=True)
+        else:
+            click.confirm(f"Remove '{model}'?", abort=True)
     remove_model(model)
 
 
 @main.command()
 @click.argument("path")
 @click.option("-n", "--name", default=None, help="Name to register the model as.")
-def add(path, name):
+@click.option("--no-hash", is_flag=True,
+              help="Skip SHA256 computation (disables content-level duplicate detection).")
+@click.option("--on-duplicate", default="ask",
+              type=click.Choice(["ask", "alias", "copy", "move", "register", "skip"]),
+              help="What to do when the model is already registered (default: ask).")
+def add(path, name, no_hash, on_duplicate):
     """Register a local model file or HuggingFace directory.
+
+    Duplicate detection is two-tier: the resolved path is checked first,
+    then the file's SHA256 against digests stored in the registry.
 
     \b
     Examples:
       localm add C:\\models\\mymodel.gguf
-      localm add D:\\projects\\heresy\\gemma-4-12B-it-qat-q4_0-unquantized-bin --name gemma4-12b
+      localm add D:\\models\\gemma.gguf --name gemma4-12b
+      localm add D:\\models\\gemma.gguf -n g2 --on-duplicate alias
     """
-    add_local(path, name)
+    add_local(path, name, on_duplicate=on_duplicate, no_hash=no_hash)
+
+
+@main.command()
+@click.argument("existing", shell_complete=_complete_model_name)
+@click.argument("new_name")
+def alias(existing, new_name):
+    """Register NEW_NAME as another name for EXISTING (same file, no copy).
+
+    Works like 'ollama cp': both names point at the same model file.
+    Removing one name keeps the file as long as another name references it.
+
+    \b
+    Example:
+      localm alias gemma3-12b daily-driver
+    """
+    from .model_manager import alias_model
+
+    if not alias_model(existing, new_name):
+        sys.exit(1)
+
+
+_POWERSHELL_COMPLETION = r'''# localm tab completion — add this block to your PowerShell $PROFILE
+# (run: notepad $PROFILE)
+Register-ArgumentCompleter -Native -CommandName localm -ScriptBlock {
+    param($wordToComplete, $commandAst, $cursorPosition)
+    $words = @($commandAst.CommandElements | Select-Object -Skip 1 | ForEach-Object { $_.Extent.Text })
+    if ($words.Count -eq 0 -or ($wordToComplete -eq '' -and $words[-1] -ne '')) {
+        $words += ''
+    }
+    localm __complete @words 2>$null | Where-Object { $_ } | ForEach-Object {
+        [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+    }
+}
+'''
+
+
+@main.command("__complete", hidden=True)
+@click.argument("words", nargs=-1)
+def _complete_hidden(words):
+    """Internal: print completion candidates for the partial command line."""
+    words = list(words)
+    partial = words[-1] if words else ""
+    prior = words[:-1]
+
+    # Commands whose first positional argument is a registered model name
+    model_cmds = {"run", "serve", "rm", "alias"}
+
+    if prior and prior[0] in model_cmds and len(prior) == 1:
+        from .config import load_registry
+        candidates = sorted(load_registry())
+    elif not prior:
+        candidates = sorted(
+            cmd for cmd, obj in main.commands.items()
+            if not getattr(obj, "hidden", False)
+        )
+    else:
+        candidates = []
+
+    for c in candidates:
+        if c.startswith(partial):
+            click.echo(c)
+
+
+@main.command("completion")
+@click.argument("shell", type=click.Choice(["powershell", "bash", "zsh", "fish"]))
+def completion(shell):
+    """Print shell tab-completion setup for SHELL.
+
+    \b
+    PowerShell:  localm completion powershell >> $PROFILE
+    bash:        localm completion bash   (prints the one-liner to add)
+    zsh / fish:  same, using Click's built-in completion support
+    """
+    if shell == "powershell":
+        click.echo(_POWERSHELL_COMPLETION)
+    elif shell == "bash":
+        click.echo('# Add to ~/.bashrc:\neval "$(_LOCALM_COMPLETE=bash_source localm)"')
+    elif shell == "zsh":
+        click.echo('# Add to ~/.zshrc:\neval "$(_LOCALM_COMPLETE=zsh_source localm)"')
+    elif shell == "fish":
+        click.echo('# Add to ~/.config/fish/completions/localm.fish:\n'
+                   '_LOCALM_COMPLETE=fish_source localm | source')
 
 
 @main.command()
