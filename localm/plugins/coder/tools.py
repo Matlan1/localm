@@ -401,6 +401,16 @@ def tool_run_shell(
                 shell_cmd = ["cmd", "/C", command]
             else:
                 shell_cmd = ["/bin/sh", "-c", command]
+        else:
+            # Shell builtins (echo, dir, type, …) have no executable on disk —
+            # argument-list mode would fail with "file not found". Detect via
+            # PATH lookup and route those through the shell instead.
+            import shutil as _shutil
+            if not shell_cmd or _shutil.which(shell_cmd[0]) is None:
+                if sys.platform == "win32":
+                    shell_cmd = ["cmd", "/C", command]
+                else:
+                    shell_cmd = ["/bin/sh", "-c", command]
 
     env: dict | None = None
     if _privacy:
@@ -597,7 +607,13 @@ def tool_search_files(cwd: Path, pattern: str, path: str = ".") -> ToolResult:
         return ToolResult.error(str(e))
     full_pattern = str(base / pattern) if not Path(pattern).is_absolute() else pattern
     try:
-        matches = sorted(_glob.glob(full_pattern, recursive=True))
+        matches = set(_glob.glob(full_pattern, recursive=True))
+        # Bare filename patterns ("*.py") only match the top level — agents
+        # almost always mean "anywhere in the project", so search subdirs too
+        if not Path(pattern).is_absolute() and "/" not in pattern \
+                and "\\" not in pattern and "**" not in pattern:
+            matches |= set(_glob.glob(str(base / "**" / pattern), recursive=True))
+        matches = sorted(matches)
     except Exception as e:
         return ToolResult.error(str(e))
 
@@ -895,6 +911,7 @@ def tool_generate_image(
     output_path: str = "output.png",
     guidance: Optional[float] = None,
     negative_prompt: Optional[str] = None,
+    seed: Optional[int] = None,
     lora_name: Optional[str] = None,
     lora_strength_model: float = 1.0,
     lora_strength_clip: float = 0.5,
@@ -905,14 +922,18 @@ def tool_generate_image(
     import os
     from localm.image_gen.comfy import generate_image
 
-    out_p = _resolve(cwd, output_path)
+    try:
+        out_p = _confine(cwd, output_path)
+        input_p = _confine(cwd, input_image) if input_image else None
+    except PermissionError as e:
+        return ToolResult.error(str(e))
     api_url = os.environ.get("FLUX_API_URL", "http://127.0.0.1:8188")
-    input_p = _resolve(cwd, input_image) if input_image else None
     ok, message = generate_image(
         prompt, out_p,
         api_url=api_url,
         guidance=guidance,
         negative_prompt=negative_prompt,
+        seed=seed,
         lora_name=lora_name,
         lora_strength_model=lora_strength_model,
         lora_strength_clip=lora_strength_clip,
@@ -1010,7 +1031,15 @@ def tool_run_tests(
     output, trunc = _truncate(combined)
 
     ok = proc.returncode == 0
-    status = "passed" if ok else f"failed (exit {proc.returncode})"
+    if ok:
+        status = "passed"
+    elif proc.returncode == 5 and "pytest" in " ".join(cmd):
+        # pytest exit 5 = no tests collected — not a failure, but worth
+        # distinguishing so the agent doesn't "fix" passing code
+        ok = True
+        status = "no tests found"
+    else:
+        status = f"failed (exit {proc.returncode})"
     return ToolResult(
         ok=ok,
         output=f"<runner>{' '.join(cmd[:2])}</runner>\n"
@@ -1347,6 +1376,7 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
             "output_path":  {"type": "string", "description": "Path to save the result (default: output.png)", "required": False},
             "input_image":  {"type": "string", "description": "Path to an existing image to use as the starting point (img2img mode).", "required": False},
             "denoise":      {"type": "float",  "description": "img2img only — how much to change the input (0.0=no change, 1.0=completely new). Default 0.75.", "required": False},
+            "seed":         {"type": "int",    "description": "Noise seed for reproducible output. Each result reports its seed; pass it back to reproduce or tweak.", "required": False},
             "guidance":        {"type": "float",  "description": "Guidance scale (default: 3.5). Lower values (2.5-3.0) improve photorealism.", "required": False},
             "negative_prompt": {"type": "string", "description": "Things to steer away from, e.g. 'old, mature, middle-aged'. Applied via ConditioningConcat.", "required": False},
             "lora_name":          {"type": "string", "description": "LoRA filename to load (optional).", "required": False},

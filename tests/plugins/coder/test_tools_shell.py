@@ -98,7 +98,7 @@ class TestRunShell:
         assert captured_env.get("HISTSIZE") == "0"
 
     def test_simple_command_uses_arg_list(self, tmp_path):
-        """Commands with no shell operators are run as an argument list, not via shell."""
+        """Commands whose executable exists on PATH run as an argument list."""
         captured_cmd = []
 
         def fake_run(cmd, **kwargs):
@@ -106,11 +106,27 @@ class TestRunShell:
             return self._make_proc(stdout="")
 
         with patch("localm.plugins.coder.tools.subprocess.run", side_effect=fake_run):
-            tool_run_shell(tmp_path, "echo hi")
+            tool_run_shell(tmp_path, "git status")   # git resolves via PATH
 
         # Must NOT go through cmd/sh — first token is the executable
-        assert captured_cmd[0] == "echo"
-        assert "hi" in captured_cmd
+        assert captured_cmd[0] == "git"
+        assert "status" in captured_cmd
+
+    def test_shell_builtin_routed_through_shell(self, tmp_path):
+        """echo/dir/type have no executable on disk — must use the shell,
+        otherwise argument-list mode fails with 'file not found'."""
+        captured_cmd = []
+
+        def fake_run(cmd, **kwargs):
+            captured_cmd.extend(cmd)
+            return self._make_proc(stdout="hi\n")
+
+        with patch("localm.plugins.coder.tools.subprocess.run", side_effect=fake_run), \
+             patch("shutil.which", return_value=None):
+            r = tool_run_shell(tmp_path, "echo hi")
+
+        assert r.ok
+        assert captured_cmd[0] in ("cmd", "/bin/sh")
 
     def test_pipe_uses_shell(self, tmp_path):
         """Commands with pipe operators are routed through the system shell."""

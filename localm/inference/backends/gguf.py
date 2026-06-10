@@ -47,6 +47,61 @@ class GgufBackend(BaseBackend):
     #  Load / unload                                                       #
     # ------------------------------------------------------------------ #
 
+    # Rough VRAM headroom for KV cache + compute buffers beyond model weights
+    _VRAM_OVERHEAD_BYTES = int(1.5e9)
+
+    @staticmethod
+    def _free_vram_bytes() -> Optional[int]:
+        """Free VRAM on device 0 in bytes, or None when not measurable."""
+        try:
+            import torch
+            if torch.cuda.is_available():
+                free, _total = torch.cuda.mem_get_info(0)
+                return int(free)
+        except Exception:
+            pass
+        return None
+
+    def _model_bytes(self) -> int:
+        """Total size of the model on disk (all parts of a split GGUF)."""
+        from localm.model_manager import split_gguf_parts
+        p = Path(self.model_path)
+        parts = split_gguf_parts(p.name)
+        if parts:
+            return sum(
+                (p.parent / part).stat().st_size
+                for part in parts if (p.parent / part).is_file()
+            )
+        return p.stat().st_size if p.is_file() else 0
+
+    def _check_vram(self) -> None:
+        """
+        Warn — loudly and with options — when the model is unlikely to fit
+        in the currently free VRAM. Never blocks: partial offload and system
+        RAM spill can still work, and the estimate is approximate.
+        """
+        if self.n_gpu_layers == 0:
+            return  # CPU-only run, VRAM is irrelevant
+        free = self._free_vram_bytes()
+        if free is None:
+            return  # can't measure (no torch / no GPU) — nothing useful to say
+        need = self._model_bytes() + self._VRAM_OVERHEAD_BYTES
+        if free >= need:
+            return
+        console.print(
+            f"[yellow]⚠ Low VRAM:[/yellow] this model needs roughly "
+            f"[bold]{need / 1e9:.1f} GB[/bold] (weights + buffers) but only "
+            f"[bold]{free / 1e9:.1f} GB[/bold] is free.\n"
+            f"  [dim]Likely cause: another GPU app is holding memory "
+            f"(ComfyUI, a browser, another model).[/dim]\n"
+            f"  Options:\n"
+            f"    • Free VRAM first (close the other app, or POST "
+            f"/v1/models/unload on its server)\n"
+            f"    • Offload fewer layers:  [bold]-g 24[/bold]  "
+            f"(or [bold]-g 0[/bold] for CPU-only)\n"
+            f"  Continuing anyway — load may be slow or fail."
+        )
+
     def load(self) -> None:
         # Split GGUF pre-flight: all sibling parts must be present, otherwise
         # llama.cpp fails with a cryptic native error mid-load.
@@ -58,12 +113,21 @@ class GgufBackend(BaseBackend):
                 f"Split GGUF is incomplete — missing part(s): {names}. "
                 f"Re-run 'localm pull' to download all parts."
             )
+        self._check_vram()
         try:
             self._load_native()
         except Exception as exc:
+            free = self._free_vram_bytes()
+            vram_hint = ""
+            if free is not None and free < self._model_bytes() + self._VRAM_OVERHEAD_BYTES:
+                vram_hint = (
+                    " The GPU is low on memory — free VRAM or retry with "
+                    "fewer GPU layers (-g 24, or -g 0 for CPU)."
+                )
             console.print(
-                f"[yellow]Native llama backend failed ({exc}) — "
-                "falling back to llama-cli.exe (model reloads each request).[/yellow]"
+                f"[yellow]Native llama backend failed ({exc}).{vram_hint}[/yellow]\n"
+                f"[yellow]Falling back to llama-cli.exe "
+                f"(slower — model reloads on every request).[/yellow]"
             )
             self._use_subprocess = True
             self._loaded = True

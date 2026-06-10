@@ -51,8 +51,14 @@ class TestFluxImageTool(unittest.TestCase):
         mock_view_response.__enter__.return_value = mock_view_response
         mock_view_response.read.return_value = b"MOCK_PNG_IMAGE_BYTES"
 
-        # Make urlopen return the three mocks sequentially
+        # Zeroth call: /system_stats reachability probe
+        mock_alive_response = MagicMock()
+        mock_alive_response.__enter__.return_value = mock_alive_response
+        mock_alive_response.read.return_value = b"{}"
+
+        # Make urlopen return the mocks sequentially
         mock_urlopen.side_effect = [
+            mock_alive_response,   # for GET /system_stats (fail-fast probe)
             mock_prompt_response,  # for POST /prompt
             mock_history_response, # for GET /history/mock_prompt_abc_123
             mock_view_response     # for GET /view?filename=...
@@ -64,12 +70,17 @@ class TestFluxImageTool(unittest.TestCase):
         # 3. Assertions
         self.assertTrue(result.ok)
         self.assertIn("Image saved to", result.output)
+        self.assertIn("seed", result.output)   # reproducibility hint
         self.assertTrue(self.abs_output_path.exists())
         self.assertEqual(self.abs_output_path.read_bytes(), b"MOCK_PNG_IMAGE_BYTES")
+        # Sidecar JSON saved next to the image
+        sidecar = self.abs_output_path.with_suffix(".png.json")
+        self.assertTrue(sidecar.exists())
+        sidecar.unlink()
 
     @patch("urllib.request.urlopen")
     def test_generate_image_connection_failure(self, mock_urlopen):
-        # Force a connection refusal
+        # Force a connection refusal — the fail-fast probe catches it now
         mock_urlopen.side_effect = urllib.error.URLError("Connection refused")
 
         # Execute the tool
@@ -77,7 +88,8 @@ class TestFluxImageTool(unittest.TestCase):
 
         # Assertions
         self.assertFalse(result.ok)
-        self.assertIn("Could not connect to ComfyUI", result.output)
+        self.assertIn("not reachable", result.output)
+        self.assertIn("FLUX_API_URL", result.output)   # actionable hint
         self.assertFalse(self.abs_output_path.exists())
 
 if __name__ == "__main__":

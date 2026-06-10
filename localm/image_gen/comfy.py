@@ -48,10 +48,20 @@ def _localm_unload(localm_url: Optional[str] = None) -> None:
 #  Helpers
 # ---------------------------------------------------------------------------
 
+def _comfy_alive(api_url: str, timeout: float = 3.0) -> bool:
+    """Quick reachability probe so callers can fail fast with a clear error."""
+    try:
+        with urllib.request.urlopen(f"{api_url}/system_stats", timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+
 def _image_dimensions(path: Path) -> tuple[int, int]:
     """Return (width, height) from a PNG or JPEG without any external libs."""
     try:
-        data = path.read_bytes(32)
+        with open(path, "rb") as f:
+            data = f.read(32)
         if data[:8] == b"\x89PNG\r\n\x1a\n":
             return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
         if data[:2] == b"\xff\xd8":
@@ -189,6 +199,15 @@ def generate_image(
 
     _con = Console()
 
+    # 0. Fail fast if ComfyUI is down — BEFORE unloading the LLM, so a dead
+    # image server doesn't cost the user a pointless model unload + reload
+    if not _comfy_alive(api_url):
+        return False, (
+            f"ComfyUI is not reachable at {api_url}.\n"
+            "Start ComfyUI first (default: http://127.0.0.1:8188), or set the "
+            "FLUX_API_URL environment variable if it runs elsewhere."
+        )
+
     # 1. Unload LLM to free VRAM before FLUX loads
     _localm_unload(localm_url)
 
@@ -319,16 +338,15 @@ def generate_image(
                     node["inputs"]["conditioning"] = ["51", 0]
                     break
 
-    # 9. Set seed (use provided value or randomise)
+    # 9. Set seed (use provided value or randomise) — on every noise/sampler
+    # node, so workflows with more than one of them stay reproducible
     seed = seed if seed is not None else random.randint(1, 10 ** 12)
     for node in workflow.values():
         cls = node.get("class_type", "")
         if cls in ("KSampler", "KSamplerAdvanced"):
             node["inputs"]["seed"] = seed
-            break
-        if cls == "RandomNoise":
+        elif cls == "RandomNoise":
             node["inputs"]["noise_seed"] = seed
-            break
 
     # 9. Queue the prompt in ComfyUI
     try:
@@ -447,7 +465,34 @@ def generate_image(
         except Exception:
             pass
 
-        return True, f"Image saved to {output_path}"
+        # Sidecar JSON: everything needed to reproduce or tweak this image.
+        # Saved as <output>.json next to the image; failure is non-fatal.
+        try:
+            sidecar = {
+                "prompt": prompt,
+                "negative_prompt": negative_prompt,
+                "seed": seed,
+                "guidance": guidance,
+                "lora_name": lora_name,
+                "lora_strength_model": lora_strength_model if lora_name else None,
+                "lora_strength_clip": lora_strength_clip if lora_name else None,
+                "input_image": str(input_image) if input_image else None,
+                "denoise": (denoise if denoise is not None else 0.75)
+                           if input_image else None,
+                "clip_name1": clip_name1,
+                "clip_name2": clip_name2,
+                "elapsed_seconds": round(time.time() - start_time, 1),
+                "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            }
+            output_path.with_suffix(output_path.suffix + ".json").write_text(
+                json.dumps({k: v for k, v in sidecar.items() if v is not None},
+                           indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+        return True, f"Image saved to {output_path} (seed {seed} — reuse it to reproduce)"
 
     except Exception as e:
         return False, f"Failed to download generated image from ComfyUI: {e}"
