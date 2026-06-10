@@ -663,3 +663,79 @@ except ImportError:
             'Enable it with:  [bold]pip install "localm[coder]"[/bold]\n'
             '  or (editable):  [bold]pip install -e ".[coder]"[/bold]'
         )
+
+
+# ------------------------------------------------------------------ #
+#  Plugin management (external plugins in ~/.localm/plugins/)          #
+# ------------------------------------------------------------------ #
+
+@main.group()
+def plugin() -> None:
+    """Manage external plugins (installed in ~/.localm/plugins/)."""
+
+
+@plugin.command("install")
+@click.argument("source", type=click.Path(exists=True, file_okay=False))
+@click.option("--force", is_flag=True, help="Overwrite an existing install of the same plugin.")
+def plugin_install(source, force):
+    """Install a plugin from a local directory containing plugin.toml."""
+    from .plugins.loader import PluginError, install_plugin
+
+    try:
+        manifest = install_plugin(Path(source), force=force)
+    except PluginError as e:
+        console.print(f"[red]{e}[/red]")
+        sys.exit(1)
+    console.print(
+        f"[green]Installed[/green] [bold]{manifest.name}[/bold] "
+        f"v{manifest.version} → {manifest.path}"
+    )
+    if manifest.tool_exports:
+        console.print(f"  Tool exports: {', '.join(manifest.tool_exports)}")
+
+
+@plugin.command("list")
+def plugin_list():
+    """List installed external plugins."""
+    from .plugins.loader import discover_errors, discover_plugins, plugins_dir
+
+    manifests = discover_plugins()
+    errors = discover_errors()
+    if not manifests and not errors:
+        console.print(f"[dim]No external plugins installed ({plugins_dir()})[/dim]")
+        return
+    for m in manifests:
+        desc = f" — {m.description}" if m.description else ""
+        console.print(f"  [bold]{m.name}[/bold] v{m.version}{desc}")
+        if m.tool_exports:
+            console.print(f"    [dim]tools: {', '.join(m.tool_exports)}[/dim]")
+    for err in errors:
+        console.print(f"  [yellow]invalid:[/yellow] {err}")
+
+
+@plugin.command("remove")
+@click.argument("name")
+def plugin_remove(name):
+    """Remove an installed plugin by name."""
+    from .plugins.loader import PluginError, remove_plugin
+
+    try:
+        existed = remove_plugin(name)
+    except PluginError as e:
+        console.print(f"[red]{e}[/red]")
+        sys.exit(1)
+    if existed:
+        console.print(f"[green]Removed[/green] plugin [bold]{name}[/bold]")
+    else:
+        console.print(f"[yellow]Plugin {name!r} is not installed[/yellow]")
+
+
+# Register external plugin commands at import time so they show in --help.
+# A broken plugin must never take down the CLI — warnings only.
+try:
+    from .plugins.loader import register_external_plugins as _register_ext
+
+    for _warning in _register_ext(main):
+        console.print(f"[yellow]plugin warning:[/yellow] {_warning}")
+except Exception as _e:  # pragma: no cover — absolute last resort
+    console.print(f"[yellow]plugin discovery failed:[/yellow] {_e}")

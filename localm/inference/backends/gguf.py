@@ -48,6 +48,16 @@ class GgufBackend(BaseBackend):
     # ------------------------------------------------------------------ #
 
     def load(self) -> None:
+        # Split GGUF pre-flight: all sibling parts must be present, otherwise
+        # llama.cpp fails with a cryptic native error mid-load.
+        from localm.model_manager import missing_split_parts
+        missing = missing_split_parts(Path(self.model_path))
+        if missing:
+            names = ", ".join(p.name for p in missing)
+            raise FileNotFoundError(
+                f"Split GGUF is incomplete — missing part(s): {names}. "
+                f"Re-run 'localm pull' to download all parts."
+            )
         try:
             self._load_native()
         except Exception as exc:

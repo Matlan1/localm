@@ -70,6 +70,15 @@ _COMPACT_WARN_RATIO  = 0.70   # warn user in interactive mode
 _COMPACT_AUTO_RATIO  = 0.90   # silently compact in non-interactive mode
 _DEFAULT_CTX_TOKENS  = 4096   # fallback when n_ctx is unknown
 
+# Code file extensions that should be verified (tests / syntax) after writes
+_CODE_EXTS: frozenset[str] = frozenset({
+    ".py", ".js", ".ts", ".jsx", ".tsx", ".rs", ".go", ".java",
+    ".c", ".h", ".cpp", ".hpp", ".cs", ".rb", ".php",
+})
+
+# run_shell commands containing one of these substrings count as verification
+_TEST_COMMAND_MARKERS: tuple[str, ...] = ("pytest", "unittest", "npm test", "cargo test", "go test")
+
 
 # ---------------------------------------------------------------------------
 #  Native tool-calling helpers
@@ -161,6 +170,8 @@ class Agent:
         parent: Optional["Agent"] = None,
         mode: SessionMode = SessionMode.PRIVACY,
         scope: Optional[str] = None,
+        self_verify: bool = True,
+        turn_budget: Optional[int] = None,
         **gen_kwargs,
     ) -> None:
         self.backend        = backend
@@ -176,6 +187,9 @@ class Agent:
         self.parent         = parent
         self.mode           = mode
         self.scope          = scope        # optional glob filter on file-access tools
+        self.self_verify    = self_verify  # nudge agent to verify code changes before finishing
+        # Per-task turn budget for uncertainty escalation. None → 2/3 of max_turns.
+        self.turn_budget    = turn_budget if turn_budget is not None else max(3, (max_turns * 2) // 3)
         self.gen_kwargs     = gen_kwargs
 
         self._messages: list[dict] = []
@@ -186,6 +200,7 @@ class Agent:
         self._compact_warned: bool = False
         self._last_run_ok: bool = True    # False when the last _loop hit max_turns
         self._undo_stack: list[dict] = []
+        self._unverified_writes: set[str] = set()  # code files changed since last test run
         self._model_name: str = getattr(backend, "model_id", "")
         self._audit: AuditLogT = make_audit_log(mode, label=name)
         self._project_map: ProjectMap = ProjectMap.build(cwd)
@@ -285,6 +300,7 @@ class Agent:
         self._compact_warned = False
         self._consecutive_errors.clear()
         self._last_run_ok = True
+        self._unverified_writes.clear()
 
     def set_cwd(self, cwd: Path) -> None:
         self.cwd = cwd
@@ -365,6 +381,9 @@ class Agent:
         Returns the final response text.
         """
         final_response = ""
+        start_turns = self._turns          # turns used by *this* task only
+        verify_nudged = False              # self-verification fires at most once per task
+        budget_escalated = False           # uncertainty escalation fires at most once per task
 
         try:
             while self._turns < self.max_turns:
@@ -377,6 +396,35 @@ class Agent:
 
                 self._audit.set_turn(self._turns)
 
+                # ---- uncertainty escalation ------------------------------
+                # When the task exceeds its turn budget, stop guessing:
+                # interactively ask the user whether to keep going; in
+                # non-interactive mode tell the model to surface blockers.
+                task_turns = self._turns - start_turns
+                if not budget_escalated and task_turns > self.turn_budget:
+                    budget_escalated = True
+                    if interactive:
+                        print_warning(
+                            f"This task has used {task_turns} turns "
+                            f"(budget: {self.turn_budget})."
+                        )
+                        if not confirm("  Keep going?"):
+                            final_response = (
+                                f"[stopped by user after {task_turns} turns — "
+                                "task exceeded its turn budget]"
+                            )
+                            self._last_run_ok = False
+                            break
+                    else:
+                        self._add_user(
+                            f"[turn budget] You have used {task_turns} turns on this "
+                            f"task (budget: {self.turn_budget}). If you are stuck or "
+                            "uncertain, STOP guessing: summarise what you tried, state "
+                            "exactly what is blocking you, and ask for guidance instead "
+                            "of continuing to experiment. If you are genuinely close to "
+                            "done, finish with the minimal remaining steps."
+                        )
+
                 # ---- context-budget check --------------------------------
                 self._maybe_compact(interactive=interactive)
 
@@ -388,6 +436,32 @@ class Agent:
                 calls = parse_tool_calls(response)
 
                 if not calls:
+                    # Self-verification: don't accept a final answer while code
+                    # changes sit unverified — nudge the agent to check its work.
+                    # Fires at most once per task to avoid infinite loops.
+                    if (
+                        self.self_verify
+                        and not verify_nudged
+                        and self._unverified_writes
+                        and self._turns < self.max_turns
+                    ):
+                        verify_nudged = True
+                        files = ", ".join(sorted(self._unverified_writes))
+                        self._add_assistant(response)
+                        self._add_user(
+                            f"[self-verification] You changed code files ({files}) "
+                            "but have not verified them. Before giving your final "
+                            "answer: run run_tests if this project has a test "
+                            "suite, otherwise re-read the changed files to check "
+                            "for mistakes. Then give your final answer."
+                        )
+                        if interactive:
+                            print_info(
+                                "(self-verification: asking agent to verify "
+                                f"changes to {files})"
+                            )
+                        continue
+
                     # No tool calls → this is the final answer
                     if not interactive:
                         print_assistant_response(response, name=self.name)
@@ -859,6 +933,20 @@ ws     ::= [ \t\n\r]*
         # Incremental map refresh after file-mutating tools
         if result.ok and call.name in _MUTATING_TOOLS:
             self._refresh_map_for_tool(call)
+
+        # Self-verification bookkeeping: remember code files changed on disk,
+        # forget them once the agent runs the test suite (or a test command)
+        if result.ok and not self.dry_run and not self.patch_mode:
+            if call.name in _UNDOABLE_TOOLS:
+                path_arg = call.args.get("path", "")
+                if path_arg and Path(path_arg).suffix.lower() in _CODE_EXTS:
+                    self._unverified_writes.add(path_arg)
+            elif call.name == "run_tests":
+                self._unverified_writes.clear()
+            elif call.name == "run_shell":
+                cmd = str(call.args.get("command", "")).lower()
+                if any(marker in cmd for marker in _TEST_COMMAND_MARKERS):
+                    self._unverified_writes.clear()
 
         return result
 

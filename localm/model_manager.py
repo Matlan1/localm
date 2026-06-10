@@ -1,7 +1,8 @@
+import re
 import shutil
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -47,6 +48,51 @@ def resolve_spec(spec: str) -> str:
     return MODEL_SHORTCUTS.get(spec, spec)
 
 
+# ------------------------------------------------------------------ #
+#  Split GGUF (multi-part *-00001-of-00003.gguf files)                 #
+# ------------------------------------------------------------------ #
+
+# llama.cpp split naming convention: <stem>-00001-of-00003.gguf
+_SPLIT_GGUF_RE = re.compile(
+    r"^(?P<stem>.+)-(?P<idx>\d{5})-of-(?P<total>\d{5})\.gguf$", re.IGNORECASE
+)
+
+
+def split_gguf_parts(filename: str) -> Optional[List[str]]:
+    """
+    If *filename* follows the llama.cpp split convention
+    (``model-00001-of-00003.gguf``), return the full ordered list of part
+    filenames. Returns None for regular single-file GGUFs.
+    """
+    m = _SPLIT_GGUF_RE.match(Path(filename).name)
+    if not m:
+        return None
+    total = int(m.group("total"))
+    if total < 2:
+        return None
+    stem = m.group("stem")
+    return [f"{stem}-{i:05d}-of-{total:05d}.gguf" for i in range(1, total + 1)]
+
+
+def first_split_part(filename: str) -> str:
+    """Return the first-part filename for a split GGUF (llama.cpp wants this one)."""
+    parts = split_gguf_parts(filename)
+    return parts[0] if parts else filename
+
+
+def missing_split_parts(first_part: Path) -> List[Path]:
+    """
+    Given the path of any part of a split GGUF, return sibling part paths
+    that are missing on disk. Empty list means all parts present (or the
+    file is not a split GGUF at all).
+    """
+    parts = split_gguf_parts(first_part.name)
+    if not parts:
+        return []
+    return [first_part.parent / p for p in parts
+            if not (first_part.parent / p).is_file()]
+
+
 def get_model_path(name: str) -> Optional[Path]:
     """Resolve a model name/alias/path to the model file or directory.
 
@@ -76,8 +122,14 @@ def get_model_info(name: str):
     # HF model directory
     if direct.is_dir() and (direct / "config.json").exists():
         return direct, None
-    # GGUF file
+    # GGUF file — for split GGUFs, normalise to the first part (llama.cpp
+    # needs the *-00001-of-N part to load the whole set)
     if direct.is_file() and direct.suffix == ".gguf":
+        first = first_split_part(direct.name)
+        if first != direct.name:
+            first_path = direct.parent / first
+            if first_path.is_file():
+                return first_path, None
         return direct, None
     # Ollama blob (no extension, sha256- prefix)
     if direct.is_file() and direct.name.startswith("sha256-"):
@@ -191,43 +243,59 @@ def _pull_gguf_file(spec: str, name: Optional[str]) -> None:
         parts = spec.rsplit("/", 1)
         repo_id, filename = parts[0], parts[1]
 
+    # Split GGUF: normalise to the full ordered part list. llama.cpp loads
+    # the model from the first part, so that's what gets registered.
+    all_parts = split_gguf_parts(filename) or [filename]
+    filename  = all_parts[0]
+
     model_name = name or filename.removesuffix(".gguf")
     dest = MODELS_DIR / filename
 
-    if dest.exists():
+    missing = [p for p in all_parts if not (MODELS_DIR / p).exists()]
+    if not missing:
         console.print(f"[yellow]Already downloaded:[/yellow] {model_name}")
         _register(model_name, dest, f"hf:{repo_id}")
         return
 
     ensure_dirs()
 
-    # Disk space pre-flight — HEAD the CDN URL to get Content-Length
+    # Disk space pre-flight — HEAD each missing part's CDN URL for Content-Length
     try:
         import requests as _req
-        cdn_url  = hf_hub_url(repo_id, filename)
-        head     = _req.head(cdn_url, allow_redirects=True, timeout=10)
-        file_size = int(head.headers.get("content-length", 0))
+        total_size = 0
+        for part in missing:
+            cdn_url = hf_hub_url(repo_id, part)
+            head    = _req.head(cdn_url, allow_redirects=True, timeout=10)
+            total_size += int(head.headers.get("content-length", 0))
     except Exception:
-        file_size = 0
+        total_size = 0
 
-    if not _check_disk_space(MODELS_DIR, file_size):
+    if not _check_disk_space(MODELS_DIR, total_size):
         return
 
-    console.print(f"Pulling [bold cyan]{repo_id}[/bold cyan] / [bold]{filename}[/bold]")
-
-    try:
-        local = hf_hub_download(
-            repo_id=repo_id,
-            filename=filename,
-            local_dir=str(MODELS_DIR),
-            local_dir_use_symlinks=False,
+    if len(all_parts) > 1:
+        console.print(
+            f"Pulling [bold cyan]{repo_id}[/bold cyan] / [bold]{filename}[/bold] "
+            f"[dim](split GGUF, {len(all_parts)} parts, "
+            f"{len(missing)} to download)[/dim]"
         )
-        final = MODELS_DIR / filename
-        if Path(local) != final:
-            shutil.move(local, final)
-    except Exception as e:
-        console.print(f"[red]Download failed:[/red] {e}")
-        return
+    else:
+        console.print(f"Pulling [bold cyan]{repo_id}[/bold cyan] / [bold]{filename}[/bold]")
+
+    for part in missing:
+        try:
+            local = hf_hub_download(
+                repo_id=repo_id,
+                filename=part,
+                local_dir=str(MODELS_DIR),
+                local_dir_use_symlinks=False,
+            )
+            final = MODELS_DIR / part
+            if Path(local) != final:
+                shutil.move(local, final)
+        except Exception as e:
+            console.print(f"[red]Download failed[/red] ({part}): {e}")
+            return
 
     _register(model_name, MODELS_DIR / filename, f"hf:{repo_id}")
     console.print(f"[green]✓[/green] [bold]{model_name}[/bold] is ready")
@@ -388,9 +456,15 @@ def remove_model(name: str) -> None:
         if path.is_dir():
             import shutil
             shutil.rmtree(path)
+            console.print(f"[dim]Deleted {path}[/dim]")
         else:
-            path.unlink()
-        console.print(f"[dim]Deleted {path}[/dim]")
+            # Split GGUF: remove every sibling part, not just the registered one
+            siblings = split_gguf_parts(path.name) or [path.name]
+            for part in siblings:
+                part_path = path.parent / part
+                if part_path.exists():
+                    part_path.unlink()
+                    console.print(f"[dim]Deleted {part_path}[/dim]")
     elif path.exists():
         console.print(f"[dim]Unregistered (file not deleted — lives outside ~/.localm/models)[/dim]")
     del reg[name]
