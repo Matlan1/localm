@@ -840,8 +840,34 @@ def tool_fetch_url(
     emitted to stderr before the request so the user can see outbound URLs.
     """
     import html.parser
+    import ipaddress
+    import socket
     import urllib.error
+    import urllib.parse
     import urllib.request
+
+    # Scheme allowlist: urllib.urlopen also speaks file://, ftp://, and data://
+    # — a prompt-injected agent could otherwise read local files
+    # (file:///etc/passwd, file:///C:/Users/.../.ssh/id_rsa) straight into the
+    # conversation.  Only real web fetches are permitted.
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return ToolResult.error(
+            f"fetch_url only supports http/https URLs (got '{parsed.scheme}:'). "
+            "Reading local files via file:// is not allowed."
+        )
+    host = parsed.hostname or ""
+    # SSRF guard: block link-local / cloud-metadata endpoints (169.254.x).
+    # Localhost and private ranges stay reachable on purpose — the agent
+    # legitimately talks to localm's own server and other local dev services.
+    try:
+        for info in socket.getaddrinfo(host, None):
+            ip = ipaddress.ip_address(info[4][0])
+            if ip.is_link_local:
+                return ToolResult.error(
+                    f"fetch_url refuses link-local / metadata address {ip}.")
+    except (socket.gaierror, ValueError):
+        pass  # unresolved host → let urllib surface the error normally
 
     if _privacy:
         import sys as _sys

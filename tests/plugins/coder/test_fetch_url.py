@@ -234,3 +234,63 @@ class TestPrivacyAuditLog:
             tool_fetch_url(Path("/tmp"), "http://example.com/page")
         err = capsys.readouterr().err
         assert "http://example.com/page" not in err
+
+
+# ---------------------------------------------------------------------------
+#  Scheme allowlist / SSRF guard (security)
+# ---------------------------------------------------------------------------
+
+class TestSchemeAllowlist:
+    def test_file_scheme_rejected(self):
+        # The urlopen mock must NEVER be reached for a file:// URL.
+        with patch("urllib.request.urlopen") as m:
+            r = _call("file:///etc/passwd")
+        assert not r.ok
+        assert "file://" in r.output or "http/https" in r.output
+        m.assert_not_called()
+
+    def test_windows_file_scheme_rejected(self):
+        with patch("urllib.request.urlopen") as m:
+            r = _call("file:///C:/Users/me/.ssh/id_rsa")
+        assert not r.ok
+        m.assert_not_called()
+
+    def test_ftp_scheme_rejected(self):
+        with patch("urllib.request.urlopen") as m:
+            r = _call("ftp://example.com/secret")
+        assert not r.ok
+        m.assert_not_called()
+
+    def test_data_scheme_rejected(self):
+        with patch("urllib.request.urlopen") as m:
+            r = _call("data:text/plain;base64,SGVsbG8=")
+        assert not r.ok
+        m.assert_not_called()
+
+    def test_link_local_metadata_blocked(self):
+        # 169.254.169.254 (cloud metadata) must be refused before any fetch.
+        with patch("urllib.request.urlopen") as m, \
+             patch("socket.getaddrinfo",
+                   return_value=[(2, 1, 6, "", ("169.254.169.254", 80))]):
+            r = _call("http://metadata.internal/latest/meta-data/")
+        assert not r.ok
+        assert "link-local" in r.output or "metadata" in r.output
+        m.assert_not_called()
+
+    def test_normal_http_still_works(self):
+        with patch("socket.getaddrinfo",
+                   return_value=[(2, 1, 6, "", ("93.184.216.34", 80))]), \
+             patch("urllib.request.urlopen",
+                   return_value=_fake_response("<p>hi</p>")):
+            r = _call("http://example.com")
+        assert r.ok
+        assert "hi" in r.output
+
+    def test_localhost_still_reachable(self):
+        # The agent legitimately talks to localm's own server on localhost.
+        with patch("socket.getaddrinfo",
+                   return_value=[(2, 1, 6, "", ("127.0.0.1", 8642))]), \
+             patch("urllib.request.urlopen",
+                   return_value=_fake_response("<p>local</p>")):
+            r = _call("http://127.0.0.1:8642/health")
+        assert r.ok
