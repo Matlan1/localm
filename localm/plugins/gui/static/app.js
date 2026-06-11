@@ -31,6 +31,22 @@ marked.setOptions({ breaks: true, mangle: false, headerIds: false });
 
 function renderMarkdown(target, text) {
   target.innerHTML = DOMPurify.sanitize(marked.parse(text || ""));
+  // LaTeX math: $...$, $$...$$, \(...\), \[...\]. KaTeX only rewrites text
+  // nodes after sanitisation, so this stays XSS-safe.
+  if (typeof renderMathInElement !== "undefined") {
+    try {
+      renderMathInElement(target, {
+        delimiters: [
+          { left: "$$", right: "$$", display: true },
+          { left: "$", right: "$", display: false },
+          { left: "\\(", right: "\\)", display: false },
+          { left: "\\[", right: "\\]", display: true },
+        ],
+        throwOnError: false,
+        ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code"],
+      });
+    } catch (e) { /* malformed TeX mid-stream — final render fixes it */ }
+  }
   target.querySelectorAll("pre code").forEach((block) => {
     try { hljs.highlightElement(block); } catch (e) { /* unknown lang */ }
   });

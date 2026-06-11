@@ -80,6 +80,21 @@ def create_app(engine: Engine) -> FastAPI:
         lifespan=lifespan,
     )
 
+    # Debug mode: log every request with timing to the debug log file
+    from localm.debuglog import debug_enabled, logger as _dbg
+    if debug_enabled():
+        @app.middleware("http")
+        async def _log_requests(request, call_next):
+            start = time.perf_counter()
+            response = await call_next(request)
+            _dbg.debug(
+                "%s %s -> %d (%.0f ms)",
+                request.method, request.url.path,
+                response.status_code,
+                (time.perf_counter() - start) * 1000,
+            )
+            return response
+
     # CORS: localhost-only by default. A wildcard here would let ANY website
     # the user visits call this API from browser JS and read the responses
     # (drive-by GPU use, response exfiltration, /v1/models/unload abuse).

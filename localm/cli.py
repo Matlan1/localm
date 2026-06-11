@@ -74,8 +74,11 @@ def main() -> None:
               help="Local image file to include (repeat for multiple). Use with -p.")
 @click.option("--output-dir",         default=None,  type=click.Path(),
               help="Directory to save any images the model produces.")
+@click.option("--debug", is_flag=True,
+              help="Write a debug log (~/.localm/logs/), capture native llama.cpp "
+                   "stderr, and show raw model markers instead of scrubbing them.")
 def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
-        mmproj, device, images, output_dir):
+        mmproj, device, images, output_dir, debug):
     """Run a model — interactive chat or single prompt.
 
     \b
@@ -97,6 +100,10 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
     Pipe a prompt from stdin:
       echo "Explain RDNA2" | localm run qwen2.5-7b
     """
+    if debug:
+        from .debuglog import enable_debug
+        console.print(f"[yellow]debug log:[/yellow] {enable_debug()}")
+
     info = get_model_info(model)
     if info is None:
         console.print(f"[red]Model not found:[/red] {model}")
@@ -395,7 +402,10 @@ def _save_chat(messages: list, filepath: str) -> None:
 @click.option("-g", "--gpu-layers",  default=None,        type=int)
 @click.option("--mmproj",            default=None)
 @click.option("--device",            default=None)
-def serve(model, host, port, ctx, gpu_layers, mmproj, device):
+@click.option("--debug", is_flag=True,
+              help="Write a debug log (~/.localm/logs/), capture native llama.cpp "
+                   "stderr, and log requests.")
+def serve(model, host, port, ctx, gpu_layers, mmproj, device, debug):
     """Start an OpenAI-compatible inference server.
 
     \b
@@ -405,6 +415,10 @@ def serve(model, host, port, ctx, gpu_layers, mmproj, device):
 
     Compatible with any OpenAI client library.
     """
+    if debug:
+        from .debuglog import enable_debug
+        console.print(f"[yellow]debug log:[/yellow] {enable_debug()}")
+
     info = get_model_info(model)
     if info is None:
         console.print(f"[red]Model not found:[/red] {model}")

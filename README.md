@@ -173,6 +173,10 @@ localm mcp [opts]                # MCP stdio server
 localm benchmark MODEL           # TTFT and tok/s at increasing prompt sizes
 ```
 
+`--debug` on `gui`, `serve`, and `run` writes a log to `~/.localm/logs/` with
+request timing and the native llama.cpp stderr stream (including crash abort
+reasons), and shows raw model output without marker scrubbing.
+
 ### Model management
 
 ```bash

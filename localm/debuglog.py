@@ -1,0 +1,107 @@
+"""
+Debug mode for localm.
+
+Enabled with ``--debug`` on ``localm gui`` / ``serve`` / ``run`` or by
+setting ``LOCALM_DEBUG=1``. When active:
+
+- A timestamped log file is created under ``~/.localm/logs/``.
+- Python logging (logger ``localm``) writes DEBUG records to it.
+- The native llama.cpp stderr stream — normally suppressed to keep chat
+  output clean — is redirected INTO the log file instead of discarded.
+  Native aborts (e.g. batch-size violations) print their reason there,
+  which is exactly the information needed to analyse a hard crash.
+- Internal model markers (thinking-channel tags and similar) are shown
+  raw in chat output instead of being scrubbed.
+
+The env var is the single source of truth so child processes (jobs,
+managed servers) inherit debug mode automatically. LOCALM_DEBUG holds the
+log file path so every process in the tree appends to the same file.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import time
+from pathlib import Path
+from typing import Optional
+
+_ENV_VAR = "LOCALM_DEBUG"
+
+logger = logging.getLogger("localm")
+
+
+def debug_enabled() -> bool:
+    return bool(os.environ.get(_ENV_VAR))
+
+
+def log_file_path() -> Optional[Path]:
+    """The active debug log file, or None when debug mode is off."""
+    value = os.environ.get(_ENV_VAR, "")
+    if value and value not in ("1", "true", "yes"):
+        return Path(value)
+    return None
+
+
+def logs_dir() -> Path:
+    return Path.home() / ".localm" / "logs"
+
+
+def enable_debug() -> Path:
+    """
+    Turn on debug mode for this process and its children.
+
+    Idempotent: a second call returns the existing log file.
+    """
+    existing = log_file_path()
+    if existing is not None:
+        return existing
+
+    logs_dir().mkdir(parents=True, exist_ok=True)
+    path = logs_dir() / f"localm_{time.strftime('%Y-%m-%d_%H%M%S')}_{os.getpid()}.log"
+    os.environ[_ENV_VAR] = str(path)
+
+    handler = logging.FileHandler(path, encoding="utf-8")
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)-7s %(name)s: %(message)s"))
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+
+    logger.debug("debug mode enabled (pid %d)", os.getpid())
+    return path
+
+
+def attach_child_logging() -> None:
+    """
+    In a child process that inherited LOCALM_DEBUG: attach the file handler
+    so this process's logger writes to the shared log file too.
+    """
+    path = log_file_path()
+    if path is None or any(
+        isinstance(h, logging.FileHandler)
+        and getattr(h, "baseFilename", "") == str(path)
+        for h in logger.handlers
+    ):
+        return
+    handler = logging.FileHandler(path, encoding="utf-8")
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)-7s %(name)s: %(message)s"))
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+
+
+def native_stderr_target() -> Optional[int]:
+    """
+    File descriptor that native (llama.cpp) stderr should be redirected to
+    during suppression windows: the debug log in debug mode, else None
+    (caller falls back to devnull).
+
+    The caller owns the descriptor and must close it after dup2.
+    """
+    path = log_file_path()
+    if path is None:
+        return None
+    try:
+        return os.open(str(path), os.O_WRONLY | os.O_APPEND | os.O_CREAT)
+    except OSError:
+        return None

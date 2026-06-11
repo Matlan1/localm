@@ -25,17 +25,25 @@ from ._structs import llama_token, LlamaChatMessage, LlamaContextParams, LlamaMo
 @contextlib.contextmanager
 def _quiet_stderr():
     """
-    Redirect fd 2 (stderr) to /dev/null for the duration of the block.
+    Redirect fd 2 (stderr) away from the terminal for the duration of the block.
 
     llama.cpp writes model-loading noise (create_tensor, llama_kv_cache,
     sched_reserve, …) directly via fprintf(stderr, …), bypassing Python's
     logging system entirely.  The only reliable way to silence it is to
     redirect the file descriptor at the OS level.
+
+    In debug mode the stream goes into the debug log file instead of
+    /dev/null — native abort messages (the reason for a hard crash) land
+    there, which is the difference between a diagnosable crash and a
+    silent one.
     """
-    devnull_fd = os.open(os.devnull, os.O_WRONLY)
-    saved_fd   = os.dup(2)
-    os.dup2(devnull_fd, 2)
-    os.close(devnull_fd)
+    from localm.debuglog import native_stderr_target
+    target_fd = native_stderr_target()
+    if target_fd is None:
+        target_fd = os.open(os.devnull, os.O_WRONLY)
+    saved_fd = os.dup(2)
+    os.dup2(target_fd, 2)
+    os.close(target_fd)
     try:
         yield
     finally:
@@ -231,6 +239,50 @@ def _filtered_stream(pieces: Iterator[str]) -> Iterator[str]:
             buf = buf[safe:]
 
     # Stream ended without a stop string — flush remaining buffer
+    if buf:
+        yield buf
+
+
+# ---------------------------------------------------------------------------
+#  Internal-marker scrubbing
+#
+#  Some finetunes emit their training-format control markers as plain text:
+#  harmony-style channel tags (<|channel|>analysis … <|message|>), mangled
+#  variants of them, or reserved vocabulary placeholders (<unused7>).  These
+#  are model internals, not content — they are stripped from normal chat
+#  output.  Debug mode (LOCALM_DEBUG) shows them raw for analysis.
+# ---------------------------------------------------------------------------
+
+import re as _re
+
+_MARKER_RE = _re.compile(
+    r"<\|?channel\|?>(thought|analysis|final|commentary)?"   # channel tags, incl. mangled
+    r"|<\|message\|>"
+    r"|<\|start\|>(assistant|user|system)?"
+    r"|<\|return\|>"
+    r"|<unused\d+>?"                                          # Gemma reserved tokens
+)
+
+# Longest text a partial marker could span across two stream pieces
+_MARKER_HOLD = 24
+
+
+def _scrub_stream(pieces: Iterator[str]) -> Iterator[str]:
+    """
+    Remove internal model markers from a text stream.
+
+    Buffers the trailing ``_MARKER_HOLD`` characters because a marker can
+    straddle two pieces; flushes the remainder when the stream ends.
+    """
+    buf = ""
+    for piece in pieces:
+        buf += piece
+        buf = _MARKER_RE.sub("", buf)
+        safe = max(0, len(buf) - _MARKER_HOLD)
+        if safe > 0:
+            yield buf[:safe]
+            buf = buf[safe:]
+    buf = _MARKER_RE.sub("", buf)
     if buf:
         yield buf
 
@@ -666,9 +718,14 @@ class LlamaCpp:
             }
 
     def _decode_stream(self, gen: Iterator[int]) -> Iterator[str]:
-        """Convert a token-ID stream to a text-piece stream, then filter stop strings."""
+        """Token-ID stream → text stream: stop-string filter, then marker scrub
+        (skipped in debug mode so raw model output is observable)."""
+        from localm.debuglog import debug_enabled
         raw = (self._tokenizer.token_to_piece(t) for t in gen)
-        yield from _filtered_stream(raw)
+        stream = _filtered_stream(raw)
+        if not debug_enabled():
+            stream = _scrub_stream(stream)
+        yield from stream
 
     def _stream_chunks(self, gen: Iterator[int]) -> Generator:
         chunk_id = _make_chunk_id()

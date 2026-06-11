@@ -55,6 +55,29 @@ Stop asks the agent to halt at the next safe point. End session terminates it.
 - **Settings**: edit the server config (`~/.localm/config.json`) and the GUI's
   API key; light/dark theme toggle lives in the sidebar.
 
+## Math rendering
+
+Chat output renders LaTeX math offline via vendored KaTeX: `$inline$`,
+`$$display$$`, `\(...\)`, and `\[...\]`. Code blocks are excluded so source
+code with dollar signs is never mangled.
+
+## Debug mode
+
+```bash
+localm gui --debug      # also available on serve and run
+```
+
+Debug mode writes a timestamped log to `~/.localm/logs/` containing every
+HTTP request with timing, and captures the native llama.cpp stderr stream
+(model loading details, KV cache messages, and crash abort reasons) that is
+normally suppressed to keep chat output clean. If the server ever dies
+mid-generation, the native abort message at the end of that file says why.
+
+Normal operation also strips internal model markers from chat output —
+thinking-channel tags like `<|channel|>analysis` and reserved placeholder
+tokens that some finetunes emit as text. Debug mode shows them raw so model
+behaviour can be analysed.
+
 ## Security notes
 
 - The server binds to 127.0.0.1 by default and CORS is locked to localhost, so other websites you visit cannot call your API from browser JS.

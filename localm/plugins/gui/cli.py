@@ -28,7 +28,10 @@ def _complete_model(ctx, param, incomplete):
 @click.option("-c", "--ctx", default=None, type=int, help="Context window size.")
 @click.option("-g", "--gpu-layers", default=None, type=int)
 @click.option("--no-browser", is_flag=True, help="Don't open the browser automatically.")
-def main(model, host, port, ctx, gpu_layers, no_browser):
+@click.option("--debug", is_flag=True,
+              help="Write a debug log (~/.localm/logs/), capture native llama.cpp "
+                   "stderr, log requests, and show raw model markers in chat.")
+def main(model, host, port, ctx, gpu_layers, no_browser, debug):
     """Open the localm web GUI — chat and the coder agent in your browser.
 
     \b
@@ -39,6 +42,10 @@ def main(model, host, port, ctx, gpu_layers, no_browser):
     """
     from rich.console import Console
     console = Console()
+
+    if debug:
+        from localm.debuglog import enable_debug
+        console.print(f"[yellow]debug log:[/yellow] {enable_debug()}")
 
     from localm.config import load_registry, pick_port
     from localm.model_manager import get_model_info
