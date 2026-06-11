@@ -201,7 +201,8 @@ class Launcher(tk.Tk):
                    command=self._refresh_models).grid(
             row=1, column=1, padx=(8, 0), pady=(4, 0))
         model_card.columnconfigure(0, weight=1)
-        self._refresh_models()
+        # NOTE: the initial _refresh_models() runs at the END of _build —
+        # its "no models" message needs the footer status label to exist.
 
         # ----- options -----
         opt_card = self._card(root)
@@ -291,6 +292,10 @@ class Launcher(tk.Tk):
         self.status.pack(side="left", padx=12)
         ttk.Button(footer, text="Launch", style="Launch.TButton",
                    command=self._launch).pack(side="right")
+
+        # Populate the model list last — on a fresh install with an empty
+        # registry this shows a hint in the status label built just above.
+        self._refresh_models()
 
     # ------------------------------------------------------------- #
 
