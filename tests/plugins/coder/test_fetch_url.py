@@ -1,33 +1,63 @@
 """
-Tests for tool_fetch_url in localm.plugins.coder.tools
+Tests for tool_fetch_url / tool_web_search in localm.plugins.coder.tools.
 
-All network calls are mocked — no real HTTP is made.
+Both route through localm.netpolicy. All network calls are mocked — no real
+HTTP is made. The policy itself is tested in tests/test_netpolicy.py; here we
+test the tool-level behaviour (stripping, truncation, errors, privacy audit,
+and that policy refusals surface as tool errors).
 """
 
-import io
-import pytest
-from unittest.mock import MagicMock, patch
 from pathlib import Path
+from unittest.mock import patch
 
-from localm.plugins.coder.tools import tool_fetch_url
+import pytest
+
+from localm.plugins.coder.tools import tool_fetch_url, tool_web_search
 
 
 # ---------------------------------------------------------------------------
 #  Helpers
 # ---------------------------------------------------------------------------
 
-def _fake_response(body: str, content_type: str = "text/html; charset=utf-8"):
-    """Build a mock urllib response object."""
-    resp = MagicMock()
-    resp.read.return_value = body.encode("utf-8")
-    resp.headers.get.return_value = content_type
-    resp.__enter__ = lambda s: s
-    resp.__exit__ = MagicMock(return_value=False)
-    return resp
+class _FakeResponse:
+    def __init__(self, body: str, content_type: str = "text/html; charset=utf-8"):
+        self.status_code = 200
+        self.headers = {"Content-Type": content_type}
+        self._body = body.encode("utf-8")
+
+    is_redirect = False
+    is_permanent_redirect = False
+
+    def iter_content(self, chunk_size=65536):
+        yield self._body
+
+    def raise_for_status(self):
+        pass
+
+    def close(self):
+        pass
+
+
+_PUBLIC_DNS = [(2, 1, 6, "", ("93.184.216.34", 80))]
+_LOOPBACK_DNS = [(2, 1, 6, "", ("127.0.0.1", 8642))]
+
+
+@pytest.fixture(autouse=True)
+def _policy_env(monkeypatch):
+    """Deterministic policy: mode allow, no domain rules, default SSRF guard."""
+    monkeypatch.setenv("LOCALM_NET_MODE", "allow")
+    monkeypatch.setattr("localm.config.load_config", lambda: {})
 
 
 def _call(url: str = "http://example.com", max_chars: int = 8000, **kwargs):
     return tool_fetch_url(Path("/tmp"), url, max_chars=max_chars, **kwargs)
+
+
+def _fetch(html: str, content_type="text/html", url="http://example.com"):
+    with patch("socket.getaddrinfo", return_value=_PUBLIC_DNS), \
+         patch("requests.get",
+               return_value=_FakeResponse(html, content_type)):
+        return _call(url)
 
 
 # ---------------------------------------------------------------------------
@@ -35,18 +65,14 @@ def _call(url: str = "http://example.com", max_chars: int = 8000, **kwargs):
 # ---------------------------------------------------------------------------
 
 class TestHtmlStripping:
-    def _fetch(self, html: str, content_type="text/html"):
-        with patch("urllib.request.urlopen", return_value=_fake_response(html, content_type)):
-            return _call()
-
     def test_basic_tag_removal(self):
-        result = self._fetch("<html><body><p>Hello world</p></body></html>")
+        result = _fetch("<html><body><p>Hello world</p></body></html>")
         assert result.ok
         assert "Hello world" in result.output
         assert "<p>" not in result.output
 
     def test_script_tags_stripped(self):
-        result = self._fetch(
+        result = _fetch(
             "<html><body><p>Keep me</p>"
             "<script>alert('secret')</script></body></html>"
         )
@@ -55,7 +81,7 @@ class TestHtmlStripping:
         assert "alert" not in result.output
 
     def test_style_tags_stripped(self):
-        result = self._fetch(
+        result = _fetch(
             "<html><head><style>body{color:red}</style></head>"
             "<body><p>Visible</p></body></html>"
         )
@@ -63,7 +89,7 @@ class TestHtmlStripping:
         assert "color:red" not in result.output
 
     def test_head_content_stripped(self):
-        result = self._fetch(
+        result = _fetch(
             "<html><head><title>Page Title</title></head>"
             "<body><p>Body text</p></body></html>"
         )
@@ -71,25 +97,24 @@ class TestHtmlStripping:
         assert "Page Title" not in result.output
 
     def test_noscript_stripped(self):
-        result = self._fetch(
+        result = _fetch(
             "<html><body><noscript>JS required</noscript><p>Content</p></body></html>"
         )
         assert "Content" in result.output
         assert "JS required" not in result.output
 
     def test_html_entities_decoded(self):
-        result = self._fetch("<p>&amp; &lt; &gt; &quot;</p>")
+        result = _fetch("<p>&amp; &lt; &gt; &quot;</p>")
         assert "& < > \"" in result.output
 
     def test_excessive_blank_lines_collapsed(self):
-        result = self._fetch("<p>A</p>\n\n\n\n\n\n<p>B</p>")
-        # Should not have 3+ consecutive newlines
+        result = _fetch("<p>A</p>\n\n\n\n\n\n<p>B</p>")
         assert "\n\n\n" not in result.output
         assert "A" in result.output
         assert "B" in result.output
 
     def test_url_and_content_in_output(self):
-        result = self._fetch("<p>text</p>")
+        result = _fetch("<p>text</p>")
         assert "http://example.com" in result.output
         assert "text" in result.output
 
@@ -100,19 +125,13 @@ class TestHtmlStripping:
 
 class TestPlainText:
     def test_plain_text_not_html_stripped(self):
-        raw = "line one\nline two\nline three"
-        with patch("urllib.request.urlopen",
-                   return_value=_fake_response(raw, "text/plain")):
-            result = _call()
+        result = _fetch("line one\nline two\nline three", "text/plain")
         assert result.ok
         assert "line one" in result.output
         assert "line two" in result.output
 
     def test_json_content_type_passthrough(self):
-        raw = '{"key": "value"}'
-        with patch("urllib.request.urlopen",
-                   return_value=_fake_response(raw, "application/json")):
-            result = _call()
+        result = _fetch('{"key": "value"}', "application/json")
         assert result.ok
         assert '"key"' in result.output
 
@@ -123,25 +142,22 @@ class TestPlainText:
 
 class TestTruncation:
     def test_long_content_truncated_at_max_chars(self):
-        body = "<p>" + "x" * 20_000 + "</p>"
-        with patch("urllib.request.urlopen",
-                   return_value=_fake_response(body)):
+        with patch("socket.getaddrinfo", return_value=_PUBLIC_DNS), \
+             patch("requests.get",
+                   return_value=_FakeResponse("<p>" + "x" * 20_000 + "</p>")):
             result = tool_fetch_url(Path("/tmp"), "http://x.com", max_chars=100)
         assert result.ok
         assert result.truncated
         assert "truncated" in result.output.lower()
 
     def test_short_content_not_truncated(self):
-        body = "<p>short</p>"
-        with patch("urllib.request.urlopen",
-                   return_value=_fake_response(body)):
-            result = _call(max_chars=8000)
+        result = _fetch("<p>short</p>")
         assert not result.truncated
 
     def test_summary_mentions_truncation(self):
-        body = "<p>" + "y" * 20_000 + "</p>"
-        with patch("urllib.request.urlopen",
-                   return_value=_fake_response(body)):
+        with patch("socket.getaddrinfo", return_value=_PUBLIC_DNS), \
+             patch("requests.get",
+                   return_value=_FakeResponse("<p>" + "y" * 20_000 + "</p>")):
             result = tool_fetch_url(Path("/tmp"), "http://x.com", max_chars=50)
         assert "truncated" in result.summary
 
@@ -151,23 +167,23 @@ class TestTruncation:
 # ---------------------------------------------------------------------------
 
 class TestErrors:
-    def test_url_error_returns_error_result(self):
-        import urllib.error
-        with patch("urllib.request.urlopen",
-                   side_effect=urllib.error.URLError("connection refused")):
+    def test_connection_error_returns_error_result(self):
+        with patch("socket.getaddrinfo", return_value=_PUBLIC_DNS), \
+             patch("requests.get",
+                   side_effect=ConnectionError("connection refused")):
             result = _call("http://unreachable.example")
         assert not result.ok
         assert "Could not fetch" in result.output
 
     def test_generic_exception_returns_error_result(self):
-        with patch("urllib.request.urlopen", side_effect=Exception("boom")):
+        with patch("socket.getaddrinfo", return_value=_PUBLIC_DNS), \
+             patch("requests.get", side_effect=Exception("boom")):
             result = _call()
         assert not result.ok
 
     def test_error_result_not_truncated(self):
-        import urllib.error
-        with patch("urllib.request.urlopen",
-                   side_effect=urllib.error.URLError("nope")):
+        with patch("socket.getaddrinfo", return_value=_PUBLIC_DNS), \
+             patch("requests.get", side_effect=Exception("nope")):
             result = _call()
         assert not result.truncated
 
@@ -178,18 +194,16 @@ class TestErrors:
 
 class TestUserAgent:
     def test_user_agent_set(self):
-        sent_headers = {}
+        sent = {}
 
-        def fake_urlopen(req, timeout=None):
-            sent_headers.update(req.headers)
-            return _fake_response("<p>ok</p>")
+        def fake_get(url, **kwargs):
+            sent.update(kwargs.get("headers") or {})
+            return _FakeResponse("<p>ok</p>")
 
-        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch("socket.getaddrinfo", return_value=_PUBLIC_DNS), \
+             patch("requests.get", side_effect=fake_get):
             _call()
-
-        # Headers are title-cased by urllib
-        ua = sent_headers.get("User-agent", "")
-        assert "localm" in ua.lower()
+        assert "localm" in sent.get("User-Agent", "").lower()
 
 
 # ---------------------------------------------------------------------------
@@ -198,16 +212,11 @@ class TestUserAgent:
 
 class TestSummary:
     def test_summary_contains_url(self):
-        with patch("urllib.request.urlopen",
-                   return_value=_fake_response("<p>hi</p>")):
-            result = _call("http://docs.example.com/page")
+        result = _fetch("<p>hi</p>", url="http://docs.example.com/page")
         assert "docs.example.com" in result.summary
 
     def test_summary_contains_char_count(self):
-        with patch("urllib.request.urlopen",
-                   return_value=_fake_response("<p>hello world</p>")):
-            result = _call()
-        # summary should mention how many chars
+        result = _fetch("<p>hello world</p>")
         assert "chars" in result.summary or any(c.isdigit() for c in result.summary)
 
 
@@ -217,8 +226,8 @@ class TestSummary:
 
 class TestPrivacyAuditLog:
     def test_prints_url_to_stderr_in_privacy_mode(self, capsys):
-        with patch("urllib.request.urlopen",
-                   return_value=_fake_response("<p>ok</p>")):
+        with patch("socket.getaddrinfo", return_value=_PUBLIC_DNS), \
+             patch("requests.get", return_value=_FakeResponse("<p>ok</p>")):
             result = tool_fetch_url(
                 Path("/tmp"), "http://example.com/secret",
                 _privacy=True,
@@ -229,68 +238,98 @@ class TestPrivacyAuditLog:
         assert "privacy" in err.lower() or "fetch_url" in err.lower()
 
     def test_no_stderr_without_privacy_mode(self, capsys):
-        with patch("urllib.request.urlopen",
-                   return_value=_fake_response("<p>ok</p>")):
+        with patch("socket.getaddrinfo", return_value=_PUBLIC_DNS), \
+             patch("requests.get", return_value=_FakeResponse("<p>ok</p>")):
             tool_fetch_url(Path("/tmp"), "http://example.com/page")
         err = capsys.readouterr().err
         assert "http://example.com/page" not in err
 
+    def test_web_search_prints_query_in_privacy_mode(self, capsys):
+        with patch("localm.netpolicy.web_search",
+                   return_value=[{"title": "t", "url": "https://u/",
+                                  "snippet": "s"}]):
+            result = tool_web_search(Path("/tmp"), "secret query", _privacy=True)
+        assert result.ok
+        assert "secret query" in capsys.readouterr().err
+
 
 # ---------------------------------------------------------------------------
-#  Scheme allowlist / SSRF guard (security)
+#  Policy enforcement surfaces as tool errors (no fetch attempted)
 # ---------------------------------------------------------------------------
 
-class TestSchemeAllowlist:
+class TestPolicyEnforcement:
     def test_file_scheme_rejected(self):
-        # The urlopen mock must NEVER be reached for a file:// URL.
-        with patch("urllib.request.urlopen") as m:
+        with patch("requests.get") as m:
             r = _call("file:///etc/passwd")
         assert not r.ok
-        assert "file://" in r.output or "http/https" in r.output
+        assert "http/https" in r.output
         m.assert_not_called()
 
     def test_windows_file_scheme_rejected(self):
-        with patch("urllib.request.urlopen") as m:
+        with patch("requests.get") as m:
             r = _call("file:///C:/Users/me/.ssh/id_rsa")
         assert not r.ok
         m.assert_not_called()
 
     def test_ftp_scheme_rejected(self):
-        with patch("urllib.request.urlopen") as m:
+        with patch("requests.get") as m:
             r = _call("ftp://example.com/secret")
         assert not r.ok
         m.assert_not_called()
 
     def test_data_scheme_rejected(self):
-        with patch("urllib.request.urlopen") as m:
+        with patch("requests.get") as m:
             r = _call("data:text/plain;base64,SGVsbG8=")
         assert not r.ok
         m.assert_not_called()
 
     def test_link_local_metadata_blocked(self):
         # 169.254.169.254 (cloud metadata) must be refused before any fetch.
-        with patch("urllib.request.urlopen") as m, \
+        with patch("requests.get") as m, \
              patch("socket.getaddrinfo",
                    return_value=[(2, 1, 6, "", ("169.254.169.254", 80))]):
             r = _call("http://metadata.internal/latest/meta-data/")
         assert not r.ok
-        assert "link-local" in r.output or "metadata" in r.output
+        assert "non-public" in r.output
         m.assert_not_called()
 
     def test_normal_http_still_works(self):
-        with patch("socket.getaddrinfo",
-                   return_value=[(2, 1, 6, "", ("93.184.216.34", 80))]), \
-             patch("urllib.request.urlopen",
-                   return_value=_fake_response("<p>hi</p>")):
-            r = _call("http://example.com")
-        assert r.ok
-        assert "hi" in r.output
+        result = _fetch("<p>hi</p>")
+        assert result.ok
+        assert "hi" in result.output
 
-    def test_localhost_still_reachable(self):
-        # The agent legitimately talks to localm's own server on localhost.
-        with patch("socket.getaddrinfo",
-                   return_value=[(2, 1, 6, "", ("127.0.0.1", 8642))]), \
-             patch("urllib.request.urlopen",
-                   return_value=_fake_response("<p>local</p>")):
+    def test_localhost_blocked_by_default(self):
+        # Changed with the netpolicy rework: loopback/private targets are an
+        # SSRF surface (the localm API itself, ComfyUI, router admin pages)
+        # and are refused unless net_allow_private is set. The error message
+        # names the escape hatch.
+        with patch("requests.get") as m, \
+             patch("socket.getaddrinfo", return_value=_LOOPBACK_DNS):
+            r = _call("http://127.0.0.1:8642/health")
+        assert not r.ok
+        assert "net_allow_private" in r.output
+        m.assert_not_called()
+
+    def test_localhost_reachable_with_net_allow_private(self, monkeypatch):
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"net_allow_private": True})
+        with patch("socket.getaddrinfo", return_value=_LOOPBACK_DNS), \
+             patch("requests.get", return_value=_FakeResponse("<p>local</p>")):
             r = _call("http://127.0.0.1:8642/health")
         assert r.ok
+        assert "local" in r.output
+
+    def test_deny_list_blocks_domain(self, monkeypatch):
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"net_deny": ["example.com"]})
+        with patch("requests.get") as m:
+            r = _call("http://example.com/page")
+        assert not r.ok
+        assert "deny list" in r.output
+        m.assert_not_called()
+
+    def test_web_search_policy_refusal_is_tool_error(self, monkeypatch):
+        monkeypatch.setenv("LOCALM_NET_MODE", "off")
+        r = tool_web_search(Path("/tmp"), "anything")
+        assert not r.ok
+        assert "net_mode=off" in r.output

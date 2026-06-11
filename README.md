@@ -9,7 +9,7 @@ localm coder "add type hints to utils.py"
 localm serve mymodel
 ```
 
-Everything that does not strictly need the internet works fully offline. Online providers (OpenAI, Anthropic) exist as explicit opt-ins for the coder agent and are never a default.
+Everything that does not strictly need the internet works fully offline. Online providers (OpenAI, Anthropic) exist as explicit opt-ins for the coder agent and are never a default. When a task does need the web (current docs, the weather), the coder and chat can search and fetch pages through a single policy choke point — `off` / `ask` / `allow` modes, domain allow/deny lists, SSRF guard ([guide](docs/network.md)).
 
 ---
 
@@ -23,6 +23,7 @@ Everything that does not strictly need the internet works fully offline. Online 
 | **OpenAI-compatible server** | `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`, streaming SSE, TTFT and tok/s in usage |
 | **Web GUI** | `localm gui`: chat, coder agent, model manager, image generation, plugins, and settings in the browser; zero build step, fully offline ([guide](docs/gui.md)) |
 | **Coding agent** | `localm coder` / `localcoder`: agentic loop with file, shell, search, test, and image tools |
+| **Web access (opt-in)** | `web_search` + `fetch_url` for coder and chat via one network policy: `off`/`ask`/`allow`, domain allow/deny, private-address SSRF guard ([guide](docs/network.md)) |
 | **MCP client** | The coder consumes external MCP tool servers from `.localcoder/config.toml` |
 | **MCP server** | `localm mcp` exposes your local models to Claude Desktop and other MCP clients ([guide](docs/mcp.md)) |
 | **Interactive chat** | Multi-turn shell with `/imagine`, `/compact`, `/clear`, `/image`, `/system`, `/save` |
@@ -356,6 +357,7 @@ Stop strings (`<|im_end|>`, `<end_of_turn>`, etc.) are filtered via a streaming 
 | [docs/llamacpp-binding.md](docs/llamacpp-binding.md) | The ctypes binding internals |
 | [docs/gpu-setup.md](docs/gpu-setup.md) | GPU/DLL setup |
 | [docs/flux-setup.md](docs/flux-setup.md) | ComfyUI FLUX image pipeline |
+| [docs/network.md](docs/network.md) | Internet access for coder and chat: modes, domain rules, SSRF guard |
 | [docs/tls.md](docs/tls.md) | API keys, TLS, and reverse proxies for LAN serving |
 
 ---

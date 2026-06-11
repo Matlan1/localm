@@ -134,6 +134,14 @@ GUI gaps identified by comparing against LM Studio, Jan, Open WebUI.
 - [x] Coder session history browser: `GET /api/coder/history[/{name}]` lists past audit logs (`~/.localm/sessions/*.jsonl`) incl. pre-restart sessions; history button in the coder bar + "past sessions" on the setup form
 - [x] Settings "clear conversations" also clears the server store when persistence is on
 
+### Round 4 (shipped 2026-06-11) — internet access
+
+- [x] `localm/netpolicy.py`: single policy choke point for model-initiated requests — net_mode off/ask/allow (+ `LOCALM_NET_MODE` env), net_allow/net_deny domain suffix rules, private/loopback/link-local SSRF guard with `net_allow_private` escape hatch, per-hop redirect re-validation, size caps
+- [x] Coder: `web_search` tool (DuckDuckGo no-key default, SearXNG via `net_search_url`); `fetch_url` rerouted through the policy; both gated in the agent (off = fail fast, ask = approval flow); privacy-mode stderr audit
+- [x] `/api/web/search` + `/api/web/fetch` endpoints (403 on policy refusal)
+- [x] Chat: `/web <query>` command and a per-conversation "Web access" toggle — the model emits `<tool_call>` web requests, the GUI executes them through the policy and injects results as visible dimmed "Web" messages (max 3 rounds per send)
+- [x] Behaviour change: `fetch_url` to localhost/private addresses is now blocked by default (`net_allow_private true` restores it)
+
 ### Pages (round 2, shipped)
 
 - [x] Model management page: pull with progress, remove, aliases (registry list exists; mutations are CLI-only)
@@ -186,7 +194,7 @@ mode stays trace-free.
 - [ ] Persistent assistant memory for chat (ChatGPT-style memory file injected into the system prompt; `LOCALCODER.md` is the coder analogue) — non-privacy only
 - [ ] Prompt library / personas: named system prompts with icons and default params
 - [ ] Voice: Whisper STT input + TTS read-aloud (audio decode plumbing exists in `inference/media.py`)
-- [ ] Web search grounding for chat (explicit opt-in, per the offline-first policy)
+- [x] Web search grounding for chat and coder (shipped 2026-06-11, see Round 4): `localm/netpolicy.py` policy choke point (off/ask/allow, domain allow/deny, SSRF guard), coder `web_search` tool + gated `fetch_url`, `/api/web/*`, chat `/web` command + per-conversation web-access toggle with bounded tool loop ([docs/network.md](docs/network.md))
 
 ### Medium
 

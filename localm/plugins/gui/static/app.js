@@ -49,8 +49,29 @@ function stripThink(text) {
   return (text || "").replace(/<think>[\s\S]*?(<\/think>|$)/g, "").trim();
 }
 
+/** Replace raw <tool_call> JSON blocks with a compact human-readable note —
+ *  shown while the web-access loop executes the request. */
+function formatToolCalls(text) {
+  return (text || "").replace(
+    /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g,
+    (m, body) => {
+      try {
+        const call = JSON.parse(body);
+        const a = call.args || call.arguments || {};
+        const what =
+          call.name === "web_search" ? `web search: "${a.query || ""}"` :
+          call.name === "fetch_url"  ? `read page: ${a.url || ""}` :
+          String(call.name || "request");
+        return `\n> 🌐 *${what}*\n`;
+      } catch (e) {
+        return "\n> 🌐 *web request*\n";
+      }
+    });
+}
+
 function renderMarkdown(target, text) {
-  const { think, open, rest } = splitThink(text);
+  const { think, open, rest: rawRest } = splitThink(text);
+  const rest = formatToolCalls(rawRest);
   target.innerHTML = "";
   if (think) {
     const det = document.createElement("details");
@@ -529,8 +550,9 @@ function renderConvList() {
 }
 
 function addMessageRow(container, role, text, opts = {}) {
-  const row = el("div", "msg-row " + role);
-  row.appendChild(el("div", "msg-role", role === "user" ? "You" : "Model"));
+  const row = el("div", "msg-row " + role + (opts.cls ? " " + opts.cls : ""));
+  row.appendChild(el("div", "msg-role",
+    opts.label || (role === "user" ? "You" : "Model")));
   const body = el("div", "msg-body");
   renderMarkdown(body, text);
   for (const url of opts.images || []) {
@@ -590,13 +612,18 @@ function renderChat() {
   }
   conv.messages.forEach((m, i) => {
     const actions = [];
-    if (m.role === "user") {
+    if (m.role === "user" && !m.web) {
       actions.push(["edit", () => editMessage(conv, i)]);
     }
     if (m.role === "assistant" && i === conv.messages.length - 1 && !chat.abort) {
       actions.push(["regenerate", () => regenerate(conv)]);
     }
-    addMessageRow(box, m.role, msgText(m), { images: msgImages(m), actions });
+    addMessageRow(box, m.role, msgText(m), {
+      images: msgImages(m),
+      actions,
+      cls: m.web ? "web-note" : "",
+      label: m.web ? "Web" : undefined,
+    });
   });
   box.scrollTop = box.scrollHeight;
 }
@@ -670,13 +697,88 @@ $("chat-file").addEventListener("change", (e) => {
   e.target.value = "";
 });
 
+/* ---- web access (model-initiated, via the params-drawer toggle) ---- */
+
+const WEB_MAX_ROUNDS = 3;
+
+const WEB_TOOL_PROMPT =
+  "You can access the internet. When the answer genuinely needs current " +
+  "information from the web, reply with ONLY a tool call block:\n" +
+  '<tool_call>{"name": "web_search", "args": {"query": "..."}}</tool_call>\n' +
+  "To read a specific page:\n" +
+  '<tool_call>{"name": "fetch_url", "args": {"url": "https://..."}}</tool_call>\n' +
+  "The results arrive in the next user message. Then answer normally and " +
+  "name the sources you used. Do not search for things you already know.";
+
+/** First web tool call in a reply, or null. */
+function parseWebCall(text) {
+  const m = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/.exec(stripThink(text));
+  if (!m) return null;
+  try {
+    const call = JSON.parse(m[1]);
+    if (call && (call.name === "web_search" || call.name === "fetch_url")) {
+      return call;
+    }
+  } catch (e) { /* not valid JSON — treat as plain text */ }
+  return null;
+}
+
+/** Run a web tool call through the policy-enforced server endpoints. */
+async function requestWebTool(call) {
+  const a = call.args || call.arguments || {};
+  if (call.name === "web_search") {
+    const r = await fetch("/api/web/search", {
+      method: "POST", headers: authHeaders(),
+      body: JSON.stringify({ query: a.query || "", max_results: 5 }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    const lines = data.results.map((res, i) =>
+      `${i + 1}. ${res.title}\n   ${res.url}` +
+      (res.snippet ? `\n   ${res.snippet}` : ""));
+    return `[Results of web_search "${a.query}"]\n` + lines.join("\n");
+  }
+  if (call.name === "fetch_url") {
+    const r = await fetch("/api/web/fetch", {
+      method: "POST", headers: authHeaders(),
+      body: JSON.stringify({ url: a.url || "", max_chars: 6000 }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    return `[Content of ${data.url}]` +
+      (data.truncated ? " (truncated)" : "") + `\n${data.text}`;
+  }
+  throw new Error("Unknown web tool: " + call.name);
+}
+
+/** Run one model-requested web call, injecting the result (or the failure,
+ *  so the model can adapt) as a dimmed "Web" message. */
+async function runWebCall(conv, call) {
+  let note;
+  try {
+    note = await requestWebTool(call);
+  } catch (e) {
+    note = `[Web request failed: ${e.message}] Answer without the web, ` +
+           "and say that web access did not work.";
+    toast("Web request failed: " + e.message, true);
+  }
+  conv.messages.push({ role: "user", content: note, web: true });
+  saveConversations(conv);
+  renderChat();
+}
+
 /* sending */
 
-async function runCompletion(conv) {
+async function runCompletion(conv, webDepth = 0) {
   await maybeCompactConversation(conv);
   const params = chatParams();
+  const webEnabled = $("p-web").checked;
   const messages = [];
-  if (params.system) messages.push({ role: "system", content: params.system });
+  let sysText = params.system || "";
+  if (webEnabled) {
+    sysText = (sysText ? sysText + "\n\n" : "") + WEB_TOOL_PROMPT;
+  }
+  if (sysText) messages.push({ role: "system", content: sysText });
   // Server-generated images (/api/ URLs from /imagine) must not be sent to
   // the model as image parts — replace those messages with a text note.
   messages.push(...conv.messages.map((m) => {
@@ -755,6 +857,16 @@ async function runCompletion(conv) {
     $("chat-usage").textContent = bits.join(" · ");
   }
   renderChat();
+
+  // Web-access loop: when the model requested a search/page and the toggle
+  // is on, run it and let the model continue — bounded rounds per send.
+  if (webEnabled && webDepth < WEB_MAX_ROUNDS) {
+    const call = parseWebCall(full);
+    if (call) {
+      await runWebCall(conv, call);
+      await runCompletion(conv, webDepth + 1);
+    }
+  }
 }
 
 async function sendChat() {
@@ -1376,6 +1488,7 @@ $("setup-history").onclick = openSessionHistory;
 
 const CHAT_COMMANDS = [
   { cmd: "imagine", hint: "generate an image with FLUX", args: "<prompt>" },
+  { cmd: "web", hint: "search the web, then answer with sources", args: "<query>" },
   { cmd: "clear", hint: "clear this conversation" },
   { cmd: "compact", hint: "summarise older messages to free context" },
   { cmd: "export", hint: "download this conversation as markdown" },
@@ -1436,9 +1549,39 @@ async function runImagineInChat(promptText) {
   }
 }
 
+/** /web <query> — explicit, user-initiated web grounding: search, inject the
+ *  results into the conversation, and let the model answer from them. */
+async function runWebInChat(query) {
+  if (!query) { toast("Usage: /web <query>", true); return; }
+  if (chat.abort) { toast("Wait for the current reply to finish", true); return; }
+  if (!currentConv()) newConversation();
+  const conv = currentConv();
+  conv.messages.push({ role: "user", content: "/web " + query });
+  if (conv.messages.length === 1) {
+    conv.title = query.slice(0, 42) + (query.length > 42 ? "…" : "");
+    renderConvList();
+  }
+  saveConversations(conv);
+  renderChat();
+  let note;
+  try {
+    note = await requestWebTool({ name: "web_search", args: { query } });
+    note += `\n\nUsing these results, answer: ${query}\nName the sources you used.`;
+  } catch (e) {
+    toast("Web search failed: " + e.message, true);
+    note = `[Web search failed: ${e.message}] Tell the user, and answer ` +
+           "from your own knowledge if you can.";
+  }
+  conv.messages.push({ role: "user", content: note, web: true });
+  saveConversations(conv);
+  renderChat();
+  await runCompletion(conv);
+}
+
 function execChatCommand(cmd, arg) {
   switch (cmd) {
     case "imagine": runImagineInChat(arg); return true;
+    case "web": runWebInChat(arg); return true;
     case "clear": {
       const conv = currentConv();
       if (conv) { conv.messages = []; saveConversations(conv); renderChat(); }

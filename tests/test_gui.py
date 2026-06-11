@@ -665,6 +665,103 @@ class TestConversationStore:
 
 
 # ------------------------------------------------------------------ #
+#  Network tool gating (net_mode policy in the agent)                 #
+# ------------------------------------------------------------------ #
+
+class TestNetworkToolGating:
+    @staticmethod
+    def _fetch_call():
+        return ("Fetching.\n<tool_call>\n"
+                + json.dumps({"name": "fetch_url",
+                              "args": {"url": "https://example.com/x"}})
+                + "\n</tool_call>")
+
+    def test_net_off_blocks_fetch(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LOCALM_NET_MODE", "off")
+        backend = ScriptedBackend([self._fetch_call(), "Understood."])
+        session = CoderSession(tmp_path, backend, auto_approve=True)
+        session.send_message("fetch the page")
+        events = _drain(session, until_types={"final"})
+        result = next(e for e in events if e["type"] == "tool_result")
+        assert result["ok"] is False
+        assert "network policy" in result["summary"]
+
+    def test_net_ask_routes_through_approval(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LOCALM_NET_MODE", "ask")
+        backend = ScriptedBackend([self._fetch_call(), "Understood."])
+        session = CoderSession(tmp_path, backend, auto_approve=False)
+        session.send_message("fetch the page")
+        events = _drain(session, until_types={"confirm_request"})
+        req = events[-1]
+        assert req["tool"] == "fetch_url"
+        assert "example.com" in json.dumps(req["args"])
+        session.answer_confirm(req["confirm_id"], approved=False)
+        events = _drain(session, until_types={"final"})
+        result = next(e for e in events if e["type"] == "tool_result")
+        assert result["ok"] is False          # rejected, nothing fetched
+
+    def test_net_allow_runs_without_confirmation(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LOCALM_NET_MODE", "allow")
+        monkeypatch.setattr("localm.netpolicy.fetch_text",
+                            lambda url, **kw: (url, "FETCHED BODY"))
+        backend = ScriptedBackend([self._fetch_call(), "Done."])
+        session = CoderSession(tmp_path, backend, auto_approve=False)
+        session.send_message("fetch the page")
+        events = _drain(session, until_types={"final"})
+        types = [e["type"] for e in events]
+        assert "confirm_request" not in types
+        result = next(e for e in events if e["type"] == "tool_result")
+        assert result["ok"] is True
+
+
+# ------------------------------------------------------------------ #
+#  Web endpoints (/api/web/*)                                         #
+# ------------------------------------------------------------------ #
+
+class TestWebEndpoints:
+    def test_search_success_and_empty_query(self, gui_app, monkeypatch):
+        app, _ = gui_app
+        monkeypatch.setattr(
+            "localm.netpolicy.web_search",
+            lambda q, max_results=5: [
+                {"title": "T", "url": "https://t/", "snippet": "s"}])
+        with TestClient(app) as client:
+            data = client.post("/api/web/search", json={"query": "x"}).json()
+            assert data["results"][0]["title"] == "T"
+            assert client.post("/api/web/search",
+                               json={"query": "  "}).status_code == 400
+
+    def test_search_policy_refusal_is_403(self, gui_app, monkeypatch):
+        from localm.netpolicy import NetworkPolicyError
+        app, _ = gui_app
+
+        def deny(q, max_results=5):
+            raise NetworkPolicyError("Network access is disabled (net_mode=off).")
+        monkeypatch.setattr("localm.netpolicy.web_search", deny)
+        with TestClient(app) as client:
+            r = client.post("/api/web/search", json={"query": "x"})
+        assert r.status_code == 403
+        assert "disabled" in r.json()["detail"]
+
+    def test_fetch_truncation_and_failure(self, gui_app, monkeypatch):
+        app, _ = gui_app
+        monkeypatch.setattr("localm.netpolicy.fetch_text",
+                            lambda url, **kw: (url, "y" * 2000))
+        with TestClient(app) as client:
+            data = client.post("/api/web/fetch",
+                               json={"url": "https://e/", "max_chars": 500}).json()
+            assert data["truncated"] is True
+            assert len(data["text"]) == 500
+
+        def boom(url, **kw):
+            raise RuntimeError("connection refused")
+        monkeypatch.setattr("localm.netpolicy.fetch_text", boom)
+        with TestClient(app) as client:
+            assert client.post("/api/web/fetch",
+                               json={"url": "https://e/"}).status_code == 502
+
+
+# ------------------------------------------------------------------ #
 #  Coder session history (past audit logs)                            #
 # ------------------------------------------------------------------ #
 

@@ -1,0 +1,359 @@
+"""Tests for localm.netpolicy — the network policy for model-initiated requests."""
+
+from unittest.mock import patch
+
+import pytest
+
+from localm import netpolicy
+from localm.netpolicy import (
+    NetworkPolicyError,
+    _domain_list,
+    _host_matches,
+    check_url,
+    format_results,
+    html_to_text,
+    network_mode,
+    safe_fetch,
+    web_search,
+)
+
+
+@pytest.fixture(autouse=True)
+def _clean_env(monkeypatch):
+    """Tests control the mode explicitly; the machine's env must not leak in."""
+    monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
+
+
+def _with_config(monkeypatch, cfg: dict):
+    monkeypatch.setattr("localm.config.load_config", lambda: cfg)
+
+
+# ------------------------------------------------------------------ #
+#  Mode resolution                                                    #
+# ------------------------------------------------------------------ #
+
+class TestNetworkMode:
+    def test_env_overrides_config(self, monkeypatch):
+        _with_config(monkeypatch, {"net_mode": "allow"})
+        monkeypatch.setenv("LOCALM_NET_MODE", "off")
+        assert network_mode() == "off"
+
+    def test_config_value_used(self, monkeypatch):
+        _with_config(monkeypatch, {"net_mode": "allow"})
+        assert network_mode() == "allow"
+
+    def test_invalid_values_fall_back_to_ask(self, monkeypatch):
+        _with_config(monkeypatch, {"net_mode": "yolo"})
+        assert network_mode() == "ask"
+        monkeypatch.setenv("LOCALM_NET_MODE", "nonsense")
+        assert network_mode() == "ask"   # bad env falls through to config→ask
+
+    def test_default_is_ask(self, monkeypatch):
+        _with_config(monkeypatch, {})
+        assert network_mode() == "ask"
+
+
+# ------------------------------------------------------------------ #
+#  Domain rules                                                       #
+# ------------------------------------------------------------------ #
+
+class TestDomainRules:
+    def test_domain_list_accepts_list_and_csv(self):
+        assert _domain_list(["A.com", " b.org "]) == ["a.com", "b.org"]
+        assert _domain_list("a.com, b.org") == ["a.com", "b.org"]
+        assert _domain_list("*.a.com") == ["a.com"]
+        assert _domain_list(None) == []
+        assert _domain_list("") == []
+
+    def test_host_matches_suffix(self):
+        assert _host_matches("example.com", "example.com")
+        assert _host_matches("api.example.com", "example.com")
+        assert not _host_matches("notexample.com", "example.com")
+        assert not _host_matches("example.com.evil.net", "example.com")
+
+    def test_deny_wins(self, monkeypatch):
+        _with_config(monkeypatch, {
+            "net_mode": "allow",
+            "net_allow": ["example.com"],
+            "net_deny": ["example.com"],
+        })
+        with pytest.raises(NetworkPolicyError, match="deny list"):
+            check_url("https://example.com/page")
+
+    def test_allow_list_restricts(self, monkeypatch):
+        _with_config(monkeypatch, {
+            "net_mode": "allow",
+            "net_allow": ["example.com"],
+            "net_allow_private": True,   # skip DNS in this test
+        })
+        check_url("https://api.example.com/x")    # passes
+        with pytest.raises(NetworkPolicyError, match="allow list"):
+            check_url("https://other.org/x")
+
+    def test_empty_allow_means_any(self, monkeypatch):
+        _with_config(monkeypatch, {"net_mode": "allow",
+                                   "net_allow_private": True})
+        check_url("https://anything.example/x")
+
+
+# ------------------------------------------------------------------ #
+#  check_url: mode, scheme, SSRF                                      #
+# ------------------------------------------------------------------ #
+
+class TestCheckUrl:
+    def test_mode_off_blocks_everything(self, monkeypatch):
+        _with_config(monkeypatch, {"net_mode": "off"})
+        with pytest.raises(NetworkPolicyError, match="net_mode=off"):
+            check_url("https://example.com")
+
+    @pytest.mark.parametrize("url", [
+        "file:///etc/passwd",
+        "ftp://example.com/x",
+        "data:text/plain;base64,aGk=",
+        "javascript:alert(1)",
+    ])
+    def test_non_http_schemes_rejected(self, monkeypatch, url):
+        _with_config(monkeypatch, {"net_mode": "allow"})
+        with pytest.raises(NetworkPolicyError, match="http/https"):
+            check_url(url)
+
+    @pytest.mark.parametrize("ip", [
+        "127.0.0.1",        # loopback
+        "10.1.2.3",         # private
+        "172.16.0.9",       # private
+        "192.168.1.1",      # private (router admin)
+        "169.254.169.254",  # link-local / cloud metadata
+        "0.0.0.0",          # unspecified
+    ])
+    def test_private_addresses_blocked(self, monkeypatch, ip):
+        _with_config(monkeypatch, {"net_mode": "allow"})
+        monkeypatch.setattr(
+            "socket.getaddrinfo",
+            lambda host, port, *a, **k: [(2, 1, 6, "", (ip, 0))])
+        with pytest.raises(NetworkPolicyError, match="non-public"):
+            check_url("https://innocent-looking.example/")
+
+    def test_private_allowed_when_configured(self, monkeypatch):
+        _with_config(monkeypatch, {"net_mode": "allow",
+                                   "net_allow_private": True})
+        monkeypatch.setattr(
+            "socket.getaddrinfo",
+            lambda host, port, *a, **k: [(2, 1, 6, "", ("127.0.0.1", 0))])
+        check_url("http://localhost:8188/")   # no raise
+
+    def test_public_address_passes(self, monkeypatch):
+        _with_config(monkeypatch, {"net_mode": "allow"})
+        monkeypatch.setattr(
+            "socket.getaddrinfo",
+            lambda host, port, *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))])
+        check_url("https://example.com/")
+
+    def test_unresolvable_host_passes_policy(self, monkeypatch):
+        import socket as _socket
+        _with_config(monkeypatch, {"net_mode": "allow"})
+
+        def boom(host, port, *a, **k):
+            raise _socket.gaierror("no such host")
+        monkeypatch.setattr("socket.getaddrinfo", boom)
+        check_url("https://does-not-exist.example/")   # fetch will fail later
+
+
+# ------------------------------------------------------------------ #
+#  safe_fetch: redirects re-validated, size caps                      #
+# ------------------------------------------------------------------ #
+
+class _FakeResponse:
+    def __init__(self, *, status=200, headers=None, body=b"", redirect=None):
+        self.status_code = status
+        self.headers = headers or {}
+        if redirect:
+            self.headers["Location"] = redirect
+        self._body = body
+
+    @property
+    def is_redirect(self):
+        return self.status_code in (301, 302, 303, 307, 308) and \
+            "Location" in self.headers
+
+    @property
+    def is_permanent_redirect(self):
+        return False
+
+    def iter_content(self, chunk_size=65536):
+        for i in range(0, len(self._body), chunk_size):
+            yield self._body[i:i + chunk_size]
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+    def close(self):
+        pass
+
+
+class TestSafeFetch:
+    def _public_dns(self, monkeypatch):
+        monkeypatch.setattr(
+            "socket.getaddrinfo",
+            lambda host, port, *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))])
+
+    def test_basic_fetch(self, monkeypatch):
+        _with_config(monkeypatch, {"net_mode": "allow"})
+        self._public_dns(monkeypatch)
+        monkeypatch.setattr("requests.get", lambda url, **kw: _FakeResponse(
+            headers={"Content-Type": "text/plain"}, body=b"hello"))
+        final, ctype, text = safe_fetch("https://example.com/a")
+        assert (final, text) == ("https://example.com/a", "hello")
+        assert "text/plain" in ctype
+
+    def test_redirect_to_private_blocked(self, monkeypatch):
+        """A public page must not be able to bounce the fetch into LAN/loopback."""
+        _with_config(monkeypatch, {"net_mode": "allow"})
+
+        def dns(host, port, *a, **k):
+            ip = "127.0.0.1" if host == "localhost" else "93.184.216.34"
+            return [(2, 1, 6, "", (ip, 0))]
+        monkeypatch.setattr("socket.getaddrinfo", dns)
+
+        def fake_get(url, **kw):
+            if "example.com" in url:
+                return _FakeResponse(status=302,
+                                     redirect="http://localhost:8642/v1/models")
+            return _FakeResponse(body=b"secret")
+        monkeypatch.setattr("requests.get", fake_get)
+        with pytest.raises(NetworkPolicyError, match="non-public"):
+            safe_fetch("https://example.com/jump")
+
+    def test_too_many_redirects(self, monkeypatch):
+        _with_config(monkeypatch, {"net_mode": "allow"})
+        self._public_dns(monkeypatch)
+        monkeypatch.setattr("requests.get", lambda url, **kw: _FakeResponse(
+            status=302, redirect="https://example.com/again"))
+        with pytest.raises(NetworkPolicyError, match="redirects"):
+            safe_fetch("https://example.com/loop")
+
+    def test_body_capped(self, monkeypatch):
+        _with_config(monkeypatch, {"net_mode": "allow"})
+        self._public_dns(monkeypatch)
+        monkeypatch.setattr("requests.get", lambda url, **kw: _FakeResponse(
+            headers={"Content-Type": "text/plain"}, body=b"x" * 500_000))
+        _, _, text = safe_fetch("https://example.com/big", max_bytes=1000)
+        assert len(text) <= 65536   # stops after the first chunk crosses the cap
+
+
+# ------------------------------------------------------------------ #
+#  HTML stripping                                                     #
+# ------------------------------------------------------------------ #
+
+class TestHtmlToText:
+    def test_strips_tags_and_script(self):
+        text = html_to_text(
+            "<html><head><title>t</title><script>evil()</script></head>"
+            "<body><h1>Hi</h1><p>one</p><p>two &amp; three</p></body></html>")
+        assert "evil" not in text
+        assert "Hi" in text
+        assert "two & three" in text
+
+    def test_survives_malformed_html(self):
+        assert isinstance(html_to_text("<div><p>ok<"), str)
+
+
+# ------------------------------------------------------------------ #
+#  Web search                                                         #
+# ------------------------------------------------------------------ #
+
+_DDG_HTML = """
+<html><body>
+<div class="result">
+  <h2 class="result__title">
+    <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fdocs&amp;rut=x">Example <b>Docs</b></a>
+  </h2>
+  <a class="result__snippet" href="...">The documentation for Example.</a>
+</div>
+<div class="result">
+  <h2 class="result__title">
+    <a class="result__a" href="https://direct.example.org/page">Direct Result</a>
+  </h2>
+  <a class="result__snippet" href="...">A direct link snippet.</a>
+</div>
+</body></html>
+"""
+
+
+class TestWebSearch:
+    def test_empty_query_rejected(self, monkeypatch):
+        _with_config(monkeypatch, {"net_mode": "allow"})
+        with pytest.raises(ValueError):
+            web_search("   ")
+
+    def test_ddg_parsing(self, monkeypatch):
+        _with_config(monkeypatch, {"net_mode": "allow"})
+        monkeypatch.setattr(
+            "socket.getaddrinfo",
+            lambda host, port, *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))])
+
+        class _R:
+            text = _DDG_HTML
+            def raise_for_status(self):
+                pass
+        monkeypatch.setattr("requests.post", lambda url, **kw: _R())
+
+        results = web_search("example docs")
+        assert results[0]["url"] == "https://example.com/docs"   # uddg decoded
+        assert results[0]["title"] == "Example Docs"
+        assert "documentation" in results[0]["snippet"]
+        assert results[1]["url"] == "https://direct.example.org/page"
+
+    def test_searxng_backend(self, monkeypatch):
+        _with_config(monkeypatch, {
+            "net_mode": "allow",
+            "net_allow_private": True,
+            "net_search_url": "http://127.0.0.1:8080/",
+        })
+        seen = {}
+
+        class _R:
+            def raise_for_status(self):
+                pass
+            def json(self):
+                return {"results": [
+                    {"title": "T1", "url": "https://a.example/", "content": "c1"},
+                    {"title": "T2", "url": "https://b.example/", "content": "c2"},
+                ]}
+
+        def fake_get(url, **kw):
+            seen["url"] = url
+            return _R()
+        monkeypatch.setattr("requests.get", fake_get)
+
+        results = web_search("query", max_results=1)
+        assert seen["url"].startswith("http://127.0.0.1:8080/search?")
+        assert results == [{"title": "T1", "url": "https://a.example/",
+                            "snippet": "c1"}]
+
+    def test_no_results_is_an_error(self, monkeypatch):
+        _with_config(monkeypatch, {"net_mode": "allow"})
+        monkeypatch.setattr(
+            "socket.getaddrinfo",
+            lambda host, port, *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))])
+
+        class _R:
+            text = "<html><body>captcha?</body></html>"
+            def raise_for_status(self):
+                pass
+        monkeypatch.setattr("requests.post", lambda url, **kw: _R())
+        with pytest.raises(RuntimeError, match="no parseable results"):
+            web_search("anything")
+
+    def test_mode_off_blocks_search(self, monkeypatch):
+        _with_config(monkeypatch, {"net_mode": "off"})
+        with pytest.raises(NetworkPolicyError):
+            web_search("anything")
+
+    def test_format_results(self):
+        out = format_results([
+            {"title": "A", "url": "https://a/", "snippet": "sa"},
+            {"title": "B", "url": "https://b/", "snippet": ""},
+        ])
+        assert "1. A" in out and "https://a/" in out and "sa" in out
+        assert "2. B" in out

@@ -15,8 +15,15 @@ reply does not pay the load cost.
 ## Chat
 
 - Typing `/` opens a command menu: `/imagine <prompt>` (generate an image
-  inline), `/clear`, `/compact`, `/export`, `/rename <title>`, `/system`,
-  `/new`. Slash input is always handled by the UI, never sent to the model.
+  inline), `/web <query>` (search the web, answer with sources), `/clear`,
+  `/compact`, `/export`, `/rename <title>`, `/system`, `/new`. Slash input is
+  always handled by the UI, never sent to the model.
+- Web access: `/web` grounds one answer in search results, and the "Web
+  access" checkbox in the parameters drawer lets the model search and read
+  pages on its own mid-conversation (bounded rounds; every request and result
+  is shown as a dimmed "Web" message). Both run through the server's network
+  policy — see [network.md](network.md). Off by default; without them chat is
+  fully offline.
 - Model selector in the sidebar lists every registered model. Switching loads the new model and unloads the old one (the switch waits for any in-flight request to finish).
 - Streaming responses with markdown and highlighted code blocks, copy buttons on messages and code.
 - The parameters drawer sets temperature, top-p, max tokens, seed, and a system prompt per conversation.
