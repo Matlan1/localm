@@ -174,7 +174,7 @@ Every surface — terminal chat (`localm run`), the API server (`localm serve`),
 | mode | what is written |
 |---|---|
 | `privacy` (default) | **Nothing, anywhere.** No audit trail, no transcripts, no coder checkpoints, no image/music prompt sidecars; GUI conversations stay in memory only (gone on reload); readline + child-shell history suppressed; shell history scrubbed on exit. Explicit actions (`/save`, `/export`, generated files themselves) still work. |
-| `log` | JSONL audit trail per session in `~/.localm/sessions/` (user messages, replies, tool calls). |
+| `log` | JSONL audit trail per session in `~/.localm/sessions/` (user messages, replies, tool calls). GUI chat conversations additionally persist server-side in `~/.localm/chats/` and reload on any browser; past coder audit logs are browsable from the GUI's history button. |
 | `full` | Everything in `log`, plus a human-readable Markdown transcript (coder: `.localcoder/sessions/` in the project; chat/server: `~/.localm/sessions/`). |
 
 Resolution order: `--mode` flag > project `.localcoder/config.toml` (coder only) > per-surface config (`chat_mode` / `coder_mode`) > global config `mode` > `privacy`. Set them in `~/.localm/config.json`, the GUI Settings page, or the launcher's Privacy card (global + chat/coder overrides).

@@ -20,7 +20,8 @@ reply does not pay the load cost.
 - Model selector in the sidebar lists every registered model. Switching loads the new model and unloads the old one (the switch waits for any in-flight request to finish).
 - Streaming responses with markdown and highlighted code blocks, copy buttons on messages and code.
 - The parameters drawer sets temperature, top-p, max tokens, seed, and a system prompt per conversation.
-- Conversations are stored in your browser's localStorage, never on the server. Deleting one removes it for good.
+- Conversation persistence follows the session mode. In `privacy` (the default) conversations live in memory only and vanish on reload. In `log`/`full` they are saved to `chats/` in the localm data directory (with localStorage as a cache), so they survive reloads, browser profile wipes, and server restarts. Deleting one removes it everywhere.
+- The page you were on (chat, coder, models, …) is restored after a reload — except in privacy mode, which leaves no trace of it.
 - The usage line under the composer shows total tokens, time to first token, and tokens per second for the last reply.
 
 ## Coder
@@ -31,7 +32,7 @@ What you see in the feed:
 
 - The agent's reasoning streams live.
 - Every tool call becomes a card. Click it to expand arguments and output.
-- Destructive actions (file writes, shell commands) pause the agent and show an approval card with a unified diff of exactly what would change. Approve or reject from the browser. Unanswered approvals time out after 10 minutes and are rejected.
+- Destructive actions (file writes, shell commands) pause the agent and show an approval card with a unified diff of exactly what would change. Approve or reject from the browser. Unanswered approvals time out after 10 minutes and are rejected. Answered approvals keep showing their outcome — including after a page reload, and in other tabs attached to the same session.
 - Auto-approve can be enabled at session start if you trust the task.
 
 Session persistence follows the coder's modes: `privacy` (default, nothing saved), `log` (JSONL audit trail), `full` (audit trail plus markdown transcript).
@@ -47,6 +48,9 @@ Stop asks the agent to halt at the next safe point. End session terminates it.
   auto-approve.
 - The bar's undo button reverts the last file write, compact summarises old
   turns to free context, and log opens the JSONL audit trail (log/full modes).
+- The history button (also "past sessions" on the setup form) lists the audit
+  logs earlier log/full-mode sessions left behind — including sessions from
+  before a server restart — and opens them in the same log viewer.
 - Session setup accepts a model (switches the engine), max turns, temperature,
   and a scope glob that confines file tools.
 - Typing `/` opens the coder command menu (`/undo`, `/compact`, `/log`,

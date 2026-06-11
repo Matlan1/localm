@@ -702,6 +702,8 @@ pre:hover .copy-btn { opacity: 1; }
   border-bottom: 1px solid var(--border); word-break: break-word;
 }
 .modal-body .log-entry .t { color: var(--accent); margin-right: 8px; }
+.modal-body .log-entry.clickable { cursor: pointer; }
+.modal-body .log-entry.clickable:hover { background: rgba(128, 128, 128, 0.12); }
 
 /* theme button */
 .theme-btn { width: 100%; margin-top: 8px; }

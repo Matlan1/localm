@@ -141,6 +141,17 @@ class CoderSession:
         answered = pending.answered.wait(timeout=_CONFIRM_TIMEOUT_S)
         with self._lock:
             self._pending = None
+        # Always record the outcome in the event stream. Without this, a
+        # reloaded page replays the confirm_request and shows live
+        # approve/reject buttons for a confirmation that was already answered
+        # (or timed out, or was force-rejected by stop()).
+        self._push({
+            "type": "confirm_resolved",
+            "confirm_id": pending.id,
+            "tool": pending.tool,
+            "approved": pending.approved if answered else False,
+            "timed_out": not answered,
+        })
         if not answered:
             self._push({"type": "info",
                         "text": f"Confirmation for {call.name} timed out — rejected."})
