@@ -126,6 +126,14 @@ GUI gaps identified by comparing against LM Studio, Jan, Open WebUI.
 - [x] Session audit-log viewer (JSONL from log/full modes)
 - [x] Multiple concurrent sessions in the UI (backend already supports it)
 
+### Round 3 (shipped 2026-06-11)
+
+- [x] Fix: answered approval cards replayed as still-pending after a page reload — `confirm_resolved` event now recorded in the stream and replay buffer; cards resolve idempotently (covers approve, reject, timeout, and stop)
+- [x] Remember the active page across reloads (`localm.activeView`; never written in privacy mode)
+- [x] Server-side chat conversation persistence in non-privacy modes: `PUT/GET/DELETE /api/conversations`, stored in `<data dir>/chats/`, merged with the localStorage cache at load; privacy mode unchanged (memory only, 403 on the store)
+- [x] Coder session history browser: `GET /api/coder/history[/{name}]` lists past audit logs (`~/.localm/sessions/*.jsonl`) incl. pre-restart sessions; history button in the coder bar + "past sessions" on the setup form
+- [x] Settings "clear conversations" also clears the server store when persistence is on
+
 ### Pages (round 2, shipped)
 
 - [x] Model management page: pull with progress, remove, aliases (registry list exists; mutations are CLI-only)
@@ -161,6 +169,44 @@ Backend scaffold is in place; the user-facing parts are still to do.
 - [x] TLS / reverse-proxy guide for LAN serving
 
 ---
+
+## Suite parity roadmap
+
+Gap analysis vs the polished consumer suites (LM Studio, Msty, Jan, Open
+WebUI, GPT4All, AnythingLLM), 2026-06-11. Goal: everything below, eventually.
+Persistence-touching items are always gated on `effective_mode()` — privacy
+mode stays trace-free.
+
+### High impact
+
+- [ ] RAG / chat-with-documents: attach PDF/docx/txt in chat; persistent knowledge-base collections with embeddings (`/v1/embeddings` already exists) and citations in answers — the single biggest functional gap
+- [ ] In-app model discovery: search HuggingFace from the Models page, curated starter picks, per-quant "fits your VRAM" badges (reuse the VRAM preflight logic)
+- [ ] Conversation search + folders/pinning across all chats (build on the new server store)
+- [ ] Message branching: edit-and-fork trees, regeneration variant navigation (< 2/3 >) instead of overwrite
+- [ ] Persistent assistant memory for chat (ChatGPT-style memory file injected into the system prompt; `LOCALCODER.md` is the coder analogue) — non-privacy only
+- [ ] Prompt library / personas: named system prompts with icons and default params
+- [ ] Voice: Whisper STT input + TTS read-aloud (audio decode plumbing exists in `inference/media.py`)
+- [ ] Web search grounding for chat (explicit opt-in, per the offline-first policy)
+
+### Medium
+
+- [ ] Hardware monitor in the GUI status bar (live RAM/VRAM/CPU/GPU)
+- [ ] Sampler presets; per-model saved defaults; chat-template editor
+- [ ] GPU offload / context sliders with live VRAM estimate in Settings (CLI config covers the function, not the feel)
+- [ ] Multi-model side-by-side compare; JIT model load + idle TTL auto-unload (currently `Semaphore(1)` + one engine)
+- [ ] Download manager panel: background queue, pause, parallel (CLI already resumes)
+- [ ] Mermaid diagram rendering; artifacts/canvas live HTML/SVG preview; sandboxed code interpreter
+- [ ] Command palette (Ctrl+K), keyboard shortcuts, drag-and-drop files into chat
+- [ ] Flash attention / KV-cache quantization / speculative decoding toggles
+
+### Polish / later
+
+- [ ] First-run wizard: detect hardware, recommend a starter model
+- [ ] Empty-state funnels ("no models yet → pull one" guided flow)
+- [ ] One-file backup / export-import of all user data (chats, prompts, settings)
+- [ ] i18n, accessibility pass, mobile/PWA layout
+- [ ] Profiles / multi-user accounts (likely out of scope for home use)
+- [ ] Native shell, tray, auto-update, installer — tracked above as the Tauri 2 item
 
 ## Future Benchmarking (Under Review)
 

@@ -189,10 +189,13 @@ $("theme-toggle").onclick = () =>
 const VIEWS = ["chat", "coder", "models", "images", "plugins", "settings"];
 
 function showView(name) {
+  if (!VIEWS.includes(name)) name = "chat";
   for (const v of VIEWS) {
     $("view-" + v).classList.toggle("active", v === name);
     $("nav-" + v).classList.toggle("active", v === name);
   }
+  // Remembered across reloads — but never in privacy mode (no traces).
+  if (!chat.privacy) localStorage.setItem("localm.activeView", name);
   // Lazy page refreshes live in pages.js
   if (window.onViewShown) window.onViewShown(name);
 }
@@ -273,6 +276,7 @@ const chat = {
   attachments: [],   // {name, dataUri}
   ctxMax: 16384,     // context ceiling — refreshed from /v1/config
   privacy: false,    // server in privacy mode → conversations not persisted
+  persist: false,    // non-privacy: conversations sync to the server store
 };
 
 // Conversation compaction mirrors localm/inference/compact.py:
@@ -328,7 +332,7 @@ async function compactConversation(conv) {
        { role: "assistant", content: "Understood." }];
 
   conv.messages = [...bridge, ...recent];
-  saveConversations();
+  saveConversations(conv);
   renderChat();
   toast(summary ? "Older messages summarised to free context"
                 : "Older messages trimmed (summarisation unavailable)");
@@ -353,6 +357,8 @@ async function refreshCtxLimit() {
       chat.privacy = cfg.effective_mode === "privacy";
       if (chat.privacy) {
         localStorage.removeItem("localm.conversations");
+        localStorage.removeItem("localm.activeView");
+        localStorage.removeItem("localm.coderCwd");
         const h = document.querySelector("#conversations h3");
         if (h && !document.getElementById("privacy-hint")) {
           const hint = document.createElement("div");
@@ -368,7 +374,7 @@ async function refreshCtxLimit() {
   } catch (e) { /* keep default */ }
 }
 
-function saveConversations() {
+function saveConversations(changed) {
   if (chat.privacy) return;   // privacy mode: no traces, not even localStorage
   try {
     localStorage.setItem("localm.conversations",
@@ -378,6 +384,81 @@ function saveConversations() {
     const slim = chat.conversations.slice(0, 10);
     try { localStorage.setItem("localm.conversations", JSON.stringify(slim)); } catch {}
   }
+  if (changed) pushConversation(changed);
+}
+
+/* ---- server-side conversation store (non-privacy modes only) ---- */
+
+const _convPushTimers = new Map();
+
+/** Debounced upsert of one conversation to the server store. */
+function pushConversation(conv) {
+  if (!chat.persist) return;
+  // Brand-new conversations with nothing in them yet aren't worth a file.
+  if (!conv.messages.length && conv.title === "New chat") return;
+  conv.updated_at = Date.now();
+  clearTimeout(_convPushTimers.get(conv.id));
+  _convPushTimers.set(conv.id, setTimeout(async () => {
+    _convPushTimers.delete(conv.id);
+    try {
+      await fetch("/api/conversations/" + encodeURIComponent(conv.id), {
+        method: "PUT",
+        headers: authHeaders(),
+        body: JSON.stringify({ title: conv.title,
+                               updated_at: conv.updated_at,
+                               messages: conv.messages }),
+      });
+    } catch (e) { /* offline — localStorage still has the copy */ }
+  }, 600));
+}
+
+function deleteConversationRemote(convId) {
+  if (!chat.persist) return;
+  clearTimeout(_convPushTimers.get(convId));
+  _convPushTimers.delete(convId);
+  fetch("/api/conversations/" + encodeURIComponent(convId), {
+    method: "DELETE", headers: authHeaders(),
+  }).catch(() => {});
+}
+
+/** Load the server store and merge with the localStorage cache: the newer
+ *  copy of each conversation wins; local-only ones are uploaded. */
+async function initServerConversations() {
+  if (chat.privacy) return;
+  try {
+    const r = await fetch("/api/conversations", { headers: authHeaders() });
+    if (!r.ok) return;
+    const data = await r.json();
+    if (!data.enabled) return;
+    chat.persist = true;
+    const byId = new Map(data.conversations.map((c) => [c.id, c]));
+    for (const local of chat.conversations) {
+      const remote = byId.get(local.id);
+      if (!remote || (local.updated_at || 0) > (remote.updated_at || 0)) {
+        byId.set(local.id, local);
+        pushConversation(local);
+      }
+    }
+    chat.conversations = [...byId.values()]
+      .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
+    if (!chat.activeId && chat.conversations.length) {
+      chat.activeId = chat.conversations[0].id;
+    }
+    saveConversations();
+    renderConvList();
+    renderChat();
+    const h = document.querySelector("#conversations h3");
+    if (h && !document.getElementById("persist-hint")) {
+      const hint = document.createElement("div");
+      hint.id = "persist-hint";
+      hint.className = "privacy-hint";
+      hint.textContent = "history saved on this machine";
+      hint.title = "Conversations are stored in the localm data directory " +
+        "(chats/) because the server runs in log or full mode. They survive " +
+        "browser reloads and profile wipes.";
+      h.after(hint);
+    }
+  } catch (e) { /* store unavailable — localStorage keeps working */ }
 }
 
 function currentConv() {
@@ -388,7 +469,7 @@ function newConversation() {
   const conv = { id: Date.now().toString(36), title: "New chat", messages: [] };
   chat.conversations.unshift(conv);
   chat.activeId = conv.id;
-  saveConversations();
+  saveConversations(conv);
   renderConvList();
   renderChat();
 }
@@ -416,7 +497,7 @@ function renderConvList() {
       input.value = conv.title;
       const commit = () => {
         conv.title = input.value.trim() || conv.title;
-        saveConversations();
+        saveConversations(conv);
         renderConvList();
       };
       input.onblur = commit;
@@ -431,6 +512,7 @@ function renderConvList() {
       e.stopPropagation();
       chat.conversations = chat.conversations.filter((c) => c.id !== conv.id);
       if (chat.activeId === conv.id) chat.activeId = chat.conversations[0]?.id || null;
+      deleteConversationRemote(conv.id);
       saveConversations();
       renderConvList();
       renderChat();
@@ -524,7 +606,7 @@ function editMessage(conv, index) {
   $("chat-input").value = msgText(m);
   autoGrow($("chat-input"));
   conv.messages = conv.messages.slice(0, index);   // drop it and everything after
-  saveConversations();
+  saveConversations(conv);
   renderChat();
   $("chat-input").focus();
 }
@@ -534,7 +616,7 @@ function regenerate(conv) {
   // Drop the last assistant reply, keep the user message, stream again
   if (conv.messages[conv.messages.length - 1]?.role === "assistant") {
     conv.messages.pop();
-    saveConversations();
+    saveConversations(conv);
     renderChat();
   }
   runCompletion(conv);
@@ -665,7 +747,7 @@ async function runCompletion(conv) {
   }
 
   conv.messages.push({ role: "assistant", content: full });
-  saveConversations();
+  saveConversations(conv);
   if (usage) {
     const bits = [`${usage.total_tokens} tok`];
     if (usage.ttft_ms != null) bits.push(`TTFT ${usage.ttft_ms} ms`);
@@ -708,6 +790,7 @@ async function sendChat() {
     conv.title = text.slice(0, 42) + (text.length > 42 ? "…" : "") || "Image chat";
     renderConvList();
   }
+  saveConversations(conv);   // user message persists even if the reply dies
   input.value = "";
   autoGrow(input);
   renderChat();
@@ -813,6 +896,7 @@ function registerSession(info, { replay }) {
     liveBody: null,
     liveText: "",
     pendingCards: [],
+    confirmCards: new Map(),   // confirm_id → {card, title, buttons, tool}
     closed: false,
   };
   coder.sessions.set(info.id, s);
@@ -873,6 +957,18 @@ function buildToolCard(ev) {
   return card;
 }
 
+/** Mark a confirm card as resolved. Idempotent — fed both by the local
+ *  button click and by the confirm_resolved event from the server (which is
+ *  also what replay sends for already-answered confirmations). */
+function resolveConfirmCard(s, confirmId, approved, timedOut) {
+  const entry = s.confirmCards.get(confirmId);
+  if (!entry || entry.card.classList.contains("answered")) return;
+  entry.card.classList.add("answered");
+  entry.title.textContent = timedOut
+    ? "✗ Timed out — rejected " + entry.tool
+    : (approved ? "✓ Approved " : "✗ Rejected ") + entry.tool;
+}
+
 function buildConfirmCard(s, ev) {
   const card = el("div", "confirm-card");
   const inner = el("div", "inner");
@@ -891,13 +987,18 @@ function buildConfirmCard(s, ev) {
   const no = el("button", "btn-reject", "Reject");
   const answer = async (approved) => {
     try {
-      await fetch(`/api/coder/sessions/${s.info.id}/confirm`, {
+      const r = await fetch(`/api/coder/sessions/${s.info.id}/confirm`, {
         method: "POST",
         headers: authHeaders(),
         body: JSON.stringify({ confirm_id: ev.confirm_id, approved }),
       });
-      card.classList.add("answered");
-      title.textContent = (approved ? "✓ Approved " : "✗ Rejected ") + ev.tool;
+      if (!r.ok) {
+        // Already answered elsewhere (another tab) or timed out server-side —
+        // the confirm_resolved event carries the real outcome.
+        toast("Confirmation was no longer pending", true);
+        return;
+      }
+      resolveConfirmCard(s, ev.confirm_id, approved, false);
     } catch (e) {
       toast("Failed to answer confirmation: " + e.message, true);
     }
@@ -908,6 +1009,7 @@ function buildConfirmCard(s, ev) {
   buttons.appendChild(no);
   inner.appendChild(buttons);
   card.appendChild(inner);
+  s.confirmCards.set(ev.confirm_id, { card, title, tool: ev.tool });
   return card;
 }
 
@@ -955,6 +1057,10 @@ function handleCoderEvent(s, ev) {
     case "confirm_request": {
       flushAssistantBlock(s);
       feedAppend(s, buildConfirmCard(s, ev));
+      break;
+    }
+    case "confirm_resolved": {
+      resolveConfirmCard(s, ev.confirm_id, ev.approved, ev.timed_out);
       break;
     }
     case "user": {
@@ -1064,7 +1170,7 @@ async function startCoderSession() {
     });
     if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
     const info = await r.json();
-    localStorage.setItem("localm.coderCwd", cwd);
+    if (!chat.privacy) localStorage.setItem("localm.coderCwd", cwd);
     registerSession(info, { replay: false });
     activateSession(info.id);
     refreshModels();
@@ -1192,14 +1298,9 @@ $("coder-compact").onclick = async () => {
   }
 };
 
-$("coder-log").onclick = async () => {
-  const s = activeSession();
-  if (!s) return;
-  const r = await fetch(`/api/coder/sessions/${s.info.id}/log`, {
-    headers: authHeaders() });
-  const data = await r.json();
-  if (!r.ok) { toast(data.detail || "No log available", true); return; }
-  openModal("Audit log — " + sessionLabel(s.info), (body) => {
+/** Audit-entry modal shared by the live-session log and past-session history. */
+function showAuditModal(title, data) {
+  openModal(title, (body) => {
     body.appendChild(el("div", "sub", data.path));
     for (const entry of data.entries) {
       const row = el("div", "log-entry");
@@ -1210,7 +1311,64 @@ $("coder-log").onclick = async () => {
     }
     if (!data.entries.length) body.appendChild(el("div", "sub", "(empty)"));
   });
+}
+
+$("coder-log").onclick = async () => {
+  const s = activeSession();
+  if (!s) return;
+  const r = await fetch(`/api/coder/sessions/${s.info.id}/log`, {
+    headers: authHeaders() });
+  const data = await r.json();
+  if (!r.ok) { toast(data.detail || "No log available", true); return; }
+  showAuditModal("Audit log — " + sessionLabel(s.info), data);
 };
+
+/** Past coder sessions: audit logs left behind by log/full-mode sessions,
+ *  including ones from before a server restart. */
+async function openSessionHistory() {
+  let data = null;
+  try {
+    const r = await fetch("/api/coder/history", { headers: authHeaders() });
+    if (r.ok) data = await r.json();
+  } catch (e) { /* handled below */ }
+  if (!data) { toast("Could not load session history", true); return; }
+  openModal("Past coder sessions", (body) => {
+    if (!data.enabled) {
+      body.appendChild(el("div", "sub",
+        "New sessions are not being recorded (privacy mode). Anything below " +
+        "is from earlier log/full-mode sessions."));
+    }
+    if (!data.logs.length) {
+      body.appendChild(el("div", "sub",
+        "No session logs yet — start a session with persistence set to " +
+        "log or full, and its audit trail will appear here."));
+      return;
+    }
+    for (const item of data.logs) {
+      const row = el("div", "log-entry clickable");
+      const when = new Date(item.mtime * 1000).toLocaleString();
+      const kb = (item.size_bytes / 1024).toFixed(1);
+      row.appendChild(el("span", "t", when));
+      row.appendChild(document.createTextNode(`${item.name} (${kb} KB)`));
+      row.onclick = async () => {
+        try {
+          const r = await fetch(
+            "/api/coder/history/" + encodeURIComponent(item.name),
+            { headers: authHeaders() });
+          const entries = await r.json();
+          if (!r.ok) throw new Error(entries.detail || r.statusText);
+          showAuditModal("Session — " + item.name, entries);
+        } catch (e) {
+          toast("Could not open log: " + e.message, true);
+        }
+      };
+      body.appendChild(row);
+    }
+  });
+}
+
+$("coder-history").onclick = openSessionHistory;
+$("setup-history").onclick = openSessionHistory;
 
 /* ================================================================ */
 /*  Slash commands                                                   */
@@ -1240,7 +1398,7 @@ async function runImagineInChat(promptText) {
   if (!currentConv()) newConversation();
   const conv = currentConv();
   conv.messages.push({ role: "user", content: "/imagine " + promptText });
-  saveConversations();
+  saveConversations(conv);
   renderChat();
   const box = $("chat-messages");
   const { body } = addMessageRow(box, "assistant", "");
@@ -1266,7 +1424,7 @@ async function runImagineInChat(promptText) {
             image_url: { url: "/api/imagine/file/" + encodeURIComponent(end.result) } },
         ],
       });
-      saveConversations();
+      saveConversations(conv);
       renderChat();
     } else {
       body.textContent = "Image generation " + end.status +
@@ -1283,14 +1441,14 @@ function execChatCommand(cmd, arg) {
     case "imagine": runImagineInChat(arg); return true;
     case "clear": {
       const conv = currentConv();
-      if (conv) { conv.messages = []; saveConversations(); renderChat(); }
+      if (conv) { conv.messages = []; saveConversations(conv); renderChat(); }
       return true;
     }
     case "compact": $("compact-conv").onclick(); return true;
     case "export": exportConversation(); return true;
     case "rename": {
       const conv = currentConv();
-      if (conv && arg) { conv.title = arg; saveConversations(); renderConvList(); }
+      if (conv && arg) { conv.title = arg; saveConversations(conv); renderConvList(); }
       else toast("Usage: /rename <title>", true);
       return true;
     }
@@ -1404,7 +1562,8 @@ attachSlashMenu($("coder-input"), CODER_COMMANDS, (c) => execCoderCommand(c));
 
 $("setup-cwd").value = localStorage.getItem("localm.coderCwd") || "";
 refreshModels().then(() => populateSetupModels());
-refreshCtxLimit();
+// Server persistence depends on knowing the privacy state first.
+refreshCtxLimit().then(initServerConversations);
 setInterval(refreshModels, 30000);
 renderConvList();
 if (chat.conversations.length) {
@@ -1413,3 +1572,10 @@ if (chat.conversations.length) {
 }
 renderChat();
 reattachSessions();
+// Restore the last active page (set in non-privacy mode only). Deferred a
+// tick so pages.js has installed window.onViewShown and the lazy page
+// refresh fires for the restored view.
+{
+  const savedView = localStorage.getItem("localm.activeView");
+  if (savedView && savedView !== "chat") setTimeout(() => showView(savedView), 0);
+}
