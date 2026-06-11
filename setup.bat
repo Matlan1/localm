@@ -92,10 +92,25 @@ if "%DATAPICK%"=="3" (
     )
 )
 
+rem ---- optional desktop shortcut ----------------------------------------------
+echo.
+choice /c YN /n /m "  Create a desktop shortcut to the graphical launcher? [Y/N] "
+if not errorlevel 2 (
+    powershell -NoProfile -Command ^
+        "$s = (New-Object -ComObject WScript.Shell).CreateShortcut([Environment]::GetFolderPath('Desktop') + '\localm.lnk');" ^
+        "$s.TargetPath = '%CD%\localm-launcher.bat';" ^
+        "$s.WorkingDirectory = '%CD%';" ^
+        "$s.Description = 'localm graphical launcher';" ^
+        "$s.Save()"
+    if not errorlevel 1 echo  Shortcut created: Desktop\localm.lnk
+)
+
 rem ---- done ------------------------------------------------------------------
 echo.
 echo  Done. This clone is self-contained:
 echo    localm-launcher.bat   graphical launcher (GUI / chat / server / coder)
+echo                          (use this, not launcher.pyw — .pyw has no file
+echo                          association when Python comes from uv)
 echo    localm.bat            terminal chat with the default model
 echo    .venv\Scripts\localm  CLI directly, e.g.:
 echo        .venv\Scripts\localm pull ^<model^>
