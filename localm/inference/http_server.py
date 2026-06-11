@@ -55,7 +55,11 @@ def _require_auth(
     api_key = os.environ.get("LOCALM_API_KEY")
     if not api_key:
         return  # no key configured — dev/local mode, skip auth
-    if credentials is None or credentials.credentials != api_key:
+    # Constant-time compare so a network attacker can't recover the key byte
+    # by byte from response-timing differences.
+    import hmac
+    if credentials is None or not hmac.compare_digest(
+            credentials.credentials, api_key):
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 
