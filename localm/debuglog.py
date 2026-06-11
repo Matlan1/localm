@@ -67,8 +67,39 @@ def enable_debug() -> Path:
     logger.addHandler(handler)
     logger.setLevel(logging.DEBUG)
 
+    _install_thread_hook()
     logger.debug("debug mode enabled (pid %d)", os.getpid())
     return path
+
+
+def _install_thread_hook() -> None:
+    """
+    Mirror uncaught thread exceptions into the debug log.
+
+    Worker threads (generation, jobs, agent sessions) otherwise print their
+    tracebacks only to the console, where they scroll away — the log file
+    must carry them too.
+    """
+    import threading
+
+    previous = threading.excepthook
+
+    def _hook(args):
+        try:
+            logger.error(
+                "uncaught exception in thread %s",
+                getattr(args.thread, "name", "?"),
+                exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+            )
+        except Exception:
+            pass
+        previous(args)
+
+    # Idempotent: don't stack hooks on repeated enable calls
+    if getattr(threading.excepthook, "_localm_hook", False):
+        return
+    _hook._localm_hook = True
+    threading.excepthook = _hook
 
 
 def attach_child_logging() -> None:
@@ -88,6 +119,7 @@ def attach_child_logging() -> None:
         "%(asctime)s %(levelname)-7s %(name)s: %(message)s"))
     logger.addHandler(handler)
     logger.setLevel(logging.DEBUG)
+    _install_thread_hook()
 
 
 def native_stderr_target() -> Optional[int]:

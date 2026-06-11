@@ -406,8 +406,77 @@ def attach_gui(
         import time as _time
         out_path = images_dir / f"{_time.strftime('%Y%m%d_%H%M%S')}_{os.urandom(3).hex()}.png"
 
+        def _ensure_comfy(job) -> bool:
+            """ComfyUI reachable? If not, launch it when configured, else
+            tell the user exactly what to do."""
+            import shlex
+            import subprocess
+            import sys as _sys
+            import time as _t
+            from localm.config import load_config
+            from localm.image_gen.comfy import _comfy_alive, default_api_url
+            api_url = default_api_url()
+            if _comfy_alive(api_url):
+                return True
+            launch_cmd = load_config().get("comfy_launch_cmd")
+            if not launch_cmd:
+                job.push({"type": "line", "text":
+                          f"ComfyUI is not running at {api_url}. Start it "
+                          "(your ComfyUI/Stability Matrix launcher) and retry, "
+                          "or set a launch command so localm can start it:  "
+                          "localm config comfy_launch_cmd \"D:\\path\\to\\comfyui.bat\""})
+                return False
+            job.push({"type": "line",
+                      "text": f"ComfyUI not running — launching: {launch_cmd}"})
+            # The command is the user's own config value (their launcher
+            # script). cmd /c handles .bat files; shlex covers POSIX.
+            if _sys.platform == "win32":
+                argv = ["cmd", "/c", launch_cmd]
+            else:
+                argv = shlex.split(launch_cmd)
+            try:
+                subprocess.Popen(argv,
+                                 stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+            except Exception as e:
+                job.push({"type": "line", "text": f"Launch failed: {e}"})
+                return False
+            deadline = _t.monotonic() + 180
+            while _t.monotonic() < deadline:
+                if _comfy_alive(api_url):
+                    job.push({"type": "line", "text": "ComfyUI is up."})
+                    return True
+                _t.sleep(2)
+            job.push({"type": "line",
+                      "text": "ComfyUI did not come up within 3 minutes."})
+            return False
+
+        def _reload_llm(job) -> None:
+            """Hand VRAM back: ask ComfyUI to drop its models, then reload
+            the chat model so the next reply is instant."""
+            from localm.image_gen.comfy import free_comfy_vram
+            if not free_comfy_vram():
+                job.push({"type": "line", "text":
+                          "ComfyUI kept its models in VRAM (no /free support) — "
+                          "the chat model will reload on the next message instead."})
+                return
+            job.push({"type": "line", "text": "Reloading the chat model…"})
+            try:
+                import requests as _rq
+                headers = {}
+                key = os.environ.get("LOCALM_API_KEY")
+                if key:
+                    headers["Authorization"] = f"Bearer {key}"
+                _rq.post(f"{self_url}/models/load", headers=headers, timeout=300)
+                job.push({"type": "line", "text": "Chat model ready."})
+            except Exception as e:
+                job.push({"type": "line", "text":
+                          f"Reload deferred to the next message ({e})."})
+
         def _generate(job):
             from localm.image_gen.comfy import generate_image
+            if not _ensure_comfy(job):
+                return False
             job.push({"type": "line", "text": "Submitting workflow to ComfyUI…"})
             ok, message = generate_image(
                 req.prompt,
@@ -422,6 +491,7 @@ def attach_gui(
             job.push({"type": "line", "text": message})
             if ok:
                 job.result = out_path.name
+                _reload_llm(job)
             return ok
 
         job = jobs.start_fn("imagine", _generate, result_path=out_path.name)

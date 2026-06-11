@@ -103,8 +103,11 @@ class Engine:
         device: Optional[str] = None,
         display_name: Optional[str] = None,
     ) -> None:
+        import threading
         self.model_path = model_path
         self.display_name = display_name or model_display_name(model_path)
+        # Serialise load() across threads (HTTP requests vs background preload)
+        self._load_lock = threading.Lock()
         self._backend = create_backend(
             model_path,
             mmproj_path=mmproj_path,
@@ -118,14 +121,18 @@ class Engine:
         return self._backend.loaded
 
     def load(self) -> None:
-        if self._backend.loaded:
-            return
-        backend_type = type(self._backend).__name__.replace("Backend", "")
-        console.print(
-            f"Loading [bold cyan]{self.display_name}[/bold cyan] "
-            f"[dim](backend: {backend_type})[/dim]"
-        )
-        self._backend.load()
+        if not hasattr(self, "_load_lock"):
+            import threading
+            self._load_lock = threading.Lock()
+        with self._load_lock:
+            if self._backend.loaded:
+                return
+            backend_type = type(self._backend).__name__.replace("Backend", "")
+            console.print(
+                f"Loading [bold cyan]{self.display_name}[/bold cyan] "
+                f"[dim](backend: {backend_type})[/dim]"
+            )
+            self._backend.load()
 
     def unload(self) -> None:
         self._backend.unload()

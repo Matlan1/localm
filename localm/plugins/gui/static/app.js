@@ -400,7 +400,12 @@ function addMessageRow(container, role, text, opts = {}) {
   for (const url of opts.images || []) {
     const img = document.createElement("img");
     img.className = "msg-img";
-    img.src = url;   // data: URI from the user's own attachment
+    if (url.startsWith("/api/")) {
+      // server-side generated image — fetch with auth headers
+      fetchImageURL(url).then((u) => (img.src = u)).catch(() => img.remove());
+    } else {
+      img.src = url;   // data: URI from the user's own attachment
+    }
     body.appendChild(img);
   }
   row.appendChild(body);
@@ -432,6 +437,10 @@ function buildEmptyHint() {
   div.appendChild(big);
   div.appendChild(document.createTextNode(
     "Chat with your local model. Everything stays on this machine."));
+  const tip = el("div", "", "Type / for commands — /imagine generates images locally.");
+  tip.style.marginTop = "10px";
+  tip.style.fontSize = "13px";
+  div.appendChild(tip);
   return div;
 }
 
@@ -532,7 +541,17 @@ async function runCompletion(conv) {
   const params = chatParams();
   const messages = [];
   if (params.system) messages.push({ role: "system", content: params.system });
-  messages.push(...conv.messages.map((m) => ({ role: m.role, content: m.content })));
+  // Server-generated images (/api/ URLs from /imagine) must not be sent to
+  // the model as image parts — replace those messages with a text note.
+  messages.push(...conv.messages.map((m) => {
+    if (Array.isArray(m.content) &&
+        m.content.some((p) => p.type === "image_url" &&
+                              p.image_url?.url?.startsWith("/api/"))) {
+      return { role: m.role,
+               content: msgText(m) + "\n[An image was generated and shown to the user.]" };
+    }
+    return { role: m.role, content: m.content };
+  }));
 
   const body = { model: modelSelect.value, messages, stream: true };
   for (const k of ["temperature", "top_p", "top_k", "repeat_penalty",
@@ -603,6 +622,13 @@ async function sendChat() {
   const text = input.value.trim();
   if (!text && chat.attachments.length === 0) return;
   if (chat.abort) return;
+
+  if (text.startsWith("/")) {
+    input.value = "";
+    autoGrow(input);
+    handleSlashSubmit(text, execChatCommand);
+    return;
+  }
 
   if (!currentConv()) newConversation();
   const conv = currentConv();
@@ -1013,6 +1039,14 @@ async function sendCoderTask() {
   const input = $("coder-input");
   const text = input.value.trim();
   if (!text || !s) return;
+
+  if (text.startsWith("/")) {
+    input.value = "";
+    autoGrow(input);
+    handleSlashSubmit(text, (c) => execCoderCommand(c));
+    return;
+  }
+
   if (s.busy) { toast("Agent is still working — stop it first or wait", true); return; }
   try {
     const r = await fetch(`/api/coder/sessions/${s.info.id}/message`, {
@@ -1119,6 +1153,192 @@ $("coder-log").onclick = async () => {
     if (!data.entries.length) body.appendChild(el("div", "sub", "(empty)"));
   });
 };
+
+/* ================================================================ */
+/*  Slash commands                                                   */
+/* ================================================================ */
+
+const CHAT_COMMANDS = [
+  { cmd: "imagine", hint: "generate an image with FLUX", args: "<prompt>" },
+  { cmd: "clear", hint: "clear this conversation" },
+  { cmd: "compact", hint: "summarise older messages to free context" },
+  { cmd: "export", hint: "download this conversation as markdown" },
+  { cmd: "rename", hint: "rename this conversation", args: "<title>" },
+  { cmd: "system", hint: "edit the system prompt" },
+  { cmd: "new", hint: "start a new conversation" },
+];
+
+const CODER_COMMANDS = [
+  { cmd: "undo", hint: "revert the last file write" },
+  { cmd: "compact", hint: "summarise older turns" },
+  { cmd: "log", hint: "open the audit log" },
+  { cmd: "stop", hint: "interrupt the current task" },
+  { cmd: "end", hint: "end this session" },
+  { cmd: "help", hint: "list available commands" },
+];
+
+async function runImagineInChat(promptText) {
+  if (!promptText) { toast("Usage: /imagine <prompt>", true); return; }
+  if (!currentConv()) newConversation();
+  const conv = currentConv();
+  conv.messages.push({ role: "user", content: "/imagine " + promptText });
+  saveConversations();
+  renderChat();
+  const box = $("chat-messages");
+  const { body } = addMessageRow(box, "assistant", "");
+  body.textContent = "Generating image…";
+  box.scrollTop = box.scrollHeight;
+  try {
+    const r = await fetch("/api/imagine", {
+      method: "POST", headers: authHeaders(),
+      body: JSON.stringify({ prompt: promptText }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    const end = await streamJob(data.job_id, (line) => {
+      body.textContent = line;
+      if (nearBottom(box)) box.scrollTop = box.scrollHeight;
+    });
+    if (end.status === "done" && end.result) {
+      conv.messages.push({
+        role: "assistant",
+        content: [
+          { type: "text", text: "Here is the generated image:" },
+          { type: "image_url",
+            image_url: { url: "/api/imagine/file/" + encodeURIComponent(end.result) } },
+        ],
+      });
+      saveConversations();
+      renderChat();
+    } else {
+      body.textContent = "Image generation " + end.status +
+        " — see the Images page for details.";
+    }
+  } catch (e) {
+    body.textContent = "Image generation failed: " + e.message;
+    toast(e.message, true);
+  }
+}
+
+function execChatCommand(cmd, arg) {
+  switch (cmd) {
+    case "imagine": runImagineInChat(arg); return true;
+    case "clear": {
+      const conv = currentConv();
+      if (conv) { conv.messages = []; saveConversations(); renderChat(); }
+      return true;
+    }
+    case "compact": $("compact-conv").onclick(); return true;
+    case "export": exportConversation(); return true;
+    case "rename": {
+      const conv = currentConv();
+      if (conv && arg) { conv.title = arg; saveConversations(); renderConvList(); }
+      else toast("Usage: /rename <title>", true);
+      return true;
+    }
+    case "system":
+      $("params").classList.add("open");
+      $("p-system").focus();
+      return true;
+    case "new": newConversation(); return true;
+  }
+  return false;
+}
+
+function execCoderCommand(cmd) {
+  switch (cmd) {
+    case "undo": $("coder-undo").onclick(); return true;
+    case "compact": $("coder-compact").onclick(); return true;
+    case "log": $("coder-log").onclick(); return true;
+    case "stop": $("coder-stop").onclick(); return true;
+    case "end": $("coder-end").onclick(); return true;
+    case "help":
+      openModal("Coder commands", (body) => {
+        for (const c of CODER_COMMANDS) {
+          const row = el("div", "log-entry");
+          row.appendChild(el("span", "t", "/" + c.cmd));
+          row.appendChild(document.createTextNode(c.hint));
+          body.appendChild(row);
+        }
+        body.appendChild(el("div", "sub",
+          "Anything not starting with / is sent to the agent as a task."));
+      });
+      return true;
+  }
+  return false;
+}
+
+/** Attach a slash-command dropdown to a composer textarea. */
+function attachSlashMenu(textarea, commands, execute) {
+  const menu = el("div", "slash-menu");
+  menu.style.display = "none";
+  textarea.closest(".composer-wrap").appendChild(menu);
+  let selected = 0;
+  let visible = [];
+
+  function close() { menu.style.display = "none"; visible = []; }
+
+  function render() {
+    const value = textarea.value;
+    if (!value.startsWith("/") || value.includes("\n")) { close(); return; }
+    const typed = value.slice(1).split(" ")[0].toLowerCase();
+    visible = commands.filter((c) => c.cmd.startsWith(typed));
+    if (!visible.length) { close(); return; }
+    selected = Math.min(selected, visible.length - 1);
+    menu.replaceChildren();
+    visible.forEach((c, i) => {
+      const row = el("div", "slash-item" + (i === selected ? " selected" : ""));
+      row.appendChild(el("span", "cmd", "/" + c.cmd + (c.args ? " " + c.args : "")));
+      row.appendChild(el("span", "hint", c.hint));
+      row.onmousedown = (e) => { e.preventDefault(); pick(c); };
+      menu.appendChild(row);
+    });
+    menu.style.display = "block";
+  }
+
+  function pick(c) {
+    if (c.args) {
+      textarea.value = "/" + c.cmd + " ";
+      textarea.focus();
+      close();
+    } else {
+      textarea.value = "";
+      autoGrow(textarea);
+      close();
+      execute(c.cmd, "");
+    }
+  }
+
+  textarea.addEventListener("input", () => { selected = 0; render(); });
+  textarea.addEventListener("blur", () => setTimeout(close, 150));
+  textarea.addEventListener("keydown", (e) => {
+    if (menu.style.display === "none") return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault(); selected = (selected + 1) % visible.length; render();
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault(); selected = (selected - 1 + visible.length) % visible.length; render();
+    } else if (e.key === "Enter" && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+      e.preventDefault(); pick(visible[selected]);
+    } else if (e.key === "Escape") {
+      close();
+    }
+  });
+}
+
+/** Intercept "/cmd arg" on submit. Returns true when handled (not for the model). */
+function handleSlashSubmit(text, execute) {
+  if (!text.startsWith("/")) return false;
+  const space = text.indexOf(" ");
+  const cmd = (space === -1 ? text.slice(1) : text.slice(1, space)).toLowerCase();
+  const arg = space === -1 ? "" : text.slice(space + 1).trim();
+  if (!execute(cmd, arg)) {
+    toast(`Unknown command: /${cmd}`, true);
+  }
+  return true;   // never send slash input to the model
+}
+
+attachSlashMenu($("chat-input"), CHAT_COMMANDS, execChatCommand);
+attachSlashMenu($("coder-input"), CODER_COMMANDS, (c) => execCoderCommand(c));
 
 /* ================================================================ */
 /*  Init                                                             */

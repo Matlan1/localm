@@ -304,10 +304,28 @@ class GgufBackend(BaseBackend):
             kwargs["seed"] = seed
 
         # native ctypes path (LlamaCpp)
-        for chunk in self._llm.create_chat_completion(**kwargs):
-            token = chunk["choices"][0].get("delta", {}).get("content", "")
-            if token:
-                yield token
+        try:
+            for chunk in self._llm.create_chat_completion(**kwargs):
+                token = chunk["choices"][0].get("delta", {}).get("content", "")
+                if token:
+                    yield token
+        except OSError as e:
+            # A native fault (access violation etc.) leaves the loaded model
+            # in an unknown state. Without this, every later request returns
+            # an instant empty stream — a zombie server. Drop the broken
+            # instance so the next request triggers a clean reload.
+            from localm.debuglog import logger as _dbg
+            _dbg.exception("native inference fault — dropping model instance")
+            try:
+                self.unload()
+            except Exception:
+                self._llm = None
+                self._loaded = False
+            raise RuntimeError(
+                f"Native inference fault ({e}). The model has been unloaded "
+                "and will reload on the next request. See the debug log for "
+                "the native stack trace."
+            ) from e
 
     def _subprocess_stream(
         self,

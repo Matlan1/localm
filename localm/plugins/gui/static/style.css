@@ -706,6 +706,34 @@ pre:hover .copy-btn { opacity: 1; }
 /* theme button */
 .theme-btn { width: 100%; margin-top: 8px; }
 
+/* slash command menu */
+
+.composer-wrap { position: relative; }
+.slash-menu {
+  position: absolute;
+  bottom: calc(100% - 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(560px, 90%);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0,0,0,0.45);
+  overflow: hidden;
+  z-index: 40;
+}
+.slash-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 8px 14px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.slash-item:hover, .slash-item.selected { background: var(--accent-soft); }
+.slash-item .cmd { font-family: var(--mono); color: var(--accent); white-space: nowrap; }
+.slash-item .hint { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* conv rename input */
 .conv-item input {
   flex: 1; background: var(--bg-input); border: 1px solid var(--accent);

@@ -827,49 +827,69 @@ ws     ::= [ \t\n\r]*
     #  LLM call
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _stream_hiding_tool_calls(pieces):
+    # Tool-call wrapper markers, canonical and mangled finetune variants
+    _TC_OPENERS = ("<tool_call", "<|tool_call")
+    _TC_CLOSERS = ("</tool_call>", "<tool_call|>", "<|/tool_call>", "<|tool_call|>")
+
+    @classmethod
+    def _stream_hiding_tool_calls(cls, pieces):
         """
         Yield displayable text tokens from a stream, silently buffering
-        <tool_call>...</tool_call> blocks so raw XML never hits the terminal.
+        tool-call blocks (canonical <tool_call>...</tool_call> and mangled
+        <|tool_call>...<tool_call|> variants) so raw JSON never hits the
+        terminal.
 
         Yields (token, is_hidden) pairs where is_hidden=True means the
         token belongs to a tool-call block and should not be displayed.
-        The full accumulated string (including hidden parts) is the return value.
         """
+        def _find_first(haystack, needles, offset=0):
+            best = -1
+            best_len = 0
+            for needle in needles:
+                idx = haystack.find(needle, offset)
+                if idx != -1 and (best == -1 or idx < best):
+                    best, best_len = idx, len(needle)
+            return best, best_len
+
+        def _partial_opener_at_end(haystack):
+            """Length of a trailing fragment that could grow into an opener."""
+            max_keep = max(len(n) for n in cls._TC_OPENERS) - 1
+            for k in range(min(max_keep, len(haystack)), 0, -1):
+                tail = haystack[-k:]
+                if any(needle.startswith(tail) for needle in cls._TC_OPENERS):
+                    return k
+            return 0
+
         buf = ""
         in_call = False
         for piece in pieces:
             buf += piece
-            # Simple state machine: track whether we're inside a tool_call block
             while True:
                 if not in_call:
-                    start = buf.find("<tool_call")
+                    start, _ = _find_first(buf, cls._TC_OPENERS)
                     if start == -1:
-                        # No tool_call in buffer — yield everything
-                        yield buf, False
-                        buf = ""
+                        # Hold back a tail that might be a split opener
+                        keep = _partial_opener_at_end(buf)
+                        if len(buf) > keep:
+                            yield buf[:len(buf) - keep], False
+                            buf = buf[len(buf) - keep:]
                         break
-                    else:
-                        # Yield text before the tag, then enter buffering mode
-                        if start > 0:
-                            yield buf[:start], False
-                        buf = buf[start:]
-                        in_call = True
+                    if start > 0:
+                        yield buf[:start], False
+                    buf = buf[start:]
+                    in_call = True
                 else:
-                    end = buf.find("</tool_call>")
+                    # Search past the opener so <|tool_call|> as an opener
+                    # is not immediately matched as its own closer
+                    end, end_len = _find_first(buf, cls._TC_CLOSERS, 2)
                     if end == -1:
-                        # Still accumulating the block — hold the buffer
                         break
-                    else:
-                        # Complete block: yield it as hidden
-                        end += len("</tool_call>")
-                        yield buf[:end], True
-                        buf = buf[end:]
-                        in_call = False
-        # Flush any remainder
+                    end += end_len
+                    yield buf[:end], True
+                    buf = buf[end:]
+                    in_call = False
         if buf:
-            yield buf, in_call   # in_call=True means an unclosed tag — display as-is
+            yield buf, in_call   # unclosed tag at stream end — display as-is
 
     def _call_llm(self, messages: list[dict], interactive: bool) -> str:
         if self.on_event is not None:

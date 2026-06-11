@@ -114,6 +114,16 @@ def main(model, host, port, ctx, gpu_layers, no_browser, debug):
     console.print(f"  model: [cyan]{display_name or Path(str(model_path)).stem}[/cyan]")
     console.print("  Ctrl+C to stop")
 
+    # Preload the model in the background so the first chat reply is fast.
+    # Engine.load is lock-protected; a request arriving mid-load waits on it.
+    def _preload():
+        try:
+            engine.load()
+        except Exception as e:
+            console.print(f"[yellow]Background model load failed: {e}[/yellow]")
+
+    threading.Thread(target=_preload, daemon=True, name="preload").start()
+
     if not no_browser:
         # Delay slightly so the server is listening when the tab opens
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()

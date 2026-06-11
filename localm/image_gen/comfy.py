@@ -38,10 +38,39 @@ def _localm_unload(localm_url: Optional[str] = None) -> None:
         return
     try:
         req = urllib.request.Request(f"{url}/models/unload", data=b"", method="POST")
-        with urllib.request.urlopen(req, timeout=10):
+        # Unload waits for any in-flight generation to finish (it must not
+        # free the context mid-decode), so give it time
+        with urllib.request.urlopen(req, timeout=180):
             pass
     except Exception:
         pass
+
+
+def default_api_url() -> str:
+    """ComfyUI base URL: FLUX_API_URL env override, else the default port."""
+    return os.environ.get("FLUX_API_URL", "http://127.0.0.1:8188").rstrip("/")
+
+
+def free_comfy_vram(api_url: Optional[str] = None) -> bool:
+    """
+    Ask ComfyUI to unload its models and free VRAM (POST /free).
+
+    Returns True when ComfyUI accepted the request. Used after generation
+    so the chat model can be reloaded immediately instead of spilling into
+    system RAM next to a resident FLUX. Older ComfyUI builds without /free
+    return False; callers should then leave the LLM reload lazy.
+    """
+    url = (api_url or default_api_url()).rstrip("/")
+    try:
+        body = json.dumps({"unload_models": True, "free_memory": True}).encode()
+        req = urllib.request.Request(
+            f"{url}/free", data=body,
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=30):
+            return True
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------

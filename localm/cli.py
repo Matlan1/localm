@@ -335,6 +335,33 @@ def _handle_command(
     if cmd in ("exit", "quit", "q", "bye"):
         console.print("[dim]Bye.[/dim]")
         return True
+    elif cmd == "imagine":
+        if engine is None:
+            console.print("[dim]/imagine not available in this mode[/dim]")
+        elif not arg:
+            console.print("[dim]Usage: /imagine <prompt>[/dim]")
+        else:
+            from .image_gen.comfy import (
+                _comfy_alive, default_api_url, free_comfy_vram, generate_image)
+            api = default_api_url()
+            if not _comfy_alive(api):
+                console.print(
+                    f"[yellow]ComfyUI is not running at {api}.[/yellow] "
+                    "Start it and retry, or set "
+                    "[bold]localm config comfy_launch_cmd <path>[/bold]."
+                )
+            else:
+                import time as _t
+                out_dir = Path.home() / ".localm" / "gui_images"
+                out_dir.mkdir(parents=True, exist_ok=True)
+                out = out_dir / f"{_t.strftime('%Y%m%d_%H%M%S')}_cli.png"
+                console.print("[dim]Freeing VRAM (chat model unloads, "
+                              "reloads on your next message)…[/dim]")
+                engine.unload()
+                ok, message = generate_image(arg, out)
+                console.print(message)
+                if ok:
+                    free_comfy_vram(api)
     elif cmd == "compact":
         if engine is None:
             console.print("[dim]/compact not available in this mode[/dim]")
@@ -406,6 +433,7 @@ def _handle_command(
             "/system <text>          set system prompt\n"
             "/save [file]            save conversation to JSON\n"
             "/compact                summarise older turns to free context\n"
+            "/imagine <prompt>       generate an image via ComfyUI FLUX\n"
             "/temp <float>           sampling temperature\n"
             "/tokens <int>           max response tokens"
             "[/dim]"

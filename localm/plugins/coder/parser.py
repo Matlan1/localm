@@ -55,10 +55,17 @@ _RE_XML = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 
-# Gemma4 native: <|tool_call>call:name{...args...}<tool_call|>
-# Args may use {"key": "val"} JSON or Gemma's special <|"|> quote tokens.
-_RE_GEMMA = re.compile(
-    r"<\|tool_call\>call:(?P<name>\w+)(?P<body>\{.*?\})<tool_call\|>",
+# Marker-variant wrapper. Finetunes mangle the canonical <tool_call> tags in
+# the wild: <|tool_call>, <|tool_call|>, closing as <tool_call|> or
+# <|/tool_call>, an optional "call:NAME" prefix (sometimes the literal
+# "call:tool_call"), and whitespace before the JSON. The JSON body itself is
+# usually valid — only the wrapper is broken — so accept any delimiter
+# variant and recover the call from the body.
+_RE_VARIANT = re.compile(
+    r"<\|?/?tool_call\|?>\s*"
+    r"(?:call:(?P<name>\w+)\s*)?"
+    r"(?P<body>\{.*?\})"
+    r"\s*<\|?/?tool_call\|?>",
     re.DOTALL,
 )
 
@@ -155,18 +162,27 @@ def parse_tool_calls(text: str) -> list[ToolCall]:
             calls.append(ToolCall(name=name, args=args, raw=m.group(0), start=start, end=end))
             seen_spans.append((start, end))
 
-    # Gemma4 native format: <|tool_call>call:name{...}<tool_call|>
-    for m in _RE_GEMMA.finditer(text):
+    # Marker-variant wrappers (mangled <|tool_call> dialects)
+    for m in _RE_VARIANT.finditer(text):
         start, end = m.span()
         if _overlaps(start, end):
             continue
 
-        name = m.group("name")
-        body = m.group("body")
-        args = _parse_gemma_args(body)
-        if args is None:
+        prefix_name = m.group("name")
+        # "call:tool_call" is wrapper noise, not a tool name
+        if prefix_name and prefix_name.lower() == "tool_call":
+            prefix_name = None
+        body = m.group("body").replace('<|"|>', '"')   # Gemma quote tokens
+
+        parsed = _try_parse_body(body, prefix_name)
+        if parsed is None and prefix_name:
+            # Bare-key args form: {path: "x"} with the name in the prefix
+            args = _parse_gemma_args(body)
+            parsed = (prefix_name, args) if args is not None else None
+        if parsed is None:
             continue
 
+        name, args = parsed
         calls.append(ToolCall(name=name, args=args, raw=m.group(0), start=start, end=end))
         seen_spans.append((start, end))
 

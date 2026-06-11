@@ -272,7 +272,11 @@ def create_app(engine: Engine) -> FastAPI:
         if not _engine.loaded:
             return {"status": "already_unloaded", "model": _engine.display_name}
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, _engine.unload)
+        # Under the inference semaphore: freeing the native context while a
+        # generation is mid-decode crashes the GPU driver (access violation
+        # in the HIP runtime). Unload must wait its turn.
+        async with _inference_sem:
+            await loop.run_in_executor(None, _engine.unload)
         return {"status": "unloaded", "model": _engine.display_name}
 
     @app.post("/v1/models/load", dependencies=[Depends(_require_auth)])
@@ -289,7 +293,8 @@ def create_app(engine: Engine) -> FastAPI:
         if _engine.loaded:
             return {"status": "already_loaded", "model": _engine.display_name}
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, _engine.load)
+        async with _inference_sem:
+            await loop.run_in_executor(None, _engine.load)
         return {"status": "loaded", "model": _engine.display_name}
 
     # ---------------------------------------------------------------- #
@@ -469,14 +474,24 @@ async def _stream_sse(
 
     # Run blocking generator in executor so we don't block the event loop
     loop = asyncio.get_running_loop()
-    token_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    token_queue: asyncio.Queue = asyncio.Queue()
+    _DONE = object()
 
     def _generate():
         try:
             for token in engine.chat_stream(messages, **gen_kwargs):
                 loop.call_soon_threadsafe(token_queue.put_nowait, token)
+        except Exception as e:
+            # Log it (debug log included) and surface it to the client —
+            # a silent thread death looks like an empty reply.
+            from localm.debuglog import logger as _dbg
+            _dbg.exception("generation thread failed")
+            import traceback
+            traceback.print_exc()
+            loop.call_soon_threadsafe(
+                token_queue.put_nowait, RuntimeError(str(e)))
         finally:
-            loop.call_soon_threadsafe(token_queue.put_nowait, None)
+            loop.call_soon_threadsafe(token_queue.put_nowait, _DONE)
 
     import threading
 
@@ -488,10 +503,14 @@ async def _stream_sse(
         t.start()
 
         completion_parts: list[str] = []
+        gen_error: Exception | None = None
         while True:
             token = await token_queue.get()
-            if token is None:
+            if token is _DONE:
                 break
+            if isinstance(token, Exception):
+                gen_error = token
+                continue
             if first_token_at is None:
                 first_token_at = time.perf_counter()
             completion_parts.append(token)
@@ -500,6 +519,11 @@ async def _stream_sse(
 
         t.join()
         gen_elapsed = time.perf_counter() - gen_start
+
+    if gen_error is not None:
+        err_chunk = ChatChunk.token(
+            f"\n[inference error: {gen_error}]", model_id, chunk_id, ts)
+        yield f"data: {err_chunk.model_dump_json()}\n\n"
 
     # Count tokens on the full completion text — more accurate and efficient
     completion_tokens = engine.count_tokens("".join(completion_parts))

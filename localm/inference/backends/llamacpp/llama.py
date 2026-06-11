@@ -550,6 +550,13 @@ class LlamaCpp:
         pos = n_prompt
         try:
             for _ in range(max_new_tokens):
+                if self._ctx_ptr is None:
+                    # The context was freed (unload/close) while we were
+                    # generating. Stop cleanly instead of passing NULL into
+                    # the native library, which crashes the GPU driver.
+                    raise RuntimeError(
+                        "Model was unloaded during generation — request aborted."
+                    )
                 token = api.llama_sampler_sample(sampler, self._ctx_ptr, -1)
                 api.llama_sampler_accept(sampler, token)
 
@@ -652,6 +659,11 @@ class LlamaCpp:
 
         suffix = prompt_tokens[prefix:]
         for i in range(0, len(suffix), _PREFILL_CHUNK):
+            if self._ctx_ptr is None:
+                self._cached_tokens = []
+                raise RuntimeError(
+                    "Model was unloaded during prefill — request aborted."
+                )
             chunk = suffix[i:i + _PREFILL_CHUNK]
             tok_arr = (llama_token * len(chunk))(*chunk)
             batch = api.llama_batch_get_one(tok_arr, len(chunk))

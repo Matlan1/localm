@@ -29,6 +29,9 @@ DEFAULT_CONFIG: dict = {
     "confirm_remove": True,   # ask before localm rm deletes files
     "port": 8642,             # default inference server port (auto-bumps if busy)
     "cors_origins": None,     # None = localhost only; list of origins; or "*"
+    # Command that starts your ComfyUI install (e.g. a launch .bat). When set,
+    # image generation can start ComfyUI automatically if it is not running.
+    "comfy_launch_cmd": None,
 }
 
 # localm claims 8642-8741 — far from ComfyUI (8188), A1111 (7860),

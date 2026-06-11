@@ -1,0 +1,23 @@
+docs: full documentation tidy-up
+
+- README: docs table completed, em-dash sweep per style rules
+- server-api.md rewritten: correct port range, auth, real CORS policy,
+  all current endpoints (completions, embeddings, models/{id}, config,
+  plugins), usage performance fields, behaviour notes
+- architecture.md refreshed: plugins layer, dynamic context window, KV
+  prefix reuse, compaction, debug mode, output filtering
+- llamacpp-binding.md: generation-loop section matches the KV-reuse and
+  chunked-prefill reality; sampler chain includes grammar and penalties;
+  honest Known Limitations
+- flux-setup.md rewritten as a current-state guide (hand-off banners,
+  Q&A planning notes and stale repo paths removed)
+- FEATURE_REPORT.md and rocm-migration.md moved to docs/archive/ with a
+  historical note; both were point-in-time records
+- TODO.md: section headers no longer say Missing over shipped lists
+- chatlogs_errorlogs/ gitignored (local logs stay local)
+
+Fix found during review: GgufBackend.embed now raises a clear
+NotImplementedError instead of AttributeError, so /v1/embeddings returns
+422 for GGUF models instead of a 500. Test added. Suite: 734 passed.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
