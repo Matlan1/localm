@@ -619,6 +619,32 @@ class TestImageManagement:
             r = client.delete("/api/imagine/file/..%5Cconfig.json")
         assert r.status_code in (400, 404)
 
+    @pytest.mark.parametrize("name", [
+        "..%5Cconfig.json",       # ..\config.json
+        "..%2Fconfig.json",       # ../config.json (decodes to /, off-route)
+        "C:evil.png",             # Windows drive-relative (blocklist bypass)
+        "%2e%2e%5c%2e%2e%5cwin.ini",  # ..\..\win.ini
+        "sub%2Ffile.png",         # nested subpath
+    ])
+    def test_delete_rejects_traversal_vectors(self, img_app, tmp_path, name):
+        app, _ = img_app
+        # plant a file the traversal would target; it must survive
+        target = tmp_path / ".localm" / "config.json"
+        target.write_text("{}")
+        with TestClient(app) as client:
+            r = client.delete(f"/api/imagine/file/{name}")
+        assert not (200 <= r.status_code < 300)   # never a successful delete
+        assert target.exists()
+
+    def test_confine_blocks_drive_relative_serve(self, img_app, tmp_path):
+        """A drive-relative name must never resolve outside the images dir."""
+        app, _ = img_app
+        # plant a file one level up that the bypass would have reached
+        (tmp_path / ".localm" / "config.json").write_text("{}")
+        with TestClient(app) as client:
+            r = client.get("/api/imagine/file/..%5Cconfig.json")
+        assert r.status_code in (400, 404)
+
     def test_move_relocates_file_and_sidecar(self, img_app, tmp_path):
         app, images = img_app
         self._make_image(images, meta={"prompt": "x"})
