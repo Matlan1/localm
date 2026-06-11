@@ -235,7 +235,85 @@ const chat = {
   activeId: null,
   abort: null,
   attachments: [],   // {name, dataUri}
+  ctxMax: 16384,     // context ceiling — refreshed from /v1/config
 };
+
+// Conversation compaction mirrors localm/inference/compact.py:
+// summarise older turns at 70% of the ceiling, keep the last 4 verbatim,
+// hard-trim with a visible note when summarisation fails. Never blocks chat.
+const COMPACT_RATIO = 0.7;
+const COMPACT_KEEP = 4;
+
+function estimateConvTokens(conv) {
+  let total = Math.ceil(($("p-system").value || "").length / 4);
+  for (const m of conv.messages) {
+    total += Math.ceil(msgText(m).length / 4) + msgImages(m).length * 750;
+  }
+  return total;
+}
+
+async function compactConversation(conv) {
+  if (conv.messages.length <= COMPACT_KEEP) return false;
+  const older = conv.messages.slice(0, -COMPACT_KEEP);
+  const recent = conv.messages.slice(-COMPACT_KEEP);
+  const excerpt = older.map((m) =>
+    `${m.role.toUpperCase()}: ${msgText(m).slice(0, 600)}`).join("\n\n");
+
+  let summary = "";
+  try {
+    const r = await fetch("/v1/chat/completions", {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({
+        model: modelSelect.value,
+        messages: [{
+          role: "user",
+          content: "Summarise the following conversation in under 200 words. " +
+            "Keep facts, names, decisions, and anything the user asked to " +
+            "remember. Reply with the summary only.\n\n" + excerpt,
+        }],
+        max_tokens: 400,
+        temperature: 0.3,
+        stream: false,
+      }),
+    });
+    if (r.ok) {
+      const data = await r.json();
+      summary = (data.choices?.[0]?.message?.content || "").trim();
+    }
+  } catch (e) { /* summarisation unavailable — hard trim below */ }
+
+  const bridge = summary
+    ? [{ role: "user", content: "[Conversation summary]\n" + summary },
+       { role: "assistant", content: "Understood. Continuing from this summary." }]
+    : [{ role: "user", content:
+         "[Earlier conversation was removed to fit the context window.]" },
+       { role: "assistant", content: "Understood." }];
+
+  conv.messages = [...bridge, ...recent];
+  saveConversations();
+  renderChat();
+  toast(summary ? "Older messages summarised to free context"
+                : "Older messages trimmed (summarisation unavailable)");
+  return true;
+}
+
+async function maybeCompactConversation(conv) {
+  if (!chat.ctxMax || chat.ctxMax <= 0) return;
+  if (estimateConvTokens(conv) >= COMPACT_RATIO * chat.ctxMax) {
+    await compactConversation(conv);
+  }
+}
+
+async function refreshCtxLimit() {
+  try {
+    const r = await fetch("/v1/config", { headers: authHeaders() });
+    if (r.ok) {
+      const cfg = await r.json();
+      chat.ctxMax = cfg.n_ctx_max ?? 16384;
+    }
+  } catch (e) { /* keep default */ }
+}
 
 function saveConversations() {
   try {
@@ -450,6 +528,7 @@ $("chat-file").addEventListener("change", (e) => {
 /* sending */
 
 async function runCompletion(conv) {
+  await maybeCompactConversation(conv);
   const params = chatParams();
   const messages = [];
   if (params.system) messages.push({ role: "system", content: params.system });
@@ -577,6 +656,15 @@ $("chat-input").addEventListener("keydown", (e) => {
 $("chat-input").addEventListener("input", (e) => autoGrow(e.target));
 $("toggle-params").onclick = () => $("params").classList.toggle("open");
 $("export-conv").onclick = exportConversation;
+$("compact-conv").onclick = async () => {
+  const conv = currentConv();
+  if (!conv || conv.messages.length <= COMPACT_KEEP) {
+    toast("Nothing to compact yet", true);
+    return;
+  }
+  if (chat.abort) { toast("Wait for the current reply to finish", true); return; }
+  await compactConversation(conv);
+};
 $("new-conv").onclick = () => { newConversation(); showView("chat"); };
 
 /* ================================================================ */
@@ -1038,6 +1126,7 @@ $("coder-log").onclick = async () => {
 
 $("setup-cwd").value = localStorage.getItem("localm.coderCwd") || "";
 refreshModels().then(() => populateSetupModels());
+refreshCtxLimit();
 setInterval(refreshModels, 30000);
 renderConvList();
 if (chat.conversations.length) {

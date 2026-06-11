@@ -264,7 +264,8 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
             break
 
         if user_input.startswith("/"):
-            stop = _handle_command(user_input, messages, gen_opts, pending_images)
+            stop = _handle_command(user_input, messages, gen_opts, pending_images,
+                                   engine=engine)
             if stop:
                 break
             continue
@@ -272,6 +273,23 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
         msg = _build_user_message(user_input, pending_images)
         pending_images.clear()
         messages.append(msg)
+
+        # Seamless compaction: summarise older turns before the history
+        # collides with the context ceiling. Never fails — falls back to a
+        # visible hard trim when summarisation is unavailable.
+        from .inference.compact import maybe_compact
+        limit = load_config().get("n_ctx_max", 16384) or 0
+        compacted_msgs, did_compact = maybe_compact(
+            messages,
+            limit_tokens=limit,
+            count_tokens=engine.count_tokens,
+            generate=lambda m, max_tok: "".join(
+                engine.chat_stream(m, max_tokens=max_tok, temperature=0.3)),
+        )
+        if did_compact:
+            messages[:] = compacted_msgs
+            console.print("[dim](older conversation summarised to free context)[/dim]")
+
         console.print("\n[bold blue]Assistant[/bold blue]: ", end="")
 
         parts: list[str] = []
@@ -307,6 +325,7 @@ def _handle_command(
     messages: list,
     gen_opts: dict,
     pending_images: Optional[list] = None,
+    engine=None,
 ) -> bool:
     """Handle a /command. Returns True if the session should exit."""
     parts = raw[1:].split(" ", 1)
@@ -316,6 +335,21 @@ def _handle_command(
     if cmd in ("exit", "quit", "q", "bye"):
         console.print("[dim]Bye.[/dim]")
         return True
+    elif cmd == "compact":
+        if engine is None:
+            console.print("[dim]/compact not available in this mode[/dim]")
+        else:
+            from .inference.compact import compact_messages
+            new_messages, changed = compact_messages(
+                messages,
+                generate=lambda m, max_tok: "".join(
+                    engine.chat_stream(m, max_tokens=max_tok, temperature=0.3)),
+            )
+            if changed:
+                messages[:] = new_messages
+                console.print("[dim]Older conversation summarised.[/dim]")
+            else:
+                console.print("[dim]Nothing to compact yet.[/dim]")
     elif cmd == "clear":
         messages[:] = [m for m in messages if m["role"] == "system"]
         if pending_images is not None:
@@ -371,6 +405,7 @@ def _handle_command(
             "/images                 list queued images\n"
             "/system <text>          set system prompt\n"
             "/save [file]            save conversation to JSON\n"
+            "/compact                summarise older turns to free context\n"
             "/temp <float>           sampling temperature\n"
             "/tokens <int>           max response tokens"
             "[/dim]"

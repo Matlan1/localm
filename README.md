@@ -59,7 +59,10 @@ For HuggingFace Transformers models (full-precision, multimodal):
 uv tool install -e ".[gpu]"    # AMD ROCm
 ```
 
-On Windows you can also double-click `localm.bat` in the repo root to start chatting with the first registered model.
+On Windows, double-click `localm-launcher.bat` in the repo root for a graphical
+launcher: pick Web GUI, terminal chat, API server, or the coder agent, choose a
+model, toggle debug mode, set port/context/GPU layers, and hit Launch. Your
+choices are remembered. (`localm.bat` still starts a plain chat directly.)
 
 ---
 
@@ -221,6 +224,14 @@ weights and a fixed overhead, and sizes the ceiling from what remains. When a
 conversation reaches the ceiling, replies shorten to fit; when even that is
 impossible you get a clear error instead of an out-of-memory crash. An
 explicit `-c/--ctx` larger than the ceiling always wins.
+
+Long chats compact automatically before they collide with the ceiling: at 70%
+fill, older turns are summarised by the model and replaced with a short
+summary, keeping the last two exchanges verbatim. If summarisation is
+unavailable the history is trimmed with a visible note instead — chat keeps
+working either way. This applies to both `localm run` and the GUI; both also
+have a manual trigger (`/compact` in the terminal, the compact button in the
+browser).
 
 Config lives at `~/.localm/config.json`. Set `LOCALM_API_KEY` to require bearer auth on the HTTP API (recommended before binding to anything other than 127.0.0.1; the CLI warns you about exposed unauthenticated binds). CORS is locked to localhost by default and can be widened with the `cors_origins` config key.
 
