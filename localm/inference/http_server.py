@@ -150,6 +150,10 @@ def create_app(engine: Engine) -> FastAPI:
 
     @app.get("/v1/models")
     async def list_models():
+        # The GUI can run with no engine yet (fresh install, empty registry —
+        # the user adds a model from the Models page). Report an empty list.
+        if _engine is None:
+            return {"object": "list", "data": []}
         return {
             "object": "list",
             "data": [

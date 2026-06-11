@@ -77,6 +77,13 @@ model, toggle debug mode, set port/context/GPU layers, and hit Launch. Your
 choices are remembered. (`localm.bat` still starts a plain chat directly.) Both
 use the clone's own `.venv` automatically.
 
+**No models yet?** On a fresh install the launcher's **Import** row gets you a
+first model three ways: *from file…* / *from folder…* register a GGUF or a
+HuggingFace directory already on disk, and *from URL…* opens the Web GUI on its
+Models page and downloads the model there with a live progress bar. You can
+also just launch the Web GUI with nothing registered — it opens straight to the
+Models page so you can pull or import from the browser.
+
 ---
 
 ## Quick Start

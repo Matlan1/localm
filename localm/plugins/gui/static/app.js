@@ -1715,10 +1715,28 @@ if (chat.conversations.length) {
 }
 renderChat();
 reattachSessions();
-// Restore the last active page (set in non-privacy mode only). Deferred a
-// tick so pages.js has installed window.onViewShown and the lazy page
-// refresh fires for the restored view.
+// Deep links + restore. Deferred a tick so pages.js has installed
+// window.onViewShown and the #pull-start handler.
 {
-  const savedView = localStorage.getItem("localm.activeView");
-  if (savedView && savedView !== "chat") setTimeout(() => showView(savedView), 0);
+  const params = new URLSearchParams(location.search);
+  const pullSpec = params.get("pull");      // from `localm gui --pull SPEC`
+  const viewParam = params.get("view");
+  if (pullSpec || viewParam) {
+    // Strip the query so a reload doesn't restart the download.
+    history.replaceState(null, "", location.pathname);
+    setTimeout(() => {
+      showView(VIEWS.includes(viewParam) ? viewParam : "models");
+      if (pullSpec) {
+        const specInput = $("pull-spec");
+        if (specInput) {
+          specInput.value = pullSpec;
+          $("pull-start").click();   // kick off the pull with progress
+        }
+      }
+    }, 0);
+  } else {
+    // Restore the last active page (set in non-privacy mode only).
+    const savedView = localStorage.getItem("localm.activeView");
+    if (savedView && savedView !== "chat") setTimeout(() => showView(savedView), 0);
+  }
 }

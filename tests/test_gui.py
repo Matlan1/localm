@@ -369,6 +369,41 @@ class TestCoderEndpoints:
         assert collected[-1]["type"] == "closed"
 
 
+class TestModelLessServer:
+    """The GUI starts with no engine on a fresh install (empty registry); the
+    user adds a model from the Models page. The server must not crash."""
+
+    @pytest.fixture
+    def app_no_engine(self):
+        from localm.inference.http_server import create_app
+        app = create_app(None)
+        with TestClient(app) as client:
+            yield client
+
+    def test_v1_models_empty_when_no_engine(self, app_no_engine):
+        data = app_no_engine.get("/v1/models").json()
+        assert data == {"object": "list", "data": []}
+
+    def test_health_503_when_no_engine(self, app_no_engine):
+        assert app_no_engine.get("/health").status_code == 503
+
+    def test_gui_models_lists_registry_without_engine(self):
+        """/api/models reads the registry, not the engine — works model-less."""
+        app = FastAPI()
+
+        async def switch_model(name):
+            pass
+
+        attach_gui(app, self_url="http://127.0.0.1:9/v1",
+                   switch_model=switch_model, active_model=lambda: "")
+        with patch("localm.config.load_registry", return_value=_FAKE_REGISTRY):
+            with TestClient(app) as client:
+                data = client.get("/api/models").json()
+        assert data["active"] == ""
+        assert [m["name"] for m in data["models"]] == ["model-a", "model-b"]
+        assert all(m["active"] is False for m in data["models"])
+
+
 class TestStaticFiles:
     def test_index_served(self, gui_app):
         app, _ = gui_app
