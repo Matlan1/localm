@@ -103,6 +103,22 @@ class ConfirmRequest(BaseModel):
     approved: bool
 
 
+class ConversationUpsert(BaseModel):
+    title: str = "Untitled"
+    updated_at: float = 0
+    messages: list = []
+
+
+class WebSearchRequest(BaseModel):
+    query: str
+    max_results: int = 5
+
+
+class WebFetchRequest(BaseModel):
+    url: str
+    max_chars: int = 8000
+
+
 # ------------------------------------------------------------------ #
 #  Attach                                                             #
 # ------------------------------------------------------------------ #
@@ -719,6 +735,151 @@ def attach_gui(
                               "size_bytes": p.stat().st_size,
                               "mtime": p.stat().st_mtime})
         return {"tracks": items}
+
+    # ------------------- chat conversation store ------------------ #
+    # Server-side persistence for GUI chat conversations so they survive
+    # browser reloads, profile wipes, and other devices on the LAN.
+    # Strictly gated on the chat surface's session mode: in privacy mode
+    # (the default) nothing is readable or writable here and the GUI keeps
+    # conversations in memory only.
+
+    import re as _re
+
+    chats_dir = home_dir() / "chats"
+    _CONV_ID = _re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+    _CONV_MAX_BYTES = 16 * 1024 * 1024   # data-URI images make these large
+
+    def _chat_persist_enabled() -> bool:
+        from localm.audit import SessionMode, effective_mode
+        return effective_mode("chat") != SessionMode.PRIVACY
+
+    def _conv_path(conv_id: str) -> Path:
+        if not _CONV_ID.match(conv_id):
+            raise HTTPException(400, "Invalid conversation id")
+        return chats_dir / f"{conv_id}.json"
+
+    @app.get("/api/conversations", dependencies=[Depends(_require_auth)])
+    async def conversations_list():
+        if not _chat_persist_enabled():
+            return {"enabled": False, "conversations": []}
+        items = []
+        if chats_dir.is_dir():
+            for p in chats_dir.glob("*.json"):
+                try:
+                    data = json.loads(p.read_text(encoding="utf-8"))
+                    data["id"] = p.stem
+                    items.append(data)
+                except Exception:
+                    continue   # corrupt file — skip, never block the list
+        items.sort(key=lambda c: c.get("updated_at", 0), reverse=True)
+        return {"enabled": True, "conversations": items[:200]}
+
+    @app.put("/api/conversations/{conv_id}",
+             dependencies=[Depends(_require_auth)])
+    async def conversation_upsert(conv_id: str, req: ConversationUpsert):
+        if not _chat_persist_enabled():
+            raise HTTPException(
+                403, "Chat persistence is off (privacy mode). "
+                     "Set mode/chat_mode to 'log' or 'full' to enable it.")
+        path = _conv_path(conv_id)
+        payload = json.dumps(
+            {"id": conv_id, "title": req.title,
+             "updated_at": req.updated_at, "messages": req.messages},
+            ensure_ascii=False)
+        if len(payload.encode("utf-8")) > _CONV_MAX_BYTES:
+            raise HTTPException(413, "Conversation too large to persist")
+        chats_dir.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(payload, encoding="utf-8")
+        tmp.replace(path)
+        return {"status": "saved", "id": conv_id}
+
+    @app.delete("/api/conversations/{conv_id}",
+                dependencies=[Depends(_require_auth)])
+    async def conversation_delete(conv_id: str):
+        if not _chat_persist_enabled():
+            raise HTTPException(403, "Chat persistence is off (privacy mode)")
+        path = _conv_path(conv_id)
+        if path.is_file():
+            path.unlink()
+            return {"status": "deleted", "id": conv_id}
+        return {"status": "absent", "id": conv_id}
+
+    # -------------------------- web access ------------------------ #
+    # Search and fetch for the chat surface, enforced by localm.netpolicy
+    # (net_mode, net_allow/net_deny, SSRF guard). Callers are either the
+    # user's explicit /web command or the per-conversation web-access toggle
+    # — both are direct consent, so "ask" mode does not re-prompt here; only
+    # "off" blocks. Domain rules and the private-address guard always apply.
+
+    @app.post("/api/web/search", dependencies=[Depends(_require_auth)])
+    async def web_search_endpoint(req: WebSearchRequest):
+        from localm.netpolicy import NetworkPolicyError, web_search
+        if not req.query.strip():
+            raise HTTPException(400, "Empty query")
+        loop = asyncio.get_running_loop()
+        try:
+            results = await loop.run_in_executor(
+                None, lambda: web_search(req.query, max_results=req.max_results))
+        except NetworkPolicyError as e:
+            raise HTTPException(403, str(e))
+        except Exception as e:
+            raise HTTPException(502, f"Search failed: {e}")
+        return {"query": req.query, "results": results}
+
+    @app.post("/api/web/fetch", dependencies=[Depends(_require_auth)])
+    async def web_fetch_endpoint(req: WebFetchRequest):
+        from localm.netpolicy import NetworkPolicyError, fetch_text
+        loop = asyncio.get_running_loop()
+        try:
+            final_url, text = await loop.run_in_executor(
+                None, lambda: fetch_text(req.url))
+        except NetworkPolicyError as e:
+            raise HTTPException(403, str(e))
+        except Exception as e:
+            raise HTTPException(502, f"Fetch failed: {e}")
+        max_chars = max(500, min(req.max_chars, 60_000))
+        return {"url": final_url,
+                "text": text[:max_chars],
+                "truncated": len(text) > max_chars}
+
+    # --------------------- coder session history ------------------ #
+    # Read-only browser for past audit logs (~/.localm/sessions/*.jsonl,
+    # written in log/full modes). Live sessions have /log; this lists what
+    # earlier sessions — including ones from before a server restart — left
+    # behind. Privacy mode writes no logs, so the list is simply empty.
+
+    @app.get("/api/coder/history", dependencies=[Depends(_require_auth)])
+    async def coder_history():
+        from localm import audit as _audit
+        from localm.audit import SessionMode, effective_mode
+        sessions_dir = _audit._SESSIONS_DIR
+        items = []
+        if sessions_dir.is_dir():
+            for p in sorted(sessions_dir.glob("*.jsonl"),
+                            key=lambda f: f.stat().st_mtime, reverse=True)[:100]:
+                items.append({
+                    "name": p.name,
+                    "size_bytes": p.stat().st_size,
+                    "mtime": p.stat().st_mtime,
+                })
+        return {"enabled": effective_mode("coder") != SessionMode.PRIVACY,
+                "logs": items}
+
+    @app.get("/api/coder/history/{name}",
+             dependencies=[Depends(_require_auth)])
+    async def coder_history_entries(name: str):
+        from localm import audit as _audit
+        if not name.endswith(".jsonl"):
+            raise HTTPException(400, "Invalid log name")
+        path = _confined_file(_audit._SESSIONS_DIR, name, "session log")
+        entries = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return {"path": str(path), "entries": entries}
 
     # ------------------------- static ----------------------------- #
     # Mounted last: API routes above take precedence over the SPA files.

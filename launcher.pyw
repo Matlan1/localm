@@ -15,9 +15,10 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, ttk
+from tkinter import filedialog, simpledialog, ttk
 
 REPO_DIR = Path(__file__).resolve().parent
 
@@ -201,6 +202,18 @@ class Launcher(tk.Tk):
                    command=self._refresh_models).grid(
             row=1, column=1, padx=(8, 0), pady=(4, 0))
         model_card.columnconfigure(0, weight=1)
+
+        # ----- import a model (for empty registries / new models) -----
+        imp = ttk.Frame(model_card, style="Card.TFrame")
+        imp.grid(row=2, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        ttk.Label(imp, text="Import:", style="Dim.TLabel").pack(side="left")
+        self.import_btns = []
+        for text, cmd in (("from file…", self._import_from_file),
+                          ("from folder…", self._import_from_folder),
+                          ("from URL…", self._import_from_url)):
+            b = ttk.Button(imp, text=text, style="Quiet.TButton", command=cmd)
+            b.pack(side="left", padx=(8, 0))
+            self.import_btns.append(b)
         # NOTE: the initial _refresh_models() runs at the END of _build —
         # its "no models" message needs the footer status label to exist.
 
@@ -306,7 +319,89 @@ class Launcher(tk.Tk):
             self.model.set(models[0])
         if not models:
             self.model.set("")
-            self.status_msg("No models registered — run: localm pull <name>", error=True)
+            self.status_msg("No models yet — Import one, or launch the Web GUI "
+                            "to add one there", error=True)
+
+    # ------------------------- model import ----------------------- #
+
+    def _set_import_enabled(self, enabled: bool) -> None:
+        for b in self.import_btns:
+            b.configure(state="normal" if enabled else "disabled")
+
+    def _import_from_file(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Select a GGUF model file",
+            filetypes=[("GGUF models", "*.gguf"), ("All files", "*.*")])
+        if path:
+            self._register_path(path)
+
+    def _import_from_folder(self) -> None:
+        path = filedialog.askdirectory(
+            title="Select a HuggingFace model directory")
+        if path:
+            self._register_path(path)
+
+    def _register_path(self, path: str) -> None:
+        """Register a local file/dir via `localm add` off the UI thread.
+        SHA256 hashing of a multi-GB file can take a few seconds."""
+        before = set(load_models())
+        self._set_import_enabled(False)
+        self.status_msg("Importing… (hashing may take a moment)")
+
+        def work():
+            ok, msg = False, ""
+            try:
+                proc = subprocess.run(
+                    [python_exe(), "-m", "localm", "add", path,
+                     "--on-duplicate", "alias"],
+                    cwd=str(REPO_DIR), capture_output=True, text=True,
+                    timeout=900)
+                ok = proc.returncode == 0
+                out = (proc.stdout + proc.stderr).strip().splitlines()
+                msg = out[-1] if out else ""
+            except Exception as e:
+                msg = str(e)
+            self.after(0, lambda: self._register_done(ok, msg, before))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _register_done(self, ok: bool, msg: str, before: set) -> None:
+        self._set_import_enabled(True)
+        self._refresh_models()
+        new = sorted(set(load_models()) - before)
+        if ok and new:
+            self.model.set(new[0])
+            self.status_msg(f"Imported {new[0]} ✓")
+        elif ok:
+            self.status_msg("Imported ✓ (already registered)")
+        else:
+            self.status_msg(f"Import failed: {msg[:70]}", error=True)
+
+    def _import_from_url(self) -> None:
+        """Download from a URL/HuggingFace spec inside the Web GUI, where the
+        Models page shows a live progress bar. Opens a model-less GUI that
+        starts the pull immediately."""
+        spec = simpledialog.askstring(
+            "Import from URL",
+            "HuggingFace repo, repo:file.gguf, or https URL:",
+            parent=self)
+        if not spec or not spec.strip():
+            return
+        spec = spec.strip()
+        cmd = [python_exe(), "-m", "localm", "gui", "--pull", spec]
+        port = self.port.get().strip()
+        if port:
+            cmd += ["-p", port]
+        cmd += ["--mode", self.privacy_global.get() or "privacy"]
+        try:
+            subprocess.Popen(cmd, cwd=str(REPO_DIR),
+                             creationflags=subprocess.CREATE_NEW_CONSOLE)
+        except Exception as e:
+            self.status_msg(f"Launch failed: {e}", error=True)
+            return
+        self.status_msg("Downloading in the Web GUI — watch the Models page ✓")
+        if not self.keep_open.get():
+            self.after(900, self.destroy)
 
     def _pick_dir(self) -> None:
         chosen = filedialog.askdirectory(initialdir=self.coder_dir.get() or str(Path.home()))
@@ -335,11 +430,10 @@ class Launcher(tk.Tk):
     def _build_command(self) -> list | None:
         mode = self.mode.get()
         model = self.model.get().strip()
-        if not model and mode != "serve":
-            # serve also needs a model; chat/gui/coder definitely do
-            pass
-        if not model:
-            self.status_msg("Pick a model first", error=True)
+        # The Web GUI can open with no model (you add one on the Models page);
+        # chat / serve / coder need a model to run.
+        if not model and mode != "gui":
+            self.status_msg("Pick or import a model first", error=True)
             return None
 
         cmd = [python_exe(), "-m", "localm"]
@@ -359,7 +453,9 @@ class Launcher(tk.Tk):
         }[mode]
 
         if mode == "gui":
-            cmd += ["gui", model]
+            cmd += ["gui"]
+            if model:
+                cmd += [model]
             if port:
                 cmd += ["-p", port]
             if ctx:

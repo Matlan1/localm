@@ -7,20 +7,37 @@ localm gui              # first registered model, opens your default browser
 localm gui mymodel      # pick a model
 localm gui --no-browser # just start the server, open the URL yourself
 localm gui -p 8650      # explicit port (auto-bumps when busy)
+localm gui --pull bartowski/Qwen2.5-7B-Instruct-GGUF:Qwen2.5-7B-Instruct-Q4_K_M.gguf
 ```
 
 The selected model preloads in a background thread at startup, so the first
 reply does not pay the load cost.
 
+**Starting with no models.** On a fresh install `localm gui` (no model
+argument, empty registry) still opens — it lands on the Models page so you can
+pull or import a first model from the browser; the engine starts once you load
+one. `localm gui --pull <spec>` goes further and begins downloading `<spec>` (a
+HuggingFace repo, `repo:file.gguf`, or an https URL) immediately, with progress
+shown on the Models page. The graphical launcher's **Import** row drives the
+same flows (file / folder / URL).
+
 ## Chat
 
 - Typing `/` opens a command menu: `/imagine <prompt>` (generate an image
-  inline), `/clear`, `/compact`, `/export`, `/rename <title>`, `/system`,
-  `/new`. Slash input is always handled by the UI, never sent to the model.
+  inline), `/web <query>` (search the web, answer with sources), `/clear`,
+  `/compact`, `/export`, `/rename <title>`, `/system`, `/new`. Slash input is
+  always handled by the UI, never sent to the model.
+- Web access: `/web` grounds one answer in search results, and the "Web
+  access" checkbox in the parameters drawer lets the model search and read
+  pages on its own mid-conversation (bounded rounds; every request and result
+  is shown as a dimmed "Web" message). Both run through the server's network
+  policy — see [network.md](network.md). Off by default; without them chat is
+  fully offline.
 - Model selector in the sidebar lists every registered model. Switching loads the new model and unloads the old one (the switch waits for any in-flight request to finish).
 - Streaming responses with markdown and highlighted code blocks, copy buttons on messages and code.
 - The parameters drawer sets temperature, top-p, max tokens, seed, and a system prompt per conversation.
-- Conversations are stored in your browser's localStorage, never on the server. Deleting one removes it for good.
+- Conversation persistence follows the session mode. In `privacy` (the default) conversations live in memory only and vanish on reload. In `log`/`full` they are saved to `chats/` in the localm data directory (with localStorage as a cache), so they survive reloads, browser profile wipes, and server restarts. Deleting one removes it everywhere.
+- The page you were on (chat, coder, models, …) is restored after a reload — except in privacy mode, which leaves no trace of it.
 - The usage line under the composer shows total tokens, time to first token, and tokens per second for the last reply.
 
 ## Coder
@@ -31,7 +48,7 @@ What you see in the feed:
 
 - The agent's reasoning streams live.
 - Every tool call becomes a card. Click it to expand arguments and output.
-- Destructive actions (file writes, shell commands) pause the agent and show an approval card with a unified diff of exactly what would change. Approve or reject from the browser. Unanswered approvals time out after 10 minutes and are rejected.
+- Destructive actions (file writes, shell commands) pause the agent and show an approval card with a unified diff of exactly what would change. Approve or reject from the browser. Unanswered approvals time out after 10 minutes and are rejected. Answered approvals keep showing their outcome — including after a page reload, and in other tabs attached to the same session.
 - Auto-approve can be enabled at session start if you trust the task.
 
 Session persistence follows the coder's modes: `privacy` (default, nothing saved), `log` (JSONL audit trail), `full` (audit trail plus markdown transcript).
@@ -47,6 +64,9 @@ Stop asks the agent to halt at the next safe point. End session terminates it.
   auto-approve.
 - The bar's undo button reverts the last file write, compact summarises old
   turns to free context, and log opens the JSONL audit trail (log/full modes).
+- The history button (also "past sessions" on the setup form) lists the audit
+  logs earlier log/full-mode sessions left behind — including sessions from
+  before a server restart — and opens them in the same log viewer.
 - Session setup accepts a model (switches the engine), max turns, temperature,
   and a scope glob that confines file tools.
 - Typing `/` opens the coder command menu (`/undo`, `/compact`, `/log`,

@@ -126,6 +126,28 @@ GUI gaps identified by comparing against LM Studio, Jan, Open WebUI.
 - [x] Session audit-log viewer (JSONL from log/full modes)
 - [x] Multiple concurrent sessions in the UI (backend already supports it)
 
+### Round 3 (shipped 2026-06-11)
+
+- [x] Fix: answered approval cards replayed as still-pending after a page reload — `confirm_resolved` event now recorded in the stream and replay buffer; cards resolve idempotently (covers approve, reject, timeout, and stop)
+- [x] Remember the active page across reloads (`localm.activeView`; never written in privacy mode)
+- [x] Server-side chat conversation persistence in non-privacy modes: `PUT/GET/DELETE /api/conversations`, stored in `<data dir>/chats/`, merged with the localStorage cache at load; privacy mode unchanged (memory only, 403 on the store)
+- [x] Coder session history browser: `GET /api/coder/history[/{name}]` lists past audit logs (`~/.localm/sessions/*.jsonl`) incl. pre-restart sessions; history button in the coder bar + "past sessions" on the setup form
+- [x] Settings "clear conversations" also clears the server store when persistence is on
+
+### Round 4 (shipped 2026-06-11) — internet access
+
+- [x] `localm/netpolicy.py`: single policy choke point for model-initiated requests — net_mode off/ask/allow (+ `LOCALM_NET_MODE` env), net_allow/net_deny domain suffix rules, private/loopback/link-local SSRF guard with `net_allow_private` escape hatch, per-hop redirect re-validation, size caps
+- [x] Coder: `web_search` tool (DuckDuckGo no-key default, SearXNG via `net_search_url`); `fetch_url` rerouted through the policy; both gated in the agent (off = fail fast, ask = approval flow); privacy-mode stderr audit
+- [x] `/api/web/search` + `/api/web/fetch` endpoints (403 on policy refusal)
+- [x] Chat: `/web <query>` command and a per-conversation "Web access" toggle — the model emits `<tool_call>` web requests, the GUI executes them through the policy and injects results as visible dimmed "Web" messages (max 3 rounds per send)
+- [x] Behaviour change: `fetch_url` to localhost/private addresses is now blocked by default (`net_allow_private true` restores it)
+
+### Round 5 (shipped 2026-06-11) — onboarding with no models
+
+- [x] `localm gui` opens model-less on an empty registry (engine starts when the user loads a model) instead of `exit(1)`; `/v1/models` + `/health` null-safe
+- [x] `localm gui --pull SPEC` deep-links the browser to the Models page (`?view=models&pull=…`) and auto-starts the download with the existing progress UI; query string stripped after handling
+- [x] Launcher **Import** row: *from file…* / *from folder…* register a local GGUF / HF dir via `localm add` (off-thread, selects the new model); *from URL…* launches a model-less GUI with `--pull`; the Web GUI can also be launched with no model selected
+
 ### Pages (round 2, shipped)
 
 - [x] Model management page: pull with progress, remove, aliases (registry list exists; mutations are CLI-only)
@@ -161,6 +183,44 @@ Backend scaffold is in place; the user-facing parts are still to do.
 - [x] TLS / reverse-proxy guide for LAN serving
 
 ---
+
+## Suite parity roadmap
+
+Gap analysis vs the polished consumer suites (LM Studio, Msty, Jan, Open
+WebUI, GPT4All, AnythingLLM), 2026-06-11. Goal: everything below, eventually.
+Persistence-touching items are always gated on `effective_mode()` — privacy
+mode stays trace-free.
+
+### High impact
+
+- [ ] RAG / chat-with-documents: attach PDF/docx/txt in chat; persistent knowledge-base collections with embeddings (`/v1/embeddings` already exists) and citations in answers — the single biggest functional gap
+- [ ] In-app model discovery: search HuggingFace from the Models page, curated starter picks, per-quant "fits your VRAM" badges (reuse the VRAM preflight logic)
+- [ ] Conversation search + folders/pinning across all chats (build on the new server store)
+- [ ] Message branching: edit-and-fork trees, regeneration variant navigation (< 2/3 >) instead of overwrite
+- [ ] Persistent assistant memory for chat (ChatGPT-style memory file injected into the system prompt; `LOCALCODER.md` is the coder analogue) — non-privacy only
+- [ ] Prompt library / personas: named system prompts with icons and default params
+- [ ] Voice: Whisper STT input + TTS read-aloud (audio decode plumbing exists in `inference/media.py`)
+- [x] Web search grounding for chat and coder (shipped 2026-06-11, see Round 4): `localm/netpolicy.py` policy choke point (off/ask/allow, domain allow/deny, SSRF guard), coder `web_search` tool + gated `fetch_url`, `/api/web/*`, chat `/web` command + per-conversation web-access toggle with bounded tool loop ([docs/network.md](docs/network.md))
+
+### Medium
+
+- [ ] Hardware monitor in the GUI status bar (live RAM/VRAM/CPU/GPU)
+- [ ] Sampler presets; per-model saved defaults; chat-template editor
+- [ ] GPU offload / context sliders with live VRAM estimate in Settings (CLI config covers the function, not the feel)
+- [ ] Multi-model side-by-side compare; JIT model load + idle TTL auto-unload (currently `Semaphore(1)` + one engine)
+- [ ] Download manager panel: background queue, pause, parallel (CLI already resumes)
+- [ ] Mermaid diagram rendering; artifacts/canvas live HTML/SVG preview; sandboxed code interpreter
+- [ ] Command palette (Ctrl+K), keyboard shortcuts, drag-and-drop files into chat
+- [ ] Flash attention / KV-cache quantization / speculative decoding toggles
+
+### Polish / later
+
+- [ ] First-run wizard: detect hardware, recommend a starter model
+- [ ] Empty-state funnels ("no models yet → pull one" guided flow)
+- [ ] One-file backup / export-import of all user data (chats, prompts, settings)
+- [ ] i18n, accessibility pass, mobile/PWA layout
+- [ ] Profiles / multi-user accounts (likely out of scope for home use)
+- [ ] Native shell, tray, auto-update, installer — tracked above as the Tauri 2 item
 
 ## Future Benchmarking (Under Review)
 
