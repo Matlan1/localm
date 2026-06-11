@@ -456,6 +456,99 @@ def serve(model, host, port, ctx, gpu_layers, mmproj, device):
 
 
 # ------------------------------------------------------------------ #
+#  benchmark                                                           #
+# ------------------------------------------------------------------ #
+
+@main.command()
+@click.argument("model", shell_complete=_complete_model_name)
+@click.option("-n", "--gen-tokens", default=128, show_default=True,
+              help="Tokens to generate per run.")
+@click.option("--prompts", default="64,512,2048", show_default=True,
+              help="Comma-separated approximate prompt sizes in tokens.")
+@click.option("-c", "--ctx",        default=None, type=int)
+@click.option("-g", "--gpu-layers", default=None, type=int)
+def benchmark(model, gen_tokens, prompts, ctx, gpu_layers):
+    """Measure TTFT and generation throughput at increasing prompt lengths.
+
+    Runs a fixed prompt padded to each requested size, streams GEN_TOKENS
+    tokens, and reports time to first token, tokens per second, and total
+    time. Results depend on your hardware, quantisation, and context size.
+    """
+    import time as _time
+
+    info = get_model_info(model)
+    if info is None:
+        console.print(f"[red]Model not found:[/red] {model}")
+        sys.exit(1)
+    model_path, _hint = info
+
+    try:
+        sizes = [int(s) for s in prompts.split(",") if s.strip()]
+    except ValueError:
+        console.print(f"[red]Invalid --prompts:[/red] {prompts}")
+        sys.exit(1)
+
+    from .inference.engine import Engine
+    engine = Engine(str(model_path), n_ctx=ctx, n_gpu_layers=gpu_layers,
+                    display_name=model)
+    console.print(f"Loading [cyan]{model}[/cyan]…")
+    engine.load()
+
+    pad_block = (
+        "The quick brown fox jumps over the lazy dog while the river keeps "
+        "flowing through the quiet valley under a pale morning sky. "
+    )
+    question = "\n\nReply with a short story continuing the text above."
+
+    rows = []
+    try:
+        for target in sizes:
+            # Build a prompt of roughly `target` tokens using the real tokenizer
+            padding = pad_block
+            while engine.count_tokens(padding) < target:
+                padding += pad_block
+            prompt = padding + question
+            prompt_tokens = engine.count_tokens(prompt)
+
+            console.print(f"  prompt ≈ {prompt_tokens} tok … ", end="")
+            start = _time.perf_counter()
+            first_at = None
+            generated = 0
+            for token in engine.chat_stream(
+                [{"role": "user", "content": prompt}],
+                max_tokens=gen_tokens, temperature=0.0,
+            ):
+                if first_at is None:
+                    first_at = _time.perf_counter()
+                generated += 1
+            elapsed = _time.perf_counter() - start
+
+            ttft_ms = (first_at - start) * 1000 if first_at else float("nan")
+            gen_time = elapsed - (first_at - start) if first_at else elapsed
+            tps = generated / gen_time if gen_time > 0 and generated else 0.0
+            console.print("done")
+            rows.append((prompt_tokens, generated, ttft_ms, tps, elapsed))
+    finally:
+        engine.unload()
+
+    from rich.table import Table
+    table = Table(title=f"benchmark — {model}")
+    table.add_column("prompt tok", justify="right")
+    table.add_column("gen tok", justify="right")
+    table.add_column("TTFT ms", justify="right")
+    table.add_column("tok/s", justify="right")
+    table.add_column("total s", justify="right")
+    for prompt_tokens, generated, ttft_ms, tps, elapsed in rows:
+        table.add_row(
+            str(prompt_tokens), str(generated),
+            f"{ttft_ms:.0f}", f"{tps:.1f}", f"{elapsed:.1f}",
+        )
+    console.print(table)
+    console.print("[dim]TTFT includes prompt prefill; tok/s measures pure "
+                  "generation after the first token.[/dim]")
+
+
+# ------------------------------------------------------------------ #
 #  Model management                                                    #
 # ------------------------------------------------------------------ #
 

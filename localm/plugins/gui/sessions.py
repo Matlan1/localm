@@ -51,6 +51,7 @@ class CoderSession:
         auto_approve: bool = False,
         max_turns: int = 40,
         mode: str = "privacy",
+        scope: Optional[str] = None,
         **gen_kwargs,
     ) -> None:
         from localm.plugins.coder.agent import Agent
@@ -59,7 +60,12 @@ class CoderSession:
         self.id = uuid.uuid4().hex[:12]
         self.cwd = cwd
         self.created_at = time.time()
+        self.model = getattr(backend, "model_id", "")
+        self.auto_approve = auto_approve
+        self.mode = mode
         self.events: queue.Queue = queue.Queue(maxsize=_QUEUE_MAX)
+        # Bounded replay buffer so a reloaded page can rebuild the feed.
+        self.history: list = []
         self.busy = False
         self.closed = False
         self._pending: Optional[_PendingConfirm] = None
@@ -72,7 +78,8 @@ class CoderSession:
             auto_approve=auto_approve,
             max_turns=max_turns,
             mode=parse_mode(mode),
-            on_event=self._push,
+            scope=scope,
+            on_event=self._on_agent_event,
             confirm_handler=None if auto_approve else self._confirm,
             **gen_kwargs,
         )
@@ -81,8 +88,23 @@ class CoderSession:
     #  Event plumbing                                                     #
     # ------------------------------------------------------------------ #
 
+    def _on_agent_event(self, event: dict) -> None:
+        """Agent event hook: enrich write/edit/patch tool calls with a diff
+        preview so the GUI can render them even under auto-approve."""
+        if event.get("type") == "tool_call" and \
+                event.get("tool") in ("write_file", "edit_file", "patch_file"):
+            from types import SimpleNamespace
+            call = SimpleNamespace(name=event["tool"], args=event.get("args", {}))
+            diff = self._diff_preview(call)
+            if diff:
+                event = {**event, "diff": diff}
+        self._push(event)
+
     def _push(self, event: dict) -> None:
         """Enqueue an event, dropping the oldest when the queue is full."""
+        self.history.append(event)
+        if len(self.history) > _QUEUE_MAX:
+            del self.history[: _QUEUE_MAX // 10]
         try:
             self.events.put_nowait(event)
         except queue.Full:
@@ -162,6 +184,9 @@ class CoderSession:
                 return False
             self.busy = True
 
+        # In the event stream (and replay buffer) so reloaded pages see it too
+        self._push({"type": "user", "text": text})
+
         def _run():
             try:
                 final = self.agent.run_task(text)
@@ -181,6 +206,40 @@ class CoderSession:
         self._thread = threading.Thread(target=_run, daemon=True)
         self._thread.start()
         return True
+
+    def undo(self) -> Optional[str]:
+        """Revert the last undoable file operation. None when nothing to undo."""
+        with self._lock:
+            if self.busy:
+                return None
+        return self.agent.undo()
+
+    def compact(self) -> bool:
+        """Summarise old conversation history. False when nothing to compact
+        or the agent is mid-task."""
+        with self._lock:
+            if self.busy:
+                return False
+        return self.agent.compact()
+
+    def audit_log_path(self) -> Optional[Path]:
+        """Path of the JSONL audit log (log/full modes), or None in privacy mode."""
+        return getattr(self.agent._audit, "path", None)
+
+    def info(self) -> dict:
+        """Summary dict for the session list endpoint."""
+        return {
+            "id": self.id,
+            "cwd": str(self.cwd),
+            "model": self.model,
+            "mode": self.mode,
+            "auto_approve": self.auto_approve,
+            "busy": self.busy,
+            "turns": self.agent.turns,
+            "total_tokens": self.agent.total_tokens,
+            "created_at": self.created_at,
+            "pending_confirm": self._pending is not None,
+        }
 
     def answer_confirm(self, confirm_id: str, approved: bool) -> bool:
         """Resolve a pending confirmation. False if id doesn't match."""
@@ -227,6 +286,11 @@ class SessionManager:
     def get(self, session_id: str) -> Optional[CoderSession]:
         with self._lock:
             return self._sessions.get(session_id)
+
+    def list(self) -> list:
+        with self._lock:
+            sessions = list(self._sessions.values())
+        return [s.info() for s in sorted(sessions, key=lambda s: s.created_at)]
 
     def remove(self, session_id: str) -> Optional[CoderSession]:
         with self._lock:

@@ -12,11 +12,42 @@ Covers:
 from __future__ import annotations
 
 import os
+import time
 from typing import Iterator
 
 import requests
 
 from .base import BaseLLMBackend
+
+# Retry policy for rate limits and transient server errors (mainly relevant
+# for the opt-in cloud providers; a local server never returns 429).
+_RETRY_STATUSES = {429, 500, 502, 503, 529}
+_MAX_RETRIES = 4
+_BACKOFF_BASE_S = 2.0
+
+
+def _retry_delay(response, attempt: int) -> float:
+    """Honour Retry-After when present, else exponential backoff."""
+    retry_after = response.headers.get("Retry-After", "")
+    if retry_after.isdigit():
+        return min(float(retry_after), 120.0)
+    return min(_BACKOFF_BASE_S * (2 ** attempt), 60.0)
+
+
+def _post_with_retry(url: str, *, headers: dict, json_body: dict,
+                     timeout: int, stream: bool = False) -> requests.Response:
+    """POST with retry on 429/5xx. Returns the first non-retryable response."""
+    last = None
+    for attempt in range(_MAX_RETRIES + 1):
+        resp = requests.post(url, headers=headers, json=json_body,
+                             timeout=timeout, stream=stream)
+        if resp.status_code not in _RETRY_STATUSES or attempt == _MAX_RETRIES:
+            return resp
+        delay = _retry_delay(resp, attempt)
+        resp.close()
+        last = resp
+        time.sleep(delay)
+    return last  # unreachable, keeps type checkers happy
 
 
 class HTTPBackend(BaseLLMBackend):
@@ -130,10 +161,10 @@ class HTTPBackend(BaseLLMBackend):
 
     def chat(self, messages: list[dict], **kwargs) -> str:
         self._last_usage = {}
-        resp = requests.post(
+        resp = _post_with_retry(
             f"{self._base_url}/chat/completions",
             headers=self._headers(),
-            json=self._body(messages, stream=False, **kwargs),
+            json_body=self._body(messages, stream=False, **kwargs),
             timeout=self._timeout,
         )
         resp.raise_for_status()
@@ -155,10 +186,10 @@ class HTTPBackend(BaseLLMBackend):
         # Accumulate streaming native tool_calls: index → {name, arguments_buf}
         _tc_buf: dict[int, dict] = {}
 
-        with requests.post(
+        with _post_with_retry(
             f"{self._base_url}/chat/completions",
             headers=self._headers(),
-            json=self._body(messages, stream=True, **kwargs),
+            json_body=self._body(messages, stream=True, **kwargs),
             timeout=self._timeout,
             stream=True,
         ) as resp:

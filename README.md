@@ -21,7 +21,7 @@ Everything that does not strictly need the internet works fully offline. Online 
 | **GPU support** | AMD (ROCm / HIP), NVIDIA (CUDA), CPU. Auto-detected from DLL loading order |
 | **HF Transformers** | Full HuggingFace model directories |
 | **OpenAI-compatible server** | `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`, streaming SSE, TTFT and tok/s in usage |
-| **Web GUI** | `localm gui`: browser chat + coder agent, zero build step, fully offline ([guide](docs/gui.md)) |
+| **Web GUI** | `localm gui`: chat, coder agent, model manager, image generation, plugins, and settings in the browser; zero build step, fully offline ([guide](docs/gui.md)) |
 | **Coding agent** | `localm coder` / `localcoder`: agentic loop with file, shell, search, test, and image tools |
 | **MCP client** | The coder consumes external MCP tool servers from `.localcoder/config.toml` |
 | **MCP server** | `localm mcp` exposes your local models to Claude Desktop and other MCP clients ([guide](docs/mcp.md)) |
@@ -168,8 +168,9 @@ localm run MODEL [opts]          # chat or single prompt
 localm gui [MODEL] [opts]        # browser GUI (chat + coder)
 localm serve MODEL [opts]        # OpenAI-compatible server
 localm coder [TASK] [opts]       # AI coding agent
+localm coder --estimate "task"   # planning turn only: approach + effort, no execution
 localm mcp [opts]                # MCP stdio server
-localm imagine "prompt"          # image generation via ComfyUI
+localm benchmark MODEL           # TTFT and tok/s at increasing prompt sizes
 ```
 
 ### Model management
@@ -290,6 +291,7 @@ Stop strings (`<|im_end|>`, `<end_of_turn>`, etc.) are filtered via a streaming 
 | [docs/architecture.md](docs/architecture.md) | Design notes |
 | [docs/gpu-setup.md](docs/gpu-setup.md) | GPU/DLL setup |
 | [docs/flux-setup.md](docs/flux-setup.md) | ComfyUI FLUX image pipeline |
+| [docs/tls.md](docs/tls.md) | API keys, TLS, and reverse proxies for LAN serving |
 
 ---
 

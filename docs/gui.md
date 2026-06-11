@@ -32,6 +32,29 @@ Session persistence follows the coder's modes: `privacy` (default, nothing saved
 
 Stop asks the agent to halt at the next safe point. End session terminates it.
 
+## Coder extras
+
+- Multiple sessions can run side by side; the dropdown in the bar switches
+  between them, and reloading the page reattaches to running sessions and
+  replays their feeds.
+- File-writing tool calls show a rendered diff in their card even under
+  auto-approve.
+- The bar's undo button reverts the last file write, compact summarises old
+  turns to free context, and log opens the JSONL audit trail (log/full modes).
+- Session setup accepts a model (switches the engine), max turns, temperature,
+  and a scope glob that confines file tools.
+
+## Other pages
+
+- **Models**: pull with live progress, switch the active engine, add aliases,
+  inspect path/hash/size, and remove models (alias-aware, never the active one).
+- **Images**: drive the local ComfyUI FLUX pipeline; prompt, negative prompt,
+  seed, guidance, img2img with denoise; history grid with per-image metadata
+  from the sidecar files.
+- **Plugins**: list installed plugins, install from a local folder, remove.
+- **Settings**: edit the server config (`~/.localm/config.json`) and the GUI's
+  API key; light/dark theme toggle lives in the sidebar.
+
 ## Security notes
 
 - The server binds to 127.0.0.1 by default and CORS is locked to localhost, so other websites you visit cannot call your API from browser JS.

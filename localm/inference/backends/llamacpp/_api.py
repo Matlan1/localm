@@ -421,6 +421,28 @@ def llama_sampler_init_temp(temp: float) -> ctypes.c_void_p:
     return _bind("llama_sampler_init_temp", LlamaSampler, ctypes.c_float)(temp)
 
 
+def has_penalties_sampler() -> bool:
+    """True when this llama.dll exports llama_sampler_init_penalties."""
+    try:
+        getattr(load_lib(), "llama_sampler_init_penalties")
+        return True
+    except AttributeError:
+        return False
+
+
+def llama_sampler_init_penalties(
+    penalty_last_n: int,
+    penalty_repeat: float,
+    penalty_freq: float = 0.0,
+    penalty_present: float = 0.0,
+) -> ctypes.c_void_p:
+    """Repetition penalty sampler (current 4-argument signature)."""
+    return _bind(
+        "llama_sampler_init_penalties", LlamaSampler,
+        ctypes.c_int32, ctypes.c_float, ctypes.c_float, ctypes.c_float,
+    )(penalty_last_n, penalty_repeat, penalty_freq, penalty_present)
+
+
 def llama_sampler_init_grammar(
     vocab: ctypes.c_void_p,
     grammar_str: bytes,

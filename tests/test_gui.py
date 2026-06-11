@@ -333,6 +333,197 @@ class TestStaticFiles:
             assert client.get("/vendor/marked.min.js").status_code == 200
 
 
+class TestSessionExtras:
+    def test_session_list_and_info(self, gui_app, tmp_path):
+        app, _ = gui_app
+        with TestClient(app) as client:
+            assert client.get("/api/coder/sessions").json()["sessions"] == []
+            sid = client.post("/api/coder/sessions",
+                              json={"cwd": str(tmp_path)}).json()["id"]
+            sessions = client.get("/api/coder/sessions").json()["sessions"]
+            assert [s["id"] for s in sessions] == [sid]
+            assert sessions[0]["busy"] is False
+            assert sessions[0]["mode"] == "privacy"
+            client.delete(f"/api/coder/sessions/{sid}")
+
+    def test_undo_with_nothing_to_undo_is_409(self, gui_app, tmp_path):
+        app, _ = gui_app
+        with TestClient(app) as client:
+            sid = client.post("/api/coder/sessions",
+                              json={"cwd": str(tmp_path)}).json()["id"]
+            assert client.post(f"/api/coder/sessions/{sid}/undo").status_code == 409
+            assert client.post(f"/api/coder/sessions/{sid}/compact").status_code == 409
+            client.delete(f"/api/coder/sessions/{sid}")
+
+    def test_log_404_in_privacy_mode(self, gui_app, tmp_path):
+        app, _ = gui_app
+        with TestClient(app) as client:
+            sid = client.post("/api/coder/sessions",
+                              json={"cwd": str(tmp_path)}).json()["id"]
+            assert client.get(f"/api/coder/sessions/{sid}/log").status_code == 404
+            client.delete(f"/api/coder/sessions/{sid}")
+
+    def test_create_with_unknown_model_404(self, gui_app, tmp_path):
+        app, _ = gui_app
+        with patch("localm.config.load_registry", return_value=_FAKE_REGISTRY):
+            with TestClient(app) as client:
+                r = client.post("/api/coder/sessions",
+                                json={"cwd": str(tmp_path), "model": "ghost"})
+        assert r.status_code == 404
+
+    def test_create_with_model_switches_engine(self, gui_app, tmp_path):
+        app, switched = gui_app
+        with patch("localm.config.load_registry", return_value=_FAKE_REGISTRY):
+            with TestClient(app) as client:
+                r = client.post("/api/coder/sessions",
+                                json={"cwd": str(tmp_path), "model": "model-b"})
+                assert r.status_code == 200
+                client.delete(f"/api/coder/sessions/{r.json()['id']}")
+        assert switched == ["model-b"]
+
+    def test_replay_rebuilds_history(self, gui_app, tmp_path):
+        app, _ = gui_app
+        with TestClient(app) as client:
+            sid = client.post("/api/coder/sessions",
+                              json={"cwd": str(tmp_path)}).json()["id"]
+            # Drive some history directly through the session object
+            # (no model behind these tests)
+            import localm.plugins.gui.web  # noqa: F401
+            # fetch via the manager closure: reach through the route list
+            # is brittle — instead use the documented API shape: events with
+            # replay after pushing through a message is covered by the
+            # CoderSession unit tests; here we just check the marker frame.
+            collected = []
+            def _close_soon():
+                time.sleep(0.3)
+                client.delete(f"/api/coder/sessions/{sid}")
+            t = threading.Thread(target=_close_soon, daemon=True)
+            t.start()
+            with client.stream(
+                "GET", f"/api/coder/sessions/{sid}/events?replay=true") as r:
+                for line in r.iter_lines():
+                    if line.startswith("data: "):
+                        collected.append(json.loads(line[6:]))
+                        if collected[-1]["type"] in ("closed",):
+                            break
+            t.join()
+        assert collected[0]["type"] == "replay_done"
+
+
+class TestPlatformEndpoints:
+    """The /v1/plugins, /v1/config, /v1/models/{id} endpoints live on the
+    inference app; build one with a stub engine."""
+
+    @pytest.fixture
+    def v1_client(self):
+        from localm.inference.http_server import create_app
+        engine = type("E", (), {"display_name": "model-a", "loaded": False})()
+        app = create_app(engine)
+        with TestClient(app) as client:
+            yield client
+
+    def test_model_detail_404(self, v1_client):
+        with patch("localm.config.load_registry", return_value={}):
+            assert v1_client.get("/v1/models/nope").status_code == 404
+
+    def test_model_detail_fields(self, v1_client, tmp_path):
+        f = tmp_path / "a.gguf"
+        f.write_bytes(b"x" * 128)
+        registry = {
+            "model-a": {"path": str(f), "source": "local", "sha256": "ab" * 32},
+            "alias-a": {"path": str(f), "source": "local"},
+        }
+        with patch("localm.config.load_registry", return_value=registry):
+            data = v1_client.get("/v1/models/model-a").json()
+        assert data["size_bytes"] == 128
+        assert data["aliases"] == ["alias-a"]
+        assert data["sha256"] == "ab" * 32
+        assert data["active"] is True
+
+    def test_config_roundtrip(self, v1_client, tmp_path):
+        cfg_file = tmp_path / "config.json"
+        with patch("localm.config.CONFIG_FILE", cfg_file), \
+             patch("localm.config.HOME_DIR", tmp_path), \
+             patch("localm.config.MODELS_DIR", tmp_path / "models"):
+            data = v1_client.get("/v1/config").json()
+            assert data["n_ctx"] == 4096
+            r = v1_client.patch("/v1/config", json={"n_ctx": 8192})
+            assert r.json()["n_ctx"] == 8192
+            assert json.loads(cfg_file.read_text())["n_ctx"] == 8192
+
+    def test_config_rejects_unknown_keys(self, v1_client):
+        r = v1_client.patch("/v1/config", json={"hax": 1})
+        assert r.status_code == 400
+
+    def test_plugins_list_empty(self, v1_client, tmp_path):
+        with patch("localm.plugins.loader.plugins_dir", return_value=tmp_path):
+            data = v1_client.get("/v1/plugins").json()
+        assert data["plugins"] == []
+        assert data["errors"] == []
+
+    def test_plugin_install_and_remove(self, v1_client, tmp_path):
+        src = tmp_path / "src" / "myplug"
+        src.mkdir(parents=True)
+        (src / "plugin.toml").write_text(
+            '[plugin]\nname = "myplug"\nentry = "mod:main"\n', encoding="utf-8")
+        (src / "mod.py").write_text("main = None\n", encoding="utf-8")
+        plugdir = tmp_path / "installed"
+        with patch("localm.plugins.loader.plugins_dir", return_value=plugdir):
+            r = v1_client.post("/v1/plugins/install", json={"source": str(src)})
+            assert r.status_code == 200
+            assert r.json()["name"] == "myplug"
+            assert (plugdir / "myplug" / "plugin.toml").is_file()
+            assert v1_client.delete("/v1/plugins/myplug").status_code == 200
+            assert v1_client.delete("/v1/plugins/myplug").status_code == 404
+
+    def test_plugin_install_invalid_source(self, v1_client):
+        r = v1_client.post("/v1/plugins/install", json={"source": "Z:/nope"})
+        assert r.status_code == 400
+
+
+class TestJobs:
+    def test_cli_job_streams_lines_and_ends(self):
+        from localm.plugins.gui.jobs import JobManager
+        mgr = JobManager()
+        # Use python -m localm --help via start_cli's own python: cheap + real
+        job = mgr.start_cli("pull", ["--help"])
+        events = []
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            try:
+                ev = job.events.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            events.append(ev)
+            if ev["type"] == "end":
+                break
+        assert events[-1]["type"] == "end"
+        assert events[-1]["status"] == "done"
+        assert any("localm" in e.get("text", "") for e in events if e["type"] == "line")
+
+    def test_fn_job_success_and_failure(self):
+        from localm.plugins.gui.jobs import JobManager
+        mgr = JobManager()
+
+        ok_job = mgr.start_fn("imagine", lambda job: True)
+        fail_job = mgr.start_fn("imagine", lambda job: False)
+        boom_job = mgr.start_fn("imagine", lambda job: (_ for _ in ()).throw(RuntimeError("x")))
+
+        for job, status in ((ok_job, "done"), (fail_job, "failed"), (boom_job, "failed")):
+            end = None
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                try:
+                    ev = job.events.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+                if ev["type"] == "end":
+                    end = ev
+                    break
+            assert end is not None
+            assert end["status"] == status
+
+
 # ------------------------------------------------------------------ #
 #  Agent hooks (direct)                                               #
 # ------------------------------------------------------------------ #

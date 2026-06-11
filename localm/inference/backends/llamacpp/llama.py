@@ -262,16 +262,19 @@ def _build_sampler(
     top_k: int = 40,
     top_p: float = 0.95,
     min_p: float = 0.05,
+    repeat_penalty: float = 1.0,
     seed: int = _DEFAULT_SEED,
     grammar: Optional[str] = None,
 ) -> int:
     """
     Construct a sampler chain:
-        [grammar] → top_k → top_p → min_p → temperature → dist (random draw)
+        [grammar] → [penalties] → top_k → top_p → min_p → temperature → dist
 
     The optional grammar sampler sits first so it masks invalid tokens before
-    any scoring or sampling stage sees them.  For temperature ≤ 0 greedy
-    sampling replaces the stochastic stages.
+    any scoring or sampling stage sees them.  The repetition-penalty stage is
+    added when ``repeat_penalty != 1.0`` and the DLL exports it — without it
+    models prone to looping repeat the same marker lines until max_tokens.
+    For temperature ≤ 0 greedy sampling replaces the stochastic stages.
 
     Parameters
     ----------
@@ -292,6 +295,13 @@ def _build_sampler(
         api.llama_sampler_chain_add(
             chain,
             api.llama_sampler_init_grammar(vocab, grammar.encode(), b"root"),
+        )
+
+    # Repetition penalty applies to greedy and stochastic sampling alike
+    if repeat_penalty and repeat_penalty != 1.0 and api.has_penalties_sampler():
+        api.llama_sampler_chain_add(
+            chain,
+            api.llama_sampler_init_penalties(64, repeat_penalty, 0.0, 0.0),
         )
 
     if temperature <= 0.0:
@@ -466,6 +476,7 @@ class LlamaCpp:
             temperature=temperature,
             top_k=top_k,
             top_p=top_p,
+            repeat_penalty=repeat_penalty,
             seed=self._seed,
             grammar=grammar,
         )
@@ -574,12 +585,19 @@ class LlamaCpp:
         # Update the tokenizer's ctx reference
         self._tokenizer._ctx = self._ctx_ptr
 
-        n_prompt = len(prompt_tokens)
-        tok_arr = (llama_token * n_prompt)(*prompt_tokens)
-        batch = api.llama_batch_get_one(tok_arr, n_prompt)
-        ret = api.llama_decode(self._ctx_ptr, batch)
-        if ret != 0:
-            raise RuntimeError(f"llama_decode failed during prefill (code {ret})")
+        # Prefill in n_batch-sized chunks. A single llama_decode call with
+        # more tokens than n_batch does not return an error — it aborts the
+        # whole process inside the native library. Long chat histories
+        # (prompt > 2048 tokens) land here whenever the context is recreated.
+        n_batch = cp.n_batch
+        for i in range(0, len(prompt_tokens), n_batch):
+            chunk = prompt_tokens[i:i + n_batch]
+            tok_arr = (llama_token * len(chunk))(*chunk)
+            batch = api.llama_batch_get_one(tok_arr, len(chunk))
+            ret = api.llama_decode(self._ctx_ptr, batch)
+            if ret != 0:
+                self._cached_tokens = []
+                raise RuntimeError(f"llama_decode failed during prefill (code {ret})")
 
         self._cached_tokens = list(prompt_tokens)
 

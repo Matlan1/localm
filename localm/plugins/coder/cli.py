@@ -92,6 +92,11 @@ def _complete_model(ctx, param, incomplete):
               help="Auto-approve file writes but still prompt before shell commands.")
 @click.option("--dry-run",          is_flag=True,
               help="Show what the agent would do without executing destructive tools.")
+@click.option("--estimate",         is_flag=True,
+              help=(
+                  "Plan only: one LLM turn that outlines the approach and rough "
+                  "effort for TASK, executes nothing, then exits."
+              ))
 @click.option("--patch-mode",       "patch_mode", default=None,
               metavar="FILE",
               help=(
@@ -133,7 +138,7 @@ def _complete_model(ctx, param, incomplete):
 def main(
     task, model, url, api_key, port, cwd,
     no_server, max_turns, temperature, max_tokens,
-    verbose, yes, interactive_confirm, dry_run, patch_mode, ci, output_format,
+    verbose, yes, interactive_confirm, dry_run, estimate, patch_mode, ci, output_format,
     native_tools, provider, mode, scope,
 ):
     """
@@ -279,6 +284,13 @@ def main(
         agent.patch_mode = True
 
     try:
+        if estimate:
+            if not task:
+                print_error("--estimate requires a TASK to estimate.")
+                sys.exit(2 if ci else 1)
+            _run_estimate(agent, task, output_format)
+            return
+
         if task:
             # Non-interactive single-task mode
             response = agent.run_task(task)
@@ -331,6 +343,51 @@ def main(
             clear_shell_history_traces()
         if server_ctx:
             server_ctx.stop()
+
+
+# ---------------------------------------------------------------------------
+#  Estimate mode
+# ---------------------------------------------------------------------------
+
+def _run_estimate(agent: Agent, task: str, output_format: str) -> None:
+    """
+    One planning turn, zero execution.
+
+    Sends the task with an instruction to produce a plan and effort estimate
+    instead of tool calls, prints the result, and reports the prompt-side
+    token cost so the user knows what a real run starts from.
+    """
+    prompt = (
+        "ESTIMATE ONLY — do not call any tools and do not make changes.\n"
+        "For the following task, reply with:\n"
+        "1. A short step-by-step plan (which files you would read and change)\n"
+        "2. Roughly how many agent turns you expect it to take\n"
+        "3. Risks or open questions that could change the estimate\n\n"
+        f"Task: {task}"
+    )
+    messages = [
+        {"role": "system", "content": agent._system_prompt},
+        {"role": "user", "content": prompt},
+    ]
+    response = agent.backend.chat(messages, **agent.gen_kwargs)
+    usage = getattr(agent.backend, "last_usage", {}) or {}
+
+    if output_format == "json":
+        import json as _json
+        sys.stdout.write(_json.dumps({
+            "estimate": response,
+            "prompt_tokens": usage.get("prompt_tokens"),
+            "total_tokens": usage.get("total_tokens"),
+        }, indent=2) + "\n")
+        return
+
+    console.print(response)
+    if usage.get("total_tokens"):
+        print_info(
+            f"Planning turn used {usage['total_tokens']} tokens "
+            f"({usage.get('prompt_tokens', '?')} prompt). A real run pays "
+            "roughly the prompt cost on every turn."
+        )
 
 
 # ---------------------------------------------------------------------------

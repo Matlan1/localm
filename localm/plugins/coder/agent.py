@@ -551,7 +551,9 @@ class Agent:
                 # Execute tools — run non-destructive batches in parallel
                 result_blocks = self._execute_tools(calls, interactive=interactive)
 
-                # Feed all results back as a user message
+                # Feed all results back as a user message, compressing large
+                # outputs when the context is filling up
+                result_blocks = self._compress_results(result_blocks)
                 combined = "\n\n".join(result_blocks)
                 self._add_user(combined)
 
@@ -776,6 +778,35 @@ ws     ::= [ \t\n\r]*
             *recent,
         ]
         return True
+
+    # Tool-result compression thresholds
+    _COMPRESS_FILL_RATIO = 0.50   # only compress when context is half full
+    _COMPRESS_MIN_CHARS  = 6000   # blocks smaller than this are never touched
+    _COMPRESS_HEAD_CHARS = 3000   # kept from the start of a compressed block
+    _COMPRESS_TAIL_CHARS = 1000   # kept from the end (errors usually live here)
+
+    def _compress_results(self, blocks: list[str]) -> list[str]:
+        """
+        Shrink oversized tool-result blocks once the context window is more
+        than half full. Keeps the head (context) and tail (errors, summaries)
+        of each block and marks the elision, so the agent knows output was
+        dropped and can re-read specific files if it needs the middle.
+        """
+        if self._fill_ratio() < self._COMPRESS_FILL_RATIO:
+            return blocks
+        compressed = []
+        for block in blocks:
+            if len(block) <= self._COMPRESS_MIN_CHARS:
+                compressed.append(block)
+                continue
+            dropped = len(block) - self._COMPRESS_HEAD_CHARS - self._COMPRESS_TAIL_CHARS
+            compressed.append(
+                block[: self._COMPRESS_HEAD_CHARS]
+                + f"\n[... {dropped} chars of tool output elided to save context — "
+                "re-run the tool on a narrower target if you need the middle ...]\n"
+                + block[-self._COMPRESS_TAIL_CHARS:]
+            )
+        return compressed
 
     def _maybe_compact(self, interactive: bool) -> None:
         """Check fill ratio and warn or auto-compact as appropriate."""

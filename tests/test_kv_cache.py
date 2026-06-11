@@ -10,6 +10,7 @@ import pytest
 
 from localm.inference.backends.llamacpp.llama import (
     LlamaCpp,
+    _build_sampler,
     _common_prefix_len,
 )
 
@@ -237,6 +238,27 @@ class TestFreshContextPath:
         # No stale cache claim after failure
         assert llm._cached_tokens == []
 
+    def test_long_prompt_prefill_is_chunked(self):
+        """Regression: a fresh-context prefill larger than n_batch must be
+        split into n_batch-sized decode calls. A single oversized batch
+        aborts the process inside the native library (crash reported after
+        long chat histories forced a context rebuild)."""
+        llm = _bare_llama()
+        mock_api = MagicMock()
+        cp = MagicMock()
+        mock_api.llama_context_default_params.return_value = cp
+        mock_api.llama_init_from_model.return_value = 444
+        mock_api.llama_decode.return_value = 0
+        with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
+            llm._prefill_fresh_context(list(range(5000)), needed=6000)
+
+        # n_batch is capped at 2048 → 5000 tokens need 3 decode calls
+        assert mock_api.llama_decode.call_count == 3
+        batch_sizes = [c[0][1] for c in mock_api.llama_batch_get_one.call_args_list]
+        assert batch_sizes == [2048, 2048, 904]
+        assert all(size <= 2048 for size in batch_sizes)
+        assert llm._cached_tokens == list(range(5000))
+
     def test_close_clears_cached_tokens(self):
         llm = _bare_llama()
         llm._cached_tokens = [1, 2, 3]
@@ -245,3 +267,43 @@ class TestFreshContextPath:
             llm.close()
         assert llm._cached_tokens == []
         assert llm._ctx_ptr is None
+
+
+# ---------------------------------------------------------------------------
+#  Sampler chain — repetition penalty
+# ---------------------------------------------------------------------------
+
+class TestRepeatPenaltySampler:
+    """Regression: repeat_penalty was accepted everywhere but never added to
+    the sampler chain, so models prone to looping repeated marker lines
+    until max_tokens."""
+
+    def _mock_api(self, has_penalties=True):
+        mock_api = MagicMock()
+        mock_api.has_penalties_sampler.return_value = has_penalties
+        return mock_api
+
+    def test_penalty_added_when_set(self):
+        mock_api = self._mock_api()
+        with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
+            _build_sampler(vocab=1, repeat_penalty=1.1)
+        mock_api.llama_sampler_init_penalties.assert_called_once_with(
+            64, 1.1, 0.0, 0.0)
+
+    def test_no_penalty_at_neutral_value(self):
+        mock_api = self._mock_api()
+        with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
+            _build_sampler(vocab=1, repeat_penalty=1.0)
+        mock_api.llama_sampler_init_penalties.assert_not_called()
+
+    def test_skipped_when_dll_lacks_export(self):
+        mock_api = self._mock_api(has_penalties=False)
+        with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
+            _build_sampler(vocab=1, repeat_penalty=1.3)
+        mock_api.llama_sampler_init_penalties.assert_not_called()
+
+    def test_penalty_applies_in_greedy_mode_too(self):
+        mock_api = self._mock_api()
+        with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
+            _build_sampler(vocab=1, temperature=0.0, repeat_penalty=1.2)
+        mock_api.llama_sampler_init_penalties.assert_called_once()

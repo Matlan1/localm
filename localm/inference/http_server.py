@@ -18,6 +18,7 @@ import json
 import os
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import AsyncIterator, List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -133,6 +134,110 @@ def create_app(engine: Engine) -> FastAPI:
                 }
             ],
         }
+
+    @app.get("/v1/models/{model_id}")
+    async def model_detail(model_id: str):
+        """Registry metadata for one model: path, source, size, hash, aliases."""
+        from localm.config import load_registry
+        registry = load_registry()
+        entry = registry.get(model_id)
+        if entry is None:
+            raise HTTPException(404, f"Model not registered: {model_id}")
+        path = entry.get("path", "")
+        p = Path(path)
+        size = None
+        try:
+            if p.is_file():
+                size = p.stat().st_size
+            elif p.is_dir():
+                size = sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+        except OSError:
+            pass
+        aliases = sorted(
+            n for n, e in registry.items()
+            if e.get("path") == path and n != model_id
+        )
+        return {
+            "id": model_id,
+            "object": "model",
+            "owned_by": "localm",
+            "path": path,
+            "source": entry.get("source", ""),
+            "sha256": entry.get("sha256"),
+            "size_bytes": size,
+            "aliases": aliases,
+            "active": _engine is not None and _engine.display_name == model_id,
+            "loaded": _engine is not None
+                      and _engine.display_name == model_id and _engine.loaded,
+        }
+
+    # ---------------------------------------------------------------- #
+    #  Plugins                                                           #
+    # ---------------------------------------------------------------- #
+
+    @app.get("/v1/plugins", dependencies=[Depends(_require_auth)])
+    async def list_plugins():
+        from localm.plugins.loader import discover_errors, discover_plugins
+        return {
+            "plugins": [
+                {
+                    "name": m.name,
+                    "version": m.version,
+                    "description": m.description,
+                    "entry": m.entry,
+                    "path": str(m.path),
+                    "tool_exports": m.tool_exports,
+                }
+                for m in discover_plugins()
+            ],
+            "errors": discover_errors(),
+        }
+
+    @app.post("/v1/plugins/install", dependencies=[Depends(_require_auth)])
+    async def install_plugin_ep(body: dict):
+        from pathlib import Path as _P
+        from localm.plugins.loader import PluginError, install_plugin
+        source = body.get("source", "")
+        if not source:
+            raise HTTPException(400, "Missing 'source' (local directory path)")
+        try:
+            manifest = install_plugin(_P(source), force=bool(body.get("force")))
+        except PluginError as e:
+            raise HTTPException(400, str(e))
+        return {"status": "installed", "name": manifest.name,
+                "version": manifest.version}
+
+    @app.delete("/v1/plugins/{name}", dependencies=[Depends(_require_auth)])
+    async def remove_plugin_ep(name: str):
+        from localm.plugins.loader import PluginError, remove_plugin
+        try:
+            existed = remove_plugin(name)
+        except PluginError as e:
+            raise HTTPException(400, str(e))
+        if not existed:
+            raise HTTPException(404, f"Plugin not installed: {name}")
+        return {"status": "removed", "name": name}
+
+    # ---------------------------------------------------------------- #
+    #  Config                                                            #
+    # ---------------------------------------------------------------- #
+
+    @app.get("/v1/config", dependencies=[Depends(_require_auth)])
+    async def get_config():
+        from localm.config import load_config
+        return load_config()
+
+    @app.patch("/v1/config", dependencies=[Depends(_require_auth)])
+    async def patch_config(body: dict):
+        """Update known config keys and persist. Unknown keys are rejected."""
+        from localm.config import DEFAULT_CONFIG, load_config, save_config
+        unknown = [k for k in body if k not in DEFAULT_CONFIG]
+        if unknown:
+            raise HTTPException(400, f"Unknown config keys: {', '.join(unknown)}")
+        cfg = load_config()
+        cfg.update(body)
+        save_config(cfg)
+        return cfg
 
     # ---------------------------------------------------------------- #
     #  Model lifecycle — unload / load                                   #

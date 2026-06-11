@@ -110,43 +110,43 @@ GUI gaps identified by comparing against LM Studio, Jan, Open WebUI.
 
 ### Missing — chat
 
-- [ ] Image attachment (multimodal) — CLI has `--image`, the GUI composer has no attach button
-- [ ] top-k and repeat-penalty in the parameters drawer (server already accepts them)
-- [ ] GBNF grammar field (server already accepts `grammar`)
-- [ ] Regenerate last reply / edit a sent message
-- [ ] Rename and export conversations (markdown/JSON)
+- [x] Image attachment (multimodal) — CLI has `--image`, the GUI composer has no attach button
+- [x] top-k and repeat-penalty in the parameters drawer (server already accepts them)
+- [x] GBNF grammar field (server already accepts `grammar`)
+- [x] Regenerate last reply / edit a sent message
+- [x] Rename and export conversations (markdown/JSON)
 
 ### Missing — coder
 
-- [ ] Session reattach after page reload — needs `GET /api/coder/sessions` (list) so the UI can reconnect to a live session instead of orphaning it
-- [ ] Rendered diff in tool cards when auto-approve is on (currently raw args JSON; diffs only show in approval cards)
-- [ ] Expose max-turns and temperature in the session setup form (API already accepts both)
-- [ ] Per-session model choice (sessions always use the active chat model)
-- [ ] Undo / compact / scope — REPL commands with no GUI equivalent
-- [ ] Session audit-log viewer (JSONL from log/full modes)
-- [ ] Multiple concurrent sessions in the UI (backend already supports it)
+- [x] Session reattach after page reload — needs `GET /api/coder/sessions` (list) so the UI can reconnect to a live session instead of orphaning it
+- [x] Rendered diff in tool cards when auto-approve is on (currently raw args JSON; diffs only show in approval cards)
+- [x] Expose max-turns and temperature in the session setup form (API already accepts both)
+- [x] Per-session model choice (sessions always use the active chat model)
+- [x] Undo / compact / scope — REPL commands with no GUI equivalent
+- [x] Session audit-log viewer (JSONL from log/full modes)
+- [x] Multiple concurrent sessions in the UI (backend already supports it)
 
 ### Missing — pages
 
-- [ ] Model management page: pull with progress, remove, aliases (registry list exists; mutations are CLI-only)
-- [ ] Plugin manager page (needs `/v1/plugins` endpoints)
-- [ ] Settings page: server config editing (needs `/v1/config` GET/PATCH)
-- [ ] Image generation panel (ComfyUI at 8188)
-- [ ] Light theme toggle (dark only today)
+- [x] Model management page: pull with progress, remove, aliases (registry list exists; mutations are CLI-only)
+- [x] Plugin manager page (needs `/v1/plugins` endpoints)
+- [x] Settings page: server config editing (needs `/v1/config` GET/PATCH)
+- [x] Image generation panel (ComfyUI at 8188)
+- [x] Light theme toggle (dark only today)
 - [ ] Tauri 2 native shell wrapping this frontend (window, sidecar lifecycle, tray)
 
 ---
 
 ## Server / platform (open)
 
-- [ ] `GET /v1/models/{id}` — model detail endpoint with registry metadata
-- [ ] `localm benchmark <model>` — standard prompt, TTFT, tok/s at multiple context lengths
-- [ ] 429 retry/backoff for cloud coder backends (OpenAI/Anthropic opt-ins)
-- [ ] Tool result compression — summarise large tool outputs when context fill > 50%
-- [ ] `read_env` coder tool — reads `.env` and active env vars with secrets stripped
-- [ ] `--estimate` flag — one planning turn without execution, prints expected token usage
-- [ ] PyPI packaging polish — classifiers, `localm[gpu]`/`localm[cpu]` extras, publish workflow
-- [ ] TLS / reverse-proxy guide for LAN serving
+- [x] `GET /v1/models/{id}` — model detail endpoint with registry metadata
+- [x] `localm benchmark <model>` — standard prompt, TTFT, tok/s at multiple context lengths
+- [x] 429 retry/backoff for cloud coder backends (OpenAI/Anthropic opt-ins)
+- [x] Tool result compression — summarise large tool outputs when context fill > 50%
+- [x] `read_env` coder tool — reads `.env` and active env vars with secrets stripped
+- [x] `--estimate` flag — one planning turn without execution, prints expected token usage
+- [x] PyPI packaging polish — classifiers, `localm[gpu]`/`localm[cpu]` extras, publish workflow
+- [x] TLS / reverse-proxy guide for LAN serving
 
 ---
 
