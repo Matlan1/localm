@@ -92,6 +92,16 @@ DEFAULT_CONFIG: dict = {
     # many images in a row — the chat model then reloads lazily on the next
     # chat message instead.
     "reload_llm_after_imagine": True,
+    # Network policy for model-initiated requests (coder fetch_url/web_search,
+    # chat web access). See localm/netpolicy.py and docs/network.md.
+    #   off   = all policy-routed network access fails fast
+    #   ask   = allowed; the coder asks for approval per request (default)
+    #   allow = no confirmation
+    "net_mode": "ask",
+    "net_allow": [],            # domains; empty = any. "x.com" covers *.x.com
+    "net_deny": [],             # domains always refused (wins over allow)
+    "net_allow_private": False, # True = permit loopback/private targets (SSRF guard off)
+    "net_search_url": None,     # SearXNG base URL; None = DuckDuckGo (no key)
 }
 
 # localm claims 8642-8741 — far from ComfyUI (8188), A1111 (7860),

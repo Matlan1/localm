@@ -65,6 +65,10 @@ _SCOPED_TOOLS: frozenset[str] = frozenset({
     "list_dir", "tree",
 })
 
+# Model-initiated network tools, governed by the net_mode policy
+# (localm.netpolicy): off = fail fast, ask = approval flow, allow = run.
+_NETWORK_TOOLS: frozenset[str] = frozenset({"fetch_url", "web_search"})
+
 # Fraction of estimated context window at which compaction is triggered
 _COMPACT_WARN_RATIO  = 0.70   # warn user in interactive mode
 _COMPACT_AUTO_RATIO  = 0.90   # silently compact in non-interactive mode
@@ -1010,9 +1014,27 @@ ws     ::= [ \t\n\r]*
                 console.print("    [dim yellow][dry-run] skipped[/dim yellow]")
             return result
 
-        # Confirmation for destructive tools — with diff preview for write_file
+        # Network policy: model-initiated network tools are governed by
+        # net_mode (off = fail fast, ask = approval flow, allow = run).
+        net_mode = None
+        if call.name in _NETWORK_TOOLS:
+            from localm.netpolicy import network_mode
+            net_mode = network_mode()
+            if net_mode == "off":
+                result = ToolResult.error(
+                    "Network access is disabled (net_mode=off). The user can "
+                    "enable it with: localm config net_mode ask"
+                )
+                if interactive:
+                    print_tool_error(call.name, result.output)
+                self._emit("tool_result", tool=call.name, ok=False,
+                           summary="blocked by network policy (net_mode=off)")
+                return result
+
+        # Confirmation for destructive tools (diff preview for write_file)
+        # and for network tools when net_mode is "ask"
         needs_confirm = (
-            tool_def.destructive and (
+            (tool_def.destructive or net_mode == "ask") and (
                 not self.auto_approve or call.name in self.always_confirm
             )
         )
@@ -1048,7 +1070,8 @@ ws     ::= [ \t\n\r]*
         args = dict(call.args)
         if call.name == "spawn_agent":
             args["_parent_agent"] = self
-        if call.name in ("run_shell", "fetch_url") and self.mode == SessionMode.PRIVACY:
+        if call.name in ("run_shell", "fetch_url", "web_search") \
+                and self.mode == SessionMode.PRIVACY:
             args["_privacy"] = True
 
         try:
