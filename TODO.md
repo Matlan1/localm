@@ -142,6 +142,12 @@ GUI gaps identified by comparing against LM Studio, Jan, Open WebUI.
 - [x] Chat: `/web <query>` command and a per-conversation "Web access" toggle — the model emits `<tool_call>` web requests, the GUI executes them through the policy and injects results as visible dimmed "Web" messages (max 3 rounds per send)
 - [x] Behaviour change: `fetch_url` to localhost/private addresses is now blocked by default (`net_allow_private true` restores it)
 
+### Round 5 (shipped 2026-06-11) — onboarding with no models
+
+- [x] `localm gui` opens model-less on an empty registry (engine starts when the user loads a model) instead of `exit(1)`; `/v1/models` + `/health` null-safe
+- [x] `localm gui --pull SPEC` deep-links the browser to the Models page (`?view=models&pull=…`) and auto-starts the download with the existing progress UI; query string stripped after handling
+- [x] Launcher **Import** row: *from file…* / *from folder…* register a local GGUF / HF dir via `localm add` (off-thread, selects the new model); *from URL…* launches a model-less GUI with `--pull`; the Web GUI can also be launched with no model selected
+
 ### Pages (round 2, shipped)
 
 - [x] Model management page: pull with progress, remove, aliases (registry list exists; mutations are CLI-only)

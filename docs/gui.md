@@ -7,10 +7,19 @@ localm gui              # first registered model, opens your default browser
 localm gui mymodel      # pick a model
 localm gui --no-browser # just start the server, open the URL yourself
 localm gui -p 8650      # explicit port (auto-bumps when busy)
+localm gui --pull bartowski/Qwen2.5-7B-Instruct-GGUF:Qwen2.5-7B-Instruct-Q4_K_M.gguf
 ```
 
 The selected model preloads in a background thread at startup, so the first
 reply does not pay the load cost.
+
+**Starting with no models.** On a fresh install `localm gui` (no model
+argument, empty registry) still opens — it lands on the Models page so you can
+pull or import a first model from the browser; the engine starts once you load
+one. `localm gui --pull <spec>` goes further and begins downloading `<spec>` (a
+HuggingFace repo, `repo:file.gguf`, or an https URL) immediately, with progress
+shown on the Models page. The graphical launcher's **Import** row drives the
+same flows (file / folder / URL).
 
 ## Chat
 
