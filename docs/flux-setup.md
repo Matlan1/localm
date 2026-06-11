@@ -17,7 +17,12 @@ This guide covers the setup for a 16 GB VRAM card and how localm drives it.
 | VAE | `ae.safetensors` | `models/vae/` |
 
 3. Start ComfyUI on its default port 8188. localm reads `FLUX_API_URL` if
-   yours runs elsewhere.
+   yours runs elsewhere. Optionally tell localm how to start it so image
+   requests can launch it on demand:
+
+```bash
+localm config comfy_launch_cmd "D:\path\to\comfyui.bat"
+```
 
 Quantized FLUX dev (Q8_0) generates in roughly 30 to 60 seconds on a 16 GB
 card. On AMD, a native Windows ROCm environment works well; the decisions
@@ -26,20 +31,25 @@ behind that setup are recorded in
 
 ## How localm drives it
 
-Three frontends share the same pipeline (`localm/image_gen/comfy.py`):
+Four frontends share the same pipeline (`localm/image_gen/comfy.py`):
 
+- `/imagine <prompt>` in chat (GUI and `localm run`)
+- The GUI's Images page (`localm gui`)
 - The coder agent's `generate_image` tool, invoked when you ask the agent
   for an image
-- The GUI's Images page (`localm gui`)
 - The MCP server's `generate_image` tool (`localm mcp`)
 
 Features handled for you:
 
 - **VRAM handover**: before generation, localm unloads the LLM
-  (`POST /v1/models/unload`) so FLUX gets the full VRAM budget; the LLM
-  reloads automatically on the next chat request (a few seconds overhead).
+  (`POST /v1/models/unload`, waiting for any in-flight reply to finish) so
+  FLUX gets the full VRAM budget. After generation, ComfyUI is asked to
+  release its models (`POST /free`) and the LLM reloads immediately; on
+  older ComfyUI builds without `/free`, the reload stays lazy and happens
+  on the next chat request instead.
 - **Fail-fast probe**: ComfyUI is probed before the LLM is unloaded, so an
-  unreachable server costs nothing.
+  unreachable server costs nothing. With `comfy_launch_cmd` set, localm
+  starts ComfyUI itself and waits for it to come up.
 - **Reproducibility**: the seed is applied to every sampler node and
   reported back; a JSON sidecar with prompt, seed, guidance, and encoder
   settings is written next to every output image.

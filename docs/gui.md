@@ -9,8 +9,14 @@ localm gui --no-browser # just start the server, open the URL yourself
 localm gui -p 8650      # explicit port (auto-bumps when busy)
 ```
 
+The selected model preloads in a background thread at startup, so the first
+reply does not pay the load cost.
+
 ## Chat
 
+- Typing `/` opens a command menu: `/imagine <prompt>` (generate an image
+  inline), `/clear`, `/compact`, `/export`, `/rename <title>`, `/system`,
+  `/new`. Slash input is always handled by the UI, never sent to the model.
 - Model selector in the sidebar lists every registered model. Switching loads the new model and unloads the old one (the switch waits for any in-flight request to finish).
 - Streaming responses with markdown and highlighted code blocks, copy buttons on messages and code.
 - The parameters drawer sets temperature, top-p, max tokens, seed, and a system prompt per conversation.
@@ -43,6 +49,9 @@ Stop asks the agent to halt at the next safe point. End session terminates it.
   turns to free context, and log opens the JSONL audit trail (log/full modes).
 - Session setup accepts a model (switches the engine), max turns, temperature,
   and a scope glob that confines file tools.
+- Typing `/` opens the coder command menu (`/undo`, `/compact`, `/log`,
+  `/stop`, `/end`, `/help`); commands run in the UI instead of being sent to
+  the agent as a task.
 
 ## Other pages
 
@@ -50,7 +59,10 @@ Stop asks the agent to halt at the next safe point. End session terminates it.
   inspect path/hash/size, and remove models (alias-aware, never the active one).
 - **Images**: drive the local ComfyUI FLUX pipeline; prompt, negative prompt,
   seed, guidance, img2img with denoise; history grid with per-image metadata
-  from the sidecar files.
+  from the sidecar files. If ComfyUI is not running, the job says how to
+  start it, or starts it automatically when `comfy_launch_cmd` is set in the
+  config. After a successful generation, ComfyUI is asked to release its
+  models and the chat model reloads so the next reply is instant.
 - **Plugins**: list installed plugins, install from a local folder, remove.
 - **Settings**: edit the server config (`~/.localm/config.json`) and the GUI's
   API key; light/dark theme toggle lives in the sidebar.

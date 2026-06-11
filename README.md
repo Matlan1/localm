@@ -25,7 +25,7 @@ Everything that does not strictly need the internet works fully offline. Online 
 | **Coding agent** | `localm coder` / `localcoder`: agentic loop with file, shell, search, test, and image tools |
 | **MCP client** | The coder consumes external MCP tool servers from `.localcoder/config.toml` |
 | **MCP server** | `localm mcp` exposes your local models to Claude Desktop and other MCP clients ([guide](docs/mcp.md)) |
-| **Interactive chat** | Multi-turn shell with `/clear`, `/image`, `/system`, `/temp`, `/save` |
+| **Interactive chat** | Multi-turn shell with `/imagine`, `/compact`, `/clear`, `/image`, `/system`, `/save` |
 | **Model registry** | Pull from HuggingFace (split GGUF supported), aliases, SHA256 dedup, tab completion |
 | **Image generation** | `generate_image` tool drives a local ComfyUI FLUX pipeline with VRAM handover |
 | **Plugins** | Drop a folder with `plugin.toml` into `~/.localm/plugins/` to add CLI commands and agent tools |
@@ -109,7 +109,10 @@ localm gui                # picks the first registered model, opens your browser
 localm gui mymodel        # or name one
 ```
 
-Chat and the coder agent in one page. See [docs/gui.md](docs/gui.md).
+Chat, the coder agent, model management, and image generation in one page.
+The model preloads in the background so the first reply is fast, and typing
+`/` in any composer opens a command menu (`/imagine` generates images
+inline). See [docs/gui.md](docs/gui.md).
 
 ### Start the inference server
 
@@ -204,6 +207,7 @@ localm config n_gpu_layers 99
 localm config n_ctx 8192
 localm config port 8650
 localm config confirm_remove false
+localm config comfy_launch_cmd "D:\path\to\comfyui.bat"   # auto-start ComfyUI for image generation
 ```
 
 ### Dynamic context window
