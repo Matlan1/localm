@@ -528,15 +528,28 @@ def attach_gui(
         job = jobs.start_fn("imagine", _generate, result_path=out_path.name)
         return {"job_id": job.id}
 
-    def _image_path(name: str) -> Path:
-        """Resolve *name* inside the GUI images directory — no path
-        components allowed."""
-        if "/" in name or "\\" in name or ".." in name:
+    def _confined_file(base: Path, name: str, kind: str) -> Path:
+        """Resolve *name* and guarantee it stays directly inside *base*.
+
+        Blocklisting separators is not enough on Windows: a drive-relative
+        name like ``C:evil`` joins to ``C:evil`` (outside *base*), and an
+        absolute name replaces the join entirely.  We verify the *resolved*
+        path's parent is *base* and the basename is unchanged, which also
+        rejects ``..``, nested subpaths, and ``con``/device names."""
+        if name != Path(name).name or name in ("", ".", ".."):
             raise HTTPException(400, "Invalid file name")
-        path = images_dir / name
-        if not path.is_file():
-            raise HTTPException(404, "No such image")
-        return path
+        try:
+            resolved = (base / name).resolve()
+        except (OSError, ValueError):
+            raise HTTPException(400, "Invalid file name")
+        if resolved.parent != base.resolve() or resolved.name != name:
+            raise HTTPException(400, "Invalid file name")
+        if not resolved.is_file():
+            raise HTTPException(404, f"No such {kind}")
+        return resolved
+
+    def _image_path(name: str) -> Path:
+        return _confined_file(images_dir, name, "image")
 
     @app.get("/api/imagine/file/{name}", dependencies=[Depends(_require_auth)])
     async def imagine_file(name: str):
@@ -646,12 +659,7 @@ def attach_gui(
         return {"job_id": job.id}
 
     def _music_path(name: str) -> Path:
-        if "/" in name or "\\" in name or ".." in name:
-            raise HTTPException(400, "Invalid file name")
-        path = music_dir / name
-        if not path.is_file():
-            raise HTTPException(404, "No such track")
-        return path
+        return _confined_file(music_dir, name, "track")
 
     @app.get("/api/music/file/{name}", dependencies=[Depends(_require_auth)])
     async def music_file(name: str):
