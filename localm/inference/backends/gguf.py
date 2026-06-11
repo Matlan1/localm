@@ -34,11 +34,17 @@ class GgufBackend(BaseBackend):
         mmproj_path: Optional[str] = None,
         n_ctx: int = 4096,
         n_gpu_layers: int = 99,
+        n_ctx_max: Optional[int] = None,
+        n_ctx_grow: int = 4096,
+        ctx_auto: bool = False,
     ) -> None:
         self.model_path = str(Path(model_path).resolve())
         self.mmproj_path = mmproj_path   # multimodal projection GGUF
         self.n_ctx = n_ctx
         self.n_gpu_layers = n_gpu_layers
+        self.n_ctx_max = n_ctx_max       # ceiling for dynamic growth (0/None = unlimited)
+        self.n_ctx_grow = n_ctx_grow
+        self.ctx_auto = ctx_auto         # derive n_ctx_max from free VRAM at load
         self._llm = None
         self._loaded = False
         self._use_subprocess = False   # set to True if llama-cpp-python unavailable
@@ -102,6 +108,46 @@ class GgufBackend(BaseBackend):
             f"  Continuing anyway — load may be slow or fail."
         )
 
+    # Bounds for VRAM-derived context ceilings
+    _AUTO_CTX_MIN = 4096
+    _AUTO_CTX_MAX = 65536
+    _AUTO_CTX_FALLBACK = 16384   # no GPU visibility — match common practice
+
+    def _auto_ctx_max(self) -> int:
+        """
+        Derive a context ceiling from available resources.
+
+        Budget = free VRAM - model weights - fixed overhead. The KV cost per
+        token is estimated from the model's size class (larger models have
+        more layers and wider KV heads; sliding-window models need less, so
+        the estimate is deliberately conservative). The result is clamped to
+        a sane range and rounded to whole KiB of tokens.
+        """
+        free = self._free_vram_bytes()
+        if free is None:
+            return self._AUTO_CTX_FALLBACK
+        model = self._model_bytes()
+        budget = free - model - self._VRAM_OVERHEAD_BYTES
+        if budget <= 0:
+            return max(self.n_ctx, self._AUTO_CTX_MIN)
+        # Heuristic: ~1 byte of KV per token per 100KB of model weights,
+        # clamped so tiny and huge models stay in a plausible band.
+        bytes_per_token = min(max(model // 100_000, 16_000), 512_000)
+        auto = budget // bytes_per_token
+        auto = (auto // 1024) * 1024
+        return int(max(self._AUTO_CTX_MIN, min(self._AUTO_CTX_MAX, auto)))
+
+    def _effective_ctx_max(self) -> Optional[int]:
+        """The context ceiling to use for this load (auto or configured)."""
+        if self.ctx_auto:
+            auto = self._auto_ctx_max()
+            console.print(
+                f"[dim]  ctx auto : window may grow to {auto:,} tokens "
+                f"(from free VRAM)[/dim]"
+            )
+            return auto
+        return self.n_ctx_max
+
     def load(self) -> None:
         # Split GGUF pre-flight: all sibling parts must be present, otherwise
         # llama.cpp fails with a cryptic native error mid-load.
@@ -147,14 +193,19 @@ class GgufBackend(BaseBackend):
             transient=True,
             console=console,
         ) as progress:
+            ctx_max = self._effective_ctx_max()
+            cap_label = f"→{ctx_max}" if ctx_max else "→∞"
             progress.add_task(
-                f"Loading model  (ctx={self.n_ctx}, gpu_layers={self.n_gpu_layers})",
+                f"Loading model  (ctx={self.n_ctx}{cap_label}, "
+                f"gpu_layers={self.n_gpu_layers})",
                 total=None,
             )
             self._llm = LlamaCpp(
                 model_path=self.model_path,
                 n_ctx=self.n_ctx,
                 n_gpu_layers=self.n_gpu_layers,
+                n_ctx_max=ctx_max,
+                n_ctx_grow=self.n_ctx_grow,
                 verbose=False,
             )
 

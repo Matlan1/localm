@@ -388,9 +388,18 @@ class LlamaCpp:
         verbose: bool = False,
         seed: int = _DEFAULT_SEED,
         n_threads: Optional[int] = None,
+        n_ctx_max: Optional[int] = None,
+        n_ctx_grow: int = 4096,
         **_ignored,
     ) -> None:
         self._n_ctx       = n_ctx
+        # Dynamic context window: starts at n_ctx, grows in n_ctx_grow steps
+        # up to n_ctx_max when a conversation outgrows it. None/0 = unlimited
+        # (the pre-dynamic behaviour: grow exactly as far as needed).
+        # An explicitly requested base larger than the ceiling wins — the
+        # user asked for it, the cap only governs automatic growth.
+        self._n_ctx_max   = max(n_ctx_max, n_ctx) if n_ctx_max else None
+        self._n_ctx_grow  = max(256, n_ctx_grow)
         self._seed        = seed
         self._verbose     = verbose
         self._model_ptr   = None   # type: ignore[assignment]
@@ -509,6 +518,11 @@ class LlamaCpp:
         if n_prompt == 0:
             return
 
+        # Dynamic window: shrink the generation budget to fit under the
+        # ceiling rather than blowing past it; fail clearly when even a
+        # minimal reply cannot fit any more.
+        max_new_tokens = self._fit_generation_budget(n_prompt, max_new_tokens)
+
         _ctx = _quiet_stderr if not self._verbose else contextlib.nullcontext
         needed = n_prompt + max_new_tokens + 64
 
@@ -557,6 +571,43 @@ class LlamaCpp:
                 pos += 1
         finally:
             api.llama_sampler_free(sampler)
+
+    # ------------------------------------------------------------------ #
+    #  Dynamic context window                                              #
+    # ------------------------------------------------------------------ #
+
+    def _fit_generation_budget(self, n_prompt: int, max_new_tokens: int) -> int:
+        """
+        Clamp the generation budget so prompt + reply fits under n_ctx_max.
+
+        Raises RuntimeError when the prompt alone leaves no usable room —
+        the conversation has genuinely outgrown the configured ceiling.
+        """
+        if not self._n_ctx_max:
+            return max_new_tokens
+        room = self._n_ctx_max - n_prompt - 64
+        if room < 32:
+            raise RuntimeError(
+                f"Conversation ({n_prompt} tokens) has outgrown the maximum "
+                f"context window (n_ctx_max={self._n_ctx_max}). Start a new "
+                f"chat, or raise it:  localm config n_ctx_max 32768  "
+                f"(or set ctx_auto true to size it from free VRAM)."
+            )
+        return min(max_new_tokens, room)
+
+    def _target_ctx(self, needed: int) -> int:
+        """
+        Context size to create for a request needing *needed* tokens:
+        grow in n_ctx_grow steps (avoids a rebuild on every turn), never
+        below the configured base, capped at n_ctx_max when one is set.
+        """
+        grow = self._n_ctx_grow
+        target = ((needed + grow - 1) // grow) * grow
+        target = max(self._n_ctx, target)
+        if self._n_ctx_max:
+            # _fit_generation_budget guarantees needed <= n_ctx_max here
+            target = min(target, self._n_ctx_max)
+        return target
 
     # ------------------------------------------------------------------ #
     #  KV cache management                                                 #
@@ -625,7 +676,7 @@ class LlamaCpp:
         self._cached_tokens = []
 
         cp = api.llama_context_default_params()
-        cp.n_ctx       = max(self._n_ctx, needed)
+        cp.n_ctx       = self._target_ctx(needed)
         cp.n_batch     = min(cp.n_ctx, 2048)
         cp.n_ubatch    = cp.n_batch   # micro-batch must match so prefill fits in one call
         cp.offload_kqv = True

@@ -47,6 +47,8 @@ def _bare_llama() -> LlamaCpp:
     """Construct a LlamaCpp without running __init__ (no DLL access)."""
     llm = LlamaCpp.__new__(LlamaCpp)
     llm._n_ctx = 4096
+    llm._n_ctx_max = None     # unlimited — preserves the original test scenarios
+    llm._n_ctx_grow = 4096
     llm._seed = 1234
     llm._verbose = False
     llm._model_ptr = 111

@@ -203,6 +203,25 @@ localm config port 8650
 localm config confirm_remove false
 ```
 
+### Dynamic context window
+
+The context window starts at `n_ctx` (default 4096) and grows automatically
+when a conversation outgrows it, in `n_ctx_grow` steps (default 4096), up to
+`n_ctx_max` (default 16384). Small windows load fast; long chats get room
+when they need it; the ceiling keeps VRAM use predictable.
+
+```bash
+localm config n_ctx_max 32768    # raise the ceiling
+localm config n_ctx_grow 8192    # grow in bigger steps (fewer rebuilds)
+localm config ctx_auto true      # derive the ceiling from free VRAM at load
+```
+
+With `ctx_auto`, localm measures free VRAM at load time, subtracts the model
+weights and a fixed overhead, and sizes the ceiling from what remains. When a
+conversation reaches the ceiling, replies shorten to fit; when even that is
+impossible you get a clear error instead of an out-of-memory crash. An
+explicit `-c/--ctx` larger than the ceiling always wins.
+
 Config lives at `~/.localm/config.json`. Set `LOCALM_API_KEY` to require bearer auth on the HTTP API (recommended before binding to anything other than 127.0.0.1; the CLI warns you about exposed unauthenticated binds). CORS is locked to localhost by default and can be widened with the `cors_origins` config key.
 
 ### Shell completion

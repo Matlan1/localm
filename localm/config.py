@@ -16,7 +16,10 @@ _BINARY_CANDIDATES = [
 
 DEFAULT_CONFIG: dict = {
     "binary_dir": None,    # None = auto-detect from _BINARY_CANDIDATES
-    "n_ctx": 4096,
+    "n_ctx": 4096,         # initial context window (grows on demand)
+    "n_ctx_max": 16384,    # ceiling the window may grow to (0 = unlimited)
+    "n_ctx_grow": 4096,    # growth step — window expands in multiples of this
+    "ctx_auto": False,     # True = derive n_ctx_max from free VRAM at load
     "n_gpu_layers": 99,    # 99 = offload everything to GPU
     "temperature": 0.8,
     "top_p": 0.95,

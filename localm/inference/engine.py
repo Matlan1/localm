@@ -53,6 +53,9 @@ def create_backend(
             mmproj_path=mmproj_path,
             n_ctx=n_ctx or cfg["n_ctx"],
             n_gpu_layers=n_gpu_layers if n_gpu_layers is not None else cfg["n_gpu_layers"],
+            n_ctx_max=cfg.get("n_ctx_max", 16384),
+            n_ctx_grow=cfg.get("n_ctx_grow", 4096),
+            ctx_auto=bool(cfg.get("ctx_auto", False)),
         )
 
     raise ValueError(
