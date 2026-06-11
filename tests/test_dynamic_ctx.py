@@ -1,0 +1,136 @@
+"""Tests for the dynamic context window: growth steps, ceiling, auto sizing."""
+
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from localm.inference.backends.llamacpp.llama import LlamaCpp
+
+
+def _llm(n_ctx=4096, n_ctx_max=16384, n_ctx_grow=4096):
+    llm = LlamaCpp.__new__(LlamaCpp)
+    llm._n_ctx = n_ctx
+    llm._n_ctx_max = max(n_ctx_max, n_ctx) if n_ctx_max else None
+    llm._n_ctx_grow = max(256, n_ctx_grow)
+    llm._cached_tokens = []
+    llm._ctx_capacity = n_ctx
+    llm._kv_supported = None
+    llm._verbose = False
+    llm._model_ptr = None
+    llm._ctx_ptr = None
+    llm._tokenizer = MagicMock()
+    return llm
+
+
+class TestTargetCtx:
+    def test_within_base_stays_at_base(self):
+        assert _llm()._target_ctx(1000) == 4096
+
+    def test_grows_in_steps(self):
+        llm = _llm()
+        assert llm._target_ctx(4097) == 8192
+        assert llm._target_ctx(8192) == 8192
+        assert llm._target_ctx(9000) == 12288
+
+    def test_capped_at_max(self):
+        llm = _llm(n_ctx_max=10000)
+        assert llm._target_ctx(9999) == 10000
+
+    def test_unlimited_when_no_max(self):
+        llm = _llm(n_ctx_max=0)
+        assert llm._target_ctx(50_000) == 53248   # next 4096 multiple
+
+    def test_custom_grow_step(self):
+        llm = _llm(n_ctx_grow=2048)
+        assert llm._target_ctx(4097) == 6144
+
+    def test_explicit_base_beats_smaller_cap(self):
+        # User asked for -c 32768; a 16384 cap must not shrink it
+        llm = _llm(n_ctx=32768, n_ctx_max=16384)
+        assert llm._n_ctx_max == 32768
+        assert llm._target_ctx(1000) == 32768
+
+
+class TestGenerationBudget:
+    def test_untouched_when_fits(self):
+        assert _llm()._fit_generation_budget(1000, 1024) == 1024
+
+    def test_clamped_near_ceiling(self):
+        llm = _llm(n_ctx_max=8192)
+        # room = 8192 - 7000 - 64 = 1128
+        assert llm._fit_generation_budget(7000, 4096) == 1128
+
+    def test_raises_when_conversation_outgrows_ceiling(self):
+        llm = _llm(n_ctx_max=8192)
+        with pytest.raises(RuntimeError, match="n_ctx_max"):
+            llm._fit_generation_budget(8190, 1024)
+
+    def test_unlimited_never_clamps(self):
+        llm = _llm(n_ctx_max=0)
+        assert llm._fit_generation_budget(100_000, 4096) == 4096
+
+
+class TestFreshContextUsesPolicy:
+    def test_rebuild_rounds_to_grow_step(self):
+        llm = _llm()
+        llm._ctx_ptr = 222
+        mock_api = MagicMock()
+        cp = MagicMock()
+        mock_api.llama_context_default_params.return_value = cp
+        mock_api.llama_init_from_model.return_value = 444
+        mock_api.llama_decode.return_value = 0
+        with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
+            llm._prefill_fresh_context(list(range(100)), needed=5000)
+        assert cp.n_ctx == 8192          # rounded up, not exact-fit 5000
+        assert llm._ctx_capacity == 8192
+
+    def test_rebuild_respects_cap(self):
+        llm = _llm(n_ctx_max=6000)
+        llm._ctx_ptr = 222
+        mock_api = MagicMock()
+        cp = MagicMock()
+        mock_api.llama_context_default_params.return_value = cp
+        mock_api.llama_init_from_model.return_value = 444
+        mock_api.llama_decode.return_value = 0
+        with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
+            llm._prefill_fresh_context(list(range(100)), needed=5500)
+        assert cp.n_ctx == 6000
+
+
+class TestAutoCtxMax:
+    def _backend(self, free_vram, model_bytes, n_ctx=4096):
+        from localm.inference.backends.gguf import GgufBackend
+        b = GgufBackend.__new__(GgufBackend)
+        b.n_ctx = n_ctx
+        b.n_ctx_max = None
+        b.ctx_auto = True
+        b._free_vram_bytes = lambda: free_vram
+        b._model_bytes = lambda: model_bytes
+        return b
+
+    def test_no_gpu_falls_back(self):
+        b = self._backend(free_vram=None, model_bytes=int(13e9))
+        assert b._auto_ctx_max() == 16384
+
+    def test_no_headroom_returns_minimum(self):
+        b = self._backend(free_vram=int(14e9), model_bytes=int(13e9))
+        assert b._auto_ctx_max() == 4096
+
+    def test_plenty_of_vram_is_clamped_to_upper_bound(self):
+        b = self._backend(free_vram=int(80e9), model_bytes=int(2e9))
+        assert b._auto_ctx_max() == 65536
+
+    def test_mid_range_scales_with_budget(self):
+        # 16GB free, 13GB model, 1.5GB overhead → ~1.5GB KV budget
+        # bytes/token = 13e9 / 100k = 130KB → ~11.5k tokens → 11264 rounded
+        b = self._backend(free_vram=int(16e9), model_bytes=int(13e9))
+        result = b._auto_ctx_max()
+        assert 8192 <= result <= 13312
+        assert result % 1024 == 0
+
+    def test_result_always_in_sane_band(self):
+        for free in (int(5e9), int(10e9), int(24e9), int(48e9)):
+            for model in (int(1e9), int(8e9), int(13e9), int(30e9)):
+                b = self._backend(free_vram=free, model_bytes=model)
+                v = b._auto_ctx_max()
+                assert 4096 <= v <= 65536

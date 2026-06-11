@@ -1,0 +1,191 @@
+"""Tests for localm.inference.http_server — unload/load endpoints and usage in responses."""
+
+import json
+import unittest
+from unittest.mock import MagicMock, patch, PropertyMock
+
+from fastapi.testclient import TestClient
+
+from localm.inference.http_server import create_app
+
+
+def _make_mock_engine(loaded: bool = True):
+    """Mock Engine with controllable loaded state and fake chat_stream."""
+    engine = MagicMock()
+    _state = {"loaded": loaded}
+
+    def _unload():
+        _state["loaded"] = False
+
+    def _load():
+        _state["loaded"] = True
+
+    def _chat_stream(messages, **kwargs):
+        yield "Hello"
+        yield " world"
+
+    engine.unload.side_effect = _unload
+    engine.load.side_effect = _load
+    engine.chat_stream.side_effect = _chat_stream
+    engine.display_name = "test-model"
+    type(engine).loaded = property(lambda self: _state["loaded"])
+    return engine
+
+
+class TestHealthEndpoint(unittest.TestCase):
+    def setUp(self):
+        self.engine = _make_mock_engine(loaded=True)
+        self.client = TestClient(create_app(self.engine))
+
+    def test_health_when_loaded(self):
+        r = self.client.get("/health")
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertEqual(data["status"], "ok")
+        self.assertTrue(data["loaded"])
+
+    def test_health_when_unloaded(self):
+        self.engine.unload()
+        r = self.client.get("/health")
+        self.assertEqual(r.status_code, 200)      # still 200, not 503
+        self.assertFalse(r.json()["loaded"])
+
+
+class TestModelsEndpoint(unittest.TestCase):
+    def setUp(self):
+        self.engine = _make_mock_engine(loaded=True)
+        self.client = TestClient(create_app(self.engine))
+
+    def test_models_list_includes_loaded(self):
+        r = self.client.get("/v1/models")
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertEqual(data["object"], "list")
+        self.assertTrue(data["data"][0]["loaded"])
+
+    def test_models_list_shows_unloaded(self):
+        self.engine.unload()
+        r = self.client.get("/v1/models")
+        self.assertFalse(r.json()["data"][0]["loaded"])
+
+
+class TestUnloadEndpoint(unittest.TestCase):
+    def setUp(self):
+        self.engine = _make_mock_engine(loaded=True)
+        self.client = TestClient(create_app(self.engine))
+
+    def test_unload_when_loaded(self):
+        r = self.client.post("/v1/models/unload")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["status"], "unloaded")
+        self.engine.unload.assert_called_once()
+
+    def test_unload_when_already_unloaded(self):
+        self.engine.unload()   # unload first
+        r = self.client.post("/v1/models/unload")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["status"], "already_unloaded")
+
+
+class TestLoadEndpoint(unittest.TestCase):
+    def setUp(self):
+        self.engine = _make_mock_engine(loaded=False)
+        self.client = TestClient(create_app(self.engine))
+
+    def test_load_when_unloaded(self):
+        r = self.client.post("/v1/models/load")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["status"], "loaded")
+        self.engine.load.assert_called_once()
+
+    def test_load_when_already_loaded(self):
+        self.engine.load()     # load first
+        r = self.client.post("/v1/models/load")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["status"], "already_loaded")
+
+
+class TestChatCompletionsNonStreaming(unittest.TestCase):
+    def setUp(self):
+        self.engine = _make_mock_engine(loaded=True)
+        self.client = TestClient(create_app(self.engine))
+
+    def _post(self, messages=None, stream=False, **kwargs):
+        payload = {
+            "model": "test-model",
+            "messages": messages or [{"role": "user", "content": "hi"}],
+            "stream": stream,
+            **kwargs,
+        }
+        return self.client.post("/v1/chat/completions", json=payload)
+
+    def test_non_streaming_returns_200(self):
+        r = self._post()
+        self.assertEqual(r.status_code, 200)
+
+    def test_non_streaming_has_content(self):
+        r = self._post()
+        data = r.json()
+        content = data["choices"][0]["message"]["content"]
+        self.assertIn("Hello", content)
+        self.assertIn("world", content)
+
+    def test_non_streaming_has_usage(self):
+        r = self._post()
+        data = r.json()
+        self.assertIn("usage", data)
+        self.assertIsNotNone(data["usage"])
+        self.assertGreater(data["usage"]["prompt_tokens"], 0)
+        self.assertGreater(data["usage"]["total_tokens"], 0)
+
+    def test_non_streaming_finish_reason_stop(self):
+        r = self._post()
+        self.assertEqual(r.json()["choices"][0]["finish_reason"], "stop")
+
+
+class TestChatCompletionsStreaming(unittest.TestCase):
+    def setUp(self):
+        self.engine = _make_mock_engine(loaded=True)
+        self.client = TestClient(create_app(self.engine))
+
+    def _stream_chunks(self, messages=None):
+        payload = {
+            "model": "test-model",
+            "messages": messages or [{"role": "user", "content": "hi"}],
+            "stream": True,
+        }
+        chunks = []
+        with self.client.stream("POST", "/v1/chat/completions", json=payload) as r:
+            self.assertEqual(r.status_code, 200)
+            for line in r.iter_lines():
+                if not line or line == "data: [DONE]":
+                    continue
+                if line.startswith("data: "):
+                    chunks.append(json.loads(line[6:]))
+        return chunks
+
+    def test_streaming_yields_content_tokens(self):
+        chunks = self._stream_chunks()
+        content = "".join(
+            c["choices"][0]["delta"].get("content", "")
+            for c in chunks
+            if c["choices"][0]["delta"].get("content")
+        )
+        self.assertIn("Hello", content)
+
+    def test_streaming_final_chunk_has_usage(self):
+        chunks = self._stream_chunks()
+        done_chunks = [c for c in chunks if c["choices"][0].get("finish_reason") == "stop"]
+        self.assertEqual(len(done_chunks), 1)
+        usage = done_chunks[0].get("usage")
+        self.assertIsNotNone(usage)
+        self.assertGreater(usage["total_tokens"], 0)
+
+    def test_streaming_final_chunk_finish_reason_stop(self):
+        chunks = self._stream_chunks()
+        finish_reasons = [c["choices"][0].get("finish_reason") for c in chunks]
+        self.assertIn("stop", finish_reasons)
+
+
+if __name__ == "__main__":
+    unittest.main()

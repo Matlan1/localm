@@ -1,0 +1,760 @@
+"""
+OpenAI-compatible HTTP inference server built with FastAPI + uvicorn.
+
+Endpoints:
+  GET  /health
+  GET  /v1/models
+  POST /v1/chat/completions  (streaming + non-streaming, multimodal-capable)
+
+Start programmatically:
+    from localm.inference.http_server import serve
+    serve(engine, host="127.0.0.1", port=8642)
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import time
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import AsyncIterator, List, Optional
+
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
+from localm.inference.engine import Engine
+from localm.inference.protocol import (
+    ChatChunk, ChatRequest, ChatResponse, CompletionRequest, EmbeddingRequest,
+    FullChoice, Message, UsageInfo, make_chunk_id,
+)
+
+# Global engine reference set by serve()
+_engine: Engine | None = None
+
+# Inference serialisation — only one request runs inference at a time.
+# Additional requests queue behind this semaphore.
+_inference_sem: asyncio.Semaphore | None = None
+
+# Optional bearer-token auth — enabled when LOCALM_API_KEY is set.
+_bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def _require_auth(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
+) -> None:
+    """Validate the Bearer token when LOCALM_API_KEY is set in the environment.
+
+    If the env var is absent the server runs in open/dev mode (no auth check).
+    If the env var is set, every request to a protected endpoint must supply a
+    matching ``Authorization: Bearer <token>`` header.
+    """
+    api_key = os.environ.get("LOCALM_API_KEY")
+    if not api_key:
+        return  # no key configured — dev/local mode, skip auth
+    if credentials is None or credentials.credentials != api_key:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+
+# ------------------------------------------------------------------ #
+#  App factory                                                         #
+# ------------------------------------------------------------------ #
+
+def create_app(engine: Engine) -> FastAPI:
+    global _engine
+    _engine = engine
+
+    # Session-persistence mode for this server (privacy → no traces).
+    # One audit log / transcript covers the server lifetime; GUI chat and
+    # any API client traffic flow through /v1/chat/completions and land here.
+    from localm.audit import effective_mode, make_audit_log, make_transcript
+    _mode = effective_mode("server")
+    _audit = make_audit_log(_mode, label="server")
+    _transcript = make_transcript(_mode, label="server")
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        global _inference_sem
+        # Semaphore created inside the running event loop — Python 3.10+ safe
+        _inference_sem = asyncio.Semaphore(1)
+        yield
+        _audit.close()
+
+    app = FastAPI(
+        title="localm inference server",
+        version="0.1.0",
+        lifespan=lifespan,
+    )
+
+    # Debug mode: log every request with timing to the debug log file
+    from localm.debuglog import debug_enabled, logger as _dbg
+    if debug_enabled():
+        @app.middleware("http")
+        async def _log_requests(request, call_next):
+            start = time.perf_counter()
+            response = await call_next(request)
+            _dbg.debug(
+                "%s %s -> %d (%.0f ms)",
+                request.method, request.url.path,
+                response.status_code,
+                (time.perf_counter() - start) * 1000,
+            )
+            return response
+
+    # CORS: localhost-only by default. A wildcard here would let ANY website
+    # the user visits call this API from browser JS and read the responses
+    # (drive-by GPU use, response exfiltration, /v1/models/unload abuse).
+    # Override with config "cors_origins": ["https://app.example"] or "*".
+    from localm.config import load_config
+    cors_cfg = load_config().get("cors_origins")
+    cors_kwargs: dict
+    if cors_cfg == "*":
+        cors_kwargs = {"allow_origins": ["*"]}
+    elif isinstance(cors_cfg, list) and cors_cfg:
+        cors_kwargs = {"allow_origins": cors_cfg}
+    else:
+        cors_kwargs = {
+            "allow_origin_regex": r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
+        }
+    app.add_middleware(
+        CORSMiddleware,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        **cors_kwargs,
+    )
+
+    # ---------------------------------------------------------------- #
+    #  Health                                                            #
+    # ---------------------------------------------------------------- #
+
+    @app.get("/health")
+    async def health():
+        if _engine is None:
+            raise HTTPException(503, "No engine initialised")
+        return {
+            "status": "ok",
+            "model":  _engine.display_name,
+            "loaded": _engine.loaded,
+        }
+
+    # ---------------------------------------------------------------- #
+    #  Models list                                                       #
+    # ---------------------------------------------------------------- #
+
+    @app.get("/v1/models")
+    async def list_models():
+        return {
+            "object": "list",
+            "data": [
+                {
+                    "id":       _engine.display_name,
+                    "object":   "model",
+                    "created":  int(time.time()),
+                    "owned_by": "localm",
+                    "loaded":   _engine.loaded,
+                }
+            ],
+        }
+
+    @app.get("/v1/models/{model_id}")
+    async def model_detail(model_id: str):
+        """Registry metadata for one model: path, source, size, hash, aliases."""
+        from localm.config import load_registry
+        registry = load_registry()
+        entry = registry.get(model_id)
+        if entry is None:
+            raise HTTPException(404, f"Model not registered: {model_id}")
+        path = entry.get("path", "")
+        p = Path(path)
+        size = None
+        try:
+            if p.is_file():
+                size = p.stat().st_size
+            elif p.is_dir():
+                size = sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+        except OSError:
+            pass
+        aliases = sorted(
+            n for n, e in registry.items()
+            if e.get("path") == path and n != model_id
+        )
+        return {
+            "id": model_id,
+            "object": "model",
+            "owned_by": "localm",
+            "path": path,
+            "source": entry.get("source", ""),
+            "sha256": entry.get("sha256"),
+            "size_bytes": size,
+            "aliases": aliases,
+            "active": _engine is not None and _engine.display_name == model_id,
+            "loaded": _engine is not None
+                      and _engine.display_name == model_id and _engine.loaded,
+        }
+
+    # ---------------------------------------------------------------- #
+    #  Plugins                                                           #
+    # ---------------------------------------------------------------- #
+
+    @app.get("/v1/plugins", dependencies=[Depends(_require_auth)])
+    async def list_plugins():
+        from localm.plugins.loader import discover_errors, discover_plugins
+        return {
+            "plugins": [
+                {
+                    "name": m.name,
+                    "version": m.version,
+                    "description": m.description,
+                    "entry": m.entry,
+                    "path": str(m.path),
+                    "tool_exports": m.tool_exports,
+                }
+                for m in discover_plugins()
+            ],
+            "errors": discover_errors(),
+        }
+
+    @app.post("/v1/plugins/install", dependencies=[Depends(_require_auth)])
+    async def install_plugin_ep(body: dict):
+        from pathlib import Path as _P
+        from localm.plugins.loader import PluginError, install_plugin
+        source = body.get("source", "")
+        if not source:
+            raise HTTPException(400, "Missing 'source' (local directory path)")
+        try:
+            manifest = install_plugin(_P(source), force=bool(body.get("force")))
+        except PluginError as e:
+            raise HTTPException(400, str(e))
+        return {"status": "installed", "name": manifest.name,
+                "version": manifest.version}
+
+    @app.delete("/v1/plugins/{name}", dependencies=[Depends(_require_auth)])
+    async def remove_plugin_ep(name: str):
+        from localm.plugins.loader import PluginError, remove_plugin
+        try:
+            existed = remove_plugin(name)
+        except PluginError as e:
+            raise HTTPException(400, str(e))
+        if not existed:
+            raise HTTPException(404, f"Plugin not installed: {name}")
+        return {"status": "removed", "name": name}
+
+    # ---------------------------------------------------------------- #
+    #  Config                                                            #
+    # ---------------------------------------------------------------- #
+
+    @app.get("/v1/config", dependencies=[Depends(_require_auth)])
+    async def get_config():
+        from localm.config import load_config
+        from localm.audit import effective_mode
+        cfg = load_config()
+        # Read-only extras for the frontend (skipped by the settings form).
+        # The server mode is fixed at startup (the audit log is opened then);
+        # the coder default is resolved per new session.
+        cfg["effective_mode"] = _mode.value
+        cfg["effective_coder_mode"] = effective_mode("coder").value
+        return cfg
+
+    @app.patch("/v1/config", dependencies=[Depends(_require_auth)])
+    async def patch_config(body: dict):
+        """Update known config keys and persist. Unknown keys are rejected."""
+        from localm.config import DEFAULT_CONFIG, load_config, save_config
+        unknown = [k for k in body if k not in DEFAULT_CONFIG]
+        if unknown:
+            raise HTTPException(400, f"Unknown config keys: {', '.join(unknown)}")
+        cfg = load_config()
+        cfg.update(body)
+        save_config(cfg)
+        return cfg
+
+    # ---------------------------------------------------------------- #
+    #  Model lifecycle — unload / load                                   #
+    # ---------------------------------------------------------------- #
+
+    @app.post("/v1/models/unload", dependencies=[Depends(_require_auth)])
+    async def unload_model():
+        """
+        Release the model from GPU/CPU memory.
+
+        Call this before starting a VRAM-intensive task (e.g. ComfyUI FLUX
+        generation) so the GPU memory is fully available.  The next call to
+        /v1/chat/completions will reload the model automatically.
+        """
+        if _engine is None:
+            raise HTTPException(503, "No engine initialised")
+        if not _engine.loaded:
+            return {"status": "already_unloaded", "model": _engine.display_name}
+        loop = asyncio.get_running_loop()
+        # Under the inference semaphore: freeing the native context while a
+        # generation is mid-decode crashes the GPU driver (access violation
+        # in the HIP runtime). Unload must wait its turn.
+        async with _inference_sem:
+            await loop.run_in_executor(None, _engine.unload)
+        return {"status": "unloaded", "model": _engine.display_name}
+
+    @app.post("/v1/models/load", dependencies=[Depends(_require_auth)])
+    async def load_model():
+        """
+        Explicitly reload the model into memory.
+
+        Normally you don't need this — /v1/chat/completions reloads
+        automatically if the model was unloaded.  Use this endpoint if you
+        want to pre-warm the model before the first inference request.
+        """
+        if _engine is None:
+            raise HTTPException(503, "No engine initialised")
+        if _engine.loaded:
+            return {"status": "already_loaded", "model": _engine.display_name}
+        loop = asyncio.get_running_loop()
+        async with _inference_sem:
+            await loop.run_in_executor(None, _engine.load)
+        return {"status": "loaded", "model": _engine.display_name}
+
+    # ---------------------------------------------------------------- #
+    #  Chat completions                                                  #
+    # ---------------------------------------------------------------- #
+
+    @app.post("/v1/chat/completions", dependencies=[Depends(_require_auth)])
+    async def chat_completions(req: ChatRequest):
+        if _engine is None:
+            raise HTTPException(503, "No model loaded")
+
+        # Convert pydantic Messages to plain dicts for the backend
+        messages = _protocol_messages_to_dicts(req.messages)
+
+        gen_kwargs = dict(
+            max_tokens=req.max_tokens,
+            temperature=req.temperature,
+            top_p=req.top_p,
+            top_k=req.top_k,
+            repeat_penalty=req.repeat_penalty,
+            grammar=req.grammar,
+            seed=req.seed,
+        )
+        # Strip None so Engine uses its config defaults
+        gen_kwargs = {k: v for k, v in gen_kwargs.items() if v is not None}
+
+        if req.stream:
+            return StreamingResponse(
+                _stream_sse(_engine, messages, req.model, _inference_sem,
+                            audit=_audit, transcript=_transcript, **gen_kwargs),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+        else:
+            return await _complete(_engine, messages, req.model, _inference_sem,
+                                   audit=_audit, transcript=_transcript,
+                                   **gen_kwargs)
+
+    # ---------------------------------------------------------------- #
+    #  Embeddings  (/v1/embeddings)                                     #
+    # ---------------------------------------------------------------- #
+
+    @app.post("/v1/embeddings", dependencies=[Depends(_require_auth)])
+    async def embeddings(req: EmbeddingRequest):
+        if _engine is None:
+            raise HTTPException(503, "No model loaded")
+
+        texts = [req.input] if isinstance(req.input, str) else req.input
+
+        loop = asyncio.get_running_loop()
+        try:
+            async with _inference_sem:
+                vecs = await loop.run_in_executor(None, lambda: _engine.embed(texts))
+        except NotImplementedError as e:
+            raise HTTPException(422, str(e))
+
+        total_tokens = sum(_engine.count_tokens(t) for t in texts)
+        return {
+            "object": "list",
+            "data": [
+                {"object": "embedding", "index": i, "embedding": vec}
+                for i, vec in enumerate(vecs)
+            ],
+            "model": req.model,
+            "usage": {"prompt_tokens": total_tokens, "total_tokens": total_tokens},
+        }
+
+    # ---------------------------------------------------------------- #
+    #  Raw text completions  (/v1/completions)                          #
+    # ---------------------------------------------------------------- #
+
+    @app.post("/v1/completions", dependencies=[Depends(_require_auth)])
+    async def completions(req: CompletionRequest):
+        if _engine is None:
+            raise HTTPException(503, "No model loaded")
+
+        # Wrap the prompt as a single user message so the chat backend handles it
+        messages = [{"role": "user", "content": req.prompt}]
+
+        gen_kwargs = dict(
+            max_tokens=req.max_tokens,
+            temperature=req.temperature,
+            top_p=req.top_p,
+            top_k=req.top_k,
+            repeat_penalty=req.repeat_penalty,
+            grammar=req.grammar,
+            seed=req.seed,
+        )
+        gen_kwargs = {k: v for k, v in gen_kwargs.items() if v is not None}
+
+        if req.stream:
+            return StreamingResponse(
+                _stream_sse_completion(_engine, req.prompt, req.model, _inference_sem, **gen_kwargs),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+
+        loop = asyncio.get_running_loop()
+        prompt_tokens = _engine.count_tokens(req.prompt)
+
+        def _run():
+            return "".join(_engine.chat_stream(messages, **gen_kwargs))
+
+        async with _inference_sem:
+            text = await loop.run_in_executor(None, _run)
+
+        completion_tokens = _engine.count_tokens(text)
+        ts  = int(time.time())
+        cid = make_chunk_id()
+        return {
+            "id": cid,
+            "object": "text_completion",
+            "created": ts,
+            "model": req.model,
+            "choices": [{"text": text, "index": 0, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+            },
+        }
+
+    return app
+
+
+# ------------------------------------------------------------------ #
+#  Performance metric helpers                                          #
+# ------------------------------------------------------------------ #
+
+def _ttft_ms(gen_start: float, first_token_at: Optional[float]) -> Optional[float]:
+    """Time to first token in milliseconds, or None if nothing was generated."""
+    if first_token_at is None:
+        return None
+    return round((first_token_at - gen_start) * 1000, 1)
+
+
+def _tokens_per_sec(completion_tokens: int, elapsed: float) -> Optional[float]:
+    """Generation throughput, or None when not measurable."""
+    if not completion_tokens or elapsed <= 0:
+        return None
+    return round(completion_tokens / elapsed, 2)
+
+
+# ------------------------------------------------------------------ #
+#  SSE streaming                                                       #
+# ------------------------------------------------------------------ #
+
+def _last_user_text(messages: list) -> str:
+    """Text of the most recent user message (for the audit trail)."""
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            content = m.get("content")
+            if isinstance(content, str):
+                return content
+            return " ".join(p.get("text", "") for p in (content or [])
+                            if isinstance(p, dict) and p.get("type") == "text")
+    return ""
+
+
+def _audit_exchange(audit, transcript, messages: list, reply: str) -> None:
+    """Record one chat exchange (log/full modes; no-op log in privacy)."""
+    if audit is None:
+        return
+    try:
+        user_text = _last_user_text(messages)
+        audit.user(user_text)
+        audit.llm(reply)
+        if transcript is not None:
+            transcript.exchange(user_text, reply)
+    except Exception:
+        pass  # auditing must never break serving
+
+
+async def _stream_sse(
+    engine: Engine,
+    messages: list,
+    model_id: str,
+    sem: asyncio.Semaphore,
+    audit=None,
+    transcript=None,
+    **gen_kwargs,
+) -> AsyncIterator[str]:
+    from localm.inference.protocol import ChoiceDelta, StreamChoice
+
+    chunk_id = make_chunk_id()
+    ts = int(time.time())
+
+    # Exact prompt token count from the backend tokenizer
+    prompt_text = " ".join(
+        m.get("content") if isinstance(m.get("content"), str)
+        else " ".join(p.get("text", "") for p in (m.get("content") or [])
+                      if p.get("type") == "text")
+        for m in messages
+    )
+    prompt_tokens = engine.count_tokens(prompt_text)
+
+    # Role announcement
+    role_chunk = ChatChunk(
+        id=chunk_id,
+        created=ts,
+        model=model_id,
+        choices=[StreamChoice(delta=ChoiceDelta(role="assistant"))],
+    )
+    yield f"data: {role_chunk.model_dump_json()}\n\n"
+
+    # Run blocking generator in executor so we don't block the event loop
+    loop = asyncio.get_running_loop()
+    token_queue: asyncio.Queue = asyncio.Queue()
+    _DONE = object()
+
+    def _generate():
+        try:
+            for token in engine.chat_stream(messages, **gen_kwargs):
+                loop.call_soon_threadsafe(token_queue.put_nowait, token)
+        except Exception as e:
+            # Log it (debug log included) and surface it to the client —
+            # a silent thread death looks like an empty reply.
+            from localm.debuglog import logger as _dbg
+            _dbg.exception("generation thread failed")
+            import traceback
+            traceback.print_exc()
+            loop.call_soon_threadsafe(
+                token_queue.put_nowait, RuntimeError(str(e)))
+        finally:
+            loop.call_soon_threadsafe(token_queue.put_nowait, _DONE)
+
+    import threading
+
+    # Serialise inference — only one request runs at a time
+    async with sem:
+        gen_start = time.perf_counter()
+        first_token_at: float | None = None
+        t = threading.Thread(target=_generate, daemon=True)
+        t.start()
+
+        completion_parts: list[str] = []
+        gen_error: Exception | None = None
+        while True:
+            token = await token_queue.get()
+            if token is _DONE:
+                break
+            if isinstance(token, Exception):
+                gen_error = token
+                continue
+            if first_token_at is None:
+                first_token_at = time.perf_counter()
+            completion_parts.append(token)
+            chunk = ChatChunk.token(token, model_id, chunk_id, ts)
+            yield f"data: {chunk.model_dump_json()}\n\n"
+
+        t.join()
+        gen_elapsed = time.perf_counter() - gen_start
+
+    if gen_error is not None:
+        err_chunk = ChatChunk.token(
+            f"\n[inference error: {gen_error}]", model_id, chunk_id, ts)
+        yield f"data: {err_chunk.model_dump_json()}\n\n"
+
+    _audit_exchange(audit, transcript, messages, "".join(completion_parts))
+
+    # Count tokens on the full completion text — more accurate and efficient
+    completion_tokens = engine.count_tokens("".join(completion_parts))
+
+    usage = UsageInfo(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=prompt_tokens + completion_tokens,
+        ttft_ms=_ttft_ms(gen_start, first_token_at),
+        tokens_per_sec=_tokens_per_sec(completion_tokens, gen_elapsed),
+    )
+    done = ChatChunk.done(model_id, chunk_id, ts, usage=usage)
+    yield f"data: {done.model_dump_json()}\n\n"
+    yield "data: [DONE]\n\n"
+
+
+# ------------------------------------------------------------------ #
+#  SSE streaming for /v1/completions                                   #
+# ------------------------------------------------------------------ #
+
+async def _stream_sse_completion(
+    engine: Engine,
+    prompt: str,
+    model_id: str,
+    sem: asyncio.Semaphore,
+    **gen_kwargs,
+) -> AsyncIterator[str]:
+    messages = [{"role": "user", "content": prompt}]
+    chunk_id = make_chunk_id()
+    ts = int(time.time())
+    prompt_tokens = engine.count_tokens(prompt)
+
+    loop = asyncio.get_running_loop()
+    token_queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+    def _generate():
+        try:
+            for token in engine.chat_stream(messages, **gen_kwargs):
+                loop.call_soon_threadsafe(token_queue.put_nowait, token)
+        finally:
+            loop.call_soon_threadsafe(token_queue.put_nowait, None)
+
+    import threading
+
+    async with sem:
+        gen_start = time.perf_counter()
+        first_token_at: float | None = None
+        t = threading.Thread(target=_generate, daemon=True)
+        t.start()
+
+        completion_parts: list[str] = []
+        while True:
+            token = await token_queue.get()
+            if token is None:
+                break
+            if first_token_at is None:
+                first_token_at = time.perf_counter()
+            completion_parts.append(token)
+            chunk = {
+                "id": chunk_id, "object": "text_completion.chunk",
+                "created": ts, "model": model_id,
+                "choices": [{"text": token, "index": 0, "finish_reason": None}],
+            }
+            yield f"data: {json.dumps(chunk)}\n\n"
+
+        t.join()
+        gen_elapsed = time.perf_counter() - gen_start
+
+    completion_tokens = engine.count_tokens("".join(completion_parts))
+    done = {
+        "id": chunk_id, "object": "text_completion.chunk",
+        "created": ts, "model": model_id,
+        "choices": [{"text": "", "index": 0, "finish_reason": "stop"}],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+            "ttft_ms": _ttft_ms(gen_start, first_token_at),
+            "tokens_per_sec": _tokens_per_sec(completion_tokens, gen_elapsed),
+        },
+    }
+    yield f"data: {json.dumps(done)}\n\n"
+    yield "data: [DONE]\n\n"
+
+
+# ------------------------------------------------------------------ #
+#  Non-streaming completion                                            #
+# ------------------------------------------------------------------ #
+
+async def _complete(
+    engine: Engine,
+    messages: list,
+    model_id: str,
+    sem: asyncio.Semaphore,
+    audit=None,
+    transcript=None,
+    **gen_kwargs,
+):
+    loop = asyncio.get_running_loop()
+
+    # Exact prompt token count before running inference
+    prompt_text = " ".join(
+        m.get("content") if isinstance(m.get("content"), str)
+        else " ".join(p.get("text", "") for p in (m.get("content") or [])
+                      if p.get("type") == "text")
+        for m in messages
+    )
+    prompt_tokens = engine.count_tokens(prompt_text)
+
+    def _run():
+        return "".join(engine.chat_stream(messages, **gen_kwargs))
+
+    # Serialise inference — only one request runs at a time
+    async with sem:
+        gen_start = time.perf_counter()
+        text = await loop.run_in_executor(None, _run)
+        gen_elapsed = time.perf_counter() - gen_start
+
+    _audit_exchange(audit, transcript, messages, text)
+
+    completion_tokens = engine.count_tokens(text)
+    usage = UsageInfo(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=prompt_tokens + completion_tokens,
+        tokens_per_sec=_tokens_per_sec(completion_tokens, gen_elapsed),
+    )
+
+    response = ChatResponse(
+        id=make_chunk_id(),
+        created=int(time.time()),
+        model=model_id,
+        choices=[
+            FullChoice(
+                message=Message(role="assistant", content=text),
+                finish_reason="stop",
+            )
+        ],
+        usage=usage,
+    )
+    return JSONResponse(response.model_dump())
+
+
+# ------------------------------------------------------------------ #
+#  Helpers                                                             #
+# ------------------------------------------------------------------ #
+
+def _protocol_messages_to_dicts(messages: List[Message]) -> list:
+    """Convert Pydantic Message objects to plain dicts for backends."""
+    result = []
+    for msg in messages:
+        if isinstance(msg.content, str):
+            result.append({"role": msg.role, "content": msg.content})
+        else:
+            parts = []
+            for part in msg.content:
+                if hasattr(part, "text"):
+                    parts.append({"type": "text", "text": part.text})
+                elif hasattr(part, "image_url"):
+                    parts.append({
+                        "type": "image_url",
+                        "image_url": {"url": part.image_url.url},
+                    })
+                elif hasattr(part, "input_audio"):
+                    parts.append({
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": part.input_audio.data,
+                            "format": part.input_audio.format,
+                        },
+                    })
+            result.append({"role": msg.role, "content": parts})
+    return result
+
+
+# ------------------------------------------------------------------ #
+#  Entry point                                                         #
+# ------------------------------------------------------------------ #
+
+def serve(engine: Engine, host: str = "127.0.0.1", port: int = 8642) -> None:
+    """Start the server — blocks until Ctrl+C."""
+    import uvicorn
+
+    app = create_app(engine)
+    uvicorn.run(app, host=host, port=port, log_level="warning")

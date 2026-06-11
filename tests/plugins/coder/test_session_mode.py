@@ -1,0 +1,272 @@
+"""
+Tests for localm.plugins.coder.audit session-mode logic and agent integration.
+
+Covers:
+  - SessionMode enum / parse_mode()
+  - NullAuditLog (no-op, no files created)
+  - AuditLog (writes JSONL)
+  - make_audit_log() factory
+  - Agent.close() — privacy: no files; log: closes JSONL; full: writes markdown
+  - _write_session_markdown content
+"""
+
+import json
+import pytest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+from localm.plugins.coder.audit import (
+    AuditLog,
+    NullAuditLog,
+    SessionMode,
+    make_audit_log,
+    parse_mode,
+)
+
+
+# ---------------------------------------------------------------------------
+#  SessionMode / parse_mode
+# ---------------------------------------------------------------------------
+
+class TestSessionMode:
+    def test_privacy_value(self):
+        assert SessionMode.PRIVACY.value == "privacy"
+
+    def test_log_value(self):
+        assert SessionMode.LOG.value == "log"
+
+    def test_full_value(self):
+        assert SessionMode.FULL.value == "full"
+
+    def test_parse_privacy(self):
+        assert parse_mode("privacy") == SessionMode.PRIVACY
+
+    def test_parse_log(self):
+        assert parse_mode("log") == SessionMode.LOG
+
+    def test_parse_full(self):
+        assert parse_mode("full") == SessionMode.FULL
+
+    def test_parse_uppercase(self):
+        assert parse_mode("LOG") == SessionMode.LOG
+        assert parse_mode("PRIVACY") == SessionMode.PRIVACY
+        assert parse_mode("FULL") == SessionMode.FULL
+
+    def test_parse_invalid_raises(self):
+        with pytest.raises(ValueError, match="Unknown session mode"):
+            parse_mode("cloud")
+
+    def test_parse_whitespace_stripped(self):
+        assert parse_mode("  full  ") == SessionMode.FULL
+
+
+# ---------------------------------------------------------------------------
+#  NullAuditLog
+# ---------------------------------------------------------------------------
+
+class TestNullAuditLog:
+    def test_path_is_none(self):
+        log = NullAuditLog()
+        assert log.path is None
+
+    def test_methods_are_no_ops(self, tmp_path):
+        log = NullAuditLog()
+        # None of these should raise or write anything
+        log.set_turn(1)
+        log.user("hello")
+        log.llm("response", tokens=100)
+        log.tool_call("read_file", {"path": "x.py"})
+        log.tool_result("read_file", ok=True, summary="10 lines")
+        log.close()
+        # No files created anywhere
+        assert not list(tmp_path.rglob("*.jsonl"))
+
+    def test_close_is_idempotent(self):
+        log = NullAuditLog()
+        log.close()
+        log.close()   # should not raise
+
+
+# ---------------------------------------------------------------------------
+#  AuditLog (real writer)
+# ---------------------------------------------------------------------------
+
+class TestAuditLog:
+    def test_creates_jsonl_file(self, tmp_path):
+        with patch("localm.plugins.coder.audit._SESSIONS_DIR", tmp_path):
+            log = AuditLog(label="test")
+        assert log.path.exists()
+        assert log.path.suffix == ".jsonl"
+
+    def test_label_in_filename(self, tmp_path):
+        with patch("localm.plugins.coder.audit._SESSIONS_DIR", tmp_path):
+            log = AuditLog(label="myagent")
+        assert "myagent" in log.path.name
+
+    def test_writes_start_event(self, tmp_path):
+        with patch("localm.plugins.coder.audit._SESSIONS_DIR", tmp_path):
+            log = AuditLog(label="t")
+        events = [json.loads(l) for l in log.path.read_text().splitlines()]
+        assert events[0]["type"] == "system"
+        assert events[0]["data"]["msg"] == "session started"
+
+    def test_writes_user_event(self, tmp_path):
+        with patch("localm.plugins.coder.audit._SESSIONS_DIR", tmp_path):
+            log = AuditLog(label="t")
+        log.user("hello world")
+        log.close()
+        events = [json.loads(l) for l in log.path.read_text().splitlines()]
+        user_evts = [e for e in events if e["type"] == "user"]
+        assert len(user_evts) == 1
+        assert user_evts[0]["data"]["content"] == "hello world"
+
+    def test_writes_llm_event(self, tmp_path):
+        with patch("localm.plugins.coder.audit._SESSIONS_DIR", tmp_path):
+            log = AuditLog(label="t")
+        log.set_turn(2)
+        log.llm("model response", tokens=500)
+        log.close()
+        events = [json.loads(l) for l in log.path.read_text().splitlines()]
+        llm_evts = [e for e in events if e["type"] == "llm"]
+        assert llm_evts[0]["turn"] == 2
+        assert llm_evts[0]["data"]["tokens"] == 500
+
+    def test_close_writes_end_event(self, tmp_path):
+        with patch("localm.plugins.coder.audit._SESSIONS_DIR", tmp_path):
+            log = AuditLog(label="t")
+        log.close()
+        events = [json.loads(l) for l in log.path.read_text().splitlines()]
+        assert events[-1]["type"] == "system"
+        assert events[-1]["data"]["msg"] == "session ended"
+
+
+# ---------------------------------------------------------------------------
+#  make_audit_log factory
+# ---------------------------------------------------------------------------
+
+class TestMakeAuditLog:
+    def test_privacy_returns_null(self):
+        result = make_audit_log(SessionMode.PRIVACY)
+        assert isinstance(result, NullAuditLog)
+
+    def test_log_returns_real(self, tmp_path):
+        with patch("localm.plugins.coder.audit._SESSIONS_DIR", tmp_path):
+            result = make_audit_log(SessionMode.LOG, label="x")
+        assert isinstance(result, AuditLog)
+        result.close()
+
+    def test_full_returns_real(self, tmp_path):
+        with patch("localm.plugins.coder.audit._SESSIONS_DIR", tmp_path):
+            result = make_audit_log(SessionMode.FULL, label="x")
+        assert isinstance(result, AuditLog)
+        result.close()
+
+
+# ---------------------------------------------------------------------------
+#  Agent.close() — per mode
+# ---------------------------------------------------------------------------
+
+def _make_agent(tmp_path, mode):
+    from localm.plugins.coder.agent import Agent
+    backend = MagicMock()
+    backend.model_id = "test-model"
+    backend.last_usage = {}
+    with patch("localm.plugins.coder.agent.AuditLog"), \
+         patch("localm.plugins.coder.agent.NullAuditLog"), \
+         patch("localm.plugins.coder.agent.make_audit_log") as mock_factory, \
+         patch("localm.plugins.coder.agent.load_memory", return_value=""), \
+         patch("localm.plugins.coder.agent.ProjectMap") as mock_pm:
+        mock_pm.build.return_value.file_count.return_value = 0
+        mock_factory.return_value = NullAuditLog()
+        agent = Agent(backend=backend, cwd=tmp_path, mode=mode)
+    return agent
+
+
+class TestAgentClose:
+    def test_privacy_close_returns_none(self, tmp_path):
+        agent = _make_agent(tmp_path, SessionMode.PRIVACY)
+        result = agent.close()
+        assert result is None
+
+    def test_log_close_returns_none(self, tmp_path):
+        agent = _make_agent(tmp_path, SessionMode.LOG)
+        result = agent.close()
+        assert result is None
+
+    def test_full_close_writes_markdown(self, tmp_path):
+        agent = _make_agent(tmp_path, SessionMode.FULL)
+        # Add a simple conversation
+        agent._messages = [
+            {"role": "user",      "content": "Write a hello world"},
+            {"role": "assistant", "content": "Here it is: print('hello world')"},
+        ]
+        agent._turns = 1
+        agent._model_name = "gemma4-4b"
+
+        result = agent.close()
+        assert result is not None
+        assert result.exists()
+        assert result.suffix == ".md"
+        assert result.parent == tmp_path / ".localcoder" / "sessions"
+
+    def test_full_markdown_contains_user_message(self, tmp_path):
+        agent = _make_agent(tmp_path, SessionMode.FULL)
+        agent._messages = [
+            {"role": "user", "content": "My specific question here"},
+        ]
+        agent._turns = 1
+
+        result = agent.close()
+        content = result.read_text()
+        assert "My specific question here" in content
+
+    def test_full_markdown_skips_tool_results(self, tmp_path):
+        agent = _make_agent(tmp_path, SessionMode.FULL)
+        agent._messages = [
+            {"role": "user",      "content": "do a thing"},
+            {"role": "assistant", "content": "<tool_call>{\"name\": \"read_file\", \"args\": {\"path\": \"x.py\"}}</tool_call>"},
+            {"role": "user",      "content": "<tool_result name='read_file'>lots of code here</tool_result>"},
+            {"role": "assistant", "content": "Done reading."},
+        ]
+        agent._turns = 2
+
+        result = agent.close()
+        content = result.read_text()
+        # Tool result blobs should NOT appear
+        assert "<tool_result" not in content
+        assert "lots of code here" not in content
+        # But tool call summary should appear
+        assert "read_file" in content
+
+    def test_full_markdown_contains_model_name(self, tmp_path):
+        agent = _make_agent(tmp_path, SessionMode.FULL)
+        agent._model_name = "deepseek-r1"
+        agent._messages = []
+        agent._turns = 0
+
+        result = agent.close()
+        content = result.read_text()
+        assert "deepseek-r1" in content
+
+    def test_full_markdown_tool_call_summary(self, tmp_path):
+        agent = _make_agent(tmp_path, SessionMode.FULL)
+        agent._messages = [
+            {"role": "assistant", "content": (
+                'Calling read_file.\n'
+                '<tool_call>{"name": "write_file", "args": {"path": "out.py", "content": "x"}}</tool_call>'
+            )},
+        ]
+        agent._turns = 1
+
+        result = agent.close()
+        content = result.read_text()
+        assert "write_file" in content
+        assert "out.py" in content
+
+    def test_privacy_no_files_created(self, tmp_path):
+        agent = _make_agent(tmp_path, SessionMode.PRIVACY)
+        agent._messages = [{"role": "user", "content": "secret message"}]
+        agent.close()
+        # No .localcoder/sessions directory should exist
+        sessions_dir = tmp_path / ".localcoder" / "sessions"
+        assert not sessions_dir.exists()
