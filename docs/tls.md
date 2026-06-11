@@ -12,7 +12,7 @@ and run shell commands on the host. Anyone who can reach the port can do all
 of that. Bearer auth (`LOCALM_API_KEY`) is the minimum; TLS stops the key
 from crossing the network in cleartext.
 
-## Step 1 — always set an API key
+## Step 1: always set an API key
 
 ```powershell
 $env:LOCALM_API_KEY = Read-Host -MaskInput "localm API key"
@@ -25,7 +25,7 @@ Clients send `Authorization: Bearer <key>`.
 Do not put the key on the command line (it lands in shell history); use
 `Read-Host -MaskInput` as above or set it in your environment manager.
 
-## Step 2 — terminate TLS in front of localm
+## Step 2: terminate TLS in front of localm
 
 localm itself speaks plain HTTP. Put a reverse proxy in front for TLS.
 
@@ -72,7 +72,7 @@ The two SSE settings matter: `proxy_buffering off` and a generous
 `proxy_read_timeout`, otherwise streaming chat stalls and long generations
 get cut off.
 
-## Step 3 — scope what you expose
+## Step 3: scope what you expose
 
 - Serve the bare API (`localm serve`) over the LAN, not the GUI. The GUI's
   coder sessions execute code on the host; that should stay a localhost

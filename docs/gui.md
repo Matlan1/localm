@@ -73,7 +73,7 @@ HTTP request with timing, and captures the native llama.cpp stderr stream
 normally suppressed to keep chat output clean. If the server ever dies
 mid-generation, the native abort message at the end of that file says why.
 
-Normal operation also strips internal model markers from chat output —
+Normal operation also strips internal model markers from chat output -
 thinking-channel tags like `<|channel|>analysis` and reserved placeholder
 tokens that some finetunes emit as text. Debug mode shows them raw so model
 behaviour can be analysed.

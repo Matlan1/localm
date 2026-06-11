@@ -45,3 +45,6 @@ flux_local_setup_guide.md
 
 # Local integration tests — contain environment-specific paths and filenames
 tests/test_flux_generation.py
+
+# Local crash/chat logs kept out of the repo
+chatlogs_errorlogs/

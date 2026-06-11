@@ -1,181 +1,121 @@
 # HTTP Server API
 
-localm's inference server exposes an OpenAI-compatible REST API. Start it with:
+localm's inference server exposes an OpenAI-compatible REST API plus a small
+set of localm-specific management endpoints.
 
 ```bash
-localm serve <model> [--host 127.0.0.1] [--port 8080]
+localm serve <model>          # default 127.0.0.1:8642, auto-bumps when busy
 ```
 
-## Endpoints
+Authentication: open when `LOCALM_API_KEY` is unset (local development).
+When set, endpoints require `Authorization: Bearer <key>`. CORS is locked to
+localhost by default; widen it with the `cors_origins` config key. See
+[tls.md](tls.md) before exposing the server beyond 127.0.0.1.
 
-### `GET /health`
-
-Returns 200 if the model is loaded, 503 otherwise.
-
-```json
-{"status": "ok", "model": "gemma4-4b"}
-```
-
-### `GET /v1/models`
-
-Lists the currently loaded model in OpenAI format.
-
-```json
-{
-  "object": "list",
-  "data": [
-    {
-      "id": "gemma4-4b",
-      "object": "model",
-      "created": 1749000000,
-      "owned_by": "localm"
-    }
-  ]
-}
-```
+## OpenAI-compatible endpoints
 
 ### `POST /v1/chat/completions`
 
-Chat completions — streaming or non-streaming.
+Streaming and non-streaming chat. Standard OpenAI request body, plus localm
+extras:
 
-**Request body:**
+| Field | Notes |
+|---|---|
+| `top_k`, `repeat_penalty` | extra sampling controls |
+| `seed` | reproducible generation |
+| `grammar` | GBNF grammar constraining the output (local models) |
 
 ```json
 {
-  "model": "gemma4-4b",
-  "messages": [
-    {"role": "system", "content": "You are a helpful assistant."},
-    {"role": "user",   "content": "What is the capital of France?"}
-  ],
-  "max_tokens": 1024,
+  "model": "mymodel",
+  "messages": [{"role": "user", "content": "What is the capital of France?"}],
+  "stream": true,
   "temperature": 0.8,
-  "top_p": 0.95,
-  "top_k": 40,
-  "repeat_penalty": 1.1,
-  "stream": false
+  "seed": 42
 }
 ```
 
-All fields except `messages` are optional.
-
-**Non-streaming response:**
+The final usage block carries exact token counts from the model's own
+tokenizer plus performance numbers:
 
 ```json
 {
-  "id": "chatcmpl-abc123",
-  "object": "chat.completion",
-  "created": 1749000000,
-  "model": "gemma4-4b",
-  "choices": [
-    {
-      "index": 0,
-      "message": {"role": "assistant", "content": "Paris."},
-      "finish_reason": "stop"
-    }
-  ]
+  "usage": {
+    "prompt_tokens": 14, "completion_tokens": 3, "total_tokens": 17,
+    "ttft_ms": 181.4, "tokens_per_sec": 38.2
+  }
 }
 ```
 
-**Streaming response** (`stream: true`) — Server-Sent Events:
+Multimodal input uses the standard multipart content format with base64
+data-URIs (`{"type": "image_url", "image_url": {"url": "data:image/..."}}`)
+and requires a model loaded with `--mmproj`.
 
-```
-data: {"id":"chatcmpl-abc123","object":"chat.completion.chunk","created":1749000000,"model":"gemma4-4b","choices":[{"index":0,"delta":{"role":"assistant","content":null},"finish_reason":null}]}
+### `POST /v1/completions`
 
-data: {"id":"chatcmpl-abc123","object":"chat.completion.chunk","created":1749000000,"model":"gemma4-4b","choices":[{"index":0,"delta":{"role":null,"content":"Paris"},"finish_reason":null}]}
+Raw text completion (streaming and non-streaming), same extras as chat.
 
-data: {"id":"chatcmpl-abc123","object":"chat.completion.chunk","created":1749000000,"model":"gemma4-4b","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
-
-data: [DONE]
-```
-
-### `POST /v1/models/unload`
-
-Unloads the current model from GPU memory without stopping the server. Returns 200 immediately; the model is released asynchronously.
+### `POST /v1/embeddings`
 
 ```json
-{}
+{"model": "mymodel", "input": ["text one", "text two"]}
 ```
 
-**Response:**
-```json
-{"status": "unloaded"}
-```
+Returns OpenAI-format embedding vectors. 422 when the loaded model cannot
+embed.
 
-Useful before running FLUX image generation so ComfyUI has the full VRAM budget. The model reloads automatically on the next `/v1/chat/completions` request (see `engine.py` — `chat_stream` calls `backend.load()` if the backend is unloaded).
+### `GET /v1/models`
 
-### `POST /v1/models/load`
+Lists the currently served model. `GET /v1/models/{id}` returns registry
+detail for any registered model: path, source, size, SHA256, aliases, and
+whether it is active and loaded.
 
-Reloads the previously-unloaded model. Blocks until the model is ready.
+### `GET /health`
 
-```json
-{}
-```
+200 with model name and load state; 503 when no engine is initialised.
 
-**Response:**
-```json
-{"status": "loaded"}
-```
+## Model lifecycle
 
----
+`POST /v1/models/unload` releases the model from VRAM (e.g. before image
+generation hands the GPU to ComfyUI); `POST /v1/models/load` reloads it.
+Unloading is implicit-recovery: the next chat request reloads automatically.
 
-## Multimodal (image input)
+## Management endpoints
 
-Pass images as base64 data-URIs in the multipart content format:
+### `GET /v1/config` / `PATCH /v1/config`
 
-```json
-{
-  "model": "gemma4-12b",
-  "messages": [
-    {
-      "role": "user",
-      "content": [
-        {
-          "type": "image_url",
-          "image_url": {
-            "url": "data:image/jpeg;base64,/9j/4AAQ..."
-          }
-        },
-        {"type": "text", "text": "Describe this image."}
-      ]
-    }
-  ]
-}
-```
+Read and update `~/.localm/config.json`. PATCH accepts only known keys and
+persists immediately; engine values (context sizes, GPU layers) apply on the
+next model load.
 
-Image input requires a multimodal model loaded with `--mmproj <path>`.
+### `GET /v1/plugins` / `POST /v1/plugins/install` / `DELETE /v1/plugins/{name}`
 
-## Python Client Example
+List installed external plugins (with manifest errors surfaced), install
+from a local directory containing `plugin.toml`, remove by name.
+
+## Client example
 
 ```python
 from openai import OpenAI
 
-client = OpenAI(
-    base_url="http://localhost:8080/v1",
-    api_key="localm",  # any non-empty string
-)
+client = OpenAI(base_url="http://localhost:8642/v1", api_key="localm")
 
-# Non-streaming
-response = client.chat.completions.create(
-    model="gemma4-4b",
-    messages=[{"role": "user", "content": "Hello!"}],
-)
-print(response.choices[0].message.content)
-
-# Streaming
 stream = client.chat.completions.create(
-    model="gemma4-4b",
+    model="mymodel",
     messages=[{"role": "user", "content": "Tell me a story."}],
     stream=True,
 )
 for chunk in stream:
     print(chunk.choices[0].delta.content or "", end="", flush=True)
-print()
 ```
 
-## CORS
+## Behaviour notes
 
-The server allows all origins (`*`) by default, making it usable from browser-based UIs without a proxy.
-
-## Concurrency
-
-Requests are serialised — the model generates one completion at a time. Concurrent requests queue and execute in order. This is intentional: GPU memory is shared and the KV cache is not concurrency-safe.
+- **Concurrency**: inference is serialised through a semaphore; concurrent
+  requests queue in order. GPU memory is shared and the KV cache is not
+  concurrency-safe, so this is deliberate.
+- **Context**: the window starts at `n_ctx` and grows on demand up to
+  `n_ctx_max` (see the dynamic context section of the README). Conversations
+  that outgrow the ceiling get a clear error instead of an OOM.
+- **GUI endpoints**: `localm gui` adds `/api/*` routes (coder sessions,
+  model switching, image jobs) on top of this API; see [gui.md](gui.md).

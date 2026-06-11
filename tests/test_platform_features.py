@@ -34,6 +34,18 @@ class TestReadEnv:
         assert "visible" in result.output
 
 
+class TestGgufEmbedUnsupported:
+    def test_clear_not_implemented_when_binding_lacks_embeddings(self):
+        from localm.inference.backends.gguf import GgufBackend
+        backend = GgufBackend.__new__(GgufBackend)
+        backend._llm = object()   # no create_embedding attribute
+        try:
+            backend.embed(["text"])
+            assert False, "expected NotImplementedError"
+        except NotImplementedError as e:
+            assert "GGUF" in str(e)
+
+
 class TestResultCompression:
     def _agent(self, fill):
         from localm.plugins.coder.agent import Agent

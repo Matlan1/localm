@@ -228,7 +228,7 @@ explicit `-c/--ctx` larger than the ceiling always wins.
 Long chats compact automatically before they collide with the ceiling: at 70%
 fill, older turns are summarised by the model and replaced with a short
 summary, keeping the last two exchanges verbatim. If summarisation is
-unavailable the history is trimmed with a visible note instead — chat keeps
+unavailable the history is trimmed with a visible note instead: chat keeps
 working either way. This applies to both `localm run` and the GUI; both also
 have a manual trigger (`/compact` in the terminal, the compact button in the
 browser).
@@ -323,6 +323,7 @@ Stop strings (`<|im_end|>`, `<end_of_turn>`, etc.) are filtered via a streaming 
 | [docs/mcp.md](docs/mcp.md) | MCP in both directions: serving models, consuming tool servers |
 | [docs/server-api.md](docs/server-api.md) | HTTP API details |
 | [docs/architecture.md](docs/architecture.md) | Design notes |
+| [docs/llamacpp-binding.md](docs/llamacpp-binding.md) | The ctypes binding internals |
 | [docs/gpu-setup.md](docs/gpu-setup.md) | GPU/DLL setup |
 | [docs/flux-setup.md](docs/flux-setup.md) | ComfyUI FLUX image pipeline |
 | [docs/tls.md](docs/tls.md) | API keys, TLS, and reverse proxies for LAN serving |

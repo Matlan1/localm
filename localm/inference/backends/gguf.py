@@ -260,6 +260,11 @@ class GgufBackend(BaseBackend):
     def embed(self, texts: List[str]) -> List[List[float]]:
         if not self._llm:
             raise RuntimeError("Model not loaded — call load() first")
+        if not hasattr(self._llm, "create_embedding"):
+            raise NotImplementedError(
+                "Embeddings are not supported by the built-in GGUF binding yet. "
+                "Use a HuggingFace-format model for /v1/embeddings."
+            )
         result = self._llm.create_embedding(texts)
         # create_embedding returns {"data": [{"embedding": [...], "index": N}, ...]}
         data = result.get("data", result) if isinstance(result, dict) else result

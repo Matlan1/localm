@@ -1,4 +1,4 @@
-# localm GUI — Plan and status
+# localm GUI: Plan and status
 
 **Implemented:** web-first GUI as a built-in plugin (`localm/plugins/gui/`), served by the existing FastAPI server. `localm gui` starts the server and opens the browser. See `docs/gui.md`.
 

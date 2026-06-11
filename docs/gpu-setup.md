@@ -2,9 +2,9 @@
 
 ## AMD (ROCm / HIP)
 
-localm uses the native `llama.dll` HIP build for AMD GPUs. No Python GPU packages are needed for GGUF inference — only the prebuilt DLLs.
+localm uses the native `llama.dll` HIP build for AMD GPUs. No Python GPU packages are needed for GGUF inference: only the prebuilt DLLs.
 
-### gfx1030 (RX 6000 series — Navi21)
+### gfx1030 (RX 6000 series: Navi21)
 
 Required DLLs (load order matters):
 

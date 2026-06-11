@@ -1,3 +1,11 @@
+# localm Feature Report (June 2026, historical)
+
+Point-in-time gap audit that drove the foundation-hardening work. Everything
+listed as missing here has since been implemented or explicitly deferred;
+see TODO.md for current status. Kept for the reasoning and comparisons.
+
+---
+
 # localm — Feature Report
 
 Comprehensive audit of the project against professional-grade expectations for

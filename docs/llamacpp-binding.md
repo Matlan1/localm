@@ -1,6 +1,6 @@
 # llama.cpp ctypes Binding
 
-`localm.inference.backends.llamacpp` is a pure-Python ctypes wrapper around the native `llama.dll`.  It replaces `llama-cpp-python` entirely — no C compiler, no Python wheel, no version lock.
+`localm.inference.backends.llamacpp` is a pure-Python ctypes wrapper around the native `llama.dll`.  It replaces `llama-cpp-python` entirely: no C compiler, no Python wheel, no version lock.
 
 ## Module Layout
 
@@ -28,7 +28,7 @@ ggml.dll → ggml-base.dll → ggml-cpu.dll → ggml-hip.dll → llama.dll
 
 The binary directory is prepended to `os.environ["PATH"]` so Windows finds any further runtime DLLs (e.g. HIP runtime) automatically.
 
-`load_lib()` is idempotent — it caches `_loaded_lib` and returns immediately on repeat calls.
+`load_lib()` is idempotent: it caches `_loaded_lib` and returns immediately on repeat calls.
 
 ## Struct Layouts (`_structs.py`)
 
@@ -69,7 +69,7 @@ Size asserts in `_structs.py` will catch layout drift at import time.
 
 ### `LlamaBatch` (56 bytes)
 
-Matches the C layout exactly — `n_tokens` + 4 bytes padding + 6 pointers.
+Matches the C layout exactly: `n_tokens` + 4 bytes padding + 6 pointers.
 
 ### `LlamaChatMessage` (16 bytes)
 
@@ -103,7 +103,8 @@ Covered functions (grouped):
 **Chat template**: `llama_model_chat_template`, `llama_chat_apply_template`  
 **Batch**: `llama_batch_get_one`, `llama_batch_init`, `llama_batch_free`  
 **Inference**: `llama_decode`, `llama_get_logits_ith`, `llama_get_logits`  
-**Sampler chain**: `llama_sampler_chain_init`, `llama_sampler_chain_add`, `llama_sampler_free`, `llama_sampler_sample`, `llama_sampler_accept`, `llama_sampler_init_greedy`, `llama_sampler_init_dist`, `llama_sampler_init_top_k`, `llama_sampler_init_top_p`, `llama_sampler_init_min_p`, `llama_sampler_init_temp`  
+**Sampler chain**: `llama_sampler_chain_init`, `llama_sampler_chain_add`, `llama_sampler_free`, `llama_sampler_sample`, `llama_sampler_accept`, `llama_sampler_init_greedy`, `llama_sampler_init_dist`, `llama_sampler_init_top_k`, `llama_sampler_init_top_p`, `llama_sampler_init_min_p`, `llama_sampler_init_temp`, `llama_sampler_init_grammar`, `llama_sampler_init_penalties` (export-probed)  
+**Memory (KV cache)**: `llama_get_memory`, `llama_memory_clear`, `llama_memory_seq_rm` (all probed at runtime via `has_memory_api()`)  
 **Diagnostics**: `llama_print_system_info`
 
 ## LlamaCpp Class (`llama.py`)
@@ -131,7 +132,7 @@ The constructor:
 
 `create_chat_completion` formats messages via `_apply_model_template(model_ptr, messages)`:
 
-1. Calls `llama_model_chat_template(model_ptr)` — returns the Jinja template embedded in the GGUF
+1. Calls `llama_model_chat_template(model_ptr)`: returns the Jinja template embedded in the GGUF
 2. Builds a `LlamaChatMessage` ctypes array from the messages list
 3. Calls `llama_chat_apply_template(tmpl, array, n, add_assistant=True, buf, buflen)`
 4. If the template includes a BOS marker (`<bos>`, `<s>`) at the start, skips `add_special` in tokenize to avoid doubling
@@ -139,13 +140,23 @@ The constructor:
 
 ### Generation loop (`_generate`)
 
-The KV cache is cleared by re-creating a fresh context before each call (the prebuilt DLL lacks `llama_kv_self_clear`):
+KV cache strategy (probed at runtime via the `llama_memory_*` function
+family):
+
+- **Prefix reuse** (default on current DLLs): the common token prefix with
+  the previous call stays in the KV cache; diverging cached tokens are
+  removed with `llama_memory_seq_rm` and only the new suffix is prefilled.
+  Follow-up chat turns skip re-evaluating the whole history.
+- **Fresh rebuild** (old DLLs, or when the request outgrows the live
+  context): the context is freed and re-created at the next dynamic-window
+  size (`n_ctx_grow` steps up to `n_ctx_max`), then the full prompt is
+  prefilled.
+- Prefill is always chunked to `n_batch` (2048): a single oversized
+  `llama_decode` batch aborts the native process rather than returning an
+  error.
 
 ```
-llama_free(ctx)
-→ llama_init_from_model(model, params)
-→ prefill prompt in one batch (llama_batch_get_one + llama_decode)
-→ loop:
+loop:
     token = llama_sampler_sample(chain, ctx, -1)
     llama_sampler_accept(chain, token)
     if llama_vocab_is_eog(vocab, token): break
@@ -168,12 +179,25 @@ Stop strings checked: `<|im_end|>`, `<end_of_turn>`, `<|eot_id|>`, `</s>`, `<|en
 
 ### Sampler chain
 
-For `temperature > 0`:  `top_k(40) → top_p(0.95) → min_p(0.05) → temp(t) → dist(seed)`  
-For `temperature == 0`: `greedy`
+`[grammar] → [penalties] → top_k(40) → top_p(0.95) → min_p(0.05) → temp(t) → dist(seed)`
+
+- The GBNF grammar stage (`llama_sampler_init_grammar`) is added when a
+  grammar string is supplied.
+- The repetition-penalty stage is added when `repeat_penalty != 1.0` and
+  the DLL exports `llama_sampler_init_penalties`.
+- For `temperature == 0` the stochastic stages are replaced by `greedy`
+  (grammar and penalties still apply).
+
+### Output filtering
+
+`_filtered_stream` halts on stop strings (above); `_scrub_stream` then
+removes internal model markers (thinking-channel tags, reserved placeholder
+tokens) unless debug mode is active.
 
 ## Known Limitations
 
-- **No KV cache reuse across calls** — context is recreated for each `_generate()` call. Cost is ~10–50 ms per call depending on n_ctx.
-- **Single sequence only** — `n_seq_max=1` (the `llama_batch_get_one` path)
-- **No grammar sampling** — `llama_sampler_init_grammar` not currently bound
-- **No embedding extraction** — `embeddings=False` in context params
+- **Single sequence only**: `n_seq_max=1` (the `llama_batch_get_one` path)
+- **No embedding extraction**: the binding has no embedding path yet;
+  `GgufBackend.embed` raises `NotImplementedError` and `/v1/embeddings`
+  returns 422 for GGUF models. HF-format models embed fine.
+- **No speculative decoding / draft models**
