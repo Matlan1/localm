@@ -28,6 +28,10 @@ def _complete_model(ctx, param, incomplete):
 @click.option("-c", "--ctx", default=None, type=int, help="Context window size.")
 @click.option("-g", "--gpu-layers", default=None, type=int)
 @click.option("--no-browser", is_flag=True, help="Don't open the browser automatically.")
+@click.option("--pull", "pull_spec", default=None, metavar="SPEC",
+              help="Open the GUI on the Models page and start downloading SPEC "
+                   "(a HuggingFace repo, repo:file.gguf, or https URL). Lets you "
+                   "fetch a first model with a progress bar, no model required.")
 @click.option("--debug", is_flag=True,
               help="Write a debug log (~/.localm/logs/), capture native llama.cpp "
                    "stderr, log requests, and record raw model output in the log.")
@@ -36,14 +40,16 @@ def _complete_model(ctx, param, incomplete):
               help="Session persistence [default: config 'mode', else privacy]. "
                    "privacy = nothing saved; log = JSONL audit of chat traffic; "
                    "full = log + markdown transcript.")
-def main(model, host, port, ctx, gpu_layers, no_browser, debug, mode):
+def main(model, host, port, ctx, gpu_layers, no_browser, pull_spec, debug, mode):
     """Open the localm web GUI — chat and the coder agent in your browser.
 
     \b
-    MODEL is optional; defaults to the first registered model.
-    The GUI runs fully offline against your local models:
+    MODEL is optional; defaults to the first registered model. With no model
+    registered at all, the GUI still opens so you can add one from the Models
+    page (or pass --pull SPEC to start a download immediately):
       localm gui
       localm gui gemma4-4b
+      localm gui --pull bartowski/Qwen2.5-7B-Instruct-GGUF:Qwen2.5-7B-Instruct-Q4_K_M.gguf
     """
     from rich.console import Console
     console = Console()
@@ -70,19 +76,27 @@ def main(model, host, port, ctx, gpu_layers, no_browser, debug, mode):
     from localm.model_manager import get_model_info
 
     registry = load_registry()
+    model_less = False
     if not model:
         if not registry:
-            console.print("[red]No models registered.[/red] "
-                          "Pull one first:  localm pull <name>")
-            sys.exit(1)
-        model = sorted(registry)[0]
+            # Fresh install: open the GUI anyway so the user can add a model
+            # from the Models page (or via --pull). No engine until then.
+            model_less = True
+            console.print("[yellow]No models registered yet.[/yellow] "
+                          "Opening the GUI — add one on the Models page"
+                          + (" (download starting)…" if pull_spec else "."))
+        else:
+            model = sorted(registry)[0]
 
-    info = get_model_info(model)
-    if info is None:
-        console.print(f"[red]Model not found:[/red] {model}")
-        sys.exit(1)
-    model_path, display_hint = info
-    display_name = model if model in registry else display_hint
+    model_path = None
+    display_name = ""
+    if not model_less:
+        info = get_model_info(model)
+        if info is None:
+            console.print(f"[red]Model not found:[/red] {model}")
+            sys.exit(1)
+        model_path, display_hint = info
+        display_name = model if model in registry else display_hint
 
     chosen_port, was_busy = pick_port(port, host="127.0.0.1" if host == "0.0.0.0" else host)
     if was_busy:
@@ -104,10 +118,10 @@ def main(model, host, port, ctx, gpu_layers, no_browser, debug, mode):
             display_name=name if name in load_registry() else m_hint,
         )
 
-    engine = _make_engine(model)
+    engine = None if model_less else _make_engine(model)
     app = hs.create_app(engine)
 
-    state = {"model": model}
+    state = {"model": "" if model_less else model}
 
     async def switch_model(name: str) -> None:
         """Swap engines under the inference semaphore so no request is mid-flight."""
@@ -128,9 +142,21 @@ def main(model, host, port, ctx, gpu_layers, no_browser, debug, mode):
         active_model=lambda: state["model"],
     )
 
-    url = f"http://127.0.0.1:{chosen_port}/"
-    console.print(f"[bold green]localm GUI[/bold green] → {url}")
-    console.print(f"  model: [cyan]{display_name or Path(str(model_path)).stem}[/cyan]")
+    base_url = f"http://127.0.0.1:{chosen_port}/"
+    # Deep-link the browser to the Models page (and a pending download) when
+    # the GUI was opened with --pull or with nothing registered yet.
+    open_url = base_url
+    if pull_spec:
+        from urllib.parse import quote
+        open_url = f"{base_url}?view=models&pull={quote(pull_spec, safe='')}"
+    elif model_less:
+        open_url = f"{base_url}?view=models"
+
+    console.print(f"[bold green]localm GUI[/bold green] → {base_url}")
+    if model_less:
+        console.print("  model: [yellow]none yet — add one on the Models page[/yellow]")
+    else:
+        console.print(f"  model: [cyan]{display_name or Path(str(model_path)).stem}[/cyan]")
     console.print("  Ctrl+C to stop")
 
     # Preload the model in the background so the first chat reply is fast.
@@ -141,11 +167,12 @@ def main(model, host, port, ctx, gpu_layers, no_browser, debug, mode):
         except Exception as e:
             console.print(f"[yellow]Background model load failed: {e}[/yellow]")
 
-    threading.Thread(target=_preload, daemon=True, name="preload").start()
+    if engine is not None:
+        threading.Thread(target=_preload, daemon=True, name="preload").start()
 
     if not no_browser:
         # Delay slightly so the server is listening when the tab opens
-        threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+        threading.Timer(1.0, lambda: webbrowser.open(open_url)).start()
 
     import uvicorn
     try:

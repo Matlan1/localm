@@ -9,7 +9,7 @@ localm coder "add type hints to utils.py"
 localm serve mymodel
 ```
 
-Everything that does not strictly need the internet works fully offline. Online providers (OpenAI, Anthropic) exist as explicit opt-ins for the coder agent and are never a default.
+Everything that does not strictly need the internet works fully offline. Online providers (OpenAI, Anthropic) exist as explicit opt-ins for the coder agent and are never a default. When a task does need the web (current docs, the weather), the coder and chat can search and fetch pages through a single policy choke point — `off` / `ask` / `allow` modes, domain allow/deny lists, SSRF guard ([guide](docs/network.md)).
 
 ---
 
@@ -23,6 +23,7 @@ Everything that does not strictly need the internet works fully offline. Online 
 | **OpenAI-compatible server** | `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`, streaming SSE, TTFT and tok/s in usage |
 | **Web GUI** | `localm gui`: chat, coder agent, model manager, image generation, plugins, and settings in the browser; zero build step, fully offline ([guide](docs/gui.md)) |
 | **Coding agent** | `localm coder` / `localcoder`: agentic loop with file, shell, search, test, and image tools |
+| **Web access (opt-in)** | `web_search` + `fetch_url` for coder and chat via one network policy: `off`/`ask`/`allow`, domain allow/deny, private-address SSRF guard ([guide](docs/network.md)) |
 | **MCP client** | The coder consumes external MCP tool servers from `.localcoder/config.toml` |
 | **MCP server** | `localm mcp` exposes your local models to Claude Desktop and other MCP clients ([guide](docs/mcp.md)) |
 | **Interactive chat** | Multi-turn shell with `/imagine`, `/compact`, `/clear`, `/image`, `/system`, `/save` |
@@ -75,6 +76,13 @@ launcher: pick Web GUI, terminal chat, API server, or the coder agent, choose a
 model, toggle debug mode, set port/context/GPU layers, and hit Launch. Your
 choices are remembered. (`localm.bat` still starts a plain chat directly.) Both
 use the clone's own `.venv` automatically.
+
+**No models yet?** On a fresh install the launcher's **Import** row gets you a
+first model three ways: *from file…* / *from folder…* register a GGUF or a
+HuggingFace directory already on disk, and *from URL…* opens the Web GUI on its
+Models page and downloads the model there with a live progress bar. You can
+also just launch the Web GUI with nothing registered — it opens straight to the
+Models page so you can pull or import from the browser.
 
 ---
 
@@ -174,7 +182,7 @@ Every surface — terminal chat (`localm run`), the API server (`localm serve`),
 | mode | what is written |
 |---|---|
 | `privacy` (default) | **Nothing, anywhere.** No audit trail, no transcripts, no coder checkpoints, no image/music prompt sidecars; GUI conversations stay in memory only (gone on reload); readline + child-shell history suppressed; shell history scrubbed on exit. Explicit actions (`/save`, `/export`, generated files themselves) still work. |
-| `log` | JSONL audit trail per session in `~/.localm/sessions/` (user messages, replies, tool calls). |
+| `log` | JSONL audit trail per session in `~/.localm/sessions/` (user messages, replies, tool calls). GUI chat conversations additionally persist server-side in `~/.localm/chats/` and reload on any browser; past coder audit logs are browsable from the GUI's history button. |
 | `full` | Everything in `log`, plus a human-readable Markdown transcript (coder: `.localcoder/sessions/` in the project; chat/server: `~/.localm/sessions/`). |
 
 Resolution order: `--mode` flag > project `.localcoder/config.toml` (coder only) > per-surface config (`chat_mode` / `coder_mode`) > global config `mode` > `privacy`. Set them in `~/.localm/config.json`, the GUI Settings page, or the launcher's Privacy card (global + chat/coder overrides).
@@ -356,6 +364,7 @@ Stop strings (`<|im_end|>`, `<end_of_turn>`, etc.) are filtered via a streaming 
 | [docs/llamacpp-binding.md](docs/llamacpp-binding.md) | The ctypes binding internals |
 | [docs/gpu-setup.md](docs/gpu-setup.md) | GPU/DLL setup |
 | [docs/flux-setup.md](docs/flux-setup.md) | ComfyUI FLUX image pipeline |
+| [docs/network.md](docs/network.md) | Internet access for coder and chat: modes, domain rules, SSRF guard |
 | [docs/tls.md](docs/tls.md) | API keys, TLS, and reverse proxies for LAN serving |
 
 ---

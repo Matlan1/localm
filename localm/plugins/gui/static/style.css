@@ -188,6 +188,10 @@ nav button.active { background: var(--accent-soft); color: var(--accent); }
 }
 .msg-row.user .msg-role { color: var(--accent); }
 .msg-row.assistant .msg-role { color: var(--green); }
+/* injected web search/fetch results — visible but visually secondary */
+.msg-row.web-note { opacity: 0.7; }
+.msg-row.web-note .msg-body { font-size: 13px; max-height: 180px; overflow-y: auto; }
+.msg-row.web-note .msg-role { color: var(--yellow); }
 .msg-body { line-height: 1.6; word-wrap: break-word; }
 .msg-body p { margin: 0 0 10px; }
 .msg-body p:last-child { margin-bottom: 0; }
@@ -312,6 +316,11 @@ pre:hover .copy-btn { opacity: 1; }
 }
 #params.open { display: grid; }
 #params label { font-size: 12px; color: var(--text-dim); display: block; margin-bottom: 4px; }
+#params .check-row label {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; color: var(--text); cursor: pointer; margin: 2px 0;
+}
+#params .check-row input[type="checkbox"] { width: auto; }
 #params input, #params textarea {
   width: 100%;
   background: var(--bg-input);
@@ -702,6 +711,8 @@ pre:hover .copy-btn { opacity: 1; }
   border-bottom: 1px solid var(--border); word-break: break-word;
 }
 .modal-body .log-entry .t { color: var(--accent); margin-right: 8px; }
+.modal-body .log-entry.clickable { cursor: pointer; }
+.modal-body .log-entry.clickable:hover { background: rgba(128, 128, 128, 0.12); }
 
 /* theme button */
 .theme-btn { width: 100%; margin-top: 8px; }

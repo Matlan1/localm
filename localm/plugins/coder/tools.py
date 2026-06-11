@@ -836,95 +836,63 @@ def tool_fetch_url(
     and package changelogs.  Content is truncated to ``max_chars`` to avoid
     flooding the context window.
 
+    Routed through localm.netpolicy: net_mode/net_allow/net_deny apply, every
+    redirect hop is re-validated, and private/loopback targets are refused
+    unless net_allow_private is set.
+
     In privacy mode (``_privacy=True``) a one-line network audit message is
     emitted to stderr before the request so the user can see outbound URLs.
     """
-    import html.parser
-    import ipaddress
-    import socket
-    import urllib.error
-    import urllib.parse
-    import urllib.request
-
-    # Scheme allowlist: urllib.urlopen also speaks file://, ftp://, and data://
-    # — a prompt-injected agent could otherwise read local files
-    # (file:///etc/passwd, file:///C:/Users/.../.ssh/id_rsa) straight into the
-    # conversation.  Only real web fetches are permitted.
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        return ToolResult.error(
-            f"fetch_url only supports http/https URLs (got '{parsed.scheme}:'). "
-            "Reading local files via file:// is not allowed."
-        )
-    host = parsed.hostname or ""
-    # SSRF guard: block link-local / cloud-metadata endpoints (169.254.x).
-    # Localhost and private ranges stay reachable on purpose — the agent
-    # legitimately talks to localm's own server and other local dev services.
-    try:
-        for info in socket.getaddrinfo(host, None):
-            ip = ipaddress.ip_address(info[4][0])
-            if ip.is_link_local:
-                return ToolResult.error(
-                    f"fetch_url refuses link-local / metadata address {ip}.")
-    except (socket.gaierror, ValueError):
-        pass  # unresolved host → let urllib surface the error normally
+    from localm.netpolicy import NetworkPolicyError, fetch_text
 
     if _privacy:
         import sys as _sys
         print(f"[localm privacy] fetch_url: {url}", file=_sys.stderr, flush=True)
 
-    class _HTMLStripper(html.parser.HTMLParser):
-        _SKIP = {"script", "style", "head", "meta", "link", "noscript"}
-
-        def __init__(self):
-            super().__init__(convert_charrefs=True)
-            self._buf: list[str] = []
-            self._skip = 0
-
-        def handle_starttag(self, tag, attrs):
-            if tag.lower() in self._SKIP:
-                self._skip += 1
-
-        def handle_endtag(self, tag):
-            if tag.lower() in self._SKIP and self._skip:
-                self._skip -= 1
-
-        def handle_data(self, data):
-            if not self._skip:
-                self._buf.append(data)
-
-        def get_text(self) -> str:
-            import re
-            raw = "".join(self._buf)
-            # Collapse excessive blank lines
-            return re.sub(r"\n{3,}", "\n\n", raw).strip()
-
     try:
-        req = urllib.request.Request(
-            url,
-            headers={"User-Agent": "localm/0.1 (fetch_url tool)"},
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            content_type = resp.headers.get("Content-Type", "")
-            raw = resp.read(1_000_000).decode("utf-8", errors="replace")
-    except urllib.error.URLError as e:
-        return ToolResult.error(f"Could not fetch {url}: {e}")
-    except Exception as e:
+        final_url, text = fetch_text(url)
+    except NetworkPolicyError as e:
         return ToolResult.error(str(e))
-
-    if "html" in content_type.lower():
-        stripper = _HTMLStripper()
-        stripper.feed(raw)
-        text = stripper.get_text()
-    else:
-        text = raw.strip()
+    except Exception as e:
+        return ToolResult.error(f"Could not fetch {url}: {e}")
 
     output, trunc = _truncate(text, max_chars)
     return ToolResult(
         ok=True,
-        output=f"<url>{url}</url>\n<content>\n{output}\n</content>",
+        output=f"<url>{final_url}</url>\n<content>\n{output}\n</content>",
         summary=f"fetched {url[:60]} ({len(text):,} chars{', truncated' if trunc else ''})",
         truncated=trunc,
+    )
+
+
+def tool_web_search(
+    cwd: Path,
+    query: str,
+    max_results: int = 5,
+    _privacy: bool = False,
+) -> ToolResult:
+    """
+    Search the web and return numbered results (title, URL, snippet).
+
+    Use fetch_url on a result URL to read the full page. Routed through
+    localm.netpolicy like fetch_url.
+    """
+    from localm.netpolicy import NetworkPolicyError, format_results, web_search
+
+    if _privacy:
+        import sys as _sys
+        print(f"[localm privacy] web_search: {query}", file=_sys.stderr, flush=True)
+
+    try:
+        results = web_search(query, max_results=max_results)
+    except NetworkPolicyError as e:
+        return ToolResult.error(str(e))
+    except Exception as e:
+        return ToolResult.error(f"Web search failed: {e}")
+
+    return ToolResult.success(
+        format_results(results),
+        summary=f"web_search '{query[:50]}' ({len(results)} results)",
     )
 
 
@@ -1436,6 +1404,19 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
         params={
             "url":       {"type": "string", "description": "Full URL to fetch",               "required": True},
             "max_chars": {"type": "int",    "description": "Truncate output (default 8000)",  "required": False},
+        },
+    ),
+    "web_search": ToolDef(
+        name="web_search",
+        fn=tool_web_search,
+        description=(
+            "Search the web; returns numbered results with title, URL, and "
+            "snippet. Use when you need current information (versions, docs, "
+            "errors, facts). Follow up with fetch_url to read a full page."
+        ),
+        params={
+            "query":       {"type": "string", "description": "Search query",                       "required": True},
+            "max_results": {"type": "int",    "description": "How many results (default 5, max 10)", "required": False},
         },
     ),
     "spawn_agent": ToolDef(

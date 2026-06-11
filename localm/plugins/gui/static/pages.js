@@ -538,8 +538,17 @@ $("gui-key-save").onclick = () => {
   setTimeout(() => location.reload(), 600);
 };
 
-$("gui-clear-convs").onclick = () => {
-  if (!confirm("Delete all saved conversations from this browser?")) return;
+$("gui-clear-convs").onclick = async () => {
+  const where = chat.persist
+    ? "from this browser AND the server store" : "from this browser";
+  if (!confirm(`Delete all saved conversations ${where}?`)) return;
+  if (chat.persist) {
+    // Server store is the source of truth — clear it too or they come back.
+    await Promise.allSettled(chat.conversations.map((c) =>
+      fetch("/api/conversations/" + encodeURIComponent(c.id), {
+        method: "DELETE", headers: authHeaders(),
+      })));
+  }
   localStorage.removeItem("localm.conversations");
   location.reload();
 };

@@ -182,6 +182,54 @@ class TestCoderSession:
         assert session.send_message("too late") is False
 
 
+class TestConfirmResolution:
+    """Every answered confirmation must leave a confirm_resolved event in the
+    stream AND the replay buffer — otherwise a reloaded page replays the
+    confirm_request with live approve/reject buttons."""
+
+    def _request(self, tmp_path, fname):
+        backend = ScriptedBackend([_write_call(fname, "x"), "Done."])
+        session = CoderSession(tmp_path, backend, auto_approve=False)
+        session.send_message("write")
+        events = _drain(session, until_types={"confirm_request"})
+        return session, events[-1]
+
+    def test_approve_emits_confirm_resolved(self, tmp_path):
+        session, req = self._request(tmp_path, "a.txt")
+        session.answer_confirm(req["confirm_id"], approved=True)
+        events = _drain(session, until_types={"final"})
+        resolved = next(e for e in events if e["type"] == "confirm_resolved")
+        assert resolved["confirm_id"] == req["confirm_id"]
+        assert resolved["approved"] is True
+        assert resolved["timed_out"] is False
+
+    def test_reject_emits_confirm_resolved(self, tmp_path):
+        session, req = self._request(tmp_path, "b.txt")
+        session.answer_confirm(req["confirm_id"], approved=False)
+        events = _drain(session, until_types={"final"})
+        resolved = next(e for e in events if e["type"] == "confirm_resolved")
+        assert resolved["approved"] is False
+        assert resolved["timed_out"] is False
+
+    def test_stop_emits_confirm_resolved_rejected(self, tmp_path):
+        session, req = self._request(tmp_path, "c.txt")
+        session.stop()
+        events = _drain(session, until_types={"final"})
+        resolved = next(e for e in events if e["type"] == "confirm_resolved")
+        assert resolved["confirm_id"] == req["confirm_id"]
+        assert resolved["approved"] is False
+
+    def test_replay_buffer_contains_resolution(self, tmp_path):
+        session, req = self._request(tmp_path, "d.txt")
+        session.answer_confirm(req["confirm_id"], approved=True)
+        _drain(session, until_types={"final"})
+        types = [e["type"] for e in session.history]
+        i_req = types.index("confirm_request")
+        i_res = types.index("confirm_resolved")
+        assert i_req < i_res          # replay rebuilds the card, then resolves it
+        assert session.history[i_res]["confirm_id"] == req["confirm_id"]
+
+
 class TestSessionManager:
     def test_create_get_remove(self, tmp_path):
         mgr = SessionManager()
@@ -319,6 +367,41 @@ class TestCoderEndpoints:
                             break
             t.join()
         assert collected[-1]["type"] == "closed"
+
+
+class TestModelLessServer:
+    """The GUI starts with no engine on a fresh install (empty registry); the
+    user adds a model from the Models page. The server must not crash."""
+
+    @pytest.fixture
+    def app_no_engine(self):
+        from localm.inference.http_server import create_app
+        app = create_app(None)
+        with TestClient(app) as client:
+            yield client
+
+    def test_v1_models_empty_when_no_engine(self, app_no_engine):
+        data = app_no_engine.get("/v1/models").json()
+        assert data == {"object": "list", "data": []}
+
+    def test_health_503_when_no_engine(self, app_no_engine):
+        assert app_no_engine.get("/health").status_code == 503
+
+    def test_gui_models_lists_registry_without_engine(self):
+        """/api/models reads the registry, not the engine — works model-less."""
+        app = FastAPI()
+
+        async def switch_model(name):
+            pass
+
+        attach_gui(app, self_url="http://127.0.0.1:9/v1",
+                   switch_model=switch_model, active_model=lambda: "")
+        with patch("localm.config.load_registry", return_value=_FAKE_REGISTRY):
+            with TestClient(app) as client:
+                data = client.get("/api/models").json()
+        assert data["active"] == ""
+        assert [m["name"] for m in data["models"]] == ["model-a", "model-b"]
+        assert all(m["active"] is False for m in data["models"])
 
 
 class TestStaticFiles:
@@ -522,6 +605,245 @@ class TestJobs:
                     break
             assert end is not None
             assert end["status"] == status
+
+
+# ------------------------------------------------------------------ #
+#  Conversation store (server-side chat persistence)                  #
+# ------------------------------------------------------------------ #
+
+@pytest.fixture
+def persist_app(tmp_path, monkeypatch):
+    """GUI app whose data dir lives under tmp_path."""
+    monkeypatch.delenv("LOCALM_HOME", raising=False)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    app = FastAPI()
+
+    async def switch_model(name):
+        pass
+
+    attach_gui(app, self_url="http://127.0.0.1:9/v1",
+               switch_model=switch_model, active_model=lambda: "model-a")
+    return app, tmp_path / ".localm" / "chats"
+
+
+class TestConversationStore:
+    def test_privacy_mode_disables_store(self, persist_app, monkeypatch):
+        monkeypatch.setenv("LOCALM_MODE", "privacy")
+        app, chats = persist_app
+        with TestClient(app) as client:
+            data = client.get("/api/conversations").json()
+            assert data == {"enabled": False, "conversations": []}
+            r = client.put("/api/conversations/abc",
+                           json={"title": "x", "messages": []})
+            assert r.status_code == 403
+            assert client.delete("/api/conversations/abc").status_code == 403
+        assert not chats.exists()       # privacy: not even an empty directory
+
+    def test_upsert_list_delete_roundtrip(self, persist_app, monkeypatch):
+        monkeypatch.setenv("LOCALM_MODE", "log")
+        app, chats = persist_app
+        with TestClient(app) as client:
+            r = client.put("/api/conversations/abc123", json={
+                "title": "My chat", "updated_at": 5,
+                "messages": [{"role": "user", "content": "hi"}]})
+            assert r.status_code == 200
+            assert (chats / "abc123.json").is_file()
+
+            data = client.get("/api/conversations").json()
+            assert data["enabled"] is True
+            assert [c["id"] for c in data["conversations"]] == ["abc123"]
+            assert data["conversations"][0]["messages"][0]["content"] == "hi"
+
+            assert client.delete(
+                "/api/conversations/abc123").json()["status"] == "deleted"
+            assert client.get("/api/conversations").json()["conversations"] == []
+            assert client.delete(
+                "/api/conversations/abc123").json()["status"] == "absent"
+
+    def test_list_sorted_newest_first(self, persist_app, monkeypatch):
+        monkeypatch.setenv("LOCALM_MODE", "log")
+        app, _ = persist_app
+        with TestClient(app) as client:
+            client.put("/api/conversations/old",
+                       json={"title": "old", "updated_at": 1, "messages": []})
+            client.put("/api/conversations/new",
+                       json={"title": "new", "updated_at": 2, "messages": []})
+            data = client.get("/api/conversations").json()
+        assert [c["id"] for c in data["conversations"]] == ["new", "old"]
+
+    @pytest.mark.parametrize("bad_id", [
+        "..%5Cevil",        # ..\evil
+        "a b",              # whitespace
+        "x" * 65,           # too long
+        "sp%C3%A4t",        # non-ASCII
+    ])
+    def test_invalid_ids_rejected(self, persist_app, monkeypatch, bad_id):
+        monkeypatch.setenv("LOCALM_MODE", "log")
+        app, chats = persist_app
+        with TestClient(app) as client:
+            r = client.put(f"/api/conversations/{bad_id}",
+                           json={"title": "x", "messages": []})
+            assert r.status_code == 400
+            assert client.delete(f"/api/conversations/{bad_id}").status_code == 400
+        assert not chats.exists()
+
+    def test_corrupt_file_skipped(self, persist_app, monkeypatch):
+        monkeypatch.setenv("LOCALM_MODE", "log")
+        app, chats = persist_app
+        chats.mkdir(parents=True)
+        (chats / "broken.json").write_text("{nope", encoding="utf-8")
+        with TestClient(app) as client:
+            client.put("/api/conversations/ok",
+                       json={"title": "ok", "updated_at": 1, "messages": []})
+            data = client.get("/api/conversations").json()
+        assert [c["id"] for c in data["conversations"]] == ["ok"]
+
+
+# ------------------------------------------------------------------ #
+#  Network tool gating (net_mode policy in the agent)                 #
+# ------------------------------------------------------------------ #
+
+class TestNetworkToolGating:
+    @staticmethod
+    def _fetch_call():
+        return ("Fetching.\n<tool_call>\n"
+                + json.dumps({"name": "fetch_url",
+                              "args": {"url": "https://example.com/x"}})
+                + "\n</tool_call>")
+
+    def test_net_off_blocks_fetch(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LOCALM_NET_MODE", "off")
+        backend = ScriptedBackend([self._fetch_call(), "Understood."])
+        session = CoderSession(tmp_path, backend, auto_approve=True)
+        session.send_message("fetch the page")
+        events = _drain(session, until_types={"final"})
+        result = next(e for e in events if e["type"] == "tool_result")
+        assert result["ok"] is False
+        assert "network policy" in result["summary"]
+
+    def test_net_ask_routes_through_approval(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LOCALM_NET_MODE", "ask")
+        backend = ScriptedBackend([self._fetch_call(), "Understood."])
+        session = CoderSession(tmp_path, backend, auto_approve=False)
+        session.send_message("fetch the page")
+        events = _drain(session, until_types={"confirm_request"})
+        req = events[-1]
+        assert req["tool"] == "fetch_url"
+        assert "example.com" in json.dumps(req["args"])
+        session.answer_confirm(req["confirm_id"], approved=False)
+        events = _drain(session, until_types={"final"})
+        result = next(e for e in events if e["type"] == "tool_result")
+        assert result["ok"] is False          # rejected, nothing fetched
+
+    def test_net_allow_runs_without_confirmation(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LOCALM_NET_MODE", "allow")
+        monkeypatch.setattr("localm.netpolicy.fetch_text",
+                            lambda url, **kw: (url, "FETCHED BODY"))
+        backend = ScriptedBackend([self._fetch_call(), "Done."])
+        session = CoderSession(tmp_path, backend, auto_approve=False)
+        session.send_message("fetch the page")
+        events = _drain(session, until_types={"final"})
+        types = [e["type"] for e in events]
+        assert "confirm_request" not in types
+        result = next(e for e in events if e["type"] == "tool_result")
+        assert result["ok"] is True
+
+
+# ------------------------------------------------------------------ #
+#  Web endpoints (/api/web/*)                                         #
+# ------------------------------------------------------------------ #
+
+class TestWebEndpoints:
+    def test_search_success_and_empty_query(self, gui_app, monkeypatch):
+        app, _ = gui_app
+        monkeypatch.setattr(
+            "localm.netpolicy.web_search",
+            lambda q, max_results=5: [
+                {"title": "T", "url": "https://t/", "snippet": "s"}])
+        with TestClient(app) as client:
+            data = client.post("/api/web/search", json={"query": "x"}).json()
+            assert data["results"][0]["title"] == "T"
+            assert client.post("/api/web/search",
+                               json={"query": "  "}).status_code == 400
+
+    def test_search_policy_refusal_is_403(self, gui_app, monkeypatch):
+        from localm.netpolicy import NetworkPolicyError
+        app, _ = gui_app
+
+        def deny(q, max_results=5):
+            raise NetworkPolicyError("Network access is disabled (net_mode=off).")
+        monkeypatch.setattr("localm.netpolicy.web_search", deny)
+        with TestClient(app) as client:
+            r = client.post("/api/web/search", json={"query": "x"})
+        assert r.status_code == 403
+        assert "disabled" in r.json()["detail"]
+
+    def test_fetch_truncation_and_failure(self, gui_app, monkeypatch):
+        app, _ = gui_app
+        monkeypatch.setattr("localm.netpolicy.fetch_text",
+                            lambda url, **kw: (url, "y" * 2000))
+        with TestClient(app) as client:
+            data = client.post("/api/web/fetch",
+                               json={"url": "https://e/", "max_chars": 500}).json()
+            assert data["truncated"] is True
+            assert len(data["text"]) == 500
+
+        def boom(url, **kw):
+            raise RuntimeError("connection refused")
+        monkeypatch.setattr("localm.netpolicy.fetch_text", boom)
+        with TestClient(app) as client:
+            assert client.post("/api/web/fetch",
+                               json={"url": "https://e/"}).status_code == 502
+
+
+# ------------------------------------------------------------------ #
+#  Coder session history (past audit logs)                            #
+# ------------------------------------------------------------------ #
+
+class TestCoderHistory:
+    @staticmethod
+    def _fake_log(sessions_dir, name="2026-01-01_000000_1_coder.jsonl"):
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        log = sessions_dir / name
+        entry = {"t": 1, "turn": 0, "type": "user", "data": {"content": "hi"}}
+        log.write_text(json.dumps(entry) + "\nnot json\n", encoding="utf-8")
+        return log, entry
+
+    def test_history_lists_and_reads_logs(self, gui_app, tmp_path, monkeypatch):
+        import localm.audit as audit_mod
+        sessions_dir = tmp_path / "sessions"
+        log, entry = self._fake_log(sessions_dir)
+        monkeypatch.setattr(audit_mod, "_SESSIONS_DIR", sessions_dir)
+        monkeypatch.setenv("LOCALM_MODE", "log")
+        app, _ = gui_app
+        with TestClient(app) as client:
+            data = client.get("/api/coder/history").json()
+            assert data["enabled"] is True
+            assert [l["name"] for l in data["logs"]] == [log.name]
+            parsed = client.get(f"/api/coder/history/{log.name}").json()
+        assert parsed["entries"] == [entry]     # malformed line skipped
+
+    def test_history_enabled_false_in_privacy(self, gui_app, tmp_path, monkeypatch):
+        import localm.audit as audit_mod
+        monkeypatch.setattr(audit_mod, "_SESSIONS_DIR", tmp_path / "none")
+        monkeypatch.setenv("LOCALM_MODE", "privacy")
+        app, _ = gui_app
+        with TestClient(app) as client:
+            data = client.get("/api/coder/history").json()
+        assert data == {"enabled": False, "logs": []}
+
+    def test_history_rejects_bad_names(self, gui_app, tmp_path, monkeypatch):
+        import localm.audit as audit_mod
+        sessions_dir = tmp_path / "sessions"
+        self._fake_log(sessions_dir)
+        # plant a sibling the traversal would reach
+        (tmp_path / "secret.jsonl").write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(audit_mod, "_SESSIONS_DIR", sessions_dir)
+        app, _ = gui_app
+        with TestClient(app) as client:
+            assert client.get("/api/coder/history/notes.txt").status_code == 400
+            r = client.get("/api/coder/history/..%5Csecret.jsonl")
+            assert r.status_code in (400, 404)
 
 
 # ------------------------------------------------------------------ #
