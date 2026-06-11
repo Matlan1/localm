@@ -48,3 +48,4 @@ tests/test_flux_generation.py
 
 # Local crash/chat logs kept out of the repo
 chatlogs_errorlogs/
+.commitmsg.txt
