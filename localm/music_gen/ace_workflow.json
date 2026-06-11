@@ -1,0 +1,50 @@
+{
+  "1": {
+    "inputs": { "ckpt_name": "ace_step_v1_3.5b.safetensors" },
+    "class_type": "CheckpointLoaderSimple"
+  },
+  "2": {
+    "inputs": { "seconds": 120, "batch_size": 1 },
+    "class_type": "EmptyAceStepLatentAudio"
+  },
+  "3": {
+    "inputs": {
+      "tags": "",
+      "lyrics": "",
+      "lyrics_strength": 0.99,
+      "clip": ["1", 1]
+    },
+    "class_type": "TextEncodeAceStepAudio"
+  },
+  "4": {
+    "inputs": { "conditioning": ["3", 0] },
+    "class_type": "ConditioningZeroOut"
+  },
+  "5": {
+    "inputs": { "model": ["1", 0], "shift": 5.0 },
+    "class_type": "ModelSamplingSD3"
+  },
+  "6": {
+    "inputs": {
+      "seed": 0,
+      "steps": 50,
+      "cfg": 5.0,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1.0,
+      "model": ["5", 0],
+      "positive": ["3", 0],
+      "negative": ["4", 0],
+      "latent_image": ["2", 0]
+    },
+    "class_type": "KSampler"
+  },
+  "7": {
+    "inputs": { "samples": ["6", 0], "vae": ["1", 2] },
+    "class_type": "VAEDecodeAudio"
+  },
+  "8": {
+    "inputs": { "filename_prefix": "audio/localm", "audio": ["7", 0] },
+    "class_type": "SaveAudio"
+  }
+}

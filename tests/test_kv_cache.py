@@ -1,0 +1,311 @@
+"""
+Tests for persistent KV cache prefix reuse in the native llama.cpp wrapper.
+
+The native DLL is never loaded — the api module is mocked throughout.
+"""
+
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from localm.inference.backends.llamacpp.llama import (
+    LlamaCpp,
+    _build_sampler,
+    _common_prefix_len,
+)
+
+
+# ---------------------------------------------------------------------------
+#  _common_prefix_len
+# ---------------------------------------------------------------------------
+
+class TestCommonPrefixLen:
+    def test_identical(self):
+        assert _common_prefix_len([1, 2, 3], [1, 2, 3]) == 3
+
+    def test_disjoint(self):
+        assert _common_prefix_len([1, 2], [9, 8]) == 0
+
+    def test_partial(self):
+        assert _common_prefix_len([1, 2, 3, 4], [1, 2, 9]) == 2
+
+    def test_one_is_prefix_of_other(self):
+        assert _common_prefix_len([1, 2], [1, 2, 3, 4]) == 2
+
+    def test_empty(self):
+        assert _common_prefix_len([], [1, 2]) == 0
+
+
+# ---------------------------------------------------------------------------
+#  Wrapper-level KV behaviour (api module fully mocked)
+# ---------------------------------------------------------------------------
+
+_LIVE_FAKES: list = []
+
+
+def _bare_llama() -> LlamaCpp:
+    """Construct a LlamaCpp without running __init__ (no DLL access)."""
+    llm = LlamaCpp.__new__(LlamaCpp)
+    llm._n_ctx = 4096
+    llm._n_ctx_max = None     # unlimited — preserves the original test scenarios
+    llm._n_ctx_grow = 4096
+    llm._seed = 1234
+    llm._verbose = False
+    llm._model_ptr = 111
+    llm._ctx_ptr = 222
+    llm._tokenizer = MagicMock()
+    llm._cached_tokens = []
+    llm._ctx_capacity = 4096
+    llm._kv_supported = None
+    _LIVE_FAKES.append(llm)
+    return llm
+
+
+@pytest.fixture(autouse=True)
+def _neutralise_fake_pointers():
+    """
+    Null out the fake model/ctx pointers before each object is garbage
+    collected — otherwise __del__ → close() passes them to the real
+    llama_free and crashes the interpreter with an access violation.
+    """
+    yield
+    for llm in _LIVE_FAKES:
+        llm._model_ptr = None
+        llm._ctx_ptr = None
+    _LIVE_FAKES.clear()
+
+
+class TestCanReuseKv:
+    def test_reuse_when_supported_and_fits(self):
+        llm = _bare_llama()
+        with patch(
+            "localm.inference.backends.llamacpp.llama.api.has_memory_api",
+            return_value=True,
+        ):
+            assert llm._can_reuse_kv(1000) is True
+
+    def test_no_reuse_without_memory_api(self):
+        llm = _bare_llama()
+        with patch(
+            "localm.inference.backends.llamacpp.llama.api.has_memory_api",
+            return_value=False,
+        ):
+            assert llm._can_reuse_kv(1000) is False
+
+    def test_no_reuse_when_request_exceeds_capacity(self):
+        llm = _bare_llama()
+        llm._kv_supported = True
+        assert llm._can_reuse_kv(5000) is False
+
+    def test_no_reuse_without_live_context(self):
+        llm = _bare_llama()
+        llm._ctx_ptr = None
+        llm._kv_supported = True
+        assert llm._can_reuse_kv(100) is False
+
+    def test_probe_failure_treated_as_unsupported(self):
+        llm = _bare_llama()
+        with patch(
+            "localm.inference.backends.llamacpp.llama.api.has_memory_api",
+            side_effect=AttributeError("missing"),
+        ):
+            assert llm._can_reuse_kv(100) is False
+        assert llm._kv_supported is False
+
+    def test_probe_result_cached(self):
+        llm = _bare_llama()
+        with patch(
+            "localm.inference.backends.llamacpp.llama.api.has_memory_api",
+            return_value=True,
+        ) as probe:
+            llm._can_reuse_kv(100)
+            llm._can_reuse_kv(100)
+        probe.assert_called_once()
+
+
+class TestPrefillWithReuse:
+    def _patch_api(self, **overrides):
+        mock_api = MagicMock()
+        mock_api.llama_get_memory.return_value = 333
+        mock_api.llama_memory_seq_rm.return_value = True
+        mock_api.llama_decode.return_value = 0
+        for k, v in overrides.items():
+            setattr(mock_api, k, v)
+        return patch(
+            "localm.inference.backends.llamacpp.llama.api", mock_api
+        ), mock_api
+
+    def test_only_suffix_decoded_on_shared_prefix(self):
+        llm = _bare_llama()
+        llm._cached_tokens = [1, 2, 3, 4]
+        ctx, mock_api = self._patch_api()
+        with ctx:
+            llm._prefill_with_reuse([1, 2, 3, 4, 5, 6])
+
+        # Cached prefix [1,2,3,4] kept → seq_rm not needed (prefix == cache len)
+        mock_api.llama_memory_seq_rm.assert_not_called()
+        # Exactly one decode call for the 2-token suffix
+        assert mock_api.llama_decode.call_count == 1
+        args = mock_api.llama_batch_get_one.call_args[0]
+        assert args[1] == 2  # n_tokens of the suffix batch
+        assert llm._cached_tokens == [1, 2, 3, 4, 5, 6]
+
+    def test_diverging_cache_trimmed(self):
+        llm = _bare_llama()
+        llm._cached_tokens = [1, 2, 9, 9]
+        ctx, mock_api = self._patch_api()
+        with ctx:
+            llm._prefill_with_reuse([1, 2, 3, 4])
+
+        # Diverges at index 2 → remove cached positions [2, end)
+        mock_api.llama_memory_seq_rm.assert_called_once_with(333, 0, 2, -1)
+        assert llm._cached_tokens == [1, 2, 3, 4]
+
+    def test_identical_prompt_redecodes_last_token(self):
+        """Same prompt again: last token re-decoded so logits are fresh."""
+        llm = _bare_llama()
+        llm._cached_tokens = [1, 2, 3]
+        ctx, mock_api = self._patch_api()
+        with ctx:
+            llm._prefill_with_reuse([1, 2, 3])
+
+        mock_api.llama_memory_seq_rm.assert_called_once_with(333, 0, 2, -1)
+        args = mock_api.llama_batch_get_one.call_args[0]
+        assert args[1] == 1  # only the final token decoded
+
+    def test_seq_rm_failure_falls_back_to_full_clear(self):
+        llm = _bare_llama()
+        llm._cached_tokens = [1, 2, 9]
+        ctx, mock_api = self._patch_api(
+            llama_memory_seq_rm=MagicMock(return_value=False))
+        with ctx:
+            llm._prefill_with_reuse([1, 2, 3])
+
+        mock_api.llama_memory_clear.assert_called_once()
+        # Full prompt decoded from position 0
+        args = mock_api.llama_batch_get_one.call_args[0]
+        assert args[1] == 3
+        assert llm._cached_tokens == [1, 2, 3]
+
+    def test_decode_failure_wipes_cache_state(self):
+        llm = _bare_llama()
+        llm._cached_tokens = [1, 2]
+        ctx, mock_api = self._patch_api(
+            llama_decode=MagicMock(return_value=-1))
+        with ctx:
+            with pytest.raises(RuntimeError, match="prefill"):
+                llm._prefill_with_reuse([1, 2, 3, 4])
+
+        assert llm._cached_tokens == []
+        mock_api.llama_memory_clear.assert_called_once()
+
+    def test_long_suffix_chunked(self):
+        llm = _bare_llama()
+        llm._cached_tokens = []
+        llm._ctx_capacity = 10_000
+        ctx, mock_api = self._patch_api()
+        with ctx:
+            llm._prefill_with_reuse(list(range(5000)))
+
+        # 5000 tokens → chunks of 2048 → 3 decode calls
+        assert mock_api.llama_decode.call_count == 3
+
+
+class TestFreshContextPath:
+    def test_fresh_context_resets_cache_and_capacity(self):
+        llm = _bare_llama()
+        llm._cached_tokens = [9, 9, 9]
+        mock_api = MagicMock()
+        mock_api.llama_context_default_params.return_value = MagicMock()
+        mock_api.llama_init_from_model.return_value = 444
+        mock_api.llama_decode.return_value = 0
+        with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
+            llm._prefill_fresh_context([1, 2, 3], needed=5000)
+
+        mock_api.llama_free.assert_called_once_with(222)
+        assert llm._ctx_ptr == 444
+        assert llm._cached_tokens == [1, 2, 3]
+        # Capacity grew to fit the request
+        assert llm._ctx_capacity >= 5000
+
+    def test_fresh_context_decode_failure_raises(self):
+        llm = _bare_llama()
+        mock_api = MagicMock()
+        mock_api.llama_context_default_params.return_value = MagicMock()
+        mock_api.llama_init_from_model.return_value = 444
+        mock_api.llama_decode.return_value = -1
+        with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
+            with pytest.raises(RuntimeError, match="prefill"):
+                llm._prefill_fresh_context([1, 2, 3], needed=100)
+        # No stale cache claim after failure
+        assert llm._cached_tokens == []
+
+    def test_long_prompt_prefill_is_chunked(self):
+        """Regression: a fresh-context prefill larger than n_batch must be
+        split into n_batch-sized decode calls. A single oversized batch
+        aborts the process inside the native library (crash reported after
+        long chat histories forced a context rebuild)."""
+        llm = _bare_llama()
+        mock_api = MagicMock()
+        cp = MagicMock()
+        mock_api.llama_context_default_params.return_value = cp
+        mock_api.llama_init_from_model.return_value = 444
+        mock_api.llama_decode.return_value = 0
+        with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
+            llm._prefill_fresh_context(list(range(5000)), needed=6000)
+
+        # n_batch is capped at 2048 → 5000 tokens need 3 decode calls
+        assert mock_api.llama_decode.call_count == 3
+        batch_sizes = [c[0][1] for c in mock_api.llama_batch_get_one.call_args_list]
+        assert batch_sizes == [2048, 2048, 904]
+        assert all(size <= 2048 for size in batch_sizes)
+        assert llm._cached_tokens == list(range(5000))
+
+    def test_close_clears_cached_tokens(self):
+        llm = _bare_llama()
+        llm._cached_tokens = [1, 2, 3]
+        mock_api = MagicMock()
+        with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
+            llm.close()
+        assert llm._cached_tokens == []
+        assert llm._ctx_ptr is None
+
+
+# ---------------------------------------------------------------------------
+#  Sampler chain — repetition penalty
+# ---------------------------------------------------------------------------
+
+class TestRepeatPenaltySampler:
+    """Regression: repeat_penalty was accepted everywhere but never added to
+    the sampler chain, so models prone to looping repeated marker lines
+    until max_tokens."""
+
+    def _mock_api(self, has_penalties=True):
+        mock_api = MagicMock()
+        mock_api.has_penalties_sampler.return_value = has_penalties
+        return mock_api
+
+    def test_penalty_added_when_set(self):
+        mock_api = self._mock_api()
+        with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
+            _build_sampler(vocab=1, repeat_penalty=1.1)
+        mock_api.llama_sampler_init_penalties.assert_called_once_with(
+            64, 1.1, 0.0, 0.0)
+
+    def test_no_penalty_at_neutral_value(self):
+        mock_api = self._mock_api()
+        with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
+            _build_sampler(vocab=1, repeat_penalty=1.0)
+        mock_api.llama_sampler_init_penalties.assert_not_called()
+
+    def test_skipped_when_dll_lacks_export(self):
+        mock_api = self._mock_api(has_penalties=False)
+        with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
+            _build_sampler(vocab=1, repeat_penalty=1.3)
+        mock_api.llama_sampler_init_penalties.assert_not_called()
+
+    def test_penalty_applies_in_greedy_mode_too(self):
+        mock_api = self._mock_api()
+        with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
+            _build_sampler(vocab=1, temperature=0.0, repeat_penalty=1.2)
+        mock_api.llama_sampler_init_penalties.assert_called_once()

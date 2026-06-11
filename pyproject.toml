@@ -1,0 +1,109 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "localm"
+version = "0.1.0"
+description = "Local AI platform — offline LLM inference, model management, and extensible agent plugins"
+readme = "README.md"
+license = { text = "MIT" }
+keywords = ["llm", "gguf", "llama", "local", "offline", "inference", "agent", "mcp"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Environment :: Web Environment",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Code Generators",
+]
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.1",
+    "rich>=13.0",
+    "requests>=2.31",
+    "huggingface-hub>=0.23",
+    "pydantic>=2.0",
+    "fastapi>=0.111",
+    "uvicorn>=0.30",
+]
+
+[project.optional-dependencies]
+# AI coding agent — offline agentic loop, tool use, project map
+# Install with:  pip install "localm[coder]"
+# Invoke via:    localm coder --model <name>  OR  localcoder --model <name>
+coder = [
+    # requests is already a core dep; listed here for explicit plugin opt-in
+    "requests>=2.31",
+]
+
+# AMD RDNA2 (RX 6xxx) GPU stack — ROCm 7.13.0, Python 3.12, Windows
+# Install with:  uv pip install -e ".[gpu]"  (requires Python 3.12 venv)
+gpu = [
+    "transformers[kernels]~=5.10",
+    "accelerate>=1.0",
+    "pillow>=10.0",
+    "torch==2.9.1+rocm7.13.0; sys_platform == 'win32'",
+    "torchvision==0.24.0+rocm7.13.0; sys_platform == 'win32'",
+    "rocm; sys_platform == 'win32'",
+    "rocm-sdk-core; sys_platform == 'win32'",
+    "rocm-sdk-libraries-gfx103x-all; sys_platform == 'win32'",
+]
+# In-process GGUF inference — AMD GPU build:
+#   pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/rocm602
+gguf = [
+    "llama-cpp-python>=0.2.90",
+]
+# Audio multimodal (Gemma4 unified audio)
+audio = [
+    "soundfile>=0.12",
+]
+# CPU-only install — the base package already runs GGUF models on CPU via the
+# ctypes binding (only llama.dll + ggml*.dll needed). This extra exists so
+# `pip install "localm[cpu]"` is an explicit, documented choice.
+cpu = []
+
+[project.scripts]
+localm    = "localm.cli:main"
+# backward-compat alias — installed only when the [coder] extra is present.
+# pip/uv honours this because the package is installed; the command always
+# works as long as localm[coder] was requested.
+localcoder = "localm.plugins.coder.cli:main"
+
+[tool.uv]
+exclude-newer-package = { rocm = false, rocm-sdk-core = false, rocm-sdk-libraries-gfx103x-all = false, torch = false, torchvision = false, transformers = false }
+
+[[tool.uv.index]]
+name = "rocm-gfx1030"
+url = "https://repo.amd.com/rocm/whl/gfx103X-all/"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+  { url = "https://repo.amd.com/rocm/whl/gfx103X-all/torch-2.9.1%2Brocm7.13.0-cp312-cp312-win_amd64.whl", marker = "sys_platform == 'win32' and python_version == '3.12'" },
+]
+torchvision = [
+  { url = "https://repo.amd.com/rocm/whl/gfx103X-all/torchvision-0.24.0%2Brocm7.13.0-cp312-cp312-win_amd64.whl", marker = "sys_platform == 'win32' and python_version == '3.12'" },
+]
+rocm = [
+  { index = "rocm-gfx1030", marker = "sys_platform == 'win32'" },
+]
+rocm-sdk-core = [
+  { index = "rocm-gfx1030", marker = "sys_platform == 'win32'" },
+]
+rocm-sdk-libraries-gfx103x-all = [
+  { index = "rocm-gfx1030", marker = "sys_platform == 'win32'" },
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: marks tests that require external tools (git, network) to be present",
+]

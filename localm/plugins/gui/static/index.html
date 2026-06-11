@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>localm</title>
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/vendor/github-dark.min.css">
+<link rel="stylesheet" href="/vendor/katex.min.css">
+</head>
+<body>
+<div id="app">
+
+  <aside id="sidebar">
+    <div id="logo">local<span>m</span></div>
+    <nav>
+      <button id="nav-chat" class="active">&#128172; Chat</button>
+      <button id="nav-coder">&#9881;&#65039; Coder</button>
+      <button id="nav-models">&#128230; Models</button>
+      <button id="nav-images">&#127912; Images</button>
+      <button id="nav-plugins">&#129513; Plugins</button>
+      <button id="nav-settings">&#9965; Settings</button>
+    </nav>
+
+    <div id="conversations">
+      <h3>Conversations <button id="new-conv" title="New conversation">+</button></h3>
+      <div id="conv-list"></div>
+    </div>
+
+    <div id="model-box">
+      <label for="model-select">Model</label>
+      <select id="model-select"></select>
+      <div id="model-status"><span class="dot" id="status-dot"></span><span id="status-text">connecting…</span></div>
+      <button class="btn-quiet theme-btn" id="theme-toggle" title="Toggle light/dark">&#9728; theme</button>
+    </div>
+  </aside>
+
+  <main id="main">
+
+    <!-- ============ CHAT ============ -->
+    <section id="view-chat" class="view active">
+      <div id="chat-messages"></div>
+      <div class="composer-wrap">
+        <div id="params">
+          <div><label>Temperature</label><input id="p-temperature" type="number" step="0.05" min="0" max="2" placeholder="default"></div>
+          <div><label>Top-p</label><input id="p-top-p" type="number" step="0.05" min="0" max="1" placeholder="default"></div>
+          <div><label>Top-k</label><input id="p-top-k" type="number" step="1" min="1" placeholder="default"></div>
+          <div><label>Repeat penalty</label><input id="p-repeat-penalty" type="number" step="0.05" min="0.5" max="2" placeholder="default"></div>
+          <div><label>Max tokens</label><input id="p-max-tokens" type="number" step="64" min="1" placeholder="default"></div>
+          <div><label>Seed</label><input id="p-seed" type="number" step="1" placeholder="random"></div>
+          <div class="full"><label>System prompt</label><textarea id="p-system" rows="3" placeholder="You are a helpful assistant."></textarea></div>
+          <div class="full"><label>GBNF grammar (constrains output; local models only)</label><textarea id="p-grammar" rows="3" placeholder='root ::= "yes" | "no"' spellcheck="false"></textarea></div>
+        </div>
+        <div id="attach-chips"></div>
+        <div class="composer">
+          <button class="attach" id="chat-attach" title="Attach image">&#128247;</button>
+          <input type="file" id="chat-file" accept="image/*" multiple style="display:none">
+          <textarea id="chat-input" rows="1" placeholder="Message the model…  (Ctrl+Enter to send)"></textarea>
+          <button class="send" id="chat-send" title="Send">&#10148;</button>
+        </div>
+        <div class="composer-row">
+          <span>
+            <button id="toggle-params">&#9881; parameters</button>
+            &nbsp;&nbsp;
+            <button id="export-conv" title="Download this conversation">&#11015; export</button>
+            &nbsp;&nbsp;
+            <button id="compact-conv" title="Summarise older messages to free context">&#8645; compact</button>
+          </span>
+          <span id="chat-usage"></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ CODER ============ -->
+    <section id="view-coder" class="view">
+      <div id="coder-bar">
+        <select id="session-select" title="Switch session"></select>
+        <button class="btn-quiet" id="session-new">+ new</button>
+        <span class="cwd" id="coder-cwd"></span>
+        <span id="coder-state"></span>
+        <span class="spacer"></span>
+        <button class="btn-quiet" id="coder-undo" title="Revert the last file write">undo</button>
+        <button class="btn-quiet" id="coder-compact" title="Summarise old turns to free context">compact</button>
+        <button class="btn-quiet" id="coder-log" title="View the audit log">log</button>
+        <button class="btn-quiet" id="coder-stop">Stop</button>
+        <button class="btn-quiet" id="coder-end">End</button>
+      </div>
+
+      <div id="coder-setup">
+        <h2>Coder session</h2>
+        <div class="sub">Run the localcoder agent against a project directory. The agent
+        can read, write, and run code; destructive actions ask for your approval below
+        unless you enable auto-approve.</div>
+        <label for="setup-cwd">Project directory</label>
+        <input type="text" id="setup-cwd" placeholder="D:\projects\myapp" spellcheck="false">
+        <div class="grid2">
+          <div>
+            <label for="setup-model">Model (switches the active engine)</label>
+            <select id="setup-model"></select>
+          </div>
+          <div>
+            <label for="setup-mode">Session persistence</label>
+            <select id="setup-mode">
+              <option value="privacy" selected>privacy — nothing saved</option>
+              <option value="log">log — JSONL audit trail</option>
+              <option value="full">full — audit + markdown transcript</option>
+            </select>
+          </div>
+          <div>
+            <label for="setup-max-turns">Max turns</label>
+            <input type="number" id="setup-max-turns" value="40" min="1" step="1">
+          </div>
+          <div>
+            <label for="setup-temperature">Temperature</label>
+            <input type="number" id="setup-temperature" placeholder="default" min="0" max="2" step="0.05">
+          </div>
+        </div>
+        <label for="setup-scope">Scope (optional glob — file tools are confined to matching paths)</label>
+        <input type="text" id="setup-scope" placeholder="src/**/*.py" spellcheck="false">
+        <div class="checks">
+          <label><input type="checkbox" id="setup-auto"> Auto-approve destructive tools</label>
+        </div>
+        <div class="actions">
+          <button class="btn-primary" id="setup-start">Start session</button>
+        </div>
+      </div>
+
+      <div id="coder-feeds"></div>
+
+      <div class="composer-wrap" id="coder-composer" style="display:none">
+        <div class="composer">
+          <textarea id="coder-input" rows="1" placeholder="Describe a task for the agent…  (Ctrl+Enter to send)"></textarea>
+          <button class="send" id="coder-send" title="Send">&#10148;</button>
+        </div>
+        <div class="composer-row">
+          <span></span>
+          <span id="coder-usage"></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ MODELS ============ -->
+    <section id="view-models" class="view">
+      <div class="page">
+        <h2>Models</h2>
+        <div class="card">
+          <h3>Pull a model</h3>
+          <div class="row">
+            <input type="text" id="pull-spec" placeholder="owner/repo:file.gguf  ·  owner/repo  ·  https://…" spellcheck="false">
+            <input type="text" id="pull-name" placeholder="name (optional)" spellcheck="false" style="max-width:180px">
+            <button class="btn-primary" id="pull-start">Pull</button>
+          </div>
+          <pre id="pull-log" class="job-log" style="display:none"></pre>
+        </div>
+        <div class="card">
+          <h3>Registered models</h3>
+          <div id="models-table"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ IMAGES ============ -->
+    <section id="view-images" class="view">
+      <div class="page">
+        <h2>Image generation</h2>
+        <div class="sub">Runs your local ComfyUI FLUX pipeline (port 8188). The LLM is
+        unloaded automatically to hand VRAM to the image model, and reloads on the next
+        chat request.</div>
+        <div class="card">
+          <label>Prompt</label>
+          <textarea id="img-prompt" rows="3" placeholder="a watercolor fox in a snowy forest"></textarea>
+          <div class="grid2">
+            <div><label>Negative prompt</label><input type="text" id="img-negative" placeholder="optional"></div>
+            <div><label>Seed</label><input type="number" id="img-seed" placeholder="random"></div>
+            <div><label>Guidance</label><input type="number" id="img-guidance" step="0.1" placeholder="default (~3.5)"></div>
+            <div><label>Denoise (img2img)</label><input type="number" id="img-denoise" step="0.05" min="0" max="1" placeholder="default"></div>
+          </div>
+          <label>Input image path (optional, img2img)</label>
+          <input type="text" id="img-input" placeholder="D:\pictures\base.png" spellcheck="false">
+          <div class="actions">
+            <button class="btn-primary" id="img-generate">Generate</button>
+            <label class="inline-check" title="When off, ComfyUI stays loaded for fast batch generation; the chat model reloads on the next chat message.">
+              <input type="checkbox" id="img-reload-llm" checked> reload chat model after generation
+            </label>
+          </div>
+          <pre id="img-log" class="job-log" style="display:none"></pre>
+          <div id="img-result"></div>
+        </div>
+        <div class="card">
+          <h3>History</h3>
+          <div id="img-history" class="img-grid"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ PLUGINS ============ -->
+    <section id="view-plugins" class="view">
+      <div class="page">
+        <h2>Plugins</h2>
+        <div class="sub">External plugins live in <code>~/.localm/plugins/</code>. A plugin is a
+        folder with a <code>plugin.toml</code> manifest; it can add a CLI command and export
+        tools to the coder agent. Installation is a local directory copy.</div>
+        <div class="card">
+          <h3>Install</h3>
+          <div class="row">
+            <input type="text" id="plugin-source" placeholder="D:\path\to\plugin-folder" spellcheck="false">
+            <button class="btn-primary" id="plugin-install">Install</button>
+          </div>
+        </div>
+        <div class="card">
+          <h3>Installed</h3>
+          <div id="plugins-table"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ SETTINGS ============ -->
+    <section id="view-settings" class="view">
+      <div class="page">
+        <h2>Settings</h2>
+        <div class="card">
+          <h3>Server configuration</h3>
+          <div class="sub">Stored in <code>~/.localm/config.json</code>. Engine values apply on
+          the next model load.</div>
+          <div id="config-form" class="grid2"></div>
+          <div class="actions">
+            <button class="btn-primary" id="config-save">Save</button>
+          </div>
+        </div>
+        <div class="card">
+          <h3>GUI</h3>
+          <label>API key (sent as Bearer token; stored in this browser only)</label>
+          <input type="password" id="gui-api-key" placeholder="only needed when LOCALM_API_KEY is set">
+          <div class="actions">
+            <button class="btn-quiet" id="gui-key-save">Save key</button>
+            <button class="btn-quiet" id="gui-clear-convs">Delete all conversations</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<div id="toast"></div>
+
+<div id="modal" class="modal-backdrop" style="display:none">
+  <div class="modal">
+    <div class="modal-head"><span id="modal-title"></span><button id="modal-close">×</button></div>
+    <div class="modal-body" id="modal-body"></div>
+  </div>
+</div>
+
+<script src="/vendor/marked.min.js"></script>
+<script src="/vendor/purify.min.js"></script>
+<script src="/vendor/highlight.min.js"></script>
+<script src="/vendor/katex.min.js"></script>
+<script src="/vendor/auto-render.min.js"></script>
+<script src="/app.js"></script>
+<script src="/pages.js"></script>
+</body>
+</html>
