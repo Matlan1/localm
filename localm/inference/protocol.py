@@ -165,12 +165,13 @@ class ChatChunk(BaseModel):
         chunk_id: str,
         ts: int,
         usage: Optional["UsageInfo"] = None,
+        finish_reason: str = "stop",
     ) -> "ChatChunk":
         return cls(
             id=chunk_id,
             created=ts,
             model=model,
-            choices=[StreamChoice(delta=ChoiceDelta(), finish_reason="stop")],
+            choices=[StreamChoice(delta=ChoiceDelta(), finish_reason=finish_reason)],
             usage=usage,
         )
 
