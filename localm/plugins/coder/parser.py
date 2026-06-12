@@ -76,6 +76,31 @@ _RE_FENCE = re.compile(
 )
 
 
+def _lenient_json(body: str) -> Optional[dict]:
+    """
+    JSON parse tolerating the mangles local finetunes actually produce:
+
+    - literal newlines/tabs inside string values (strict=False) — models
+      write multi-line file content without escaping it
+    - a doubled outer brace:  call:write_file{{"path": "x"}}  (seen from
+      Gemma finetunes in the wild; it silently broke tool calling)
+    - single-quoted keys:  {'path': "x"}
+    """
+    candidates = [body]
+    if body.startswith("{{") and body.endswith("}}"):
+        candidates.append(body[1:-1])
+    for cand in candidates:
+        for fix in (lambda s: s,
+                    lambda s: re.sub(r"'([^']+)':", r'"\1":', s)):
+            try:
+                obj = json.loads(fix(cand), strict=False)
+                if isinstance(obj, dict):
+                    return obj
+            except json.JSONDecodeError:
+                continue
+    return None
+
+
 def _parse_gemma_args(body: str) -> Optional[dict]:
     """
     Parse Gemma4's native tool-call argument format.
@@ -87,18 +112,13 @@ def _parse_gemma_args(body: str) -> Optional[dict]:
     # Normalise <|"|> quote tokens → regular double-quotes
     body = body.replace('<|"|>', '"')
     body = body.strip()
-    try:
-        obj = json.loads(body)
-        return obj if isinstance(obj, dict) else None
-    except json.JSONDecodeError:
-        # Try bare-key form:  {key: "value", key2: 123}
-        # Convert bare keys to quoted keys
-        repaired = re.sub(r'(\{|,)\s*([A-Za-z_]\w*)\s*:', r'\1"\2":', body)
-        try:
-            obj = json.loads(repaired)
-            return obj if isinstance(obj, dict) else None
-        except json.JSONDecodeError:
-            return None
+    obj = _lenient_json(body)
+    if obj is not None:
+        return obj
+    # Try bare-key form:  {key: "value", key2: 123}
+    # Convert bare keys to quoted keys
+    repaired = re.sub(r'(\{|,)\s*([A-Za-z_]\w*)\s*:', r'\1"\2":', body)
+    return _lenient_json(repaired)
 
 
 def _try_parse_body(body: str, name_attr: Optional[str]) -> Optional[tuple[str, dict]]:
@@ -110,17 +130,8 @@ def _try_parse_body(body: str, name_attr: Optional[str]) -> Optional[tuple[str, 
     - Args-only JSON (when name_attr is provided): {"path": "..."}
     """
     body = body.strip()
-    try:
-        obj = json.loads(body)
-    except json.JSONDecodeError:
-        # Try lenient repair: replace single-quoted keys
-        try:
-            repaired = re.sub(r"'([^']+)':", r'"\1":', body)
-            obj = json.loads(repaired)
-        except json.JSONDecodeError:
-            return None
-
-    if not isinstance(obj, dict):
+    obj = _lenient_json(body)
+    if obj is None:
         return None
 
     # Full format: {"name": "...", "args": {...}}

@@ -13,6 +13,7 @@ Commands
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -421,7 +422,79 @@ def _read_multiline() -> str:
     return "\n".join(lines)
 
 
+# Every REPL slash command, for tab completion and /help
+_SLASH_COMMANDS = (
+    "/help", "/exit", "/quit", "/clear", "/model", "/mode", "/cwd", "/cd",
+    "/reindex", "/verbose", "/approve", "/history", "/undo", "/resume",
+    "/compact", "/memory", "/remember", "/forget", "/save", "/export",
+    "/scope", "/changes", "/diff",
+)
+
+
+def _setup_readline(agent: Agent) -> None:
+    """
+    Tab completion (slash commands + project paths) and persistent REPL
+    history.
+
+    Best-effort: stock Windows CPython has no readline (pyreadline3 provides
+    it when installed), so every step degrades silently. History persists to
+    .localcoder/repl_history only outside privacy mode — privacy promises no
+    traces, and suppress_readline_history() has already disabled saving there.
+    """
+    try:
+        import readline
+    except ImportError:
+        return
+
+    def complete(text: str, state: int):
+        buf = readline.get_line_buffer()
+        if buf.startswith("/") and " " not in buf:
+            options = [c + " " for c in _SLASH_COMMANDS if c.startswith(buf)]
+        else:
+            # Complete the current token as a path relative to the project
+            import glob as _g
+            try:
+                matches = _g.glob(str(agent.cwd / (text + "*")))
+            except Exception:
+                matches = []
+            options = []
+            for m in matches[:50]:
+                rel = os.path.relpath(m, agent.cwd)
+                options.append(rel + os.sep if os.path.isdir(m) else rel)
+        try:
+            return options[state]
+        except IndexError:
+            return None
+
+    try:
+        readline.set_completer(complete)
+        readline.set_completer_delims(" \t\n")
+        readline.parse_and_bind("tab: complete")
+    except Exception:
+        return
+
+    if agent.mode != SessionMode.PRIVACY:
+        hist = agent.cwd / ".localcoder" / "repl_history"
+        try:
+            hist.parent.mkdir(parents=True, exist_ok=True)
+            if hist.is_file():
+                readline.read_history_file(str(hist))
+            readline.set_history_length(500)
+            import atexit
+
+            def _save_history(path=str(hist)):
+                try:
+                    readline.write_history_file(path)
+                except Exception:
+                    pass
+
+            atexit.register(_save_history)
+        except Exception:
+            pass
+
+
 def _repl(agent: Agent) -> None:
+    _setup_readline(agent)
     while True:
         try:
             user_input = _read_multiline().strip()
@@ -536,6 +609,32 @@ def _handle_command(raw: str, agent: Agent) -> bool:
             print_info("Nothing to undo.")
         else:
             print_success(msg)
+            remaining = len(agent.undo_list())
+            if remaining:
+                print_info(f"({remaining} more step(s) on the undo stack)")
+
+    elif cmd == "changes":
+        files = agent.changed_files()
+        if not files:
+            print_info("No files changed this session.")
+        else:
+            for f in files:
+                badge = "new" if f["created"] else "edited"
+                gone = "" if f["exists"] else "  [red](deleted since)[/red]"
+                console.print(
+                    f"  [cyan]{f['path']}[/cyan]  [dim]{badge}, "
+                    f"{f['writes']} write(s) via {f['last_tool']}[/dim]{gone}"
+                )
+            print_info("Use /diff [path] for the cumulative changes.")
+
+    elif cmd == "diff":
+        diff = agent.session_diff(arg or None)
+        if not diff:
+            print_info("No changes to show."
+                       + (f" ('{arg}' was not changed this session)" if arg else ""))
+        else:
+            from rich.syntax import Syntax
+            console.print(Syntax(diff, "diff", theme="monokai", line_numbers=False))
 
     elif cmd == "compact":
         ratio = agent._fill_ratio()

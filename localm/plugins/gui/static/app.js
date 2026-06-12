@@ -1648,8 +1648,19 @@ function renderDiff(text) {
   return pre;
 }
 
+/** Args worth showing next to a diff — the bulky text fields ARE the diff. */
+function slimArgs(args) {
+  const slim = {};
+  for (const [k, v] of Object.entries(args || {})) {
+    if (k === "content" || k === "old" || k === "new" || k === "diff") continue;
+    slim[k] = v;
+  }
+  return slim;
+}
+
 function buildToolCard(ev) {
   const card = el("div", "tool-card");
+  card.dataset.t0 = String(Date.now());
   const inner = el("div", "inner");
   const head = el("div", "head");
   head.appendChild(el("span", "name", ev.tool));
@@ -1658,6 +1669,10 @@ function buildToolCard(ev) {
   head.appendChild(el("span", "state", "…"));
   const body = el("div", "body");
   if (ev.diff) {
+    const rest = slimArgs(ev.args);
+    if (Object.keys(rest).length) {
+      body.appendChild(el("pre", "args", JSON.stringify(rest, null, 2)));
+    }
     body.appendChild(renderDiff(ev.diff));
   } else {
     body.textContent = JSON.stringify(ev.args, null, 2);
@@ -1697,18 +1712,31 @@ function buildConfirmCard(s, ev) {
   const buttons = el("div", "buttons");
   const yes = el("button", "btn-approve", "Approve");
   const no = el("button", "btn-reject", "Reject");
+  // "always allow" lives inside .buttons so the answered-state CSS hides it
+  const allowCb = document.createElement("input");
+  allowCb.type = "checkbox";
+  const allowLabel = el("label", "always-allow");
+  allowLabel.appendChild(allowCb);
+  allowLabel.appendChild(document.createTextNode(
+    ` always allow ${ev.tool} this session`));
   const answer = async (approved) => {
     try {
       const r = await fetch(`/api/coder/sessions/${s.info.id}/confirm`, {
         method: "POST",
         headers: authHeaders(),
-        body: JSON.stringify({ confirm_id: ev.confirm_id, approved }),
+        body: JSON.stringify({
+          confirm_id: ev.confirm_id, approved,
+          always_allow: approved && allowCb.checked,
+        }),
       });
       if (!r.ok) {
         // Already answered elsewhere (another tab) or timed out server-side —
         // the confirm_resolved event carries the real outcome.
         toast("Confirmation was no longer pending", true);
         return;
+      }
+      if (approved && allowCb.checked) {
+        toast(`${ev.tool} auto-approved for the rest of this session`);
       }
       resolveConfirmCard(s, ev.confirm_id, approved, false);
     } catch (e) {
@@ -1719,6 +1747,7 @@ function buildConfirmCard(s, ev) {
   no.onclick = () => answer(false);
   buttons.appendChild(yes);
   buttons.appendChild(no);
+  buttons.appendChild(allowLabel);
   inner.appendChild(buttons);
   card.appendChild(inner);
   s.confirmCards.set(ev.confirm_id, { card, title, tool: ev.tool });
@@ -1726,6 +1755,11 @@ function buildConfirmCard(s, ev) {
 }
 
 function handleCoderEvent(s, ev) {
+  // Keep a light event log (no token spam) so "export" can rebuild the
+  // session as markdown without another server round-trip.
+  if (ev.type !== "token") {
+    (s.eventLog = s.eventLog || []).push(ev);
+  }
   switch (ev.type) {
     case "token": {
       startAssistantBlock(s);
@@ -1742,8 +1776,9 @@ function handleCoderEvent(s, ev) {
       s.info.total_tokens = ev.total_tokens;
       if (s.info.id === coder.activeId) {
         $("coder-state").textContent = "working…";
+        const ctx = ev.ctx_ratio ? ` · ctx ${Math.round(ev.ctx_ratio * 100)}%` : "";
         if (ev.total_tokens)
-          $("coder-usage").textContent = `${ev.total_tokens} tok · turn ${ev.turn}`;
+          $("coder-usage").textContent = `${ev.total_tokens} tok · turn ${ev.turn}${ctx}`;
       }
       break;
     }
@@ -1758,7 +1793,9 @@ function handleCoderEvent(s, ev) {
       const card = s.pendingCards.shift();
       if (card) {
         const state = card.querySelector(".state");
-        state.textContent = ev.summary || (ev.ok ? "ok" : "failed");
+        const t0 = Number(card.dataset.t0 || 0);
+        const took = t0 ? ` · ${((Date.now() - t0) / 1000).toFixed(1)}s` : "";
+        state.textContent = (ev.summary || (ev.ok ? "ok" : "failed")) + took;
         state.className = "state " + (ev.ok ? "ok" : "fail");
         if (ev.output && !card.querySelector(".body .diff")) {
           card.querySelector(".body").textContent = ev.output;
@@ -1778,7 +1815,8 @@ function handleCoderEvent(s, ev) {
     case "user": {
       // replayed user message (emitted client-side on send; replay rebuilds it)
       flushAssistantBlock(s);
-      addMessageRow(s.feedEl, "user", ev.text);
+      addMessageRow(s.feedEl, "user", ev.text,
+        ev.queued ? { cls: "web-note", label: "Queued" } : {});
       break;
     }
     case "info": {
@@ -1798,9 +1836,12 @@ function handleCoderEvent(s, ev) {
       s.info.total_tokens = ev.total_tokens;
       if (s.info.id === coder.activeId) $("coder-state").textContent = "idle";
       renderSessionSelect();
-      feedAppend(s, el("div", "feed-final",
-        (ev.ok ? "Task finished" : "Task ended") +
-        ` — ${ev.turns} turns, ${ev.total_tokens} tokens`));
+      let finalLine = (ev.ok ? "Task finished" : "Task ended") +
+        ` — ${ev.turns} turns, ${ev.total_tokens} tokens`;
+      if (ev.changed_files?.length) {
+        finalLine += ` · ${ev.changed_files.length} file(s) changed (see "files")`;
+      }
+      feedAppend(s, el("div", "feed-final", finalLine));
       break;
     }
     case "error": {
@@ -1865,6 +1906,7 @@ async function startCoderSession() {
     const body = {
       cwd,
       auto_approve: $("setup-auto").checked,
+      dry_run: $("setup-dry").checked,
       mode: $("setup-mode").value,
       max_turns: Number($("setup-max-turns").value) || 40,
     };
@@ -1923,19 +1965,24 @@ async function sendCoderTask() {
     return;
   }
 
-  if (s.busy) { toast("Agent is still working — stop it first or wait", true); return; }
   try {
     const r = await fetch(`/api/coder/sessions/${s.info.id}/message`, {
       method: "POST",
       headers: authHeaders(),
       body: JSON.stringify({ text }),
     });
-    if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
-    s.busy = true;
-    $("coder-state").textContent = "working…";
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    if (data.status === "queued") {
+      // Mid-task steering: the agent reads it at the next turn boundary
+      toast("Queued — the agent picks it up at the next turn");
+    } else {
+      s.busy = true;
+      $("coder-state").textContent = "working…";
+      renderSessionSelect();
+    }
     // The user message arrives back through the event stream (so replay
     // works after a page reload) — no client-side row here.
-    renderSessionSelect();
     input.value = "";
     autoGrow(input);
   } catch (e) {
@@ -2010,20 +2057,119 @@ $("coder-compact").onclick = async () => {
   }
 };
 
-/** Audit-entry modal shared by the live-session log and past-session history. */
+/** Audit-entry modal shared by the live-session log and past-session history.
+ *  A filter box narrows entries by substring (type, turn, or payload). */
 function showAuditModal(title, data) {
   openModal(title, (body) => {
     body.appendChild(el("div", "sub", data.path));
+    const filter = document.createElement("input");
+    filter.type = "text";
+    filter.placeholder = "filter entries… (tool name, text, type)";
+    filter.className = "log-filter";
+    filter.spellcheck = false;
+    body.appendChild(filter);
+    const rows = [];
     for (const entry of data.entries) {
       const row = el("div", "log-entry");
       const ts = new Date(entry.t).toLocaleTimeString();
-      row.appendChild(el("span", "t", `${ts} #${entry.turn} ${entry.type}`));
-      row.appendChild(document.createTextNode(JSON.stringify(entry.data)));
+      const label = `${ts} #${entry.turn} ${entry.type}`;
+      const payload = JSON.stringify(entry.data);
+      row.appendChild(el("span", "t", label));
+      row.appendChild(document.createTextNode(payload));
       body.appendChild(row);
+      rows.push({ row, text: (label + " " + payload).toLowerCase() });
     }
+    filter.addEventListener("input", () => {
+      const q = filter.value.trim().toLowerCase();
+      for (const r of rows) {
+        r.row.style.display = !q || r.text.includes(q) ? "" : "none";
+      }
+    });
     if (!data.entries.length) body.appendChild(el("div", "sub", "(empty)"));
   });
 }
+
+/** Files the agent changed this session, with per-file and full-session diffs. */
+async function openFilesModal() {
+  const s = activeSession();
+  if (!s) return;
+  let data;
+  try {
+    const r = await fetch(`/api/coder/sessions/${s.info.id}/files`,
+                          { headers: authHeaders() });
+    data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+  } catch (e) {
+    toast("Could not load changed files: " + e.message, true);
+    return;
+  }
+  openModal("Files changed — " + sessionLabel(s.info), (body) => {
+    if (!data.files.length) {
+      body.appendChild(el("div", "sub", "No files changed this session."));
+      return;
+    }
+    const diffBox = el("div", "files-diff");
+    const showDiff = async (path) => {
+      diffBox.replaceChildren(el("div", "sub", "loading diff…"));
+      try {
+        const r = await fetch(
+          `/api/coder/sessions/${s.info.id}/files/diff?path=` +
+          encodeURIComponent(path || ""), { headers: authHeaders() });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.detail || r.statusText);
+        diffBox.replaceChildren(
+          d.diff ? renderDiff(d.diff) : el("div", "sub", "(no difference)"));
+      } catch (e) {
+        diffBox.replaceChildren(el("div", "sub", "diff failed: " + e.message));
+      }
+    };
+    for (const f of data.files) {
+      const row = el("div", "log-entry clickable");
+      row.appendChild(el("span", "t", f.created ? "new" : "edit"));
+      row.appendChild(document.createTextNode(
+        `${f.path} — ${f.writes} write(s)` + (f.exists ? "" : " (deleted since)")));
+      row.onclick = () => showDiff(f.path);
+      body.appendChild(row);
+    }
+    const all = el("button", "btn-quiet", "full session diff");
+    all.onclick = () => showDiff("");
+    body.appendChild(all);
+    body.appendChild(diffBox);
+  });
+}
+
+/** Download the active session's feed as markdown (explicit user action —
+ *  works in privacy mode too, same contract as chat /export). */
+function exportCoderSession() {
+  const s = activeSession();
+  const log = s?.eventLog || [];
+  if (!log.length) { toast("Nothing to export yet", true); return; }
+  const lines = [`# Coder session — ${sessionLabel(s.info)}`, ""];
+  for (const ev of log) {
+    if (ev.type === "user") {
+      lines.push(`**You${ev.queued ? " (queued)" : ""}**: ${ev.text}`, "");
+    } else if (ev.type === "tool_call") {
+      lines.push(`- \`${ev.tool}\` ` +
+        JSON.stringify(slimArgs(ev.args)).slice(0, 200));
+    } else if (ev.type === "tool_result") {
+      lines.push(`  - ${ev.ok ? "ok" : "FAILED"}` +
+        (ev.summary ? `: ${ev.summary}` : ""));
+    } else if (ev.type === "info") {
+      lines.push(`> ${ev.text}`, "");
+    } else if (ev.type === "final") {
+      lines.push("", `**Agent**: ${ev.text}`, "");
+    }
+  }
+  const blob = new Blob([lines.join("\n")], { type: "text/markdown" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `coder-session-${s.info.id}.md`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+$("coder-files").onclick = openFilesModal;
+$("coder-export").onclick = exportCoderSession;
 
 $("coder-log").onclick = async () => {
   const s = activeSession();
@@ -2106,7 +2252,9 @@ const CHAT_COMMANDS = [
 
 const CODER_COMMANDS = [
   { cmd: "undo", hint: "revert the last file write" },
+  { cmd: "files", hint: "files changed this session, with diffs" },
   { cmd: "compact", hint: "summarise older turns" },
+  { cmd: "export", hint: "download this session's feed as markdown" },
   { cmd: "log", hint: "open the audit log" },
   { cmd: "stop", hint: "interrupt the current task" },
   { cmd: "end", hint: "end this session" },
@@ -2341,7 +2489,9 @@ function execChatCommand(cmd, arg) {
 function execCoderCommand(cmd) {
   switch (cmd) {
     case "undo": $("coder-undo").onclick(); return true;
+    case "files": openFilesModal(); return true;
     case "compact": $("coder-compact").onclick(); return true;
+    case "export": exportCoderSession(); return true;
     case "log": $("coder-log").onclick(); return true;
     case "stop": $("coder-stop").onclick(); return true;
     case "end": $("coder-end").onclick(); return true;

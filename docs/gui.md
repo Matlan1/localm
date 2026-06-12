@@ -82,9 +82,25 @@ Start a session by pointing the agent at a project directory. The agent gets the
 What you see in the feed:
 
 - The agent's reasoning streams live.
-- Every tool call becomes a card. Click it to expand arguments and output.
-- Destructive actions (file writes, shell commands) pause the agent and show an approval card with a unified diff of exactly what would change. Approve or reject from the browser. Unanswered approvals time out after 10 minutes and are rejected. Answered approvals keep showing their outcome — including after a page reload, and in other tabs attached to the same session.
-- Auto-approve can be enabled at session start if you trust the task.
+- Every tool call becomes a card showing its arguments (and the diff, for
+  file writes — both at once). Click to expand; the result line shows the
+  outcome and how long the tool took.
+- Destructive actions (file writes, shell commands) pause the agent and show
+  an approval card with a unified diff of exactly what would change. Approve
+  or reject from the browser — or tick **always allow <tool> this session**
+  on approval and that tool skips the flow for the rest of the session.
+  Unanswered approvals time out (default 10 minutes, configurable with
+  `localm config coder_confirm_timeout <seconds>`) and are rejected. Answered
+  approvals keep showing their outcome — including after a page reload, and
+  in other tabs attached to the same session.
+- Auto-approve can be enabled at session start if you trust the task, and
+  **dry run** makes destructive tools report what they would do without
+  touching anything — a safe way to preview an agent's plan.
+- **You can keep typing while the agent works**: a message sent mid-task is
+  queued and injected at the next turn boundary as a steering note ("also add
+  logging", "skip the tests"), shown in the feed with a *Queued* label.
+- The usage line shows tokens, the turn number, and how full the model's
+  context window is (`ctx 42%`).
 
 Session persistence follows the coder's modes: `privacy` (default, nothing saved), `log` (JSONL audit trail), `full` (audit trail plus markdown transcript).
 
@@ -97,16 +113,25 @@ Stop asks the agent to halt at the next safe point. End session terminates it.
   replays their feeds.
 - File-writing tool calls show a rendered diff in their card even under
   auto-approve.
+- The bar's **files** button lists every file the session has changed, with
+  per-file cumulative diffs (original → current, across all edits) and a
+  full-session diff; the task-finished line in the feed says how many files
+  changed.
 - The bar's undo button reverts the last file write, compact summarises old
-  turns to free context, and log opens the JSONL audit trail (log/full modes).
+  turns to free context, **export** downloads the session feed as markdown,
+  and log opens the JSONL audit trail (log/full modes) — with a filter box
+  to narrow entries by tool name, type, or text.
 - The history button (also "past sessions" on the setup form) lists the audit
   logs earlier log/full-mode sessions left behind — including sessions from
   before a server restart — and opens them in the same log viewer.
 - Session setup accepts a model (switches the engine), max turns, temperature,
-  and a scope glob that confines file tools.
-- Typing `/` opens the coder command menu (`/undo`, `/compact`, `/log`,
-  `/stop`, `/end`, `/help`); commands run in the UI instead of being sent to
-  the agent as a task.
+  a scope glob that confines file tools, and the dry-run toggle.
+- Typing `/` opens the coder command menu (`/undo`, `/files`, `/compact`,
+  `/export`, `/log`, `/stop`, `/end`, `/help`); commands run in the UI
+  instead of being sent to the agent as a task.
+- If a tool fails 4 times in a row the agent stops with a circuit-breaker
+  message instead of burning its remaining turns; the conversation stays
+  intact so you can adjust and continue.
 
 ## Other pages
 

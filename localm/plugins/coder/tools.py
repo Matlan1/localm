@@ -10,6 +10,7 @@ Tools are registered in the TOOL_REGISTRY dict at the bottom of this file.
 
 from __future__ import annotations
 
+import difflib
 import glob as _glob
 import json
 import os
@@ -130,11 +131,38 @@ def _line_count(text: str) -> int:
     return text.count("\n") + 1
 
 
+def _closest_snippet(text: str, old: str, min_score: float = 0.55) -> str:
+    """
+    Find the file region most similar to a failed `old` string and return a
+    short line-numbered snippet of it, so the model can see exactly how the
+    real text differs (usually whitespace or a changed identifier).
+    Returns "" when nothing is similar enough to help.
+    """
+    text_lines = text.splitlines()
+    old_lines = [l for l in old.splitlines() if l.strip()]
+    if not text_lines or not old_lines:
+        return ""
+    probe = old_lines[0].strip()
+    best_i, best_score = -1, 0.0
+    for i, line in enumerate(text_lines):
+        score = difflib.SequenceMatcher(None, probe, line.strip()).ratio()
+        if score > best_score:
+            best_i, best_score = i, score
+    if best_i < 0 or best_score < min_score:
+        return ""
+    start = max(0, best_i - 1)
+    end = min(len(text_lines), best_i + len(old_lines) + 1)
+    return "\n".join(f"{n + 1:4d}: {text_lines[n]}" for n in range(start, end))
+
+
 # ---------------------------------------------------------------------------
 #  Tool functions
 # ---------------------------------------------------------------------------
 
-def tool_read_file(cwd: Path, path: str) -> ToolResult:
+def tool_read_file(cwd: Path, path: str, offset: int = 0, limit: int = 0) -> ToolResult:
+    """Read a file. *offset* (1-based start line) and *limit* (max lines)
+    slice big files so a truncated first read can be followed by targeted
+    reads of the middle instead of re-fetching the whole file."""
     try:
         p = _confine(cwd, path)
     except PermissionError as e:
@@ -151,6 +179,7 @@ def tool_read_file(cwd: Path, path: str) -> ToolResult:
     rel = p.relative_to(cwd) if p.is_relative_to(cwd) else p
 
     # Render Jupyter notebooks as readable text rather than raw JSON
+    # (offset/limit are ignored — cell structure beats line numbers there)
     if p.suffix == ".ipynb":
         try:
             nb   = json.loads(raw)
@@ -166,12 +195,33 @@ def tool_read_file(cwd: Path, path: str) -> ToolResult:
         except Exception:
             pass  # fall through to plain-text read if JSON is malformed
 
-    lines = _line_count(raw)
+    total_lines = _line_count(raw)
+    if offset or limit:
+        start = max(1, int(offset) or 1)
+        if start > total_lines:
+            return ToolResult.error(
+                f"offset {start} is past the end of {rel} ({total_lines} lines)")
+        count = int(limit) if limit else total_lines
+        all_lines = raw.splitlines(keepends=True)
+        sliced = all_lines[start - 1:start - 1 + count]
+        end = start + len(sliced) - 1
+        output, trunc = _truncate("".join(sliced))
+        range_label = f"{start}-{end} of {total_lines}"
+        return ToolResult(
+            ok=True,
+            output=f"<path>{rel}</path>\n<lines>{range_label}</lines>\n<content>\n{output}\n</content>",
+            summary=f"{rel} — lines {range_label}{' (truncated)' if trunc else ''}",
+            truncated=trunc,
+        )
+
     output, trunc = _truncate(raw)
+    if trunc:
+        output += ("\n[file truncated — re-read specific parts with "
+                   "read_file(path, offset=<start line>, limit=<lines>)]")
     return ToolResult(
         ok=True,
-        output=f"<path>{rel}</path>\n<lines>{lines}</lines>\n<content>\n{output}\n</content>",
-        summary=f"{rel} — {lines} lines{' (truncated)' if trunc else ''}",
+        output=f"<path>{rel}</path>\n<lines>{total_lines}</lines>\n<content>\n{output}\n</content>",
+        summary=f"{rel} — {total_lines} lines{' (truncated)' if trunc else ''}",
         truncated=trunc,
     )
 
@@ -256,11 +306,16 @@ def tool_edit_file(cwd: Path, path: str, old: str, new: str) -> ToolResult:
         return ToolResult.error(str(e))
 
     if old not in text:
-        snippet = textwrap.shorten(repr(old[:120]), width=120)
+        wanted = textwrap.shorten(repr(old[:120]), width=120)
+        nearest = _closest_snippet(text, old)
+        hint = (f"Closest match in the file:\n{nearest}\n"
+                if nearest else "")
         return ToolResult.error(
             f"String not found in {path}.\n"
-            f"Looking for: {snippet}\n"
-            f"Hint: read the file first to get the exact text."
+            f"Looking for: {wanted}\n"
+            f"{hint}"
+            "Hint: `old` must match the file exactly (whitespace and "
+            "indentation included) — read the file first and copy the text."
         )
 
     count = text.count(old)
@@ -522,7 +577,10 @@ def tool_tree(
         entries = [e for e in entries if e.name not in _IGNORE and not e.name.endswith(".egg-info")]
         for i, entry in enumerate(entries):
             if total >= max_files:
-                lines.append(f"{prefix}    ... (limit reached)")
+                lines.append(
+                    f"{prefix}    ... (file limit {max_files} reached — entries "
+                    "omitted; raise max_files or point tree at a subdirectory)"
+                )
                 return
             connector = "└── " if i == len(entries) - 1 else "├── "
             if entry.is_dir():
@@ -659,7 +717,8 @@ def tool_grep(cwd: Path, pattern: str, path: str = ".", glob: str = "", context:
 
     results = []
     total_hits = 0
-    for fp in files:
+    capped_note = ""
+    for file_idx, fp in enumerate(files):
         if not fp.is_file():
             continue
         try:
@@ -685,12 +744,23 @@ def tool_grep(cwd: Path, pattern: str, path: str = ".", glob: str = "", context:
                     marker = "→ " if j == hit_offset else "  "
                     results.append(f"{marker}{lineno - hit_offset + j:4d}: {ctx_line}")
                 results.append("")
+            if len(hits) > 20:
+                results.append(f"[... {len(hits) - 20} more match(es) in {rel} not shown]")
+                results.append("")
             total_hits += len(hits)
             if len(results) > 300:
+                remaining = sum(1 for f in files[file_idx + 1:] if f.is_file())
+                if remaining:
+                    capped_note = (
+                        f"\n[output cap reached — {remaining} more file(s) were NOT "
+                        "searched; narrow the search with glob= or path= to cover them]"
+                    )
                 break
 
     if not results:
         return ToolResult.success(f"No matches for '{pattern}'", summary="0 matches")
+    if capped_note:
+        results.append(capped_note)
 
     output, trunc = _truncate("\n".join(results))
     return ToolResult(
@@ -1266,8 +1336,15 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
     "read_file": ToolDef(
         name="read_file",
         fn=tool_read_file,
-        description="Read the contents of a file.",
-        params={"path": {"type": "string", "description": "File path (relative to cwd)", "required": True}},
+        description=(
+            "Read the contents of a file. Large files are truncated — "
+            "re-read a specific region with offset/limit."
+        ),
+        params={
+            "path":   {"type": "string", "description": "File path (relative to cwd)", "required": True},
+            "offset": {"type": "int",    "description": "1-based start line (optional)", "required": False},
+            "limit":  {"type": "int",    "description": "Max lines to read from offset (optional)", "required": False},
+        },
     ),
     "write_file": ToolDef(
         name="write_file",

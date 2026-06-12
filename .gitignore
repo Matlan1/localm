@@ -11,9 +11,10 @@ build/
 venv/
 .uv/
 
-# Editor
+# Editor / assistant configs (launch.json names which local model to run)
 .vscode/
 .idea/
+.claude/
 *.swp
 *.swo
 *~
