@@ -29,6 +29,33 @@ class ExtractError(Exception):
     where applicable, what to install."""
 
 
+def _decode_text(data: bytes) -> str:
+    """
+    Decode a plain-text file without trusting it to be UTF-8.
+
+    Windows editors routinely save "text files" as UTF-16; blindly decoding
+    those as UTF-8 yields NUL-interleaved mojibake that an LLM cannot read —
+    the attachment then looks present but carries no information.
+    """
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return data.decode("utf-16", errors="replace")          # BOM, either endianness
+    if data.startswith(b"\xef\xbb\xbf"):
+        return data.decode("utf-8-sig", errors="replace")
+    # BOM-less UTF-16 must be sniffed BEFORE trying UTF-8: NUL is a valid
+    # UTF-8 codepoint, so ASCII-range UTF-16 (every other byte NUL) decodes
+    # as UTF-8 "successfully" into NUL-riddled garbage. Real text files
+    # contain no NULs at all.
+    sample = data[:512]
+    if sample and sample.count(0) > len(sample) // 4:
+        endian = "utf-16-be" if sample[0:1] == b"\x00" else "utf-16-le"
+        return data.decode(endian, errors="replace")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        # Legacy single-byte encoding — cp1252 maps every byte, nothing is lost
+        return data.decode("cp1252", errors="replace")
+
+
 def extract_text(path: Path) -> str:
     """Return the plain text of *path*. Raises ExtractError on failure."""
     path = Path(path)
@@ -47,10 +74,10 @@ def extract_bytes(data: bytes, filename: str) -> str:
     suffix = Path(filename).suffix.lower()
 
     if suffix in _PLAIN_SUFFIXES:
-        text = data.decode("utf-8", errors="replace")
+        text = _decode_text(data)
     elif suffix in (".html", ".htm"):
         from localm.netpolicy import html_to_text
-        text = html_to_text(data.decode("utf-8", errors="replace"))
+        text = html_to_text(_decode_text(data))
     elif suffix == ".docx":
         text = _extract_docx(data, filename)
     elif suffix == ".ipynb":
