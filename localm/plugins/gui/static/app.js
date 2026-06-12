@@ -1033,6 +1033,72 @@ async function runWebCall(conv, call) {
   renderChat();
 }
 
+/* ---- assistant memory ---- */
+
+const memory = { text: "", writable: false };
+
+async function refreshMemory() {
+  try {
+    const r = await fetch("/api/memory", { headers: authHeaders() });
+    if (!r.ok) return;
+    const data = await r.json();
+    memory.text = data.text || "";
+    memory.writable = !!data.writable;
+  } catch (e) { /* server unreachable */ }
+}
+
+async function rememberFact(fact) {
+  if (!fact) { toast("Usage: /remember <fact>", true); return; }
+  try {
+    const r = await fetch("/api/memory/append", {
+      method: "POST", headers: authHeaders(),
+      body: JSON.stringify({ text: fact }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    await refreshMemory();
+    toast("Remembered ✓");
+  } catch (e) {
+    toast("Could not save: " + e.message, true);
+  }
+}
+
+function openMemoryModal() {
+  openModal("Memory — what the model knows about you", (body) => {
+    body.appendChild(el("div", "sub", memory.writable
+      ? "Injected into the system prompt while the 🧠 toggle is on. " +
+        "Edit freely — it's a plain markdown file in the localm data directory."
+      : "Read-only: privacy mode blocks memory writes (no new traces). " +
+        "Existing memory is still injected while the 🧠 toggle is on."));
+    const ta = document.createElement("textarea");
+    ta.value = memory.text;
+    ta.rows = 14;
+    ta.style.width = "100%";
+    ta.readOnly = !memory.writable;
+    body.appendChild(ta);
+    if (memory.writable) {
+      const save = el("button", "btn-primary", "Save");
+      save.style.marginTop = "10px";
+      save.onclick = async () => {
+        try {
+          const r = await fetch("/api/memory", {
+            method: "PUT", headers: authHeaders(),
+            body: JSON.stringify({ text: ta.value }),
+          });
+          const data = await r.json();
+          if (!r.ok) throw new Error(data.detail || r.statusText);
+          await refreshMemory();
+          toast("Memory saved");
+          $("modal").style.display = "none";
+        } catch (e) {
+          toast("Save failed: " + e.message, true);
+        }
+      };
+      body.appendChild(save);
+    }
+  });
+}
+
 /* ---- prompt library (personas) ---- */
 
 const PERSONA_PARAM_IDS = {
@@ -1131,6 +1197,11 @@ async function runCompletion(conv, webDepth = 0) {
   const webEnabled = $("p-web").checked;
   const messages = [];
   let sysText = params.system || "";
+  if ($("p-memory").checked && memory.text.trim()) {
+    sysText = (sysText ? sysText + "\n\n" : "") +
+      "Long-term memory — things to remember about the user:\n" +
+      memory.text.trim();
+  }
   if (webEnabled) {
     sysText = (sysText ? sysText + "\n\n" : "") + WEB_TOOL_PROMPT;
   }
@@ -1918,6 +1989,8 @@ const CHAT_COMMANDS = [
   { cmd: "export", hint: "download this conversation as markdown" },
   { cmd: "rename", hint: "rename this conversation", args: "<title>" },
   { cmd: "persona", hint: "apply a saved persona (system prompt + params)", args: "<name>" },
+  { cmd: "remember", hint: "add a fact to the model's long-term memory", args: "<fact>" },
+  { cmd: "memory", hint: "view or edit the memory file" },
   { cmd: "pin", hint: "pin/unpin this conversation" },
   { cmd: "folder", hint: "move this conversation to a folder (empty = remove)", args: "<name>" },
   { cmd: "system", hint: "edit the system prompt" },
@@ -2027,6 +2100,8 @@ function execChatCommand(cmd, arg) {
       else toast("Usage: /rename <title>", true);
       return true;
     }
+    case "remember": rememberFact(arg); return true;
+    case "memory": openMemoryModal(); return true;
     case "persona": {
       if (!arg) {
         const names = personaCache.map((p) => p.name);
@@ -2175,6 +2250,7 @@ refreshModels().then(() => populateSetupModels());
 refreshCtxLimit().then(initServerConversations);
 refreshKbSelect();
 refreshPersonas();
+refreshMemory();
 setInterval(refreshModels, 30000);
 renderConvList();
 if (chat.conversations.length) {
