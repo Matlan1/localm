@@ -46,12 +46,15 @@ if errorlevel 1 (
 )
 
 rem ---- install localm (editable) into the venv ------------------------------
+rem  [voice] ships the speech-to-text package preinstalled; the Whisper model
+rem  itself is only downloaded after the user consents in the GUI (privacy:
+rem  that one fetch is the only network access, transcription is local).
 echo.
 echo  Installing localm into .venv ...
 if "%FLAVOUR%"=="gpu" (
-    uv pip install -p .venv -e ".[gpu,coder,audio]"
+    uv pip install -p .venv -e ".[gpu,coder,audio,voice]"
 ) else (
-    uv pip install -p .venv -e ".[coder]"
+    uv pip install -p .venv -e ".[coder,voice]"
 )
 if errorlevel 1 (
     echo  [!] Install failed — see the error above.
