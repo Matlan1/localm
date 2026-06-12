@@ -22,7 +22,17 @@ from pathlib import Path
 from typing import Optional
 
 # How long a confirmation may sit unanswered before it is auto-rejected.
+# Overridable via the "coder_confirm_timeout" config key (seconds).
 _CONFIRM_TIMEOUT_S = 600
+
+
+def _confirm_timeout() -> float:
+    try:
+        from localm.config import load_config
+        return float(load_config().get("coder_confirm_timeout")
+                     or _CONFIRM_TIMEOUT_S)
+    except Exception:
+        return _CONFIRM_TIMEOUT_S
 
 # Queue size: generous, but bounded so a disconnected client can't grow memory
 # without limit. When full, oldest events are dropped (tokens are recoverable —
@@ -52,6 +62,7 @@ class CoderSession:
         max_turns: int = 40,
         mode: str = "privacy",
         scope: Optional[str] = None,
+        dry_run: bool = False,
         **gen_kwargs,
     ) -> None:
         from localm.plugins.coder.agent import Agent
@@ -63,11 +74,15 @@ class CoderSession:
         self.model = getattr(backend, "model_id", "")
         self.auto_approve = auto_approve
         self.mode = mode
+        self.dry_run = dry_run
         self.events: queue.Queue = queue.Queue(maxsize=_QUEUE_MAX)
         # Bounded replay buffer so a reloaded page can rebuild the feed.
         self.history: list = []
         self.busy = False
         self.closed = False
+        # Tools the user marked "always allow" on an approval card — those
+        # skip the confirmation flow for the rest of this session.
+        self.allowed_tools: set[str] = set()
         self._pending: Optional[_PendingConfirm] = None
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
@@ -79,6 +94,7 @@ class CoderSession:
             max_turns=max_turns,
             mode=parse_mode(mode),
             scope=scope,
+            dry_run=dry_run,
             on_event=self._on_agent_event,
             confirm_handler=None if auto_approve else self._confirm,
             **gen_kwargs,
@@ -123,6 +139,12 @@ class CoderSession:
         destructive tool call. Sends a confirm_request event with a diff
         preview for file-writing tools.
         """
+        # Tools granted "always allow" earlier in the session skip the flow
+        if call.name in self.allowed_tools:
+            self._push({"type": "info",
+                        "text": f"{call.name} auto-approved "
+                                "(always-allow granted this session)"})
+            return True
         pending = _PendingConfirm(
             id=uuid.uuid4().hex[:8],
             tool=call.name,
@@ -138,7 +160,7 @@ class CoderSession:
             "args": pending.args,
             "diff": pending.diff,
         })
-        answered = pending.answered.wait(timeout=_CONFIRM_TIMEOUT_S)
+        answered = pending.answered.wait(timeout=_confirm_timeout())
         with self._lock:
             self._pending = None
         # Always record the outcome in the event stream. Without this, a
@@ -188,15 +210,28 @@ class CoderSession:
     #  Public API (called from web handlers)                              #
     # ------------------------------------------------------------------ #
 
-    def send_message(self, text: str) -> bool:
-        """Start a task in the worker thread. False if the agent is busy."""
+    def send_message(self, text: str, _echo: bool = True) -> str:
+        """
+        Deliver a user message.
+
+        Returns "started" when a new task begins, "queued" when the agent is
+        mid-task (the message is injected at the next turn boundary as a
+        steering note), or "closed" when the session is gone.
+        """
         with self._lock:
-            if self.busy or self.closed:
-                return False
+            if self.closed:
+                return "closed"
+            if self.busy:
+                # Mid-task steering: hand the text to the running agent and
+                # record it in the feed so every tab sees it was delivered.
+                self.agent.queue_message(text)
+                self._push({"type": "user", "text": text, "queued": True})
+                return "queued"
             self.busy = True
 
         # In the event stream (and replay buffer) so reloaded pages see it too
-        self._push({"type": "user", "text": text})
+        if _echo:
+            self._push({"type": "user", "text": text})
 
         def _run():
             try:
@@ -207,16 +242,25 @@ class CoderSession:
                     "ok": self.agent.last_run_ok,
                     "turns": self.agent.turns,
                     "total_tokens": self.agent.total_tokens,
+                    "changed_files": [f["path"] for f in
+                                      self.agent.changed_files()],
                 })
             except Exception as e:
                 self._push({"type": "error", "text": f"{type(e).__name__}: {e}"})
             finally:
                 with self._lock:
                     self.busy = False
+                # A message queued in the task's final moments would otherwise
+                # sit until the user sends again — run it as a follow-up task.
+                leftover = self.agent._drain_queued()
+                if leftover and not self.closed:
+                    self._push({"type": "info",
+                                "text": "running queued message(s) as a follow-up"})
+                    self.send_message("\n\n".join(leftover), _echo=False)
 
         self._thread = threading.Thread(target=_run, daemon=True)
         self._thread.start()
-        return True
+        return "started"
 
     def undo(self) -> Optional[str]:
         """Revert the last undoable file operation. None when nothing to undo."""
@@ -237,6 +281,14 @@ class CoderSession:
         """Path of the JSONL audit log (log/full modes), or None in privacy mode."""
         return getattr(self.agent._audit, "path", None)
 
+    def changed_files(self) -> list:
+        """Files the agent has changed this session (safe to call mid-task)."""
+        return self.agent.changed_files()
+
+    def session_diff(self, path: Optional[str] = None) -> str:
+        """Cumulative diff of the session's changes (all files or one)."""
+        return self.agent.session_diff(path)
+
     def info(self) -> dict:
         """Summary dict for the session list endpoint."""
         return {
@@ -245,19 +297,28 @@ class CoderSession:
             "model": self.model,
             "mode": self.mode,
             "auto_approve": self.auto_approve,
+            "dry_run": self.dry_run,
             "busy": self.busy,
             "turns": self.agent.turns,
             "total_tokens": self.agent.total_tokens,
             "created_at": self.created_at,
             "pending_confirm": self._pending is not None,
+            "allowed_tools": sorted(self.allowed_tools),
+            "changed_files": len(self.agent.changed_files()),
         }
 
-    def answer_confirm(self, confirm_id: str, approved: bool) -> bool:
-        """Resolve a pending confirmation. False if id doesn't match."""
+    def answer_confirm(self, confirm_id: str, approved: bool,
+                       always_allow: bool = False) -> bool:
+        """Resolve a pending confirmation. False if id doesn't match.
+
+        ``always_allow`` (only honoured on approval) whitelists the tool for
+        the rest of the session — later calls skip the confirmation flow."""
         with self._lock:
             pending = self._pending
         if pending is None or pending.id != confirm_id:
             return False
+        if approved and always_allow:
+            self.allowed_tools.add(pending.tool)
         pending.approved = approved
         pending.answered.set()
         return True
