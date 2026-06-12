@@ -58,6 +58,7 @@
           <div><label>Max tokens</label><input id="p-max-tokens" type="number" step="64" min="1" placeholder="default"></div>
           <div><label>Seed</label><input id="p-seed" type="number" step="1" placeholder="random"></div>
           <div class="full check-row"><label title="Lets the model search the web and read pages mid-conversation (uses the server's network policy). Off = fully offline chat."><input type="checkbox" id="p-web"> &#127760; Web access — the model may search and read pages</label></div>
+          <div class="full check-row"><label title="Injects your memory file (chat-memory.md) into the system prompt. Add facts with /remember, view or edit with /memory. Writes are blocked in privacy mode."><input type="checkbox" id="p-memory" checked> &#129504; Memory — remind the model what it knows about you</label></div>
           <div class="full"><label>&#128218; Knowledge — ground replies in an indexed collection (manage on the Knowledge page)</label><select id="p-kb"><option value="">(none)</option></select></div>
           <div class="full"><label>System prompt</label><textarea id="p-system" rows="3" placeholder="You are a helpful assistant."></textarea></div>
           <div class="full"><label>GBNF grammar (constrains output; local models only)</label><textarea id="p-grammar" rows="3" placeholder='root ::= "yes" | "no"' spellcheck="false"></textarea></div>

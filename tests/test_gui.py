@@ -870,6 +870,54 @@ class TestDiscoverEndpoints:
 
 
 # ------------------------------------------------------------------ #
+#  Assistant memory (/api/memory)                                      #
+# ------------------------------------------------------------------ #
+
+class TestAssistantMemory:
+    def test_roundtrip_and_append(self, persist_app, tmp_path, monkeypatch):
+        monkeypatch.setenv("LOCALM_MODE", "log")
+        app, _ = persist_app
+        with TestClient(app) as client:
+            data = client.get("/api/memory").json()
+            assert data["text"] == "" and data["writable"] is True
+
+            assert client.put("/api/memory",
+                              json={"text": "- likes terse answers"}).status_code == 200
+            client.post("/api/memory/append", json={"text": "runs an RX 6800"})
+            text = client.get("/api/memory").json()["text"]
+            assert "- likes terse answers" in text
+            assert "- runs an RX 6800" in text     # "- " prefix added
+            assert (tmp_path / ".localm" / "chat-memory.md").is_file()
+
+            # clearing removes the file entirely
+            client.put("/api/memory", json={"text": ""})
+            assert not (tmp_path / ".localm" / "chat-memory.md").exists()
+
+    def test_privacy_blocks_writes_allows_reads(self, persist_app, tmp_path,
+                                                monkeypatch):
+        home = tmp_path / ".localm"
+        home.mkdir(parents=True, exist_ok=True)
+        (home / "chat-memory.md").write_text("- earlier fact\n", encoding="utf-8")
+        monkeypatch.setenv("LOCALM_MODE", "privacy")
+        app, _ = persist_app
+        with TestClient(app) as client:
+            data = client.get("/api/memory").json()
+            assert data["text"].strip() == "- earlier fact"   # read OK
+            assert data["writable"] is False
+            assert client.put("/api/memory",
+                              json={"text": "x"}).status_code == 403
+            assert client.post("/api/memory/append",
+                               json={"text": "x"}).status_code == 403
+
+    def test_empty_append_rejected(self, persist_app, monkeypatch):
+        monkeypatch.setenv("LOCALM_MODE", "log")
+        app, _ = persist_app
+        with TestClient(app) as client:
+            assert client.post("/api/memory/append",
+                               json={"text": "  "}).status_code == 400
+
+
+# ------------------------------------------------------------------ #
 #  Prompt library (/api/prompts)                                       #
 # ------------------------------------------------------------------ #
 

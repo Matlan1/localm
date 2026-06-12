@@ -142,6 +142,12 @@ GUI gaps identified by comparing against LM Studio, Jan, Open WebUI.
 - [x] Chat: `/web <query>` command and a per-conversation "Web access" toggle — the model emits `<tool_call>` web requests, the GUI executes them through the policy and injects results as visible dimmed "Web" messages (max 3 rounds per send)
 - [x] Behaviour change: `fetch_url` to localhost/private addresses is now blocked by default (`net_allow_private true` restores it)
 
+### Round 11 (shipped 2026-06-12) — assistant memory
+
+- [x] `<data dir>/chat-memory.md`: plain markdown the user can read/edit; `GET/PUT /api/memory` + `POST /api/memory/append`; size-capped; clearing deletes the file
+- [x] 🧠 drawer toggle injects memory into the system prompt across all chats; `/remember <fact>` appends a bullet; `/memory` opens a view/edit modal
+- [x] Privacy semantics: writes 403 in privacy mode (memory persists conversation-derived facts), reads stay allowed — privacy means no new traces, not amnesia
+
 ### Round 10 (shipped 2026-06-12) — prompt library / personas
 
 - [x] `/api/prompts` CRUD on `<data dir>/prompts.json` (atomic writes; explicit user assets, available in every session mode)
@@ -232,7 +238,7 @@ mode stays trace-free.
 - [x] In-app model discovery (shipped 2026-06-12, see Round 7): HF search on the Models page + `localm search` CLI; per-quant sizes with "fits your VRAM" badges; "starter picks" = most-downloaded GGUF repos (dynamic, nothing hardcoded)
 - [x] Conversation search + folders/pinning (shipped 2026-06-12, see Round 8): sidebar full-text search with snippets, 📌 pin-to-top, collapsible 📁 folders, `/pin` + `/folder` commands; persisted through the server store in non-privacy modes
 - [x] Message branching (shipped 2026-06-12, see Round 9): edit forks instead of deleting, regenerate keeps the old reply as a variant, ‹ k/N › navigation at fork points
-- [ ] Persistent assistant memory for chat (ChatGPT-style memory file injected into the system prompt; `LOCALCODER.md` is the coder analogue) — non-privacy only
+- [x] Persistent assistant memory for chat (shipped 2026-06-12, see Round 11): `chat-memory.md` injected via the 🧠 drawer toggle; `/remember` + `/memory`; writes blocked in privacy mode, reads allowed
 - [x] Prompt library / personas (shipped 2026-06-12, see Round 10): named system prompts with sampling defaults, saved/applied from the params drawer or `/persona <name>`
 - [ ] Voice: Whisper STT input + TTS read-aloud (audio decode plumbing exists in `inference/media.py`)
 - [x] Web search grounding for chat and coder (shipped 2026-06-11, see Round 4): `localm/netpolicy.py` policy choke point (off/ask/allow, domain allow/deny, SSRF guard), coder `web_search` tool + gated `fetch_url`, `/api/web/*`, chat `/web` command + per-conversation web-access toggle with bounded tool loop ([docs/network.md](docs/network.md))
