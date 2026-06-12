@@ -94,10 +94,15 @@ class TestGenerateVideo:
         captured = {}
         fake = _fake_comfy(captured, output_key=output_key,
                            history_outputs=history_outputs)
+        # Pin COMFY_OUTPUT_DIR to a sandbox so the post-download cleanup can
+        # never consult the developer's real config (and delete a real file).
+        comfy_out = tmp_path / "comfy_out"
         with patch.object(comfy, "_comfy_alive", return_value=True), \
              patch.object(comfy, "_localm_unload"), \
              patch.object(comfy.urllib.request, "urlopen", fake), \
-             patch.object(comfy.time, "sleep"):
+             patch.object(comfy.time, "sleep"), \
+             patch.dict(comfy.os.environ,
+                        {"COMFY_OUTPUT_DIR": str(comfy_out)}):
             ok, msg = comfy.generate_video(
                 "a red fox running", tmp_path / "out.mp4", **kwargs)
         return ok, msg, captured
@@ -156,6 +161,18 @@ class TestGenerateVideo:
         ok, msg, _ = self._run(tmp_path, history_outputs={"11": {}})
         assert not ok
         assert "no video output" in msg
+
+    def test_comfy_side_copy_deleted_when_dir_known(self, tmp_path):
+        """The duplicate in ComfyUI's own output dir is removed when
+        COMFY_OUTPUT_DIR / comfy_output_dir points at it."""
+        comfy_out = tmp_path / "comfy_out"
+        comfy_out.mkdir()
+        orig = comfy_out / "clip.mp4"          # matches the fake history
+        orig.write_bytes(b"comfy-side copy")
+        ok, _, _ = self._run(tmp_path)
+        assert ok
+        assert not orig.exists()
+        assert (tmp_path / "out.mp4").is_file()   # local save unaffected
 
     def test_image_to_video_wires_start_image(self, tmp_path):
         img = tmp_path / "start.png"
