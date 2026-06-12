@@ -124,6 +124,12 @@ Stop asks the agent to halt at the next safe point. End session terminates it.
   start it, or starts it automatically when `comfy_launch_cmd` is set in the
   config. After a successful generation, ComfyUI is asked to release its
   models and the chat model reloads so the next reply is instant.
+- **Music**: generate tracks with the local ComfyUI ACE-Step workflow — style
+  tags, optional lyrics ([verse]/[chorus] markers), and an **arbitrary track
+  length in seconds**; seed/steps/CFG for control. Same VRAM handover as image
+  generation. History with inline playback, move-to-folder, and delete.
+  `/music <tags>` in chat generates a default-length instrumental inline, and
+  `localm music "tags" --lyrics song.txt -d 180` does it from the terminal.
 - **Knowledge**: create document collections, index files or folders with live
   progress, inspect/remove indexed documents, test-search a collection, and
   delete collections (index only — original files untouched). Collections show

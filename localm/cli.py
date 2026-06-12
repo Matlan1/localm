@@ -773,6 +773,62 @@ def search_cmd(query, limit, list_files):
         sys.exit(1)
 
 
+@main.command("music")
+@click.argument("tags")
+@click.option("--lyrics", type=click.Path(exists=True), default=None,
+              help="Lyrics file ([verse]/[chorus] markers supported); "
+                   "omit for an instrumental.")
+@click.option("-d", "--duration", default=120.0, show_default=True,
+              help="Track length in seconds — arbitrary.")
+@click.option("-o", "--out", default=None,
+              help="Output .flac path [default: ./music_<timestamp>.flac]")
+@click.option("--seed", type=int, default=None, help="Reproducible seed.")
+@click.option("--steps", type=int, default=None, help="Sampler steps (default 50).")
+@click.option("--cfg", type=float, default=None, help="Guidance (default 5.0).")
+def music_cmd(tags, lyrics, duration, out, seed, steps, cfg):
+    """Generate a music track with the local ComfyUI ACE-Step workflow.
+
+    \b
+    Examples:
+      localm music "synthwave, 80s, 120 bpm, dreamy"
+      localm music "folk ballad, acoustic guitar" --lyrics song.txt -d 180
+
+    ComfyUI must be running (or start it via the GUI, which can auto-launch
+    it when comfy_launch_cmd is configured).
+    """
+    import time as _time
+    from rich.console import Console
+    from .audit import SessionMode, effective_mode
+    from .image_gen.comfy import _comfy_alive, default_api_url
+    from .music_gen import generate_music
+    console = Console()
+
+    api_url = default_api_url()
+    if not _comfy_alive(api_url):
+        console.print(
+            f"[red]ComfyUI is not running at {api_url}.[/red] Start it and "
+            "retry — or use the GUI's Music page, which can launch it "
+            "automatically when comfy_launch_cmd is set.")
+        sys.exit(1)
+
+    out_path = Path(out) if out \
+        else Path(f"music_{_time.strftime('%Y%m%d_%H%M%S')}.flac")
+    lyr = Path(lyrics).read_text(encoding="utf-8") if lyrics else None
+    kwargs = {k: v for k, v in
+              (("seed", seed), ("steps", steps), ("cfg", cfg)) if v is not None}
+    ok, message = generate_music(
+        tags, out_path,
+        lyrics=lyr,
+        duration_seconds=duration,
+        on_progress=lambda t: console.print(f"  [dim]{t}[/dim]"),
+        write_sidecar=effective_mode("server") != SessionMode.PRIVACY,
+        **kwargs,
+    )
+    console.print(f"[{'green' if ok else 'red'}]{message}[/{'green' if ok else 'red'}]")
+    if not ok:
+        sys.exit(1)
+
+
 @main.command("list")
 def list_cmd():
     """List registered models."""
