@@ -797,6 +797,58 @@ class TestWebEndpoints:
 
 
 # ------------------------------------------------------------------ #
+#  Model discovery endpoints (/api/discover/*)                         #
+# ------------------------------------------------------------------ #
+
+class TestDiscoverEndpoints:
+    def test_search_returns_results_and_vram(self, gui_app, monkeypatch):
+        app, _ = gui_app
+        monkeypatch.setattr(
+            "localm.discover.hf_search",
+            lambda q, limit=20: [{"id": "org/m", "downloads": 1,
+                                  "likes": 0, "updated": ""}])
+        monkeypatch.setattr("localm.discover.vram_info",
+                            lambda: {"total": 16_000_000_000})
+        with TestClient(app) as client:
+            data = client.get("/api/discover/search?q=llama").json()
+        assert data["results"][0]["id"] == "org/m"
+        assert data["vram"]["total"] == 16_000_000_000
+
+    def test_files_get_fit_badges(self, gui_app, monkeypatch):
+        app, _ = gui_app
+        monkeypatch.setattr(
+            "localm.discover.hf_gguf_files",
+            lambda repo: [{"file": "m-Q4_K_M.gguf", "quant": "Q4_K_M",
+                           "size_bytes": 4_000_000_000, "n_parts": 1}])
+        monkeypatch.setattr("localm.discover.vram_info",
+                            lambda: {"total": 16_000_000_000})
+        with TestClient(app) as client:
+            data = client.get("/api/discover/files?repo=org/m").json()
+        assert data["files"][0]["fit"] == "fits"
+
+    def test_net_off_is_403(self, gui_app, monkeypatch):
+        from localm.discover import DiscoverError
+        app, _ = gui_app
+
+        def blocked(q, limit=20):
+            raise DiscoverError("Network access is disabled (net_mode=off).")
+        monkeypatch.setattr("localm.discover.hf_search", blocked)
+        with TestClient(app) as client:
+            r = client.get("/api/discover/search?q=x")
+        assert r.status_code == 403
+
+    def test_hf_unreachable_is_502(self, gui_app, monkeypatch):
+        from localm.discover import DiscoverError
+        app, _ = gui_app
+
+        def down(repo):
+            raise DiscoverError("HuggingFace request failed: timeout")
+        monkeypatch.setattr("localm.discover.hf_gguf_files", down)
+        with TestClient(app) as client:
+            assert client.get("/api/discover/files?repo=a/b").status_code == 502
+
+
+# ------------------------------------------------------------------ #
 #  Knowledge endpoints (/api/rag/*)                                    #
 # ------------------------------------------------------------------ #
 

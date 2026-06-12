@@ -142,6 +142,14 @@ GUI gaps identified by comparing against LM Studio, Jan, Open WebUI.
 - [x] Chat: `/web <query>` command and a per-conversation "Web access" toggle — the model emits `<tool_call>` web requests, the GUI executes them through the policy and injects results as visible dimmed "Web" messages (max 3 rounds per send)
 - [x] Behaviour change: `fetch_url` to localhost/private addresses is now blocked by default (`net_allow_private true` restores it)
 
+### Round 7 (shipped 2026-06-12) — model discovery
+
+- [x] `localm/discover.py`: HF model search (empty query = most downloaded GGUF — dynamic "starter picks", no hardcoded model names), repo tree parsing with quant-label extraction and split-GGUF grouping (sizes summed, first part = pull spec)
+- [x] "Fits your VRAM" badges vs **total** VRAM (capacity, not currently-free — the active model occupies the GPU while browsing) using the GGUF preflight overhead estimate; VRAM detection works without torch: torch → nvidia-smi → Windows display-adapter registry (`qwMemorySize`)
+- [x] `/api/discover/search` + `/api/discover/files` (403 on net_mode=off — the kill switch covers discovery even though model downloads are otherwise outside the network policy)
+- [x] Models page "Find models" card: lazy search (no network call until asked), downloads/likes, expandable per-quant list with colored fit badges and one-click pull into the existing progress flow
+- [x] CLI: `localm search [query…]` and `localm search owner/repo --files`
+
 ### Round 6 (shipped 2026-06-12) — knowledge / RAG
 
 - [x] `localm/rag/` package: extraction (txt/md/code/html/docx/ipynb stdlib; pdf via the `[rag]` extra), paragraph-aware chunking, pure-stdlib BM25, JSON collection store under `<data dir>/rag/` with mtime-based re-indexing and atomic rewrites
@@ -202,7 +210,7 @@ mode stays trace-free.
 ### High impact
 
 - [x] RAG / chat-with-documents (shipped 2026-06-12, see Round 6): in-chat document attachments (in-memory, privacy-clean) + persistent knowledge collections with cited retrieval; lexical-first BM25 with embeddings blended in when the backend supports them ([docs/rag.md](docs/rag.md))
-- [ ] In-app model discovery: search HuggingFace from the Models page, curated starter picks, per-quant "fits your VRAM" badges (reuse the VRAM preflight logic)
+- [x] In-app model discovery (shipped 2026-06-12, see Round 7): HF search on the Models page + `localm search` CLI; per-quant sizes with "fits your VRAM" badges; "starter picks" = most-downloaded GGUF repos (dynamic, nothing hardcoded)
 - [ ] Conversation search + folders/pinning across all chats (build on the new server store)
 - [ ] Message branching: edit-and-fork trees, regeneration variant navigation (< 2/3 >) instead of overwrite
 - [ ] Persistent assistant memory for chat (ChatGPT-style memory file injected into the system prompt; `LOCALCODER.md` is the coder analogue) — non-privacy only
