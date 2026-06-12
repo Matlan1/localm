@@ -149,6 +149,15 @@
       <div class="page">
         <h2>Models</h2>
         <div class="card">
+          <h3>Find models</h3>
+          <div class="row">
+            <input type="text" id="disc-query" placeholder="search HuggingFace for GGUF models — empty shows the most downloaded" spellcheck="false">
+            <button class="btn-primary" id="disc-search">Search</button>
+          </div>
+          <div class="sub" id="disc-vram"></div>
+          <div id="disc-results"></div>
+        </div>
+        <div class="card">
           <h3>Pull a model</h3>
           <div class="row">
             <input type="text" id="pull-spec" placeholder="owner/repo:file.gguf  ·  owner/repo  ·  https://…" spellcheck="false">
