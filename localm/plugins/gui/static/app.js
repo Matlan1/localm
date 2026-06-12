@@ -1033,6 +1033,96 @@ async function runWebCall(conv, call) {
   renderChat();
 }
 
+/* ---- prompt library (personas) ---- */
+
+const PERSONA_PARAM_IDS = {
+  temperature: "p-temperature",
+  top_p: "p-top-p",
+  top_k: "p-top-k",
+  repeat_penalty: "p-repeat-penalty",
+  max_tokens: "p-max-tokens",
+};
+
+let personaCache = [];
+
+async function refreshPersonas() {
+  try {
+    const r = await fetch("/api/prompts", { headers: authHeaders() });
+    if (!r.ok) return;
+    personaCache = (await r.json()).prompts;
+    const sel = $("p-persona");
+    const current = sel.value;
+    sel.replaceChildren();
+    const none = document.createElement("option");
+    none.value = "";
+    none.textContent = "(none)";
+    sel.appendChild(none);
+    for (const p of personaCache) {
+      const opt = document.createElement("option");
+      opt.value = p.name;
+      opt.textContent = p.name;
+      sel.appendChild(opt);
+    }
+    if ([...sel.options].some((o) => o.value === current)) sel.value = current;
+  } catch (e) { /* server unreachable */ }
+}
+
+function applyPersona(name) {
+  const p = personaCache.find((x) => x.name === name);
+  if (!p) { toast("No such persona: " + name, true); return false; }
+  $("p-system").value = p.system || "";
+  for (const [key, id] of Object.entries(PERSONA_PARAM_IDS)) {
+    $(id).value = p.params?.[key] ?? "";
+  }
+  $("p-persona").value = name;
+  toast(`Persona '${name}' applied`);
+  return true;
+}
+
+$("p-persona").onchange = () => {
+  const name = $("p-persona").value;
+  if (name) applyPersona(name);
+};
+
+$("persona-save").onclick = async () => {
+  const name = prompt("Persona name:", $("p-persona").value || "");
+  if (!name || !name.trim()) return;
+  const params = {};
+  for (const [key, id] of Object.entries(PERSONA_PARAM_IDS)) {
+    const v = $(id).value.trim();
+    if (v !== "" && !Number.isNaN(Number(v))) params[key] = Number(v);
+  }
+  try {
+    const r = await fetch("/api/prompts/" + encodeURIComponent(name.trim()), {
+      method: "PUT", headers: authHeaders(),
+      body: JSON.stringify({ system: $("p-system").value, params }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    await refreshPersonas();
+    $("p-persona").value = name.trim();
+    toast(`Persona '${name.trim()}' saved`);
+  } catch (e) {
+    toast("Save failed: " + e.message, true);
+  }
+};
+
+$("persona-delete").onclick = async () => {
+  const name = $("p-persona").value;
+  if (!name) { toast("Select a persona first", true); return; }
+  if (!confirm(`Delete persona '${name}'? The drawer values stay as they are.`)) return;
+  try {
+    const r = await fetch("/api/prompts/" + encodeURIComponent(name), {
+      method: "DELETE", headers: authHeaders() });
+    if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+    await refreshPersonas();
+    $("p-persona").value = "";
+    toast(`Persona '${name}' deleted`);
+  } catch (e) {
+    toast("Delete failed: " + e.message, true);
+  }
+};
+
 /* sending */
 
 async function runCompletion(conv, webDepth = 0) {
@@ -1827,6 +1917,7 @@ const CHAT_COMMANDS = [
   { cmd: "compact", hint: "summarise older messages to free context" },
   { cmd: "export", hint: "download this conversation as markdown" },
   { cmd: "rename", hint: "rename this conversation", args: "<title>" },
+  { cmd: "persona", hint: "apply a saved persona (system prompt + params)", args: "<name>" },
   { cmd: "pin", hint: "pin/unpin this conversation" },
   { cmd: "folder", hint: "move this conversation to a folder (empty = remove)", args: "<name>" },
   { cmd: "system", hint: "edit the system prompt" },
@@ -1934,6 +2025,20 @@ function execChatCommand(cmd, arg) {
       const conv = currentConv();
       if (conv && arg) { conv.title = arg; saveConversations(conv); renderConvList(); }
       else toast("Usage: /rename <title>", true);
+      return true;
+    }
+    case "persona": {
+      if (!arg) {
+        const names = personaCache.map((p) => p.name);
+        toast(names.length ? "Personas: " + names.join(", ")
+                           : "No personas saved yet — use the drawer's save…",
+              !names.length);
+        return true;
+      }
+      // case-insensitive match for typing convenience
+      const hit = personaCache.find(
+        (p) => p.name.toLowerCase() === arg.toLowerCase());
+      applyPersona(hit ? hit.name : arg);
       return true;
     }
     case "pin": {
@@ -2069,6 +2174,7 @@ refreshModels().then(() => populateSetupModels());
 // Server persistence depends on knowing the privacy state first.
 refreshCtxLimit().then(initServerConversations);
 refreshKbSelect();
+refreshPersonas();
 setInterval(refreshModels, 30000);
 renderConvList();
 if (chat.conversations.length) {

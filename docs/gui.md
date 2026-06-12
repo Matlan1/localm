@@ -44,6 +44,10 @@ same flows (file / folder / URL).
 - Model selector in the sidebar lists every registered model. Switching loads the new model and unloads the old one (the switch waits for any in-flight request to finish).
 - Streaming responses with markdown and highlighted code blocks, copy buttons on messages and code.
 - The parameters drawer sets temperature, top-p, max tokens, seed, and a system prompt per conversation.
+- Personas: save the current system prompt + sampling values under a name
+  (drawer → save…), then apply them from the drawer select or with
+  `/persona <name>`. Stored in `prompts.json` in the localm data directory —
+  explicit user assets, available in every session mode.
 - Conversation persistence follows the session mode. In `privacy` (the default) conversations live in memory only and vanish on reload. In `log`/`full` they are saved to `chats/` in the localm data directory (with localStorage as a cache), so they survive reloads, browser profile wipes, and server restarts. Deleting one removes it everywhere.
 - The sidebar search filters chats by title **and** message content (content
   matches show a snippet). Hover a chat for 📌 pin-to-top and 📁 move-to-folder;
