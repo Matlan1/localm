@@ -102,6 +102,10 @@ DEFAULT_CONFIG: dict = {
     "net_deny": [],             # domains always refused (wins over allow)
     "net_allow_private": False, # True = permit loopback/private targets (SSRF guard off)
     "net_search_url": None,     # SearXNG base URL; None = DuckDuckGo (no key)
+    # Speech-to-text (GUI mic button; needs the [voice] extra).
+    # Model sizes: tiny / base / small / medium — bigger = better + slower.
+    "voice_stt_model": "base",
+    "voice_stt_language": None,  # None = auto-detect; or "en", "de", …
 }
 
 # localm claims 8642-8741 — far from ComfyUI (8188), A1111 (7860),

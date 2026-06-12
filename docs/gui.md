@@ -54,6 +54,13 @@ same flows (file / folder / URL).
   Privacy semantics: privacy mode blocks memory **writes** (no new traces)
   but still injects what earlier non-privacy sessions saved — privacy means
   no traces, not amnesia.
+- Voice: the 🎤 button records from the microphone and transcribes locally
+  with Whisper into the composer (needs `pip install "localm[voice]"`; the
+  model downloads once on first use, then everything is offline; recordings
+  are processed in memory, never written to disk). Every reply has a 🔊
+  read-aloud button, and the "Speak replies aloud" drawer toggle reads each
+  finished reply automatically — both use the browser's built-in offline
+  voices, no setup at all.
 - Conversation persistence follows the session mode. In `privacy` (the default) conversations live in memory only and vanish on reload. In `log`/`full` they are saved to `chats/` in the localm data directory (with localStorage as a cache), so they survive reloads, browser profile wipes, and server restarts. Deleting one removes it everywhere.
 - The sidebar search filters chats by title **and** message content (content
   matches show a snippet). Hover a chat for 📌 pin-to-top and 📁 move-to-folder;

@@ -142,6 +142,13 @@ GUI gaps identified by comparing against LM Studio, Jan, Open WebUI.
 - [x] Chat: `/web <query>` command and a per-conversation "Web access" toggle — the model emits `<tool_call>` web requests, the GUI executes them through the policy and injects results as visible dimmed "Web" messages (max 3 rounds per send)
 - [x] Behaviour change: `fetch_url` to localhost/private addresses is now blocked by default (`net_allow_private true` restores it)
 
+### Round 12 (shipped 2026-06-12) — voice
+
+- [x] `localm/voice.py` + `[voice]` extra: Whisper STT via faster-whisper (CPU int8 — runs on the GGUF-only base install, no torch); model from config `voice_stt_model` (default "base"), downloaded once on first use, then fully offline
+- [x] `POST /api/voice/transcribe` (in-memory decode, never touches disk → privacy-clean; 501 with install hint when the extra is missing)
+- [x] 🎤 mic button in the composer (MediaRecorder, click to start/stop, transcript lands in the input)
+- [x] TTS with zero backend: 🔊 read-aloud per reply (toggle to stop) + "Speak replies aloud" drawer checkbox — browser speechSynthesis, offline by construction
+
 ### Round 11 (shipped 2026-06-12) — assistant memory
 
 - [x] `<data dir>/chat-memory.md`: plain markdown the user can read/edit; `GET/PUT /api/memory` + `POST /api/memory/append`; size-capped; clearing deletes the file
@@ -240,7 +247,7 @@ mode stays trace-free.
 - [x] Message branching (shipped 2026-06-12, see Round 9): edit forks instead of deleting, regenerate keeps the old reply as a variant, ‹ k/N › navigation at fork points
 - [x] Persistent assistant memory for chat (shipped 2026-06-12, see Round 11): `chat-memory.md` injected via the 🧠 drawer toggle; `/remember` + `/memory`; writes blocked in privacy mode, reads allowed
 - [x] Prompt library / personas (shipped 2026-06-12, see Round 10): named system prompts with sampling defaults, saved/applied from the params drawer or `/persona <name>`
-- [ ] Voice: Whisper STT input + TTS read-aloud (audio decode plumbing exists in `inference/media.py`)
+- [x] Voice (shipped 2026-06-12, see Round 12): 🎤 Whisper STT via the `[voice]` extra (faster-whisper, CPU int8, no torch); 🔊 read-aloud + auto-speak via the browser's offline speechSynthesis
 - [x] Web search grounding for chat and coder (shipped 2026-06-11, see Round 4): `localm/netpolicy.py` policy choke point (off/ask/allow, domain allow/deny, SSRF guard), coder `web_search` tool + gated `fetch_url`, `/api/web/*`, chat `/web` command + per-conversation web-access toggle with bounded tool loop ([docs/network.md](docs/network.md))
 
 ### Medium

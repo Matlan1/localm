@@ -59,6 +59,7 @@
           <div><label>Seed</label><input id="p-seed" type="number" step="1" placeholder="random"></div>
           <div class="full check-row"><label title="Lets the model search the web and read pages mid-conversation (uses the server's network policy). Off = fully offline chat."><input type="checkbox" id="p-web"> &#127760; Web access — the model may search and read pages</label></div>
           <div class="full check-row"><label title="Injects your memory file (chat-memory.md) into the system prompt. Add facts with /remember, view or edit with /memory. Writes are blocked in privacy mode."><input type="checkbox" id="p-memory" checked> &#129504; Memory — remind the model what it knows about you</label></div>
+          <div class="full check-row"><label title="Reads each finished reply aloud with the browser's built-in offline voices. Every assistant message also has a 🔊 button."><input type="checkbox" id="p-speak"> &#128266; Speak replies aloud</label></div>
           <div class="full"><label>&#128218; Knowledge — ground replies in an indexed collection (manage on the Knowledge page)</label><select id="p-kb"><option value="">(none)</option></select></div>
           <div class="full"><label>System prompt</label><textarea id="p-system" rows="3" placeholder="You are a helpful assistant."></textarea></div>
           <div class="full"><label>GBNF grammar (constrains output; local models only)</label><textarea id="p-grammar" rows="3" placeholder='root ::= "yes" | "no"' spellcheck="false"></textarea></div>
@@ -66,6 +67,7 @@
         <div id="attach-chips"></div>
         <div class="composer">
           <button class="attach" id="chat-attach" title="Attach images or documents (pdf, docx, txt, md, …)">&#128206;</button>
+          <button class="attach" id="chat-mic" title="Hold a thought, speak it — click to record, click again to transcribe (needs the [voice] extra)">&#127908;</button>
           <input type="file" id="chat-file" accept="image/*,.pdf,.docx,.txt,.md,.markdown,.rst,.html,.htm,.ipynb,.json,.jsonl,.yaml,.yml,.toml,.csv,.tsv,.log,.py,.js,.ts,.java,.c,.h,.cpp,.cs,.go,.rs,.rb,.sh,.ps1,.sql,.xml,.css" multiple style="display:none">
           <textarea id="chat-input" rows="1" placeholder="Message the model…  (Ctrl+Enter to send)"></textarea>
           <button class="send" id="chat-send" title="Send">&#10148;</button>
