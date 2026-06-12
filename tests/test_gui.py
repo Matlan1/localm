@@ -660,21 +660,26 @@ class TestConversationStore:
             assert client.delete(
                 "/api/conversations/abc123").json()["status"] == "absent"
 
-    def test_pinned_and_folder_roundtrip(self, persist_app, monkeypatch):
+    def test_pinned_folder_branches_roundtrip(self, persist_app, monkeypatch):
         monkeypatch.setenv("LOCALM_MODE", "log")
         app, _ = persist_app
+        branches = [{"parent": "root", "current": 1,
+                     "tails": [[{"role": "user", "content": "old", "id": "a-1"}],
+                               None]}]
         with TestClient(app) as client:
             client.put("/api/conversations/org1", json={
                 "title": "work", "updated_at": 1, "pinned": True,
-                "folder": "projects", "messages": []})
+                "folder": "projects", "branches": branches, "messages": []})
             client.put("/api/conversations/org2", json={
                 "title": "plain", "updated_at": 2, "messages": []})
             convs = {c["id"]: c for c in
                      client.get("/api/conversations").json()["conversations"]}
         assert convs["org1"]["pinned"] is True
         assert convs["org1"]["folder"] == "projects"
+        assert convs["org1"]["branches"] == branches
         assert convs["org2"]["pinned"] is False     # defaults applied
         assert convs["org2"]["folder"] is None
+        assert convs["org2"]["branches"] == []
 
     def test_list_sorted_newest_first(self, persist_app, monkeypatch):
         monkeypatch.setenv("LOCALM_MODE", "log")

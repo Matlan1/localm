@@ -142,6 +142,13 @@ GUI gaps identified by comparing against LM Studio, Jan, Open WebUI.
 - [x] Chat: `/web <query>` command and a per-conversation "Web access" toggle — the model emits `<tool_call>` web requests, the GUI executes them through the policy and injects results as visible dimmed "Web" messages (max 3 rounds per send)
 - [x] Behaviour change: `fetch_url` to localhost/private addresses is now blocked by default (`net_allow_private true` restores it)
 
+### Round 9 (shipped 2026-06-12) — message branching
+
+- [x] Fork-point model: `conv.messages` stays the live linear branch (compaction, retrieval injection, export, and the API mapping untouched); alternative timelines park in `conv.branches` records keyed by the preceding message's id
+- [x] Edit-and-fork: editing a sent message parks the old tail as a sibling instead of destroying it; regenerate parks the old reply as a variant
+- [x] ‹ k/N › navigation in the message meta row at any fork point; switching writes the live tail back into its slot and splices in the chosen sibling
+- [x] Branches persist through the conversation store; cleared by `/clear`; fork records anchored in compacted-away history are pruned (conservatively — anchors inside parked tails are kept)
+
 ### Round 8 (shipped 2026-06-12) — conversation organization
 
 - [x] Sidebar search across ALL chats: matches titles and message content; content hits show a one-line snippet; searching auto-expands collapsed groups so matches are never hidden
@@ -218,7 +225,7 @@ mode stays trace-free.
 - [x] RAG / chat-with-documents (shipped 2026-06-12, see Round 6): in-chat document attachments (in-memory, privacy-clean) + persistent knowledge collections with cited retrieval; lexical-first BM25 with embeddings blended in when the backend supports them ([docs/rag.md](docs/rag.md))
 - [x] In-app model discovery (shipped 2026-06-12, see Round 7): HF search on the Models page + `localm search` CLI; per-quant sizes with "fits your VRAM" badges; "starter picks" = most-downloaded GGUF repos (dynamic, nothing hardcoded)
 - [x] Conversation search + folders/pinning (shipped 2026-06-12, see Round 8): sidebar full-text search with snippets, 📌 pin-to-top, collapsible 📁 folders, `/pin` + `/folder` commands; persisted through the server store in non-privacy modes
-- [ ] Message branching: edit-and-fork trees, regeneration variant navigation (< 2/3 >) instead of overwrite
+- [x] Message branching (shipped 2026-06-12, see Round 9): edit forks instead of deleting, regenerate keeps the old reply as a variant, ‹ k/N › navigation at fork points
 - [ ] Persistent assistant memory for chat (ChatGPT-style memory file injected into the system prompt; `LOCALCODER.md` is the coder analogue) — non-privacy only
 - [ ] Prompt library / personas: named system prompts with icons and default params
 - [ ] Voice: Whisper STT input + TTS read-aloud (audio decode plumbing exists in `inference/media.py`)

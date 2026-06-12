@@ -49,6 +49,12 @@ same flows (file / folder / URL).
   matches show a snippet). Hover a chat for 📌 pin-to-top and 📁 move-to-folder;
   folders are collapsible groups, and `/pin` and `/folder <name>` do the same
   from the composer. Pins and folders persist with the conversation.
+- Branching: regenerating a reply keeps the old one as a variant, and editing
+  a sent message forks the conversation instead of deleting what followed.
+  A ‹ 2/3 › control in the message meta row switches between siblings at any
+  fork point. Branches persist with the conversation; export and the model's
+  context always use the currently selected branch, and forks anchored in
+  history that gets compacted away are pruned.
 - The page you were on (chat, coder, models, …) is restored after a reload — except in privacy mode, which leaves no trace of it.
 - The usage line under the composer shows total tokens, time to first token, and tokens per second for the last reply.
 
