@@ -838,9 +838,10 @@ def music_cmd(tags, lyrics, duration, out, seed, steps, cfg):
                    "rule; ~5s is the model's native length).")
 @click.option("--fps", default=24, show_default=True, help="Frame rate.")
 @click.option("--width", type=int, default=None,
-              help="Width (multiple of 16; default 832).")
+              help="Width (multiple of 16; default 1280 — the model's native "
+                   "resolution; quality collapses well below it).")
 @click.option("--height", type=int, default=None,
-              help="Height (multiple of 16; default 480).")
+              help="Height (multiple of 16; default 704 — see --width).")
 @click.option("--image", "input_image", type=click.Path(exists=True),
               default=None,
               help="Animate this picture instead of starting from noise "

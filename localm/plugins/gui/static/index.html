@@ -256,9 +256,10 @@
       <div class="page">
         <h2>Video generation</h2>
         <div class="sub">Runs the Wan 2.2 workflow on your local ComfyUI (same VRAM
-        handover as image generation). ~5 seconds is the model's native length —
-        longer clips cost VRAM and time linearly and lose coherence. Video is the
-        slowest generator: expect many minutes per clip.</div>
+        handover as image generation). Keep the native 1280&times;704 resolution —
+        the model was trained at 720p and quality collapses below it; iterate with
+        short durations and fewer steps instead (~5 s is the native length). Video
+        is the slowest generator: minutes to hours per clip.</div>
         <div class="card">
           <label>Prompt — subject, motion, camera, lighting (motion verbs matter)</label>
           <textarea id="video-prompt" rows="2" placeholder="a red fox running through fresh snow, low camera tracking shot, golden hour"></textarea>
@@ -267,8 +268,8 @@
           <div class="grid2">
             <div><label>Duration (seconds)</label><input type="number" id="video-seconds" value="5" min="1" max="20" step="1"></div>
             <div><label>FPS</label><input type="number" id="video-fps" value="24" min="8" max="60" step="1"></div>
-            <div><label>Width</label><input type="number" id="video-width" step="16" placeholder="default (832)"></div>
-            <div><label>Height</label><input type="number" id="video-height" step="16" placeholder="default (480)"></div>
+            <div><label>Width</label><input type="number" id="video-width" step="16" placeholder="default (1280, native)"></div>
+            <div><label>Height</label><input type="number" id="video-height" step="16" placeholder="default (704, native)"></div>
             <div><label>Seed</label><input type="number" id="video-seed" placeholder="random"></div>
             <div><label>Steps</label><input type="number" id="video-steps" placeholder="default (30)"></div>
             <div><label>CFG</label><input type="number" id="video-cfg" step="0.5" placeholder="default (5.0)"></div>
