@@ -54,6 +54,11 @@ def main(model, host, port, ctx, gpu_layers, no_browser, pull_spec, debug, mode)
     from rich.console import Console
     console = Console()
 
+    # A click into this console window must not freeze the server
+    # (Windows QuickEdit suspends output, and output blocks inference).
+    from localm.winconsole import disable_quickedit
+    disable_quickedit()
+
     if debug:
         from localm.debuglog import enable_debug
         console.print(f"[yellow]debug log:[/yellow] {enable_debug()}")
