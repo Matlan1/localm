@@ -781,6 +781,118 @@ def add(path, name, no_hash, on_duplicate):
     add_local(path, name, on_duplicate=on_duplicate, no_hash=no_hash)
 
 
+@main.group("rag")
+def rag_group():
+    """Knowledge collections — chat with your documents (offline RAG).
+
+    Index files or folders into named collections, then ground chat replies
+    in them: pick the collection in the GUI's parameters drawer, or query
+    from the terminal. Retrieval is BM25 (always available offline);
+    embeddings are blended in when indexed via the GUI with a model that
+    supports them. PDF needs the [rag] extra:  pip install "localm[rag]"
+    """
+
+
+@rag_group.command("list")
+def rag_list():
+    """List collections with document and chunk counts."""
+    from rich.console import Console
+    from .rag import Collection, collection_names
+    console = Console()
+    names = collection_names()
+    if not names:
+        console.print("[dim]No collections yet. "
+                      "Create one:  localm rag add <name> <path>[/dim]")
+        return
+    for n in names:
+        s = Collection(n).stats()
+        retrieval = "hybrid" if s["has_vectors"] else "BM25"
+        console.print(f"[cyan]{n}[/cyan]  {s['n_docs']} docs · "
+                      f"{s['n_chunks']} chunks · {retrieval}")
+
+
+@rag_group.command("add")
+@click.argument("collection")
+@click.argument("paths", nargs=-1, required=True)
+def rag_add(collection, paths):
+    """Index files/folders into COLLECTION (created if missing).
+
+    Folders are indexed recursively (txt/md/pdf/docx/html/code). Unchanged
+    files are skipped; changed ones are re-indexed. CLI indexing is
+    lexical-only — index from the GUI to add embeddings when the active
+    model supports them.
+
+    \b
+    Examples:
+      localm rag add manuals D:\\docs\\printer-manual.pdf
+      localm rag add project D:\\projects\\myapp
+    """
+    from rich.console import Console
+    from .rag import Collection
+    console = Console()
+    try:
+        coll = Collection(collection)
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        sys.exit(1)
+    coll.create()
+    result = coll.add_paths(list(paths),
+                            on_progress=lambda t: console.print(f"  [dim]{t}[/dim]"))
+    console.print(f"[green]{result['added']} added, {result['updated']} updated, "
+                  f"{result['skipped']} unchanged[/green] — "
+                  f"{result['chunks']} chunks in '{collection}'")
+    for f in result["failed"]:
+        console.print(f"  [yellow]failed:[/yellow] {f['path']}: {f['error']}")
+    if result["failed"]:
+        sys.exit(1)
+
+
+@rag_group.command("query")
+@click.argument("collection")
+@click.argument("text")
+@click.option("-k", default=4, show_default=True, help="Number of results.")
+def rag_query(collection, text, k):
+    """Show the top-K chunks COLLECTION returns for TEXT."""
+    from rich.console import Console
+    from .rag import Collection
+    console = Console()
+    coll = Collection(collection)
+    if not coll.exists():
+        console.print(f"[red]No such collection:[/red] {collection}")
+        sys.exit(1)
+    hits = coll.query(text, k=k)
+    if not hits:
+        console.print("[dim](no matches)[/dim]")
+        return
+    for i, h in enumerate(hits, 1):
+        console.print(f"[cyan][{i}][/cyan] [bold]{h['source']}[/bold]:{h['pos']} "
+                      f"[dim](score {h['score']})[/dim]")
+        excerpt = h["text"][:300].replace("\n", " ")
+        console.print(f"    {excerpt}\n")
+
+
+@rag_group.command("rm")
+@click.argument("collection")
+@click.option("-y", "--yes", is_flag=True, help="Skip confirmation.")
+def rag_rm(collection, yes):
+    """Delete a collection (the index only — original files are untouched)."""
+    from rich.console import Console
+    from .rag import delete_collection
+    console = Console()
+    if not yes:
+        click.confirm(f"Delete collection '{collection}'? Original files are "
+                      "kept; only the index is removed.", abort=True)
+    try:
+        if delete_collection(collection):
+            console.print(f"[green]Deleted '{collection}'.[/green]")
+        else:
+            console.print(f"[red]No such collection:[/red] {collection}")
+            sys.exit(1)
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        sys.exit(1)
+
+
 @main.command()
 @click.argument("existing", shell_complete=_complete_model_name)
 @click.argument("new_name")

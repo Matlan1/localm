@@ -18,6 +18,7 @@
       <button id="nav-coder">&#9881;&#65039; Coder</button>
       <button id="nav-models">&#128230; Models</button>
       <button id="nav-images">&#127912; Images</button>
+      <button id="nav-knowledge">&#128218; Knowledge</button>
       <button id="nav-plugins">&#129513; Plugins</button>
       <button id="nav-settings">&#9965; Settings</button>
     </nav>
@@ -49,13 +50,14 @@
           <div><label>Max tokens</label><input id="p-max-tokens" type="number" step="64" min="1" placeholder="default"></div>
           <div><label>Seed</label><input id="p-seed" type="number" step="1" placeholder="random"></div>
           <div class="full check-row"><label title="Lets the model search the web and read pages mid-conversation (uses the server's network policy). Off = fully offline chat."><input type="checkbox" id="p-web"> &#127760; Web access — the model may search and read pages</label></div>
+          <div class="full"><label>&#128218; Knowledge — ground replies in an indexed collection (manage on the Knowledge page)</label><select id="p-kb"><option value="">(none)</option></select></div>
           <div class="full"><label>System prompt</label><textarea id="p-system" rows="3" placeholder="You are a helpful assistant."></textarea></div>
           <div class="full"><label>GBNF grammar (constrains output; local models only)</label><textarea id="p-grammar" rows="3" placeholder='root ::= "yes" | "no"' spellcheck="false"></textarea></div>
         </div>
         <div id="attach-chips"></div>
         <div class="composer">
-          <button class="attach" id="chat-attach" title="Attach image">&#128247;</button>
-          <input type="file" id="chat-file" accept="image/*" multiple style="display:none">
+          <button class="attach" id="chat-attach" title="Attach images or documents (pdf, docx, txt, md, …)">&#128206;</button>
+          <input type="file" id="chat-file" accept="image/*,.pdf,.docx,.txt,.md,.markdown,.rst,.html,.htm,.ipynb,.json,.jsonl,.yaml,.yml,.toml,.csv,.tsv,.log,.py,.js,.ts,.java,.c,.h,.cpp,.cs,.go,.rs,.rb,.sh,.ps1,.sql,.xml,.css" multiple style="display:none">
           <textarea id="chat-input" rows="1" placeholder="Message the model…  (Ctrl+Enter to send)"></textarea>
           <button class="send" id="chat-send" title="Send">&#10148;</button>
         </div>
@@ -192,6 +194,30 @@
         <div class="card">
           <h3>History</h3>
           <div id="img-history" class="img-grid"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ KNOWLEDGE ============ -->
+    <section id="view-knowledge" class="view">
+      <div class="page">
+        <h2>Knowledge</h2>
+        <div class="sub">Index folders or files into collections, then pick a collection in
+        the chat parameters drawer — replies get grounded in the most relevant excerpts,
+        with citations. Retrieval is BM25 (always works offline); embeddings are blended
+        in automatically when the active model supports them. Collections live in the
+        localm data directory under <code>rag/</code>.</div>
+        <div class="card">
+          <h3>New collection</h3>
+          <div class="row">
+            <input type="text" id="kb-name" placeholder="name (letters, digits, - _)" spellcheck="false" style="max-width:260px">
+            <button class="btn-primary" id="kb-create">Create</button>
+          </div>
+        </div>
+        <div class="card">
+          <h3>Collections</h3>
+          <div id="kb-table"></div>
+          <pre id="kb-log" class="job-log" style="display:none"></pre>
         </div>
       </div>
     </section>

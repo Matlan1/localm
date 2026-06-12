@@ -24,6 +24,7 @@ Everything that does not strictly need the internet works fully offline. Online 
 | **Web GUI** | `localm gui`: chat, coder agent, model manager, image generation, plugins, and settings in the browser; zero build step, fully offline ([guide](docs/gui.md)) |
 | **Coding agent** | `localm coder` / `localcoder`: agentic loop with file, shell, search, test, and image tools |
 | **Web access (opt-in)** | `web_search` + `fetch_url` for coder and chat via one network policy: `off`/`ask`/`allow`, domain allow/deny, private-address SSRF guard ([guide](docs/network.md)) |
+| **Knowledge (RAG)** | Chat with your documents: attach files in chat (in-memory, privacy-clean) or index folders into collections with cited retrieval — BM25 always, embeddings blended in when the backend supports them ([guide](docs/rag.md)) |
 | **MCP client** | The coder consumes external MCP tool servers from `.localcoder/config.toml` |
 | **MCP server** | `localm mcp` exposes your local models to Claude Desktop and other MCP clients ([guide](docs/mcp.md)) |
 | **Interactive chat** | Multi-turn shell with `/imagine`, `/compact`, `/clear`, `/image`, `/system`, `/save` |
@@ -233,6 +234,15 @@ localm info                          # paths + current config
 
 `localm rm` only deletes the file when the last alias pointing at it is removed, and the confirmation prompt states exactly what will happen.
 
+### Knowledge (RAG)
+
+```bash
+localm rag add NAME PATH...      # index files/folders into a collection
+localm rag list                  # collections with doc/chunk counts
+localm rag query NAME "text"     # show the top matching excerpts
+localm rag rm NAME [--yes]       # delete a collection (index only, files kept)
+```
+
 ### Configuration
 
 ```bash
@@ -364,6 +374,7 @@ Stop strings (`<|im_end|>`, `<end_of_turn>`, etc.) are filtered via a streaming 
 | [docs/llamacpp-binding.md](docs/llamacpp-binding.md) | The ctypes binding internals |
 | [docs/gpu-setup.md](docs/gpu-setup.md) | GPU/DLL setup |
 | [docs/flux-setup.md](docs/flux-setup.md) | ComfyUI FLUX image pipeline |
+| [docs/rag.md](docs/rag.md) | Knowledge: chat with your documents, collections, retrieval design |
 | [docs/network.md](docs/network.md) | Internet access for coder and chat: modes, domain rules, SSRF guard |
 | [docs/tls.md](docs/tls.md) | API keys, TLS, and reverse proxies for LAN serving |
 

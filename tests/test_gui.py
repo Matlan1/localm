@@ -797,6 +797,123 @@ class TestWebEndpoints:
 
 
 # ------------------------------------------------------------------ #
+#  Knowledge endpoints (/api/rag/*)                                    #
+# ------------------------------------------------------------------ #
+
+class TestRagEndpoints:
+    """persist_app monkeypatches Path.home → collections land under tmp."""
+
+    @staticmethod
+    def _wait_job(client, job_id, timeout=30):
+        """Stream a job's SSE events until the end frame; return all lines."""
+        import time as _time
+        lines, end = [], None
+        deadline = _time.monotonic() + timeout
+        with client.stream("GET", f"/api/jobs/{job_id}/events") as r:
+            for raw in r.iter_lines():
+                if _time.monotonic() > deadline:
+                    break
+                if not raw.startswith("data: "):
+                    continue
+                ev = json.loads(raw[6:])
+                if ev["type"] == "line":
+                    lines.append(ev["text"])
+                if ev["type"] == "end":
+                    end = ev
+                    break
+        return end, lines
+
+    def test_create_list_detail_delete(self, persist_app):
+        app, _ = persist_app
+        with TestClient(app) as client:
+            assert client.get("/api/rag/collections").json() == {"collections": []}
+            r = client.post("/api/rag/collections", json={"name": "kb1"})
+            assert r.status_code == 200
+            assert r.json()["name"] == "kb1"
+            # duplicate
+            assert client.post("/api/rag/collections",
+                               json={"name": "kb1"}).status_code == 409
+            # invalid name
+            assert client.post("/api/rag/collections",
+                               json={"name": "a b"}).status_code == 400
+            data = client.get("/api/rag/collections").json()
+            assert [c["name"] for c in data["collections"]] == ["kb1"]
+            detail = client.get("/api/rag/collections/kb1").json()
+            assert detail["n_docs"] == 0 and detail["docs"] == []
+            assert client.delete("/api/rag/collections/kb1").status_code == 200
+            assert client.delete("/api/rag/collections/kb1").status_code == 404
+
+    def test_add_and_query_roundtrip(self, persist_app, tmp_path):
+        app, _ = persist_app
+        docs = tmp_path / "kdocs"
+        docs.mkdir()
+        (docs / "gpu.md").write_text(
+            "ROCm needs the gfx1030 runtime DLLs.", encoding="utf-8")
+        with TestClient(app) as client:
+            client.post("/api/rag/collections", json={"name": "kb"})
+            # unknown collection / bad path validation
+            assert client.post("/api/rag/collections/ghost/add",
+                               json={"paths": [str(docs)]}).status_code == 404
+            assert client.post("/api/rag/collections/kb/add",
+                               json={"paths": ["Z:/nope"]}).status_code == 400
+
+            r = client.post("/api/rag/collections/kb/add",
+                            json={"paths": [str(docs)], "embed": False})
+            assert r.status_code == 200
+            end, lines = self._wait_job(client, r.json()["job_id"])
+            assert end and end["status"] == "done"
+            assert any("1 added" in l for l in lines)
+
+            q = client.post("/api/rag/collections/kb/query",
+                            json={"query": "ROCm runtime DLLs"})
+            assert q.status_code == 200
+            hits = q.json()["hits"]
+            assert hits and "gpu.md" in hits[0]["source"]
+
+            assert client.post("/api/rag/collections/kb/query",
+                               json={"query": "  "}).status_code == 400
+            assert client.post(
+                "/api/rag/collections/kb/remove-doc",
+                json={"path": "Z:/never"}).status_code == 404
+            src = q.json()["hits"][0]["source"]
+            assert client.post("/api/rag/collections/kb/remove-doc",
+                               json={"path": src}).status_code == 200
+
+    def test_extract_endpoint(self, persist_app):
+        import base64
+        app, _ = persist_app
+        with TestClient(app) as client:
+            b64 = base64.b64encode("hello attachment".encode()).decode()
+            r = client.post("/api/rag/extract",
+                            json={"filename": "note.txt", "content_b64": b64})
+            assert r.status_code == 200
+            assert r.json()["text"] == "hello attachment"
+            assert r.json()["truncated"] is False
+            # invalid base64
+            assert client.post("/api/rag/extract",
+                               json={"filename": "x.txt",
+                                     "content_b64": "!!not-b64!!"}).status_code == 400
+            # unsupported type
+            exe = base64.b64encode(b"\x00\x01").decode()
+            assert client.post("/api/rag/extract",
+                               json={"filename": "x.exe",
+                                     "content_b64": exe}).status_code == 422
+
+    def test_extract_writes_nothing_to_disk(self, persist_app, tmp_path):
+        """Privacy guarantee: attachment extraction is in-memory only."""
+        import base64
+        app, _ = persist_app
+        home = tmp_path / ".localm"
+        before = {str(p) for p in home.rglob("*")} if home.exists() else set()
+        with TestClient(app) as client:
+            b64 = base64.b64encode(b"secret content").decode()
+            client.post("/api/rag/extract",
+                        json={"filename": "secret.txt", "content_b64": b64})
+        after = {str(p) for p in home.rglob("*")} if home.exists() else set()
+        assert after == before
+
+
+# ------------------------------------------------------------------ #
 #  Coder session history (past audit logs)                            #
 # ------------------------------------------------------------------ #
 
