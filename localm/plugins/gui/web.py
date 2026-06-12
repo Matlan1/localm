@@ -106,6 +106,8 @@ class ConfirmRequest(BaseModel):
 class ConversationUpsert(BaseModel):
     title: str = "Untitled"
     updated_at: float = 0
+    pinned: bool = False
+    folder: str | None = None
     messages: list = []
 
 
@@ -848,7 +850,9 @@ def attach_gui(
         path = _conv_path(conv_id)
         payload = json.dumps(
             {"id": conv_id, "title": req.title,
-             "updated_at": req.updated_at, "messages": req.messages},
+             "updated_at": req.updated_at,
+             "pinned": req.pinned, "folder": req.folder,
+             "messages": req.messages},
             ensure_ascii=False)
         if len(payload.encode("utf-8")) > _CONV_MAX_BYTES:
             raise HTTPException(413, "Conversation too large to persist")

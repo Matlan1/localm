@@ -382,6 +382,7 @@ async function refreshCtxLimit() {
         localStorage.removeItem("localm.activeView");
         localStorage.removeItem("localm.coderCwd");
         localStorage.removeItem("localm.kbAddPath");
+        localStorage.removeItem("localm.convCollapsed");
         const h = document.querySelector("#conversations h3");
         if (h && !document.getElementById("privacy-hint")) {
           const hint = document.createElement("div");
@@ -429,6 +430,8 @@ function pushConversation(conv) {
         headers: authHeaders(),
         body: JSON.stringify({ title: conv.title,
                                updated_at: conv.updated_at,
+                               pinned: !!conv.pinned,
+                               folder: conv.folder || null,
                                messages: conv.messages }),
       });
     } catch (e) { /* offline — localStorage still has the copy */ }
@@ -508,48 +511,170 @@ function msgImages(m) {
     .map((p) => p.image_url?.url).filter(Boolean);
 }
 
+/* ---- conversation list: search, pin, folders ---- */
+
+const convUI = {
+  search: "",
+  collapsed: new Set(JSON.parse(
+    localStorage.getItem("localm.convCollapsed") || "[]")),
+};
+
+function saveCollapsed() {
+  if (chat.privacy) return;   // folder names are conversation-derived
+  localStorage.setItem("localm.convCollapsed",
+    JSON.stringify([...convUI.collapsed]));
+}
+
+/** Short excerpt around the first content match, or null (no match). */
+function searchSnippet(conv, term) {
+  for (const m of conv.messages) {
+    const text = msgText(m);
+    const idx = text.toLowerCase().indexOf(term);
+    if (idx !== -1) {
+      const start = Math.max(0, idx - 18);
+      return (start > 0 ? "…" : "") +
+        text.slice(start, idx + 50).replace(/\s+/g, " ");
+    }
+  }
+  return null;
+}
+
+function buildConvItem(conv, snippet) {
+  const item = el("div", "conv-item" + (conv.id === chat.activeId ? " active" : ""));
+  const title = el("span", "title");
+  title.appendChild(document.createTextNode(conv.title));
+  if (snippet) title.appendChild(el("span", "snippet", snippet));
+  title.ondblclick = (e) => {
+    e.stopPropagation();
+    const input = document.createElement("input");
+    input.value = conv.title;
+    const commit = () => {
+      conv.title = input.value.trim() || conv.title;
+      saveConversations(conv);
+      renderConvList();
+    };
+    input.onblur = commit;
+    input.onkeydown = (ke) => { if (ke.key === "Enter") input.blur(); };
+    item.replaceChild(input, title);
+    input.focus();
+    input.select();
+  };
+  item.appendChild(title);
+
+  const pin = el("button", "del" + (conv.pinned ? " pinned-btn" : ""), "📌");
+  pin.title = conv.pinned ? "Unpin" : "Pin to top";
+  pin.onclick = (e) => {
+    e.stopPropagation();
+    conv.pinned = !conv.pinned;
+    if (!conv.pinned) delete conv.pinned;
+    saveConversations(conv);
+    renderConvList();
+  };
+  item.appendChild(pin);
+
+  const fold = el("button", "del", "📁");
+  fold.title = conv.folder ? `Folder: ${conv.folder} (click to change)`
+                           : "Move to a folder";
+  fold.onclick = (e) => {
+    e.stopPropagation();
+    const name = prompt("Folder name (empty removes it from the folder):",
+                        conv.folder || "");
+    if (name === null) return;
+    if (name.trim()) conv.folder = name.trim();
+    else delete conv.folder;
+    saveConversations(conv);
+    renderConvList();
+  };
+  item.appendChild(fold);
+
+  const del = el("button", "del", "×");
+  del.title = "Delete conversation";
+  del.onclick = (e) => {
+    e.stopPropagation();
+    chat.conversations = chat.conversations.filter((c) => c.id !== conv.id);
+    if (chat.activeId === conv.id) chat.activeId = chat.conversations[0]?.id || null;
+    deleteConversationRemote(conv.id);
+    saveConversations();
+    renderConvList();
+    renderChat();
+  };
+  item.appendChild(del);
+
+  item.onclick = () => {
+    chat.activeId = conv.id;
+    renderConvList();
+    renderChat();
+    showView("chat");
+  };
+  return item;
+}
+
 function renderConvList() {
   const list = $("conv-list");
-  list.innerHTML = "";
+  list.replaceChildren();
+  const term = convUI.search.trim().toLowerCase();
+
+  // Filter: title match shows plain; content match shows a snippet
+  const visible = [];
   for (const conv of chat.conversations) {
-    const item = el("div", "conv-item" + (conv.id === chat.activeId ? " active" : ""));
-    const title = el("span", "title", conv.title);
-    title.ondblclick = (e) => {
-      e.stopPropagation();
-      const input = document.createElement("input");
-      input.value = conv.title;
-      const commit = () => {
-        conv.title = input.value.trim() || conv.title;
-        saveConversations(conv);
+    if (!term) {
+      visible.push({ conv, snippet: null });
+    } else if ((conv.title || "").toLowerCase().includes(term)) {
+      visible.push({ conv, snippet: null });
+    } else {
+      const snippet = searchSnippet(conv, term);
+      if (snippet !== null) visible.push({ conv, snippet });
+    }
+  }
+
+  // Group: pinned on top, then folders (A-Z), then the rest
+  const pinned = visible.filter((v) => v.conv.pinned);
+  const folders = new Map();
+  const loose = [];
+  for (const v of visible) {
+    if (v.conv.pinned) continue;
+    if (v.conv.folder) {
+      if (!folders.has(v.conv.folder)) folders.set(v.conv.folder, []);
+      folders.get(v.conv.folder).push(v);
+    } else {
+      loose.push(v);
+    }
+  }
+
+  const addGroup = (label, key, items) => {
+    if (!items.length) return;
+    if (label) {
+      // While searching, groups stay expanded so matches are never hidden
+      const collapsed = !term && convUI.collapsed.has(key);
+      const head = el("div", "conv-group", (collapsed ? "▸ " : "▾ ") + label);
+      head.onclick = () => {
+        if (convUI.collapsed.has(key)) convUI.collapsed.delete(key);
+        else convUI.collapsed.add(key);
+        saveCollapsed();
         renderConvList();
       };
-      input.onblur = commit;
-      input.onkeydown = (ke) => { if (ke.key === "Enter") input.blur(); };
-      item.replaceChild(input, title);
-      input.focus();
-      input.select();
-    };
-    item.appendChild(title);
-    const del = el("button", "del", "×");
-    del.onclick = (e) => {
-      e.stopPropagation();
-      chat.conversations = chat.conversations.filter((c) => c.id !== conv.id);
-      if (chat.activeId === conv.id) chat.activeId = chat.conversations[0]?.id || null;
-      deleteConversationRemote(conv.id);
-      saveConversations();
-      renderConvList();
-      renderChat();
-    };
-    item.appendChild(del);
-    item.onclick = () => {
-      chat.activeId = conv.id;
-      renderConvList();
-      renderChat();
-      showView("chat");
-    };
-    list.appendChild(item);
+      list.appendChild(head);
+      if (collapsed) return;
+    }
+    for (const v of items) list.appendChild(buildConvItem(v.conv, v.snippet));
+  };
+
+  addGroup(pinned.length ? "📌 pinned" : "", "::pinned", pinned);
+  for (const name of [...folders.keys()].sort()) {
+    addGroup("📁 " + name, "f:" + name, folders.get(name));
+  }
+  addGroup((pinned.length || folders.size) && loose.length ? "chats" : "",
+           "::chats", loose);
+
+  if (term && !visible.length) {
+    list.appendChild(el("div", "privacy-hint", "no matching chats"));
   }
 }
+
+$("conv-search").addEventListener("input", (e) => {
+  convUI.search = e.target.value;
+  renderConvList();
+});
 
 function addMessageRow(container, role, text, opts = {}) {
   const row = el("div", "msg-row " + role + (opts.cls ? " " + opts.cls : ""));
@@ -1599,6 +1724,8 @@ const CHAT_COMMANDS = [
   { cmd: "compact", hint: "summarise older messages to free context" },
   { cmd: "export", hint: "download this conversation as markdown" },
   { cmd: "rename", hint: "rename this conversation", args: "<title>" },
+  { cmd: "pin", hint: "pin/unpin this conversation" },
+  { cmd: "folder", hint: "move this conversation to a folder (empty = remove)", args: "<name>" },
   { cmd: "system", hint: "edit the system prompt" },
   { cmd: "new", hint: "start a new conversation" },
 ];
@@ -1699,6 +1826,26 @@ function execChatCommand(cmd, arg) {
       const conv = currentConv();
       if (conv && arg) { conv.title = arg; saveConversations(conv); renderConvList(); }
       else toast("Usage: /rename <title>", true);
+      return true;
+    }
+    case "pin": {
+      const conv = currentConv();
+      if (!conv) return true;
+      conv.pinned = !conv.pinned;
+      if (!conv.pinned) delete conv.pinned;
+      saveConversations(conv);
+      renderConvList();
+      toast(conv.pinned ? "Pinned" : "Unpinned");
+      return true;
+    }
+    case "folder": {
+      const conv = currentConv();
+      if (!conv) return true;
+      if (arg) conv.folder = arg;
+      else delete conv.folder;
+      saveConversations(conv);
+      renderConvList();
+      toast(arg ? `Moved to folder '${arg}'` : "Removed from its folder");
       return true;
     }
     case "system":
