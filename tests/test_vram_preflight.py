@@ -72,3 +72,51 @@ class TestVramPreflight:
             b.load()
         out = capsys.readouterr().out
         assert "low on memory" not in out
+
+
+class TestVramReport:
+    """The post-load VRAM line must use driver-level numbers (mem_get_info),
+    never torch allocator counters — llama.dll allocates outside torch, so
+    memory_allocated() reads 0.00 GB no matter what the model occupies."""
+
+    def _fake_torch(self, free_total_per_device):
+        import sys
+        from unittest.mock import MagicMock
+        fake = MagicMock()
+        fake.cuda.is_available.return_value = True
+        fake.cuda.device_count.return_value = len(free_total_per_device)
+        fake.cuda.mem_get_info.side_effect = \
+            lambda i: free_total_per_device[i]
+        return patch.dict(sys.modules, {"torch": fake})
+
+    def test_vram_levels_returns_driver_numbers(self):
+        with self._fake_torch([(4_000_000_000, 16_000_000_000)]):
+            levels = GgufBackend._vram_levels()
+        assert levels == [(4_000_000_000, 16_000_000_000)]
+
+    def test_vram_levels_empty_without_torch(self):
+        import sys
+        # Simulate torch being absent (import raises)
+        with patch.dict(sys.modules, {"torch": None}):
+            assert GgufBackend._vram_levels() == []
+
+    def test_load_reports_usage_delta(self, tmp_path, capsys):
+        """End to end through _load_native with a stubbed LlamaCpp: the
+        printed line shows in-use/total and the delta this load consumed."""
+        import sys
+        from unittest.mock import MagicMock
+        b = _backend(tmp_path, size_bytes=1_000_000)
+        # 12 GB free before the load, 4 GB free after -> 8 GB this load
+        levels = iter([[(12_000_000_000, 16_000_000_000)],
+                       [(4_000_000_000, 16_000_000_000)]])
+        fake_llamacpp = MagicMock()
+        with patch.object(GgufBackend, "_vram_levels",
+                          side_effect=lambda: next(levels)), \
+             patch("localm.inference.backends.llamacpp._loader.load_lib"), \
+             patch.dict(sys.modules,
+                        {"localm.inference.backends.llamacpp": fake_llamacpp}):
+            b._load_native()
+        out = capsys.readouterr().out
+        assert "12.00 GB in use / 16.00 GB total" in out
+        assert "+8.00 GB this load" in out
+        assert "0.00 GB allocated" not in out      # the old, wrong line
