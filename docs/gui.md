@@ -83,8 +83,14 @@ Stop asks the agent to halt at the next safe point. End session terminates it.
 
 ## Other pages
 
-- **Models**: pull with live progress, switch the active engine, add aliases,
-  inspect path/hash/size, and remove models (alias-aware, never the active one).
+- **Models**: search HuggingFace for GGUF models right on the page (empty
+  query shows the most downloaded), expand a repo to see every quantization
+  with its size and a "fits your VRAM" badge (compared against total VRAM,
+  measured via torch, nvidia-smi, or the Windows display-adapter registry —
+  no torch required), and pull any file with one click. Plus: pull by spec
+  with live progress, switch the active engine, add aliases, inspect
+  path/hash/size, and remove models (alias-aware, never the active one).
+  Search is lazy — no network request until you ask.
 - **Images**: drive the local ComfyUI FLUX pipeline; prompt, negative prompt,
   seed, guidance, img2img with denoise; history grid with per-image metadata
   from the sidecar files. If ComfyUI is not running, the job says how to

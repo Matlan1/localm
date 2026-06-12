@@ -718,6 +718,61 @@ def pull(model_spec, name, sha256, redownload):
     pull_model(model_spec, name, expected_sha256=sha256, redownload=redownload)
 
 
+@main.command("search")
+@click.argument("query", nargs=-1)
+@click.option("-n", "--limit", default=10, show_default=True, help="Max repos.")
+@click.option("--files", "list_files", is_flag=True,
+              help="Treat QUERY as one repo id and list its GGUF files "
+                   "with per-quant VRAM fit.")
+def search_cmd(query, limit, list_files):
+    """Search HuggingFace for GGUF models (empty query = most downloaded).
+
+    \b
+    Examples:
+      localm search qwen2.5 7b instruct
+      localm search bartowski/Qwen2.5-7B-Instruct-GGUF --files
+    """
+    from rich.console import Console
+    from .discover import (DiscoverError, fit_label, hf_gguf_files,
+                           hf_search, vram_info)
+    console = Console()
+    text = " ".join(query).strip()
+    try:
+        if list_files:
+            if not text:
+                console.print("[red]--files needs a repo id, e.g. "
+                              "owner/repo[/red]")
+                sys.exit(1)
+            total = vram_info().get("total")
+            if total:
+                console.print(f"[dim]fit vs {total / 1e9:.0f} GB total VRAM "
+                              "(weights + ~1.5 GB overhead)[/dim]")
+            for f in hf_gguf_files(text):
+                fit = fit_label(f["size_bytes"], total)
+                badge = {"fits": "[green]fits[/green]",
+                         "tight": "[yellow]tight[/yellow]",
+                         "too-big": "[red]too big[/red]"}.get(fit, "")
+                parts = f" ({f['n_parts']} parts)" if f["n_parts"] > 1 else ""
+                console.print(
+                    f"  [cyan]{f['quant'] or '?':10}[/cyan] "
+                    f"{f['size_bytes'] / 1e9:6.1f} GB{parts}  {badge}  "
+                    f"[dim]{f['file']}[/dim]")
+            console.print(f"\n[dim]pull one:  localm pull {text}:<file>[/dim]")
+        else:
+            results = hf_search(text, limit=limit)
+            if not results:
+                console.print("[dim](no GGUF repos found)[/dim]")
+                return
+            for r in results:
+                console.print(f"[cyan]{r['id']}[/cyan]  "
+                              f"[dim]⬇ {r['downloads']:,}  ♥ {r['likes']:,}[/dim]")
+            console.print("\n[dim]list quants:  localm search <repo> "
+                          "--files[/dim]")
+    except DiscoverError as e:
+        console.print(f"[red]{e}[/red]")
+        sys.exit(1)
+
+
 @main.command("list")
 def list_cmd():
     """List registered models."""
