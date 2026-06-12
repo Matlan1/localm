@@ -33,11 +33,11 @@ from typing import Optional
 
 # Shared ComfyUI plumbing lives in image_gen — one server, one set of helpers
 from localm.image_gen.comfy import (
-    _comfy_alive,
     _localm_unload,
     _upload_image,
     comfy_http_error_detail,
     default_api_url,
+    ensure_comfy,
 )
 
 # wan_workflow.json is the committed generic template (public Wan 2.2 5B
@@ -149,13 +149,11 @@ def generate_video(
     if fps <= 0:
         return False, "FPS must be positive."
 
-    # Fail fast if ComfyUI is down — before costing the user an LLM unload
-    if not _comfy_alive(api_url):
-        return False, (
-            f"ComfyUI is not reachable at {api_url}.\n"
-            "Start ComfyUI first (default: http://127.0.0.1:8188), or set the "
-            "FLUX_API_URL environment variable if it runs elsewhere."
-        )
+    # Make sure ComfyUI is up (auto-launching when configured) — before
+    # costing the user an LLM unload
+    ok, msg = ensure_comfy(api_url, on_progress=_say)
+    if not ok:
+        return False, msg
 
     _localm_unload(localm_url)
 
