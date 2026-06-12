@@ -33,6 +33,14 @@ same flows (file / folder / URL).
   is shown as a dimmed "Web" message). Both run through the server's network
   policy — see [network.md](network.md). Off by default; without them chat is
   fully offline.
+- Documents: the paperclip attaches PDFs, docx, text, and code files alongside
+  images. They are converted to text in memory (nothing written to disk, so
+  privacy mode stays clean) and shown as a dimmed "Doc" message the model
+  reads before your question.
+- Knowledge: pick an indexed collection in the parameters drawer and every
+  question is answered against the most relevant excerpts, cited as `[1]`
+  (file + line). Collections are managed on the Knowledge page — see
+  [rag.md](rag.md).
 - Model selector in the sidebar lists every registered model. Switching loads the new model and unloads the old one (the switch waits for any in-flight request to finish).
 - Streaming responses with markdown and highlighted code blocks, copy buttons on messages and code.
 - The parameters drawer sets temperature, top-p, max tokens, seed, and a system prompt per conversation.
@@ -83,6 +91,10 @@ Stop asks the agent to halt at the next safe point. End session terminates it.
   start it, or starts it automatically when `comfy_launch_cmd` is set in the
   config. After a successful generation, ComfyUI is asked to release its
   models and the chat model reloads so the next reply is instant.
+- **Knowledge**: create document collections, index files or folders with live
+  progress, inspect/remove indexed documents, test-search a collection, and
+  delete collections (index only — original files untouched). Collections show
+  `hybrid` when embeddings are available, `BM25` otherwise.
 - **Plugins**: list installed plugins, install from a local folder, remove.
 - **Settings**: edit the server config (`~/.localm/config.json`) and the GUI's
   API key; light/dark theme toggle lives in the sidebar.

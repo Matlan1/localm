@@ -142,6 +142,14 @@ GUI gaps identified by comparing against LM Studio, Jan, Open WebUI.
 - [x] Chat: `/web <query>` command and a per-conversation "Web access" toggle — the model emits `<tool_call>` web requests, the GUI executes them through the policy and injects results as visible dimmed "Web" messages (max 3 rounds per send)
 - [x] Behaviour change: `fetch_url` to localhost/private addresses is now blocked by default (`net_allow_private true` restores it)
 
+### Round 6 (shipped 2026-06-12) — knowledge / RAG
+
+- [x] `localm/rag/` package: extraction (txt/md/code/html/docx/ipynb stdlib; pdf via the `[rag]` extra), paragraph-aware chunking, pure-stdlib BM25, JSON collection store under `<data dir>/rag/` with mtime-based re-indexing and atomic rewrites
+- [x] Lexical-first retrieval by design: the ctypes GGUF binding has no embedding support, so BM25 is the always-on baseline; embeddings (via the server's own `/v1/embeddings`) are stored when available and blended 50/50 — failures degrade, never break
+- [x] `/api/rag/*`: collection CRUD, indexing as a progress-streamed job, query, remove-doc, and `/api/rag/extract` (uploaded attachment → text entirely in memory — privacy-mode chats can use documents trace-free)
+- [x] GUI: Knowledge page (create/index/search/inspect/delete), chat params-drawer collection selector with cited excerpt injection, paperclip accepts documents alongside images ("Doc"/"Sources" dimmed messages)
+- [x] CLI: `localm rag add/list/query/rm`; `[rag]` extra (pypdf only)
+
 ### Round 5 (shipped 2026-06-11) — onboarding with no models
 
 - [x] `localm gui` opens model-less on an empty registry (engine starts when the user loads a model) instead of `exit(1)`; `/v1/models` + `/health` null-safe
@@ -193,7 +201,7 @@ mode stays trace-free.
 
 ### High impact
 
-- [ ] RAG / chat-with-documents: attach PDF/docx/txt in chat; persistent knowledge-base collections with embeddings (`/v1/embeddings` already exists) and citations in answers — the single biggest functional gap
+- [x] RAG / chat-with-documents (shipped 2026-06-12, see Round 6): in-chat document attachments (in-memory, privacy-clean) + persistent knowledge collections with cited retrieval; lexical-first BM25 with embeddings blended in when the backend supports them ([docs/rag.md](docs/rag.md))
 - [ ] In-app model discovery: search HuggingFace from the Models page, curated starter picks, per-quant "fits your VRAM" badges (reuse the VRAM preflight logic)
 - [ ] Conversation search + folders/pinning across all chats (build on the new server store)
 - [ ] Message branching: edit-and-fork trees, regeneration variant navigation (< 2/3 >) instead of overwrite
