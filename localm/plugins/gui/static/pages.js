@@ -141,6 +141,100 @@ async function showModelDetail(name) {
   });
 }
 
+/* ---- model discovery (HuggingFace search + VRAM fit badges) ---- */
+
+function fmtCount(n) {
+  if (n == null) return "0";
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
+  return String(n);
+}
+
+const FIT_TEXT = { "fits": "fits your VRAM", "tight": "tight fit",
+                   "too-big": "needs partial CPU offload" };
+
+async function discoverSearch() {
+  const box = $("disc-results");
+  box.replaceChildren(el("div", "sub", "searching HuggingFace…"));
+  $("disc-search").disabled = true;
+  try {
+    const q = $("disc-query").value.trim();
+    const r = await fetch("/api/discover/search?q=" + encodeURIComponent(q),
+                          { headers: authHeaders() });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    $("disc-vram").textContent = data.vram.total
+      ? `Badges compare each file against your ${(data.vram.total / 1e9).toFixed(0)} GB total VRAM (weights + ~1.5 GB overhead).`
+      : "No GPU VRAM detected — sizes shown without fit badges.";
+    box.replaceChildren();
+    if (!data.results.length) {
+      box.appendChild(el("div", "sub", "(no GGUF repos found)"));
+      return;
+    }
+    for (const m of data.results) {
+      const row = el("div", "disc-repo");
+      const head = el("div", "head");
+      head.appendChild(el("span", "name", m.id));
+      head.appendChild(el("span", "meta",
+        `⬇ ${fmtCount(m.downloads)}  ♥ ${fmtCount(m.likes)}`));
+      const btn = el("button", "", "files");
+      const filesBox = el("div", "files");
+      btn.onclick = () => discoverFiles(m.id, filesBox, btn);
+      head.appendChild(btn);
+      row.appendChild(head);
+      row.appendChild(filesBox);
+      box.appendChild(row);
+    }
+  } catch (e) {
+    box.replaceChildren(el("div", "sub", "Search failed: " + e.message));
+  } finally {
+    $("disc-search").disabled = false;
+  }
+}
+
+async function discoverFiles(repo, filesBox, btn) {
+  if (filesBox.childElementCount) {            // toggle collapse
+    filesBox.replaceChildren();
+    return;
+  }
+  btn.disabled = true;
+  filesBox.replaceChildren(el("div", "sub", "loading file list…"));
+  try {
+    const r = await fetch("/api/discover/files?repo=" + encodeURIComponent(repo),
+                          { headers: authHeaders() });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    filesBox.replaceChildren();
+    for (const f of data.files) {
+      const row = el("div", "disc-file");
+      row.appendChild(el("span", "quant", f.quant || "?"));
+      const desc = `${(f.size_bytes / 1e9).toFixed(1)} GB` +
+        (f.n_parts > 1 ? ` (${f.n_parts} parts)` : "");
+      row.appendChild(el("span", "mono", desc));
+      if (f.fit) row.appendChild(el("span", "fit " + f.fit, FIT_TEXT[f.fit]));
+      row.appendChild(el("span", "fname", f.file));
+      const pull = el("button", "", "pull");
+      pull.onclick = () => {
+        $("pull-spec").value = `${repo}:${f.file}`;
+        $("pull-name").value = "";
+        $("pull-start").click();
+        $("pull-log").scrollIntoView({ behavior: "smooth", block: "nearest" });
+      };
+      row.appendChild(pull);
+      filesBox.appendChild(row);
+    }
+  } catch (e) {
+    filesBox.replaceChildren(el("div", "sub", "Failed: " + e.message));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+$("disc-search").onclick = discoverSearch;
+$("disc-query").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") discoverSearch();
+});
+
 $("pull-start").onclick = async () => {
   const spec = $("pull-spec").value.trim();
   if (!spec) { toast("Enter a model spec", true); return; }

@@ -760,6 +760,46 @@ def attach_gui(
                               "mtime": p.stat().st_mtime})
         return {"tracks": items}
 
+    # ------------------------ model discovery --------------------- #
+    # Search HuggingFace for GGUF models and show per-quant "fits your
+    # VRAM" badges. User-initiated prelude to a pull (docs/network.md);
+    # net_mode=off blocks it like everything else.
+
+    def _discover_status(e: Exception) -> int:
+        msg = str(e)
+        if "net_mode" in msg:
+            return 403          # blocked by the network kill switch
+        if "request failed" in msg:
+            return 502          # HF unreachable
+        return 422              # bad repo / no GGUF files
+
+    @app.get("/api/discover/search", dependencies=[Depends(_require_auth)])
+    async def discover_search(q: str = "", limit: int = 20):
+        from localm.discover import DiscoverError, hf_search, vram_info
+        loop = asyncio.get_running_loop()
+        try:
+            results = await loop.run_in_executor(
+                None, lambda: hf_search(q, limit=limit))
+        except DiscoverError as e:
+            raise HTTPException(_discover_status(e), str(e))
+        return {"query": q, "results": results, "vram": vram_info()}
+
+    @app.get("/api/discover/files", dependencies=[Depends(_require_auth)])
+    async def discover_files(repo: str):
+        from localm.discover import (DiscoverError, fit_label, hf_gguf_files,
+                                     vram_info)
+        loop = asyncio.get_running_loop()
+        try:
+            files = await loop.run_in_executor(
+                None, lambda: hf_gguf_files(repo))
+        except DiscoverError as e:
+            raise HTTPException(_discover_status(e), str(e))
+        vram = vram_info()
+        total = vram.get("total")
+        for f in files:
+            f["fit"] = fit_label(f["size_bytes"], total)
+        return {"repo": repo.strip().strip("/"), "files": files, "vram": vram}
+
     # ------------------- chat conversation store ------------------ #
     # Server-side persistence for GUI chat conversations so they survive
     # browser reloads, profile wipes, and other devices on the LAN.

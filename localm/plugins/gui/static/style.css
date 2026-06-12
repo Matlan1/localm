@@ -714,6 +714,28 @@ pre:hover .copy-btn { opacity: 1; }
 .modal-body .log-entry.clickable { cursor: pointer; }
 .modal-body .log-entry.clickable:hover { background: rgba(128, 128, 128, 0.12); }
 
+/* model discovery */
+.disc-repo { border-bottom: 1px solid var(--border); padding: 8px 0; }
+.disc-repo .head { display: flex; align-items: center; gap: 12px; }
+.disc-repo .name { font-family: var(--mono); font-size: 13px; flex: 1; }
+.disc-repo .meta { color: var(--text-dim); font-size: 12px; white-space: nowrap; }
+.disc-file {
+  display: flex; align-items: center; gap: 10px;
+  padding: 5px 0 5px 14px; font-size: 12.5px;
+}
+.disc-file .quant {
+  font-family: var(--mono); font-weight: 600; min-width: 64px;
+  color: var(--accent);
+}
+.disc-file .fname {
+  font-family: var(--mono); color: var(--text-dim); flex: 1;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.disc-file .fit { font-size: 11px; padding: 1px 8px; border-radius: 9px; white-space: nowrap; }
+.disc-file .fit.fits { background: rgba(63, 182, 139, 0.18); color: var(--green); }
+.disc-file .fit.tight { background: rgba(222, 179, 73, 0.18); color: var(--yellow); }
+.disc-file .fit.too-big { background: rgba(226, 93, 93, 0.18); color: var(--red); }
+
 /* theme button */
 .theme-btn { width: 100%; margin-top: 8px; }
 

@@ -29,6 +29,7 @@ Everything that does not strictly need the internet works fully offline. Online 
 | **MCP server** | `localm mcp` exposes your local models to Claude Desktop and other MCP clients ([guide](docs/mcp.md)) |
 | **Interactive chat** | Multi-turn shell with `/imagine`, `/compact`, `/clear`, `/image`, `/system`, `/save` |
 | **Model registry** | Pull from HuggingFace (split GGUF supported), aliases, SHA256 dedup, tab completion |
+| **Model discovery** | Search HF from the Models page or `localm search`; per-quant sizes with "fits your VRAM" badges (torch-free VRAM detection) |
 | **Image generation** | `generate_image` tool drives a local ComfyUI FLUX pipeline with VRAM handover |
 | **Plugins** | Drop a folder with `plugin.toml` into `~/.localm/plugins/` to add CLI commands and agent tools |
 | **Multimodal** | Image attachment via `--image` or `/image` (requires mmproj GGUF) |
@@ -221,6 +222,8 @@ reasons), and shows raw model output without marker scrubbing.
 ### Model management
 
 ```bash
+localm search qwen 7b                # find GGUF repos on HuggingFace
+localm search owner/repo --files     # quants + sizes + "fits your VRAM"
 localm pull owner/repo:file.gguf     # specific GGUF (multi-part handled)
 localm pull owner/repo               # full HF model directory
 localm pull https://...gguf          # direct URL (--sha256 optional)
