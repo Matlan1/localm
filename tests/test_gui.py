@@ -870,6 +870,107 @@ class TestDiscoverEndpoints:
 
 
 # ------------------------------------------------------------------ #
+#  Voice (/api/voice/transcribe)                                       #
+# ------------------------------------------------------------------ #
+
+class TestVoiceEndpoint:
+    def test_success_path(self, gui_app, monkeypatch):
+        import base64
+        app, _ = gui_app
+        monkeypatch.setattr("localm.voice.transcribe_bytes",
+                            lambda data, language=None: "hello world")
+        with TestClient(app) as client:
+            r = client.post("/api/voice/transcribe", json={
+                "audio_b64": base64.b64encode(b"fake-webm").decode()})
+        assert r.status_code == 200
+        assert r.json()["text"] == "hello world"
+
+    def test_missing_package_is_501(self, gui_app):
+        """faster-whisper is not installed in the test venv — the real
+        VoiceError install-hint path must surface as 501."""
+        import base64
+        try:
+            import faster_whisper  # noqa: F401
+            pytest.skip("faster-whisper installed — hint path unreachable")
+        except ImportError:
+            pass
+        app, _ = gui_app
+        with TestClient(app) as client:
+            r = client.post("/api/voice/transcribe", json={
+                "audio_b64": base64.b64encode(b"fake").decode()})
+        assert r.status_code == 501
+        assert "localm[voice]" in r.json()["detail"]
+
+    def test_bad_base64_is_400(self, gui_app):
+        app, _ = gui_app
+        with TestClient(app) as client:
+            r = client.post("/api/voice/transcribe",
+                            json={"audio_b64": "!!nope!!"})
+        assert r.status_code == 400
+
+    def test_transcription_failure_is_422(self, gui_app, monkeypatch):
+        import base64
+        from localm.voice import VoiceError
+        app, _ = gui_app
+
+        def boom(data, language=None):
+            raise VoiceError("No speech detected in the recording")
+        monkeypatch.setattr("localm.voice.transcribe_bytes", boom)
+        with TestClient(app) as client:
+            r = client.post("/api/voice/transcribe", json={
+                "audio_b64": base64.b64encode(b"silence").decode()})
+        assert r.status_code == 422
+
+
+# ------------------------------------------------------------------ #
+#  Assistant memory (/api/memory)                                      #
+# ------------------------------------------------------------------ #
+
+class TestAssistantMemory:
+    def test_roundtrip_and_append(self, persist_app, tmp_path, monkeypatch):
+        monkeypatch.setenv("LOCALM_MODE", "log")
+        app, _ = persist_app
+        with TestClient(app) as client:
+            data = client.get("/api/memory").json()
+            assert data["text"] == "" and data["writable"] is True
+
+            assert client.put("/api/memory",
+                              json={"text": "- likes terse answers"}).status_code == 200
+            client.post("/api/memory/append", json={"text": "runs an RX 6800"})
+            text = client.get("/api/memory").json()["text"]
+            assert "- likes terse answers" in text
+            assert "- runs an RX 6800" in text     # "- " prefix added
+            assert (tmp_path / ".localm" / "chat-memory.md").is_file()
+
+            # clearing removes the file entirely
+            client.put("/api/memory", json={"text": ""})
+            assert not (tmp_path / ".localm" / "chat-memory.md").exists()
+
+    def test_privacy_blocks_writes_allows_reads(self, persist_app, tmp_path,
+                                                monkeypatch):
+        home = tmp_path / ".localm"
+        home.mkdir(parents=True, exist_ok=True)
+        (home / "chat-memory.md").write_text("- earlier fact\n", encoding="utf-8")
+        monkeypatch.setenv("LOCALM_MODE", "privacy")
+        app, _ = persist_app
+        with TestClient(app) as client:
+            data = client.get("/api/memory").json()
+            assert data["text"].strip() == "- earlier fact"   # read OK
+            assert data["writable"] is False
+            assert client.put("/api/memory",
+                              json={"text": "x"}).status_code == 403
+            assert client.post("/api/memory/append",
+                               json={"text": "x"}).status_code == 403
+
+    def test_empty_append_rejected(self, persist_app, monkeypatch):
+        monkeypatch.setenv("LOCALM_MODE", "log")
+        app, _ = persist_app
+        with TestClient(app) as client:
+            assert client.post("/api/memory/append",
+                               json={"text": "  "}).status_code == 400
+
+
+# ------------------------------------------------------------------ #
 #  Prompt library (/api/prompts)                                       #
 # ------------------------------------------------------------------ #
 

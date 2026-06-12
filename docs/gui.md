@@ -48,6 +48,19 @@ same flows (file / folder / URL).
   (drawer → save…), then apply them from the drawer select or with
   `/persona <name>`. Stored in `prompts.json` in the localm data directory —
   explicit user assets, available in every session mode.
+- Memory: `/remember <fact>` adds a line to `chat-memory.md` in the data
+  directory; `/memory` views or edits the whole file; the 🧠 drawer toggle
+  injects it into the system prompt so the model knows it across every chat.
+  Privacy semantics: privacy mode blocks memory **writes** (no new traces)
+  but still injects what earlier non-privacy sessions saved — privacy means
+  no traces, not amnesia.
+- Voice: the 🎤 button records from the microphone and transcribes locally
+  with Whisper into the composer (needs `pip install "localm[voice]"`; the
+  model downloads once on first use, then everything is offline; recordings
+  are processed in memory, never written to disk). Every reply has a 🔊
+  read-aloud button, and the "Speak replies aloud" drawer toggle reads each
+  finished reply automatically — both use the browser's built-in offline
+  voices, no setup at all.
 - Conversation persistence follows the session mode. In `privacy` (the default) conversations live in memory only and vanish on reload. In `log`/`full` they are saved to `chats/` in the localm data directory (with localStorage as a cache), so they survive reloads, browser profile wipes, and server restarts. Deleting one removes it everywhere.
 - The sidebar search filters chats by title **and** message content (content
   matches show a snippet). Hover a chat for 📌 pin-to-top and 📁 move-to-folder;
@@ -111,6 +124,12 @@ Stop asks the agent to halt at the next safe point. End session terminates it.
   start it, or starts it automatically when `comfy_launch_cmd` is set in the
   config. After a successful generation, ComfyUI is asked to release its
   models and the chat model reloads so the next reply is instant.
+- **Music**: generate tracks with the local ComfyUI ACE-Step workflow — style
+  tags, optional lyrics ([verse]/[chorus] markers), and an **arbitrary track
+  length in seconds**; seed/steps/CFG for control. Same VRAM handover as image
+  generation. History with inline playback, move-to-folder, and delete.
+  `/music <tags>` in chat generates a default-length instrumental inline, and
+  `localm music "tags" --lyrics song.txt -d 180` does it from the terminal.
 - **Knowledge**: create document collections, index files or folders with live
   progress, inspect/remove indexed documents, test-search a collection, and
   delete collections (index only — original files untouched). Collections show

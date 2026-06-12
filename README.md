@@ -25,6 +25,7 @@ Everything that does not strictly need the internet works fully offline. Online 
 | **Coding agent** | `localm coder` / `localcoder`: agentic loop with file, shell, search, test, and image tools |
 | **Web access (opt-in)** | `web_search` + `fetch_url` for coder and chat via one network policy: `off`/`ask`/`allow`, domain allow/deny, private-address SSRF guard ([guide](docs/network.md)) |
 | **Knowledge (RAG)** | Chat with your documents: attach files in chat (in-memory, privacy-clean) or index folders into collections with cited retrieval — BM25 always, embeddings blended in when the backend supports them ([guide](docs/rag.md)) |
+| **Voice** | 🎤 local Whisper speech-to-text into the composer (`localm[voice]` extra, CPU, no torch) and 🔊 read-aloud via the browser's offline voices |
 | **MCP client** | The coder consumes external MCP tool servers from `.localcoder/config.toml` |
 | **MCP server** | `localm mcp` exposes your local models to Claude Desktop and other MCP clients ([guide](docs/mcp.md)) |
 | **Interactive chat** | Multi-turn shell with `/imagine`, `/compact`, `/clear`, `/image`, `/system`, `/save` |

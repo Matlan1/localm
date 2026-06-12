@@ -71,6 +71,11 @@ audio = [
 rag = [
     "pypdf>=4.0",
 ]
+# Speech-to-text for the GUI mic button (Whisper, CPU int8 — no torch).
+# Install with:  pip install "localm[voice]"
+voice = [
+    "faster-whisper>=1.0",
+]
 # CPU-only install — the base package already runs GGUF models on CPU via the
 # ctypes binding (only llama.dll + ggml*.dll needed). This extra exists so
 # `pip install "localm[cpu]"` is an explicit, documented choice.
