@@ -690,17 +690,59 @@ pre:hover .copy-btn { opacity: 1; }
   gap: 12px;
 }
 .img-grid .thumb {
+  position: relative;
   border: 1px solid var(--border);
   border-radius: 9px;
   overflow: hidden;
   cursor: pointer;
   background: var(--code-bg);
 }
+.img-grid .thumb.selected { border-color: var(--accent); }
 .img-grid .thumb img { width: 100%; display: block; aspect-ratio: 1; object-fit: cover; }
 .img-grid .thumb .cap {
   font-size: 11px; color: var(--text-dim); padding: 5px 8px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+
+/* selection checkbox — hidden until hover, stays while checked */
+.thumb-sel {
+  position: absolute; top: 6px; left: 6px;
+  width: 17px; height: 17px; cursor: pointer; margin: 0;
+  opacity: 0; transition: opacity 0.12s; accent-color: var(--accent);
+}
+.thumb:hover .thumb-sel, .thumb-sel:checked { opacity: 1; }
+
+/* hover quick actions */
+.thumb-acts {
+  position: absolute; top: 6px; right: 6px;
+  display: flex; gap: 4px;
+  opacity: 0; transition: opacity 0.12s;
+}
+.thumb:hover .thumb-acts { opacity: 1; }
+.thumb-acts button {
+  background: rgba(0, 0, 0, 0.55); color: #fff;
+  border: none; border-radius: 6px;
+  width: 26px; height: 26px; cursor: pointer; font-size: 13px;
+}
+.thumb-acts button:hover { background: var(--accent); }
+.thumb-acts button.danger:hover { background: var(--red); }
+
+/* bulk actions bar */
+#img-bulk {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px; margin-bottom: 12px;
+  background: var(--bg-input); border: 1px solid var(--border);
+  border-radius: 8px;
+}
+#img-bulk .count { font-size: 13px; color: var(--text-dim); }
+#img-bulk button.danger {
+  background: none; border: 1px solid var(--red); color: var(--red);
+  border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 12.5px;
+}
+#img-bulk button.danger:hover { background: var(--red); color: #fff; }
+
+/* show-all toggle spans the grid */
+.img-show-all { grid-column: 1 / -1; }
 #img-result { margin-top: 14px; }
 #img-result img {
   max-width: 100%; border-radius: 10px; border: 1px solid var(--border);
