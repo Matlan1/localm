@@ -95,6 +95,36 @@ def _comfy_alive(api_url: str, timeout: float = 3.0) -> bool:
         return False
 
 
+def comfy_http_error_detail(e: "urllib.error.HTTPError") -> str:
+    """
+    Human-readable detail from a ComfyUI /prompt error response.
+
+    A 400 from /prompt means the workflow failed validation — not a
+    connectivity problem. The response body is JSON naming the failing
+    node and why (a model file missing from ComfyUI's models directory
+    is the usual cause). Shared by image, music, and video generation.
+    """
+    try:
+        body = json.loads(e.read().decode("utf-8", "replace"))
+    except Exception:
+        return f"HTTP {e.code}: {e.reason}"
+    lines = []
+    err = body.get("error") or {}
+    if err.get("message"):
+        msg = err["message"]
+        if err.get("details"):
+            msg += f" — {err['details']}"
+        lines.append(msg)
+    for node_id, info in (body.get("node_errors") or {}).items():
+        cls = info.get("class_type") or f"node {node_id}"
+        for ne in info.get("errors", []):
+            msg = ne.get("message", "")
+            if ne.get("details"):
+                msg += f" ({ne['details']})"
+            lines.append(f"{cls}: {msg}")
+    return "\n".join(lines) or f"HTTP {e.code}: {e.reason}"
+
+
 def _image_dimensions(path: Path) -> tuple[int, int]:
     """Return (width, height) from a PNG or JPEG without any external libs."""
     try:
@@ -447,6 +477,13 @@ def generate_image(
                 "Check the ComfyUI console for workflow validation errors."
             )
 
+    except urllib.error.HTTPError as e:
+        return False, (
+            f"ComfyUI rejected the workflow (HTTP {e.code}):\n"
+            f"{comfy_http_error_detail(e)}\n"
+            "A model file missing from ComfyUI's models directory is the "
+            "usual cause — check the names in your workflow template."
+        )
     except urllib.error.URLError as e:
         return False, (
             f"Could not connect to ComfyUI at {api_url}.\n"
