@@ -68,6 +68,23 @@ class GgufBackend(BaseBackend):
             pass
         return None
 
+    @staticmethod
+    def _vram_levels() -> list:
+        """(free, total) bytes per device, [] when not measurable.
+
+        Driver-level numbers (mem_get_info), NOT torch allocator counters:
+        llama.dll allocates through HIP/CUDA directly, so
+        torch.cuda.memory_allocated() reads zero for GGUF loads no matter
+        how much VRAM the model actually occupies."""
+        try:
+            import torch
+            if torch.cuda.is_available():
+                return [tuple(torch.cuda.mem_get_info(i))
+                        for i in range(torch.cuda.device_count())]
+        except Exception:
+            pass
+        return []
+
     def _model_bytes(self) -> int:
         """Total size of the model on disk (all parts of a split GGUF)."""
         from localm.model_manager import split_gguf_parts
@@ -186,6 +203,8 @@ class GgufBackend(BaseBackend):
         from localm.inference.backends.llamacpp import LlamaCpp
         from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
+        vram_before = self._vram_levels()
+
         with Progress(
             SpinnerColumn(),
             TextColumn("[dim]{task.description}[/dim]"),
@@ -211,19 +230,19 @@ class GgufBackend(BaseBackend):
 
         self._loaded = True
 
-        # VRAM usage after load (torch / ROCm / CUDA only — skip if torch absent)
-        try:
-            import torch
-            if torch.cuda.is_available():
-                for i in range(torch.cuda.device_count()):
-                    allocated = torch.cuda.memory_allocated(i) / 1e9
-                    reserved  = torch.cuda.memory_reserved(i)  / 1e9
-                    console.print(
-                        f"[dim]  vram     : {allocated:.2f} GB allocated / "
-                        f"{reserved:.2f} GB reserved (device {i})[/dim]"
-                    )
-        except Exception:
-            pass
+        # VRAM usage after load — device-level driver numbers, because
+        # torch's allocator counters (memory_allocated/reserved) can only
+        # see torch's own allocations and always read 0.00 for llama.dll.
+        # "in use" therefore includes every process on the GPU; the delta
+        # is what this load itself consumed.
+        for i, (free, total) in enumerate(self._vram_levels()):
+            used = (total - free) / 1e9
+            line = (f"  vram     : {used:.2f} GB in use / "
+                    f"{total / 1e9:.2f} GB total (device {i}")
+            if i < len(vram_before):
+                delta = (vram_before[i][0] - free) / 1e9
+                line += f", {delta:+.2f} GB this load"
+            console.print(f"[dim]{line})[/dim]")
 
         console.print("[green]✓[/green] Model loaded")
 
