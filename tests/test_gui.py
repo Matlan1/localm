@@ -660,6 +660,22 @@ class TestConversationStore:
             assert client.delete(
                 "/api/conversations/abc123").json()["status"] == "absent"
 
+    def test_pinned_and_folder_roundtrip(self, persist_app, monkeypatch):
+        monkeypatch.setenv("LOCALM_MODE", "log")
+        app, _ = persist_app
+        with TestClient(app) as client:
+            client.put("/api/conversations/org1", json={
+                "title": "work", "updated_at": 1, "pinned": True,
+                "folder": "projects", "messages": []})
+            client.put("/api/conversations/org2", json={
+                "title": "plain", "updated_at": 2, "messages": []})
+            convs = {c["id"]: c for c in
+                     client.get("/api/conversations").json()["conversations"]}
+        assert convs["org1"]["pinned"] is True
+        assert convs["org1"]["folder"] == "projects"
+        assert convs["org2"]["pinned"] is False     # defaults applied
+        assert convs["org2"]["folder"] is None
+
     def test_list_sorted_newest_first(self, persist_app, monkeypatch):
         monkeypatch.setenv("LOCALM_MODE", "log")
         app, _ = persist_app
