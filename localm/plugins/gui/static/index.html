@@ -44,6 +44,13 @@
       <div id="chat-messages"></div>
       <div class="composer-wrap">
         <div id="params">
+          <div class="full"><label>Persona — a saved system prompt + sampling defaults</label>
+            <div class="row">
+              <select id="p-persona"><option value="">(none)</option></select>
+              <button class="btn-quiet" id="persona-save" title="Save the current system prompt and sampling values under a name">save…</button>
+              <button class="btn-quiet" id="persona-delete" title="Delete the selected persona">delete</button>
+            </div>
+          </div>
           <div><label>Temperature</label><input id="p-temperature" type="number" step="0.05" min="0" max="2" placeholder="default"></div>
           <div><label>Top-p</label><input id="p-top-p" type="number" step="0.05" min="0" max="1" placeholder="default"></div>
           <div><label>Top-k</label><input id="p-top-k" type="number" step="1" min="1" placeholder="default"></div>
