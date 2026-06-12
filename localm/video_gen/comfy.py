@@ -104,8 +104,11 @@ def generate_video(
     fps
         Output frame rate (default 24, the Wan 2.2 native rate).
     width / height
-        Output resolution.  None keeps the template default (832x480).
-        Must be multiples of 16.
+        Output resolution.  None keeps the template default (1280x704 —
+        the model's NATIVE resolution; Wan 2.2 5B was trained at 720p and
+        output collapses into washed-out smears well below it, so iterate
+        by shortening the clip, not by shrinking the frame).  Must be
+        multiples of 16.
     steps / cfg
         Sampler settings.  None keeps the template defaults (30 / 5.0).
     seed

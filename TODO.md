@@ -150,8 +150,9 @@ GUI gaps identified by comparing against LM Studio, Jan, Open WebUI.
 - [x] `/video <prompt>` in chat: inline clip with a video-player message (messages gain a `video` field, rendered like `audio` via blob URLs)
 - [x] CLI: `localm video "prompt" [-d s] [--fps n] [--width/--height] [--image start.png] [-o out.mp4] [--seed/--steps/--cfg]`
 - [x] Tests: frame snapping, fail-fast before LLM unload, mocked end-to-end with sidecar privacy, save-node output-key variants (`images`/`gifs`/`videos`), endpoint validation + path confinement
-- [x] Verified end-to-end 2026-06-12 against a real ComfyUI with the Wan 2.2 5B files: `localm video` produced a valid h264 MP4 (2 s 640x368, 10 steps, ~9 min on a 16 GB RDNA2 card incl. model load); privacy mode left no sidecar; measured timings folded into docs/video.md
-- [x] Post-download cleanup: the duplicate clip in ComfyUI's own output dir is deleted when `COMFY_OUTPUT_DIR`/`comfy_output_dir` is set (same behaviour as image generation; found during the e2e run)
+- [x] Verified end-to-end 2026-06-12 against a real ComfyUI with the Wan 2.2 5B files: 1 s clip at the native 1280x704, 20 steps → crisp, on-prompt h264 MP4 in ~7.5 min on a 16 GB RDNA2 card (~13.5 s/step + model load); privacy mode left no sidecar; measured timings in docs/video.md
+- [x] Quality lesson from the e2e run, folded into template + docs + GUI: the 5B is **720p-native** — sub-native resolutions (e.g. 640x368) produce washed-out mush, so the template default is now 1280x704 and "iterate by shortening the clip, never by shrinking the frame"
+- [x] Post-download cleanup: the duplicate clip in ComfyUI's own output dir is deleted when `COMFY_OUTPUT_DIR`/`comfy_output_dir` is set (same behaviour as image generation; found during the e2e run, then verified live on the second render)
 
 ### Round 13 (shipped 2026-06-12) — music surfaces
 

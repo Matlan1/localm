@@ -147,7 +147,7 @@ class TestGenerateVideo:
         assert ok
         wf = captured["workflow"]
         assert wf["5"]["inputs"]["text"]          # template negative intact
-        assert wf["6"]["inputs"]["width"] == 832
+        assert wf["6"]["inputs"]["width"] == 1280  # native 720p — see docs
         assert wf["8"]["inputs"]["steps"] == 30
 
     @pytest.mark.parametrize("key", ["videos", "gifs", "images"])
