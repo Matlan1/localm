@@ -96,7 +96,9 @@
         <span id="coder-state"></span>
         <span class="spacer"></span>
         <button class="btn-quiet" id="coder-undo" title="Revert the last file write">undo</button>
+        <button class="btn-quiet" id="coder-files" title="Files changed this session, with diffs">files</button>
         <button class="btn-quiet" id="coder-compact" title="Summarise old turns to free context">compact</button>
+        <button class="btn-quiet" id="coder-export" title="Download this session's feed as markdown">export</button>
         <button class="btn-quiet" id="coder-log" title="View the audit log">log</button>
         <button class="btn-quiet" id="coder-history" title="Browse past session logs">history</button>
         <button class="btn-quiet" id="coder-stop">Stop</button>
@@ -136,6 +138,7 @@
         <input type="text" id="setup-scope" placeholder="src/**/*.py" spellcheck="false">
         <div class="checks">
           <label><input type="checkbox" id="setup-auto"> Auto-approve destructive tools</label>
+          <label title="Destructive tools report what they would do without touching anything"><input type="checkbox" id="setup-dry"> Dry run (nothing is written or executed)</label>
         </div>
         <div class="actions">
           <button class="btn-primary" id="setup-start">Start session</button>

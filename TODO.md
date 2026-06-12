@@ -142,6 +142,32 @@ GUI gaps identified by comparing against LM Studio, Jan, Open WebUI.
 - [x] Chat: `/web <query>` command and a per-conversation "Web access" toggle — the model emits `<tool_call>` web requests, the GUI executes them through the policy and injects results as visible dimmed "Web" messages (max 3 rounds per send)
 - [x] Behaviour change: `fetch_url` to localhost/private addresses is now blocked by default (`net_allow_private true` restores it)
 
+### Round 15 (shipped 2026-06-12) — coder overhaul (QoL round)
+
+Agent core (both surfaces):
+- [x] Changed-files tracker: every successful write/edit/patch/notebook-edit recorded with its first-seen original; `changed_files()` + `session_diff()` produce cumulative per-file and whole-session diffs (original → current, not edit-by-edit)
+- [x] Mid-task steering: `queue_message()` (thread-safe) injects user messages at the next turn boundary as a steering note — no more "agent is busy" wall; leftovers run as a follow-up task
+- [x] Circuit breaker: 4 identical consecutive tool failures abort the task with the conversation intact (hints still escalate at 2 and 3)
+- [x] Context meter: turn events carry `ctx_ratio`; CLI turn divider and GUI usage line show `ctx N%` (colored in the CLI)
+- [x] Parallel batch timeout (120 s): one hung non-destructive tool no longer blocks the whole batch
+- [x] Patch-mode guard: write tools the interceptor can't express as a diff are blocked instead of silently writing to disk
+- [x] `read_file(offset, limit)`: re-read the middle of truncated files; truncation note says how
+- [x] Explicit truncation markers: grep per-file caps + "N files NOT searched", tree file-limit message with the fix
+- [x] `edit_file` failures show the closest-matching file region (line-numbered) instead of a repr blob
+
+CLI REPL:
+- [x] `/changes` (files touched) + `/diff [path]` (cumulative session diff, syntax-colored)
+- [x] Tab completion for slash commands and project paths; persistent REPL history in `.localcoder/repl_history` (log/full modes only — never privacy)
+- [x] `/undo` reports remaining stack depth; `/help` covers everything (and the `\exit` markup typo is gone)
+
+GUI:
+- [x] Queue-while-busy through `POST /message` (returns `queued`), with *Queued* feed labels
+- [x] Files panel: `GET /files` + `GET /files/diff?path=` endpoints, bar button + `/files` command, per-file and full-session diff views
+- [x] Approval cards: "always allow <tool> this session" checkbox (server-side allowlist, shown in session info); confirm timeout configurable via `coder_confirm_timeout`
+- [x] Tool cards show args *and* diff, plus elapsed time on the result line
+- [x] Dry-run toggle at session setup; final feed line counts changed files; `export` downloads the feed as markdown; audit-log viewer gains a filter box
+- [x] Tests: 52 new (agent QoL, tools QoL, GUI session/endpoints) + audit holes closed: checkpoint/resume, undo stack, parallel ordering/timeout, retry streaks, stop midstream, read_env redaction, edit_notebook_cell, patch-mode guard
+
 ### Round 14 (shipped 2026-06-12) — video generation
 
 - [x] `localm/video_gen/` — Wan 2.2 TI2V 5B workflow (`wan_workflow.json`, public Comfy-Org stack; gitignored `wan_workflow_local.json` override) + `generate_video()` via ComfyUI: duration snapped to Wan's 4k+1 frame rule (~5 s native at 24 fps, up to 20 s accepted), text-to-video or image-to-video (`start_image` via the shared upload helper), MP4 output, privacy-gated sidecar, VRAM handoff

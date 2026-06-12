@@ -123,12 +123,17 @@ def print_streaming_done() -> None:
 #  Turn divider
 # ---------------------------------------------------------------------------
 
-def print_turn_divider(turn: int, total_tokens: int = 0, turn_tokens: int = 0) -> None:
+def print_turn_divider(turn: int, total_tokens: int = 0, turn_tokens: int = 0,
+                       ctx_ratio: float | None = None) -> None:
     parts = [f"── turn {turn}"]
     if turn_tokens:
         parts.append(f"~{turn_tokens:,} tok this turn")
     if total_tokens:
         parts.append(f"~{total_tokens:,} total")
+    if ctx_ratio is not None and ctx_ratio > 0:
+        pct = min(ctx_ratio, 1.0) * 100
+        color = "red" if ctx_ratio >= 0.85 else ("yellow" if ctx_ratio >= 0.65 else "dim")
+        parts.append(f"[{color}]ctx {pct:.0f}%[/{color}]")
     body = "  ·  ".join(parts)
     console.print(f"\n[dim]{body} ──────────────────────────────────────[/dim]")
 
@@ -255,6 +260,8 @@ HELP_TEXT = """\
   [bold]/verbose[/bold]              toggle verbose tool output
   [bold]/approve[/bold]              toggle auto-approve for destructive tools
   [bold]/history[/bold]              show turn count, context usage, and index size
+  [bold]/changes[/bold]              list every file this session has changed
+  [bold]/diff [path][/bold]          cumulative diff of session changes (all or one file)
   [bold]/undo[/bold]                 revert the last file write or edit
   [bold]/resume[/bold]               resume an interrupted session
   [bold]/compact[/bold]              summarise old turns to free context space
@@ -265,6 +272,9 @@ HELP_TEXT = """\
   [bold]/export [path][/bold]        export session transcript to Markdown
   [bold]/scope [glob][/bold]         show or set the file-access scope (e.g. src/**/*.py)
   [bold]/scope clear[/bold]          remove the active scope restriction
+
+[dim]Tab completes commands and project paths (where readline is available);
+REPL history persists across sessions in log/full modes, never in privacy.[/dim]
 
 [dim]Session modes (set with --mode at startup or mode = "..." in .localcoder/config.toml):
   privacy  nothing saved automatically (default)
