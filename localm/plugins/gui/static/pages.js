@@ -275,32 +275,166 @@ $("pull-start").onclick = async () => {
 /*  Images page                                                      */
 /* ================================================================ */
 
+const imgState = {
+  items: [],
+  selected: new Set(),   // names selected for bulk actions
+  showAll: false,        // grid shows 24 by default
+};
+
+const IMG_GRID_DEFAULT = 24;
+
+async function imgApiDelete(name) {
+  const r = await fetch(`/api/imagine/file/${encodeURIComponent(name)}`, {
+    method: "DELETE", headers: authHeaders() });
+  if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+}
+
+async function imgApiMove(name, dest) {
+  const r = await fetch(`/api/imagine/file/${encodeURIComponent(name)}/move`, {
+    method: "POST", headers: authHeaders(),
+    body: JSON.stringify({ dest }),
+  });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.detail || r.statusText);
+  return data.path;
+}
+
+async function imgDownload(name) {
+  const url = await fetchImageURL(`/api/imagine/file/${encodeURIComponent(name)}`);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.click();
+}
+
 async function refreshImageHistory() {
   refreshReloadToggle();
-  const grid = $("img-history");
-  grid.replaceChildren();
   try {
     const r = await fetch("/api/imagine/history", { headers: authHeaders() });
     if (!r.ok) return;
-    const data = await r.json();
-    if (!data.images.length) {
-      grid.appendChild(el("div", "sub", "No generated images yet."));
-      return;
+    imgState.items = (await r.json()).images;
+  } catch (e) { return; /* server unreachable */ }
+  // Drop selections for images that no longer exist
+  const names = new Set(imgState.items.map((i) => i.name));
+  for (const n of imgState.selected) if (!names.has(n)) imgState.selected.delete(n);
+  renderImageGrid();
+}
+
+function renderImageGrid() {
+  const grid = $("img-history");
+  grid.replaceChildren();
+  renderImgBulkBar();
+  if (!imgState.items.length) {
+    grid.appendChild(el("div", "sub", "No generated images yet."));
+    return;
+  }
+  const shown = imgState.showAll
+    ? imgState.items : imgState.items.slice(0, IMG_GRID_DEFAULT);
+  for (const item of shown) {
+    const thumb = el("div", "thumb");
+    const img = document.createElement("img");
+    fetchImageURL(`/api/imagine/file/${encodeURIComponent(item.name)}`)
+      .then((url) => (img.src = url))
+      .catch(() => thumb.remove());
+    thumb.appendChild(img);
+
+    // selection checkbox (top-left) — selected thumbs stay marked
+    const sel = document.createElement("input");
+    sel.type = "checkbox";
+    sel.className = "thumb-sel";
+    sel.checked = imgState.selected.has(item.name);
+    thumb.classList.toggle("selected", sel.checked);
+    sel.onclick = (e) => {
+      e.stopPropagation();
+      if (sel.checked) imgState.selected.add(item.name);
+      else imgState.selected.delete(item.name);
+      thumb.classList.toggle("selected", sel.checked);
+      renderImgBulkBar();
+    };
+    thumb.appendChild(sel);
+
+    // hover quick actions (top-right)
+    const acts = el("div", "thumb-acts");
+    const dl = el("button", "", "⤓");
+    dl.title = "Download";
+    dl.onclick = (e) => {
+      e.stopPropagation();
+      imgDownload(item.name).catch((err) => toast("Download failed: " + err.message, true));
+    };
+    const del = el("button", "danger", "🗑");
+    del.title = "Delete from disk";
+    del.onclick = async (e) => {
+      e.stopPropagation();
+      if (!confirm(`Delete ${item.name}? This removes the file from disk.`)) return;
+      try {
+        await imgApiDelete(item.name);
+        toast("Deleted " + item.name);
+        refreshImageHistory();
+      } catch (err) { toast("Delete failed: " + err.message, true); }
+    };
+    acts.append(dl, del);
+    thumb.appendChild(acts);
+
+    const capText = item.meta?.prompt
+      ? item.meta.prompt.slice(0, 60) : item.name;
+    thumb.appendChild(el("div", "cap", capText));
+    thumb.onclick = () => showImageDetail(item);
+    grid.appendChild(thumb);
+  }
+  if (imgState.items.length > IMG_GRID_DEFAULT) {
+    const toggle = el("button", "btn-quiet img-show-all",
+      imgState.showAll ? "show fewer"
+                       : `show all (${imgState.items.length})`);
+    toggle.onclick = () => { imgState.showAll = !imgState.showAll; renderImageGrid(); };
+    grid.appendChild(toggle);
+  }
+}
+
+/** Bulk actions bar — appears above the grid while a selection exists. */
+function renderImgBulkBar() {
+  const bar = $("img-bulk");
+  const n = imgState.selected.size;
+  bar.style.display = n ? "flex" : "none";
+  if (!n) { bar.replaceChildren(); return; }
+  bar.replaceChildren();
+  bar.appendChild(el("span", "count", `${n} selected`));
+
+  const move = el("button", "btn-quiet", "move to folder…");
+  move.onclick = async () => {
+    const dest = await pickDirectory(`Move ${n} image(s) to…`,
+      localStorage.getItem("localm.imgMoveDest") || "");
+    if (!dest) return;
+    let moved = 0, failed = 0;
+    for (const name of [...imgState.selected]) {
+      try { await imgApiMove(name, dest); moved++; }
+      catch (e) { failed++; toast(`${name}: ${e.message}`, true); }
     }
-    for (const item of data.images.slice(0, 24)) {
-      const thumb = el("div", "thumb");
-      const img = document.createElement("img");
-      fetchImageURL(`/api/imagine/file/${encodeURIComponent(item.name)}`)
-        .then((url) => (img.src = url))
-        .catch(() => thumb.remove());
-      thumb.appendChild(img);
-      const capText = item.meta?.prompt
-        ? item.meta.prompt.slice(0, 60) : item.name;
-      thumb.appendChild(el("div", "cap", capText));
-      thumb.onclick = () => showImageDetail(item);
-      grid.appendChild(thumb);
+    if (!chat.privacy) localStorage.setItem("localm.imgMoveDest", dest);
+    toast(`Moved ${moved} image(s)` + (failed ? `, ${failed} failed` : ""));
+    imgState.selected.clear();
+    refreshImageHistory();
+  };
+
+  const del = el("button", "danger", "delete");
+  del.onclick = async () => {
+    if (!confirm(`Delete ${n} image(s) from disk?`)) return;
+    let deleted = 0, failed = 0;
+    for (const name of [...imgState.selected]) {
+      try { await imgApiDelete(name); deleted++; }
+      catch (e) { failed++; toast(`${name}: ${e.message}`, true); }
     }
-  } catch (e) { /* server unreachable */ }
+    toast(`Deleted ${deleted} image(s)` + (failed ? `, ${failed} failed` : ""));
+    imgState.selected.clear();
+    refreshImageHistory();
+  };
+
+  const clear = el("button", "btn-quiet", "clear selection");
+  clear.onclick = () => {
+    imgState.selected.clear();
+    renderImageGrid();
+  };
+
+  bar.append(move, del, clear);
 }
 
 function closeModal() { $("modal").style.display = "none"; }
@@ -349,23 +483,84 @@ function showImageDetail(item) {
     };
     actions.appendChild(toChat);
 
-    const move = el("button", "btn-quiet", "move to folder…");
-    move.onclick = async () => {
-      const dest = prompt("Destination folder:", localStorage.getItem("localm.imgMoveDest") || "");
-      if (!dest) return;
+    if (item.meta?.prompt) {
+      const reuse = el("button", "btn-quiet", "reuse settings");
+      reuse.title = "Fill the generation form with this image's prompt, seed, and settings";
+      reuse.onclick = () => {
+        $("img-prompt").value = item.meta.prompt || "";
+        $("img-negative").value = item.meta.negative_prompt || "";
+        $("img-seed").value = item.meta.seed ?? "";
+        $("img-guidance").value = item.meta.guidance ?? "";
+        $("img-denoise").value = item.meta.denoise ?? "";
+        $("img-input").value = item.meta.input_image || "";
+        closeModal();
+        toast("Settings restored — tweak and generate");
+      };
+      actions.appendChild(reuse);
+    }
+
+    const dl = el("button", "btn-quiet", "download");
+    dl.onclick = () =>
+      imgDownload(item.name).catch((e) => toast("Download failed: " + e.message, true));
+    actions.appendChild(dl);
+
+    const copyImg = el("button", "btn-quiet", "copy image");
+    copyImg.title = "Copy the image to the clipboard";
+    copyImg.onclick = async () => {
+      try {
+        const url = await fetchImageURL(
+          `/api/imagine/file/${encodeURIComponent(item.name)}`);
+        const blob = await (await fetch(url)).blob();
+        await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+        toast("Image copied to clipboard");
+      } catch (e) {
+        toast("Copy failed: " + e.message, true);
+      }
+    };
+    actions.appendChild(copyImg);
+
+    const copyPath = el("button", "btn-quiet", "copy path");
+    copyPath.title = item.path || "";
+    copyPath.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(item.path || item.name);
+        toast("Path copied");
+      } catch (e) { toast("Copy failed: " + e.message, true); }
+    };
+    actions.appendChild(copyPath);
+
+    const rename = el("button", "btn-quiet", "rename…");
+    rename.onclick = async () => {
+      const newName = prompt("New name:", item.name);
+      if (!newName || newName.trim() === item.name) return;
       const r = await fetch(
-        `/api/imagine/file/${encodeURIComponent(item.name)}/move`, {
+        `/api/imagine/file/${encodeURIComponent(item.name)}/rename`, {
           method: "POST", headers: authHeaders(),
-          body: JSON.stringify({ dest: dest.trim() }),
+          body: JSON.stringify({ new_name: newName.trim() }),
         });
       const data = await r.json();
       if (r.ok) {
-        localStorage.setItem("localm.imgMoveDest", dest.trim());
-        toast("Moved to " + data.path);
+        toast("Renamed to " + data.name);
         closeModal();
         refreshImageHistory();
       } else {
-        toast(data.detail || "Move failed", true);
+        toast(data.detail || "Rename failed", true);
+      }
+    };
+    actions.appendChild(rename);
+
+    const move = el("button", "btn-quiet", "move to folder…");
+    move.onclick = async () => {
+      const dest = await pickDirectory("Move image to…",
+        localStorage.getItem("localm.imgMoveDest") || "");
+      if (!dest) return;
+      try {
+        const path = await imgApiMove(item.name, dest);
+        if (!chat.privacy) localStorage.setItem("localm.imgMoveDest", dest);
+        toast("Moved to " + path);
+        refreshImageHistory();
+      } catch (e) {
+        toast("Move failed: " + e.message, true);
       }
     };
     actions.appendChild(move);
@@ -373,16 +568,13 @@ function showImageDetail(item) {
     const del = el("button", "danger", "delete");
     del.onclick = async () => {
       if (!confirm(`Delete ${item.name}? This removes the file from disk.`)) return;
-      const r = await fetch(
-        `/api/imagine/file/${encodeURIComponent(item.name)}`, {
-          method: "DELETE", headers: authHeaders() });
-      const data = await r.json();
-      if (r.ok) {
+      try {
+        await imgApiDelete(item.name);
         toast("Deleted " + item.name);
         closeModal();
         refreshImageHistory();
-      } else {
-        toast(data.detail || "Delete failed", true);
+      } catch (e) {
+        toast("Delete failed: " + e.message, true);
       }
     };
     actions.appendChild(del);

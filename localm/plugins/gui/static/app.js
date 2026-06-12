@@ -2170,60 +2170,79 @@ async function fetchDirs(path) {
   return data;
 }
 
-function openDirPicker() {
-  // Start from the current input value when it looks usable, else drives/root
-  const start = $("setup-cwd").value.trim();
-  openModal("Pick a project directory", (body) => {
-    const pathEl = el("div", "dir-picker-path");
-    const listEl = el("div", "dir-picker-list");
-    const actions = el("div", "actions");
-    const useBtn = el("button", "btn-primary", "Use this directory");
-    actions.appendChild(useBtn);
-    body.append(pathEl, listEl, actions);
-    let current = "";
-
-    useBtn.onclick = () => {
-      if (!current) return;
-      $("setup-cwd").value = current;
-      localStorage.setItem("localm.coderCwd", current);
+/** Modal directory browser. Resolves with the chosen path, or null when the
+ *  modal is dismissed. Used by the coder setup form and the media pages. */
+function pickDirectory(title, startPath = "") {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
       $("modal").style.display = "none";
+      resolve(value);
     };
+    openModal(title || "Pick a directory", (body) => {
+      const pathEl = el("div", "dir-picker-path");
+      const listEl = el("div", "dir-picker-list");
+      const actions = el("div", "actions");
+      const useBtn = el("button", "btn-primary", "Use this directory");
+      actions.appendChild(useBtn);
+      body.append(pathEl, listEl, actions);
+      let current = "";
 
-    async function show(path) {
-      let data;
-      try {
-        data = await fetchDirs(path);
-      } catch (e) {
-        toast("Cannot open: " + e.message, true);
-        if (path) { show(""); return; }   // fall back to the drive list
-        throw e;
+      useBtn.onclick = () => { if (current) finish(current); };
+      // Dismissing the modal (×, backdrop) resolves null — poll visibility
+      // since the close handlers are owned by the shared modal chrome.
+      const watch = setInterval(() => {
+        if ($("modal").style.display === "none") {
+          clearInterval(watch);
+          finish(null);
+        }
+      }, 200);
+
+      async function show(path) {
+        let data;
+        try {
+          data = await fetchDirs(path);
+        } catch (e) {
+          toast("Cannot open: " + e.message, true);
+          if (path) { show(""); return; }   // fall back to the drive list
+          throw e;
+        }
+        current = data.path;
+        pathEl.textContent = current || "Drives";
+        useBtn.disabled = !current;
+        listEl.replaceChildren();
+        if (data.parent !== null && current) {
+          const up = el("div", "dir-picker-item up", "↑ ..");
+          up.onclick = () => show(data.parent);
+          listEl.appendChild(up);
+        }
+        for (const name of data.dirs) {
+          const item = el("div", "dir-picker-item", "📁 " + name);
+          // "/" joins fine on Windows too (Python Path accepts both
+          // separators); the server resolves and echoes the native form.
+          item.onclick = () =>
+            show(current ? current.replace(/[\\/]+$/, "") + "/" + name : name);
+          listEl.appendChild(item);
+        }
+        if (!data.dirs.length) {
+          listEl.appendChild(el("div", "dir-picker-empty", "no subdirectories"));
+        }
       }
-      current = data.path;
-      pathEl.textContent = current || "Drives";
-      useBtn.disabled = !current;
-      listEl.replaceChildren();
-      if (data.parent !== null && current) {
-        const up = el("div", "dir-picker-item up", "↑ ..");
-        up.onclick = () => show(data.parent);
-        listEl.appendChild(up);
-      }
-      for (const name of data.dirs) {
-        const item = el("div", "dir-picker-item", "📁 " + name);
-        // "/" joins fine on Windows too (Python Path accepts both separators);
-        // the server resolves and echoes back the native form.
-        item.onclick = () =>
-          show(current ? current.replace(/[\\/]+$/, "") + "/" + name : name);
-        listEl.appendChild(item);
-      }
-      if (!data.dirs.length) {
-        listEl.appendChild(el("div", "dir-picker-empty", "no subdirectories"));
-      }
-    }
-    show(start).catch(() => {});
+      show(startPath).catch(() => {});
+    });
   });
 }
 
-$("setup-browse").onclick = openDirPicker;
+$("setup-browse").onclick = async () => {
+  const dir = await pickDirectory("Pick a project directory",
+                                  $("setup-cwd").value.trim());
+  if (dir) {
+    $("setup-cwd").value = dir;
+    localStorage.setItem("localm.coderCwd", dir);
+  }
+};
 $("coder-send").onclick = sendCoderTask;
 $("coder-input").addEventListener("keydown", (e) => composerEnterToSend(e, sendCoderTask));
 $("coder-input").addEventListener("input", (e) => autoGrow(e.target));
