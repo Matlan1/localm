@@ -151,6 +151,19 @@ class PromptUpsert(BaseModel):
     params: dict = {}             # sampling defaults (temperature, top_p, …)
 
 
+class MemoryUpdate(BaseModel):
+    text: str
+
+
+class MemoryAppend(BaseModel):
+    text: str
+
+
+class TranscribeRequest(BaseModel):
+    audio_b64: str
+    language: str | None = None
+
+
 # ------------------------------------------------------------------ #
 #  Attach                                                             #
 # ------------------------------------------------------------------ #
@@ -917,6 +930,94 @@ def attach_gui(
         return {"url": final_url,
                 "text": text[:max_chars],
                 "truncated": len(text) > max_chars}
+
+    # ----------------------------- voice --------------------------- #
+    # Whisper STT for the mic button. Audio is decoded in memory and never
+    # written to disk, so privacy mode stays trace-free. TTS needs no
+    # endpoint — the browser's speechSynthesis is offline by construction.
+
+    @app.post("/api/voice/transcribe", dependencies=[Depends(_require_auth)])
+    async def voice_transcribe(req: TranscribeRequest):
+        import base64
+        from localm.voice import VoiceError, transcribe_bytes
+        try:
+            data = base64.b64decode(req.audio_b64, validate=True)
+        except Exception:
+            raise HTTPException(400, "audio_b64 is not valid base64")
+        if len(data) > 25_000_000:
+            raise HTTPException(413, "Recording too large (max 25 MB)")
+        loop = asyncio.get_running_loop()
+        try:
+            text = await loop.run_in_executor(
+                None, lambda: transcribe_bytes(data, language=req.language))
+        except VoiceError as e:
+            status = 501 if "faster-whisper" in str(e) else 422
+            raise HTTPException(status, str(e))
+        return {"text": text}
+
+    # ----------------------- assistant memory --------------------- #
+    # ChatGPT-style persistent memory for chat: a plain markdown file the
+    # user can read and edit, injected into the system prompt when the
+    # drawer toggle is on. LOCALCODER.md is the coder-side analogue.
+    #
+    # Privacy semantics: privacy mode means "no new traces", not amnesia —
+    # READING memory written by earlier non-privacy sessions is allowed,
+    # but WRITES (which would persist conversation-derived facts) return
+    # 403 while privacy is active.
+
+    memory_file = home_dir() / "chat-memory.md"
+    _MEMORY_MAX = 64_000   # characters — keep injection bounded
+
+    def _memory_writable() -> bool:
+        from localm.audit import SessionMode, effective_mode
+        return effective_mode("chat") != SessionMode.PRIVACY
+
+    def _read_memory() -> str:
+        if memory_file.is_file():
+            try:
+                return memory_file.read_text(encoding="utf-8")
+            except OSError:
+                return ""
+        return ""
+
+    def _write_memory(text: str) -> None:
+        text = text.strip()
+        if len(text) > _MEMORY_MAX:
+            raise HTTPException(413, "Memory file too large (max 64k chars)")
+        memory_file.parent.mkdir(parents=True, exist_ok=True)
+        if not text:
+            memory_file.unlink(missing_ok=True)
+            return
+        tmp = memory_file.with_name(memory_file.name + ".tmp")
+        tmp.write_text(text + "\n", encoding="utf-8")
+        tmp.replace(memory_file)
+
+    @app.get("/api/memory", dependencies=[Depends(_require_auth)])
+    async def memory_get():
+        return {"text": _read_memory(), "writable": _memory_writable(),
+                "path": str(memory_file)}
+
+    @app.put("/api/memory", dependencies=[Depends(_require_auth)])
+    async def memory_put(req: MemoryUpdate):
+        if not _memory_writable():
+            raise HTTPException(
+                403, "Memory writes are off in privacy mode (no new traces). "
+                     "Set mode/chat_mode to 'log' or 'full' to enable them.")
+        _write_memory(req.text)
+        return {"status": "saved", "chars": len(req.text.strip())}
+
+    @app.post("/api/memory/append", dependencies=[Depends(_require_auth)])
+    async def memory_append(req: MemoryAppend):
+        if not _memory_writable():
+            raise HTTPException(
+                403, "Memory writes are off in privacy mode (no new traces)")
+        fact = req.text.strip()
+        if not fact:
+            raise HTTPException(400, "Nothing to remember")
+        current = _read_memory().strip()
+        line = fact if fact.startswith("-") else f"- {fact}"
+        _write_memory((current + "\n" + line) if current else line)
+        return {"status": "appended"}
 
     # ------------------------ prompt library ---------------------- #
     # Named personas: a system prompt plus sampling defaults, applied from

@@ -13,6 +13,7 @@ window.onViewShown = (name) => {
   if (name === "coder") { populateSetupModels(); presetCoderMode(); }
   if (name === "models") refreshModelsPage();
   if (name === "images") refreshImageHistory();
+  if (name === "music") refreshMusicHistory();
   if (name === "knowledge") refreshKnowledgePage();
   if (name === "plugins") refreshPluginsPage();
   if (name === "settings") refreshSettingsPage();
@@ -632,6 +633,144 @@ $("gui-key-save").onclick = () => {
   toast("Key saved — reloading");
   setTimeout(() => location.reload(), 600);
 };
+
+/* ================================================================ */
+/*  Music page                                                       */
+/* ================================================================ */
+
+$("music-generate").onclick = async () => {
+  const tags = $("music-tags").value.trim();
+  if (!tags) { toast("Enter style tags first", true); return; }
+  const body = { tags };
+  const lyrics = $("music-lyrics").value.trim();
+  if (lyrics) body.lyrics = lyrics;
+  const duration = Number($("music-duration").value);
+  if (duration > 0) body.duration_seconds = duration;
+  for (const [field, id] of [["seed", "music-seed"], ["steps", "music-steps"],
+                             ["cfg", "music-cfg"]]) {
+    const v = $(id).value.trim();
+    if (v !== "" && !Number.isNaN(Number(v))) body[field] = Number(v);
+  }
+
+  $("music-generate").disabled = true;
+  const log = $("music-log");
+  log.style.display = "block";
+  log.textContent = "";
+  $("music-result").replaceChildren();
+  try {
+    const r = await fetch("/api/music", {
+      method: "POST", headers: authHeaders(), body: JSON.stringify(body),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    const end = await streamJob(data.job_id, (line) => {
+      log.textContent += line + "\n";
+      log.scrollTop = log.scrollHeight;
+    });
+    if (end.status === "done" && end.result) {
+      toast("Track finished");
+      const player = document.createElement("audio");
+      player.controls = true;
+      player.style.width = "100%";
+      const url = await fetchImageURL(
+        "/api/music/file/" + encodeURIComponent(end.result));
+      player.src = url;
+      $("music-result").appendChild(player);
+      refreshMusicHistory();
+    } else {
+      toast("Generation " + end.status, true);
+    }
+  } catch (e) {
+    toast("Music generation failed: " + e.message, true);
+  } finally {
+    $("music-generate").disabled = false;
+  }
+};
+
+async function refreshMusicHistory() {
+  const box = $("music-history");
+  box.replaceChildren();
+  let data;
+  try {
+    const r = await fetch("/api/music/history", { headers: authHeaders() });
+    if (!r.ok) throw new Error(r.statusText);
+    data = await r.json();
+  } catch (e) {
+    box.appendChild(el("div", "sub", "Could not load history: " + e.message));
+    return;
+  }
+  if (!data.tracks.length) {
+    box.appendChild(el("div", "sub", "No tracks yet — generate one above."));
+    return;
+  }
+  for (const item of data.tracks) {
+    const row = el("div", "disc-repo");
+    const head = el("div", "head");
+    head.appendChild(el("span", "name", item.name));
+    const bits = [];
+    if (item.meta?.tags) bits.push(item.meta.tags.slice(0, 60));
+    if (item.meta?.duration_seconds) bits.push(`${item.meta.duration_seconds}s`);
+    bits.push(`${(item.size_bytes / 1e6).toFixed(1)} MB`);
+    head.appendChild(el("span", "meta", bits.join(" · ")));
+
+    const play = el("button", "", "play");
+    let player = null;
+    play.onclick = async () => {
+      if (player) { player.remove(); player = null; play.textContent = "play"; return; }
+      play.disabled = true;
+      try {
+        const url = await fetchImageURL(
+          "/api/music/file/" + encodeURIComponent(item.name));
+        player = document.createElement("audio");
+        player.controls = true;
+        player.autoplay = true;
+        player.style.width = "100%";
+        player.src = url;
+        row.appendChild(player);
+        play.textContent = "hide";
+      } catch (e) {
+        toast("Could not load track: " + e.message, true);
+      } finally {
+        play.disabled = false;
+      }
+    };
+    head.appendChild(play);
+
+    const move = el("button", "", "move…");
+    move.onclick = async () => {
+      const dest = prompt("Destination folder:",
+        localStorage.getItem("localm.musicMoveDest") || "");
+      if (!dest) return;
+      const r = await fetch(
+        `/api/music/file/${encodeURIComponent(item.name)}/move`, {
+          method: "POST", headers: authHeaders(),
+          body: JSON.stringify({ dest: dest.trim() }),
+        });
+      const data2 = await r.json();
+      if (r.ok) {
+        if (!chat.privacy) localStorage.setItem("localm.musicMoveDest", dest.trim());
+        toast("Moved to " + data2.path);
+        refreshMusicHistory();
+      } else {
+        toast(data2.detail || "Move failed", true);
+      }
+    };
+    head.appendChild(move);
+
+    const del = el("button", "danger", "delete");
+    del.onclick = async () => {
+      if (!confirm(`Delete ${item.name}?`)) return;
+      const r = await fetch("/api/music/file/" + encodeURIComponent(item.name),
+                            { method: "DELETE", headers: authHeaders() });
+      if (r.ok) { toast("Deleted"); refreshMusicHistory(); }
+      else toast("Delete failed", true);
+    };
+    head.appendChild(del);
+
+    row.appendChild(head);
+    box.appendChild(row);
+  }
+}
 
 /* ================================================================ */
 /*  Knowledge page                                                   */

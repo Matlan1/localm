@@ -207,7 +207,7 @@ $("theme-toggle").onclick = () =>
 /*  Tabs                                                             */
 /* ================================================================ */
 
-const VIEWS = ["chat", "coder", "models", "images", "knowledge", "plugins", "settings"];
+const VIEWS = ["chat", "coder", "models", "images", "music", "knowledge", "plugins", "settings"];
 
 function showView(name) {
   if (!VIEWS.includes(name)) name = "chat";
@@ -384,6 +384,8 @@ async function refreshCtxLimit() {
         localStorage.removeItem("localm.coderCwd");
         localStorage.removeItem("localm.kbAddPath");
         localStorage.removeItem("localm.convCollapsed");
+        localStorage.removeItem("localm.imgMoveDest");
+        localStorage.removeItem("localm.musicMoveDest");
         const h = document.querySelector("#conversations h3");
         if (h && !document.getElementById("privacy-hint")) {
           const hint = document.createElement("div");
@@ -695,6 +697,14 @@ function addMessageRow(container, role, text, opts = {}) {
     }
     body.appendChild(img);
   }
+  for (const url of opts.audio || []) {
+    const player = document.createElement("audio");
+    player.controls = true;
+    player.style.width = "100%";
+    // bearer-protected file — fetch as a blob with auth headers
+    fetchImageURL(url).then((u) => (player.src = u)).catch(() => player.remove());
+    body.appendChild(player);
+  }
   row.appendChild(body);
   const meta = el("div", "msg-meta");
   const copy = el("button", "copy-btn", "copy");
@@ -759,6 +769,9 @@ function renderChat() {
     if (m.role === "user" && !tag) {
       actions.push(["edit", () => editMessage(conv, i)]);
     }
+    if (m.role === "assistant" && !tag) {
+      actions.push(["🔊", () => speak(msgText(m), { toggle: true })]);
+    }
     if (m.role === "assistant" && i === conv.messages.length - 1 && !chat.abort) {
       actions.push(["regenerate", () => regenerate(conv)]);
     }
@@ -776,6 +789,7 @@ function renderChat() {
     }
     addMessageRow(box, m.role, msgText(m), {
       images: msgImages(m),
+      audio: m.audio ? [m.audio] : [],
       actions,
       variant,
       cls: tag ? "web-note" : "",
@@ -1033,6 +1047,152 @@ async function runWebCall(conv, call) {
   renderChat();
 }
 
+/* ---- voice: mic (Whisper STT) + read-aloud (browser TTS) ---- */
+
+const voice = { rec: null, chunks: [] };
+
+function blobToB64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "");
+    reader.onerror = () => reject(new Error("could not read recording"));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function toggleMic() {
+  const btn = $("chat-mic");
+  if (voice.rec) {           // second click stops and transcribes
+    voice.rec.stop();
+    return;
+  }
+  if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+    toast("This browser does not support audio recording", true);
+    return;
+  }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    toast("Microphone unavailable: " + e.message, true);
+    return;
+  }
+  voice.chunks = [];
+  voice.rec = new MediaRecorder(stream);
+  voice.rec.ondataavailable = (e) => { if (e.data.size) voice.chunks.push(e.data); };
+  voice.rec.onstop = async () => {
+    stream.getTracks().forEach((t) => t.stop());
+    btn.classList.remove("recording");
+    const blob = new Blob(voice.chunks, { type: voice.rec.mimeType || "audio/webm" });
+    voice.rec = null;
+    btn.disabled = true;
+    btn.textContent = "…";
+    try {
+      const r = await fetch("/api/voice/transcribe", {
+        method: "POST", headers: authHeaders(),
+        body: JSON.stringify({ audio_b64: await blobToB64(blob) }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.detail || r.statusText);
+      const input = $("chat-input");
+      input.value = (input.value ? input.value.trimEnd() + " " : "") + data.text;
+      autoGrow(input);
+      input.focus();
+    } catch (e) {
+      toast("Transcription failed: " + e.message, true);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "🎤";
+    }
+  };
+  voice.rec.start();
+  btn.classList.add("recording");
+  toast("Recording — click 🎤 again to stop");
+}
+
+$("chat-mic").onclick = toggleMic;
+
+/** Read text aloud with the browser's offline voices. With toggle: true
+ *  (the 🔊 button) a second call stops instead; auto-speak replaces. */
+function speak(text, opts = {}) {
+  if (!window.speechSynthesis) {
+    toast("This browser has no speech synthesis", true);
+    return;
+  }
+  if (speechSynthesis.speaking) {
+    speechSynthesis.cancel();
+    if (opts.toggle) return;
+  }
+  const clean = stripThink(text).replace(/[*_`#>\[\]()]/g, " ");
+  if (clean.trim()) speechSynthesis.speak(new SpeechSynthesisUtterance(clean));
+}
+
+/* ---- assistant memory ---- */
+
+const memory = { text: "", writable: false };
+
+async function refreshMemory() {
+  try {
+    const r = await fetch("/api/memory", { headers: authHeaders() });
+    if (!r.ok) return;
+    const data = await r.json();
+    memory.text = data.text || "";
+    memory.writable = !!data.writable;
+  } catch (e) { /* server unreachable */ }
+}
+
+async function rememberFact(fact) {
+  if (!fact) { toast("Usage: /remember <fact>", true); return; }
+  try {
+    const r = await fetch("/api/memory/append", {
+      method: "POST", headers: authHeaders(),
+      body: JSON.stringify({ text: fact }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    await refreshMemory();
+    toast("Remembered ✓");
+  } catch (e) {
+    toast("Could not save: " + e.message, true);
+  }
+}
+
+function openMemoryModal() {
+  openModal("Memory — what the model knows about you", (body) => {
+    body.appendChild(el("div", "sub", memory.writable
+      ? "Injected into the system prompt while the 🧠 toggle is on. " +
+        "Edit freely — it's a plain markdown file in the localm data directory."
+      : "Read-only: privacy mode blocks memory writes (no new traces). " +
+        "Existing memory is still injected while the 🧠 toggle is on."));
+    const ta = document.createElement("textarea");
+    ta.value = memory.text;
+    ta.rows = 14;
+    ta.style.width = "100%";
+    ta.readOnly = !memory.writable;
+    body.appendChild(ta);
+    if (memory.writable) {
+      const save = el("button", "btn-primary", "Save");
+      save.style.marginTop = "10px";
+      save.onclick = async () => {
+        try {
+          const r = await fetch("/api/memory", {
+            method: "PUT", headers: authHeaders(),
+            body: JSON.stringify({ text: ta.value }),
+          });
+          const data = await r.json();
+          if (!r.ok) throw new Error(data.detail || r.statusText);
+          await refreshMemory();
+          toast("Memory saved");
+          $("modal").style.display = "none";
+        } catch (e) {
+          toast("Save failed: " + e.message, true);
+        }
+      };
+      body.appendChild(save);
+    }
+  });
+}
+
 /* ---- prompt library (personas) ---- */
 
 const PERSONA_PARAM_IDS = {
@@ -1131,6 +1291,11 @@ async function runCompletion(conv, webDepth = 0) {
   const webEnabled = $("p-web").checked;
   const messages = [];
   let sysText = params.system || "";
+  if ($("p-memory").checked && memory.text.trim()) {
+    sysText = (sysText ? sysText + "\n\n" : "") +
+      "Long-term memory — things to remember about the user:\n" +
+      memory.text.trim();
+  }
   if (webEnabled) {
     sysText = (sysText ? sysText + "\n\n" : "") + WEB_TOOL_PROMPT;
   }
@@ -1216,12 +1381,13 @@ async function runCompletion(conv, webDepth = 0) {
 
   // Web-access loop: when the model requested a search/page and the toggle
   // is on, run it and let the model continue — bounded rounds per send.
-  if (webEnabled && webDepth < WEB_MAX_ROUNDS) {
-    const call = parseWebCall(full);
-    if (call) {
-      await runWebCall(conv, call);
-      await runCompletion(conv, webDepth + 1);
-    }
+  const nextCall = (webEnabled && webDepth < WEB_MAX_ROUNDS)
+    ? parseWebCall(full) : null;
+  if (nextCall) {
+    await runWebCall(conv, nextCall);
+    await runCompletion(conv, webDepth + 1);
+  } else if ($("p-speak").checked && full) {
+    speak(full);   // read the finished reply aloud (offline browser voices)
   }
 }
 
@@ -1912,12 +2078,15 @@ $("setup-history").onclick = openSessionHistory;
 
 const CHAT_COMMANDS = [
   { cmd: "imagine", hint: "generate an image with FLUX", args: "<prompt>" },
+  { cmd: "music", hint: "generate a music track (ACE-Step, 120s instrumental)", args: "<style tags>" },
   { cmd: "web", hint: "search the web, then answer with sources", args: "<query>" },
   { cmd: "clear", hint: "clear this conversation" },
   { cmd: "compact", hint: "summarise older messages to free context" },
   { cmd: "export", hint: "download this conversation as markdown" },
   { cmd: "rename", hint: "rename this conversation", args: "<title>" },
   { cmd: "persona", hint: "apply a saved persona (system prompt + params)", args: "<name>" },
+  { cmd: "remember", hint: "add a fact to the model's long-term memory", args: "<fact>" },
+  { cmd: "memory", hint: "view or edit the memory file" },
   { cmd: "pin", hint: "pin/unpin this conversation" },
   { cmd: "folder", hint: "move this conversation to a folder (empty = remove)", args: "<name>" },
   { cmd: "system", hint: "edit the system prompt" },
@@ -2005,9 +2174,52 @@ async function runWebInChat(query) {
   await runCompletion(conv);
 }
 
+/** /music <tags> — generate a default-length instrumental inline; the Music
+ *  page has the full form (lyrics, duration, seed…). */
+async function runMusicInChat(tags) {
+  if (!tags) { toast("Usage: /music <style tags>", true); return; }
+  if (!currentConv()) newConversation();
+  const conv = currentConv();
+  conv.messages.push({ role: "user", content: "/music " + tags });
+  saveConversations(conv);
+  renderChat();
+  const box = $("chat-messages");
+  const { body } = addMessageRow(box, "assistant", "");
+  body.textContent = "Generating track… (long tracks take a while)";
+  box.scrollTop = box.scrollHeight;
+  try {
+    const r = await fetch("/api/music", {
+      method: "POST", headers: authHeaders(),
+      body: JSON.stringify({ tags }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    const end = await streamJob(data.job_id, (line) => {
+      body.textContent = line;
+      if (nearBottom(box)) box.scrollTop = box.scrollHeight;
+    });
+    if (end.status === "done" && end.result) {
+      conv.messages.push({
+        role: "assistant",
+        content: "Here is the generated track:",
+        audio: "/api/music/file/" + encodeURIComponent(end.result),
+      });
+      saveConversations(conv);
+      renderChat();
+    } else {
+      body.textContent = "Music generation " + end.status +
+        " — see the Music page for details.";
+    }
+  } catch (e) {
+    body.textContent = "Music generation failed: " + e.message;
+    toast(e.message, true);
+  }
+}
+
 function execChatCommand(cmd, arg) {
   switch (cmd) {
     case "imagine": runImagineInChat(arg); return true;
+    case "music": runMusicInChat(arg); return true;
     case "web": runWebInChat(arg); return true;
     case "clear": {
       const conv = currentConv();
@@ -2027,6 +2239,8 @@ function execChatCommand(cmd, arg) {
       else toast("Usage: /rename <title>", true);
       return true;
     }
+    case "remember": rememberFact(arg); return true;
+    case "memory": openMemoryModal(); return true;
     case "persona": {
       if (!arg) {
         const names = personaCache.map((p) => p.name);
@@ -2175,6 +2389,7 @@ refreshModels().then(() => populateSetupModels());
 refreshCtxLimit().then(initServerConversations);
 refreshKbSelect();
 refreshPersonas();
+refreshMemory();
 setInterval(refreshModels, 30000);
 renderConvList();
 if (chat.conversations.length) {
