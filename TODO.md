@@ -142,6 +142,12 @@ GUI gaps identified by comparing against LM Studio, Jan, Open WebUI.
 - [x] Chat: `/web <query>` command and a per-conversation "Web access" toggle — the model emits `<tool_call>` web requests, the GUI executes them through the policy and injects results as visible dimmed "Web" messages (max 3 rounds per send)
 - [x] Behaviour change: `fetch_url` to localhost/private addresses is now blocked by default (`net_allow_private true` restores it)
 
+### Round 10 (shipped 2026-06-12) — prompt library / personas
+
+- [x] `/api/prompts` CRUD on `<data dir>/prompts.json` (atomic writes; explicit user assets, available in every session mode)
+- [x] Params drawer: persona select applies system prompt + sampling defaults; save… captures the current drawer values under a name; delete removes the saved persona without touching the drawer
+- [x] `/persona <name>` slash command (case-insensitive; bare `/persona` lists what's saved)
+
 ### Round 9 (shipped 2026-06-12) — message branching
 
 - [x] Fork-point model: `conv.messages` stays the live linear branch (compaction, retrieval injection, export, and the API mapping untouched); alternative timelines park in `conv.branches` records keyed by the preceding message's id
@@ -227,7 +233,7 @@ mode stays trace-free.
 - [x] Conversation search + folders/pinning (shipped 2026-06-12, see Round 8): sidebar full-text search with snippets, 📌 pin-to-top, collapsible 📁 folders, `/pin` + `/folder` commands; persisted through the server store in non-privacy modes
 - [x] Message branching (shipped 2026-06-12, see Round 9): edit forks instead of deleting, regenerate keeps the old reply as a variant, ‹ k/N › navigation at fork points
 - [ ] Persistent assistant memory for chat (ChatGPT-style memory file injected into the system prompt; `LOCALCODER.md` is the coder analogue) — non-privacy only
-- [ ] Prompt library / personas: named system prompts with icons and default params
+- [x] Prompt library / personas (shipped 2026-06-12, see Round 10): named system prompts with sampling defaults, saved/applied from the params drawer or `/persona <name>`
 - [ ] Voice: Whisper STT input + TTS read-aloud (audio decode plumbing exists in `inference/media.py`)
 - [x] Web search grounding for chat and coder (shipped 2026-06-11, see Round 4): `localm/netpolicy.py` policy choke point (off/ask/allow, domain allow/deny, SSRF guard), coder `web_search` tool + gated `fetch_url`, `/api/web/*`, chat `/web` command + per-conversation web-access toggle with bounded tool loop ([docs/network.md](docs/network.md))
 

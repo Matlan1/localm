@@ -870,6 +870,47 @@ class TestDiscoverEndpoints:
 
 
 # ------------------------------------------------------------------ #
+#  Prompt library (/api/prompts)                                       #
+# ------------------------------------------------------------------ #
+
+class TestPromptLibrary:
+    def test_crud_roundtrip(self, persist_app, tmp_path):
+        app, _ = persist_app
+        with TestClient(app) as client:
+            assert client.get("/api/prompts").json() == {"prompts": []}
+            r = client.put("/api/prompts/Code%20reviewer", json={
+                "system": "You review code tersely.",
+                "params": {"temperature": 0.3, "max_tokens": 512}})
+            assert r.status_code == 200
+            client.put("/api/prompts/Poet", json={"system": "Rhyme."})
+
+            data = client.get("/api/prompts").json()["prompts"]
+            assert [p["name"] for p in data] == ["Code reviewer", "Poet"]
+            reviewer = data[0]
+            assert reviewer["system"] == "You review code tersely."
+            assert reviewer["params"]["temperature"] == 0.3
+            assert (tmp_path / ".localm" / "prompts.json").is_file()
+
+            # upsert replaces
+            client.put("/api/prompts/Poet", json={"system": "Haiku only."})
+            data = client.get("/api/prompts").json()["prompts"]
+            assert next(p for p in data
+                        if p["name"] == "Poet")["system"] == "Haiku only."
+
+            assert client.delete("/api/prompts/Poet").status_code == 200
+            assert client.delete("/api/prompts/Poet").status_code == 404
+            assert [p["name"] for p in
+                    client.get("/api/prompts").json()["prompts"]] == ["Code reviewer"]
+
+    @pytest.mark.parametrize("bad", ["%20%20", "x" * 65, "a%0Ab"])
+    def test_invalid_names_rejected(self, persist_app, bad):
+        app, _ = persist_app
+        with TestClient(app) as client:
+            assert client.put(f"/api/prompts/{bad}",
+                              json={"system": "x"}).status_code == 400
+
+
+# ------------------------------------------------------------------ #
 #  Knowledge endpoints (/api/rag/*)                                    #
 # ------------------------------------------------------------------ #
 
