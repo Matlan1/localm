@@ -142,6 +142,12 @@ GUI gaps identified by comparing against LM Studio, Jan, Open WebUI.
 - [x] Chat: `/web <query>` command and a per-conversation "Web access" toggle — the model emits `<tool_call>` web requests, the GUI executes them through the policy and injects results as visible dimmed "Web" messages (max 3 rounds per send)
 - [x] Behaviour change: `fetch_url` to localhost/private addresses is now blocked by default (`net_allow_private true` restores it)
 
+### Round 8 (shipped 2026-06-12) — conversation organization
+
+- [x] Sidebar search across ALL chats: matches titles and message content; content hits show a one-line snippet; searching auto-expands collapsed groups so matches are never hidden
+- [x] 📌 pin-to-top and 📁 folders (hover buttons + `/pin`, `/folder <name>` slash commands); folders render as collapsible groups, collapse state remembered (scrubbed in privacy mode — folder names are conversation-derived)
+- [x] `pinned`/`folder` persist through the conversation store (`ConversationUpsert` extended; old stored chats get safe defaults)
+
 ### Round 7 (shipped 2026-06-12) — model discovery
 
 - [x] `localm/discover.py`: HF model search (empty query = most downloaded GGUF — dynamic "starter picks", no hardcoded model names), repo tree parsing with quant-label extraction and split-GGUF grouping (sizes summed, first part = pull spec)
@@ -211,7 +217,7 @@ mode stays trace-free.
 
 - [x] RAG / chat-with-documents (shipped 2026-06-12, see Round 6): in-chat document attachments (in-memory, privacy-clean) + persistent knowledge collections with cited retrieval; lexical-first BM25 with embeddings blended in when the backend supports them ([docs/rag.md](docs/rag.md))
 - [x] In-app model discovery (shipped 2026-06-12, see Round 7): HF search on the Models page + `localm search` CLI; per-quant sizes with "fits your VRAM" badges; "starter picks" = most-downloaded GGUF repos (dynamic, nothing hardcoded)
-- [ ] Conversation search + folders/pinning across all chats (build on the new server store)
+- [x] Conversation search + folders/pinning (shipped 2026-06-12, see Round 8): sidebar full-text search with snippets, 📌 pin-to-top, collapsible 📁 folders, `/pin` + `/folder` commands; persisted through the server store in non-privacy modes
 - [ ] Message branching: edit-and-fork trees, regeneration variant navigation (< 2/3 >) instead of overwrite
 - [ ] Persistent assistant memory for chat (ChatGPT-style memory file injected into the system prompt; `LOCALCODER.md` is the coder analogue) — non-privacy only
 - [ ] Prompt library / personas: named system prompts with icons and default params
