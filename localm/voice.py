@@ -42,6 +42,30 @@ def stt_available() -> tuple[bool, str]:
             "with: pip install \"localm[voice]\"  (then restart the server)")
 
 
+def stt_model_cached() -> tuple[bool, str]:
+    """(cached, model_name) — is the configured Whisper model already in the
+    local HuggingFace cache? First use otherwise downloads it; the GUI asks
+    for consent before triggering that one network access."""
+    from pathlib import Path
+
+    from localm.config import load_config
+    name = str(load_config().get("voice_stt_model", "base"))
+    if Path(name).expanduser().is_dir():
+        return True, name                       # local model directory
+    repo = name if "/" in name else f"Systran/faster-whisper-{name}"
+    try:
+        from faster_whisper.utils import _MODELS   # name → repo mapping
+        repo = _MODELS.get(name, repo)
+    except Exception:
+        pass
+    try:
+        from huggingface_hub import try_to_load_from_cache
+        hit = try_to_load_from_cache(repo, "model.bin")
+        return isinstance(hit, str), name
+    except Exception:
+        return False, name
+
+
 def transcribe_bytes(data: bytes, language: Optional[str] = None) -> str:
     """Transcribe an audio blob (webm/ogg/wav/mp3 — anything PyAV decodes).
     Loads and caches the Whisper model on first call."""

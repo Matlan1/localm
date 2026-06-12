@@ -348,7 +348,6 @@ def _pull_gguf_file(spec: str, name: Optional[str], redownload: bool = False) ->
                 repo_id=repo_id,
                 filename=part,
                 local_dir=str(MODELS_DIR),
-                local_dir_use_symlinks=False,
             )
             final = MODELS_DIR / part
             if Path(local) != final:
@@ -416,7 +415,6 @@ def _pull_hf_snapshot(repo_id: str, name: Optional[str], redownload: bool = Fals
         snapshot_download(
             repo_id=repo_id,
             local_dir=str(dest),
-            local_dir_use_symlinks=False,
         )
     except Exception as e:
         console.print(f"[red]Download failed:[/red] {e}")

@@ -34,7 +34,8 @@ class TestFailFast:
     def test_dead_comfy_errors_without_unloading_llm(self, tmp_path):
         """A dead server must not cost the user an LLM unload+reload."""
         unload_spy = MagicMock()
-        with patch.object(comfy, "_comfy_alive", return_value=False), \
+        with patch.object(comfy, "ensure_comfy",
+                          return_value=(False, "ComfyUI is not reachable (stub)")), \
              patch.object(comfy, "_localm_unload", unload_spy):
             ok, msg = comfy.generate_video("a fox", tmp_path / "out.mp4")
         assert ok is False
@@ -51,7 +52,8 @@ class TestFailFast:
         assert ok is False and "FPS" in msg
 
     def test_missing_input_image_rejected(self, tmp_path):
-        with patch.object(comfy, "_comfy_alive", return_value=True), \
+        with patch.object(comfy, "ensure_comfy",
+                          return_value=(True, "ComfyUI is running.")), \
              patch.object(comfy, "_localm_unload"):
             ok, msg = comfy.generate_video(
                 "a fox", tmp_path / "out.mp4",
@@ -97,7 +99,8 @@ class TestGenerateVideo:
         # Pin COMFY_OUTPUT_DIR to a sandbox so the post-download cleanup can
         # never consult the developer's real config (and delete a real file).
         comfy_out = tmp_path / "comfy_out"
-        with patch.object(comfy, "_comfy_alive", return_value=True), \
+        with patch.object(comfy, "ensure_comfy",
+                          return_value=(True, "ComfyUI is running.")), \
              patch.object(comfy, "_localm_unload"), \
              patch.object(comfy.urllib.request, "urlopen", fake), \
              patch.object(comfy.time, "sleep"), \
