@@ -354,6 +354,7 @@ async function compactConversation(conv) {
        { role: "assistant", content: "Understood." }];
 
   conv.messages = [...bridge, ...recent];
+  pruneBranches(conv);   // forks anchored in the summarised-away region die
   saveConversations(conv);
   renderChat();
   toast(summary ? "Older messages summarised to free context"
@@ -432,6 +433,7 @@ function pushConversation(conv) {
                                updated_at: conv.updated_at,
                                pinned: !!conv.pinned,
                                folder: conv.folder || null,
+                               branches: conv.branches || [],
                                messages: conv.messages }),
       });
     } catch (e) { /* offline — localStorage still has the copy */ }
@@ -702,6 +704,19 @@ function addMessageRow(container, role, text, opts = {}) {
     setTimeout(() => (copy.textContent = "copy"), 1200);
   };
   meta.appendChild(copy);
+  if (opts.variant) {
+    const nav = el("span", "variant");
+    const prev = el("button", "action", "‹");
+    prev.title = "Previous variant";
+    prev.onclick = opts.variant.prev;
+    const next = el("button", "action", "›");
+    next.title = "Next variant";
+    next.onclick = opts.variant.next;
+    nav.appendChild(prev);
+    nav.appendChild(el("span", "k", `${opts.variant.k}/${opts.variant.n}`));
+    nav.appendChild(next);
+    meta.appendChild(nav);
+  }
   for (const [label, fn] of opts.actions || []) {
     const btn = el("button", "action", label);
     btn.onclick = fn;
@@ -747,9 +762,22 @@ function renderChat() {
     if (m.role === "assistant" && i === conv.messages.length - 1 && !chat.abort) {
       actions.push(["regenerate", () => regenerate(conv)]);
     }
+    // ‹ k/N › on the first message of a fork point with siblings
+    let variant = null;
+    const pid = i > 0 ? conv.messages[i - 1].id : "root";
+    const rec = (conv.branches || []).find((b) => b.parent === pid);
+    if (rec && rec.tails.length > 1) {
+      variant = {
+        k: rec.current + 1,
+        n: rec.tails.length,
+        prev: () => switchBranch(conv, i, -1),
+        next: () => switchBranch(conv, i, +1),
+      };
+    }
     addMessageRow(box, m.role, msgText(m), {
       images: msgImages(m),
       actions,
+      variant,
       cls: tag ? "web-note" : "",
       label: tag ? NOTE_LABELS[tag] : undefined,
     });
@@ -757,11 +785,87 @@ function renderChat() {
   box.scrollTop = box.scrollHeight;
 }
 
+/* ---- message branching ----
+   conv.messages is always the LIVE linear branch (so compaction, retrieval
+   injection, export, and the API mapping stay untouched). Alternative
+   timelines are parked at fork points:
+     conv.branches = [{parent: <msg id or "root">, tails: [[msg…]…], current}]
+   The slot at `current` belongs to the live tail and is only written back
+   when switching away. Editing a message or regenerating a reply parks the
+   old tail as a sibling instead of destroying it; ‹ k/N › in the message
+   meta row navigates between siblings. */
+
+let _msgIdCounter = 0;
+
+function msgId(m) {
+  if (!m.id) m.id = Date.now().toString(36) + "-" + (_msgIdCounter++);
+  return m.id;
+}
+
+function parentIdAt(conv, index) {
+  return index > 0 ? msgId(conv.messages[index - 1]) : "root";
+}
+
+function forkRecord(conv, parentId, create) {
+  conv.branches = conv.branches || [];
+  let rec = conv.branches.find((b) => b.parent === parentId);
+  if (!rec && create) {
+    rec = { parent: parentId, tails: [], current: 0 };
+    conv.branches.push(rec);
+  }
+  return rec;
+}
+
+/** Park the live tail from *index* as a sibling and open a fresh timeline. */
+function forkAt(conv, index) {
+  const rec = forkRecord(conv, parentIdAt(conv, index), true);
+  if (!rec.tails.length) {
+    rec.tails.push(null);          // slot for the pre-existing timeline
+    rec.current = 0;
+  }
+  rec.tails[rec.current] = conv.messages.slice(index);
+  rec.tails.push(null);            // slot owned by the new live timeline
+  rec.current = rec.tails.length - 1;
+  conv.messages = conv.messages.slice(0, index);
+}
+
+/** Switch the fork at *index* one sibling left/right (dir = ±1). */
+function switchBranch(conv, index, dir) {
+  if (chat.abort) { toast("Wait for the current reply to finish", true); return; }
+  const rec = forkRecord(conv, parentIdAt(conv, index), false);
+  if (!rec || rec.tails.length < 2) return;
+  const n = rec.tails.length;
+  const next = (rec.current + dir + n) % n;
+  if (next === rec.current) return;
+  rec.tails[rec.current] = conv.messages.slice(index);   // park live tail
+  conv.messages = conv.messages.slice(0, index).concat(rec.tails[next] || []);
+  rec.current = next;
+  saveConversations(conv);
+  renderChat();
+}
+
+/** Drop fork records whose parent message no longer exists anywhere
+ *  (active branch or any parked tail) — called after compaction rewrites
+ *  old history. */
+function pruneBranches(conv) {
+  if (!conv.branches || !conv.branches.length) return;
+  const ids = new Set(["root"]);
+  for (const m of conv.messages) if (m.id) ids.add(m.id);
+  for (const rec of conv.branches) {
+    for (const tail of rec.tails) {
+      for (const m of tail || []) if (m.id) ids.add(m.id);
+    }
+  }
+  conv.branches = conv.branches.filter((b) => ids.has(b.parent));
+}
+
 function editMessage(conv, index) {
   const m = conv.messages[index];
   $("chat-input").value = msgText(m);
   autoGrow($("chat-input"));
-  conv.messages = conv.messages.slice(0, index);   // drop it and everything after
+  // Fork instead of destroy: the old timeline (this message and everything
+  // after it) stays reachable via ‹ › once the edited version is sent.
+  forkAt(conv, index);
   saveConversations(conv);
   renderChat();
   $("chat-input").focus();
@@ -769,12 +873,11 @@ function editMessage(conv, index) {
 
 function regenerate(conv) {
   if (chat.abort) return;
-  // Drop the last assistant reply, keep the user message, stream again
-  if (conv.messages[conv.messages.length - 1]?.role === "assistant") {
-    conv.messages.pop();
-    saveConversations(conv);
-    renderChat();
-  }
+  const last = conv.messages.length - 1;
+  if (conv.messages[last]?.role !== "assistant") return;
+  forkAt(conv, last);                // park the old reply as a sibling
+  saveConversations(conv);
+  renderChat();
   runCompletion(conv);
 }
 
@@ -1817,7 +1920,12 @@ function execChatCommand(cmd, arg) {
     case "web": runWebInChat(arg); return true;
     case "clear": {
       const conv = currentConv();
-      if (conv) { conv.messages = []; saveConversations(conv); renderChat(); }
+      if (conv) {
+        conv.messages = [];
+        conv.branches = [];
+        saveConversations(conv);
+        renderChat();
+      }
       return true;
     }
     case "compact": $("compact-conv").onclick(); return true;
