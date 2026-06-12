@@ -1,0 +1,60 @@
+{
+  "1": {
+    "inputs": { "unet_name": "wan2.2_ti2v_5B_fp16.safetensors", "weight_dtype": "default" },
+    "class_type": "UNETLoader"
+  },
+  "2": {
+    "inputs": { "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors", "type": "wan", "device": "default" },
+    "class_type": "CLIPLoader"
+  },
+  "3": {
+    "inputs": { "vae_name": "wan2.2_vae.safetensors" },
+    "class_type": "VAELoader"
+  },
+  "4": {
+    "inputs": { "text": "", "clip": ["2", 0] },
+    "class_type": "CLIPTextEncode"
+  },
+  "5": {
+    "inputs": {
+      "text": "blurry, distorted, deformed, low quality, static image, jpeg artifacts, watermark, text, subtitles",
+      "clip": ["2", 0]
+    },
+    "class_type": "CLIPTextEncode"
+  },
+  "6": {
+    "inputs": { "width": 832, "height": 480, "length": 121, "batch_size": 1, "vae": ["3", 0] },
+    "class_type": "Wan22ImageToVideoLatent"
+  },
+  "7": {
+    "inputs": { "model": ["1", 0], "shift": 8.0 },
+    "class_type": "ModelSamplingSD3"
+  },
+  "8": {
+    "inputs": {
+      "seed": 0,
+      "steps": 30,
+      "cfg": 5.0,
+      "sampler_name": "uni_pc",
+      "scheduler": "simple",
+      "denoise": 1.0,
+      "model": ["7", 0],
+      "positive": ["4", 0],
+      "negative": ["5", 0],
+      "latent_image": ["6", 0]
+    },
+    "class_type": "KSampler"
+  },
+  "9": {
+    "inputs": { "samples": ["8", 0], "vae": ["3", 0] },
+    "class_type": "VAEDecode"
+  },
+  "10": {
+    "inputs": { "images": ["9", 0], "fps": 24 },
+    "class_type": "CreateVideo"
+  },
+  "11": {
+    "inputs": { "filename_prefix": "video/localm", "format": "mp4", "codec": "h264", "video": ["10", 0] },
+    "class_type": "SaveVideo"
+  }
+}
