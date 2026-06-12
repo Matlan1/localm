@@ -108,6 +108,7 @@ class ConversationUpsert(BaseModel):
     updated_at: float = 0
     pinned: bool = False
     folder: str | None = None
+    branches: list = []           # parked message-branch tails (fork points)
     messages: list = []
 
 
@@ -852,6 +853,7 @@ def attach_gui(
             {"id": conv_id, "title": req.title,
              "updated_at": req.updated_at,
              "pinned": req.pinned, "folder": req.folder,
+             "branches": req.branches,
              "messages": req.messages},
             ensure_ascii=False)
         if len(payload.encode("utf-8")) > _CONV_MAX_BYTES:
