@@ -45,6 +45,7 @@ localm-home.cfg
 # the committed *.example.json templates use the vanilla public stack)
 localm/image_gen/flux_workflow.json
 localm/music_gen/ace_workflow_local.json
+localm/video_gen/wan_workflow_local.json
 
 # Local screenshots / scratch media
 *.png

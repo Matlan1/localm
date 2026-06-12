@@ -829,6 +829,75 @@ def music_cmd(tags, lyrics, duration, out, seed, steps, cfg):
         sys.exit(1)
 
 
+@main.command("video")
+@click.argument("prompt")
+@click.option("--negative", default=None,
+              help="Negative prompt (default suppresses blur/watermarks).")
+@click.option("-d", "--duration", default=5.0, show_default=True,
+              help="Clip length in seconds (snapped to Wan's 4k+1 frame "
+                   "rule; ~5s is the model's native length).")
+@click.option("--fps", default=24, show_default=True, help="Frame rate.")
+@click.option("--width", type=int, default=None,
+              help="Width (multiple of 16; default 832).")
+@click.option("--height", type=int, default=None,
+              help="Height (multiple of 16; default 480).")
+@click.option("--image", "input_image", type=click.Path(exists=True),
+              default=None,
+              help="Animate this picture instead of starting from noise "
+                   "(image-to-video).")
+@click.option("-o", "--out", default=None,
+              help="Output .mp4 path [default: ./video_<timestamp>.mp4]")
+@click.option("--seed", type=int, default=None, help="Reproducible seed.")
+@click.option("--steps", type=int, default=None, help="Sampler steps (default 30).")
+@click.option("--cfg", type=float, default=None, help="Guidance (default 5.0).")
+def video_cmd(prompt, negative, duration, fps, width, height, input_image,
+              out, seed, steps, cfg):
+    """Generate a short video clip with the local ComfyUI Wan 2.2 workflow.
+
+    \b
+    Examples:
+      localm video "a red fox running through snow, tracking shot"
+      localm video "waves rolling in at dusk" --image beach.png -d 5
+
+    ComfyUI must be running (or start it via the GUI, which can auto-launch
+    it when comfy_launch_cmd is configured). Video is the slowest generator —
+    expect many minutes per clip; see docs/video.md for model setup.
+    """
+    import time as _time
+    from rich.console import Console
+    from .audit import SessionMode, effective_mode
+    from .image_gen.comfy import _comfy_alive, default_api_url
+    from .video_gen import generate_video
+    console = Console()
+
+    api_url = default_api_url()
+    if not _comfy_alive(api_url):
+        console.print(
+            f"[red]ComfyUI is not running at {api_url}.[/red] Start it and "
+            "retry — or use the GUI's Video page, which can launch it "
+            "automatically when comfy_launch_cmd is set.")
+        sys.exit(1)
+
+    out_path = Path(out) if out \
+        else Path(f"video_{_time.strftime('%Y%m%d_%H%M%S')}.mp4")
+    kwargs = {k: v for k, v in
+              (("negative_prompt", negative), ("width", width),
+               ("height", height), ("seed", seed), ("steps", steps),
+               ("cfg", cfg)) if v is not None}
+    ok, message = generate_video(
+        prompt, out_path,
+        seconds=duration,
+        fps=fps,
+        input_image=Path(input_image) if input_image else None,
+        on_progress=lambda t: console.print(f"  [dim]{t}[/dim]"),
+        write_sidecar=effective_mode("server") != SessionMode.PRIVACY,
+        **kwargs,
+    )
+    console.print(f"[{'green' if ok else 'red'}]{message}[/{'green' if ok else 'red'}]")
+    if not ok:
+        sys.exit(1)
+
+
 @main.command("list")
 def list_cmd():
     """List registered models."""
