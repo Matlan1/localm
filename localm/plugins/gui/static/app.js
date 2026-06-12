@@ -374,7 +374,10 @@ async function refreshCtxLimit() {
     const r = await fetch("/v1/config", { headers: authHeaders() });
     if (r.ok) {
       const cfg = await r.json();
-      chat.ctxMax = cfg.n_ctx_max ?? 16384;
+      // Prefer the resolved ceiling (VRAM-derived under ctx_auto) over the
+      // static config value — compaction should track what the model can
+      // actually hold.
+      chat.ctxMax = cfg.effective_ctx_max ?? cfg.n_ctx_max ?? 16384;
       // Privacy mode: conversations live in memory only — wipe anything a
       // previous non-privacy session left behind and show the hint.
       chat.privacy = cfg.effective_mode === "privacy";
@@ -796,7 +799,10 @@ function renderChat() {
         next: () => switchBranch(conv, i, +1),
       };
     }
-    addMessageRow(box, m.role, msgText(m), {
+    const noteSuffix = m.truncated
+      ? "\n\n*[stopped at the max-tokens limit — raise “Max tokens” in ⚙ parameters, or reply “continue”]*"
+      : "";
+    addMessageRow(box, m.role, msgText(m) + noteSuffix, {
       images: msgImages(m),
       audio: m.audio ? [m.audio] : [],
       video: m.video ? [m.video] : [],
@@ -1059,7 +1065,22 @@ async function runWebCall(conv, call) {
 
 /* ---- voice: mic (Whisper STT) + read-aloud (browser TTS) ---- */
 
-const voice = { rec: null, chunks: [] };
+const voice = { rec: null, chunks: [], available: true, reason: "" };
+
+/** Grey out the mic up front when the server lacks the [voice] extra,
+ *  instead of letting the user record and only then failing. */
+async function refreshVoiceStatus() {
+  try {
+    const r = await fetch("/api/voice/status", { headers: authHeaders() });
+    if (!r.ok) return;   // old server without the endpoint — leave enabled
+    const data = await r.json();
+    voice.available = data.available;
+    voice.reason = data.reason || "";
+    const btn = $("chat-mic");
+    btn.classList.toggle("unavailable", !data.available);
+    if (!data.available) btn.title = data.reason;
+  } catch (e) { /* server unreachable — status refreshes on next load */ }
+}
 
 function blobToB64(blob) {
   return new Promise((resolve, reject) => {
@@ -1074,6 +1095,10 @@ async function toggleMic() {
   const btn = $("chat-mic");
   if (voice.rec) {           // second click stops and transcribes
     voice.rec.stop();
+    return;
+  }
+  if (!voice.available) {
+    toast(voice.reason || "Speech-to-text is not installed on the server", true);
     return;
   }
   if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
@@ -1312,7 +1337,7 @@ async function runCompletion(conv, webDepth = 0) {
   if (sysText) messages.push({ role: "system", content: sysText });
   // Server-generated images (/api/ URLs from /imagine) must not be sent to
   // the model as image parts — replace those messages with a text note.
-  messages.push(...conv.messages.map((m) => {
+  const mapped = conv.messages.map((m) => {
     if (Array.isArray(m.content) &&
         m.content.some((p) => p.type === "image_url" &&
                               p.image_url?.url?.startsWith("/api/"))) {
@@ -1324,7 +1349,19 @@ async function runCompletion(conv, webDepth = 0) {
       return { role: m.role, content: stripThink(m.content) };
     }
     return { role: m.role, content: m.content };
-  }));
+  });
+  // Attached documents and knowledge excerpts are stored as separate user
+  // rows; some chat templates require strict user/assistant alternation,
+  // so consecutive plain-text same-role messages are merged before sending.
+  for (const m of mapped) {
+    const prev = messages[messages.length - 1];
+    if (prev && prev.role === m.role && prev.role !== "system" &&
+        typeof prev.content === "string" && typeof m.content === "string") {
+      prev.content += "\n\n" + m.content;
+    } else {
+      messages.push({ role: m.role, content: m.content });
+    }
+  }
 
   const body = { model: modelSelect.value, messages, stream: true };
   for (const k of ["temperature", "top_p", "top_k", "repeat_penalty",
@@ -1344,6 +1381,7 @@ async function runCompletion(conv, webDepth = 0) {
 
   let full = "";
   let usage = null;
+  let finishReason = null;
   try {
     const r = await fetch("/v1/chat/completions", {
       method: "POST",
@@ -1360,6 +1398,7 @@ async function runCompletion(conv, webDepth = 0) {
       let chunk;
       try { chunk = JSON.parse(payload); } catch { return; }
       if (chunk.usage) usage = chunk.usage;
+      if (chunk.choices?.[0]?.finish_reason) finishReason = chunk.choices[0].finish_reason;
       const delta = chunk.choices?.[0]?.delta?.content || "";
       if (delta) {
         full += delta;
@@ -1379,7 +1418,13 @@ async function runCompletion(conv, webDepth = 0) {
     sendBtn.textContent = "➤";
   }
 
-  conv.messages.push({ role: "assistant", content: full });
+  const reply = { role: "assistant", content: full };
+  if (finishReason === "length") {
+    // The reply was cut by the max-tokens budget, not finished by the model.
+    reply.truncated = true;
+    toast("Reply hit the max-tokens limit — raise “Max tokens” in ⚙ parameters, or reply “continue”", true);
+  }
+  conv.messages.push(reply);
   saveConversations(conv);
   if (usage) {
     const bits = [`${usage.total_tokens} tok`];
@@ -1529,9 +1574,19 @@ $("chat-send").onclick = () => {
   if (chat.abort) { chat.abort.abort(); return; }
   sendChat();
 };
-$("chat-input").addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendChat(); }
-});
+/** Enter sends, Shift+Enter inserts a newline, Ctrl/Cmd+Enter also sends.
+ *  Skipped while an IME composition or the slash-command menu is active
+ *  (the menu's own keydown handler picks the highlighted command). */
+function composerEnterToSend(e, send) {
+  if (e.key !== "Enter" || e.isComposing) return;
+  if (e.shiftKey) return;   // newline — the textarea's default behaviour
+  const menu = e.target.closest(".composer-wrap")?.querySelector(".slash-menu");
+  if (menu && menu.style.display !== "none") return;
+  e.preventDefault();
+  send();
+}
+
+$("chat-input").addEventListener("keydown", (e) => composerEnterToSend(e, sendChat));
 $("chat-input").addEventListener("input", (e) => autoGrow(e.target));
 $("toggle-params").onclick = () => $("params").classList.toggle("open");
 $("export-conv").onclick = exportConversation;
@@ -1553,6 +1608,8 @@ $("new-conv").onclick = () => { newConversation(); showView("chat"); };
 const coder = {
   sessions: new Map(),   // id → {info, feedEl, busy, liveBody, liveText, pendingCards, gen}
   activeId: null,
+  lastActiveId: null,    // session to return to when leaving setup mode
+  docs: [],              // file attachments: {name, text, chars, truncated}
 };
 
 function activeSession() {
@@ -1566,7 +1623,16 @@ function sessionLabel(info) {
 
 function renderSessionSelect() {
   const sel = $("session-select");
-  sel.innerHTML = "";
+  sel.replaceChildren();
+  // In setup mode (no active session) a placeholder holds the selection, so
+  // picking any real session fires onchange — even when only one exists.
+  if (!coder.activeId && coder.sessions.size) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "(new session)";
+    opt.selected = true;
+    sel.appendChild(opt);
+  }
   for (const [id, s] of coder.sessions) {
     const opt = document.createElement("option");
     opt.value = id;
@@ -1579,7 +1645,24 @@ function renderSessionSelect() {
 function showCoderUI(hasSession) {
   $("coder-setup").style.display = hasSession ? "none" : "block";
   $("coder-composer").style.display = hasSession ? "block" : "none";
-  $("coder-bar").classList.toggle("open", hasSession);
+  // Keep the bar while other sessions exist so they stay reachable
+  $("coder-bar").classList.toggle("open", hasSession || coder.sessions.size > 0);
+  if (!hasSession) {
+    // Setup mode: park every session feed and clear the session labels —
+    // the form must not render on top of a previous session's transcript.
+    // Remember where we came from so "back to session" can return there.
+    if (coder.activeId && coder.sessions.has(coder.activeId)) {
+      coder.lastActiveId = coder.activeId;
+    }
+    for (const [, s] of coder.sessions) s.feedEl.classList.remove("active");
+    coder.activeId = null;
+    $("coder-cwd").textContent = "";
+    $("coder-state").textContent = "";
+    $("coder-usage").textContent = "";
+    renderSessionSelect();
+  }
+  $("setup-cancel").style.display =
+    !hasSession && coder.sessions.size > 0 ? "" : "none";
 }
 
 function activateSession(id) {
@@ -1952,11 +2035,56 @@ async function reattachSessions() {
   } catch (e) { /* server unreachable; startup poller will retry models anyway */ }
 }
 
+/* coder file attachments — extracted to text server-side (same in-memory
+ * /api/rag/extract path as chat docs) and prepended to the task message,
+ * so the agent sees the content without needing the file inside cwd. */
+
+function renderCoderAttachChips() {
+  const box = $("coder-attach-chips");
+  box.replaceChildren();
+  coder.docs.forEach((doc, i) => {
+    const chip = el("span", "chip");
+    chip.appendChild(el("span", "", "📄 " + doc.name +
+      ` (${(doc.chars / 1000).toFixed(1)}k chars${doc.truncated ? ", trimmed" : ""})`));
+    const rm = el("button", "", "×");
+    rm.onclick = () => { coder.docs.splice(i, 1); renderCoderAttachChips(); };
+    chip.appendChild(rm);
+    box.appendChild(chip);
+  });
+}
+
+async function attachCoderDocument(file) {
+  const b64 = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "");
+    reader.onerror = () => reject(new Error("could not read file"));
+    reader.readAsDataURL(file);
+  });
+  const r = await fetch("/api/rag/extract", {
+    method: "POST", headers: authHeaders(),
+    body: JSON.stringify({ filename: file.name, content_b64: b64 }),
+  });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.detail || r.statusText);
+  coder.docs.push({ name: data.filename, text: data.text,
+                    chars: data.chars, truncated: data.truncated });
+  renderCoderAttachChips();
+}
+
+$("coder-attach").onclick = () => $("coder-file").click();
+$("coder-file").addEventListener("change", (e) => {
+  for (const file of e.target.files) {
+    attachCoderDocument(file).catch((err) =>
+      toast(`${file.name}: ${err.message}`, true));
+  }
+  e.target.value = "";
+});
+
 async function sendCoderTask() {
   const s = activeSession();
   const input = $("coder-input");
   const text = input.value.trim();
-  if (!text || !s) return;
+  if ((!text && coder.docs.length === 0) || !s) return;
 
   if (text.startsWith("/")) {
     input.value = "";
@@ -1965,11 +2093,19 @@ async function sendCoderTask() {
     return;
   }
 
+  // Attached file contents go first so the agent reads them before the task
+  let payload = text || "Read the attached file(s).";
+  if (coder.docs.length) {
+    const blocks = coder.docs.map((d) =>
+      `[Attached file: ${d.name}${d.truncated ? " (truncated)" : ""}]\n${d.text}`);
+    payload = blocks.join("\n\n") + "\n\n" + payload;
+  }
+
   try {
     const r = await fetch(`/api/coder/sessions/${s.info.id}/message`, {
       method: "POST",
       headers: authHeaders(),
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text: payload }),
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
@@ -1985,6 +2121,8 @@ async function sendCoderTask() {
     // works after a page reload) — no client-side row here.
     input.value = "";
     autoGrow(input);
+    coder.docs = [];
+    renderCoderAttachChips();
   } catch (e) {
     toast("Failed to send task: " + e.message, true);
   }
@@ -2014,10 +2152,80 @@ $("session-new").onclick = () => {
   $("coder-bar").classList.add("open");   // keep the bar so sessions stay reachable
 };
 $("setup-start").onclick = startCoderSession;
+$("setup-cancel").onclick = () => {
+  // Return to the session we left (or any remaining one) without starting
+  const id = coder.sessions.has(coder.lastActiveId)
+    ? coder.lastActiveId
+    : [...coder.sessions.keys()].pop();
+  if (id) activateSession(id);
+};
+
+/* ---- directory picker (browse… on the setup form) ---- */
+
+async function fetchDirs(path) {
+  const r = await fetch("/api/fs/dirs?path=" + encodeURIComponent(path || ""),
+                        { headers: authHeaders() });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.detail || r.statusText);
+  return data;
+}
+
+function openDirPicker() {
+  // Start from the current input value when it looks usable, else drives/root
+  const start = $("setup-cwd").value.trim();
+  openModal("Pick a project directory", (body) => {
+    const pathEl = el("div", "dir-picker-path");
+    const listEl = el("div", "dir-picker-list");
+    const actions = el("div", "actions");
+    const useBtn = el("button", "btn-primary", "Use this directory");
+    actions.appendChild(useBtn);
+    body.append(pathEl, listEl, actions);
+    let current = "";
+
+    useBtn.onclick = () => {
+      if (!current) return;
+      $("setup-cwd").value = current;
+      localStorage.setItem("localm.coderCwd", current);
+      $("modal").style.display = "none";
+    };
+
+    async function show(path) {
+      let data;
+      try {
+        data = await fetchDirs(path);
+      } catch (e) {
+        toast("Cannot open: " + e.message, true);
+        if (path) { show(""); return; }   // fall back to the drive list
+        throw e;
+      }
+      current = data.path;
+      pathEl.textContent = current || "Drives";
+      useBtn.disabled = !current;
+      listEl.replaceChildren();
+      if (data.parent !== null && current) {
+        const up = el("div", "dir-picker-item up", "↑ ..");
+        up.onclick = () => show(data.parent);
+        listEl.appendChild(up);
+      }
+      for (const name of data.dirs) {
+        const item = el("div", "dir-picker-item", "📁 " + name);
+        // "/" joins fine on Windows too (Python Path accepts both separators);
+        // the server resolves and echoes back the native form.
+        item.onclick = () =>
+          show(current ? current.replace(/[\\/]+$/, "") + "/" + name : name);
+        listEl.appendChild(item);
+      }
+      if (!data.dirs.length) {
+        listEl.appendChild(el("div", "dir-picker-empty", "no subdirectories"));
+      }
+    }
+    show(start).catch(() => {});
+  });
+}
+
+$("setup-browse").onclick = openDirPicker;
 $("coder-send").onclick = sendCoderTask;
-$("coder-input").addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendCoderTask(); }
-});
+$("coder-input").addEventListener("keydown", (e) => composerEnterToSend(e, sendCoderTask));
 $("coder-input").addEventListener("input", (e) => autoGrow(e.target));
 
 $("coder-stop").onclick = async () => {
@@ -2594,7 +2802,11 @@ refreshCtxLimit().then(initServerConversations);
 refreshKbSelect();
 refreshPersonas();
 refreshMemory();
+refreshVoiceStatus();
 setInterval(refreshModels, 30000);
+// The resolved ctx ceiling only exists once a model has loaded — keep the
+// compaction threshold in sync as models load or switch.
+setInterval(refreshCtxLimit, 30000);
 renderConvList();
 if (chat.conversations.length) {
   chat.activeId = chat.conversations[0].id;

@@ -36,6 +36,7 @@ from localm.image_gen.comfy import (
     _comfy_alive,
     _localm_unload,
     _upload_image,
+    comfy_http_error_detail,
     default_api_url,
 )
 
@@ -213,6 +214,14 @@ def generate_video(
                 "docs/video.md for the download list), and the Wan nodes "
                 "need ComfyUI v0.3.46+."
             )
+    except urllib.error.HTTPError as e:
+        return False, (
+            f"ComfyUI rejected the Wan 2.2 workflow (HTTP {e.code}):\n"
+            f"{comfy_http_error_detail(e)}\n"
+            "Missing Wan 2.2 model files are the usual cause (see "
+            "docs/video.md for the download list); the Wan nodes need "
+            "ComfyUI v0.3.46+."
+        )
     except urllib.error.URLError as e:
         return False, f"Could not connect to ComfyUI at {api_url}: {e}"
     except Exception as e:

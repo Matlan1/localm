@@ -264,6 +264,10 @@ def create_app(engine: Engine) -> FastAPI:
         # the coder default is resolved per new session.
         cfg["effective_mode"] = _mode.value
         cfg["effective_coder_mode"] = effective_mode("coder").value
+        # Resolved context ceiling (VRAM-derived when ctx_auto) — the GUI
+        # bases its compaction threshold on this, not the static config.
+        eff_ctx = getattr(_engine, "effective_ctx_max", None) if _engine else None
+        cfg["effective_ctx_max"] = eff_ctx if isinstance(eff_ctx, int) else None
         return cfg
 
     @app.patch("/v1/config", dependencies=[Depends(_require_auth)])
@@ -451,6 +455,13 @@ def create_app(engine: Engine) -> FastAPI:
 #  Performance metric helpers                                          #
 # ------------------------------------------------------------------ #
 
+def _engine_finish_reason(engine) -> str:
+    """Why the last generation ended — "stop" unless the backend reported a
+    real string (mocks and minimal engines without the attribute count as stop)."""
+    fr = getattr(engine, "last_finish_reason", "stop")
+    return fr if isinstance(fr, str) else "stop"
+
+
 def _ttft_ms(gen_start: float, first_token_at: Optional[float]) -> Optional[float]:
     """Time to first token in milliseconds, or None if nothing was generated."""
     if first_token_at is None:
@@ -592,7 +603,8 @@ async def _stream_sse(
         ttft_ms=_ttft_ms(gen_start, first_token_at),
         tokens_per_sec=_tokens_per_sec(completion_tokens, gen_elapsed),
     )
-    done = ChatChunk.done(model_id, chunk_id, ts, usage=usage)
+    done = ChatChunk.done(model_id, chunk_id, ts, usage=usage,
+                          finish_reason=_engine_finish_reason(engine))
     yield f"data: {done.model_dump_json()}\n\n"
     yield "data: [DONE]\n\n"
 
@@ -716,7 +728,7 @@ async def _complete(
         choices=[
             FullChoice(
                 message=Message(role="assistant", content=text),
-                finish_reason="stop",
+                finish_reason=_engine_finish_reason(engine),
             )
         ],
         usage=usage,

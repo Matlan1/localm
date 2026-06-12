@@ -593,6 +593,11 @@ class LlamaCpp:
         )
 
         pos = n_prompt
+        # Why generation ended, read by callers as self.last_finish_reason.
+        # Default "stop" — it must cover every early exit (EOG token, a
+        # stop-string match in _filtered_stream abandoning this generator,
+        # client abort). Only a genuinely exhausted token budget is "length".
+        self.last_finish_reason = "stop"
         try:
             for _ in range(max_new_tokens):
                 if self._ctx_ptr is None:
@@ -617,10 +622,14 @@ class LlamaCpp:
                 with _ctx():
                     ret = api.llama_decode(self._ctx_ptr, batch)
                 if ret != 0:
-                    # KV cache full or error
+                    # KV cache full or error — the reply was cut short
+                    self.last_finish_reason = "length"
                     break
                 self._cached_tokens.append(token)
                 pos += 1
+            else:
+                # Budget exhausted without the model finishing its turn
+                self.last_finish_reason = "length"
         finally:
             api.llama_sampler_free(sampler)
 
@@ -820,7 +829,7 @@ class LlamaCpp:
                     {
                         "index": 0,
                         "message": {"role": "assistant", "content": full_text},
-                        "finish_reason": "stop",
+                        "finish_reason": getattr(self, "last_finish_reason", "stop"),
                     }
                 ],
             }
@@ -857,10 +866,11 @@ class LlamaCpp:
                 "created": created,
                 "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
             }
-        # final chunk with finish_reason
+        # final chunk with finish_reason ("length" = max_tokens budget ran out)
         yield {
             "id": chunk_id,
             "object": "chat.completion.chunk",
             "created": created,
-            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "choices": [{"index": 0, "delta": {},
+                         "finish_reason": getattr(self, "last_finish_reason", "stop")}],
         }
