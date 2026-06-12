@@ -19,6 +19,7 @@
       <button id="nav-models">&#128230; Models</button>
       <button id="nav-images">&#127912; Images</button>
       <button id="nav-music">&#127925; Music</button>
+      <button id="nav-video">&#127916; Video</button>
       <button id="nav-knowledge">&#128218; Knowledge</button>
       <button id="nav-plugins">&#129513; Plugins</button>
       <button id="nav-settings">&#9965; Settings</button>
@@ -246,6 +247,42 @@
         <div class="card">
           <h3>History</h3>
           <div id="music-history"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ VIDEO ============ -->
+    <section id="view-video" class="view">
+      <div class="page">
+        <h2>Video generation</h2>
+        <div class="sub">Runs the Wan 2.2 workflow on your local ComfyUI (same VRAM
+        handover as image generation). ~5 seconds is the model's native length —
+        longer clips cost VRAM and time linearly and lose coherence. Video is the
+        slowest generator: expect many minutes per clip.</div>
+        <div class="card">
+          <label>Prompt — subject, motion, camera, lighting (motion verbs matter)</label>
+          <textarea id="video-prompt" rows="2" placeholder="a red fox running through fresh snow, low camera tracking shot, golden hour"></textarea>
+          <label>Negative prompt (optional — default suppresses blur/distortion/watermarks)</label>
+          <textarea id="video-negative" rows="1" placeholder="default"></textarea>
+          <div class="grid2">
+            <div><label>Duration (seconds)</label><input type="number" id="video-seconds" value="5" min="1" max="20" step="1"></div>
+            <div><label>FPS</label><input type="number" id="video-fps" value="24" min="8" max="60" step="1"></div>
+            <div><label>Width</label><input type="number" id="video-width" step="16" placeholder="default (832)"></div>
+            <div><label>Height</label><input type="number" id="video-height" step="16" placeholder="default (480)"></div>
+            <div><label>Seed</label><input type="number" id="video-seed" placeholder="random"></div>
+            <div><label>Steps</label><input type="number" id="video-steps" placeholder="default (30)"></div>
+            <div><label>CFG</label><input type="number" id="video-cfg" step="0.5" placeholder="default (5.0)"></div>
+            <div><label>Start image (optional, image-to-video)</label><input type="text" id="video-image" placeholder="path on this machine" spellcheck="false"></div>
+          </div>
+          <div class="actions">
+            <button class="btn-primary" id="video-generate">Generate</button>
+          </div>
+          <pre id="video-log" class="job-log" style="display:none"></pre>
+          <div id="video-result"></div>
+        </div>
+        <div class="card">
+          <h3>History</h3>
+          <div id="video-history"></div>
         </div>
       </div>
     </section>
