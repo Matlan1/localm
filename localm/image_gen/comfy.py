@@ -164,6 +164,7 @@ def generate_image(
     api_url: str = "http://127.0.0.1:8188",
     guidance: Optional[float] = None,
     negative_prompt: Optional[str] = None,
+    cfg: Optional[float] = None,
     seed: Optional[int] = None,
     clip_name1: Optional[str] = None,
     clip_name2: Optional[str] = None,
@@ -193,8 +194,20 @@ def generate_image(
         FluxGuidance scale.  None keeps the workflow's own default (~3.5).
     negative_prompt
         Things to steer away from (e.g. ``"old, mature, middle-aged"``).
-        Injected via ConditioningConcat — no CFG mode change, stays on the
-        distilled flow-match path.  Effect is softer than CFG negatives.
+        A real negative requires classifier-free guidance, so when this is
+        set the workflow's single-pass ``BasicGuider`` is swapped for a
+        ``CFGGuider`` with a dedicated negative branch and ``cfg`` > 1 (see
+        below).  This roughly doubles inference time (two forward passes per
+        step).  Leave it None to keep the fast single-pass path.
+    cfg
+        Classifier-free guidance scale for the negative branch.  Only used
+        when *negative_prompt* is set; ``None`` defaults to 3.5.  A value of
+        1.0 disables the negative entirely (the negative branch is ignored),
+        higher values push harder away from it.  Note: guidance-*distilled*
+        FLUX (the vanilla dev checkpoint) tends to over-saturate at cfg > 1;
+        de-distilled checkpoints (e.g. the "unchained" variants) handle it
+        cleanly.  Distinct from *guidance*, which is FLUX's own distilled
+        guidance embedding and applies to both branches.
     seed
         Noise seed for reproducible outputs.  Randomised if not given.
     clip_name1
@@ -358,29 +371,53 @@ def generate_image(
         if "6" in workflow:
             workflow["6"]["inputs"]["clip"] = ["100", 1]
 
-    # 8. Inject negative prompt via ConditioningConcat (no CFG mode change)
+    # 8. Inject negative prompt via real classifier-free guidance.
+    #    A negative prompt only works if the model sees a SEPARATE negative
+    #    conditioning and subtracts it (cfg > 1). The default workflow uses a
+    #    BasicGuider, which has only a positive `conditioning` input and runs
+    #    at an implicit cfg of 1 — it has no way to express a negative. We swap
+    #    it for a CFGGuider (model, positive, negative, cfg) and build a
+    #    dedicated negative branch.
+    #
+    #    Do NOT use ConditioningConcat here: it APPENDS the negative tokens to
+    #    the positive prompt, which makes the model draw those things *more* —
+    #    the exact opposite of a negative prompt.
     if negative_prompt:
+        neg_cfg = cfg if cfg is not None else 3.5
+        guide_scale = guidance if guidance is not None else 3.5
         # Use the LoRA-patched CLIP if a LoRA was injected, otherwise raw DualCLIPLoader
         clip_source = ["100", 1] if lora_name else ["31", 0]
+
+        # Encode the negative prompt on its own branch and give it the same
+        # FLUX guidance embedding as the positive side, so both live in the
+        # same conditioned space when the sampler compares them.
         workflow["50"] = {
             "inputs": {"text": negative_prompt, "clip": clip_source},
             "class_type": "CLIPTextEncode",
         }
-        workflow["51"] = {
-            "inputs": {
-                "conditioning_to": ["6", 0],
-                "conditioning_from": ["50", 0],
-            },
-            "class_type": "ConditioningConcat",
+        workflow["52"] = {
+            "inputs": {"guidance": guide_scale, "conditioning": ["50", 0]},
+            "class_type": "FluxGuidance",
         }
-        # Redirect FluxGuidance to receive the concatenated conditioning
-        if "26" in workflow:
-            workflow["26"]["inputs"]["conditioning"] = ["51", 0]
-        else:
-            for node in workflow.values():
-                if node.get("class_type") == "FluxGuidance":
-                    node["inputs"]["conditioning"] = ["51", 0]
-                    break
+
+        # Convert the guider into a CFGGuider wired to both branches.
+        guider_id = None
+        for nid, node in workflow.items():
+            if node.get("class_type") in ("BasicGuider", "CFGGuider"):
+                guider_id = nid
+                break
+        if guider_id is not None:
+            g = workflow[guider_id]
+            # BasicGuider's positive lives under "conditioning"; a CFGGuider
+            # we built on a previous override carries it under "positive".
+            positive = g["inputs"].get("positive") or g["inputs"].get("conditioning", ["26", 0])
+            g["class_type"] = "CFGGuider"
+            g["inputs"] = {
+                "model": g["inputs"]["model"],
+                "positive": positive,
+                "negative": ["52", 0],
+                "cfg": neg_cfg,
+            }
 
     # 9. Set seed (use provided value or randomise) — on every noise/sampler
     # node, so workflows with more than one of them stay reproducible
@@ -527,6 +564,7 @@ def generate_image(
             sidecar = {
                 "prompt": prompt,
                 "negative_prompt": negative_prompt,
+                "cfg": (cfg if cfg is not None else 3.5) if negative_prompt else None,
                 "seed": seed,
                 "guidance": guidance,
                 "lora_name": lora_name,
