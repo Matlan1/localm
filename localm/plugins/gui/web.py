@@ -85,6 +85,10 @@ class MoveImageRequest(BaseModel):
     dest: str                         # destination directory on this machine
 
 
+class RenameFileRequest(BaseModel):
+    new_name: str                     # new basename (extension kept)
+
+
 class MusicRequest(BaseModel):
     tags: str                         # style prompt: genre, mood, instruments…
     lyrics: str | None = None         # None/empty = instrumental
@@ -667,8 +671,9 @@ def attach_gui(
         job = jobs.start_fn("imagine", _generate, result_path=out_path.name)
         return {"job_id": job.id}
 
-    def _confined_file(base: Path, name: str, kind: str) -> Path:
-        """Resolve *name* and guarantee it stays directly inside *base*.
+    def _confined_name(base: Path, name: str) -> Path:
+        """Resolve *name* and guarantee it stays directly inside *base*,
+        without requiring it to exist (rename targets, new files).
 
         Blocklisting separators is not enough on Windows: a drive-relative
         name like ``C:evil`` joins to ``C:evil`` (outside *base*), and an
@@ -683,6 +688,11 @@ def attach_gui(
             raise HTTPException(400, "Invalid file name")
         if resolved.parent != base.resolve() or resolved.name != name:
             raise HTTPException(400, "Invalid file name")
+        return resolved
+
+    def _confined_file(base: Path, name: str, kind: str) -> Path:
+        """_confined_name plus an existence check — for files being read."""
+        resolved = _confined_name(base, name)
         if not resolved.is_file():
             raise HTTPException(404, f"No such {kind}")
         return resolved
@@ -726,6 +736,25 @@ def attach_gui(
         if sidecar.is_file():
             shutil.move(str(sidecar), str(dest_dir / sidecar.name))
         return {"status": "moved", "path": str(target)}
+
+    @app.post("/api/imagine/file/{name}/rename",
+              dependencies=[Depends(_require_auth)])
+    async def imagine_rename(name: str, req: RenameFileRequest):
+        """Rename a generated image (and its metadata sidecar) in place."""
+        path = _image_path(name)
+        new_name = req.new_name.strip()
+        if not new_name:
+            raise HTTPException(400, "Empty name")
+        if not new_name.lower().endswith(path.suffix.lower()):
+            new_name += path.suffix          # keep the extension
+        target = _confined_name(images_dir, new_name)
+        if target.exists():
+            raise HTTPException(409, f"Already exists: {new_name}")
+        path.rename(target)
+        sidecar = path.with_suffix(path.suffix + ".json")
+        if sidecar.is_file():
+            sidecar.rename(target.with_suffix(target.suffix + ".json"))
+        return {"status": "renamed", "name": target.name}
 
     @app.get("/api/imagine/history", dependencies=[Depends(_require_auth)])
     async def imagine_history():
