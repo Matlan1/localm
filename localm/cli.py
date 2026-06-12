@@ -1288,12 +1288,13 @@ def doctor():
         import torch
         if torch.cuda.is_available():
             for i in range(torch.cuda.device_count()):
-                props   = torch.cuda.get_device_properties(i)
-                total   = props.total_memory / 1e9
-                free    = (props.total_memory - torch.cuda.memory_allocated(i)) / 1e9
+                props = torch.cuda.get_device_properties(i)
+                # Driver-level free/total — torch's allocator counters miss
+                # everything allocated outside torch (llama.dll, other apps)
+                free_b, total_b = torch.cuda.mem_get_info(i)
                 console.print(
                     f"  {ok_sym}  GPU {i}: {props.name}  "
-                    f"{free:.1f} GB free / {total:.1f} GB total"
+                    f"{free_b / 1e9:.1f} GB free / {total_b / 1e9:.1f} GB total"
                 )
         else:
             console.print(f"  {warn_sym}  torch available but torch.cuda.is_available() = False")
