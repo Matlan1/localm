@@ -870,6 +870,59 @@ class TestDiscoverEndpoints:
 
 
 # ------------------------------------------------------------------ #
+#  Voice (/api/voice/transcribe)                                       #
+# ------------------------------------------------------------------ #
+
+class TestVoiceEndpoint:
+    def test_success_path(self, gui_app, monkeypatch):
+        import base64
+        app, _ = gui_app
+        monkeypatch.setattr("localm.voice.transcribe_bytes",
+                            lambda data, language=None: "hello world")
+        with TestClient(app) as client:
+            r = client.post("/api/voice/transcribe", json={
+                "audio_b64": base64.b64encode(b"fake-webm").decode()})
+        assert r.status_code == 200
+        assert r.json()["text"] == "hello world"
+
+    def test_missing_package_is_501(self, gui_app):
+        """faster-whisper is not installed in the test venv — the real
+        VoiceError install-hint path must surface as 501."""
+        import base64
+        try:
+            import faster_whisper  # noqa: F401
+            pytest.skip("faster-whisper installed — hint path unreachable")
+        except ImportError:
+            pass
+        app, _ = gui_app
+        with TestClient(app) as client:
+            r = client.post("/api/voice/transcribe", json={
+                "audio_b64": base64.b64encode(b"fake").decode()})
+        assert r.status_code == 501
+        assert "localm[voice]" in r.json()["detail"]
+
+    def test_bad_base64_is_400(self, gui_app):
+        app, _ = gui_app
+        with TestClient(app) as client:
+            r = client.post("/api/voice/transcribe",
+                            json={"audio_b64": "!!nope!!"})
+        assert r.status_code == 400
+
+    def test_transcription_failure_is_422(self, gui_app, monkeypatch):
+        import base64
+        from localm.voice import VoiceError
+        app, _ = gui_app
+
+        def boom(data, language=None):
+            raise VoiceError("No speech detected in the recording")
+        monkeypatch.setattr("localm.voice.transcribe_bytes", boom)
+        with TestClient(app) as client:
+            r = client.post("/api/voice/transcribe", json={
+                "audio_b64": base64.b64encode(b"silence").decode()})
+        assert r.status_code == 422
+
+
+# ------------------------------------------------------------------ #
 #  Assistant memory (/api/memory)                                      #
 # ------------------------------------------------------------------ #
 

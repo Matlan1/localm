@@ -159,6 +159,11 @@ class MemoryAppend(BaseModel):
     text: str
 
 
+class TranscribeRequest(BaseModel):
+    audio_b64: str
+    language: str | None = None
+
+
 # ------------------------------------------------------------------ #
 #  Attach                                                             #
 # ------------------------------------------------------------------ #
@@ -925,6 +930,30 @@ def attach_gui(
         return {"url": final_url,
                 "text": text[:max_chars],
                 "truncated": len(text) > max_chars}
+
+    # ----------------------------- voice --------------------------- #
+    # Whisper STT for the mic button. Audio is decoded in memory and never
+    # written to disk, so privacy mode stays trace-free. TTS needs no
+    # endpoint — the browser's speechSynthesis is offline by construction.
+
+    @app.post("/api/voice/transcribe", dependencies=[Depends(_require_auth)])
+    async def voice_transcribe(req: TranscribeRequest):
+        import base64
+        from localm.voice import VoiceError, transcribe_bytes
+        try:
+            data = base64.b64decode(req.audio_b64, validate=True)
+        except Exception:
+            raise HTTPException(400, "audio_b64 is not valid base64")
+        if len(data) > 25_000_000:
+            raise HTTPException(413, "Recording too large (max 25 MB)")
+        loop = asyncio.get_running_loop()
+        try:
+            text = await loop.run_in_executor(
+                None, lambda: transcribe_bytes(data, language=req.language))
+        except VoiceError as e:
+            status = 501 if "faster-whisper" in str(e) else 422
+            raise HTTPException(status, str(e))
+        return {"text": text}
 
     # ----------------------- assistant memory --------------------- #
     # ChatGPT-style persistent memory for chat: a plain markdown file the

@@ -759,6 +759,9 @@ function renderChat() {
     if (m.role === "user" && !tag) {
       actions.push(["edit", () => editMessage(conv, i)]);
     }
+    if (m.role === "assistant" && !tag) {
+      actions.push(["🔊", () => speak(msgText(m), { toggle: true })]);
+    }
     if (m.role === "assistant" && i === conv.messages.length - 1 && !chat.abort) {
       actions.push(["regenerate", () => regenerate(conv)]);
     }
@@ -1033,6 +1036,86 @@ async function runWebCall(conv, call) {
   renderChat();
 }
 
+/* ---- voice: mic (Whisper STT) + read-aloud (browser TTS) ---- */
+
+const voice = { rec: null, chunks: [] };
+
+function blobToB64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "");
+    reader.onerror = () => reject(new Error("could not read recording"));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function toggleMic() {
+  const btn = $("chat-mic");
+  if (voice.rec) {           // second click stops and transcribes
+    voice.rec.stop();
+    return;
+  }
+  if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+    toast("This browser does not support audio recording", true);
+    return;
+  }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    toast("Microphone unavailable: " + e.message, true);
+    return;
+  }
+  voice.chunks = [];
+  voice.rec = new MediaRecorder(stream);
+  voice.rec.ondataavailable = (e) => { if (e.data.size) voice.chunks.push(e.data); };
+  voice.rec.onstop = async () => {
+    stream.getTracks().forEach((t) => t.stop());
+    btn.classList.remove("recording");
+    const blob = new Blob(voice.chunks, { type: voice.rec.mimeType || "audio/webm" });
+    voice.rec = null;
+    btn.disabled = true;
+    btn.textContent = "…";
+    try {
+      const r = await fetch("/api/voice/transcribe", {
+        method: "POST", headers: authHeaders(),
+        body: JSON.stringify({ audio_b64: await blobToB64(blob) }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.detail || r.statusText);
+      const input = $("chat-input");
+      input.value = (input.value ? input.value.trimEnd() + " " : "") + data.text;
+      autoGrow(input);
+      input.focus();
+    } catch (e) {
+      toast("Transcription failed: " + e.message, true);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "🎤";
+    }
+  };
+  voice.rec.start();
+  btn.classList.add("recording");
+  toast("Recording — click 🎤 again to stop");
+}
+
+$("chat-mic").onclick = toggleMic;
+
+/** Read text aloud with the browser's offline voices. With toggle: true
+ *  (the 🔊 button) a second call stops instead; auto-speak replaces. */
+function speak(text, opts = {}) {
+  if (!window.speechSynthesis) {
+    toast("This browser has no speech synthesis", true);
+    return;
+  }
+  if (speechSynthesis.speaking) {
+    speechSynthesis.cancel();
+    if (opts.toggle) return;
+  }
+  const clean = stripThink(text).replace(/[*_`#>\[\]()]/g, " ");
+  if (clean.trim()) speechSynthesis.speak(new SpeechSynthesisUtterance(clean));
+}
+
 /* ---- assistant memory ---- */
 
 const memory = { text: "", writable: false };
@@ -1287,12 +1370,13 @@ async function runCompletion(conv, webDepth = 0) {
 
   // Web-access loop: when the model requested a search/page and the toggle
   // is on, run it and let the model continue — bounded rounds per send.
-  if (webEnabled && webDepth < WEB_MAX_ROUNDS) {
-    const call = parseWebCall(full);
-    if (call) {
-      await runWebCall(conv, call);
-      await runCompletion(conv, webDepth + 1);
-    }
+  const nextCall = (webEnabled && webDepth < WEB_MAX_ROUNDS)
+    ? parseWebCall(full) : null;
+  if (nextCall) {
+    await runWebCall(conv, nextCall);
+    await runCompletion(conv, webDepth + 1);
+  } else if ($("p-speak").checked && full) {
+    speak(full);   // read the finished reply aloud (offline browser voices)
   }
 }
 
