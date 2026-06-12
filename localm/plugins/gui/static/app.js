@@ -207,7 +207,7 @@ $("theme-toggle").onclick = () =>
 /*  Tabs                                                             */
 /* ================================================================ */
 
-const VIEWS = ["chat", "coder", "models", "images", "plugins", "settings"];
+const VIEWS = ["chat", "coder", "models", "images", "knowledge", "plugins", "settings"];
 
 function showView(name) {
   if (!VIEWS.includes(name)) name = "chat";
@@ -294,7 +294,8 @@ const chat = {
   conversations: JSON.parse(localStorage.getItem("localm.conversations") || "[]"),
   activeId: null,
   abort: null,
-  attachments: [],   // {name, dataUri}
+  attachments: [],   // image attachments: {name, dataUri}
+  docs: [],          // document attachments: {name, text, chars, truncated}
   ctxMax: 16384,     // context ceiling — refreshed from /v1/config
   privacy: false,    // server in privacy mode → conversations not persisted
   persist: false,    // non-privacy: conversations sync to the server store
@@ -380,6 +381,7 @@ async function refreshCtxLimit() {
         localStorage.removeItem("localm.conversations");
         localStorage.removeItem("localm.activeView");
         localStorage.removeItem("localm.coderCwd");
+        localStorage.removeItem("localm.kbAddPath");
         const h = document.querySelector("#conversations h3");
         if (h && !document.getElementById("privacy-hint")) {
           const hint = document.createElement("div");
@@ -610,9 +612,11 @@ function renderChat() {
     box.appendChild(buildEmptyHint());
     return;
   }
+  const NOTE_LABELS = { web: "Web", doc: "Doc", kb: "Sources" };
   conv.messages.forEach((m, i) => {
+    const tag = m.tag || (m.web ? "web" : null);
     const actions = [];
-    if (m.role === "user" && !m.web) {
+    if (m.role === "user" && !tag) {
       actions.push(["edit", () => editMessage(conv, i)]);
     }
     if (m.role === "assistant" && i === conv.messages.length - 1 && !chat.abort) {
@@ -621,8 +625,8 @@ function renderChat() {
     addMessageRow(box, m.role, msgText(m), {
       images: msgImages(m),
       actions,
-      cls: m.web ? "web-note" : "",
-      label: m.web ? "Web" : undefined,
+      cls: tag ? "web-note" : "",
+      label: tag ? NOTE_LABELS[tag] : undefined,
     });
   });
   box.scrollTop = box.scrollHeight;
@@ -670,7 +674,7 @@ function chatParams() {
 
 function renderAttachChips() {
   const box = $("attach-chips");
-  box.innerHTML = "";
+  box.replaceChildren();
   chat.attachments.forEach((att, i) => {
     const chip = el("span", "chip");
     const img = document.createElement("img");
@@ -682,17 +686,51 @@ function renderAttachChips() {
     chip.appendChild(rm);
     box.appendChild(chip);
   });
+  chat.docs.forEach((doc, i) => {
+    const chip = el("span", "chip");
+    chip.appendChild(el("span", "", "📄 " + doc.name +
+      ` (${(doc.chars / 1000).toFixed(1)}k chars${doc.truncated ? ", trimmed" : ""})`));
+    const rm = el("button", "", "×");
+    rm.onclick = () => { chat.docs.splice(i, 1); renderAttachChips(); };
+    chip.appendChild(rm);
+    box.appendChild(chip);
+  });
+}
+
+/** Document attachment → text via /api/rag/extract. The file is converted
+ *  in memory on the server and never written to disk (privacy-clean). */
+async function attachDocument(file) {
+  const b64 = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "");
+    reader.onerror = () => reject(new Error("could not read file"));
+    reader.readAsDataURL(file);
+  });
+  const r = await fetch("/api/rag/extract", {
+    method: "POST", headers: authHeaders(),
+    body: JSON.stringify({ filename: file.name, content_b64: b64 }),
+  });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.detail || r.statusText);
+  chat.docs.push({ name: data.filename, text: data.text,
+                   chars: data.chars, truncated: data.truncated });
+  renderAttachChips();
 }
 
 $("chat-attach").onclick = () => $("chat-file").click();
 $("chat-file").addEventListener("change", (e) => {
   for (const file of e.target.files) {
-    const reader = new FileReader();
-    reader.onload = () => {
-      chat.attachments.push({ name: file.name, dataUri: reader.result });
-      renderAttachChips();
-    };
-    reader.readAsDataURL(file);
+    if (file.type.startsWith("image/")) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        chat.attachments.push({ name: file.name, dataUri: reader.result });
+        renderAttachChips();
+      };
+      reader.readAsDataURL(file);
+    } else {
+      attachDocument(file).catch((err) =>
+        toast(`${file.name}: ${err.message}`, true));
+    }
   }
   e.target.value = "";
 });
@@ -869,10 +907,66 @@ async function runCompletion(conv, webDepth = 0) {
   }
 }
 
+/** Query the selected knowledge collection and inject cited excerpts. */
+async function retrieveKnowledge(conv, query) {
+  const kb = $("p-kb").value;
+  if (!kb || !query) return;
+  try {
+    const r = await fetch(
+      `/api/rag/collections/${encodeURIComponent(kb)}/query`, {
+        method: "POST", headers: authHeaders(),
+        body: JSON.stringify({ query, k: 4 }),
+      });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    if (!data.hits.length) return;
+    const basename = (p) => p.split(/[\\/]/).pop();
+    const lines = data.hits.map((h, i) =>
+      `[${i + 1}] ${basename(h.source)}:${h.pos}\n${h.text.slice(0, 900)}`);
+    conv.messages.push({
+      role: "user", tag: "kb",
+      content:
+        `[Excerpts from the "${kb}" collection relevant to: ` +
+        `${query.slice(0, 120)}]\n\n` + lines.join("\n\n") +
+        "\n\nUse these excerpts where relevant and cite them as [1], [2]… " +
+        "If they don't answer the question, say so before answering from " +
+        "general knowledge.",
+    });
+    saveConversations(conv);
+    renderChat();
+  } catch (e) {
+    toast("Knowledge retrieval failed: " + e.message, true);
+  }
+}
+
+/** Populate the params-drawer knowledge selector. pages.js calls this after
+ *  collections change on the Knowledge page. */
+async function refreshKbSelect() {
+  try {
+    const r = await fetch("/api/rag/collections", { headers: authHeaders() });
+    if (!r.ok) return;
+    const data = await r.json();
+    const sel = $("p-kb");
+    const current = sel.value;
+    sel.replaceChildren();
+    const none = document.createElement("option");
+    none.value = "";
+    none.textContent = "(none)";
+    sel.appendChild(none);
+    for (const c of data.collections) {
+      const opt = document.createElement("option");
+      opt.value = c.name;
+      opt.textContent = `${c.name} (${c.n_docs} docs, ${c.n_chunks} chunks)`;
+      sel.appendChild(opt);
+    }
+    if ([...sel.options].some((o) => o.value === current)) sel.value = current;
+  } catch (e) { /* server unreachable — selector stays as-is */ }
+}
+
 async function sendChat() {
   const input = $("chat-input");
   const text = input.value.trim();
-  if (!text && chat.attachments.length === 0) return;
+  if (!text && chat.attachments.length === 0 && chat.docs.length === 0) return;
   if (chat.abort) return;
 
   if (text.startsWith("/")) {
@@ -884,6 +978,17 @@ async function sendChat() {
 
   if (!currentConv()) newConversation();
   const conv = currentConv();
+  const isFirstMessage = conv.messages.length === 0;
+
+  // Attached documents come first so the model reads them before the question
+  for (const doc of chat.docs) {
+    conv.messages.push({
+      role: "user", tag: "doc",
+      content: `[Attached document: ${doc.name}` +
+        (doc.truncated ? " (truncated)" : "") + `]\n${doc.text}`,
+    });
+  }
+  chat.docs = [];
 
   let content;
   if (chat.attachments.length) {
@@ -892,20 +997,21 @@ async function sendChat() {
       content.push({ type: "image_url", image_url: { url: att.dataUri } });
     }
   } else {
-    content = text;
+    content = text || "Please read the attached document(s).";
   }
   conv.messages.push({ role: "user", content });
   chat.attachments = [];
   renderAttachChips();
 
-  if (conv.messages.length === 1) {
-    conv.title = text.slice(0, 42) + (text.length > 42 ? "…" : "") || "Image chat";
+  if (isFirstMessage) {
+    conv.title = text.slice(0, 42) + (text.length > 42 ? "…" : "") || "Document chat";
     renderConvList();
   }
   saveConversations(conv);   // user message persists even if the reply dies
   input.value = "";
   autoGrow(input);
   renderChat();
+  await retrieveKnowledge(conv, text);
   await runCompletion(conv);
 }
 
@@ -1707,6 +1813,7 @@ $("setup-cwd").value = localStorage.getItem("localm.coderCwd") || "";
 refreshModels().then(() => populateSetupModels());
 // Server persistence depends on knowing the privacy state first.
 refreshCtxLimit().then(initServerConversations);
+refreshKbSelect();
 setInterval(refreshModels, 30000);
 renderConvList();
 if (chat.conversations.length) {

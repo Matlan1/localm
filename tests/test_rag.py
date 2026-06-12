@@ -1,0 +1,290 @@
+"""Tests for localm.rag — extraction, chunking, BM25, and the collection store."""
+
+import json
+import zipfile
+
+import pytest
+
+from localm.rag import (
+    Collection, ExtractError, chunk_text, collection_names,
+    delete_collection, extract_text,
+)
+from localm.rag.bm25 import BM25, tokenize
+
+
+# ------------------------------------------------------------------ #
+#  Extraction                                                          #
+# ------------------------------------------------------------------ #
+
+class TestExtract:
+    def test_plain_text(self, tmp_path):
+        f = tmp_path / "notes.txt"
+        f.write_text("hello world", encoding="utf-8")
+        assert extract_text(f) == "hello world"
+
+    def test_markdown_and_code(self, tmp_path):
+        for name in ("doc.md", "script.py", "data.json"):
+            f = tmp_path / name
+            f.write_text("content of " + name, encoding="utf-8")
+            assert name in extract_text(f)
+
+    def test_html_stripped(self, tmp_path):
+        f = tmp_path / "page.html"
+        f.write_text("<html><script>x()</script><body><p>Visible</p></body></html>",
+                     encoding="utf-8")
+        text = extract_text(f)
+        assert "Visible" in text
+        assert "x()" not in text
+
+    def test_docx_via_zip(self, tmp_path):
+        f = tmp_path / "report.docx"
+        document = (
+            '<?xml version="1.0"?><w:document xmlns:w="ns">'
+            "<w:body>"
+            "<w:p><w:r><w:t>First paragraph.</w:t></w:r></w:p>"
+            "<w:p><w:r><w:t>Second </w:t></w:r><w:r><w:t>part &amp; more.</w:t></w:r></w:p>"
+            "</w:body></w:document>"
+        )
+        with zipfile.ZipFile(f, "w") as zf:
+            zf.writestr("word/document.xml", document)
+        text = extract_text(f)
+        assert "First paragraph." in text
+        assert "Second part & more." in text
+        assert text.index("First") < text.index("Second")
+
+    def test_ipynb_cells(self, tmp_path):
+        f = tmp_path / "nb.ipynb"
+        f.write_text(json.dumps({"cells": [
+            {"cell_type": "markdown", "source": ["# Title\n"]},
+            {"cell_type": "code", "source": ["print(42)\n"]},
+        ]}), encoding="utf-8")
+        text = extract_text(f)
+        assert "# Title" in text
+        assert "print(42)" in text
+
+    def test_unsupported_suffix_rejected(self, tmp_path):
+        f = tmp_path / "binary.exe"
+        f.write_bytes(b"\x00\x01")
+        with pytest.raises(ExtractError, match="Unsupported"):
+            extract_text(f)
+
+    def test_missing_file_rejected(self, tmp_path):
+        with pytest.raises(ExtractError, match="Not a file"):
+            extract_text(tmp_path / "ghost.txt")
+
+    def test_empty_file_rejected(self, tmp_path):
+        f = tmp_path / "empty.txt"
+        f.write_text("   \n  ", encoding="utf-8")
+        with pytest.raises(ExtractError, match="No extractable text"):
+            extract_text(f)
+
+    def test_pdf_without_pypdf_gives_install_hint(self, tmp_path, monkeypatch):
+        import builtins
+        real_import = builtins.__import__
+
+        def no_pypdf(name, *a, **k):
+            if name == "pypdf":
+                raise ImportError("No module named 'pypdf'")
+            return real_import(name, *a, **k)
+        monkeypatch.setattr(builtins, "__import__", no_pypdf)
+        f = tmp_path / "doc.pdf"
+        f.write_bytes(b"%PDF-1.4 fake")
+        with pytest.raises(ExtractError, match="localm\\[rag\\]"):
+            extract_text(f)
+
+
+# ------------------------------------------------------------------ #
+#  Chunking                                                            #
+# ------------------------------------------------------------------ #
+
+class TestChunk:
+    def test_empty_text(self):
+        assert chunk_text("") == []
+        assert chunk_text("   \n  ") == []
+
+    def test_small_text_single_chunk(self):
+        chunks = chunk_text("one paragraph only")
+        assert len(chunks) == 1
+        assert chunks[0]["text"] == "one paragraph only"
+        assert chunks[0]["pos"] == 1
+
+    def test_paragraphs_packed_under_limit(self):
+        text = "\n\n".join(f"Paragraph {i} " + "x" * 200 for i in range(20))
+        chunks = chunk_text(text, chunk_chars=1000)
+        assert len(chunks) > 1
+        for c in chunks:
+            assert len(c["text"]) <= 1300   # limit + joined-piece slack
+
+    def test_all_content_present(self):
+        text = "\n\n".join(f"marker-{i}" for i in range(60))
+        chunks = chunk_text(text, chunk_chars=300)
+        joined = "\n".join(c["text"] for c in chunks)
+        for i in range(60):
+            assert f"marker-{i}" in joined
+
+    def test_pathological_single_line(self):
+        chunks = chunk_text("y" * 10_000, chunk_chars=1000)
+        assert len(chunks) >= 9
+        for c in chunks:
+            assert len(c["text"]) <= 1000
+
+    def test_positions_increase(self):
+        text = "\n\n".join(f"para {i}\nsecond line" for i in range(30))
+        chunks = chunk_text(text, chunk_chars=400)
+        positions = [c["pos"] for c in chunks]
+        assert positions == sorted(positions)
+        assert positions[0] == 1
+
+
+# ------------------------------------------------------------------ #
+#  BM25                                                                #
+# ------------------------------------------------------------------ #
+
+class TestBM25:
+    def test_tokenize(self):
+        assert tokenize("Hello, World! x2") == ["hello", "world", "x2"]
+
+    def test_relevant_doc_ranks_first(self):
+        docs = [
+            "the quick brown fox jumps over the lazy dog",
+            "llama models run locally with quantized weights",
+            "recipe for sourdough bread with rye flour",
+        ]
+        scores = BM25(docs).scores("quantized llama weights")
+        assert scores.index(max(scores)) == 1
+
+    def test_unknown_terms_score_zero(self):
+        scores = BM25(["alpha beta", "gamma delta"]).scores("zzz qqq")
+        assert scores == [0.0, 0.0]
+
+    def test_empty_corpus(self):
+        assert BM25([]).scores("anything") == []
+
+
+# ------------------------------------------------------------------ #
+#  Collection store                                                    #
+# ------------------------------------------------------------------ #
+
+@pytest.fixture
+def docs_dir(tmp_path):
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "gpu.md").write_text(
+        "# GPU setup\n\nROCm needs the gfx1030 runtime DLLs.\n\n"
+        "CUDA uses ggml-cuda.dll instead.", encoding="utf-8")
+    (d / "bread.txt").write_text(
+        "Sourdough starter needs flour and water, fed daily.", encoding="utf-8")
+    (d / "skip.exe").write_bytes(b"\x00")
+    return d
+
+
+class TestCollection:
+    def test_create_list_delete(self, tmp_path):
+        base = tmp_path / "rag"
+        c = Collection("kb1", base=base).create()
+        assert c.exists()
+        assert collection_names(base) == ["kb1"]
+        assert delete_collection("kb1", base=base) is True
+        assert collection_names(base) == []
+        assert delete_collection("kb1", base=base) is False
+
+    def test_invalid_names_rejected(self, tmp_path):
+        for bad in ("", "a b", "../x", "x" * 65):
+            with pytest.raises(ValueError):
+                Collection(bad, base=tmp_path)
+
+    def test_add_query_roundtrip(self, tmp_path, docs_dir):
+        base = tmp_path / "rag"
+        c = Collection("kb", base=base).create()
+        result = c.add_paths([docs_dir])
+        assert result["added"] == 2          # .exe ignored
+        assert result["chunks"] >= 2
+        assert result["failed"] == []
+
+        hits = c.query("ROCm runtime DLLs", k=2)
+        assert hits
+        assert "gpu.md" in hits[0]["source"]
+        assert hits[0]["score"] > 0
+
+        # Persisted: a fresh object sees the same corpus
+        c2 = Collection("kb", base=base)
+        assert c2.stats()["n_chunks"] == c.stats()["n_chunks"]
+        assert "gpu.md" in c2.query("ROCm runtime", k=1)[0]["source"]
+
+    def test_unchanged_files_skipped_changed_reindexed(self, tmp_path, docs_dir):
+        import os
+        base = tmp_path / "rag"
+        c = Collection("kb", base=base).create()
+        c.add_paths([docs_dir])
+        again = c.add_paths([docs_dir])
+        assert again["added"] == 0
+        assert again["skipped"] == 2
+
+        bread = docs_dir / "bread.txt"
+        bread.write_text("Completely new rye content.", encoding="utf-8")
+        os.utime(bread, (1, 1))   # force a different mtime
+        third = c.add_paths([docs_dir])
+        assert third["updated"] == 1
+        assert "rye" in c.query("rye content", k=1)[0]["text"]
+        # the old bread text is gone
+        assert all("starter" not in ch["text"]
+                   for ch in c.query("sourdough starter flour", k=5))
+
+    def test_remove_doc(self, tmp_path, docs_dir):
+        base = tmp_path / "rag"
+        c = Collection("kb", base=base).create()
+        c.add_paths([docs_dir])
+        source = next(d["path"] for d in c.docs() if "bread" in d["path"])
+        assert c.remove_doc(source) is True
+        assert c.remove_doc(source) is False
+        assert c.stats()["n_docs"] == 1
+        assert not c.query("sourdough flour water", k=3)
+
+    def test_failed_files_reported(self, tmp_path):
+        base = tmp_path / "rag"
+        c = Collection("kb", base=base).create()
+        bad = tmp_path / "weird.docx"
+        bad.write_bytes(b"not a zip")
+        result = c.add_paths([bad])
+        assert result["added"] == 0
+        assert len(result["failed"]) == 1
+        assert "weird.docx" in result["failed"][0]["path"]
+
+    def test_embeddings_blend_and_degrade(self, tmp_path, docs_dir):
+        base = tmp_path / "rag"
+        c = Collection("kb", base=base).create()
+
+        def fake_embed(texts):
+            # "gpu" docs → x-axis, everything else → y-axis
+            return [[1.0, 0.0] if "DLL" in t or "ROCm" in t or "CUDA" in t
+                    else [0.0, 1.0] for t in texts]
+
+        c.add_paths([docs_dir], embed_fn=fake_embed)
+        assert c.stats()["has_vectors"] is True
+
+        hits = c.query("ROCm DLLs", k=1, embed_fn=fake_embed)
+        assert "gpu.md" in hits[0]["source"]
+
+        # Broken embedder at query time degrades to lexical, not an error
+        def boom(texts):
+            raise RuntimeError("no embeddings")
+        hits = c.query("ROCm DLLs", k=1, embed_fn=boom)
+        assert "gpu.md" in hits[0]["source"]
+
+    def test_embed_failure_during_indexing_degrades(self, tmp_path, docs_dir):
+        base = tmp_path / "rag"
+        c = Collection("kb", base=base).create()
+
+        def boom(texts):
+            raise NotImplementedError("GGUF binding has no embeddings")
+        messages = []
+        result = c.add_paths([docs_dir], embed_fn=boom,
+                             on_progress=messages.append)
+        assert result["added"] == 2
+        assert c.stats()["has_vectors"] is False
+        assert any("lexical-only" in m for m in messages)
+        assert c.query("sourdough flour", k=1)    # lexical retrieval works
+
+    def test_query_empty_collection(self, tmp_path):
+        c = Collection("kb", base=tmp_path / "rag").create()
+        assert c.query("anything") == []

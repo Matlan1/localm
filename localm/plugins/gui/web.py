@@ -119,6 +119,30 @@ class WebFetchRequest(BaseModel):
     max_chars: int = 8000
 
 
+class RagCreateRequest(BaseModel):
+    name: str
+
+
+class RagAddRequest(BaseModel):
+    paths: list[str]
+    embed: bool = True            # try embeddings; degrades to lexical-only
+
+
+class RagQueryRequest(BaseModel):
+    query: str
+    k: int = 4
+
+
+class RagRemoveDocRequest(BaseModel):
+    path: str
+
+
+class RagExtractRequest(BaseModel):
+    filename: str
+    content_b64: str              # in-memory extraction — no disk writes
+    max_chars: int = 24_000
+
+
 # ------------------------------------------------------------------ #
 #  Attach                                                             #
 # ------------------------------------------------------------------ #
@@ -841,6 +865,146 @@ def attach_gui(
         max_chars = max(500, min(req.max_chars, 60_000))
         return {"url": final_url,
                 "text": text[:max_chars],
+                "truncated": len(text) > max_chars}
+
+    # --------------------------- knowledge ------------------------ #
+    # Document collections for retrieval-augmented chat (localm.rag).
+    # Collections are explicit user data — indexing writes to <data dir>/rag/
+    # in every session mode, like generated images. /api/rag/extract is the
+    # exception: it converts an uploaded attachment to text entirely in
+    # memory, so privacy-mode chats can use documents without leaving traces.
+
+    def _self_embed(texts: list) -> list:
+        """Embed via this server's own /v1/embeddings — the endpoint holds
+        the inference semaphore, so indexing never races a chat reply.
+        Raises when the backend has no embedding support (GGUF ctypes
+        binding); callers degrade to lexical-only."""
+        import requests as _rq
+        headers = {}
+        key = os.environ.get("LOCALM_API_KEY")
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        r = _rq.post(f"{self_url}/embeddings",
+                     json={"input": texts, "model": active_model() or "localm"},
+                     headers=headers, timeout=600)
+        r.raise_for_status()
+        return [d["embedding"] for d in r.json()["data"]]
+
+    def _get_collection(name: str):
+        from localm.rag import Collection
+        try:
+            coll = Collection(name)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        if not coll.exists():
+            raise HTTPException(404, f"No such collection: {name}")
+        return coll
+
+    @app.get("/api/rag/collections", dependencies=[Depends(_require_auth)])
+    async def rag_collections():
+        from localm.rag import Collection, collection_names
+        return {"collections": [Collection(n).stats()
+                                for n in collection_names()]}
+
+    @app.post("/api/rag/collections", dependencies=[Depends(_require_auth)])
+    async def rag_create(req: RagCreateRequest):
+        from localm.rag import Collection
+        try:
+            coll = Collection(req.name.strip())
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        if coll.exists():
+            raise HTTPException(409, f"Collection already exists: {coll.name}")
+        coll.create()
+        return coll.stats()
+
+    @app.get("/api/rag/collections/{name}",
+             dependencies=[Depends(_require_auth)])
+    async def rag_detail(name: str):
+        coll = _get_collection(name)
+        return {**coll.stats(), "docs": coll.docs()}
+
+    @app.delete("/api/rag/collections/{name}",
+                dependencies=[Depends(_require_auth)])
+    async def rag_delete(name: str):
+        from localm.rag import delete_collection
+        try:
+            if not delete_collection(name):
+                raise HTTPException(404, f"No such collection: {name}")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return {"status": "deleted", "name": name}
+
+    @app.post("/api/rag/collections/{name}/add",
+              dependencies=[Depends(_require_auth)])
+    async def rag_add(name: str, req: RagAddRequest):
+        coll = _get_collection(name)
+        paths = [Path(p).expanduser() for p in req.paths if p.strip()]
+        if not paths:
+            raise HTTPException(400, "No paths given")
+        missing = [str(p) for p in paths if not p.exists()]
+        if missing:
+            raise HTTPException(400, f"Not found: {', '.join(missing[:5])}")
+        embed = req.embed
+
+        def _index(job):
+            embed_fn = _self_embed if embed else None
+            result = coll.add_paths(
+                paths, embed_fn=embed_fn,
+                on_progress=lambda t: job.push({"type": "line", "text": t}))
+            summary = (f"done: {result['added']} added, "
+                       f"{result['updated']} updated, "
+                       f"{result['skipped']} unchanged, "
+                       f"{len(result['failed'])} failed — "
+                       f"{result['chunks']} chunks total")
+            job.push({"type": "line", "text": summary})
+            for f in result["failed"][:10]:
+                job.push({"type": "line",
+                          "text": f"  failed: {f['path']}: {f['error']}"})
+            return True
+
+        job = jobs.start_fn("rag-index", _index)
+        return {"job_id": job.id}
+
+    @app.post("/api/rag/collections/{name}/query",
+              dependencies=[Depends(_require_auth)])
+    async def rag_query(name: str, req: RagQueryRequest):
+        coll = _get_collection(name)
+        if not req.query.strip():
+            raise HTTPException(400, "Empty query")
+        k = max(1, min(req.k, 20))
+        loop = asyncio.get_running_loop()
+        hits = await loop.run_in_executor(
+            None, lambda: coll.query(req.query, k=k, embed_fn=_self_embed))
+        return {"collection": name, "query": req.query, "hits": hits}
+
+    @app.post("/api/rag/collections/{name}/remove-doc",
+              dependencies=[Depends(_require_auth)])
+    async def rag_remove_doc(name: str, req: RagRemoveDocRequest):
+        coll = _get_collection(name)
+        if not coll.remove_doc(req.path):
+            raise HTTPException(404, f"Not in this collection: {req.path}")
+        return {"status": "removed", "path": req.path}
+
+    @app.post("/api/rag/extract", dependencies=[Depends(_require_auth)])
+    async def rag_extract(req: RagExtractRequest):
+        """Uploaded chat attachment → plain text, entirely in memory."""
+        import base64
+        from localm.rag import ExtractError, extract_bytes
+        try:
+            data = base64.b64decode(req.content_b64, validate=True)
+        except Exception:
+            raise HTTPException(400, "content_b64 is not valid base64")
+        if len(data) > 30_000_000:
+            raise HTTPException(413, "Attachment too large (max 30 MB)")
+        try:
+            text = extract_bytes(data, req.filename)
+        except ExtractError as e:
+            raise HTTPException(422, str(e))
+        max_chars = max(500, min(req.max_chars, 200_000))
+        return {"filename": req.filename,
+                "text": text[:max_chars],
+                "chars": len(text),
                 "truncated": len(text) > max_chars}
 
     # --------------------- coder session history ------------------ #

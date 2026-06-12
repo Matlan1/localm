@@ -65,6 +65,12 @@ gguf = [
 audio = [
     "soundfile>=0.12",
 ]
+# Knowledge collections (chat with your documents) — only PDF parsing needs
+# a package; txt/md/docx/html/code extraction is stdlib.
+# Install with:  pip install "localm[rag]"
+rag = [
+    "pypdf>=4.0",
+]
 # CPU-only install — the base package already runs GGUF models on CPU via the
 # ctypes binding (only llama.dll + ggml*.dll needed). This extra exists so
 # `pip install "localm[cpu]"` is an explicit, documented choice.
