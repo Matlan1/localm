@@ -556,7 +556,7 @@ $("plugin-install").onclick = async () => {
 // Keys hidden from the form (structured values the GUI shouldn't edit blind,
 // plus read-only extras the server reports)
 const _CONFIG_SKIP = new Set(["cors_origins", "effective_mode",
-                              "effective_coder_mode"]);
+                              "effective_coder_mode", "effective_ctx_max"]);
 
 let _configSnapshot = {};
 

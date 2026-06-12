@@ -30,6 +30,18 @@ class VoiceError(Exception):
     """Transcription failed; the message says why and what to install."""
 
 
+def stt_available() -> tuple[bool, str]:
+    """(available, reason) — lets the GUI grey out the mic button up front
+    instead of letting the user record and only then failing."""
+    try:
+        import faster_whisper  # noqa: F401
+        return True, ""
+    except ImportError:
+        return False, (
+            "Speech-to-text needs the faster-whisper package. Install it "
+            "with: pip install \"localm[voice]\"  (then restart the server)")
+
+
 def transcribe_bytes(data: bytes, language: Optional[str] = None) -> str:
     """Transcribe an audio blob (webm/ogg/wav/mp3 — anything PyAV decodes).
     Loads and caches the Whisper model on first call."""

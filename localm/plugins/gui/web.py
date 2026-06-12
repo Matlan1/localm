@@ -435,6 +435,41 @@ def attach_gui(
             raise HTTPException(404, f"No such session: {session_id}")
         return {"status": "closed"}
 
+    @app.get("/api/fs/dirs", dependencies=[Depends(_require_auth)])
+    async def fs_dirs(path: str = ""):
+        """Subdirectories of *path*, for the coder setup directory picker.
+
+        An empty path lists drive roots on Windows (filesystem root
+        elsewhere). Only directory names leave the server — no file
+        names or contents. The GUI is localhost + bearer-auth, and the
+        coder agent this picker feeds can read those directories anyway.
+        """
+        if not path:
+            if os.name == "nt":
+                import string
+                roots = [f"{letter}:\\" for letter in string.ascii_uppercase
+                         if Path(f"{letter}:\\").is_dir()]
+                return {"path": "", "parent": None, "dirs": roots}
+            path = "/"
+        p = Path(path).expanduser()
+        if not p.is_dir():
+            raise HTTPException(404, f"Not a directory: {path}")
+        p = p.resolve()
+        dirs = []
+        try:
+            for child in sorted(p.iterdir(), key=lambda c: c.name.lower()):
+                try:
+                    if child.is_dir() and not child.name.startswith("."):
+                        dirs.append(child.name)
+                except OSError:
+                    continue   # broken junction / reparse point
+        except PermissionError:
+            raise HTTPException(403, f"Permission denied: {path}")
+        at_root = p.parent == p
+        return {"path": str(p),
+                "parent": "" if at_root else str(p.parent),
+                "dirs": dirs}
+
     # ----------------------- model ops + jobs --------------------- #
 
     from .jobs import JobManager
@@ -1096,6 +1131,13 @@ def attach_gui(
     # Whisper STT for the mic button. Audio is decoded in memory and never
     # written to disk, so privacy mode stays trace-free. TTS needs no
     # endpoint — the browser's speechSynthesis is offline by construction.
+
+    @app.get("/api/voice/status", dependencies=[Depends(_require_auth)])
+    async def voice_status():
+        """Is speech-to-text usable? The GUI greys out the mic when not."""
+        from localm.voice import stt_available
+        ok, reason = stt_available()
+        return {"available": ok, "reason": reason}
 
     @app.post("/api/voice/transcribe", dependencies=[Depends(_require_auth)])
     async def voice_transcribe(req: TranscribeRequest):

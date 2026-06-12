@@ -71,7 +71,7 @@
           <button class="attach" id="chat-attach" title="Attach images or documents (pdf, docx, txt, md, …)">&#128206;</button>
           <button class="attach" id="chat-mic" title="Hold a thought, speak it — click to record, click again to transcribe (needs the [voice] extra)">&#127908;</button>
           <input type="file" id="chat-file" accept="image/*,.pdf,.docx,.txt,.md,.markdown,.rst,.html,.htm,.ipynb,.json,.jsonl,.yaml,.yml,.toml,.csv,.tsv,.log,.py,.js,.ts,.java,.c,.h,.cpp,.cs,.go,.rs,.rb,.sh,.ps1,.sql,.xml,.css" multiple style="display:none">
-          <textarea id="chat-input" rows="1" placeholder="Message the model…  (Ctrl+Enter to send)"></textarea>
+          <textarea id="chat-input" rows="1" placeholder="Message the model…  (Enter to send · Shift+Enter for a new line)"></textarea>
           <button class="send" id="chat-send" title="Send">&#10148;</button>
         </div>
         <div class="composer-row">
@@ -111,7 +111,10 @@
         can read, write, and run code; destructive actions ask for your approval below
         unless you enable auto-approve.</div>
         <label for="setup-cwd">Project directory</label>
-        <input type="text" id="setup-cwd" placeholder="D:\projects\myapp" spellcheck="false">
+        <div class="row">
+          <input type="text" id="setup-cwd" placeholder="D:\projects\myapp" spellcheck="false">
+          <button class="btn-quiet" id="setup-browse" title="Pick the project directory">browse…</button>
+        </div>
         <div class="grid2">
           <div>
             <label for="setup-model">Model (switches the active engine)</label>
@@ -142,6 +145,7 @@
         </div>
         <div class="actions">
           <button class="btn-primary" id="setup-start">Start session</button>
+          <button class="btn-quiet" id="setup-cancel" style="display:none" title="Return to the running session without starting a new one">&#8617; back to session</button>
           <button class="btn-quiet" id="setup-history" title="Browse audit logs of past sessions (log/full modes)">past sessions</button>
         </div>
       </div>
@@ -149,8 +153,11 @@
       <div id="coder-feeds"></div>
 
       <div class="composer-wrap" id="coder-composer" style="display:none">
+        <div id="coder-attach-chips"></div>
         <div class="composer">
-          <textarea id="coder-input" rows="1" placeholder="Describe a task for the agent…  (Ctrl+Enter to send)"></textarea>
+          <button class="attach" id="coder-attach" title="Attach text files — their content is added to your message">&#128206;</button>
+          <input type="file" id="coder-file" accept=".pdf,.docx,.txt,.md,.markdown,.rst,.html,.htm,.ipynb,.json,.jsonl,.yaml,.yml,.toml,.csv,.tsv,.log,.py,.js,.ts,.java,.c,.h,.cpp,.cs,.go,.rs,.rb,.sh,.ps1,.sql,.xml,.css" multiple style="display:none">
+          <textarea id="coder-input" rows="1" placeholder="Describe a task for the agent…  (Enter to send · Shift+Enter for a new line)"></textarea>
           <button class="send" id="coder-send" title="Send">&#10148;</button>
         </div>
         <div class="composer-row">
