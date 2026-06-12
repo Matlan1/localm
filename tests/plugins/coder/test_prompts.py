@@ -105,10 +105,14 @@ def test_small_prompt_has_condensed_rules():
     assert len(rule_lines) <= 5, f"Expected ≤5 rules in small prompt, got {len(rule_lines)}"
 
 
-def test_small_prompt_no_generate_image():
-    """generate_image is excluded from the small model tool list."""
+def test_small_prompt_lists_every_tool():
+    """The small-model list is condensed (one line per tool, no JSON
+    examples) but no longer omits tools — the docs are generated from
+    TOOL_REGISTRY so models know everything that is callable."""
+    from localm.plugins.coder.tools import TOOL_REGISTRY
     p = _prompt("phi3-mini")
-    assert "generate_image" not in p
+    for tool in TOOL_REGISTRY:
+        assert tool in p, f"Tool '{tool}' missing from small prompt"
 
 
 def test_memory_injected():
