@@ -137,6 +137,19 @@ class Engine:
     def unload(self) -> None:
         self._backend.unload()
 
+    @property
+    def effective_ctx_max(self):
+        """Resolved context ceiling of the last load (VRAM-derived when
+        ctx_auto is on), or None when unknown / not loaded yet."""
+        return getattr(self._backend, "effective_ctx_max", None)
+
+    @property
+    def last_finish_reason(self) -> str:
+        """Why the most recent generation ended: "stop" (model finished) or
+        "length" (the max_tokens budget ran out). Backends that cannot tell
+        report "stop"."""
+        return getattr(self._backend, "last_finish_reason", "stop")
+
     def count_tokens(self, text: str) -> int:
         """
         Return the number of tokens in *text* using the loaded backend's

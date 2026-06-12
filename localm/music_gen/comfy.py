@@ -27,6 +27,7 @@ from typing import Optional
 from localm.image_gen.comfy import (
     _comfy_alive,
     _localm_unload,
+    comfy_http_error_detail,
     default_api_url,
 )
 
@@ -155,6 +156,15 @@ def generate_music(
                 "missing ace_step_v1_3.5b.safetensors checkpoint is the usual "
                 "cause (download it into ComfyUI/models/checkpoints)."
             )
+    except urllib.error.HTTPError as e:
+        return False, (
+            f"ComfyUI rejected the ACE-Step workflow (HTTP {e.code}):\n"
+            f"{comfy_http_error_detail(e)}\n"
+            "The usual cause is a missing checkpoint — ACE-Step needs "
+            "ace_step_v1_3.5b.safetensors in ComfyUI/models/checkpoints "
+            "(or your own checkpoint via ace_workflow_local.json), and "
+            "ComfyUI v0.3.34+ for the ACE-Step nodes."
+        )
     except urllib.error.URLError as e:
         return False, f"Could not connect to ComfyUI at {api_url}: {e}"
     except Exception as e:

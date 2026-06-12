@@ -45,6 +45,7 @@ class GgufBackend(BaseBackend):
         self.n_ctx_max = n_ctx_max       # ceiling for dynamic growth (0/None = unlimited)
         self.n_ctx_grow = n_ctx_grow
         self.ctx_auto = ctx_auto         # derive n_ctx_max from free VRAM at load
+        self.effective_ctx_max: Optional[int] = None   # resolved ceiling of the last load
         self._llm = None
         self._loaded = False
         self._use_subprocess = False   # set to True if llama-cpp-python unavailable
@@ -213,6 +214,7 @@ class GgufBackend(BaseBackend):
             console=console,
         ) as progress:
             ctx_max = self._effective_ctx_max()
+            self.effective_ctx_max = ctx_max
             cap_label = f"→{ctx_max}" if ctx_max else "→∞"
             progress.add_task(
                 f"Loading model  (ctx={self.n_ctx}{cap_label}, "
@@ -323,9 +325,14 @@ class GgufBackend(BaseBackend):
             kwargs["seed"] = seed
 
         # native ctypes path (LlamaCpp)
+        self.last_finish_reason = "stop"
         try:
             for chunk in self._llm.create_chat_completion(**kwargs):
-                token = chunk["choices"][0].get("delta", {}).get("content", "")
+                choice = chunk["choices"][0]
+                token = choice.get("delta", {}).get("content", "")
+                if choice.get("finish_reason"):
+                    # "length" = the max_tokens budget ran out mid-reply
+                    self.last_finish_reason = choice["finish_reason"]
                 if token:
                     yield token
         except OSError as e:
