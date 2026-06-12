@@ -61,13 +61,19 @@ DEFAULT_CONFIG: dict = {
     "n_ctx": 4096,         # initial context window (grows on demand)
     "n_ctx_max": 16384,    # ceiling the window may grow to (0 = unlimited)
     "n_ctx_grow": 4096,    # growth step — window expands in multiples of this
-    "ctx_auto": False,     # True = derive n_ctx_max from free VRAM at load
+    # Size the context ceiling from free VRAM at model load (clamped to
+    # 4k–64k). The window still starts at n_ctx and grows on demand; set
+    # to false to use the fixed n_ctx_max instead.
+    "ctx_auto": True,
     "n_gpu_layers": 99,    # 99 = offload everything to GPU
     "temperature": 0.8,
     "top_p": 0.95,
     "top_k": 40,
     "repeat_penalty": 1.1,
-    "max_tokens": 1024,
+    # Generation budget per reply. Thinking models (qwen3, deepseek-r1, …)
+    # spend most of it on reasoning, so 1024 silently cut answers mid-thought;
+    # the cap exists only as a runaway guard, not a cost control.
+    "max_tokens": 4096,
     "confirm_remove": True,   # ask before localm rm deletes files
     "port": 8642,             # default inference server port (auto-bumps if busy)
     "cors_origins": None,     # None = localhost only; list of origins; or "*"
