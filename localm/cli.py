@@ -525,6 +525,11 @@ def serve(model, host, port, ctx, gpu_layers, mmproj, device, debug, mode):
 
     Compatible with any OpenAI client library.
     """
+    # A click into this console window must not freeze the server
+    # (Windows QuickEdit suspends output, and output blocks inference).
+    from .winconsole import disable_quickedit
+    disable_quickedit()
+
     if debug:
         from .debuglog import enable_debug
         console.print(f"[yellow]debug log:[/yellow] {enable_debug()}")
