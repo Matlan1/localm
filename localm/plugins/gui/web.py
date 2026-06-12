@@ -146,6 +146,11 @@ class RagExtractRequest(BaseModel):
     max_chars: int = 24_000
 
 
+class PromptUpsert(BaseModel):
+    system: str = ""
+    params: dict = {}             # sampling defaults (temperature, top_p, …)
+
+
 # ------------------------------------------------------------------ #
 #  Attach                                                             #
 # ------------------------------------------------------------------ #
@@ -912,6 +917,60 @@ def attach_gui(
         return {"url": final_url,
                 "text": text[:max_chars],
                 "truncated": len(text) > max_chars}
+
+    # ------------------------ prompt library ---------------------- #
+    # Named personas: a system prompt plus sampling defaults, applied from
+    # the chat parameters drawer. Explicit user assets (like knowledge
+    # collections), stored in <data dir>/prompts.json in every session mode.
+
+    prompts_file = home_dir() / "prompts.json"
+
+    def _check_prompt_name(name: str) -> str:
+        name = (name or "").strip()
+        if not name or len(name) > 64 or any(c in name for c in "\n\r\t"):
+            raise HTTPException(
+                400, "Persona names must be 1-64 characters on one line")
+        return name
+
+    def _load_prompts() -> dict:
+        if prompts_file.is_file():
+            try:
+                return json.loads(prompts_file.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                return {}
+        return {}
+
+    def _save_prompts(data: dict) -> None:
+        prompts_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = prompts_file.with_name(prompts_file.name + ".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                       encoding="utf-8")
+        tmp.replace(prompts_file)
+
+    @app.get("/api/prompts", dependencies=[Depends(_require_auth)])
+    async def prompts_list():
+        data = _load_prompts()
+        return {"prompts": [
+            {"name": name, **entry} for name, entry in sorted(data.items())
+        ]}
+
+    @app.put("/api/prompts/{name}", dependencies=[Depends(_require_auth)])
+    async def prompt_upsert(name: str, req: PromptUpsert):
+        name = _check_prompt_name(name)
+        data = _load_prompts()
+        data[name] = {"system": req.system, "params": req.params}
+        _save_prompts(data)
+        return {"status": "saved", "name": name}
+
+    @app.delete("/api/prompts/{name}", dependencies=[Depends(_require_auth)])
+    async def prompt_delete(name: str):
+        name = _check_prompt_name(name)
+        data = _load_prompts()
+        if name not in data:
+            raise HTTPException(404, f"No such persona: {name}")
+        del data[name]
+        _save_prompts(data)
+        return {"status": "deleted", "name": name}
 
     # --------------------------- knowledge ------------------------ #
     # Document collections for retrieval-augmented chat (localm.rag).
