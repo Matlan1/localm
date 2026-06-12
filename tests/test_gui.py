@@ -89,16 +89,21 @@ class TestCoderSession:
         assert "All done" in final["text"]
         assert final["ok"] is True
 
-    def test_busy_rejects_second_message(self, tmp_path):
+    def test_busy_queues_second_message(self, tmp_path):
+        """Sending mid-task no longer bounces — the message is queued as a
+        steering note and surfaced in the feed with queued=True."""
         class SlowBackend(ScriptedBackend):
             def chat_stream(self, messages, **kw):
                 time.sleep(0.5)
                 yield "done"
 
         session = CoderSession(tmp_path, SlowBackend(["done"]), auto_approve=True)
-        assert session.send_message("one")
-        assert session.send_message("two") is False
-        _drain(session, until_types={"final"})
+        assert session.send_message("one") == "started"
+        assert session.send_message("two") == "queued"
+        events = _drain(session, until_types={"final"})
+        queued = [e for e in events
+                  if e["type"] == "user" and e.get("queued")]
+        assert len(queued) == 1 and queued[0]["text"] == "two"
 
     def test_tool_call_events_flow(self, tmp_path):
         backend = ScriptedBackend([
@@ -179,7 +184,7 @@ class TestCoderSession:
         session.close()
         events = _drain(session, until_types={"closed"})
         assert events[-1]["type"] == "closed"
-        assert session.send_message("too late") is False
+        assert session.send_message("too late") == "closed"
 
 
 class TestConfirmResolution:
@@ -228,6 +233,96 @@ class TestConfirmResolution:
         i_res = types.index("confirm_resolved")
         assert i_req < i_res          # replay rebuilds the card, then resolves it
         assert session.history[i_res]["confirm_id"] == req["confirm_id"]
+
+
+class TestCoderQoL:
+    """Coder QoL round: always-allow, changed-files surfaces, ctx meter,
+    dry-run wiring, and the queued-message follow-up."""
+
+    def test_always_allow_skips_second_confirmation(self, tmp_path):
+        backend = ScriptedBackend([
+            _write_call("a.txt", "1"),
+            _write_call("b.txt", "2"),
+            "Done.",
+        ])
+        session = CoderSession(tmp_path, backend, auto_approve=False)
+        session.send_message("write two files")
+        events = _drain(session, until_types={"confirm_request"})
+        req = events[-1]
+        assert session.answer_confirm(req["confirm_id"], approved=True,
+                                      always_allow=True)
+        events = _drain(session, until_types={"final"})
+        # The second write_file must NOT raise another confirmation
+        assert not any(e["type"] == "confirm_request" for e in events)
+        auto = [e for e in events if e["type"] == "info"
+                and "always-allow" in e.get("text", "")]
+        assert auto, "expected the auto-approve info event"
+        assert (tmp_path / "b.txt").is_file()
+        assert "write_file" in session.info()["allowed_tools"]
+
+    def test_always_allow_ignored_on_reject(self, tmp_path):
+        backend = ScriptedBackend([_write_call("a.txt", "1"), "Done."])
+        session = CoderSession(tmp_path, backend, auto_approve=False)
+        session.send_message("write")
+        req = _drain(session, until_types={"confirm_request"})[-1]
+        session.answer_confirm(req["confirm_id"], approved=False,
+                               always_allow=True)
+        _drain(session, until_types={"final"})
+        assert session.allowed_tools == set()
+        assert not (tmp_path / "a.txt").exists()
+
+    def test_changed_files_and_diff_surfaces(self, tmp_path):
+        backend = ScriptedBackend([_write_call("hello.txt", "hi"), "Done."])
+        session = CoderSession(tmp_path, backend, auto_approve=True)
+        session.send_message("write hello")
+        events = _drain(session, until_types={"final"})
+        files = session.changed_files()
+        assert [f["path"] for f in files] == ["hello.txt"]
+        assert "+hi" in session.session_diff("hello.txt")
+        # the final event names the changed files for the feed summary
+        final = events[-1]
+        assert final["changed_files"] == ["hello.txt"]
+        assert session.info()["changed_files"] == 1
+
+    def test_turn_events_carry_ctx_ratio(self, tmp_path):
+        session = CoderSession(tmp_path, ScriptedBackend(["Done."]),
+                               auto_approve=True)
+        session.send_message("hi")
+        events = _drain(session, until_types={"final"})
+        turn = next(e for e in events if e["type"] == "turn")
+        assert "ctx_ratio" in turn
+        assert 0.0 <= turn["ctx_ratio"] <= 1.0
+
+    def test_dry_run_wires_through_to_agent(self, tmp_path):
+        backend = ScriptedBackend([_write_call("x.txt", "x"), "Done."])
+        session = CoderSession(tmp_path, backend, auto_approve=True,
+                               dry_run=True)
+        assert session.info()["dry_run"] is True
+        session.send_message("write")
+        _drain(session, until_types={"final"})
+        assert not (tmp_path / "x.txt").exists()
+
+    def test_leftover_queued_message_runs_as_followup(self, tmp_path):
+        """A message queued in the task's final moments becomes a follow-up
+        task instead of sitting in the queue forever."""
+        class SlowFinish(ScriptedBackend):
+            def chat_stream(self, messages, **kw):
+                time.sleep(0.4)
+                yield self._next()
+
+        session = CoderSession(tmp_path, SlowFinish(["Done.", "Follow-up done."]),
+                               auto_approve=True)
+        assert session.send_message("first") == "started"
+        assert session.send_message("second") == "queued"
+        _drain(session, until_types={"final"}, timeout=15)
+        # Whether it was drained mid-task or ran as a follow-up task, the
+        # agent must see the second message shortly after the first final.
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if "second" in json.dumps(session.agent._messages):
+                break
+            time.sleep(0.05)
+        assert "second" in json.dumps(session.agent._messages)
 
 
 class TestSessionManager:
@@ -330,6 +425,25 @@ class TestCoderEndpoints:
 
             assert client.delete(f"/api/coder/sessions/{sid}").status_code == 200
             assert client.delete(f"/api/coder/sessions/{sid}").status_code == 404
+
+    def test_files_endpoints_and_dry_run_flag(self, gui_app, tmp_path):
+        app, _ = gui_app
+        with TestClient(app) as client:
+            info = client.post("/api/coder/sessions",
+                               json={"cwd": str(tmp_path),
+                                     "dry_run": True}).json()
+            assert info["dry_run"] is True
+            sid = info["id"]
+
+            assert client.get(
+                f"/api/coder/sessions/{sid}/files").json() == {"files": []}
+            # full-session diff of an untouched session is empty, not an error
+            r = client.get(f"/api/coder/sessions/{sid}/files/diff")
+            assert r.status_code == 200 and r.json()["diff"] == ""
+            # a specific never-touched path is a 404
+            r = client.get(f"/api/coder/sessions/{sid}/files/diff",
+                           params={"path": "never.txt"})
+            assert r.status_code == 404
 
     def test_unknown_session_404(self, gui_app):
         app, _ = gui_app

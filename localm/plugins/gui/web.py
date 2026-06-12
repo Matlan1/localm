@@ -53,6 +53,7 @@ class CreateSessionRequest(BaseModel):
     mode: str | None = None           # None = config coder_mode/mode, else privacy
     model: str | None = None          # switch active engine when given
     scope: str | None = None          # glob restricting file-access tools
+    dry_run: bool = False             # destructive tools report but don't run
     temperature: float | None = None
     max_tokens: int | None = None
 
@@ -114,6 +115,7 @@ class MessageRequest(BaseModel):
 class ConfirmRequest(BaseModel):
     confirm_id: str
     approved: bool
+    always_allow: bool = False        # approve + whitelist the tool this session
 
 
 class ConversationUpsert(BaseModel):
@@ -288,6 +290,7 @@ def attach_gui(
             max_turns=req.max_turns,
             mode=session_mode,
             scope=req.scope,
+            dry_run=req.dry_run,
             **gen_kwargs,
         ))
         manager.create(session)
@@ -379,17 +382,44 @@ def attach_gui(
         session = _get_session(session_id)
         if not req.text.strip():
             raise HTTPException(400, "Empty message")
-        if not session.send_message(req.text):
-            raise HTTPException(409, "Agent is busy with a previous task")
-        return {"status": "started"}
+        status = session.send_message(req.text)
+        if status == "closed":
+            raise HTTPException(409, "Session is closed")
+        # "started" begins a task; "queued" steers the running one — the text
+        # is injected into the conversation at the next turn boundary.
+        return {"status": status}
 
     @app.post("/api/coder/sessions/{session_id}/confirm",
               dependencies=[Depends(_require_auth)])
     async def session_confirm(session_id: str, req: ConfirmRequest):
         session = _get_session(session_id)
-        if not session.answer_confirm(req.confirm_id, req.approved):
+        if not session.answer_confirm(req.confirm_id, req.approved,
+                                      always_allow=req.always_allow):
             raise HTTPException(409, "No matching pending confirmation")
-        return {"status": "answered", "approved": req.approved}
+        return {"status": "answered", "approved": req.approved,
+                "always_allow": req.approved and req.always_allow}
+
+    @app.get("/api/coder/sessions/{session_id}/files",
+             dependencies=[Depends(_require_auth)])
+    async def session_files(session_id: str):
+        """Files the agent has changed this session, with change counts."""
+        session = _get_session(session_id)
+        return {"files": session.changed_files()}
+
+    @app.get("/api/coder/sessions/{session_id}/files/diff",
+             dependencies=[Depends(_require_auth)])
+    async def session_files_diff(session_id: str, path: str = ""):
+        """Cumulative unified diff of session changes (?path= for one file).
+
+        Diffs only files the agent's tracker recorded — arbitrary paths
+        cannot be read through this endpoint."""
+        session = _get_session(session_id)
+        loop = asyncio.get_running_loop()
+        diff = await loop.run_in_executor(
+            None, session.session_diff, path or None)
+        if path and not diff:
+            raise HTTPException(404, f"'{path}' was not changed this session")
+        return {"diff": diff}
 
     @app.post("/api/coder/sessions/{session_id}/stop",
               dependencies=[Depends(_require_auth)])

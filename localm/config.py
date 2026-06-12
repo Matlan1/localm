@@ -87,6 +87,9 @@ DEFAULT_CONFIG: dict = {
     "mode": "privacy",
     "chat_mode": None,
     "coder_mode": None,
+    # Seconds a GUI coder approval card may sit unanswered before it is
+    # auto-rejected and the agent moves on.
+    "coder_confirm_timeout": 600,
     # After an image is generated, ask ComfyUI to release its VRAM and reload
     # the chat model so the next reply is instant. Turn off when generating
     # many images in a row — the chat model then reloads lazily on the next

@@ -59,6 +59,32 @@ class TestMangledVariants:
         assert calls[0].name == "read_file"
         assert calls[0].args == {"path": "utils.py"}
 
+    def test_doubled_braces_verbatim_from_e2e(self):
+        # Verbatim from a real gemma4-4b run: doubled outer braces silently
+        # broke tool calling — the raw call was printed as the final answer.
+        text = ('<|tool_call>call:write_file{{"path": "hello.txt", '
+                '"content": "Hello from localcoder."}}<tool_call|>')
+        calls = parse_tool_calls(text)
+        assert len(calls) == 1
+        assert calls[0].name == "write_file"
+        assert calls[0].args == {"path": "hello.txt",
+                                 "content": "Hello from localcoder."}
+
+    def test_doubled_braces_canonical_wrapper(self):
+        text = ('<tool_call>{{"name": "tree", "args": {}}}</tool_call>')
+        # outer doubling with inner empty args object
+        calls = parse_tool_calls(text)
+        assert not calls or calls[0].name == "tree"
+
+    def test_literal_newline_inside_string_value(self):
+        # Models routinely write multi-line file content without \n escapes;
+        # strict JSON rejects control characters inside strings.
+        text = ('<tool_call>\n{"name": "write_file", "args": {"path": "a.txt", '
+                '"content": "line one\nline two"}}\n</tool_call>')
+        calls = parse_tool_calls(text)
+        assert len(calls) == 1
+        assert calls[0].args["content"] == "line one\nline two"
+
     def test_pipe_both_sides_markers(self):
         text = ('<|tool_call|>\n{"name": "list_dir", "args": {"path": "."}}\n'
                 '<|tool_call|>')

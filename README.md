@@ -22,7 +22,7 @@ Everything that does not strictly need the internet works fully offline. Online 
 | **HF Transformers** | Full HuggingFace model directories |
 | **OpenAI-compatible server** | `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`, streaming SSE, TTFT and tok/s in usage |
 | **Web GUI** | `localm gui`: chat, coder agent, model manager, image/music/video generation, plugins, and settings in the browser; zero build step, fully offline ([guide](docs/gui.md)) |
-| **Coding agent** | `localm coder` / `localcoder`: agentic loop with file, shell, search, test, and image tools |
+| **Coding agent** | `localm coder` / `localcoder`: agentic loop with file, shell, search, test, and image tools; mid-task steering, cumulative session diffs (`/changes`, `/diff`), circuit breaker on repeated failures, tab-completed REPL |
 | **Web access (opt-in)** | `web_search` + `fetch_url` for coder and chat via one network policy: `off`/`ask`/`allow`, domain allow/deny, private-address SSRF guard ([guide](docs/network.md)) |
 | **Knowledge (RAG)** | Chat with your documents: attach files in chat (in-memory, privacy-clean) or index folders into collections with cited retrieval — BM25 always, embeddings blended in when the backend supports them ([guide](docs/rag.md)) |
 | **Voice** | 🎤 local Whisper speech-to-text into the composer (`localm[voice]` extra, CPU, no torch) and 🔊 read-aloud via the browser's offline voices |

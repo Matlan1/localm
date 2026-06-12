@@ -21,8 +21,10 @@ The Agent class is used by:
 from __future__ import annotations
 
 import datetime
+import difflib
 import fnmatch
 import json
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -56,8 +58,11 @@ from .prompts import build_system_prompt
 # Tools that mutate files — trigger a project map refresh after they run
 _MUTATING_TOOLS: frozenset[str] = frozenset({"write_file", "edit_file", "run_shell"})
 
-# Tools whose file changes can be undone (we snapshot before they run)
-_UNDOABLE_TOOLS: frozenset[str] = frozenset({"write_file", "edit_file", "patch_file"})
+# Tools whose file changes can be undone (we snapshot before they run).
+# These are also the tools recorded in the changed-files tracker.
+_UNDOABLE_TOOLS: frozenset[str] = frozenset({
+    "write_file", "edit_file", "patch_file", "edit_notebook_cell",
+})
 
 # File-access tools whose `path` argument must match the active scope glob
 _SCOPED_TOOLS: frozenset[str] = frozenset({
@@ -211,10 +216,19 @@ class Agent:
         self._total_tokens: int = 0
         self._last_turn_tokens: int = 0   # tokens used in the most recently completed turn
         self._consecutive_errors: dict[str, int] = {}  # tool_name → failure streak
+        self._abort_streak_tool: Optional[str] = None  # set when the circuit breaker trips
         self._compact_warned: bool = False
         self._last_run_ok: bool = True    # False when the last _loop hit max_turns
         self._undo_stack: list[dict] = []
         self._unverified_writes: set[str] = set()  # code files changed since last test run
+        # Changed-files tracker: rel path → {original: bytes|None, writes: int,
+        # last_tool: str}. The first-seen original is kept so session_diff()
+        # can show the cumulative change, not just the last edit.
+        self._changed_files: dict[str, dict] = {}
+        # Mid-task steering: messages queued (possibly from another thread)
+        # while the loop runs, delivered at the next turn boundary.
+        self._queued_messages: list[str] = []
+        self._queue_lock = threading.Lock()
         self._model_name: str = getattr(backend, "model_id", "")
         self._audit: AuditLogT = make_audit_log(mode, label=name)
         self._project_map: ProjectMap = ProjectMap.build(cwd)
@@ -280,6 +294,114 @@ class Agent:
     def request_stop(self) -> None:
         """Ask the loop to stop at the next safe point (turn or token boundary)."""
         self._stop_requested = True
+
+    def queue_message(self, text: str) -> None:
+        """
+        Queue a steering message for delivery at the next turn boundary.
+
+        Thread-safe — the GUI calls this from the request thread while the
+        agent loop runs in its own thread. The message is injected into the
+        conversation before the next LLM call, so the user can redirect a
+        running task ("also add logging", "skip the tests") without stopping
+        it. Messages queued after a task finishes are delivered at the start
+        of the next one.
+        """
+        with self._queue_lock:
+            self._queued_messages.append(text)
+
+    def queued_count(self) -> int:
+        with self._queue_lock:
+            return len(self._queued_messages)
+
+    def _drain_queued(self) -> list[str]:
+        with self._queue_lock:
+            msgs, self._queued_messages = self._queued_messages, []
+        return msgs
+
+    # ------------------------------------------------------------------ #
+    #  Changed-files tracking
+    # ------------------------------------------------------------------ #
+
+    def changed_files(self) -> list[dict]:
+        """
+        Files this session has written, with change counts.
+
+        Each entry: ``{path, writes, created, exists, last_tool}`` where
+        *created* means the file did not exist before this session touched it
+        and *exists* is its current on-disk state (False = since deleted).
+        """
+        # Snapshot first — the GUI reads this from another thread while the
+        # agent loop may be inserting entries.
+        snapshot = dict(self._changed_files)
+        out = []
+        for key in sorted(snapshot):
+            e = snapshot[key]
+            abs_path = (self.cwd / key)
+            out.append({
+                "path": key,
+                "writes": e["writes"],
+                "created": e["original"] is None,
+                "exists": abs_path.is_file(),
+                "last_tool": e["last_tool"],
+            })
+        return out
+
+    def session_diff(self, path: Optional[str] = None) -> str:
+        """
+        Cumulative unified diff of everything this session changed.
+
+        Compares each tracked file's first-seen original content against its
+        current on-disk state — so three successive edits to one file show as
+        one combined diff. Pass *path* for a single file, None for all.
+        Returns "" when nothing was changed (or the path is untracked).
+        """
+        snapshot = dict(self._changed_files)   # cross-thread read safety
+        keys = [path] if path else sorted(snapshot)
+        parts: list[str] = []
+        for key in keys:
+            entry = snapshot.get(key)
+            if entry is None:
+                continue
+            original = entry["original"]
+            old_text = (original.decode("utf-8", errors="replace")
+                        if original is not None else "")
+            abs_path = (self.cwd / key)
+            try:
+                new_text = (abs_path.read_text(encoding="utf-8", errors="replace")
+                            if abs_path.is_file() else "")
+            except Exception:
+                new_text = ""
+            diff = "".join(difflib.unified_diff(
+                old_text.splitlines(keepends=True),
+                new_text.splitlines(keepends=True),
+                fromfile=f"a/{key}" if original is not None else "/dev/null",
+                tofile=f"b/{key}" if new_text else "/dev/null",
+            ))
+            if diff:
+                parts.append(diff)
+        return "\n".join(parts)
+
+    def _record_changed_file(self, path_arg: str, old_content: bytes | None,
+                             tool: str) -> None:
+        """Track a successful file write in the changed-files map."""
+        abs_path = (self.cwd / path_arg).resolve()
+        try:
+            key = abs_path.relative_to(self.cwd.resolve()).as_posix()
+        except ValueError:
+            key = str(abs_path)
+        entry = self._changed_files.get(key)
+        if entry is None:
+            self._changed_files[key] = {
+                "original": old_content, "writes": 1, "last_tool": tool,
+            }
+        else:
+            entry["writes"] += 1
+            entry["last_tool"] = tool
+
+    def undo_list(self) -> list[dict]:
+        """The undo stack, most recent first: ``[{tool, path}, ...]``."""
+        return [{"tool": e["tool"], "path": str(e["path"])}
+                for e in reversed(self._undo_stack)]
 
     # ------------------------------------------------------------------ #
     #  Public API
@@ -451,13 +573,29 @@ class Agent:
                     final_response = "[stopped by user]"
                     self._last_run_ok = False
                     break
+
+                # Mid-task steering: deliver queued user messages before the
+                # next LLM call so the agent reads them this turn.
+                for queued in self._drain_queued():
+                    self._add_user(
+                        "[user steering note — read this before continuing, it "
+                        f"overrides earlier instructions where they conflict]\n{queued}"
+                    )
+                    self._emit("info", text="steering note delivered to the agent")
+                    if interactive:
+                        print_info("(steering note delivered)")
+
                 self._turns += 1
                 prev_turn_tokens = self._last_turn_tokens
                 self._last_turn_tokens = 0   # reset counter for this turn
 
+                ctx_ratio = self._fill_ratio()
                 if interactive:
-                    print_turn_divider(self._turns, self._total_tokens, prev_turn_tokens)
-                self._emit("turn", turn=self._turns, total_tokens=self._total_tokens)
+                    print_turn_divider(self._turns, self._total_tokens,
+                                       prev_turn_tokens, ctx_ratio=ctx_ratio)
+                self._emit("turn", turn=self._turns,
+                           total_tokens=self._total_tokens,
+                           ctx_ratio=round(min(ctx_ratio, 1.0), 3))
 
                 self._audit.set_turn(self._turns)
 
@@ -566,6 +704,23 @@ class Agent:
                 combined = "\n\n".join(result_blocks)
                 self._add_user(combined)
 
+                # Circuit breaker: a tool that keeps failing identically wastes
+                # the whole turn budget — stop and hand control back instead.
+                if self._abort_streak_tool:
+                    tool = self._abort_streak_tool
+                    self._abort_streak_tool = None
+                    streak = self._consecutive_errors.get(tool, 0)
+                    final_response = (
+                        f"[circuit breaker: {tool} failed {streak} times in a "
+                        "row — stopping so you can take a look instead of "
+                        "burning more turns. The conversation is intact; "
+                        "adjust the approach and continue.]"
+                    )
+                    print_warning(final_response)
+                    self._emit("info", text=final_response)
+                    self._last_run_ok = False
+                    break
+
             else:
                 msg = f"[max_turns={self.max_turns} reached]"
                 print_warning(msg)
@@ -630,14 +785,19 @@ class Agent:
                     result = self._execute_tool(call, interactive=interactive)
                     result_blocks.append(result.to_xml(call.name))
             else:
-                # Parallel execution for non-destructive batch
+                # Parallel execution for non-destructive batch. The pool is
+                # shut down without waiting so one hung tool (network fetch,
+                # slow disk) cannot block the whole batch past the deadline —
+                # the stuck thread is abandoned and reported as a timeout.
                 ordered: dict[int, str] = {}
-                with ThreadPoolExecutor(max_workers=min(len(group), 8)) as pool:
-                    futures = {
-                        pool.submit(self._execute_tool, call, False): (i, call)
-                        for i, call in enumerate(group)
-                    }
-                    for fut in as_completed(futures):
+                pool = ThreadPoolExecutor(max_workers=min(len(group), 8))
+                futures = {
+                    pool.submit(self._execute_tool, call, False): (i, call)
+                    for i, call in enumerate(group)
+                }
+                try:
+                    for fut in as_completed(futures,
+                                            timeout=self._PARALLEL_BATCH_TIMEOUT_S):
                         i, call = futures[fut]
                         try:
                             result = fut.result()
@@ -648,10 +808,27 @@ class Agent:
                         if interactive:
                             print_tool_call(call.name, call.args)
                             print_tool_result(call.name, result, verbose=self.verbose)
+                except TimeoutError:
+                    for fut, (i, call) in futures.items():
+                        if i not in ordered:
+                            fut.cancel()
+                            result = ToolResult.error(
+                                f"{call.name} did not finish within "
+                                f"{self._PARALLEL_BATCH_TIMEOUT_S}s (parallel "
+                                "batch timeout) — try a narrower target."
+                            )
+                            ordered[i] = result.to_xml(call.name)
+                            if interactive:
+                                print_tool_error(call.name, result.output)
+                finally:
+                    pool.shutdown(wait=False)
                 for i in range(len(group)):
                     result_blocks.append(ordered[i])
 
         return result_blocks
+
+    # Wall-clock deadline for one parallel batch of non-destructive tools
+    _PARALLEL_BATCH_TIMEOUT_S = 120
 
     # ------------------------------------------------------------------ #
     #  Compaction
@@ -976,7 +1153,9 @@ ws     ::= [ \t\n\r]*
             print_tool_call(call.name, call.args)
         self._emit("tool_call", tool=call.name, args=call.args)
 
-        # Patch-mode: intercept write tools, accumulate diffs, don't touch disk
+        # Patch-mode: intercept write tools, accumulate diffs, don't touch disk.
+        # A write tool the interceptor can't express as a diff must NOT fall
+        # through to a real disk write — patch-mode promises no changes.
         if self.patch_mode and call.name in _UNDOABLE_TOOLS:
             chunk = self._patch_mode_intercept(call)
             if chunk is not None:
@@ -987,7 +1166,15 @@ ws     ::= [ \t\n\r]*
                 )
                 if interactive:
                     console.print("    [dim cyan][patch-mode] diff captured[/dim cyan]")
-                return result
+            else:
+                result = ToolResult.error(
+                    f"[patch-mode] {call.name} cannot be captured as a diff "
+                    "(no change, or unsupported operation) — skipped. Use "
+                    "write_file/edit_file/patch_file in patch mode."
+                )
+                if interactive:
+                    console.print("    [dim yellow][patch-mode] skipped[/dim yellow]")
+            return result
 
         # Scope check — reject file operations that fall outside the active glob
         if self.scope and call.name in _SCOPED_TOOLS:
@@ -1051,18 +1238,20 @@ ws     ::= [ \t\n\r]*
                            summary="rejected by user")
                 return result
 
-        # Snapshot file content before undoable writes so /undo can restore it
+        # Snapshot file content before undoable writes so /undo can restore
+        # it and the changed-files tracker can diff against the original
+        snapshot_old: bytes | None = None
         if call.name in _UNDOABLE_TOOLS:
             path_arg = call.args.get("path", "")
             if path_arg:
                 abs_path = (self.cwd / path_arg).resolve()
                 try:
-                    old_content = abs_path.read_bytes() if abs_path.is_file() else None
+                    snapshot_old = abs_path.read_bytes() if abs_path.is_file() else None
                 except Exception:
-                    old_content = None
+                    snapshot_old = None
                 self._undo_stack.append({
                     "path": abs_path,
-                    "old_content": old_content,
+                    "old_content": snapshot_old,
                     "tool": call.name,
                 })
 
@@ -1081,7 +1270,9 @@ ws     ::= [ \t\n\r]*
         except Exception as e:
             result = ToolResult.error(f"Tool error: {e}")
 
-        # Track consecutive failures and inject escalating recovery hints
+        # Track consecutive failures and inject escalating recovery hints;
+        # at 4 identical failures the circuit breaker stops the task after
+        # this batch (checked in _loop) instead of burning the turn budget.
         if not result.ok:
             streak = self._consecutive_errors.get(call.name, 0) + 1
             self._consecutive_errors[call.name] = streak
@@ -1099,6 +1290,8 @@ ws     ::= [ \t\n\r]*
                     "Consider reading the relevant files first, "
                     "or breaking the task into smaller steps.]"
                 )
+            if streak >= 4:
+                self._abort_streak_tool = call.name
         else:
             self._consecutive_errors.pop(call.name, None)
 
@@ -1117,6 +1310,8 @@ ws     ::= [ \t\n\r]*
         if result.ok and not self.dry_run and not self.patch_mode:
             if call.name in _UNDOABLE_TOOLS:
                 path_arg = call.args.get("path", "")
+                if path_arg:
+                    self._record_changed_file(path_arg, snapshot_old, call.name)
                 if path_arg and Path(path_arg).suffix.lower() in _CODE_EXTS:
                     self._unverified_writes.add(path_arg)
             elif call.name == "run_tests":
