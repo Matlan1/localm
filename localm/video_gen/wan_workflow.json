@@ -23,7 +23,7 @@
     "class_type": "CLIPTextEncode"
   },
   "6": {
-    "inputs": { "width": 832, "height": 480, "length": 121, "batch_size": 1, "vae": ["3", 0] },
+    "inputs": { "width": 1280, "height": 704, "length": 121, "batch_size": 1, "vae": ["3", 0] },
     "class_type": "Wan22ImageToVideoLatent"
   },
   "7": {
