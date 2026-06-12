@@ -207,7 +207,7 @@ $("theme-toggle").onclick = () =>
 /*  Tabs                                                             */
 /* ================================================================ */
 
-const VIEWS = ["chat", "coder", "models", "images", "knowledge", "plugins", "settings"];
+const VIEWS = ["chat", "coder", "models", "images", "music", "knowledge", "plugins", "settings"];
 
 function showView(name) {
   if (!VIEWS.includes(name)) name = "chat";
@@ -384,6 +384,8 @@ async function refreshCtxLimit() {
         localStorage.removeItem("localm.coderCwd");
         localStorage.removeItem("localm.kbAddPath");
         localStorage.removeItem("localm.convCollapsed");
+        localStorage.removeItem("localm.imgMoveDest");
+        localStorage.removeItem("localm.musicMoveDest");
         const h = document.querySelector("#conversations h3");
         if (h && !document.getElementById("privacy-hint")) {
           const hint = document.createElement("div");
@@ -695,6 +697,14 @@ function addMessageRow(container, role, text, opts = {}) {
     }
     body.appendChild(img);
   }
+  for (const url of opts.audio || []) {
+    const player = document.createElement("audio");
+    player.controls = true;
+    player.style.width = "100%";
+    // bearer-protected file — fetch as a blob with auth headers
+    fetchImageURL(url).then((u) => (player.src = u)).catch(() => player.remove());
+    body.appendChild(player);
+  }
   row.appendChild(body);
   const meta = el("div", "msg-meta");
   const copy = el("button", "copy-btn", "copy");
@@ -779,6 +789,7 @@ function renderChat() {
     }
     addMessageRow(box, m.role, msgText(m), {
       images: msgImages(m),
+      audio: m.audio ? [m.audio] : [],
       actions,
       variant,
       cls: tag ? "web-note" : "",
@@ -2067,6 +2078,7 @@ $("setup-history").onclick = openSessionHistory;
 
 const CHAT_COMMANDS = [
   { cmd: "imagine", hint: "generate an image with FLUX", args: "<prompt>" },
+  { cmd: "music", hint: "generate a music track (ACE-Step, 120s instrumental)", args: "<style tags>" },
   { cmd: "web", hint: "search the web, then answer with sources", args: "<query>" },
   { cmd: "clear", hint: "clear this conversation" },
   { cmd: "compact", hint: "summarise older messages to free context" },
@@ -2162,9 +2174,52 @@ async function runWebInChat(query) {
   await runCompletion(conv);
 }
 
+/** /music <tags> — generate a default-length instrumental inline; the Music
+ *  page has the full form (lyrics, duration, seed…). */
+async function runMusicInChat(tags) {
+  if (!tags) { toast("Usage: /music <style tags>", true); return; }
+  if (!currentConv()) newConversation();
+  const conv = currentConv();
+  conv.messages.push({ role: "user", content: "/music " + tags });
+  saveConversations(conv);
+  renderChat();
+  const box = $("chat-messages");
+  const { body } = addMessageRow(box, "assistant", "");
+  body.textContent = "Generating track… (long tracks take a while)";
+  box.scrollTop = box.scrollHeight;
+  try {
+    const r = await fetch("/api/music", {
+      method: "POST", headers: authHeaders(),
+      body: JSON.stringify({ tags }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    const end = await streamJob(data.job_id, (line) => {
+      body.textContent = line;
+      if (nearBottom(box)) box.scrollTop = box.scrollHeight;
+    });
+    if (end.status === "done" && end.result) {
+      conv.messages.push({
+        role: "assistant",
+        content: "Here is the generated track:",
+        audio: "/api/music/file/" + encodeURIComponent(end.result),
+      });
+      saveConversations(conv);
+      renderChat();
+    } else {
+      body.textContent = "Music generation " + end.status +
+        " — see the Music page for details.";
+    }
+  } catch (e) {
+    body.textContent = "Music generation failed: " + e.message;
+    toast(e.message, true);
+  }
+}
+
 function execChatCommand(cmd, arg) {
   switch (cmd) {
     case "imagine": runImagineInChat(arg); return true;
+    case "music": runMusicInChat(arg); return true;
     case "web": runWebInChat(arg); return true;
     case "clear": {
       const conv = currentConv();

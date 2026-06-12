@@ -142,6 +142,13 @@ GUI gaps identified by comparing against LM Studio, Jan, Open WebUI.
 - [x] Chat: `/web <query>` command and a per-conversation "Web access" toggle — the model emits `<tool_call>` web requests, the GUI executes them through the policy and injects results as visible dimmed "Web" messages (max 3 rounds per send)
 - [x] Behaviour change: `fetch_url` to localhost/private addresses is now blocked by default (`net_allow_private true` restores it)
 
+### Round 13 (shipped 2026-06-12) — music surfaces
+
+- [x] Music nav page: tags/lyrics/duration (arbitrary seconds)/seed/steps/CFG form → progress-streamed job → inline player; history with play / move-to-folder / delete
+- [x] `/music <tags>` in chat: inline generation with an audio-player message (messages gain an `audio` field; bearer-protected files load as blob URLs)
+- [x] `localm music "tags" [--lyrics file] [-d seconds] [-o out.flac] [--seed/--steps/--cfg]` with a clear ComfyUI-not-running hint
+- [x] `imgMoveDest`/`musicMoveDest` localStorage keys gated + scrubbed under the privacy contract
+
 ### Round 12 (shipped 2026-06-12) — voice
 
 - [x] `localm/voice.py` + `[voice]` extra: Whisper STT via faster-whisper (CPU int8 — runs on the GGUF-only base install, no torch); model from config `voice_stt_model` (default "base"), downloaded once on first use, then fully offline
@@ -212,10 +219,10 @@ Backend scaffold is in place; the user-facing parts are still to do.
 
 - [x] `localm/music_gen/` — ACE-Step workflow (`ace_workflow.json`) + `generate_music()` via ComfyUI (arbitrary track length in seconds, lyrics or instrumental, FLAC output, sidecar metadata, VRAM handoff)
 - [x] API endpoints: `POST /api/music`, `GET /api/music/history`, `GET/DELETE /api/music/file/{name}`, `POST /api/music/file/{name}/move`
-- [ ] GUI "Music" page: tags/lyrics/duration form, job log, inline audio player, history with manage actions (mirror the Images page)
-- [ ] `/music` slash command in chat (mirror `/imagine`)
-- [ ] CLI command (`localm music "tags" --lyrics file --duration 180`)
-- [ ] Verify end-to-end against a ComfyUI install with `ace_step_v1_3.5b.safetensors`; document model download in README
+- [x] GUI "Music" page: tags/lyrics/duration form, job log, inline audio player, history with play/move/delete (shipped 2026-06-12, Round 13)
+- [x] `/music` slash command in chat — default-length instrumental with an inline player message (Round 13)
+- [x] CLI command `localm music "tags" --lyrics file --duration 180` (Round 13)
+- [ ] Verify end-to-end against a ComfyUI install with `ace_step_v1_3.5b.safetensors`; document model download in README — **needs a manual run on a machine with the model**; all surfaces are mock-tested
 
 ---
 
