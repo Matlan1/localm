@@ -22,6 +22,7 @@ existing picture (image-to-video) instead.
 from __future__ import annotations
 
 import json
+import os
 import random
 import time
 import urllib.error
@@ -103,8 +104,11 @@ def generate_video(
     fps
         Output frame rate (default 24, the Wan 2.2 native rate).
     width / height
-        Output resolution.  None keeps the template default (832x480).
-        Must be multiples of 16.
+        Output resolution.  None keeps the template default (1280x704 —
+        the model's NATIVE resolution; Wan 2.2 5B was trained at 720p and
+        output collapses into washed-out smears well below it, so iterate
+        by shortening the clip, not by shrinking the frame).  Must be
+        multiples of 16.
     steps / cfg
         Sampler settings.  None keeps the template defaults (30 / 5.0).
     seed
@@ -265,6 +269,26 @@ def generate_video(
             output_path.write_bytes(response.read())
     except Exception as e:
         return False, f"Failed to download generated clip from ComfyUI: {e}"
+
+    # Delete the original from ComfyUI's output directory so no second copy
+    # lingers there. Only possible when the user tells us where it is
+    # (COMFY_OUTPUT_DIR env var or "comfy_output_dir" config key) — there is
+    # no portable default. Same behaviour as image generation.
+    comfy_out = os.environ.get("COMFY_OUTPUT_DIR")
+    if not comfy_out:
+        try:
+            from localm.config import load_config
+            comfy_out = load_config().get("comfy_output_dir")
+        except Exception:
+            comfy_out = None
+    if comfy_out:
+        try:
+            orig = (Path(comfy_out) / video_info.get("subfolder", "")
+                    / video_info.get("filename"))
+            if orig.exists():
+                orig.unlink()
+        except Exception:
+            pass
 
     # Sidecar JSON — everything needed to reproduce or tweak the clip.
     # Skipped entirely in privacy mode (write_sidecar=False) so the prompt
