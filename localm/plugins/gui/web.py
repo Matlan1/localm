@@ -552,49 +552,14 @@ def attach_gui(
     # Shared by image (/api/imagine) and music (/api/music) generation.
 
     def _ensure_comfy(job) -> bool:
-        """ComfyUI reachable? If not, launch it when configured, else
-        tell the user exactly what to do."""
-        import shlex
-        import subprocess
-        import sys as _sys
-        import time as _t
-        from localm.config import load_config
-        from localm.image_gen.comfy import _comfy_alive, default_api_url
-        api_url = default_api_url()
-        if _comfy_alive(api_url):
-            return True
-        launch_cmd = load_config().get("comfy_launch_cmd")
-        if not launch_cmd:
-            job.push({"type": "line", "text":
-                      f"ComfyUI is not running at {api_url}. Start it "
-                      "(your ComfyUI/Stability Matrix launcher) and retry, "
-                      "or set a launch command so localm can start it:  "
-                      "localm config comfy_launch_cmd \"D:\\path\\to\\comfyui.bat\""})
-            return False
-        job.push({"type": "line",
-                  "text": f"ComfyUI not running — launching: {launch_cmd}"})
-        # The command is the user's own config value (their launcher
-        # script). cmd /c handles .bat files; shlex covers POSIX.
-        if _sys.platform == "win32":
-            argv = ["cmd", "/c", launch_cmd]
-        else:
-            argv = shlex.split(launch_cmd)
-        try:
-            subprocess.Popen(argv,
-                             stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL)
-        except Exception as e:
-            job.push({"type": "line", "text": f"Launch failed: {e}"})
-            return False
-        deadline = _t.monotonic() + 180
-        while _t.monotonic() < deadline:
-            if _comfy_alive(api_url):
-                job.push({"type": "line", "text": "ComfyUI is up."})
-                return True
-            _t.sleep(2)
-        job.push({"type": "line",
-                  "text": "ComfyUI did not come up within 3 minutes."})
-        return False
+        """ComfyUI reachable? If not, launch it when configured, else tell
+        the user exactly what to do. Shared logic lives in image_gen.comfy
+        (ensure_comfy) so the CLI and coder tools auto-launch too."""
+        from localm.image_gen.comfy import ensure_comfy
+        ok, msg = ensure_comfy(
+            on_progress=lambda t: job.push({"type": "line", "text": t}))
+        job.push({"type": "line", "text": msg})
+        return ok
 
     def _reload_llm(job) -> None:
         """Hand VRAM back: ask ComfyUI to drop its models, then reload
@@ -1163,10 +1128,13 @@ def attach_gui(
 
     @app.get("/api/voice/status", dependencies=[Depends(_require_auth)])
     async def voice_status():
-        """Is speech-to-text usable? The GUI greys out the mic when not."""
-        from localm.voice import stt_available
+        """Is speech-to-text usable? The GUI greys out the mic when not,
+        and asks for consent before the one-time Whisper model download."""
+        from localm.voice import stt_available, stt_model_cached
         ok, reason = stt_available()
-        return {"available": ok, "reason": reason}
+        cached, model_name = stt_model_cached() if ok else (False, "")
+        return {"available": ok, "reason": reason,
+                "model_cached": cached, "model": model_name}
 
     @app.post("/api/voice/transcribe", dependencies=[Depends(_require_auth)])
     async def voice_transcribe(req: TranscribeRequest):
