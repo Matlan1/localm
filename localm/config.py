@@ -78,8 +78,12 @@ DEFAULT_CONFIG: dict = {
     "port": 8642,             # default inference server port (auto-bumps if busy)
     "cors_origins": None,     # None = localhost only; list of origins; or "*"
     # Command that starts your ComfyUI install (e.g. a launch .bat). When set,
-    # image generation can start ComfyUI automatically if it is not running.
+    # the image/music/video generators start ComfyUI automatically if it is
+    # not running — from the GUI, the CLI, or the coder's generate_image tool.
     "comfy_launch_cmd": None,
+    # Working directory for comfy_launch_cmd (launchers that assume their own
+    # folder, e.g. plain "python main.py" inside a ComfyUI checkout).
+    "comfy_workdir": None,
     # ComfyUI's own output directory (e.g. StabilityMatrix's Images folder).
     # When set, the duplicate ComfyUI keeps after generation is deleted so the
     # only copy is the one localm saved.

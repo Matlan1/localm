@@ -217,10 +217,16 @@ async function discoverFiles(repo, filesBox, btn) {
       row.appendChild(el("span", "fname", f.file));
       const pull = el("button", "", "pull");
       pull.onclick = () => {
+        // Prefill the pull form — the user confirms (and can set an alias)
+        // before anything downloads. The suggested alias mirrors the
+        // server's default name (file name without .gguf).
         $("pull-spec").value = `${repo}:${f.file}`;
-        $("pull-name").value = "";
-        $("pull-start").click();
-        $("pull-log").scrollIntoView({ behavior: "smooth", block: "nearest" });
+        $("pull-name").value = f.file.replace(/\.gguf$/i, "");
+        const nameInput = $("pull-name");
+        nameInput.scrollIntoView({ behavior: "smooth", block: "center" });
+        nameInput.focus();
+        nameInput.select();
+        toast("Review the alias, then click Pull to start the download");
       };
       row.appendChild(pull);
       filesBox.appendChild(row);

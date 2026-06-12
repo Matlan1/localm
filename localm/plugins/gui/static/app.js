@@ -1065,7 +1065,8 @@ async function runWebCall(conv, call) {
 
 /* ---- voice: mic (Whisper STT) + read-aloud (browser TTS) ---- */
 
-const voice = { rec: null, chunks: [], available: true, reason: "" };
+const voice = { rec: null, chunks: [], available: true, reason: "",
+                modelCached: true, model: "" };
 
 /** Grey out the mic up front when the server lacks the [voice] extra,
  *  instead of letting the user record and only then failing. */
@@ -1076,6 +1077,8 @@ async function refreshVoiceStatus() {
     const data = await r.json();
     voice.available = data.available;
     voice.reason = data.reason || "";
+    voice.modelCached = data.model_cached !== false;
+    voice.model = data.model || "";
     const btn = $("chat-mic");
     btn.classList.toggle("unavailable", !data.available);
     if (!data.available) btn.title = data.reason;
@@ -1100,6 +1103,15 @@ async function toggleMic() {
   if (!voice.available) {
     toast(voice.reason || "Speech-to-text is not installed on the server", true);
     return;
+  }
+  if (!voice.modelCached) {
+    // Transcription is fully local, but the FIRST use fetches the Whisper
+    // model from HuggingFace — make that one network access explicit.
+    if (!confirm(
+        `First use downloads the Whisper "${voice.model}" speech model ` +
+        "from HuggingFace (one-time). Transcription itself runs fully " +
+        "offline afterwards. Download now?")) return;
+    voice.modelCached = true;   // consent given — don't re-ask this session
   }
   if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
     toast("This browser does not support audio recording", true);

@@ -95,6 +95,82 @@ def _comfy_alive(api_url: str, timeout: float = 3.0) -> bool:
         return False
 
 
+def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
+                 wait_seconds: int = 180) -> tuple[bool, str]:
+    """
+    Make sure ComfyUI is reachable, launching it when configured.
+
+    Used by every generator (image, music, video) from any caller — GUI,
+    CLI, or the coder's generate_image tool. When ComfyUI is down and the
+    ``comfy_launch_cmd`` config is set, the command is started (optionally
+    in ``comfy_workdir``) and polled until the API answers.
+
+    Returns (ok, message); the message explains what to configure when
+    nothing could be launched.
+    """
+    import shlex
+    import subprocess
+    import sys as _sys
+    import time as _t
+    from localm.config import load_config
+
+    def _say(text: str) -> None:
+        if on_progress:
+            try:
+                on_progress(text)
+            except Exception:
+                pass
+
+    api_url = (api_url or default_api_url()).rstrip("/")
+    if _comfy_alive(api_url):
+        return True, "ComfyUI is running."
+
+    cfg = load_config()
+    launch_cmd = cfg.get("comfy_launch_cmd")
+    if not launch_cmd:
+        return False, (
+            f"ComfyUI is not reachable at {api_url}.\n"
+            "Start ComfyUI first (default: http://127.0.0.1:8188), set the "
+            "FLUX_API_URL environment variable if it runs elsewhere, or let "
+            "localm start it for you:\n"
+            '  localm config comfy_launch_cmd "D:\\path\\to\\launch-comfyui.bat"\n'
+            '  localm config comfy_workdir "D:\\path\\to\\ComfyUI"   (optional cwd)'
+        )
+
+    _say(f"ComfyUI not running — launching: {launch_cmd}")
+    # The command is the user's own config value (their launcher script).
+    # On Windows pass `cmd /S /c "<line>"` as a single string: /S strips the
+    # outer quotes and runs the line verbatim, so quoted executable paths
+    # survive (a `["cmd", "/c", line]` list gets re-quoted by subprocess and
+    # mangles them). POSIX uses shlex.
+    workdir = cfg.get("comfy_workdir") or None
+    if _sys.platform == "win32":
+        argv: "str | list" = 'cmd /S /c "' + launch_cmd + '"'
+    else:
+        argv = shlex.split(launch_cmd)
+    try:
+        subprocess.Popen(argv, cwd=workdir,
+                         stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+    except Exception as e:
+        return False, f"Could not launch ComfyUI ({launch_cmd}): {e}"
+
+    deadline = _t.monotonic() + wait_seconds
+    last_said = 0.0
+    while _t.monotonic() < deadline:
+        if _comfy_alive(api_url):
+            return True, "ComfyUI is up."
+        elapsed = wait_seconds - (deadline - _t.monotonic())
+        if elapsed - last_said >= 15:
+            _say(f"Waiting for ComfyUI… ({int(elapsed)}s)")
+            last_said = elapsed
+        _t.sleep(2)
+    return False, (
+        f"ComfyUI did not come up within {wait_seconds // 60} minutes — "
+        "check the launcher window for errors."
+    )
+
+
 def comfy_http_error_detail(e: "urllib.error.HTTPError") -> str:
     """
     Human-readable detail from a ComfyUI /prompt error response.
@@ -285,14 +361,12 @@ def generate_image(
 
     _con = Console()
 
-    # 0. Fail fast if ComfyUI is down — BEFORE unloading the LLM, so a dead
-    # image server doesn't cost the user a pointless model unload + reload
-    if not _comfy_alive(api_url):
-        return False, (
-            f"ComfyUI is not reachable at {api_url}.\n"
-            "Start ComfyUI first (default: http://127.0.0.1:8188), or set the "
-            "FLUX_API_URL environment variable if it runs elsewhere."
-        )
+    # 0. Make sure ComfyUI is up (auto-launching when configured) — BEFORE
+    # unloading the LLM, so a dead image server doesn't cost the user a
+    # pointless model unload + reload
+    ok, msg = ensure_comfy(api_url, on_progress=lambda t: _con.print(f"[dim]{t}[/dim]"))
+    if not ok:
+        return False, msg
 
     # 1. Unload LLM to free VRAM before FLUX loads
     _localm_unload(localm_url)
