@@ -20,9 +20,13 @@ once:
   lose coherence — treat anything past ~8 s as experimental.
 - Wan requires a 4k+1 frame count; the requested duration is snapped to the
   nearest valid count automatically.
-- On a 16 GB RDNA2 card (no flash attention), expect a 5 s 832x480 clip to
-  take on the order of **20–40 minutes**. Lower the resolution or steps to
-  trade quality for time.
+- Measured on a 16 GB RDNA2 card (RX 6900 XT, native ROCm, no flash
+  attention): a **2 s 640x368 clip at 10 steps took ~9 minutes** end to end
+  (including the ~20 GB model load). Attention cost grows super-linearly with
+  frames x pixels, so a full 5 s 832x480 clip at 30 steps lands **well over an
+  hour** on this class of hardware. The practical workflow: iterate short and
+  small (`-d 2 --width 640 --height 368 --steps 10`), then re-render the
+  keeper at full settings overnight with the same `--seed`.
 
 ## Model files
 
