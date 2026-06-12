@@ -94,6 +94,19 @@ class MusicRequest(BaseModel):
     lyrics_strength: float | None = None
 
 
+class VideoRequest(BaseModel):
+    prompt: str                       # scene description (motion verbs matter)
+    negative_prompt: str | None = None
+    seconds: float = 5.0              # snapped to Wan's 4k+1 frame rule
+    fps: int = 24
+    width: int | None = None          # template default 832 (multiple of 16)
+    height: int | None = None         # template default 480
+    seed: int | None = None
+    steps: int | None = None
+    cfg: float | None = None
+    input_image: str | None = None    # path on this machine (image-to-video)
+
+
 class MessageRequest(BaseModel):
     text: str
 
@@ -780,6 +793,124 @@ def attach_gui(
                               "size_bytes": p.stat().st_size,
                               "mtime": p.stat().st_mtime})
         return {"tracks": items}
+
+    # ----------------------- video generation --------------------- #
+
+    video_dir = home_dir() / "gui_video"
+
+    @app.post("/api/video", dependencies=[Depends(_require_auth)])
+    async def video(req: VideoRequest):
+        if not req.prompt.strip():
+            raise HTTPException(400, "Empty prompt")
+        if req.seconds <= 0 or req.seconds > 20:
+            raise HTTPException(400, "Duration must be between 1 and 20 seconds")
+        if req.fps <= 0 or req.fps > 60:
+            raise HTTPException(400, "FPS must be between 1 and 60")
+        input_image = None
+        if req.input_image:
+            input_image = Path(req.input_image).expanduser()
+            if not input_image.is_file():
+                raise HTTPException(400, f"Input image not found: {req.input_image}")
+
+        video_dir.mkdir(parents=True, exist_ok=True)
+        import time as _time
+        out_path = video_dir / f"{_time.strftime('%Y%m%d_%H%M%S')}_{os.urandom(3).hex()}.mp4"
+
+        def _generate(job):
+            from localm.audit import SessionMode, effective_mode
+            from localm.video_gen import generate_video
+            if not _ensure_comfy(job):
+                return False
+            job.push({"type": "line", "text":
+                      f"Submitting Wan workflow to ComfyUI "
+                      f"({req.seconds:.0f}s clip — video is slow, be patient)…"})
+            kwargs = {}
+            for field in ("negative_prompt", "seconds", "fps", "width",
+                          "height", "seed", "steps", "cfg"):
+                value = getattr(req, field)
+                if value is not None:
+                    kwargs[field] = value
+            ok, message = generate_video(
+                req.prompt,
+                out_path,
+                input_image=input_image,
+                localm_url=self_url,
+                on_progress=lambda t: job.push({"type": "line", "text": t}),
+                write_sidecar=effective_mode("server") != SessionMode.PRIVACY,
+                **kwargs,
+            )
+            job.push({"type": "line", "text": message})
+            if ok:
+                job.result = out_path.name
+                _reload_llm(job)
+            return ok
+
+        job = jobs.start_fn("video", _generate, result_path=out_path.name)
+        return {"job_id": job.id}
+
+    def _video_path(name: str) -> Path:
+        return _confined_file(video_dir, name, "clip")
+
+    @app.get("/api/video/file/{name}", dependencies=[Depends(_require_auth)])
+    async def video_file(name: str):
+        from fastapi.responses import FileResponse
+        path = _video_path(name)
+        media = {".mp4": "video/mp4", ".webm": "video/webm",
+                 ".gif": "image/gif"}.get(path.suffix.lower(),
+                                          "application/octet-stream")
+        return FileResponse(str(path), media_type=media)
+
+    @app.delete("/api/video/file/{name}", dependencies=[Depends(_require_auth)])
+    async def video_delete(name: str):
+        path = _video_path(name)
+        sidecar = path.with_suffix(path.suffix + ".json")
+        path.unlink()
+        if sidecar.is_file():
+            sidecar.unlink()
+        return {"status": "deleted", "name": name}
+
+    @app.post("/api/video/file/{name}/move",
+              dependencies=[Depends(_require_auth)])
+    async def video_move(name: str, req: MoveImageRequest):
+        import shutil
+        path = _video_path(name)
+        dest_dir = Path(req.dest).expanduser()
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise HTTPException(400, f"Cannot create destination: {e}")
+        if not dest_dir.is_dir():
+            raise HTTPException(400, f"Not a directory: {req.dest}")
+        target = dest_dir / path.name
+        if target.exists():
+            raise HTTPException(409, f"Already exists: {target}")
+        shutil.move(str(path), str(target))
+        sidecar = path.with_suffix(path.suffix + ".json")
+        if sidecar.is_file():
+            shutil.move(str(sidecar), str(dest_dir / sidecar.name))
+        return {"status": "moved", "path": str(target)}
+
+    @app.get("/api/video/history", dependencies=[Depends(_require_auth)])
+    async def video_history():
+        """Generated clips, newest first, with their sidecar metadata."""
+        items = []
+        if video_dir.is_dir():
+            files = [p for p in video_dir.iterdir()
+                     if p.suffix.lower() in (".mp4", ".webm", ".gif")]
+            for p in sorted(files, key=lambda f: f.stat().st_mtime,
+                            reverse=True)[:100]:
+                meta = {}
+                sidecar = p.with_suffix(p.suffix + ".json")
+                if sidecar.is_file():
+                    try:
+                        meta = json.loads(sidecar.read_text(encoding="utf-8"))
+                    except Exception:
+                        pass
+                items.append({"name": p.name, "meta": meta,
+                              "path": str(p),
+                              "size_bytes": p.stat().st_size,
+                              "mtime": p.stat().st_mtime})
+        return {"videos": items}
 
     # ------------------------ model discovery --------------------- #
     # Search HuggingFace for GGUF models and show per-quant "fits your

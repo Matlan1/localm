@@ -130,6 +130,14 @@ Stop asks the agent to halt at the next safe point. End session terminates it.
   generation. History with inline playback, move-to-folder, and delete.
   `/music <tags>` in chat generates a default-length instrumental inline, and
   `localm music "tags" --lyrics song.txt -d 180` does it from the terminal.
+- **Video**: generate short clips with the local ComfyUI Wan 2.2 workflow —
+  prompt + negative, duration (snapped to the model's frame rule; ~5 s is the
+  native length), fps, resolution, seed/steps/CFG, and an optional start image
+  (image-to-video). Same VRAM handover; history with inline playback,
+  move-to-folder, and delete. `/video <prompt>` in chat generates a default
+  ~5 s clip inline, and `localm video "prompt"` does it from the terminal.
+  Video is the slowest generator — see [docs/video.md](video.md) for model
+  setup and honest timing expectations.
 - **Knowledge**: create document collections, index files or folders with live
   progress, inspect/remove indexed documents, test-search a collection, and
   delete collections (index only — original files untouched). Collections show

@@ -1322,3 +1322,111 @@ class TestImageManagement:
                             json={"dest": str(dest)})
         assert r.status_code == 409
         assert (images / "img.png").exists()
+
+
+# ------------------------------------------------------------------ #
+#  Video generation endpoints                                          #
+# ------------------------------------------------------------------ #
+
+@pytest.fixture
+def video_app(tmp_path, monkeypatch):
+    """GUI app whose video dir lives under tmp_path."""
+    monkeypatch.delenv("LOCALM_HOME", raising=False)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    app = FastAPI()
+
+    async def switch_model(name):
+        pass
+
+    attach_gui(app, self_url="http://127.0.0.1:9/v1",
+               switch_model=switch_model, active_model=lambda: "model-a")
+    videos = tmp_path / ".localm" / "gui_video"
+    videos.mkdir(parents=True)
+    return app, videos
+
+
+class TestVideoEndpoints:
+    @staticmethod
+    def _make_clip(videos, name="clip.mp4", meta=None):
+        (videos / name).write_bytes(b"fake mp4")
+        if meta is not None:
+            (videos / (name + ".json")).write_text(json.dumps(meta))
+
+    def test_empty_prompt_rejected(self, video_app):
+        app, _ = video_app
+        with TestClient(app) as client:
+            r = client.post("/api/video", json={"prompt": "   "})
+        assert r.status_code == 400
+
+    @pytest.mark.parametrize("seconds", [0, -1, 21, 3600])
+    def test_bad_duration_rejected(self, video_app, seconds):
+        app, _ = video_app
+        with TestClient(app) as client:
+            r = client.post("/api/video",
+                            json={"prompt": "a fox", "seconds": seconds})
+        assert r.status_code == 400
+
+    def test_bad_fps_rejected(self, video_app):
+        app, _ = video_app
+        with TestClient(app) as client:
+            r = client.post("/api/video", json={"prompt": "a fox", "fps": 0})
+        assert r.status_code == 400
+
+    def test_missing_input_image_rejected(self, video_app, tmp_path):
+        app, _ = video_app
+        with TestClient(app) as client:
+            r = client.post("/api/video", json={
+                "prompt": "a fox",
+                "input_image": str(tmp_path / "nope.png")})
+        assert r.status_code == 400
+
+    def test_history_lists_clips_with_meta(self, video_app):
+        app, videos = video_app
+        self._make_clip(videos, meta={"prompt": "a fox", "seconds": 5.0})
+        with TestClient(app) as client:
+            data = client.get("/api/video/history").json()
+        assert data["videos"][0]["name"] == "clip.mp4"
+        assert data["videos"][0]["meta"]["prompt"] == "a fox"
+        assert data["videos"][0]["size_bytes"] > 0
+
+    def test_history_empty(self, video_app):
+        app, _ = video_app
+        with TestClient(app) as client:
+            assert client.get("/api/video/history").json() == {"videos": []}
+
+    def test_serve_and_delete_clip(self, video_app):
+        app, videos = video_app
+        self._make_clip(videos, meta={"prompt": "x"})
+        with TestClient(app) as client:
+            r = client.get("/api/video/file/clip.mp4")
+            assert r.status_code == 200
+            assert r.headers["content-type"].startswith("video/mp4")
+            assert client.delete("/api/video/file/clip.mp4").status_code == 200
+        assert not (videos / "clip.mp4").exists()
+        assert not (videos / "clip.mp4.json").exists()
+
+    @pytest.mark.parametrize("name", [
+        "..%5Cconfig.json",       # ..\config.json
+        "C:evil.mp4",             # Windows drive-relative
+        "sub%2Ffile.mp4",         # nested subpath
+    ])
+    def test_confinement(self, video_app, tmp_path, name):
+        app, _ = video_app
+        target = tmp_path / ".localm" / "config.json"
+        target.write_text("{}")
+        with TestClient(app) as client:
+            r = client.delete(f"/api/video/file/{name}")
+        assert not (200 <= r.status_code < 300)
+        assert target.exists()
+
+    def test_move_relocates_clip_and_sidecar(self, video_app, tmp_path):
+        app, videos = video_app
+        self._make_clip(videos, meta={"prompt": "x"})
+        dest = tmp_path / "kept"
+        with TestClient(app) as client:
+            r = client.post("/api/video/file/clip.mp4/move",
+                            json={"dest": str(dest)})
+        assert r.status_code == 200
+        assert (dest / "clip.mp4").is_file()
+        assert (dest / "clip.mp4.json").is_file()
+        assert not (videos / "clip.mp4").exists()

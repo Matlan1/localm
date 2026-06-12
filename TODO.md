@@ -142,6 +142,16 @@ GUI gaps identified by comparing against LM Studio, Jan, Open WebUI.
 - [x] Chat: `/web <query>` command and a per-conversation "Web access" toggle — the model emits `<tool_call>` web requests, the GUI executes them through the policy and injects results as visible dimmed "Web" messages (max 3 rounds per send)
 - [x] Behaviour change: `fetch_url` to localhost/private addresses is now blocked by default (`net_allow_private true` restores it)
 
+### Round 14 (shipped 2026-06-12) — video generation
+
+- [x] `localm/video_gen/` — Wan 2.2 TI2V 5B workflow (`wan_workflow.json`, public Comfy-Org stack; gitignored `wan_workflow_local.json` override) + `generate_video()` via ComfyUI: duration snapped to Wan's 4k+1 frame rule (~5 s native at 24 fps, up to 20 s accepted), text-to-video or image-to-video (`start_image` via the shared upload helper), MP4 output, privacy-gated sidecar, VRAM handoff
+- [x] API endpoints: `POST /api/video` (progress-streamed job), `GET /api/video/history`, `GET/DELETE /api/video/file/{name}` (confined), `POST /api/video/file/{name}/move`
+- [x] GUI "Video" page: prompt/negative/duration/fps/size/seed/steps/CFG/start-image form → job log → inline `<video>` player; history with play/move/delete; `videoMoveDest` scrubbed under the privacy contract
+- [x] `/video <prompt>` in chat: inline clip with a video-player message (messages gain a `video` field, rendered like `audio` via blob URLs)
+- [x] CLI: `localm video "prompt" [-d s] [--fps n] [--width/--height] [--image start.png] [-o out.mp4] [--seed/--steps/--cfg]`
+- [x] Tests: frame snapping, fail-fast before LLM unload, mocked end-to-end with sidecar privacy, save-node output-key variants (`images`/`gifs`/`videos`), endpoint validation + path confinement
+- [ ] Verify end-to-end against a ComfyUI install with the Wan 2.2 5B files (docs/video.md) — **needs a manual run**; all surfaces are mock-tested
+
 ### Round 13 (shipped 2026-06-12) — music surfaces
 
 - [x] Music nav page: tags/lyrics/duration (arbitrary seconds)/seed/steps/CFG form → progress-streamed job → inline player; history with play / move-to-folder / delete
