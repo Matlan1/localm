@@ -340,6 +340,8 @@ class GgufBackend(BaseBackend):
             # in an unknown state. Without this, every later request returns
             # an instant empty stream — a zombie server. Drop the broken
             # instance so the next request triggers a clean reload.
+            # Mark the reason so the response doesn't report a clean "stop".
+            self.last_finish_reason = "error"
             from localm.debuglog import logger as _dbg
             _dbg.exception("native inference fault — dropping model instance")
             try:

@@ -728,7 +728,9 @@ class TestJobs:
 @pytest.fixture
 def persist_app(tmp_path, monkeypatch):
     """GUI app whose data dir lives under tmp_path."""
-    monkeypatch.delenv("LOCALM_HOME", raising=False)
+    # LOCALM_HOME is pinned to tmp_path/.localm by the autouse conftest fixture;
+    # don't delete it (that would fall through to portable mode / the real
+    # ~/.localm and let the test touch real user data).
     monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
     app = FastAPI()
 
@@ -1445,7 +1447,7 @@ class TestImageManagement:
 @pytest.fixture
 def video_app(tmp_path, monkeypatch):
     """GUI app whose video dir lives under tmp_path."""
-    monkeypatch.delenv("LOCALM_HOME", raising=False)
+    # LOCALM_HOME pinned to tmp by the autouse conftest fixture (see persist_app).
     monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
     app = FastAPI()
 

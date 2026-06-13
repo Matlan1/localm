@@ -27,6 +27,7 @@ from .config import (
     load_config,
     load_registry,
     save_registry,
+    update_registry,
 )
 
 console = Console()
@@ -812,12 +813,12 @@ def _register(
     source: str = "local",
     sha256: Optional[str] = None,
 ) -> None:
-    reg = load_registry()
     entry = {"path": str(path.resolve()), "source": source}
     if sha256:
         entry["sha256"] = sha256.lower()
-    reg[name] = entry
-    save_registry(reg)
+    # Atomic read-modify-write so a concurrent registry writer (GUI thread,
+    # a parallel pull, sync_models_dir) can't clobber this entry.
+    update_registry(lambda reg: reg.__setitem__(name, entry))
 
 
 def _unique_registry_name(reg: dict, base: str) -> str:

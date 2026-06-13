@@ -26,6 +26,15 @@ def fake_registry(tmp_path, monkeypatch):
         store.clear()
         store.update(reg)
     monkeypatch.setattr(mm, "save_registry", _save)
+    # _register now goes through update_registry (atomic read-modify-write);
+    # route it at the in-memory store so the fake stays faithful.
+    def _update(mutator):
+        reg = dict(store)
+        mutator(reg)
+        store.clear()
+        store.update(reg)
+        return dict(store)
+    monkeypatch.setattr(mm, "update_registry", _update)
     return store, models_dir
 
 
