@@ -251,6 +251,10 @@ $("pull-start").onclick = async () => {
   const log = $("pull-log");
   log.style.display = "block";
   log.textContent = "";
+  const prog = $("pull-progress");
+  const bar = $("pull-bar");
+  const pct = $("pull-pct");
+  prog.style.display = "none";
   try {
     const r = await fetch("/api/models/pull", {
       method: "POST", headers: authHeaders(),
@@ -261,8 +265,23 @@ $("pull-start").onclick = async () => {
     const end = await streamJob(data.job_id, (line) => {
       log.textContent += line + "\n";
       log.scrollTop = log.scrollHeight;
+    }, (ev) => {
+      prog.style.display = "block";
+      if (ev.pct != null && ev.total) {
+        bar.classList.remove("indeterminate");
+        bar.style.width = ev.pct + "%";
+        pct.textContent =
+          `${ev.pct.toFixed(0)}%  ·  ${fmtBytes(ev.downloaded)} / ${fmtBytes(ev.total)}`;
+      } else {
+        // Unknown total — busy bar with a running byte count
+        bar.classList.add("indeterminate");
+        bar.style.width = "100%";
+        pct.textContent = "downloading…  " + fmtBytes(ev.downloaded);
+      }
     });
     if (end.status === "done") {
+      bar.classList.remove("indeterminate");
+      bar.style.width = "100%";
       toast("Pull finished");
       $("pull-spec").value = "";
       $("pull-name").value = "";

@@ -158,8 +158,9 @@ async function readSSE(response, onData) {
   }
 }
 
-/** Stream a background job's events; onLine gets text lines; resolves with the end event. */
-async function streamJob(jobId, onLine) {
+/** Stream a background job's events. onLine gets text lines; the optional
+ *  onProgress gets {downloaded,total,pct,phase} events. Resolves with end. */
+async function streamJob(jobId, onLine, onProgress) {
   const r = await fetch(`/api/jobs/${jobId}/events`, { headers: authHeaders() });
   if (!r.ok) throw new Error(r.statusText);
   let endEvent = null;
@@ -167,9 +168,18 @@ async function streamJob(jobId, onLine) {
     let ev;
     try { ev = JSON.parse(payload); } catch { return; }
     if (ev.type === "line" && onLine) onLine(ev.text);
+    if (ev.type === "progress" && onProgress) onProgress(ev);
     if (ev.type === "end") endEvent = ev;
   });
   return endEvent || { status: "failed" };
+}
+
+function fmtBytes(n) {
+  if (n == null) return "";
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + " GB";
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + " MB";
+  if (n >= 1e3) return (n / 1e3).toFixed(0) + " KB";
+  return n + " B";
 }
 
 /** Fetch an auth-protected image into an object URL. */
