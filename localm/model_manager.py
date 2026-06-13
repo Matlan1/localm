@@ -280,7 +280,7 @@ def list_models() -> None:
         elif path.exists():
             kind = "gguf"
             b = path.stat().st_size
-            size = f"{b/1e9:.2f} GB" if b >= 1e9 else f"{b/1e6:.0f} MB"
+            size = f"{b/1024**3:.2f} GB" if b >= 1024**3 else f"{b/1024**2:.0f} MB"
         else:
             kind = "?"
             size = "[red]missing[/red]"
@@ -332,8 +332,8 @@ def _check_disk_space(dest_dir: Path, required_bytes: int) -> bool:
     try:
         usage = shutil.disk_usage(dest_dir)
         if usage.free < required_bytes:
-            need_gb  = required_bytes / 1e9
-            free_gb  = usage.free / 1e9
+            need_gb  = required_bytes / 1024**3
+            free_gb  = usage.free / 1024**3
             console.print(
                 f"[red]Not enough disk space.[/red] "
                 f"Need {need_gb:.1f} GB, have {free_gb:.1f} GB free on {dest_dir}"
@@ -598,7 +598,7 @@ def _hash_with_notice(path: Path) -> Optional[str]:
     """
     if not path.is_file():
         return None
-    size_gb = path.stat().st_size / 1e9
+    size_gb = path.stat().st_size / 1024**3
     if size_gb > 0.5:
         console.print(
             f"[dim]Hashing {path.name} ({size_gb:.1f} GB) for duplicate "
@@ -711,7 +711,7 @@ def _pull_url(
         headers["Range"] = f"bytes={already_have}-"
         console.print(
             f"Resuming [bold cyan]{url}[/bold cyan] "
-            f"[dim](skipping first {already_have / 1e6:.1f} MB)[/dim]"
+            f"[dim](skipping first {already_have / 1024**2:.1f} MB)[/dim]"
         )
     else:
         console.print(f"Downloading [bold cyan]{url}[/bold cyan]")

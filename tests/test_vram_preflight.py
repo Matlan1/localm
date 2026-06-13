@@ -106,9 +106,11 @@ class TestVramReport:
         import sys
         from unittest.mock import MagicMock
         b = _backend(tmp_path, size_bytes=1_000_000)
-        # 12 GB free before the load, 4 GB free after -> 8 GB this load
-        levels = iter([[(12_000_000_000, 16_000_000_000)],
-                       [(4_000_000_000, 16_000_000_000)]])
+        # 12 GiB free before the load, 4 GiB free after -> 8 GiB this load.
+        # Sizes are displayed in binary units (GiB labelled "GB").
+        GIB = 1024 ** 3
+        levels = iter([[(12 * GIB, 16 * GIB)],
+                       [(4 * GIB, 16 * GIB)]])
         fake_llamacpp = MagicMock()
         with patch.object(GgufBackend, "_vram_levels",
                           side_effect=lambda: next(levels)), \
