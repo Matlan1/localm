@@ -10,6 +10,8 @@ all interactive prompts fall back to their safe non-interactive defaults.
 
 from __future__ import annotations
 
+import json
+import os
 import queue
 import subprocess
 import sys
@@ -18,6 +20,8 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Optional
+
+from localm.model_manager import PROGRESS_SENTINEL
 
 
 @dataclass
@@ -61,12 +65,15 @@ class JobManager:
         self._jobs: dict[str, Job] = {}
         self._lock = threading.Lock()
 
-    def start_cli(self, kind: str, cli_args: list, *, result_path: str | None = None) -> Job:
+    def start_cli(self, kind: str, cli_args: list, *,
+                  result_path: str | None = None,
+                  extra_env: dict | None = None) -> Job:
         """
         Run ``python -m localm <cli_args>`` as a job.
 
         result_path, when given, is stored on the job as the expected output
-        artifact (e.g. the image file an imagine job writes).
+        artifact (e.g. the image file an imagine job writes). extra_env adds
+        environment variables for the subprocess (e.g. progress reporting).
         """
         job = Job(
             id=uuid.uuid4().hex[:12],
@@ -80,6 +87,10 @@ class JobManager:
 
         def _run():
             try:
+                env = None
+                if extra_env:
+                    env = os.environ.copy()
+                    env.update(extra_env)
                 job._proc = subprocess.Popen(
                     job.argv,
                     stdout=subprocess.PIPE,
@@ -88,11 +99,23 @@ class JobManager:
                     encoding="utf-8",
                     errors="replace",
                     bufsize=1,
+                    env=env,
                 )
                 for line in job._proc.stdout:
                     line = line.rstrip()
-                    if line:
-                        job.push({"type": "line", "text": line})
+                    if not line:
+                        continue
+                    # Structured download-progress lines → progress events;
+                    # everything else streams verbatim as a log line.
+                    if PROGRESS_SENTINEL in line:
+                        _, _, payload = line.partition(PROGRESS_SENTINEL)
+                        try:
+                            data = json.loads(payload)
+                        except ValueError:
+                            continue
+                        job.push({"type": "progress", **data})
+                        continue
+                    job.push({"type": "line", "text": line})
                 job._proc.wait()
                 job.returncode = job._proc.returncode
                 if job.status != "cancelled":

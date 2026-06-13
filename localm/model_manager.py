@@ -1,6 +1,11 @@
+import contextlib
+import json
+import os
 import re
 import shutil
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import List, Optional
 
@@ -18,6 +23,114 @@ from rich.table import Table
 from .config import MODELS_DIR, ensure_dirs, load_registry, save_registry
 
 console = Console()
+
+# GUI download progress: the GUI runs ``localm pull`` as a subprocess and
+# parses its stdout. When LOCALM_PROGRESS_JSON=1 the downloader streams
+# structured progress lines (this sentinel + JSON) that the GUI renders as a
+# progress bar; interactive CLI use keeps huggingface_hub's own tqdm bars.
+PROGRESS_SENTINEL = "\x1flocalm-progress\x1f"
+
+
+def _emit_progress(downloaded: int, total: int, *, phase: str = "download") -> None:
+    pct = round(downloaded * 100 / total, 1) if total else None
+    sys.stdout.write(
+        PROGRESS_SENTINEL
+        + json.dumps({"phase": phase, "downloaded": downloaded,
+                      "total": total, "pct": pct})
+        + "\n"
+    )
+    sys.stdout.flush()
+
+
+@contextlib.contextmanager
+def _download_progress(target_parts: List[Path], total_size: int):
+    """Stream JSON download progress while files land under MODELS_DIR.
+
+    Active only in GUI mode (LOCALM_PROGRESS_JSON=1) with a known total — a
+    no-op otherwise, so the CLI keeps huggingface_hub's tqdm bars. Progress is
+    measured from bytes on disk (completed parts + the growing ``.incomplete``
+    temp file), which is robust across huggingface_hub versions.
+    """
+    if os.environ.get("LOCALM_PROGRESS_JSON") != "1" or not total_size:
+        yield
+        return
+
+    stop = threading.Event()
+
+    def _downloaded_bytes() -> int:
+        done = 0
+        for p in target_parts:
+            try:
+                done += p.stat().st_size
+            except OSError:
+                pass  # not finished yet
+        active = 0
+        cache = MODELS_DIR / ".cache"
+        if cache.is_dir():
+            try:
+                for f in cache.rglob("*.incomplete"):
+                    try:
+                        active += f.stat().st_size
+                    except OSError:
+                        pass
+            except OSError:
+                pass
+        return min(done + active, total_size)
+
+    def _poll() -> None:
+        last = -1
+        while not stop.is_set():
+            dl = _downloaded_bytes()
+            if dl != last:
+                last = dl
+                _emit_progress(dl, total_size)
+            stop.wait(0.7)
+
+    t = threading.Thread(target=_poll, daemon=True)
+    t.start()
+    _emit_progress(0, total_size)
+    try:
+        yield
+    finally:
+        stop.set()
+        t.join(timeout=2)
+        _emit_progress(total_size, total_size)
+
+
+@contextlib.contextmanager
+def _snapshot_progress(disk_bytes_fn, total_size: int):
+    """Like _download_progress but for snapshot_download (many files): byte
+    count comes from a caller-supplied directory-size function. Indeterminate
+    (total_size == 0) still streams a 'downloading' phase so the GUI can show
+    a busy bar; no-op outside GUI mode."""
+    if os.environ.get("LOCALM_PROGRESS_JSON") != "1":
+        yield
+        return
+
+    stop = threading.Event()
+
+    def _poll() -> None:
+        last = -1
+        while not stop.is_set():
+            dl = disk_bytes_fn()
+            if total_size:
+                dl = min(dl, total_size)
+            if dl != last:
+                last = dl
+                _emit_progress(dl, total_size)
+            stop.wait(0.7)
+
+    t = threading.Thread(target=_poll, daemon=True)
+    t.start()
+    _emit_progress(0, total_size)
+    try:
+        yield
+    finally:
+        stop.set()
+        t.join(timeout=2)
+        if total_size:
+            _emit_progress(total_size, total_size)
+
 
 # name -> "owner/repo:filename.gguf"
 MODEL_SHORTCUTS: dict[str, str] = {
@@ -342,19 +455,20 @@ def _pull_gguf_file(spec: str, name: Optional[str], redownload: bool = False) ->
     else:
         console.print(f"Pulling [bold cyan]{repo_id}[/bold cyan] / [bold]{filename}[/bold]")
 
-    for part in missing:
-        try:
-            local = hf_hub_download(
-                repo_id=repo_id,
-                filename=part,
-                local_dir=str(MODELS_DIR),
-            )
-            final = MODELS_DIR / part
-            if Path(local) != final:
-                shutil.move(local, final)
-        except Exception as e:
-            console.print(f"[red]Download failed[/red] ({part}): {e}")
-            return
+    with _download_progress([MODELS_DIR / p for p in missing], total_size):
+        for part in missing:
+            try:
+                local = hf_hub_download(
+                    repo_id=repo_id,
+                    filename=part,
+                    local_dir=str(MODELS_DIR),
+                )
+                final = MODELS_DIR / part
+                if Path(local) != final:
+                    shutil.move(local, final)
+            except Exception as e:
+                console.print(f"[red]Download failed[/red] ({part}): {e}")
+                return
 
     _register(model_name, MODELS_DIR / filename, f"hf:{repo_id}", sha256=expected)
     console.print(f"[green]✓[/green] [bold]{model_name}[/bold] is ready")
@@ -411,11 +525,28 @@ def _pull_hf_snapshot(repo_id: str, name: Optional[str], redownload: bool = Fals
     )
     console.print("[dim]This may take a while for large models...[/dim]")
 
+    # Sum the repo's file sizes so the GUI gets a real percentage (best effort)
+    total_size = 0
     try:
-        snapshot_download(
-            repo_id=repo_id,
-            local_dir=str(dest),
-        )
+        from huggingface_hub import HfApi
+        info = HfApi().model_info(repo_id, files_metadata=True)
+        total_size = sum(getattr(s, "size", None) or 0 for s in info.siblings)
+    except Exception:
+        total_size = 0
+
+    def _disk_bytes() -> int:
+        try:
+            return sum(f.stat().st_size for f in dest.rglob("*")
+                       if f.is_file() and ".cache" not in f.parts)
+        except OSError:
+            return 0
+
+    try:
+        with _snapshot_progress(_disk_bytes, total_size):
+            snapshot_download(
+                repo_id=repo_id,
+                local_dir=str(dest),
+            )
     except Exception as e:
         console.print(f"[red]Download failed:[/red] {e}")
         return
