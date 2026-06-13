@@ -4,7 +4,7 @@ The "logged" cases are verbatim model outputs from a real session where
 zero tool calls parsed - the finetune wraps valid JSON in broken markers.
 """
 
-from localm.plugins.coder.parser import parse_tool_calls
+from localm.plugins.coder.parser import looks_like_tool_attempt, parse_tool_calls
 
 
 class TestCanonicalStillWorks:
@@ -112,6 +112,87 @@ class TestMangledVariants:
 
     def test_plain_text_not_matched(self):
         assert parse_tool_calls("just a normal answer with {braces} in it") == []
+
+
+class TestNameGatedLenientFormats:
+    """Bare JSON and ```json / bare fences are accepted only when the caller
+    passes the real tool names and the parsed name is one of them - the exact
+    formats weak local models emit, without mistaking JSON prose for a call."""
+
+    TOOLS = {"read_file", "write_file", "run_shell", "tree"}
+
+    def test_bare_json_object(self):
+        text = 'Let me look.\n{"name": "read_file", "args": {"path": "a.py"}}'
+        calls = parse_tool_calls(text, tool_names=self.TOOLS)
+        assert len(calls) == 1
+        assert calls[0].name == "read_file"
+        assert calls[0].args == {"path": "a.py"}
+
+    def test_bare_json_ignored_without_tool_names(self):
+        # Back-compat: the one-arg form never does bare-JSON matching.
+        text = '{"name": "read_file", "args": {"path": "a.py"}}'
+        assert parse_tool_calls(text) == []
+
+    def test_bare_json_unknown_name_ignored(self):
+        # A JSON example whose name is not a real tool is left alone.
+        text = '{"name": "my-package", "args": {"version": "1.0"}}'
+        assert parse_tool_calls(text, tool_names=self.TOOLS) == []
+
+    def test_json_fence(self):
+        text = '```json\n{"name": "tree", "args": {}}\n```'
+        calls = parse_tool_calls(text, tool_names=self.TOOLS)
+        assert calls[0].name == "tree"
+
+    def test_bare_triple_fence(self):
+        text = '```\n{"name": "read_file", "args": {"path": "x"}}\n```'
+        calls = parse_tool_calls(text, tool_names=self.TOOLS)
+        assert calls[0].name == "read_file"
+
+    def test_json_fence_unknown_name_ignored(self):
+        text = '```json\n{"name": "package-thing", "version": "2"}\n```'
+        assert parse_tool_calls(text, tool_names=self.TOOLS) == []
+
+    def test_tool_code_fence_is_explicit(self):
+        # ```tool_code signals intent: parsed even without the tool_names gate.
+        text = '```tool_code\n{"name": "run_shell", "args": {"command": "ls"}}\n```'
+        assert parse_tool_calls(text)[0].name == "run_shell"
+
+    def test_arguments_alias(self):
+        text = '<tool_call>{"name": "read_file", "arguments": {"path": "a"}}</tool_call>'
+        assert parse_tool_calls(text)[0].args == {"path": "a"}
+
+    def test_prose_with_braces_ignored_even_gated(self):
+        assert parse_tool_calls("normal answer with {braces}",
+                                tool_names=self.TOOLS) == []
+
+    def test_fence_and_bare_not_double_counted(self):
+        text = '```json\n{"name": "tree", "args": {}}\n```'
+        assert len(parse_tool_calls(text, tool_names=self.TOOLS)) == 1
+
+    def test_two_bare_calls(self):
+        text = ('{"name": "read_file", "args": {"path": "a"}} then '
+                '{"name": "tree", "args": {}}')
+        names = [c.name for c in parse_tool_calls(text, tool_names=self.TOOLS)]
+        assert names == ["read_file", "tree"]
+
+
+class TestLooksLikeToolAttempt:
+    def test_marker_flagged(self):
+        assert looks_like_tool_attempt("<|tool_call>garbage<tool_call|>")
+
+    def test_tool_code_fence_flagged(self):
+        assert looks_like_tool_attempt("```tool_code\nread_file(path='x')\n```")
+
+    def test_truncated_name_args_flagged(self):
+        # Malformed/cut-off JSON that the parser cannot recover still looks
+        # like an attempt because it carries both keys.
+        assert looks_like_tool_attempt('{"name": "read_file", "args": {"path"')
+
+    def test_plain_answer_not_flagged(self):
+        assert not looks_like_tool_attempt("Here is your answer. All done.")
+
+    def test_name_word_alone_not_flagged(self):
+        assert not looks_like_tool_attempt('the "name" field is required')
 
 
 class TestStreamHiding:

@@ -147,10 +147,11 @@ def _scan(root: Optional[Path]) -> tuple[List[PluginManifest], List[str]]:
     return manifests, errors
 
 
-def load_entry(manifest: PluginManifest):
+def import_plugin_module(manifest: PluginManifest):
     """
-    Import the plugin's entry module from its directory and return the
-    entry attribute (expected to be a Click command or group).
+    Import the plugin's entry module from its directory and return the module
+    object. Raises :class:`PluginError` on failure and never leaves a
+    half-imported module behind in ``sys.modules``.
     """
     module_name = f"_localm_plugin_{manifest.name.replace('-', '_')}"
     module_file = manifest.path / f"{manifest.entry_module}.py"
@@ -180,6 +181,15 @@ def load_entry(manifest: PluginManifest):
         sys.modules.pop(module_name, None)
         raise PluginError(f"Plugin {manifest.name!r} failed to import: {e}") from e
 
+    return module
+
+
+def load_entry(manifest: PluginManifest):
+    """
+    Import the plugin's entry module from its directory and return the
+    entry attribute (expected to be a Click command or group).
+    """
+    module = import_plugin_module(manifest)
     attr = getattr(module, manifest.entry_attr, None)
     if attr is None:
         raise PluginError(
