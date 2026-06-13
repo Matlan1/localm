@@ -131,13 +131,15 @@ if "%DATAPICK%"=="3" (
 
 rem ---- optional desktop shortcut ----------------------------------------------
 echo.
-choice /c YN /n /m "  Create a desktop shortcut to the graphical launcher? [Y/N] "
+choice /c YN /n /m "  Create a desktop shortcut that opens the localm GUI? [Y/N] "
 if not errorlevel 2 (
     powershell -NoProfile -Command ^
         "$s = (New-Object -ComObject WScript.Shell).CreateShortcut([Environment]::GetFolderPath('Desktop') + '\localm.lnk');" ^
-        "$s.TargetPath = '%CD%\localm-launcher.bat';" ^
+        "$s.TargetPath = '%CD%\.venv\Scripts\localm.exe';" ^
+        "$s.Arguments = 'gui';" ^
         "$s.WorkingDirectory = '%CD%';" ^
-        "$s.Description = 'localm graphical launcher';" ^
+        "$s.IconLocation = '%CD%\assets\localm.ico';" ^
+        "$s.Description = 'localm - open the web GUI';" ^
         "$s.Save()"
     if not errorlevel 1 echo  Shortcut created: Desktop\localm.lnk
 )
