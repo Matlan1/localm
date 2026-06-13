@@ -69,7 +69,9 @@ def main() -> None:
 @click.option("-t", "--temperature",  default=None,  type=float, help="Sampling temperature.")
 @click.option("-c", "--ctx",          default=None,  type=int,   help="Context window (GGUF only).")
 @click.option("-g", "--gpu-layers",   default=None,  type=int,   help="GPU layers (GGUF only, 99=all).")
-@click.option("--mmproj",             default=None,  help="Multimodal projection GGUF path.")
+@click.option("--mmproj",             default=None,
+              help="Multimodal projection GGUF path (reserved; GGUF vision is "
+                   "not yet implemented - the backend is text-only).")
 @click.option("--device",             default=None,  help="HF device override (cuda / cpu).")
 @click.option("--image", "images",   multiple=True, type=click.Path(exists=True),
               help="Local image file to include (repeat for multiple). Use with -p.")
@@ -227,11 +229,16 @@ def _file_to_data_uri(path: str) -> str:
 def _stream_once(engine, messages: list, **kwargs) -> str:
     """Stream response to stdout, print tok/s on completion, and return the full text."""
     import time as _time
+    from localm.inference.backends.base import UnsupportedInputError
     parts: list[str] = []
     t0 = _time.monotonic()
-    for token in engine.chat_stream(messages, **kwargs):
-        print(token, end="", flush=True)
-        parts.append(token)
+    try:
+        for token in engine.chat_stream(messages, **kwargs):
+            print(token, end="", flush=True)
+            parts.append(token)
+    except UnsupportedInputError as exc:
+        console.print(f"\n[red]{exc}[/red]")
+        return ""
     elapsed = _time.monotonic() - t0
     print()
     full = "".join(parts)

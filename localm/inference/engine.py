@@ -150,6 +150,18 @@ class Engine:
         report "stop"."""
         return getattr(self._backend, "last_finish_reason", "stop")
 
+    @property
+    def supports_images(self) -> bool:
+        """True when the active backend can actually see image input. For HF
+        this is only accurate once the model is loaded (see can_be_multimodal)."""
+        return getattr(self._backend, "supports_images", False)
+
+    @property
+    def can_be_multimodal(self) -> bool:
+        """True when the backend class could support images, so it is worth
+        loading the model to find out. False for text-only backends (GGUF)."""
+        return getattr(self._backend, "can_be_multimodal", False)
+
     def count_tokens(self, text: str) -> int:
         """
         Return the number of tokens in *text* using the loaded backend's

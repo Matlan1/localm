@@ -307,6 +307,13 @@ class GgufBackend(BaseBackend):
         grammar: Optional[str] = None,
         seed: Optional[int] = None,
     ) -> Iterator[str]:
+        # GGUF is text-only here: llama.py keeps only text parts and the
+        # mmproj/image path is unimplemented. Refuse an image outright rather
+        # than drop it and answer about a picture the model never received.
+        from .base import IMAGE_UNSUPPORTED_MESSAGE, UnsupportedInputError, messages_contain_image
+        if messages_contain_image(messages):
+            raise UnsupportedInputError(IMAGE_UNSUPPORTED_MESSAGE)
+
         if self._use_subprocess:
             yield from self._subprocess_stream(messages, max_tokens, temperature)
             return

@@ -6,8 +6,54 @@ from abc import ABC, abstractmethod
 from typing import Iterator, List, Optional
 
 
+class UnsupportedInputError(ValueError):
+    """Raised when a backend is handed input it cannot process - for example an
+    image attached to a text-only model - instead of silently dropping it.
+
+    Silently discarding an image is the worst failure mode: the model answers
+    confidently about a picture it never received. Backends raise this so the
+    caller can report the problem instead.
+    """
+
+
+# Shown to the user when an image is attached to a model that cannot see images.
+# Accurate whether the active model is GGUF (always text-only) or a text-only
+# HuggingFace checkpoint.
+IMAGE_UNSUPPORTED_MESSAGE = (
+    "This model cannot accept image input, so the attached image would be "
+    "ignored. To chat about images, load a vision-capable HuggingFace-format "
+    "model (for example a Gemma 3 vision or Qwen2-VL checkpoint). The built-in "
+    "GGUF backend is text-only: the --mmproj / image path is not implemented."
+)
+
+
+def messages_contain_image(messages: List[dict]) -> bool:
+    """True if any message carries an ``image_url`` content part.
+
+    Operates on the plain-dict OpenAI message shape used between the server and
+    the backends, so it is safe to call before a model is loaded.
+    """
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    return True
+    return False
+
+
 class BaseBackend(ABC):
     """Loaded model that can stream chat completions."""
+
+    # Whether this backend class can ever handle images (warrants loading the
+    # model to find out for sure). GGUF is text-only; HF may be multimodal.
+    can_be_multimodal: bool = False
+
+    @property
+    def supports_images(self) -> bool:
+        """True when this backend, in its current state, can actually see
+        images. Default False; multimodal backends override this."""
+        return False
 
     @abstractmethod
     def load(self) -> None:
