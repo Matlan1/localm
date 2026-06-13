@@ -122,6 +122,10 @@ DEFAULT_CONFIG: dict = {
     # Path to a Heretic checkout for the `abliterate` plugin (a separate AGPL
     # program, run via subprocess). None = auto-detect / offer to clone.
     "heretic_path": None,
+    # When a registered model's file has gone missing, False (default) flags the
+    # entry as "missing" (kept, shown in the list); True deletes the entry.
+    # Only files under the models folder are ever auto-deleted.
+    "autoprune_missing_models": False,
 }
 
 # localm claims 8642-8741 — far from ComfyUI (8188), A1111 (7860),

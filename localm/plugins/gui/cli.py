@@ -80,15 +80,19 @@ def main(model, host, port, ctx, gpu_layers, no_browser, pull_spec, debug, mode)
     from localm.config import load_registry, pick_port
     from localm.model_manager import get_model_info, sync_models_dir
 
-    # Pick up models added to (or removed from) the models folder since last run.
-    _added, _removed = sync_models_dir()
-    if _added or _removed:
-        _changes = []
-        if _added:
-            _changes.append(f"{_added} new")
-        if _removed:
-            _changes.append(f"{_removed} removed")
-        console.print(f"[dim]Models folder synced: {', '.join(_changes)}.[/dim]")
+    # Pick up models added to (or gone missing from) the models folder since last run.
+    _sync = sync_models_dir()
+    if _sync.changed:
+        _bits = []
+        if _sync.added:
+            _bits.append(f"{_sync.added} new")
+        if _sync.flagged:
+            _bits.append(f"{_sync.flagged} missing")
+        if _sync.restored:
+            _bits.append(f"{_sync.restored} restored")
+        if _sync.pruned:
+            _bits.append(f"{_sync.pruned} pruned")
+        console.print(f"[dim]Models folder synced: {', '.join(_bits)}.[/dim]")
 
     registry = load_registry()
     model_less = False
