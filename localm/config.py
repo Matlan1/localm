@@ -1,8 +1,10 @@
 import json
 import os
 import socket
+import sys
+import threading
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 
 def _detect_home() -> Path:
@@ -162,33 +164,98 @@ def ensure_dirs() -> None:
     MODELS_DIR.mkdir(exist_ok=True)
 
 
+# Registry and config are mutated from several places at once — the GUI server
+# threads, the `localm pull` subprocess the GUI spawns, and sync_models_dir on
+# every launch. A plain open("w")+json.dump truncates the file before writing,
+# so a crash, a job cancel (SIGTERM), or simple interleaving could leave a
+# half-written file that the next unguarded json.load() would choke on, hiding
+# every registered model app-wide. The helpers below make every write atomic
+# (write a temp file in the same dir, fsync, then os.replace — readers see only
+# the old or the new complete file, never a torn one) and make every read
+# crash-proof (fall back to the .bak snapshot, then to the default).
+_io_lock = threading.RLock()
+
+
+def _atomic_write_json(path: Path, data) -> None:
+    """Write *data* as JSON to *path* atomically (temp file + os.replace).
+
+    Keeps a one-step .bak of the previous good file so a corrupt read can
+    recover. os.replace is atomic on Windows and POSIX when src/dst share a
+    filesystem, which they do (same directory)."""
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    if path.exists():
+        try:
+            path.replace(path.with_name(path.name + ".bak"))
+        except OSError:
+            pass  # a missing .bak is not worth failing the write over
+    os.replace(tmp, path)
+
+
+def _read_json(path: Path, default):
+    """Read JSON from *path*, falling back to its .bak then *default* on any
+    corruption — a damaged file must never take the whole app down."""
+    for candidate in (path, path.with_name(path.name + ".bak")):
+        if not candidate.is_file():
+            continue
+        try:
+            with open(candidate, encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"[localm] {candidate.name} is unreadable ({e}); "
+                  "falling back.", file=sys.stderr)
+            continue
+    return default() if callable(default) else default
+
+
 def load_config() -> dict:
     ensure_dirs()
     cfg = DEFAULT_CONFIG.copy()
-    if CONFIG_FILE.exists():
-        with open(CONFIG_FILE) as f:
-            cfg.update(json.load(f))
+    with _io_lock:
+        stored = _read_json(CONFIG_FILE, {})
+    if isinstance(stored, dict):
+        cfg.update(stored)
     return cfg
 
 
 def save_config(cfg: dict) -> None:
     ensure_dirs()
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(cfg, f, indent=2)
+    with _io_lock:
+        _atomic_write_json(CONFIG_FILE, cfg)
 
 
 def load_registry() -> dict:
     ensure_dirs()
-    if REGISTRY_FILE.exists():
-        with open(REGISTRY_FILE) as f:
-            return json.load(f)
-    return {}
+    with _io_lock:
+        reg = _read_json(REGISTRY_FILE, {})
+    return reg if isinstance(reg, dict) else {}
 
 
 def save_registry(reg: dict) -> None:
     ensure_dirs()
-    with open(REGISTRY_FILE, "w") as f:
-        json.dump(reg, f, indent=2)
+    with _io_lock:
+        _atomic_write_json(REGISTRY_FILE, reg)
+
+
+def update_registry(mutator: Callable[[dict], None]) -> dict:
+    """Atomically read-modify-write the registry under the I/O lock.
+
+    *mutator* receives the registry dict and edits it in place; the result is
+    persisted with a single atomic write. Use this instead of a bare
+    load_registry()/save_registry() pair wherever a lost update would matter,
+    so two in-process writers can't clobber each other. (Cross-process writers
+    — e.g. a CLI `pull` running alongside the GUI — are still last-writer-wins,
+    but each write stays atomic and non-corrupting.)"""
+    with _io_lock:
+        reg = _read_json(REGISTRY_FILE, {})
+        if not isinstance(reg, dict):
+            reg = {}
+        mutator(reg)
+        _atomic_write_json(REGISTRY_FILE, reg)
+        return reg
 
 
 def find_binary_dir() -> Optional[Path]:

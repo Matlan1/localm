@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import os
+import threading
 import time
 import uuid
 from typing import Dict, Generator, Iterable, Iterator, List, Optional
@@ -450,6 +451,14 @@ class LlamaCpp:
         self._model_ptr   = None   # type: ignore[assignment]
         self._ctx_ptr     = None   # type: ignore[assignment]
         self._tokenizer   = None   # type: ignore[assignment]
+        # Serialize native calls (prefill/decode/free) against unload. Without
+        # this, an unload on another thread can llama_free the context between
+        # the generator's None-check and its next native call — a use-after-
+        # free that crashes the GPU driver. The decode loop holds _gen_lock
+        # around each native step; close()/_free_native take it too, after
+        # setting _stop so an in-flight generation bails at its next step.
+        self._gen_lock    = threading.RLock()
+        self._stop        = threading.Event()
         # Persistent KV cache bookkeeping (prefix reuse across calls)
         self._cached_tokens: List[int] = []   # tokens currently in the KV cache
         self._ctx_capacity  = n_ctx           # n_ctx of the live context
@@ -493,20 +502,26 @@ class LlamaCpp:
     # ------------------------------------------------------------------ #
 
     def close(self) -> None:
-        """Release GPU/CPU memory held by this instance."""
-        self._cached_tokens = []
-        if not (self._ctx_ptr or self._model_ptr):
-            return
-        # Suppress the ROCm lazy-buffer verification chatter the native
-        # destructors write to stderr ("~llama_context: ... compute buffer
-        # size ... matches expectation") — internal noise, not user output.
-        try:
-            _ctx = _quiet_stderr if not self._verbose else contextlib.nullcontext
-            with _ctx():
+        """Release GPU/CPU memory held by this instance.
+
+        Signals any in-flight generation to stop, then frees under _gen_lock
+        so the free can never land between a generator's stop-check and its
+        next native call (which would be a use-after-free GPU crash)."""
+        self._stop.set()
+        with self._gen_lock:
+            self._cached_tokens = []
+            if not (self._ctx_ptr or self._model_ptr):
+                return
+            # Suppress the ROCm lazy-buffer verification chatter the native
+            # destructors write to stderr ("~llama_context: ... compute buffer
+            # size ... matches expectation") — internal noise, not user output.
+            try:
+                _ctx = _quiet_stderr if not self._verbose else contextlib.nullcontext
+                with _ctx():
+                    self._free_native()
+            except Exception:
+                # Interpreter shutdown can break the fd redirection — free anyway
                 self._free_native()
-        except Exception:
-            # Interpreter shutdown can break the fd redirection — free anyway
-            self._free_native()
 
     def _free_native(self) -> None:
         if self._ctx_ptr:
@@ -575,11 +590,16 @@ class LlamaCpp:
         # The ROCm lazy-buffer verification messages fire asynchronously
         # after llama_init_from_model returns but before the first
         # llama_decode completes, so separate windows leave a gap.
-        with _ctx():
-            if self._can_reuse_kv(needed):
-                self._prefill_with_reuse(prompt_tokens)
-            else:
-                self._prefill_fresh_context(prompt_tokens, needed)
+        # Prefill (re)creates/decodes into the context, so it must hold the
+        # lock against a concurrent unload too.
+        with self._gen_lock:
+            if self._stop.is_set():
+                return
+            with _ctx():
+                if self._can_reuse_kv(needed):
+                    self._prefill_with_reuse(prompt_tokens)
+                else:
+                    self._prefill_fresh_context(prompt_tokens, needed)
 
         # Build sampler
         sampler = _build_sampler(
@@ -600,33 +620,43 @@ class LlamaCpp:
         self.last_finish_reason = "stop"
         try:
             for _ in range(max_new_tokens):
-                if self._ctx_ptr is None:
-                    # The context was freed (unload/close) while we were
-                    # generating. Stop cleanly instead of passing NULL into
-                    # the native library, which crashes the GPU driver.
-                    raise RuntimeError(
-                        "Model was unloaded during generation — request aborted."
-                    )
-                token = api.llama_sampler_sample(sampler, self._ctx_ptr, -1)
-                api.llama_sampler_accept(sampler, token)
+                # --- locked native region 1: sample the next token ---
+                with self._gen_lock:
+                    if self._stop.is_set() or self._ctx_ptr is None:
+                        # The context was freed (unload) while we were
+                        # generating. Stop cleanly instead of passing NULL
+                        # into the native library, which crashes the driver.
+                        self.last_finish_reason = "error"
+                        break
+                    token = api.llama_sampler_sample(sampler, self._ctx_ptr, -1)
+                    api.llama_sampler_accept(sampler, token)
+                    eog = self._tokenizer.is_eog(token)
 
                 # Stop when the model signals end-of-generation via the vocabulary
-                if self._tokenizer.is_eog(token):
-                    break
+                if eog:
+                    break   # last_finish_reason stays "stop"
 
-                yield token
+                yield token   # consumer runs here; an unload can interleave
 
-                # Feed the new token back for next step
-                tok_one = (llama_token * 1)(token)
-                batch = api.llama_batch_get_one(tok_one, 1)
-                with _ctx():
-                    ret = api.llama_decode(self._ctx_ptr, batch)
-                if ret != 0:
-                    # KV cache full or error — the reply was cut short
-                    self.last_finish_reason = "length"
-                    break
-                self._cached_tokens.append(token)
-                pos += 1
+                # --- locked native region 2: feed the token back ---
+                with self._gen_lock:
+                    if self._stop.is_set() or self._ctx_ptr is None:
+                        self.last_finish_reason = "error"
+                        break
+                    tok_one = (llama_token * 1)(token)
+                    batch = api.llama_batch_get_one(tok_one, 1)
+                    with _ctx():
+                        ret = api.llama_decode(self._ctx_ptr, batch)
+                    if ret != 0:
+                        # KV cache full or error — the reply was cut short.
+                        # The cache bookkeeping has diverged from native KV
+                        # state, so invalidate it: the next turn must not try
+                        # to reuse a prefix the cache no longer truly holds.
+                        self.last_finish_reason = "length"
+                        self._cached_tokens = []
+                        break
+                    self._cached_tokens.append(token)
+                    pos += 1
             else:
                 # Budget exhausted without the model finishing its turn
                 self.last_finish_reason = "length"
