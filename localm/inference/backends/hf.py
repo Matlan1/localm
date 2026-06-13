@@ -55,6 +55,10 @@ class HFBackend(BaseBackend):
     and only text is passed to the model.
     """
 
+    # An HF checkpoint may ship an image processor; whether this instance can
+    # actually see images is only known after load() (see supports_images).
+    can_be_multimodal = True
+
     def __init__(self, model_path: str, device: Optional[str] = None) -> None:
         self.model_path = str(Path(model_path).resolve())
         self._device = device      # None = auto-detect
@@ -63,6 +67,11 @@ class HFBackend(BaseBackend):
         self._tokenizer = None     # AutoTokenizer fallback
         self._is_multimodal = False
         self._loaded = False
+
+    @property
+    def supports_images(self) -> bool:
+        """True once a multimodal processor has been detected at load time."""
+        return self._is_multimodal
 
     # ------------------------------------------------------------------ #
     #  Load / unload                                                       #
@@ -233,6 +242,19 @@ class HFBackend(BaseBackend):
         grammar: Optional[str] = None,   # accepted but ignored - HF has no GBNF sampler
         seed: Optional[int] = None,
     ) -> Iterator[str]:
+        # Refuse images on a text-only checkpoint instead of silently dropping
+        # them (a processor-less model would otherwise ignore the picture and
+        # answer from the text alone). Checked before importing transformers so
+        # it fails fast and clearly.
+        if not self._is_multimodal:
+            from .base import (
+                IMAGE_UNSUPPORTED_MESSAGE,
+                UnsupportedInputError,
+                messages_contain_image,
+            )
+            if messages_contain_image(messages):
+                raise UnsupportedInputError(IMAGE_UNSUPPORTED_MESSAGE)
+
         from transformers import TextIteratorStreamer
 
         tokenizer = self._tokenizer

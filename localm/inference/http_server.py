@@ -26,6 +26,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from localm.inference.backends.base import (
+    IMAGE_UNSUPPORTED_MESSAGE, messages_contain_image,
+)
 from localm.inference.engine import Engine
 from localm.inference.protocol import (
     ChatChunk, ChatRequest, ChatResponse, CompletionRequest, EmbeddingRequest,
@@ -68,8 +71,15 @@ def _require_auth(
 # ------------------------------------------------------------------ #
 
 def create_app(engine: Engine) -> FastAPI:
-    global _engine
+    global _engine, _inference_sem
     _engine = engine
+
+    # Inference serialisation semaphore. Created eagerly so the app works even
+    # when the lifespan does not run (tests, or being mounted inside another
+    # app); on Python 3.10+ a Semaphore binds to the event loop lazily on first
+    # use, so constructing it here without a running loop is safe. The lifespan
+    # re-affirms it for the real uvicorn server.
+    _inference_sem = asyncio.Semaphore(1)
 
     # Session-persistence mode for this server (privacy → no traces).
     # One audit log / transcript covers the server lifetime; GUI chat and
@@ -336,6 +346,18 @@ def create_app(engine: Engine) -> FastAPI:
 
         # Convert pydantic Messages to plain dicts for the backend
         messages = _protocol_messages_to_dicts(req.messages)
+
+        # Reject image input on a text-only model with a clear 400 instead of
+        # silently dropping the picture. For GGUF (always text-only) this is
+        # known immediately; for an unloaded HF model multimodal support is
+        # only known after loading, so load first before deciding.
+        if messages_contain_image(messages) and not _engine.supports_images:
+            if not _engine.loaded and _engine.can_be_multimodal:
+                loop = asyncio.get_running_loop()
+                async with _inference_sem:
+                    await loop.run_in_executor(None, _engine.load)
+            if not _engine.supports_images:
+                raise HTTPException(400, IMAGE_UNSUPPORTED_MESSAGE)
 
         gen_kwargs = dict(
             max_tokens=req.max_tokens,

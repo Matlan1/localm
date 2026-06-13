@@ -1,0 +1,155 @@
+"""A model that cannot see images must REJECT image input, not silently drop it.
+
+Regression guard for the audit finding that GGUF (and text-only HF) accepted an
+image_url part, discarded it, and answered about a picture the model never
+received. The contract now: raise UnsupportedInputError at the backend, and
+return a clean 400 at the HTTP route.
+"""
+
+import unittest
+from unittest.mock import MagicMock
+
+import pytest
+from fastapi.testclient import TestClient
+
+from localm.inference.backends.base import (
+    IMAGE_UNSUPPORTED_MESSAGE,
+    UnsupportedInputError,
+    messages_contain_image,
+)
+from localm.inference.http_server import create_app
+
+
+_TEXT_MSG = [{"role": "user", "content": "describe this"}]
+_IMAGE_MSG = [{
+    "role": "user",
+    "content": [
+        {"type": "text", "text": "what is this?"},
+        {"type": "image_url",
+         "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}},
+    ],
+}]
+
+
+# --------------------------------------------------------------------------- #
+#  Detection helper                                                            #
+# --------------------------------------------------------------------------- #
+
+class TestMessagesContainImage:
+    def test_plain_text_string(self):
+        assert messages_contain_image(_TEXT_MSG) is False
+
+    def test_text_only_parts(self):
+        msgs = [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+        assert messages_contain_image(msgs) is False
+
+    def test_image_part_detected(self):
+        assert messages_contain_image(_IMAGE_MSG) is True
+
+    def test_ignores_non_dict_parts(self):
+        msgs = [{"role": "user", "content": ["loose string", {"type": "text", "text": "x"}]}]
+        assert messages_contain_image(msgs) is False
+
+
+# --------------------------------------------------------------------------- #
+#  Backend-level guard (the source-of-truth guarantee, covers every caller)   #
+# --------------------------------------------------------------------------- #
+
+class TestGgufRejectsImages:
+    def test_chat_stream_raises_on_image(self):
+        from localm.inference.backends.gguf import GgufBackend
+        backend = GgufBackend("does-not-need-to-exist.gguf")
+        with pytest.raises(UnsupportedInputError):
+            # Generator: the guard fires on first iteration, before any DLL use.
+            next(backend.chat_stream(_IMAGE_MSG))
+
+    def test_gguf_never_supports_images(self):
+        from localm.inference.backends.gguf import GgufBackend
+        backend = GgufBackend("does-not-need-to-exist.gguf")
+        assert backend.supports_images is False
+        assert backend.can_be_multimodal is False
+
+
+class TestHFRejectsImagesWhenTextOnly:
+    def test_supports_images_tracks_multimodal_flag(self):
+        from localm.inference.backends.hf import HFBackend
+        backend = HFBackend("does-not-need-to-exist")
+        assert backend.can_be_multimodal is True
+        assert backend.supports_images is False        # not loaded / text-only
+        backend._is_multimodal = True
+        assert backend.supports_images is True
+
+    def test_text_only_chat_stream_raises_on_image(self):
+        from localm.inference.backends.hf import HFBackend
+        backend = HFBackend("does-not-need-to-exist")
+        # _is_multimodal is False; guard runs before transformers is imported.
+        with pytest.raises(UnsupportedInputError):
+            next(backend.chat_stream(_IMAGE_MSG))
+
+
+# --------------------------------------------------------------------------- #
+#  HTTP route returns a clean 400 (the good-UX layer)                          #
+# --------------------------------------------------------------------------- #
+
+def _mock_engine(*, supports_images, can_be_multimodal, loaded=True):
+    engine = MagicMock()
+    _state = {"loaded": loaded}
+    engine.load.side_effect = lambda: _state.__setitem__("loaded", True)
+
+    def _chat_stream(messages, **kwargs):
+        yield "ok"
+
+    engine.chat_stream.side_effect = _chat_stream
+    engine.display_name = "test-model"
+    engine.supports_images = supports_images
+    engine.can_be_multimodal = can_be_multimodal
+    engine.last_finish_reason = "stop"
+    type(engine).loaded = property(lambda self: _state["loaded"])
+    return engine
+
+
+class TestRouteRejectsImage(unittest.TestCase):
+    def _post(self, engine, messages, stream=False):
+        # Enter the app via `with` so the lifespan runs and the inference
+        # semaphore is created on the event loop.
+        with TestClient(create_app(engine)) as client:
+            return client.post("/v1/chat/completions", json={
+                "model": "test-model", "messages": messages, "stream": stream,
+            })
+
+    def test_text_only_engine_rejects_image_with_400(self):
+        engine = _mock_engine(supports_images=False, can_be_multimodal=False)
+        r = self._post(engine, _IMAGE_MSG)
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("cannot accept image", r.json()["detail"])
+        engine.load.assert_not_called()          # GGUF: no wasteful load to decide
+        engine.chat_stream.assert_not_called()   # never reached the model
+
+    def test_text_request_still_succeeds(self):
+        engine = _mock_engine(supports_images=False, can_be_multimodal=False)
+        r = self._post(engine, _TEXT_MSG)
+        self.assertEqual(r.status_code, 200)
+
+    def test_multimodal_engine_lets_image_through(self):
+        engine = _mock_engine(supports_images=True, can_be_multimodal=True)
+        r = self._post(engine, _IMAGE_MSG)
+        self.assertEqual(r.status_code, 200)
+        engine.chat_stream.assert_called_once()
+
+    def test_unloaded_multimodal_candidate_loads_then_rejects(self):
+        # An HF model that is not yet loaded: support is unknown until load.
+        # The route must load it, then still reject because it is text-only.
+        engine = _mock_engine(supports_images=False, can_be_multimodal=True,
+                              loaded=False)
+        r = self._post(engine, _IMAGE_MSG)
+        self.assertEqual(r.status_code, 400)
+        engine.load.assert_called_once()
+
+    def test_message_constant_is_clear(self):
+        # The user-facing string names the cause and the remedy.
+        self.assertIn("vision", IMAGE_UNSUPPORTED_MESSAGE.lower())
+        self.assertIn("GGUF", IMAGE_UNSUPPORTED_MESSAGE)
+
+
+if __name__ == "__main__":
+    unittest.main()
