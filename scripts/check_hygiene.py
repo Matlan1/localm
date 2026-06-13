@@ -89,9 +89,9 @@ def _scan(path: Path) -> list[str]:
     except (UnicodeDecodeError, OSError):
         return []   # binary or unreadable: not our concern here
     rel = path.relative_to(REPO).as_posix()
-    # Tests legitimately use synthetic absolute paths as fixtures (Z:/nope,
-    # C:/nonexistent, file:///etc/passwd). The dash and disclosure checks still
-    # apply to them; only the absolute-path heuristic is skipped.
+    # Tests legitimately use synthetic absolute paths as fixtures (fake drive
+    # letters, nonexistent dirs, file URLs). The dash and disclosure checks
+    # still apply to them; only the absolute-path heuristic is skipped.
     is_test = rel.startswith("tests/") or "/test_" in "/" + rel or Path(rel).name.startswith("test_")
     is_code = path.suffix.lower() in _CODE_EXTS and not is_test
     problems = []
