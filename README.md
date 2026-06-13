@@ -31,6 +31,8 @@ Everything that does not strictly need the internet works fully offline. Online 
 | **Interactive chat** | Multi-turn shell with `/imagine`, `/compact`, `/clear`, `/image`, `/system`, `/save` |
 | **Model registry** | Pull from HuggingFace (split GGUF supported), aliases, SHA256 dedup, tab completion |
 | **Model discovery** | Search HF from the Models page or `localm search`; per-quant sizes with "fits your VRAM" badges (torch-free VRAM detection) |
+| **Abliteration** | `localm abliterate`: decensor a model with [Heretic](https://github.com/Matlan1/heretic-win-AMD) (a separate AGPL program, run as a subprocess), then auto-register the result (`localm[abliterate]` extra) |
+| **Folder auto-sync** | `localm list`/`gui`/launcher reconcile the registry with the models folder on start; missing files are flagged, not deleted (opt-in `autoprune_missing_models`) |
 | **Image generation** | `generate_image` tool drives a local ComfyUI FLUX pipeline with VRAM handover |
 | **Music generation** | ACE-Step via the same ComfyUI server: arbitrary track length, lyrics or instrumental (`localm music`, Music page, `/music`) |
 | **Video generation** | Wan 2.2 short clips (~5 s native, text- or image-to-video) via ComfyUI (`localm video`, Video page, `/video`; [guide](docs/video.md)) |
@@ -202,6 +204,26 @@ localm mcp --print-config     # JSON block for Claude Desktop and friends
 
 See [docs/mcp.md](docs/mcp.md) for both directions: localm as an MCP server, and the coder consuming external MCP tool servers.
 
+### Abliterate (decensor) a model
+
+`localm abliterate` hands a model off to [Heretic](https://github.com/Matlan1/heretic-win-AMD)
+to remove refusals ("safety alignment"), then registers the result so you can run
+it like any other model:
+
+```bash
+localm abliterate --model Qwen/Qwen3-4B-Instruct-2507        # HF repo or local path
+localm abliterate --model ./model.gguf --export-gguf q5_k_m  # also emit a GGUF
+localm abliterate --model <id> --print-command               # preview, don't launch
+```
+
+Heretic is a **separate program** (AGPL-3.0) — localm never bundles or imports it,
+only runs it. If it isn't found, localm offers to clone the fork into a gitignored
+`.heretic/` under your data dir; point at an existing checkout with the
+`heretic_path` config key (or the `LOCALM_HERETIC_PATH` env var). Heretic runs in
+your terminal: when it finishes, choose "Save the model to a local folder", paste
+the path localm prints, and localm registers the saved model on exit. Enable with
+`pip install "localm[abliterate]"`.
+
 ---
 
 ## CLI Reference
@@ -216,6 +238,7 @@ localm coder [TASK] [opts]       # AI coding agent
 localm coder --estimate "task"   # planning turn only: approach + effort, no execution
 localm mcp [opts]                # MCP stdio server
 localm benchmark MODEL           # TTFT and tok/s at increasing prompt sizes
+localm abliterate --model M      # decensor M with Heretic, then register it
 ```
 
 `--debug` on `gui`, `serve`, and `run` writes a log to `~/.localm/logs/` with
@@ -240,6 +263,14 @@ localm info                          # paths + current config
 
 `localm rm` only deletes the file when the last alias pointing at it is removed, and the confirmation prompt states exactly what will happen.
 
+`localm list`, `localm gui`, and the desktop launcher auto-scan the models folder
+on start: new GGUF files and HuggingFace directories (any with a `config.json`)
+are registered automatically, and entries whose file has gone missing are
+**flagged** (shown in `localm list`), not deleted — so a temporarily-unavailable
+model (unmounted drive, moved file) isn't forgotten. Set
+`autoprune_missing_models true` to delete missing entries instead; even then only
+files under the models folder are removed, and a registry backup is written first.
+
 ### Knowledge (RAG)
 
 ```bash
@@ -258,6 +289,8 @@ localm config n_ctx 8192
 localm config port 8650
 localm config confirm_remove false
 localm config comfy_launch_cmd "D:\path\to\comfyui.bat"   # auto-start ComfyUI for image generation
+localm config heretic_path "D:\path\to\heretic"          # Heretic checkout for `localm abliterate` (else auto-detect/clone)
+localm config autoprune_missing_models true              # delete missing-file entries (default: flag and keep)
 ```
 
 ### Dynamic context window
