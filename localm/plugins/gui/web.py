@@ -486,7 +486,12 @@ def attach_gui(
         args = ["pull", req.spec]
         if req.name:
             args += ["--name", req.name]
-        job = jobs.start_cli("pull", args)
+        # Stream structured download progress; suppress huggingface_hub's own
+        # tqdm bars (their \r output doesn't line-stream cleanly).
+        job = jobs.start_cli("pull", args, extra_env={
+            "LOCALM_PROGRESS_JSON": "1",
+            "HF_HUB_DISABLE_PROGRESS_BARS": "1",
+        })
         return {"job_id": job.id}
 
     @app.post("/api/models/remove", dependencies=[Depends(_require_auth)])
