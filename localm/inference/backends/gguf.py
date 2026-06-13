@@ -1,14 +1,12 @@
 """GGUF backend - uses our native ctypes wrapper around llama.dll.
 
 The native wrapper (localm.inference.backends.llamacpp) handles GPU DLL
-loading automatically.  If llama.dll cannot be found, falls back to running
-llama-cli.exe as a subprocess (model reloads each call - slow but portable).
+loading automatically. There is no subprocess fallback: GGUF runs through this
+in-process binding or it fails loudly, pointing you at `localm setup-llama`.
 """
 
 from __future__ import annotations
 
-import os
-import subprocess
 from pathlib import Path
 from typing import Iterator, List, Optional
 
@@ -23,9 +21,10 @@ class GgufBackend(BaseBackend):
     """
     Inference backend for GGUF model files.
 
-    Prefers llama-cpp-python for in-process inference (fast, keeps model in
-    memory between calls).  Falls back to llama-cli.exe subprocess if the
-    Python bindings are not installed.
+    Runs in-process via our own ctypes binding to llama.dll (no
+    llama-cpp-python, no subprocess), keeping the model in memory between
+    calls. If the native runtime cannot be loaded, load() raises rather than
+    degrading to a slower, lower-fidelity path.
     """
 
     def __init__(
@@ -48,7 +47,6 @@ class GgufBackend(BaseBackend):
         self.effective_ctx_max: Optional[int] = None   # resolved ceiling of the last load
         self._llm = None
         self._loaded = False
-        self._use_subprocess = False   # set to True if llama-cpp-python unavailable
 
     # ------------------------------------------------------------------ #
     #  Load / unload                                                       #
@@ -188,13 +186,14 @@ class GgufBackend(BaseBackend):
                     " The GPU is low on memory - free VRAM or retry with "
                     "fewer GPU layers (-g 24, or -g 0 for CPU)."
                 )
-            console.print(
-                f"[yellow]Native llama backend failed ({exc}).{vram_hint}[/yellow]\n"
-                f"[yellow]Falling back to llama-cli.exe "
-                f"(slower - model reloads on every request).[/yellow]"
-            )
-            self._use_subprocess = True
-            self._loaded = True
+            # No subprocess fallback by design: GGUF runs through our in-process
+            # ctypes binding to llama.dll or not at all. Fail loud and actionable
+            # instead of silently degrading to a slower, lower-fidelity path.
+            raise RuntimeError(
+                f"Native llama runtime failed to load: {exc}.{vram_hint}\n"
+                "Provision or repair it with  localm setup-llama  "
+                "(or set LLAMA_CPP_LIB to a working llama.dll)."
+            ) from exc
 
     def _load_native(self) -> None:
         """Load via our own ctypes wrapper (no llama-cpp-python required)."""
@@ -271,7 +270,7 @@ class GgufBackend(BaseBackend):
         """Return exact token count using the loaded model's vocabulary."""
         if self._llm is not None:
             return len(self._llm.tokenize(text, add_bos=False))
-        # Subprocess fallback or not loaded yet - fall back to heuristic
+        # Not loaded yet - fall back to a chars/4 heuristic
         return max(1, len(text) // 4)
 
     # ------------------------------------------------------------------ #
@@ -313,10 +312,6 @@ class GgufBackend(BaseBackend):
         from .base import IMAGE_UNSUPPORTED_MESSAGE, UnsupportedInputError, messages_contain_image
         if messages_contain_image(messages):
             raise UnsupportedInputError(IMAGE_UNSUPPORTED_MESSAGE)
-
-        if self._use_subprocess:
-            yield from self._subprocess_stream(messages, max_tokens, temperature)
-            return
 
         kwargs: dict = dict(
             messages=messages,
@@ -361,68 +356,3 @@ class GgufBackend(BaseBackend):
                 "and will reload on the next request. See the debug log for "
                 "the native stack trace."
             ) from e
-
-    def _subprocess_stream(
-        self,
-        messages: List[dict],
-        max_tokens: int,
-        temperature: float,
-    ) -> Iterator[str]:
-        """One-shot subprocess call to llama-cli.exe - slow but always works."""
-        from localm.config import find_binary_dir
-
-        binary_dir = find_binary_dir()
-        if binary_dir is None:
-            yield "[error: llama-cli.exe not found and llama-cpp-python not installed]"
-            return
-
-        cli = binary_dir / "llama-cli.exe"
-
-        # Format messages as a simple prompt
-        prompt = _format_messages_for_llama_cli(messages)
-
-        env = os.environ.copy()
-        env["PATH"] = str(binary_dir) + os.pathsep + env.get("PATH", "")
-
-        cmd = [
-            str(cli),
-            "-m", self.model_path,
-            "-p", prompt,
-            "--no-display-prompt",
-            "-n", str(max_tokens),
-            "--temp", str(temperature),
-            "-ngl", str(self.n_gpu_layers),
-            "--log-disable",
-        ]
-
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            env=env,
-            cwd=str(binary_dir),
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-        )
-
-        assert proc.stdout is not None
-        for char in iter(lambda: proc.stdout.read(1), ""):
-            yield char
-        proc.wait()
-
-
-def _format_messages_for_llama_cli(messages: List[dict]) -> str:
-    """Minimal ChatML formatting for llama-cli prompt mode."""
-    parts = []
-    for msg in messages:
-        role = msg.get("role", "user")
-        content = msg.get("content", "")
-        if isinstance(content, list):
-            content = " ".join(
-                p.get("text", "") for p in content if p.get("type") == "text"
-            )
-        parts.append(f"<|im_start|>{role}\n{content}<|im_end|>")
-    parts.append("<|im_start|>assistant\n")
-    return "\n".join(parts)

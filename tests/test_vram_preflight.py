@@ -56,22 +56,26 @@ class TestVramPreflight:
         b = GgufBackend(str(tmp_path / "m-00001-of-00002.gguf"))
         assert b._model_bytes() == 2_000_000
 
-    def test_load_failure_mentions_vram_when_low(self, tmp_path, capsys):
+    def test_load_failure_mentions_vram_when_low(self, tmp_path):
+        # No subprocess fallback: a native load failure raises, and the message
+        # includes the low-VRAM hint and points at setup-llama.
         b = _backend(tmp_path, size_bytes=80_000_000)
         with patch.object(GgufBackend, "_free_vram_bytes", return_value=20_000_000), \
              patch.object(b, "_load_native", side_effect=RuntimeError("alloc failed")):
-            b.load()
-        out = capsys.readouterr().out
-        assert "low on memory" in out
-        assert b._use_subprocess is True   # fallback still engaged
+            with pytest.raises(RuntimeError) as exc:
+                b.load()
+        msg = str(exc.value)
+        assert "low on memory" in msg
+        assert "setup-llama" in msg
+        assert b.loaded is False           # never claims to be loaded
 
-    def test_load_failure_no_vram_hint_when_plenty_free(self, tmp_path, capsys):
+    def test_load_failure_no_vram_hint_when_plenty_free(self, tmp_path):
         b = _backend(tmp_path, size_bytes=20_000_000)
         with patch.object(GgufBackend, "_free_vram_bytes", return_value=120_000_000), \
              patch.object(b, "_load_native", side_effect=RuntimeError("bad dll")):
-            b.load()
-        out = capsys.readouterr().out
-        assert "low on memory" not in out
+            with pytest.raises(RuntimeError) as exc:
+                b.load()
+        assert "low on memory" not in str(exc.value)
 
 
 class TestVramReport:
