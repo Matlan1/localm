@@ -15,8 +15,8 @@ from rich.panel import Panel
 
 from .config import HOME_DIR, find_binary_dir, load_config, save_config
 from .model_manager import (
-    add_local, get_model_info, get_model_path, list_models, pull_model,
-    remove_model, show_shortcuts,
+    add_local, get_model_info, list_models, pull_model,
+    remove_model, show_shortcuts, sync_models_dir,
 )
 
 console = Console()
@@ -906,7 +906,15 @@ def video_cmd(prompt, negative, duration, fps, width, height, input_image,
 
 @main.command("list")
 def list_cmd():
-    """List registered models."""
+    """List registered models (auto-detecting changes in the models folder)."""
+    added, removed = sync_models_dir()
+    if added or removed:
+        changes = []
+        if added:
+            changes.append(f"{added} new")
+        if removed:
+            changes.append(f"{removed} removed")
+        console.print(f"[dim]Models folder synced: {', '.join(changes)}.[/dim]")
     list_models()
 
 
