@@ -37,7 +37,7 @@ async function presetCoderMode() {
 
 function fmtSize(bytes) {
   if (bytes == null) return "";
-  return (bytes / 1e9).toFixed(2) + " GB";
+  return (bytes / GIB).toFixed(2) + " GB";   // binary GiB, labelled GB (see app.js)
 }
 
 async function refreshModelsPage() {
@@ -166,7 +166,7 @@ async function discoverSearch() {
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
     $("disc-vram").textContent = data.vram.total
-      ? `Badges compare each file against your ${(data.vram.total / 1e9).toFixed(0)} GB total VRAM (weights + ~1.5 GB overhead).`
+      ? `Badges compare each file against your ${(data.vram.total / GIB).toFixed(0)} GB total VRAM (weights + ~1.5 GB overhead).`
       : "No GPU VRAM detected — sizes shown without fit badges.";
     box.replaceChildren();
     if (!data.results.length) {
@@ -210,7 +210,7 @@ async function discoverFiles(repo, filesBox, btn) {
     for (const f of data.files) {
       const row = el("div", "disc-file");
       row.appendChild(el("span", "quant", f.quant || "?"));
-      const desc = `${(f.size_bytes / 1e9).toFixed(1)} GB` +
+      const desc = `${(f.size_bytes / GIB).toFixed(1)} GB` +
         (f.n_parts > 1 ? ` (${f.n_parts} parts)` : "");
       row.appendChild(el("span", "mono", desc));
       if (f.fit) row.appendChild(el("span", "fit " + f.fit, FIT_TEXT[f.fit]));
@@ -983,7 +983,7 @@ async function refreshVideoHistory() {
     const bits = [];
     if (item.meta?.prompt) bits.push(item.meta.prompt.slice(0, 60));
     if (item.meta?.seconds) bits.push(`${item.meta.seconds}s`);
-    bits.push(`${(item.size_bytes / 1e6).toFixed(1)} MB`);
+    bits.push(`${(item.size_bytes / MIB).toFixed(1)} MB`);
     head.appendChild(el("span", "meta", bits.join(" · ")));
 
     const play = el("button", "", "play");
@@ -1068,7 +1068,7 @@ async function refreshMusicHistory() {
     const bits = [];
     if (item.meta?.tags) bits.push(item.meta.tags.slice(0, 60));
     if (item.meta?.duration_seconds) bits.push(`${item.meta.duration_seconds}s`);
-    bits.push(`${(item.size_bytes / 1e6).toFixed(1)} MB`);
+    bits.push(`${(item.size_bytes / MIB).toFixed(1)} MB`);
     head.appendChild(el("span", "meta", bits.join(" · ")));
 
     const play = el("button", "", "play");

@@ -114,8 +114,8 @@ class GgufBackend(BaseBackend):
             return
         console.print(
             f"[yellow]⚠ Low VRAM:[/yellow] this model needs roughly "
-            f"[bold]{need / 1e9:.1f} GB[/bold] (weights + buffers) but only "
-            f"[bold]{free / 1e9:.1f} GB[/bold] is free.\n"
+            f"[bold]{need / 1024**3:.1f} GB[/bold] (weights + buffers) but only "
+            f"[bold]{free / 1024**3:.1f} GB[/bold] is free.\n"
             f"  [dim]Likely cause: another GPU app is holding memory "
             f"(ComfyUI, a browser, another model).[/dim]\n"
             f"  Options:\n"
@@ -238,11 +238,11 @@ class GgufBackend(BaseBackend):
         # "in use" therefore includes every process on the GPU; the delta
         # is what this load itself consumed.
         for i, (free, total) in enumerate(self._vram_levels()):
-            used = (total - free) / 1e9
+            used = (total - free) / 1024**3
             line = (f"  vram     : {used:.2f} GB in use / "
-                    f"{total / 1e9:.2f} GB total (device {i}")
+                    f"{total / 1024**3:.2f} GB total (device {i}")
             if i < len(vram_before):
-                delta = (vram_before[i][0] - free) / 1e9
+                delta = (vram_before[i][0] - free) / 1024**3
                 line += f", {delta:+.2f} GB this load"
             console.print(f"[dim]{line})[/dim]")
 

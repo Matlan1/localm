@@ -750,7 +750,7 @@ def search_cmd(query, limit, list_files):
                 sys.exit(1)
             total = vram_info().get("total")
             if total:
-                console.print(f"[dim]fit vs {total / 1e9:.0f} GB total VRAM "
+                console.print(f"[dim]fit vs {total / 1024**3:.0f} GB total VRAM "
                               "(weights + ~1.5 GB overhead)[/dim]")
             for f in hf_gguf_files(text):
                 fit = fit_label(f["size_bytes"], total)
@@ -760,7 +760,7 @@ def search_cmd(query, limit, list_files):
                 parts = f" ({f['n_parts']} parts)" if f["n_parts"] > 1 else ""
                 console.print(
                     f"  [cyan]{f['quant'] or '?':10}[/cyan] "
-                    f"{f['size_bytes'] / 1e9:6.1f} GB{parts}  {badge}  "
+                    f"{f['size_bytes'] / 1024**3:6.1f} GB{parts}  {badge}  "
                     f"[dim]{f['file']}[/dim]")
             console.print(f"\n[dim]pull one:  localm pull {text}:<file>[/dim]")
         else:
@@ -933,7 +933,7 @@ def rm(model, yes):
                 detail = (f"unregisters the name only — file kept, "
                           f"still registered as: {', '.join(others)}")
             elif str(path).startswith(str(MODELS_DIR)) and path.exists():
-                size = path.stat().st_size / 1e9 if path.is_file() else None
+                size = path.stat().st_size / 1024**3 if path.is_file() else None
                 size_s = f" ({size:.1f} GB)" if size else ""
                 detail = f"PERMANENTLY deletes {path}{size_s}"
             else:
@@ -1300,7 +1300,7 @@ def doctor():
                 free_b, total_b = torch.cuda.mem_get_info(i)
                 console.print(
                     f"  {ok_sym}  GPU {i}: {props.name}  "
-                    f"{free_b / 1e9:.1f} GB free / {total_b / 1e9:.1f} GB total"
+                    f"{free_b / 1024**3:.1f} GB free / {total_b / 1024**3:.1f} GB total"
                 )
         else:
             console.print(f"  {warn_sym}  torch available but torch.cuda.is_available() = False")

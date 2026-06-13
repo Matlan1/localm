@@ -174,11 +174,17 @@ async function streamJob(jobId, onLine, onProgress) {
   return endEvent || { status: "failed" };
 }
 
+// Sizes are shown in binary units (GiB/MiB/KiB) but labelled GB/MB/KB — the
+// GPU/LLM convention: matches the VRAM printed on the card, llama.cpp's logs,
+// and HuggingFace quant tables. (The driver reports e.g. 16 GiB; showing
+// decimal GB would read a confusing 17.2 for the same card.)
+const GIB = 1024 ** 3, MIB = 1024 ** 2, KIB = 1024;
+
 function fmtBytes(n) {
   if (n == null) return "";
-  if (n >= 1e9) return (n / 1e9).toFixed(2) + " GB";
-  if (n >= 1e6) return (n / 1e6).toFixed(1) + " MB";
-  if (n >= 1e3) return (n / 1e3).toFixed(0) + " KB";
+  if (n >= GIB) return (n / GIB).toFixed(2) + " GB";
+  if (n >= MIB) return (n / MIB).toFixed(1) + " MB";
+  if (n >= KIB) return (n / KIB).toFixed(0) + " KB";
   return n + " B";
 }
 
@@ -261,7 +267,7 @@ async function refreshModels() {
       for (const m of data.models) {
         const opt = document.createElement("option");
         opt.value = m.name;
-        const size = m.size_bytes ? ` (${(m.size_bytes / 1e9).toFixed(1)} GB)` : "";
+        const size = m.size_bytes ? ` (${(m.size_bytes / GIB).toFixed(1)} GB)` : "";
         opt.textContent = m.name + size;
         if (m.active) opt.selected = true;
         modelSelect.appendChild(opt);

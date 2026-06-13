@@ -133,8 +133,8 @@ class HFBackend(BaseBackend):
         if device == "cuda":
             try:
                 for i in range(torch.cuda.device_count()):
-                    allocated = torch.cuda.memory_allocated(i) / 1e9
-                    reserved  = torch.cuda.memory_reserved(i)  / 1e9
+                    allocated = torch.cuda.memory_allocated(i) / 1024**3
+                    reserved  = torch.cuda.memory_reserved(i)  / 1024**3
                     console.print(
                         f"[dim]  vram     : {allocated:.2f} GB allocated / "
                         f"{reserved:.2f} GB reserved (device {i})[/dim]"
