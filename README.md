@@ -18,7 +18,7 @@ Everything that does not strictly need the internet works fully offline. Online 
 - **Local model inference.** GGUF files load through a small ctypes binding to `llama.dll`, so there's no llama-cpp-python to install. HuggingFace models work too, and it works out whether to run on your AMD or NVIDIA GPU (or fall back to CPU) from what actually loads at startup.
 - **Pick how you talk to it.** A browser GUI, a plain terminal chat, and an OpenAI-compatible server for when you want other apps to connect.
 - **A coding agent that does the work.** `localm coder` works through a task with tools for files, the shell, search, and tests, and you can redirect it mid-run or review what it touched with session diffs. It speaks MCP both ways, so localm can expose your models to clients like Claude Desktop, and the coder can pull in external MCP tool servers.
-- **Built-in generation.** Through a local ComfyUI it can make images with FLUX, music of any length with ACE-Step, and short video clips from a prompt or a still with Wan 2.2.
+- **Media generation (drives your ComfyUI).** Point localm at a local [ComfyUI](https://github.com/comfyanonymous/ComfyUI) and it makes images with FLUX, music of any length with ACE-Step, and short video clips from a prompt or a still with Wan 2.2. You install ComfyUI and download the models once (roughly 20 to 25 GB for FLUX; see [docs/flux-setup.md](docs/flux-setup.md)); localm orchestrates the rest, including VRAM handover from the LLM.
 - **Bring your own data.** Attach files or index whole folders and chat against them with citations, talk to it using local Whisper, or hand it an image to look at.
 - **Model management that stays out of the way.** Pull from HuggingFace with aliases and SHA256 dedup, browse quants with a note on whether they fit your VRAM, and let it register whatever you drop into the models folder. Abliteration is a single command that passes a model to Heretic and registers what comes back.
 - **Offline first.** Nothing leaves your machine unless you allow it. The optional online parts, meaning cloud providers for the coder and web access for fetching pages, are opt-in and run through one network policy you set.
@@ -44,11 +44,11 @@ Everything that does not strictly need the internet works fully offline. Online 
 | **Model discovery** | Search HF from the Models page or `localm search`; per-quant sizes with "fits your VRAM" badges (torch-free VRAM detection) |
 | **Abliteration** | `localm abliterate`: decensor a model with [Heretic](https://github.com/Matlan1/heretic-win-AMD) (a separate AGPL program, run as a subprocess), then auto-register the result (`localm[abliterate]` extra) |
 | **Folder auto-sync** | `localm list`/`gui`/launcher reconcile the registry with the models folder on start; missing files are flagged, not deleted (opt-in `autoprune_missing_models`) |
-| **Image generation** | `generate_image` tool drives a local ComfyUI FLUX pipeline with VRAM handover |
+| **Image generation** | `generate_image` tool drives a local ComfyUI FLUX pipeline with VRAM handover (requires ComfyUI + models, see [docs/flux-setup.md](docs/flux-setup.md)) |
 | **Music generation** | ACE-Step via the same ComfyUI server: arbitrary track length, lyrics or instrumental (`localm music`, Music page, `/music`) |
 | **Video generation** | Wan 2.2 short clips (~5 s native, text- or image-to-video) via ComfyUI (`localm video`, Video page, `/video`; [guide](docs/video.md)) |
 | **Plugins** | Drop a folder with `plugin.toml` into `~/.localm/plugins/` to add CLI commands and agent tools |
-| **Multimodal** | Image attachment via `--image` or `/image` (requires mmproj GGUF) |
+| **Multimodal** | Image attachment via `--image` or `/image` with a HuggingFace-format vision model. The built-in GGUF backend is text-only and rejects an attached image with a clear error rather than silently ignoring it. |
 | **Ollama interop** | Register Ollama blobs directly via `localm add <manifest-dir>` |
 
 </details>
@@ -325,6 +325,12 @@ conversation reaches the ceiling, replies shorten to fit; when even that is
 impossible you get a clear error instead of an out-of-memory crash. An
 explicit `-c/--ctx` larger than the ceiling always wins.
 
+> Reading free VRAM needs `torch` (the `[gpu]` extra). On a CPU-only install
+> without it, `ctx_auto` cannot measure VRAM and falls back to the fixed
+> `n_ctx_max` ceiling (16384 by default); the pre-flight "Low VRAM" warning and
+> the post-load VRAM usage line are skipped for the same reason. Plain GGUF
+> inference still runs - only the VRAM-aware sizing and warnings need torch.
+
 Long chats compact automatically before they collide with the ceiling: at 70%
 fill, older turns are summarised by the model and replaced with a short
 summary, keeping the last two exchanges verbatim. If summarisation is
@@ -353,6 +359,27 @@ localm plugin remove NAME
 
 A plugin is a folder with a `plugin.toml` manifest and Python files. It can add a CLI command (`localm <name>`) and export tools into the coder agent. Installation is a local directory copy, fully offline.
 
+To export an agent tool, list it in the manifest and define a matching callable
+in the entry module (same contract as a built-in tool: `fn(cwd, **args)`
+returning a `ToolResult` or a string):
+
+```toml
+[tools]
+exports = ["tool_search_issues"]
+```
+
+```python
+def tool_search_issues(cwd, query=""):
+    """Search the local issue tracker."""           # becomes the tool description
+    return f"... results for {query} ..."
+tool_search_issues.tool_params = {"query": {"type": "string", "required": True}}
+tool_search_issues.tool_destructive = False          # default True (asks before running)
+```
+
+The coder registers it as `plugin_<name>_tool_search_issues` and tells the model
+about it, exactly like an MCP tool. External plugin code defaults to needing
+confirmation before it runs.
+
 ---
 
 ## GPU Setup (AMD)
@@ -379,7 +406,8 @@ you at `localm setup-llama`. ggml deps load before `llama.dll`, and the venv's
 `_rocm_sdk_*/bin` dirs are added to the DLL search path automatically.
 
 Before loading a model, localm checks free VRAM against the model size and warns
-when it will not fit, instead of crashing mid-load. KV cache prefix reuse keeps
+when it will not fit, instead of crashing mid-load (this check needs `torch` to
+read VRAM; on a CPU-only install it is skipped). KV cache prefix reuse keeps
 multi-turn chat fast by only prefilling the new suffix of the conversation.
 
 To use a one-off custom build without provisioning the wheel:
@@ -389,7 +417,8 @@ localm run mymodel --prompt "..."
 ```
 
 > Source of the default prebuilt and from-source build instructions for gfx1030
-> (RDNA2): see `rocm-canary-forge/windows-native`.
+> (RDNA2): see the `windows-native` directory in
+> https://github.com/Matlan1/rocm-canary-forge.
 
 ---
 

@@ -1,0 +1,115 @@
+"""Tests for sync_models_dir - registry/folder reconciliation and autoprune.
+
+This runs on every launch and can delete registry entries, yet had no coverage.
+Pins: loose-file registration, missing->flagged (default), flag clearing on
+reappear, prune deletion with a registry backup, the all-missing guardrail, and
+that external (out-of-folder) models are never pruned.
+"""
+
+from unittest.mock import MagicMock
+
+import pytest
+
+from localm import model_manager as mm
+
+
+@pytest.fixture()
+def fake_registry(tmp_path, monkeypatch):
+    """In-memory registry + temp MODELS_DIR wired into model_manager, with a
+    spy standing in for the on-disk registry backup."""
+    store: dict = {}
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    monkeypatch.setattr(mm, "MODELS_DIR", models_dir)
+    monkeypatch.setattr(mm, "ensure_dirs", lambda: None)
+    monkeypatch.setattr(mm, "load_registry", lambda: dict(store))
+
+    def _save(reg):
+        store.clear()
+        store.update(reg)
+    monkeypatch.setattr(mm, "save_registry", _save)
+
+    def _update(mutator):
+        reg = dict(store)
+        mutator(reg)
+        store.clear()
+        store.update(reg)
+        return dict(store)
+    monkeypatch.setattr(mm, "update_registry", _update)
+
+    backup_spy = MagicMock(return_value=None)
+    monkeypatch.setattr(mm, "_backup_registry", backup_spy)
+    return store, models_dir, backup_spy
+
+
+def _managed_entry(models_dir, name, exists=True):
+    """A registry entry whose file lives under the models folder."""
+    path = models_dir / f"{name}.gguf"
+    if exists:
+        path.write_bytes(b"gguf-bytes-" + name.encode())
+    return {"path": str(path), "source": "local"}
+
+
+class TestRegisterLooseFiles:
+    def test_loose_gguf_is_registered(self, fake_registry):
+        store, models_dir, _ = fake_registry
+        (models_dir / "fresh.gguf").write_bytes(b"weights")
+        result = mm.sync_models_dir(prune=False)
+        assert result.added == 1
+        assert any(e["path"].endswith("fresh.gguf") for e in store.values())
+
+
+class TestMissingFlagging:
+    def test_missing_managed_is_flagged_not_deleted(self, fake_registry):
+        store, models_dir, backup = fake_registry
+        store["m"] = _managed_entry(models_dir, "gone", exists=False)
+        result = mm.sync_models_dir(prune=False)
+        assert result.flagged == 1 and result.pruned == 0
+        assert store["m"]["missing"] is True       # kept, just flagged
+        backup.assert_not_called()
+
+    def test_reappeared_file_clears_flag(self, fake_registry):
+        store, models_dir, _ = fake_registry
+        entry = _managed_entry(models_dir, "back", exists=True)
+        entry["missing"] = True
+        store["m"] = entry
+        result = mm.sync_models_dir(prune=False)
+        assert result.restored == 1
+        assert "missing" not in store["m"]
+
+
+class TestAutoprune:
+    def test_prune_deletes_missing_and_backs_up(self, fake_registry):
+        store, models_dir, backup = fake_registry
+        store["keep"] = _managed_entry(models_dir, "keep", exists=True)
+        store["gone"] = _managed_entry(models_dir, "gone", exists=False)
+        result = mm.sync_models_dir(prune=True)
+        assert result.pruned == 1
+        assert "gone" not in store and "keep" in store
+        backup.assert_called_once()               # snapshot taken before deleting
+
+    def test_single_missing_is_pruned(self, fake_registry):
+        # The guardrail only trips for >= 2 managed models all missing at once.
+        store, models_dir, _ = fake_registry
+        store["only"] = _managed_entry(models_dir, "only", exists=False)
+        result = mm.sync_models_dir(prune=True)
+        assert result.pruned == 1 and "only" not in store
+
+    def test_all_missing_guardrail_refuses_to_prune(self, fake_registry):
+        store, models_dir, backup = fake_registry
+        store["a"] = _managed_entry(models_dir, "a", exists=False)
+        store["b"] = _managed_entry(models_dir, "b", exists=False)
+        result = mm.sync_models_dir(prune=True)
+        assert result.pruned == 0
+        assert result.flagged == 2 and result.note
+        assert "a" in store and "b" in store       # nothing deleted
+        backup.assert_not_called()
+
+    def test_external_model_never_pruned(self, fake_registry, tmp_path):
+        store, models_dir, _ = fake_registry
+        # A registered model whose file lives OUTSIDE the models folder, missing.
+        store["ext"] = {"path": str(tmp_path / "elsewhere" / "ext.gguf"),
+                        "source": "local"}
+        result = mm.sync_models_dir(prune=True)
+        assert result.pruned == 0 and result.flagged == 1
+        assert store["ext"]["missing"] is True

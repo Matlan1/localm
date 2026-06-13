@@ -19,6 +19,23 @@ def _complete_model(ctx, param, incomplete):
         return []
 
 
+def _gui_bind_warning(host: str):
+    """Warning text when the GUI binds past loopback without auth, or None when
+    the bind is safe. Builds on the server's check, then escalates for the GUI:
+    it also exposes the coder agent (shell + file edits) and has no built-in TLS.
+    """
+    from localm.cli import _exposed_bind_warning
+    base = _exposed_bind_warning(host)
+    if base is None:
+        return None
+    return (
+        base
+        + "\n  The GUI also exposes the coder agent, which can run shell "
+        "commands and edit files here. There is no built-in TLS - put it behind "
+        "a reverse proxy (see docs/tls.md) for remote access."
+    )
+
+
 @click.command("gui")
 @click.argument("model", default="", required=False, shell_complete=_complete_model)
 @click.option("-H", "--host", default="127.0.0.1", show_default=True,
@@ -172,6 +189,13 @@ def main(model, host, port, ctx, gpu_layers, no_browser, pull_spec, debug, mode)
         open_url = f"{base_url}?view=models&pull={quote(pull_spec, safe='')}"
     elif model_less:
         open_url = f"{base_url}?view=models"
+
+    # Warn loudly before binding past loopback without auth: the GUI exposes
+    # not just the chat API but the coder agent, which can run shell commands
+    # and edit files on this machine.
+    bind_warning = _gui_bind_warning(host)
+    if bind_warning:
+        console.print(f"[bold yellow]{bind_warning}[/bold yellow]")
 
     console.print(f"[bold green]localm GUI[/bold green] → {base_url}")
     if model_less:

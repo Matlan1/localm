@@ -10,10 +10,13 @@ This guide covers the setup for a 16 GB VRAM card and how localm drives it.
    [ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF) extension.
 2. Download the model files:
 
+These are the exact files the committed example workflow loads, so a fresh
+download matches it on the first run (roughly 20 to 25 GB in total):
+
 | Component | File | ComfyUI folder |
 | :--- | :--- | :--- |
 | UNET | `flux1-dev-Q8_0.gguf` (or Q6_K) | `models/unet/` |
-| Text encoder | `t5-v1_1-xxl-encoder-Q8_0.gguf` + CLIP-L | `models/clip/` |
+| Text encoders | `clip_l.safetensors` + `t5xxl_fp8_e4m3fn.safetensors` | `models/clip/` |
 | VAE | `ae.safetensors` | `models/vae/` |
 
 3. Start ComfyUI on its default port 8188. localm reads `FLUX_API_URL` if
@@ -55,7 +58,8 @@ Features handled for you:
   settings is written next to every output image.
 - **img2img**: pass an input image and a denoise strength; output
   dimensions match the input.
-- Optional negative prompts (via conditioning concat), LoRA injection, and
+- Optional negative prompts (a real negative branch via classifier-free
+  guidance / `CFGGuider`, not conditioning concat), LoRA injection, and
   encoder overrides are supported as tool parameters.
 
 ## Safety filtering
