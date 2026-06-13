@@ -53,8 +53,7 @@ def _candidate_dirs() -> List[Path]:
 
 
 def runtime_binary_dir() -> Optional[Path]:
-    """The directory llama.dll will be loaded from, or None if unprovisioned.
-    Also used by the subprocess fallback to find llama-cli/llama-server."""
+    """The directory llama.dll will be loaded from, or None if unprovisioned."""
     for d in _candidate_dirs():
         try:
             if d and d.is_dir() and (d / "llama.dll").exists():

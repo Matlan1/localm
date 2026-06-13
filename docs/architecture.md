@@ -42,8 +42,9 @@ unloaded it (e.g. image generation borrowing the VRAM).
   tags some finetunes emit as text (bypassed in debug mode).
 - **VRAM pre-flight**: free VRAM is checked against model size before load,
   with a warning rather than a block.
-- Fallback: if the DLL cannot be loaded, generation runs through a
-  `llama-cli.exe` subprocess.
+- No fallback by design: if the DLL cannot be loaded, `load()` raises a clear
+  error pointing at `localm setup-llama` rather than degrading to a slower,
+  lower-fidelity `llama-cli.exe` subprocess.
 
 ## HTTP server
 

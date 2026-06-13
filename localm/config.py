@@ -254,8 +254,9 @@ def update_registry(mutator: Callable[[dict], None]) -> dict:
 
 
 def find_binary_dir() -> Optional[Path]:
-    """Return the directory containing the llama.cpp executables
-    (llama-server.exe / llama-cli.exe) for the subprocess fallback, or None.
+    """Return the directory holding the native llama.cpp binaries (llama.dll,
+    plus optional llama-cli/llama-server exes), used by `localm info` and
+    `localm doctor`, or None when unprovisioned.
 
     Project-local resolution only: the user-configured binary_dir, then the
     localm-llama-runtime wheel bundled in this venv. No absolute path is ever
@@ -273,7 +274,9 @@ def find_binary_dir() -> Optional[Path]:
     except Exception:
         pass
     for p in candidates:
-        if (p / "llama-server.exe").exists() or (p / "llama-cli.exe").exists():
+        if ((p / "llama.dll").exists()
+                or (p / "llama-server.exe").exists()
+                or (p / "llama-cli.exe").exists()):
             return p
     return None
 
