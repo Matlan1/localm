@@ -70,6 +70,13 @@ def load_models() -> list:
     try:
         sys.path.insert(0, str(REPO_DIR))
         from localm.config import load_registry
+        # Pick up models added to (or gone missing from) the models folder since
+        # last refresh. Guarded so an older localm without sync still lists fine.
+        try:
+            from localm.model_manager import sync_models_dir
+            sync_models_dir()
+        except Exception:
+            pass
         return sorted(load_registry())
     except Exception:
         return []
