@@ -1,4 +1,4 @@
-"""Tests for localm.plugins.coder.prompts — family detection and per-family prompt content."""
+"""Tests for localm.plugins.coder.prompts - family detection and per-family prompt content."""
 
 import pytest
 from pathlib import Path
@@ -107,7 +107,7 @@ def test_small_prompt_has_condensed_rules():
 
 def test_small_prompt_lists_every_tool():
     """The small-model list is condensed (one line per tool, no JSON
-    examples) but no longer omits tools — the docs are generated from
+    examples) but no longer omits tools - the docs are generated from
     TOOL_REGISTRY so models know everything that is callable."""
     from localm.plugins.coder.tools import TOOL_REGISTRY
     p = _prompt("phi3-mini")

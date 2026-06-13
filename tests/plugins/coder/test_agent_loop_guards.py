@@ -137,7 +137,7 @@ class TestSelfVerificationNudge:
     def test_nudge_fires_only_once(self, tmp_path):
         agent = _make_agent(tmp_path)
         agent._unverified_writes = {"a.py"}
-        # Agent never verifies — second final answer must be accepted anyway
+        # Agent never verifies - second final answer must be accepted anyway
         with patch.object(agent, "_call_llm", return_value="done"), \
              patch("localm.plugins.coder.agent.parse_tool_calls", return_value=[]):
             result = agent.run_task("task")

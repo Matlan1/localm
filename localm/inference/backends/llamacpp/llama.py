@@ -1,5 +1,5 @@
 """
-High-level LlamaCpp class — a pure-Python / ctypes replacement for the
+High-level LlamaCpp class - a pure-Python / ctypes replacement for the
 llama-cpp-python ``Llama`` class.
 
 Implements only the subset used by GgufBackend:
@@ -34,7 +34,7 @@ def _quiet_stderr():
     redirect the file descriptor at the OS level.
 
     In debug mode the stream goes into the debug log file instead of
-    /dev/null — native abort messages (the reason for a hard crash) land
+    /dev/null - native abort messages (the reason for a hard crash) land
     there, which is the difference between a diagnosable crash and a
     silent one.
     """
@@ -82,7 +82,7 @@ class _Tokenizer:
             add_special=add_bos, parse_special=True,
         )
         if n < 0:
-            # buffer too small — reallocate and retry
+            # buffer too small - reallocate and retry
             n_max = -n + 64
             buf = (llama_token * n_max)()
             n = api.llama_tokenize(
@@ -108,7 +108,7 @@ class _Tokenizer:
 
 
 # ---------------------------------------------------------------------------
-#  Stop strings — supplement llama_vocab_is_eog()
+#  Stop strings - supplement llama_vocab_is_eog()
 #
 #  Some models don't register their end-of-turn token in the vocabulary's EOG
 #  list.  Checking the decoded text of each token against this set handles the
@@ -182,7 +182,7 @@ def _apply_model_template(model_ptr: int, messages: List[Dict]) -> str:
     needed = api.llama_chat_apply_template(tmpl_bytes, chat_arr, n, True, buf, buf_size)
 
     if needed < 0:
-        # Template not supported — fall back
+        # Template not supported - fall back
         return _format_chatml(messages)
 
     if needed > buf_size:
@@ -240,7 +240,7 @@ def _filtered_stream(pieces: Iterator[str]) -> Iterator[str]:
             yield buf[:safe]
             buf = buf[safe:]
 
-    # Stream ended without a stop string — flush remaining buffer
+    # Stream ended without a stop string - flush remaining buffer
     if buf:
         yield buf
 
@@ -281,7 +281,7 @@ _MARKER_RE = _re.compile(
     r"|<\|turn>(user|model|assistant|system)?\n?"         # Gemma 4 turn open
     r"|<turn\|>"                                          # Gemma 4 turn close
     # NOTE: <|tool_call> / <|tool_response> markers are deliberately NOT
-    # scrubbed — the coder agent parses them out of this same stream.
+    # scrubbed - the coder agent parses them out of this same stream.
     r"|<\|tool>|<tool\|>"                                 # Gemma 4 tool declarations
     r"|<\|think\|>|<think\|>"                             # Gemma 4 thinking enable token
     r"|<unused\d+>?"                                      # Gemma reserved tokens
@@ -305,7 +305,7 @@ def _scrub_stream(pieces: Iterator[str]) -> Iterator[str]:
 
     The trailing ``_MARKER_HOLD`` characters stay buffered because a marker
     (or its optional role suffix, e.g. ``<|turn>model``) can straddle two
-    pieces — scrubbing them too early would strip the marker head and leak
+    pieces - scrubbing them too early would strip the marker head and leak
     its tail as text.  Only the committed region is scrubbed and yielded;
     the cut never lands inside a potential marker (markers start with ``<``).
     """
@@ -317,7 +317,7 @@ def _scrub_stream(pieces: Iterator[str]) -> Iterator[str]:
             continue
         # Back the cut up to the last '<' just before the boundary so a
         # marker straddling it stays whole in the buffer.  A legit '<' in
-        # prose only delays its emission one round — the window slides past
+        # prose only delays its emission one round - the window slides past
         # it as more text arrives.
         lt = buf.rfind("<", max(0, cut - _MARKER_HOLD), cut)
         if lt != -1:
@@ -370,7 +370,7 @@ def _build_sampler(
 
     The optional grammar sampler sits first so it masks invalid tokens before
     any scoring or sampling stage sees them.  The repetition-penalty stage is
-    added when ``repeat_penalty != 1.0`` and the DLL exports it — without it
+    added when ``repeat_penalty != 1.0`` and the DLL exports it - without it
     models prone to looping repeat the same marker lines until max_tokens.
     For temperature ≤ 0 greedy sampling replaces the stochastic stages.
 
@@ -415,7 +415,7 @@ def _build_sampler(
 
 
 # ---------------------------------------------------------------------------
-#  LlamaCpp — main public class
+#  LlamaCpp - main public class
 # ---------------------------------------------------------------------------
 
 class LlamaCpp:
@@ -442,7 +442,7 @@ class LlamaCpp:
         # Dynamic context window: starts at n_ctx, grows in n_ctx_grow steps
         # up to n_ctx_max when a conversation outgrows it. None/0 = unlimited
         # (the pre-dynamic behaviour: grow exactly as far as needed).
-        # An explicitly requested base larger than the ceiling wins — the
+        # An explicitly requested base larger than the ceiling wins - the
         # user asked for it, the cap only governs automatic growth.
         self._n_ctx_max   = max(n_ctx_max, n_ctx) if n_ctx_max else None
         self._n_ctx_grow  = max(256, n_ctx_grow)
@@ -453,7 +453,7 @@ class LlamaCpp:
         self._tokenizer   = None   # type: ignore[assignment]
         # Serialize native calls (prefill/decode/free) against unload. Without
         # this, an unload on another thread can llama_free the context between
-        # the generator's None-check and its next native call — a use-after-
+        # the generator's None-check and its next native call - a use-after-
         # free that crashes the GPU driver. The decode loop holds _gen_lock
         # around each native step; close()/_free_native take it too, after
         # setting _stop so an in-flight generation bails at its next step.
@@ -514,13 +514,13 @@ class LlamaCpp:
                 return
             # Suppress the ROCm lazy-buffer verification chatter the native
             # destructors write to stderr ("~llama_context: ... compute buffer
-            # size ... matches expectation") — internal noise, not user output.
+            # size ... matches expectation") - internal noise, not user output.
             try:
                 _ctx = _quiet_stderr if not self._verbose else contextlib.nullcontext
                 with _ctx():
                     self._free_native()
             except Exception:
-                # Interpreter shutdown can break the fd redirection — free anyway
+                # Interpreter shutdown can break the fd redirection - free anyway
                 self._free_native()
 
     def _free_native(self) -> None:
@@ -568,7 +568,7 @@ class LlamaCpp:
         llama_memory_* API and the request fits in the live context, the
         common token prefix shared with the previous call is kept in the KV
         cache and only the new suffix is prefilled (fast follow-up turns in
-        a chat).  Otherwise the context is recreated from scratch — the
+        a chat).  Otherwise the context is recreated from scratch - the
         behaviour of older builds without KV-management functions.
         """
         if not self._model_ptr:
@@ -614,7 +614,7 @@ class LlamaCpp:
 
         pos = n_prompt
         # Why generation ended, read by callers as self.last_finish_reason.
-        # Default "stop" — it must cover every early exit (EOG token, a
+        # Default "stop" - it must cover every early exit (EOG token, a
         # stop-string match in _filtered_stream abandoning this generator,
         # client abort). Only a genuinely exhausted token budget is "length".
         self.last_finish_reason = "stop"
@@ -648,7 +648,7 @@ class LlamaCpp:
                     with _ctx():
                         ret = api.llama_decode(self._ctx_ptr, batch)
                     if ret != 0:
-                        # KV cache full or error — the reply was cut short.
+                        # KV cache full or error - the reply was cut short.
                         # The cache bookkeeping has diverged from native KV
                         # state, so invalidate it: the next turn must not try
                         # to reuse a prefix the cache no longer truly holds.
@@ -671,7 +671,7 @@ class LlamaCpp:
         """
         Clamp the generation budget so prompt + reply fits under n_ctx_max.
 
-        Raises RuntimeError when the prompt alone leaves no usable room —
+        Raises RuntimeError when the prompt alone leaves no usable room -
         the conversation has genuinely outgrown the configured ceiling.
         """
         if not self._n_ctx_max:
@@ -737,7 +737,7 @@ class LlamaCpp:
         if prefix < len(self._cached_tokens):
             # Drop cached tokens past the common prefix
             if not api.llama_memory_seq_rm(mem, 0, prefix, -1):
-                # Partial removal unsupported (e.g. SWA cache) — start over
+                # Partial removal unsupported (e.g. SWA cache) - start over
                 api.llama_memory_clear(mem, True)
                 prefix = 0
 
@@ -746,14 +746,14 @@ class LlamaCpp:
             if self._ctx_ptr is None:
                 self._cached_tokens = []
                 raise RuntimeError(
-                    "Model was unloaded during prefill — request aborted."
+                    "Model was unloaded during prefill - request aborted."
                 )
             chunk = suffix[i:i + _PREFILL_CHUNK]
             tok_arr = (llama_token * len(chunk))(*chunk)
             batch = api.llama_batch_get_one(tok_arr, len(chunk))
             ret = api.llama_decode(self._ctx_ptr, batch)
             if ret != 0:
-                # Cache state is now unknown — wipe it so the next call
+                # Cache state is now unknown - wipe it so the next call
                 # starts clean rather than trusting a half-decoded prefix
                 self._cached_tokens = []
                 try:
@@ -785,7 +785,7 @@ class LlamaCpp:
         self._tokenizer._ctx = self._ctx_ptr
 
         # Prefill in n_batch-sized chunks. A single llama_decode call with
-        # more tokens than n_batch does not return an error — it aborts the
+        # more tokens than n_batch does not return an error - it aborts the
         # whole process inside the native library. Long chat histories
         # (prompt > 2048 tokens) land here whenever the context is recreated.
         n_batch = cp.n_batch

@@ -3,7 +3,7 @@
 Installed (editable) into localm's venv so the project carries its own
 inference runtime instead of reaching for a folder elsewhere on disk. The
 binaries live in ``lib/`` next to this file and are provisioned by
-``localm setup-llama`` — they are deliberately never committed.
+``localm setup-llama`` - they are deliberately never committed.
 
 On a GPU build the bundled set is the matched llama.cpp + ROCm/CUDA runtime
 (e.g. the lemonade-sdk gfx1030 prebuilt: llama.dll, ggml-*.dll, amdhip64_7.dll,

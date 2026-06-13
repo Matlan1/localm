@@ -5,7 +5,7 @@ The native llama.cpp context must never be freed while a generation step is
 making a native call against it (a use-after-free that crashes the GPU
 driver). The wrapper guarantees this with a per-instance lock + stop event:
 close() signals stop, then frees *under* the lock, so it blocks until any
-in-flight native region releases — and the generation loop bails at its next
+in-flight native region releases - and the generation loop bails at its next
 step because stop is set / the context is gone.
 
 These tests exercise that contract directly without loading the DLL.
@@ -30,7 +30,7 @@ def _lockable_llama() -> LlamaCpp:
 
 
 def test_close_signals_stop_immediately_and_waits_for_the_lock():
-    """While a 'native region' holds _gen_lock, close() must not free — but it
+    """While a 'native region' holds _gen_lock, close() must not free - but it
     must set _stop right away so the generation loop bails at its next step."""
     llm = _lockable_llama()
 
@@ -47,7 +47,7 @@ def test_close_signals_stop_immediately_and_waits_for_the_lock():
 
     # stop is signalled immediately (the generator will see it and abort)...
     assert llm._stop.is_set()
-    # ...but close() is still blocked on the lock — it cannot free yet.
+    # ...but close() is still blocked on the lock - it cannot free yet.
     assert not close_returned.is_set()
 
     llm._gen_lock.release()              # the native region finishes

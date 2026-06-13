@@ -27,7 +27,7 @@ _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 def _exposed_bind_warning(host: str) -> Optional[str]:
     """
-    Warning text when binding beyond loopback without an API key set —
+    Warning text when binding beyond loopback without an API key set -
     that combination serves an unauthenticated LLM API to the whole network.
     Returns None when the configuration is safe.
     """
@@ -35,7 +35,7 @@ def _exposed_bind_warning(host: str) -> Optional[str]:
     if host in _LOOPBACK_HOSTS or os.environ.get("LOCALM_API_KEY"):
         return None
     return (
-        f"⚠ Binding to {host} WITHOUT authentication — anyone on the network "
+        f"⚠ Binding to {host} WITHOUT authentication - anyone on the network "
         f"can use this server, unload your model, and read every response.\n"
         f"  Set an API key first:  $env:LOCALM_API_KEY = \"<secret>\"  "
         f"(clients send it as a Bearer token)"
@@ -54,7 +54,7 @@ def _complete_model_name(ctx, param, incomplete):
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 @click.version_option("0.1.0", prog_name="localm")
 def main() -> None:
-    """Run local LLMs offline — HuggingFace and GGUF models, AMD/NVIDIA/CPU."""
+    """Run local LLMs offline - HuggingFace and GGUF models, AMD/NVIDIA/CPU."""
 
 
 # ------------------------------------------------------------------ #
@@ -86,7 +86,7 @@ def main() -> None:
                    "full = log + markdown transcript.")
 def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
         mmproj, device, images, output_dir, debug, mode):
-    """Run a model — interactive chat or single prompt.
+    """Run a model - interactive chat or single prompt.
 
     \b
     MODEL can be a registered name OR a direct path:
@@ -121,7 +121,7 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
         if debug:
             console.print(
                 "[yellow]⚠  privacy mode + --debug:[/yellow] the debug log "
-                "records requests and raw model output — delete it after "
+                "records requests and raw model output - delete it after "
                 "analysis if that matters.")
     else:
         console.print(f"[dim]session mode: {session_mode.value} "
@@ -130,12 +130,12 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
     info = get_model_info(model)
     if info is None:
         console.print(f"[red]Model not found:[/red] {model}")
-        console.print("  [dim]localm list[/dim]              — downloaded models")
-        console.print("  [dim]localm models[/dim]            — GGUF shortcuts")
-        console.print("  [dim]localm pull owner/repo[/dim]   — download HF model")
-        console.print("  [dim]localm pull name[/dim]         — download GGUF shortcut")
-        console.print("  [dim]localm add <path>[/dim]        — register local file/dir")
-        console.print("  [dim]localm run /full/path[/dim]    — use path directly")
+        console.print("  [dim]localm list[/dim]              - downloaded models")
+        console.print("  [dim]localm models[/dim]            - GGUF shortcuts")
+        console.print("  [dim]localm pull owner/repo[/dim]   - download HF model")
+        console.print("  [dim]localm pull name[/dim]         - download GGUF shortcut")
+        console.print("  [dim]localm add <path>[/dim]        - register local file/dir")
+        console.print("  [dim]localm run /full/path[/dim]    - use path directly")
         sys.exit(1)
 
     model_path, _display_hint = info
@@ -268,7 +268,7 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
                  out_dir: Optional[Path] = None,
                  audit=None, transcript=None) -> None:  # noqa: C901
     console.print(Panel(
-        f"[bold cyan]localm[/bold cyan] — {engine.display_name}\n"
+        f"[bold cyan]localm[/bold cyan] - {engine.display_name}\n"
         "[dim]Ctrl+C or [bold]/exit[/bold] to quit  ·  "
         "[bold]/clear[/bold] history  ·  [bold]/image <path>[/bold] attach image  ·  "
         "[bold]/help[/bold][/dim]",
@@ -313,7 +313,7 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
             audit.user(user_input)
 
         # Seamless compaction: summarise older turns before the history
-        # collides with the context ceiling. Never fails — falls back to a
+        # collides with the context ceiling. Never fails - falls back to a
         # visible hard trim when summarisation is unavailable.
         from .inference.compact import maybe_compact
         limit = load_config().get("n_ctx_max", 16384) or 0
@@ -435,7 +435,7 @@ def _handle_command(
                 console.print(f"[red]File not found:[/red] {arg}")
             else:
                 pending_images.append(str(p.resolve()))
-                console.print(f"[dim]Queued {p.name} — will attach to your next message[/dim]")
+                console.print(f"[dim]Queued {p.name} - will attach to your next message[/dim]")
     elif cmd == "images":
         if pending_images:
             for f in pending_images:
@@ -544,7 +544,7 @@ def serve(model, host, port, ctx, gpu_layers, mmproj, device, debug, mode):
     elif debug:
         console.print(
             "[yellow]⚠  privacy mode + --debug:[/yellow] the debug log records "
-            "requests and raw model output — delete it after analysis if that "
+            "requests and raw model output - delete it after analysis if that "
             "matters.")
 
     info = get_model_info(model)
@@ -570,7 +570,7 @@ def serve(model, host, port, ctx, gpu_layers, mmproj, device, debug, mode):
     if was_busy:
         console.print(
             f"[yellow]Port {requested if requested is not None else load_config().get('port', 8642)} "
-            f"is in use — serving on {port} instead.[/yellow]"
+            f"is in use - serving on {port} instead.[/yellow]"
         )
 
     engine = Engine(
@@ -674,7 +674,7 @@ def benchmark(model, gen_tokens, prompts, ctx, gpu_layers):
         engine.unload()
 
     from rich.table import Table
-    table = Table(title=f"benchmark — {model}")
+    table = Table(title=f"benchmark - {model}")
     table.add_column("prompt tok", justify="right")
     table.add_column("gen tok", justify="right")
     table.add_column("TTFT ms", justify="right")
@@ -784,7 +784,7 @@ def search_cmd(query, limit, list_files):
               help="Lyrics file ([verse]/[chorus] markers supported); "
                    "omit for an instrumental.")
 @click.option("-d", "--duration", default=120.0, show_default=True,
-              help="Track length in seconds — arbitrary.")
+              help="Track length in seconds - arbitrary.")
 @click.option("-o", "--out", default=None,
               help="Output .flac path [default: ./music_<timestamp>.flac]")
 @click.option("--seed", type=int, default=None, help="Reproducible seed.")
@@ -812,7 +812,7 @@ def music_cmd(tags, lyrics, duration, out, seed, steps, cfg):
     if not _comfy_alive(api_url):
         console.print(
             f"[red]ComfyUI is not running at {api_url}.[/red] Start it and "
-            "retry — or use the GUI's Music page, which can launch it "
+            "retry - or use the GUI's Music page, which can launch it "
             "automatically when comfy_launch_cmd is set.")
         sys.exit(1)
 
@@ -843,10 +843,10 @@ def music_cmd(tags, lyrics, duration, out, seed, steps, cfg):
                    "rule; ~5s is the model's native length).")
 @click.option("--fps", default=24, show_default=True, help="Frame rate.")
 @click.option("--width", type=int, default=None,
-              help="Width (multiple of 16; default 1280 — the model's native "
+              help="Width (multiple of 16; default 1280 - the model's native "
                    "resolution; quality collapses well below it).")
 @click.option("--height", type=int, default=None,
-              help="Height (multiple of 16; default 704 — see --width).")
+              help="Height (multiple of 16; default 704 - see --width).")
 @click.option("--image", "input_image", type=click.Path(exists=True),
               default=None,
               help="Animate this picture instead of starting from noise "
@@ -866,7 +866,7 @@ def video_cmd(prompt, negative, duration, fps, width, height, input_image,
       localm video "waves rolling in at dusk" --image beach.png -d 5
 
     ComfyUI must be running (or start it via the GUI, which can auto-launch
-    it when comfy_launch_cmd is configured). Video is the slowest generator —
+    it when comfy_launch_cmd is configured). Video is the slowest generator -
     expect many minutes per clip; see docs/video.md for model setup.
     """
     import time as _time
@@ -880,7 +880,7 @@ def video_cmd(prompt, negative, duration, fps, width, height, input_image,
     if not _comfy_alive(api_url):
         console.print(
             f"[red]ComfyUI is not running at {api_url}.[/red] Start it and "
-            "retry — or use the GUI's Video page, which can launch it "
+            "retry - or use the GUI's Video page, which can launch it "
             "automatically when comfy_launch_cmd is set.")
         sys.exit(1)
 
@@ -944,7 +944,7 @@ def rm(model, yes):
             path = Path(reg[model]["path"])
             others = [a for a in find_aliases_by_path(path, reg) if a != model]
             if others:
-                detail = (f"unregisters the name only — file kept, "
+                detail = (f"unregisters the name only - file kept, "
                           f"still registered as: {', '.join(others)}")
             elif str(path).startswith(str(MODELS_DIR)) and path.exists():
                 size = path.stat().st_size / 1024**3 if path.is_file() else None
@@ -983,7 +983,7 @@ def add(path, name, no_hash, on_duplicate):
 
 @main.group("rag")
 def rag_group():
-    """Knowledge collections — chat with your documents (offline RAG).
+    """Knowledge collections - chat with your documents (offline RAG).
 
     Index files or folders into named collections, then ground chat replies
     in them: pick the collection in the GUI's parameters drawer, or query
@@ -1019,7 +1019,7 @@ def rag_add(collection, paths):
 
     Folders are indexed recursively (txt/md/pdf/docx/html/code). Unchanged
     files are skipped; changed ones are re-indexed. CLI indexing is
-    lexical-only — index from the GUI to add embeddings when the active
+    lexical-only - index from the GUI to add embeddings when the active
     model supports them.
 
     \b
@@ -1039,7 +1039,7 @@ def rag_add(collection, paths):
     result = coll.add_paths(list(paths),
                             on_progress=lambda t: console.print(f"  [dim]{t}[/dim]"))
     console.print(f"[green]{result['added']} added, {result['updated']} updated, "
-                  f"{result['skipped']} unchanged[/green] — "
+                  f"{result['skipped']} unchanged[/green] - "
                   f"{result['chunks']} chunks in '{collection}'")
     for f in result["failed"]:
         console.print(f"  [yellow]failed:[/yellow] {f['path']}: {f['error']}")
@@ -1075,7 +1075,7 @@ def rag_query(collection, text, k):
 @click.argument("collection")
 @click.option("-y", "--yes", is_flag=True, help="Skip confirmation.")
 def rag_rm(collection, yes):
-    """Delete a collection (the index only — original files are untouched)."""
+    """Delete a collection (the index only - original files are untouched)."""
     from rich.console import Console
     from .rag import delete_collection
     console = Console()
@@ -1112,7 +1112,7 @@ def alias(existing, new_name):
         sys.exit(1)
 
 
-_POWERSHELL_COMPLETION = r'''# localm tab completion — add this block to your PowerShell $PROFILE
+_POWERSHELL_COMPLETION = r'''# localm tab completion - add this block to your PowerShell $PROFILE
 # (run: notepad $PROFILE)
 Register-ArgumentCompleter -Native -CommandName localm -ScriptBlock {
     param($wordToComplete, $commandAst, $cursorPosition)
@@ -1259,7 +1259,7 @@ def doctor():
     if (major, minor) >= (3, 10):
         console.print(f"  {ok_sym}  Python {major}.{minor}")
     else:
-        console.print(f"  {fail_sym}  Python {major}.{minor} — 3.10+ required")
+        console.print(f"  {fail_sym}  Python {major}.{minor} - 3.10+ required")
 
     # ----- llama.dll / llama.so -----
     binary_dir = find_binary_dir()
@@ -1274,11 +1274,11 @@ def doctor():
         else:
             files = [f.name for f in binary_dir.iterdir() if f.is_file()][:8]
             console.print(
-                f"  {warn_sym}  binary dir found ({binary_dir}) but no llama .dll/.so — "
+                f"  {warn_sym}  binary dir found ({binary_dir}) but no llama .dll/.so - "
                 f"contents: {files}"
             )
     else:
-        console.print(f"  {fail_sym}  llama binary dir not found — GGUF backend unavailable")
+        console.print(f"  {fail_sym}  llama binary dir not found - GGUF backend unavailable")
 
     # ----- GPU driver (CUDA / ROCm) -----
     gpu_found = False
@@ -1301,7 +1301,7 @@ def doctor():
             continue
 
     if not gpu_found:
-        console.print(f"  {warn_sym}  No GPU driver found (nvidia-smi / rocm-smi) — CPU mode only")
+        console.print(f"  {warn_sym}  No GPU driver found (nvidia-smi / rocm-smi) - CPU mode only")
 
     # ----- VRAM via torch -----
     try:
@@ -1309,7 +1309,7 @@ def doctor():
         if torch.cuda.is_available():
             for i in range(torch.cuda.device_count()):
                 props = torch.cuda.get_device_properties(i)
-                # Driver-level free/total — torch's allocator counters miss
+                # Driver-level free/total - torch's allocator counters miss
                 # everything allocated outside torch (llama.dll, other apps)
                 free_b, total_b = torch.cuda.mem_get_info(i)
                 console.print(
@@ -1319,7 +1319,7 @@ def doctor():
         else:
             console.print(f"  {warn_sym}  torch available but torch.cuda.is_available() = False")
     except ImportError:
-        console.print(f"  {warn_sym}  torch not installed — GPU VRAM check skipped")
+        console.print(f"  {warn_sym}  torch not installed - GPU VRAM check skipped")
 
     # ----- Required Python packages -----
     packages = [
@@ -1342,7 +1342,7 @@ def doctor():
             ver_str = f" {ver}" if ver else ""
         except ImportError:
             sym     = warn_sym if (mod, label) in optional_pkgs else fail_sym
-            ver_str = " — not installed"
+            ver_str = " - not installed"
         console.print(f"  {sym}  {label}{ver_str}")
 
 
@@ -1352,16 +1352,16 @@ def doctor():
 
 # Register ``localm coder`` when the coder plugin is installed.
 # The plugin is gated behind ``pip install "localm[coder]"`` so the import
-# is wrapped in a try/except — the base localm install keeps working fine
+# is wrapped in a try/except - the base localm install keeps working fine
 # if the extra was never requested.
-# MCP server plugin — expose localm to MCP clients (Claude Desktop, etc.)
+# MCP server plugin - expose localm to MCP clients (Claude Desktop, etc.)
 try:
     from .plugins.mcpserver.cli import main as _mcp_main
     main.add_command(_mcp_main, name="mcp")
 except ImportError:
     pass
 
-# GUI plugin — browser interface for chat and the coder agent
+# GUI plugin - browser interface for chat and the coder agent
 try:
     from .plugins.gui.cli import main as _gui_main
     main.add_command(_gui_main, name="gui")
@@ -1381,7 +1381,7 @@ except ImportError:
             '  or (editable):  [bold]pip install -e ".[coder]"[/bold]'
         )
 
-# Abliterate plugin — decensor a model with Heretic (run as a separate program)
+# Abliterate plugin - decensor a model with Heretic (run as a separate program)
 # and register the result. Gated behind ``pip install "localm[abliterate]"``.
 try:
     from .plugins.abliterate.cli import main as _abliterate_main
@@ -1441,7 +1441,7 @@ def plugin_list():
         console.print(f"[dim]No external plugins installed ({plugins_dir()})[/dim]")
         return
     for m in manifests:
-        desc = f" — {m.description}" if m.description else ""
+        desc = f" - {m.description}" if m.description else ""
         console.print(f"  [bold]{m.name}[/bold] v{m.version}{desc}")
         if m.tool_exports:
             console.print(f"    [dim]tools: {', '.join(m.tool_exports)}[/dim]")
@@ -1467,11 +1467,11 @@ def plugin_remove(name):
 
 
 # Register external plugin commands at import time so they show in --help.
-# A broken plugin must never take down the CLI — warnings only.
+# A broken plugin must never take down the CLI - warnings only.
 try:
     from .plugins.loader import register_external_plugins as _register_ext
 
     for _warning in _register_ext(main):
         console.print(f"[yellow]plugin warning:[/yellow] {_warning}")
-except Exception as _e:  # pragma: no cover — absolute last resort
+except Exception as _e:  # pragma: no cover - absolute last resort
     console.print(f"[yellow]plugin discovery failed:[/yellow] {_e}")

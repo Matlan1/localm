@@ -6,7 +6,7 @@ Covers:
   - NullAuditLog (no-op, no files created)
   - AuditLog (writes JSONL)
   - make_audit_log() factory
-  - Agent.close() — privacy: no files; log: closes JSONL; full: writes markdown
+  - Agent.close() - privacy: no files; log: closes JSONL; full: writes markdown
   - _write_session_markdown content
 """
 
@@ -163,7 +163,7 @@ class TestMakeAuditLog:
 
 
 # ---------------------------------------------------------------------------
-#  Agent.close() — per mode
+#  Agent.close() - per mode
 # ---------------------------------------------------------------------------
 
 def _make_agent(tmp_path, mode):

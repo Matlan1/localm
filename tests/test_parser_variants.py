@@ -1,7 +1,7 @@
 """Tests for tolerant tool-call parsing (mangled finetune dialects).
 
 The "logged" cases are verbatim model outputs from a real session where
-zero tool calls parsed — the finetune wraps valid JSON in broken markers.
+zero tool calls parsed - the finetune wraps valid JSON in broken markers.
 """
 
 from localm.plugins.coder.parser import parse_tool_calls
@@ -61,7 +61,7 @@ class TestMangledVariants:
 
     def test_doubled_braces_verbatim_from_e2e(self):
         # Verbatim from a real gemma4-4b run: doubled outer braces silently
-        # broke tool calling — the raw call was printed as the final answer.
+        # broke tool calling - the raw call was printed as the final answer.
         text = ('<|tool_call>call:write_file{{"path": "hello.txt", '
                 '"content": "Hello from localcoder."}}<tool_call|>')
         calls = parse_tool_calls(text)

@@ -28,7 +28,7 @@ def _make_call(name: str, **args):
 
 
 # ---------------------------------------------------------------------------
-#  context_chars() — multipart messages
+#  context_chars() - multipart messages
 # ---------------------------------------------------------------------------
 
 class TestContextChars:
@@ -84,7 +84,7 @@ class TestContextChars:
 
 
 # ---------------------------------------------------------------------------
-#  _patch_mode_intercept — correct arg keys
+#  _patch_mode_intercept - correct arg keys
 # ---------------------------------------------------------------------------
 
 class TestPatchModeIntercept:
@@ -118,7 +118,7 @@ class TestPatchModeIntercept:
         f = tmp_path / "code.py"
         f.write_text("x = 1\n")
 
-        # Using the OLD (wrong) keys — should find empty strings, produce empty diff
+        # Using the OLD (wrong) keys - should find empty strings, produce empty diff
         call = _make_call("edit_file", path="code.py", old_string="x = 1", new_string="x = 2")
         diff = agent._patch_mode_intercept(call)
         # old="" and new="" → replace("", "", 1) → no change → no diff lines
@@ -147,7 +147,7 @@ class TestPatchModeIntercept:
 
 
 # ---------------------------------------------------------------------------
-#  _confirm_tool — correct arg keys for edit_file / patch_file
+#  _confirm_tool - correct arg keys for edit_file / patch_file
 # ---------------------------------------------------------------------------
 
 class TestConfirmToolArgKeys:

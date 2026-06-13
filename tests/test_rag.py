@@ -1,4 +1,4 @@
-"""Tests for localm.rag — extraction, chunking, BM25, and the collection store."""
+"""Tests for localm.rag - extraction, chunking, BM25, and the collection store."""
 
 import json
 import zipfile

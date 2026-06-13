@@ -74,11 +74,11 @@ def _complete_model(ctx, param, incomplete):
 @click.option("-k", "--api-key",    default="localm",
               help="API key (use any string for local servers).")
 @click.option("-p", "--port",       default=None,  type=int,
-              help="Port for the auto-started localm serve [default: first free in 8642–8741].")
+              help="Port for the auto-started localm serve [default: first free in 8642-8741].")
 @click.option("-c", "--cwd",        default=None,  type=click.Path(exists=True, file_okay=False),
               help="Working directory [default: current directory].")
 @click.option("--no-server",        is_flag=True,
-              help="Don't start localm serve — assume server is already running.")
+              help="Don't start localm serve - assume server is already running.")
 @click.option("--max-turns",        default=None,  type=int,
               help="Max agent iterations per task [default: 40, or from .localcoder/config.toml].")
 @click.option("--temperature",      default=None,  type=float,
@@ -174,7 +174,7 @@ def main(
         _os.environ.setdefault("TERM", "dumb")
 
     # ------------------------------------------------------------------ #
-    #  Project-level config (.localcoder/config.toml) — CLI flags override
+    #  Project-level config (.localcoder/config.toml) - CLI flags override
     # ------------------------------------------------------------------ #
     proj_cfg = load_project_config(work_dir)
     if model is None:
@@ -208,7 +208,7 @@ def main(
         print_error(str(exc))
         sys.exit(2 if ci else 1)
 
-    # Privacy-mode setup — suppress readline history as early as possible
+    # Privacy-mode setup - suppress readline history as early as possible
     if session_mode == SessionMode.PRIVACY:
         suppress_readline_history()
     # Warn when privacy mode is requested but prompts leave the machine
@@ -240,7 +240,7 @@ def main(
         )
 
     elif url:
-        # Explicit URL — no server management
+        # Explicit URL - no server management
         if not model:
             print_error("--url requires --model")
             sys.exit(2 if ci else 1)
@@ -248,7 +248,7 @@ def main(
                               native_tools=native_tools)
 
     else:
-        # Offline path — localm backend
+        # Offline path - localm backend
         if not model:
             print_error(
                 "Specify a model with --model, e.g.:\n"
@@ -362,7 +362,7 @@ def _run_estimate(agent: Agent, task: str, output_format: str) -> None:
     token cost so the user knows what a real run starts from.
     """
     prompt = (
-        "ESTIMATE ONLY — do not call any tools and do not make changes.\n"
+        "ESTIMATE ONLY - do not call any tools and do not make changes.\n"
         "For the following task, reply with:\n"
         "1. A short step-by-step plan (which files you would read and change)\n"
         "2. Roughly how many agent turns you expect it to take\n"
@@ -438,7 +438,7 @@ def _setup_readline(agent: Agent) -> None:
 
     Best-effort: stock Windows CPython has no readline (pyreadline3 provides
     it when installed), so every step degrades silently. History persists to
-    .localcoder/repl_history only outside privacy mode — privacy promises no
+    .localcoder/repl_history only outside privacy mode - privacy promises no
     traces, and suppress_readline_history() has already disabled saving there.
     """
     try:
@@ -516,7 +516,7 @@ def _repl(agent: Agent) -> None:
             continue
 
         try:
-            # Starting a fresh task — discard any stale checkpoint
+            # Starting a fresh task - discard any stale checkpoint
             agent.clear_checkpoint()
             agent.chat(user_input)
         except KeyboardInterrupt:
@@ -573,7 +573,7 @@ def _handle_command(raw: str, agent: Agent) -> bool:
 
     elif cmd == "reindex":
         n = agent.reindex()
-        print_info(f"Project map rebuilt — {n} files indexed.")
+        print_info(f"Project map rebuilt - {n} files indexed.")
 
     elif cmd == "history":
         chars = agent.context_chars()
@@ -684,12 +684,12 @@ def _handle_command(raw: str, agent: Agent) -> bool:
                 "privacy": (
                     "nothing saved; readline + shell history scrubbed on exit. "
                     "cmd.exe: no history anyway. "
-                    "Online providers are explicit opt-in — warning shown if active."
+                    "Online providers are explicit opt-in - warning shown if active."
                 ),
                 "log":     "JSONL audit trail → ~/.localm/sessions/",
                 "full":    "JSONL audit trail + markdown transcript on exit",
             }
-            print_info(f"Session mode: {m}  — {notes.get(m, '')}")
+            print_info(f"Session mode: {m}  - {notes.get(m, '')}")
         else:
             print_info(
                 "Session mode cannot be changed mid-session "
@@ -754,7 +754,7 @@ def _handle_command(raw: str, agent: Agent) -> bool:
             if agent.scope:
                 print_success(f"Scope set to '{agent.scope}'")
             else:
-                print_info("Scope cleared — all files accessible.")
+                print_info("Scope cleared - all files accessible.")
 
     else:
         print_info(f"Unknown command: /{cmd}  (try /help)")

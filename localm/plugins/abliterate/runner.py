@@ -4,7 +4,7 @@ Heretic (https://github.com/Matlan1/heretic-win-AMD) is licensed under
 AGPL-3.0-or-later. localm treats it strictly as a **separate program**: this
 module only ever *runs* it via subprocess and talks to it through command-line
 arguments and the filesystem. Nothing here (or anywhere in localm) imports the
-Heretic Python package, and Heretic's source is never committed into localm — it
+Heretic Python package, and Heretic's source is never committed into localm - it
 is fetched into a gitignored folder on the user's machine on request.
 """
 

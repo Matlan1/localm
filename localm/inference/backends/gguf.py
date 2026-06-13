@@ -1,8 +1,8 @@
-"""GGUF backend — uses our native ctypes wrapper around llama.dll.
+"""GGUF backend - uses our native ctypes wrapper around llama.dll.
 
 The native wrapper (localm.inference.backends.llamacpp) handles GPU DLL
 loading automatically.  If llama.dll cannot be found, falls back to running
-llama-cli.exe as a subprocess (model reloads each call — slow but portable).
+llama-cli.exe as a subprocess (model reloads each call - slow but portable).
 """
 
 from __future__ import annotations
@@ -100,7 +100,7 @@ class GgufBackend(BaseBackend):
 
     def _check_vram(self) -> None:
         """
-        Warn — loudly and with options — when the model is unlikely to fit
+        Warn - loudly and with options - when the model is unlikely to fit
         in the currently free VRAM. Never blocks: partial offload and system
         RAM spill can still work, and the estimate is approximate.
         """
@@ -108,7 +108,7 @@ class GgufBackend(BaseBackend):
             return  # CPU-only run, VRAM is irrelevant
         free = self._free_vram_bytes()
         if free is None:
-            return  # can't measure (no torch / no GPU) — nothing useful to say
+            return  # can't measure (no torch / no GPU) - nothing useful to say
         need = self._model_bytes() + self._VRAM_OVERHEAD_BYTES
         if free >= need:
             return
@@ -123,13 +123,13 @@ class GgufBackend(BaseBackend):
             f"/v1/models/unload on its server)\n"
             f"    • Offload fewer layers:  [bold]-g 24[/bold]  "
             f"(or [bold]-g 0[/bold] for CPU-only)\n"
-            f"  Continuing anyway — load may be slow or fail."
+            f"  Continuing anyway - load may be slow or fail."
         )
 
     # Bounds for VRAM-derived context ceilings
     _AUTO_CTX_MIN = 4096
     _AUTO_CTX_MAX = 65536
-    _AUTO_CTX_FALLBACK = 16384   # no GPU visibility — match common practice
+    _AUTO_CTX_FALLBACK = 16384   # no GPU visibility - match common practice
 
     def _auto_ctx_max(self) -> int:
         """
@@ -174,7 +174,7 @@ class GgufBackend(BaseBackend):
         if missing:
             names = ", ".join(p.name for p in missing)
             raise FileNotFoundError(
-                f"Split GGUF is incomplete — missing part(s): {names}. "
+                f"Split GGUF is incomplete - missing part(s): {names}. "
                 f"Re-run 'localm pull' to download all parts."
             )
         self._check_vram()
@@ -185,13 +185,13 @@ class GgufBackend(BaseBackend):
             vram_hint = ""
             if free is not None and free < self._model_bytes() + self._VRAM_OVERHEAD_BYTES:
                 vram_hint = (
-                    " The GPU is low on memory — free VRAM or retry with "
+                    " The GPU is low on memory - free VRAM or retry with "
                     "fewer GPU layers (-g 24, or -g 0 for CPU)."
                 )
             console.print(
                 f"[yellow]Native llama backend failed ({exc}).{vram_hint}[/yellow]\n"
                 f"[yellow]Falling back to llama-cli.exe "
-                f"(slower — model reloads on every request).[/yellow]"
+                f"(slower - model reloads on every request).[/yellow]"
             )
             self._use_subprocess = True
             self._loaded = True
@@ -232,7 +232,7 @@ class GgufBackend(BaseBackend):
 
         self._loaded = True
 
-        # VRAM usage after load — device-level driver numbers, because
+        # VRAM usage after load - device-level driver numbers, because
         # torch's allocator counters (memory_allocated/reserved) can only
         # see torch's own allocations and always read 0.00 for llama.dll.
         # "in use" therefore includes every process on the GPU; the delta
@@ -271,7 +271,7 @@ class GgufBackend(BaseBackend):
         """Return exact token count using the loaded model's vocabulary."""
         if self._llm is not None:
             return len(self._llm.tokenize(text, add_bos=False))
-        # Subprocess fallback or not loaded yet — fall back to heuristic
+        # Subprocess fallback or not loaded yet - fall back to heuristic
         return max(1, len(text) // 4)
 
     # ------------------------------------------------------------------ #
@@ -280,7 +280,7 @@ class GgufBackend(BaseBackend):
 
     def embed(self, texts: List[str]) -> List[List[float]]:
         if not self._llm:
-            raise RuntimeError("Model not loaded — call load() first")
+            raise RuntimeError("Model not loaded - call load() first")
         if not hasattr(self._llm, "create_embedding"):
             raise NotImplementedError(
                 "Embeddings are not supported by the built-in GGUF binding yet. "
@@ -338,12 +338,12 @@ class GgufBackend(BaseBackend):
         except OSError as e:
             # A native fault (access violation etc.) leaves the loaded model
             # in an unknown state. Without this, every later request returns
-            # an instant empty stream — a zombie server. Drop the broken
+            # an instant empty stream - a zombie server. Drop the broken
             # instance so the next request triggers a clean reload.
             # Mark the reason so the response doesn't report a clean "stop".
             self.last_finish_reason = "error"
             from localm.debuglog import logger as _dbg
-            _dbg.exception("native inference fault — dropping model instance")
+            _dbg.exception("native inference fault - dropping model instance")
             try:
                 self.unload()
             except Exception:
@@ -361,7 +361,7 @@ class GgufBackend(BaseBackend):
         max_tokens: int,
         temperature: float,
     ) -> Iterator[str]:
-        """One-shot subprocess call to llama-cli.exe — slow but always works."""
+        """One-shot subprocess call to llama-cli.exe - slow but always works."""
         from localm.config import find_binary_dir
 
         binary_dir = find_binary_dir()

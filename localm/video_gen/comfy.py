@@ -3,7 +3,7 @@ ComfyUI Wan 2.2 short-video generation.
 
 Mirrors localm.music_gen.comfy: standalone module, reachable from the GUI,
 the CLI, or any other caller.  Uses the same ComfyUI server as image and
-music generation — the model files for the committed template (the public
+music generation - the model files for the committed template (the public
 Wan 2.2 TI2V 5B stack, ComfyUI v0.3.46+) live in ComfyUI's model dirs:
 
     models/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors
@@ -31,7 +31,7 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
-# Shared ComfyUI plumbing lives in image_gen — one server, one set of helpers
+# Shared ComfyUI plumbing lives in image_gen - one server, one set of helpers
 from localm.image_gen.comfy import (
     _localm_unload,
     _upload_image,
@@ -91,7 +91,7 @@ def generate_video(
     Parameters
     ----------
     prompt
-        Scene description — subject, motion, camera, lighting.  Motion verbs
+        Scene description - subject, motion, camera, lighting.  Motion verbs
         matter; a static description tends to produce a static clip.
     output_path
         Destination file (.mp4).  Parent directories are created if needed.
@@ -105,7 +105,7 @@ def generate_video(
     fps
         Output frame rate (default 24, the Wan 2.2 native rate).
     width / height
-        Output resolution.  None keeps the template default (1280x704 —
+        Output resolution.  None keeps the template default (1280x704 -
         the model's NATIVE resolution; Wan 2.2 5B was trained at 720p and
         output collapses into washed-out smears well below it, so iterate
         by shortening the clip, not by shrinking the frame).  Must be
@@ -123,13 +123,13 @@ def generate_video(
     localm_url
         localm server /v1 URL to unload before generation (VRAM handoff).
     max_poll_seconds
-        Timeout waiting for ComfyUI (default 60 minutes — video is slow,
+        Timeout waiting for ComfyUI (default 60 minutes - video is slow,
         especially without flash attention).
     on_progress
         Optional ``Callable[[str], None]`` for status lines.
     write_sidecar
         Write a ``<output>.json`` sidecar with the prompt and settings so
-        the clip can be reproduced.  Pass False in privacy mode — the
+        the clip can be reproduced.  Pass False in privacy mode - the
         prompt then never touches disk.
 
     Returns
@@ -149,7 +149,7 @@ def generate_video(
     if fps <= 0:
         return False, "FPS must be positive."
 
-    # Make sure ComfyUI is up (auto-launching when configured) — before
+    # Make sure ComfyUI is up (auto-launching when configured) - before
     # costing the user an LLM unload
     ok, msg = ensure_comfy(api_url, on_progress=_say)
     if not ok:
@@ -207,7 +207,7 @@ def generate_video(
         if not prompt_id:
             return False, (
                 "ComfyUI accepted the request but returned no prompt_id.\n"
-                "Check the ComfyUI console for workflow validation errors — "
+                "Check the ComfyUI console for workflow validation errors - "
                 "missing Wan 2.2 model files are the usual cause (see "
                 "docs/video.md for the download list), and the Wan nodes "
                 "need ComfyUI v0.3.46+."
@@ -260,7 +260,7 @@ def generate_video(
     if not video_info:
         return False, (
             "Generation finished but no video output was found in ComfyUI "
-            "history. Check the ComfyUI console — a SaveVideo node error or "
+            "history. Check the ComfyUI console - a SaveVideo node error or "
             "an outdated ComfyUI (need v0.3.46+ for Wan 2.2) is likely."
         )
 
@@ -279,7 +279,7 @@ def generate_video(
 
     # Delete the original from ComfyUI's output directory so no second copy
     # lingers there. Only possible when the user tells us where it is
-    # (COMFY_OUTPUT_DIR env var or "comfy_output_dir" config key) — there is
+    # (COMFY_OUTPUT_DIR env var or "comfy_output_dir" config key) - there is
     # no portable default. Same behaviour as image generation.
     comfy_out = os.environ.get("COMFY_OUTPUT_DIR")
     if not comfy_out:
@@ -297,12 +297,12 @@ def generate_video(
         except Exception:
             pass
 
-    # Sidecar JSON — everything needed to reproduce or tweak the clip.
+    # Sidecar JSON - everything needed to reproduce or tweak the clip.
     # Skipped entirely in privacy mode (write_sidecar=False) so the prompt
     # never touches disk.
     if not write_sidecar:
         return True, (f"Clip saved to {output_path} "
-                      f"(seed {seed} — reuse it to reproduce)")
+                      f"(seed {seed} - reuse it to reproduce)")
     try:
         sidecar = {
             "prompt": prompt,
@@ -329,5 +329,5 @@ def generate_video(
 
     return True, (
         f"Clip saved to {output_path} "
-        f"(seed {seed} — reuse it to reproduce)"
+        f"(seed {seed} - reuse it to reproduce)"
     )

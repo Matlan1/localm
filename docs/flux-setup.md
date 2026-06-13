@@ -69,12 +69,12 @@ The committed template, `localm/image_gen/flux_workflow.example.json`, uses
 the vanilla public FLUX stack (`flux1-dev-Q8_0.gguf`, `clip_l`,
 `t5xxl_fp8_e4m3fn`, `ae.safetensors`). To use your own models, encoders, or
 node graph, export your workflow from ComfyUI (Save → API format) as
-`localm/image_gen/flux_workflow.json` — it takes precedence automatically
+`localm/image_gen/flux_workflow.json` - it takes precedence automatically
 and is **gitignored**, so which models you actually run never leaves your
 machine. The same applies to ComfyUI's own output folder: set the
 `comfy_output_dir` config key (or `COMFY_OUTPUT_DIR` env var) if you want
 localm to clean up ComfyUI's duplicate copy after each generation.
 
-Suggested host stack: [StabilityMatrix](https://lykos.ai/) managing ComfyUI —
+Suggested host stack: [StabilityMatrix](https://lykos.ai/) managing ComfyUI -
 on RDNA2 (RX 6xxx) combine it with the ROCm/HIP fixes described in the GPU
 setup section of the README.

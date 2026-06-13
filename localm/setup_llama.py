@@ -1,4 +1,4 @@
-"""``localm setup-llama`` — provision the native llama.cpp binaries locally.
+"""``localm setup-llama`` - provision the native llama.cpp binaries locally.
 
 Makes localm self-contained: the native inference runtime (llama.dll +
 ggml-*.dll, plus a matched ROCm/CUDA runtime when the prebuilt ships one) is
@@ -188,7 +188,7 @@ def _verify() -> None:
             console.print(f"[bold green]Native runtime ready[/bold green] → {d}")
             console.print("Try it:  [bold]localm run <model>[/bold]")
         else:
-            console.print("[yellow]Binaries placed but not yet resolvable — "
+            console.print("[yellow]Binaries placed but not yet resolvable - "
                           "restart your shell so the new package is importable.[/yellow]")
     except Exception:
         pass

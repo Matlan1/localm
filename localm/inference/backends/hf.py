@@ -1,4 +1,4 @@
-"""HuggingFace Transformers backend — supports text-only and multimodal models.
+"""HuggingFace Transformers backend - supports text-only and multimodal models.
 
 Tested with:
   - Gemma4UnifiedForConditionalGeneration (text + image + audio)
@@ -192,7 +192,7 @@ class HFBackend(BaseBackend):
         model = self._model
 
         if tokenizer is None or model is None:
-            raise RuntimeError("Model not loaded — call load() first")
+            raise RuntimeError("Model not loaded - call load() first")
 
         # Sentence-transformer style models (e.g. nomic-embed, bge)
         if hasattr(model, "encode"):
@@ -230,7 +230,7 @@ class HFBackend(BaseBackend):
         top_p: float = 0.95,
         top_k: int = 40,
         repeat_penalty: float = 1.1,
-        grammar: Optional[str] = None,   # accepted but ignored — HF has no GBNF sampler
+        grammar: Optional[str] = None,   # accepted but ignored - HF has no GBNF sampler
         seed: Optional[int] = None,
     ) -> Iterator[str]:
         from transformers import TextIteratorStreamer

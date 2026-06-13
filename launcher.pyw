@@ -1,12 +1,12 @@
 """
-localm launcher — double-click to configure and start localm.
+localm launcher - double-click to configure and start localm.
 
 Pick a mode (Web GUI, terminal chat, API server, coder agent), a model,
 and options like debug logging or the context window, then Launch. Each
 mode opens in its own console window; the launcher remembers your choices
 in ~/.localm/launcher.json.
 
-Pure tkinter — no extra dependencies, works offline.
+Pure tkinter - no extra dependencies, works offline.
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ MODES = [
     ("coder", "Coder agent", "AI coding agent in a project folder"),
 ]
 
-# Session persistence (privacy) modes — see localm/audit.py
+# Session persistence (privacy) modes - see localm/audit.py
 PRIVACY_MODES = ["privacy", "log", "full"]
 USE_GLOBAL = "(use global)"
 
@@ -221,7 +221,7 @@ class Launcher(tk.Tk):
             b = ttk.Button(imp, text=text, style="Quiet.TButton", command=cmd)
             b.pack(side="left", padx=(8, 0))
             self.import_btns.append(b)
-        # NOTE: the initial _refresh_models() runs at the END of _build —
+        # NOTE: the initial _refresh_models() runs at the END of _build -
         # its "no models" message needs the footer status label to exist.
 
         # ----- options -----
@@ -255,7 +255,7 @@ class Launcher(tk.Tk):
 
         self.serve_opts = ttk.Frame(opt_card, style="Card.TFrame")
         ttk.Checkbutton(self.serve_opts,
-                        text="Expose on the network (0.0.0.0 — set "
+                        text="Expose on the network (0.0.0.0 - set "
                              "LOCALM_API_KEY first!)",
                         variable=self.host_lan).pack(side="left")
         self.serve_opts.grid(row=4, column=0, columnspan=4, sticky="w", pady=(10, 0))
@@ -313,7 +313,7 @@ class Launcher(tk.Tk):
         ttk.Button(footer, text="Launch", style="Launch.TButton",
                    command=self._launch).pack(side="right")
 
-        # Populate the model list last — on a fresh install with an empty
+        # Populate the model list last - on a fresh install with an empty
         # registry this shows a hint in the status label built just above.
         self._refresh_models()
 
@@ -326,7 +326,7 @@ class Launcher(tk.Tk):
             self.model.set(models[0])
         if not models:
             self.model.set("")
-            self.status_msg("No models yet — Import one, or launch the Web GUI "
+            self.status_msg("No models yet - Import one, or launch the Web GUI "
                             "to add one there", error=True)
 
     # ------------------------- model import ----------------------- #
@@ -406,7 +406,7 @@ class Launcher(tk.Tk):
         except Exception as e:
             self.status_msg(f"Launch failed: {e}", error=True)
             return
-        self.status_msg("Downloading in the Web GUI — watch the Models page ✓")
+        self.status_msg("Downloading in the Web GUI - watch the Models page ✓")
         if not self.keep_open.get():
             self.after(900, self.destroy)
 

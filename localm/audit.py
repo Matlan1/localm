@@ -5,7 +5,7 @@ Session modes (apply to EVERY surface: terminal chat, API server, web GUI,
 and the coder agent)
 --------------------------------------------------------------------------
 privacy (default)
-    Nothing is written to disk automatically — no audit trail, no
+    Nothing is written to disk automatically - no audit trail, no
     transcripts, no checkpoints, no generation sidecars.  Anything that
     would leave a trace must be explicitly toggled (e.g. /save, /export,
     --debug).
@@ -103,7 +103,7 @@ def effective_mode(surface: str) -> SessionMode:
 
 
 # ---------------------------------------------------------------------------
-#  NullAuditLog  (privacy mode — no-op)
+#  NullAuditLog  (privacy mode - no-op)
 # ---------------------------------------------------------------------------
 
 class NullAuditLog:
@@ -138,7 +138,7 @@ class NullAuditLog:
 
 
 # ---------------------------------------------------------------------------
-#  AuditLog  (log + full modes — JSONL writer)
+#  AuditLog  (log + full modes - JSONL writer)
 # ---------------------------------------------------------------------------
 
 # Module-level so tests can patch it (e.g. patch("localm.audit._SESSIONS_DIR"))
@@ -215,7 +215,7 @@ class AuditLog:
 
 
 # ---------------------------------------------------------------------------
-#  MarkdownTranscript  (full mode — chat + server surfaces)
+#  MarkdownTranscript  (full mode - chat + server surfaces)
 # ---------------------------------------------------------------------------
 
 class MarkdownTranscript:
@@ -242,7 +242,7 @@ class MarkdownTranscript:
         try:
             with open(self._path, "a", encoding="utf-8") as fh:
                 if not self._wrote_header:
-                    fh.write(f"# localm {self._label} transcript — "
+                    fh.write(f"# localm {self._label} transcript - "
                              f"{time.strftime('%Y-%m-%d %H:%M:%S')}\n")
                     self._wrote_header = True
                 fh.write(f"\n## You\n\n{user}\n\n## Assistant\n\n{assistant}\n")

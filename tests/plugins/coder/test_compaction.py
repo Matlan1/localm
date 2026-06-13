@@ -24,7 +24,7 @@ from localm.plugins.coder.agent import (
 # ---------------------------------------------------------------------------
 
 def _make_agent(**kwargs) -> Agent:
-    """Create an Agent with a mock backend — no real LLM, no filesystem writes."""
+    """Create an Agent with a mock backend - no real LLM, no filesystem writes."""
     backend = MagicMock()
     backend.model_id = "test-model"
     backend.chat.return_value = "Summary of the session."
@@ -121,7 +121,7 @@ class TestCompactHistory:
 
         agent._compact_history()
 
-        # 2 (summary exchange) + 4 (kept) = 6 — less than 10
+        # 2 (summary exchange) + 4 (kept) = 6 - less than 10
         assert len(agent._messages) < before
         assert len(agent._messages) == 6
 
@@ -155,7 +155,7 @@ class TestCompactHistory:
 # ---------------------------------------------------------------------------
 
 class TestCtxWindowTokens:
-    # load_config is a local import inside _ctx_window_tokens — patch at source
+    # load_config is a local import inside _ctx_window_tokens - patch at source
     _PATCH = "localm.config.load_config"
 
     def test_reads_n_ctx_from_config(self):

@@ -1,5 +1,5 @@
 """
-localm MCP server plugin — expose local models to any MCP client.
+localm MCP server plugin - expose local models to any MCP client.
 
 Run with ``localm mcp`` (stdio transport). MCP clients launch it on demand
 via their standard server config; ``localm mcp --print-config`` prints the

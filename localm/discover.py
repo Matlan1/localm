@@ -3,7 +3,7 @@ In-app model discovery: search HuggingFace for GGUF models and judge,
 per quantization, whether a file fits this machine's VRAM.
 
 Discovery is a user-initiated prelude to ``localm pull`` and sits in the same
-policy category (explicit user action — see docs/network.md): it is not
+policy category (explicit user action - see docs/network.md): it is not
 routed through the net_allow/net_deny domain rules, but ``net_mode = off``
 still blocks it, so the one kill switch keeps its promise.
 
@@ -23,7 +23,7 @@ _TIMEOUT = 20
 
 # Mirrors GgufBackend._VRAM_OVERHEAD_BYTES (KV cache + compute buffers)
 _OVERHEAD_BYTES = int(1.5e9)
-# Weights rarely load at exactly file size — small safety factor
+# Weights rarely load at exactly file size - small safety factor
 _WEIGHT_FACTOR = 1.10
 
 # Quantization label inside a GGUF filename, e.g. Q4_K_M, Q8_0, IQ4_XS,
@@ -38,7 +38,7 @@ _SPLIT_RE = re.compile(r"^(?P<stem>.+)-(?P<part>\d{5})-of-(?P<total>\d{5})\.gguf
 
 
 class DiscoverError(Exception):
-    """Discovery failed — network off, HF unreachable, or repo unusable.
+    """Discovery failed - network off, HF unreachable, or repo unusable.
     Messages are safe to show in the GUI."""
 
 
@@ -136,7 +136,7 @@ def hf_gguf_files(repo: str) -> list[dict]:
     if not files:
         raise DiscoverError(
             f"{repo} has no GGUF files. It may be a transformers-format "
-            f"repo — pull it whole with:  localm pull {repo}")
+            f"repo - pull it whole with:  localm pull {repo}")
     files.sort(key=lambda f: f["size_bytes"])
     return files
 
@@ -149,7 +149,7 @@ def _quant_of(name: str) -> str:
 def vram_info() -> dict:
     """{"total": bytes, "free"?: bytes} for the largest GPU, or {} when not
     measurable. Tries torch (CUDA/ROCm), then nvidia-smi, then the Windows
-    display-adapter registry — the GGUF-only install has no torch, and the
+    display-adapter registry - the GGUF-only install has no torch, and the
     fit badges must still work there (total is all fit_label needs)."""
     try:
         import torch

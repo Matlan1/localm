@@ -19,7 +19,7 @@ import click
 def main(model, no_images, print_config):
     """Run localm as an MCP server (stdio transport).
 
-    MCP clients launch this command on demand — add it to the client's
+    MCP clients launch this command on demand - add it to the client's
     server config and the client starts/stops it automatically:
 
     \b
@@ -56,7 +56,7 @@ def main(model, no_images, print_config):
 
     if sys.stdin.isatty():
         click.echo(
-            "localm mcp speaks the MCP stdio protocol — it is meant to be "
+            "localm mcp speaks the MCP stdio protocol - it is meant to be "
             "launched BY an MCP client, not run interactively.\n"
             "Get the client config with:  localm mcp --print-config",
             err=True,

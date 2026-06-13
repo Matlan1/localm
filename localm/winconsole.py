@@ -2,7 +2,7 @@
 Windows console hardening for long-running server processes.
 
 Windows consoles default to QuickEdit mode: a single stray click into the
-window starts a text selection, which suspends every write to the console —
+window starts a text selection, which suspends every write to the console -
 the next ``print()`` blocks, and with it whatever the server was doing
 (model loading, inference, downloads) until someone presses a key. That is
 fine for interactive shells and disastrous for servers.

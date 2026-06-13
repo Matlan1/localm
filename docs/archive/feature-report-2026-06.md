@@ -6,7 +6,7 @@ see TODO.md for current status. Kept for the reasoning and comparisons.
 
 ---
 
-# localm — Feature Report
+# localm - Feature Report
 
 Comprehensive audit of the project against professional-grade expectations for
 a local LLM runner and AI coding agent. Each section describes what is
@@ -24,7 +24,7 @@ Reference tools used for comparison:
 
 ### Current state
 
-- Custom ctypes bindings to `llama.dll` — no dependency on llama-cpp-python
+- Custom ctypes bindings to `llama.dll` - no dependency on llama-cpp-python
 - Full sampler chain: top-k, top-p, min-p, temperature, dist
 - GBNF grammar sampling via `llama_sampler_init_grammar` (offline, at the sampler layer)
 - HuggingFace Transformers backend for full-precision HF model directories
@@ -39,7 +39,7 @@ Reference tools used for comparison:
 LM Studio and Ollama both maintain a persistent KV cache across requests from
 the same session. Users expect:
 
-- In-session KV cache reuse — the prompt prefix does not need re-evaluation on
+- In-session KV cache reuse - the prompt prefix does not need re-evaluation on
   every follow-up message
 - Speculative decoding with a draft model for faster throughput on large models
 - Flash attention and grouped query attention exposed as options
@@ -54,13 +54,13 @@ the same session. Users expect:
 
 | Priority | Requirement |
 |----------|-------------|
-| High | Persistent KV cache across calls within a session — add `llama_kv_self_clear` or session-keyed context reuse so prefills are not repeated |
+| High | Persistent KV cache across calls within a session - add `llama_kv_self_clear` or session-keyed context reuse so prefills are not repeated |
 | High | Expose inference timing: TTFT, token/s, prompt eval time in the `usage` response field or a separate header |
-| Medium | GPU memory reporting — surface VRAM in use and free via `llama_get_state_size` or ROCm SMI so users can tune `n_gpu_layers` |
-| Medium | RoPE / YaRN context extension — `rope_scaling_type` and `rope_freq_scale` in context params |
-| Medium | Per-request seed control — expose `seed` on `ChatRequest` so generation is reproducible |
-| Low | Speculative decoding — draft model loaded alongside main model; `n_draft` tokens sampled per step |
-| Low | GGUF metadata inspection — surface architecture, parameter count, quant level, context limit from the file header before loading |
+| Medium | GPU memory reporting - surface VRAM in use and free via `llama_get_state_size` or ROCm SMI so users can tune `n_gpu_layers` |
+| Medium | RoPE / YaRN context extension - `rope_scaling_type` and `rope_freq_scale` in context params |
+| Medium | Per-request seed control - expose `seed` on `ChatRequest` so generation is reproducible |
+| Low | Speculative decoding - draft model loaded alongside main model; `n_draft` tokens sampled per step |
+| Low | GGUF metadata inspection - surface architecture, parameter count, quant level, context limit from the file header before loading |
 
 ---
 
@@ -72,7 +72,7 @@ the same session. Users expect:
   progress bar
 - Shortcut table maps human names to `bartowski` quantized builds
 - `localm add <path>` registers local files or directories
-- Ollama manifest resolution — recognises the Ollama blob layout and points at
+- Ollama manifest resolution - recognises the Ollama blob layout and points at
   the underlying GGUF file
 - `localm models` lists registered models with name, type, size, source, path
 - `localm rm <name>` removes from registry; deletes the file only if it lives
@@ -88,19 +88,19 @@ has `ollama update` and a curated model library with tags. Professionals expect:
 - Metadata shown before committing to a download: parameter count, architecture,
   quant level, license, context limit
 - Disk space check before starting a download
-- Resumable downloads — network interruptions should not force a restart
-- Model update detection — flag when a newer quant or version is available
+- Resumable downloads - network interruptions should not force a restart
+- Model update detection - flag when a newer quant or version is available
 
 ### Requirements
 
 | Priority | Requirement |
 |----------|-------------|
-| High | Resumable downloads — use `Range` headers and a `.part` file; verify SHA256 on completion |
-| High | Disk space pre-flight — check `shutil.disk_usage` before downloading; warn or abort if insufficient |
-| High | Split GGUF support — detect `*-of-N.gguf` naming, download all parts, pass the first part path to llama.cpp |
-| Medium | GGUF metadata display before load — read the file header to show arch, quant, context, parameter count |
-| Medium | `localm update <name>` — compare local file SHA or timestamp against the HF repo and prompt to re-download |
-| Low | Model tagging — allow users to add free-form tags to registry entries for personal organisation |
+| High | Resumable downloads - use `Range` headers and a `.part` file; verify SHA256 on completion |
+| High | Disk space pre-flight - check `shutil.disk_usage` before downloading; warn or abort if insufficient |
+| High | Split GGUF support - detect `*-of-N.gguf` naming, download all parts, pass the first part path to llama.cpp |
+| Medium | GGUF metadata display before load - read the file header to show arch, quant, context, parameter count |
+| Medium | `localm update <name>` - compare local file SHA or timestamp against the HF repo and prompt to re-download |
+| Low | Model tagging - allow users to add free-form tags to registry entries for personal organisation |
 
 ---
 
@@ -126,9 +126,9 @@ on top of a local server expect:
 - Exact token counts (not a character-length estimate)
 - `/v1/completions` non-chat endpoint for raw prompt completion
 - `/v1/embeddings` endpoint for semantic search and RAG pipelines
-- Bearer token authentication — even a simple static key stops accidental
+- Bearer token authentication - even a simple static key stops accidental
   exposure when the port is bound to 0.0.0.0
-- Concurrent request handling — multiple clients should queue rather than
+- Concurrent request handling - multiple clients should queue rather than
   receive errors
 - Standard HTTP 429 rate limiting so well-behaved clients back off cleanly
 
@@ -136,13 +136,13 @@ on top of a local server expect:
 
 | Priority | Requirement |
 |----------|-------------|
-| High | Exact prompt token counts — tokenize the input messages and return the real count in `usage.prompt_tokens` |
-| High | Bearer token auth — `LOCALM_API_KEY` environment variable; requests without a matching `Authorization` header get 401 |
-| High | Request queueing — serialise inference calls with `asyncio.Queue` so a second request waits rather than colliding |
-| Medium | `/v1/completions` — raw completion endpoint (no chat template applied) for tools that use it |
-| Medium | `/v1/embeddings` — embedding endpoint backed by a dedicated embedding model or the main model's last hidden state |
-| Medium | `/v1/models/{id}` GET endpoint — model detail card with metadata |
-| Low | Rate limiting via `slowapi` or a manual token bucket — configurable requests/minute |
+| High | Exact prompt token counts - tokenize the input messages and return the real count in `usage.prompt_tokens` |
+| High | Bearer token auth - `LOCALM_API_KEY` environment variable; requests without a matching `Authorization` header get 401 |
+| High | Request queueing - serialise inference calls with `asyncio.Queue` so a second request waits rather than colliding |
+| Medium | `/v1/completions` - raw completion endpoint (no chat template applied) for tools that use it |
+| Medium | `/v1/embeddings` - embedding endpoint backed by a dedicated embedding model or the main model's last hidden state |
+| Medium | `/v1/models/{id}` GET endpoint - model detail card with metadata |
+| Low | Rate limiting via `slowapi` or a manual token bucket - configurable requests/minute |
 | Low | `X-Request-ID` response header for tracing requests through logs |
 
 ---
@@ -153,13 +153,13 @@ on top of a local server expect:
 
 #### Current state
 
-- `LOCALCODER.md` per project — persistent memory injected at session start
+- `LOCALCODER.md` per project - persistent memory injected at session start
 - Codebase index built at startup: file tree, per-file symbol extraction for 15
   languages, kept under ~3 000 characters
 - Incremental index refresh when the agent writes or edits a file
-- Conversation compaction at 70% / 90% context fill — produces a ~300-word
+- Conversation compaction at 70% / 90% context fill - produces a ~300-word
   prose summary
-- `.localcoder/config.toml` per project — model, cwd, max turns, always_confirm
+- `.localcoder/config.toml` per project - model, cwd, max turns, always_confirm
 - Checkpoint save on Ctrl+C, `/resume` to restore
 
 #### Professional expectation
@@ -178,10 +178,10 @@ grep for it. Professionals expect:
 
 | Priority | Requirement |
 |----------|-------------|
-| High | Structured compaction format — produce JSON `{summary, changed_files, open_tasks}` using grammar sampling; inject it back as a compact system block rather than a conversation turn |
-| Medium | Embedding-based code search — embed function docstrings and file summaries at index time; retrieve top-K by cosine similarity at query time; requires `/v1/embeddings` |
-| Medium | Cross-session decision log — append significant decisions to `LOCALCODER.md` automatically rather than relying on the user to update it |
-| Low | Incremental re-indexing on git checkout / branch switch — detect `HEAD` change and refresh the index |
+| High | Structured compaction format - produce JSON `{summary, changed_files, open_tasks}` using grammar sampling; inject it back as a compact system block rather than a conversation turn |
+| Medium | Embedding-based code search - embed function docstrings and file summaries at index time; retrieve top-K by cosine similarity at query time; requires `/v1/embeddings` |
+| Medium | Cross-session decision log - append significant decisions to `LOCALCODER.md` automatically rather than relying on the user to update it |
+| Low | Incremental re-indexing on git checkout / branch switch - detect `HEAD` change and refresh the index |
 
 ---
 
@@ -199,11 +199,11 @@ Claude Code can run tests and interpret results, commit and push changes, and
 interact with the terminal. Aider has direct git commit integration.
 Professionals expect the agent to close the loop on tasks without manual steps:
 
-- Test runner integration — run tests and feed the output back as context so
+- Test runner integration - run tests and feed the output back as context so
   the agent can fix failures without the user copying output
-- Git commit and push tools — not just status/diff/log; the agent should be
+- Git commit and push tools - not just status/diff/log; the agent should be
   able to commit staged changes with a generated message
-- LSP integration — go-to-definition, find-references, type errors as a tool
+- LSP integration - go-to-definition, find-references, type errors as a tool
   so the agent gets compiler feedback rather than guessing
 - Multi-file search-and-replace atomically
 
@@ -211,13 +211,13 @@ Professionals expect the agent to close the loop on tasks without manual steps:
 
 | Priority | Requirement |
 |----------|-------------|
-| High | `run_tests` tool — wraps `pytest`, `cargo test`, `npm test`, etc.; returns pass/fail counts and failure output; non-destructive |
-| High | `git_commit` tool — stages specified files and commits with a model-generated message; respects pre-commit hooks |
-| Medium | `search_replace` tool — multi-file regex search-and-replace with preview; atomic across all matched files |
-| Medium | `git_push` / `git_create_branch` tools — close the loop on feature branch workflows |
-| Medium | `read_env` tool — reads `.env` and active environment variables; strips secrets before injecting into context |
-| Low | `lsp_symbols` / `lsp_references` tool — queries a running LSP server for definitions and references |
-| Low | `screenshot` tool — captures a region or window; useful for UI debugging and the image generation pipeline |
+| High | `run_tests` tool - wraps `pytest`, `cargo test`, `npm test`, etc.; returns pass/fail counts and failure output; non-destructive |
+| High | `git_commit` tool - stages specified files and commits with a model-generated message; respects pre-commit hooks |
+| Medium | `search_replace` tool - multi-file regex search-and-replace with preview; atomic across all matched files |
+| Medium | `git_push` / `git_create_branch` tools - close the loop on feature branch workflows |
+| Medium | `read_env` tool - reads `.env` and active environment variables; strips secrets before injecting into context |
+| Low | `lsp_symbols` / `lsp_references` tool - queries a running LSP server for definitions and references |
+| Low | `screenshot` tool - captures a region or window; useful for UI debugging and the image generation pipeline |
 
 ---
 
@@ -247,11 +247,11 @@ changes and feeds failures back into the loop. Professionals notice:
 
 | Priority | Requirement |
 |----------|-------------|
-| High | Self-verification step — after writing a file, the agent should automatically check syntax (`py_compile`, `tsc --noEmit`, `cargo check`) without the user asking |
-| High | Uncertainty escalation — if a subtask exceeds a turn budget, interrupt and ask the user rather than making a guess |
-| Medium | Parallel tool calls — when the response contains multiple independent tool calls, execute them concurrently with `asyncio.gather` |
-| Medium | Tool result compression — large tool outputs should be summarised before injection if they would push the fill ratio above 50% |
-| Low | Confidence scoring — if the model self-corrects more than a threshold per session, warn that a larger model may be needed |
+| High | Self-verification step - after writing a file, the agent should automatically check syntax (`py_compile`, `tsc --noEmit`, `cargo check`) without the user asking |
+| High | Uncertainty escalation - if a subtask exceeds a turn budget, interrupt and ask the user rather than making a guess |
+| Medium | Parallel tool calls - when the response contains multiple independent tool calls, execute them concurrently with `asyncio.gather` |
+| Medium | Tool result compression - large tool outputs should be summarised before injection if they would push the fill ratio above 50% |
+| Low | Confidence scoring - if the model self-corrects more than a threshold per session, warn that a larger model may be needed |
 
 ---
 
@@ -273,7 +273,7 @@ changes and feeds failures back into the loop. Professionals notice:
 
 #### Professional expectation
 
-Cursor and Copilot live inside the editor — the agent sees the file you are
+Cursor and Copilot live inside the editor - the agent sees the file you are
 looking at and can propose inline changes without you describing which file to
 touch. Professionals also expect:
 
@@ -287,12 +287,12 @@ touch. Professionals also expect:
 
 | Priority | Requirement |
 |----------|-------------|
-| High | `--scope GLOB` flag — agent may only read/write paths matching the glob; any tool call outside it is blocked and reported |
-| High | VS Code extension — opens a side panel backed by a localcoder session; sends the active file and selection as initial context |
-| Medium | Conversation export — `/export` REPL command writes the session as a clean markdown transcript |
-| Medium | Cost estimation — `--estimate` flag runs one planning turn (no tool execution) and prints expected token usage before the real run |
-| Medium | Retry budget per online provider — catch HTTP 429 from OpenAI/Anthropic and back off with exponential jitter |
-| Low | Neovim plugin — `localcoder.nvim` sends buffer path and visual selection to the agent; shows diffs in the quickfix list |
+| High | `--scope GLOB` flag - agent may only read/write paths matching the glob; any tool call outside it is blocked and reported |
+| High | VS Code extension - opens a side panel backed by a localcoder session; sends the active file and selection as initial context |
+| Medium | Conversation export - `/export` REPL command writes the session as a clean markdown transcript |
+| Medium | Cost estimation - `--estimate` flag runs one planning turn (no tool execution) and prints expected token usage before the real run |
+| Medium | Retry budget per online provider - catch HTTP 429 from OpenAI/Anthropic and back off with exponential jitter |
+| Low | Neovim plugin - `localcoder.nvim` sends buffer path and visual selection to the agent; shows diffs in the quickfix list |
 
 ---
 
@@ -314,9 +314,9 @@ and to pull failing CI output without copy-paste.
 
 | Priority | Requirement |
 |----------|-------------|
-| Medium | MCP server support — dynamic tool registry so third-party tools (GitHub, Linear, Jira) register themselves at startup |
-| Medium | GitHub tool set — `create_pr`, `list_issues`, `comment_on_pr` via the GitHub CLI or API |
-| Low | CI log fetcher — given a GitHub Actions run URL, fetch and summarise the failure output |
+| Medium | MCP server support - dynamic tool registry so third-party tools (GitHub, Linear, Jira) register themselves at startup |
+| Medium | GitHub tool set - `create_pr`, `list_issues`, `comment_on_pr` via the GitHub CLI or API |
+| Low | CI log fetcher - given a GitHub Actions run URL, fetch and summarise the failure output |
 
 ---
 
@@ -326,7 +326,7 @@ and to pull failing CI output without copy-paste.
 
 - Full ComfyUI FLUX pipeline via the ComfyUI API at port 8188
 - `generate_image()` with: prompt, guidance, negative prompt
-  (ConditioningConcat — no CFG mode change required), seed, dual CLIP encoder
+  (ConditioningConcat - no CFG mode change required), seed, dual CLIP encoder
   override, LoRA loading, img2img with denoise, output path
 - GGUF T5 auto-detection routes to `DualCLIPLoaderGGUF` automatically
 - `localm_url` parameter triggers model unload before generation and reload
@@ -344,12 +344,12 @@ all workflows.
 
 | Priority | Requirement |
 |----------|-------------|
-| High | Generation history — save metadata (prompt, seed, guidance, encoder, model) alongside every output image in a sidecar JSON file |
-| Medium | Abstract `BaseImageBackend` — common interface with ComfyUI and A1111 implementations behind the same `generate_image()` call |
-| Medium | Batch generation — accept a list of seeds or prompt variants; run sequentially; return a list of output paths |
-| Medium | Inpainting support — pass a mask image to a ComfyUI inpaint workflow variant |
-| Low | ControlNet conditioning — add ControlNet node injection to the workflow builder for pose, depth, and canny |
-| Low | Post-process pipeline — optional ESRGAN upscale step after generation |
+| High | Generation history - save metadata (prompt, seed, guidance, encoder, model) alongside every output image in a sidecar JSON file |
+| Medium | Abstract `BaseImageBackend` - common interface with ComfyUI and A1111 implementations behind the same `generate_image()` call |
+| Medium | Batch generation - accept a list of seeds or prompt variants; run sequentially; return a list of output paths |
+| Medium | Inpainting support - pass a mask image to a ComfyUI inpaint workflow variant |
+| Low | ControlNet conditioning - add ControlNet node injection to the workflow builder for pose, depth, and canny |
+| Low | Post-process pipeline - optional ESRGAN upscale step after generation |
 
 ---
 
@@ -374,11 +374,11 @@ confinement, and clear documentation of what leaves the machine and when.
 
 | Priority | Requirement |
 |----------|-------------|
-| High | Path confinement — all file tools validate that the resolved absolute path is under `cwd`; return a clear error if not |
-| High | Shell tool scope documentation — clarify in the README and help text that `--yes` without `always_confirm = ["run_shell"]` bypasses shell confirmation |
-| Medium | Argument list subprocess mode — when the shell command contains no pipes or redirects, pass it as an argument list rather than a shell string to avoid injection |
-| Medium | Network audit log — in privacy mode, print to stderr when `fetch_url` is called so the user is aware of outbound requests |
-| Low | `--no-network` flag — blocks `fetch_url` entirely; useful for air-gapped environments |
+| High | Path confinement - all file tools validate that the resolved absolute path is under `cwd`; return a clear error if not |
+| High | Shell tool scope documentation - clarify in the README and help text that `--yes` without `always_confirm = ["run_shell"]` bypasses shell confirmation |
+| Medium | Argument list subprocess mode - when the shell command contains no pipes or redirects, pass it as an argument list rather than a shell string to avoid injection |
+| Medium | Network audit log - in privacy mode, print to stderr when `fetch_url` is called so the user is aware of outbound requests |
+| Low | `--no-network` flag - blocks `fetch_url` entirely; useful for air-gapped environments |
 
 ---
 
@@ -401,11 +401,11 @@ quality tradeoff.
 
 | Priority | Requirement |
 |----------|-------------|
-| High | Live tokens/sec display — compute from wall-clock time between stream chunks; show next to the turn divider |
-| High | VRAM display at load — query ROCm SMI or nvidia-smi after model load; report MB allocated |
-| Medium | `localm benchmark <model>` command — runs a standard prompt, measures TTFT and generation speed at multiple context lengths, writes a report |
-| Medium | Audit log performance fields — add `ttft_ms`, `tokens_per_sec`, `prompt_tokens_exact` to the JSONL entries |
-| Low | Context recall profiling — run verbatim function recall tests against the current workspace to determine the maximum reliable context depth for a given model on the current hardware |
+| High | Live tokens/sec display - compute from wall-clock time between stream chunks; show next to the turn divider |
+| High | VRAM display at load - query ROCm SMI or nvidia-smi after model load; report MB allocated |
+| Medium | `localm benchmark <model>` command - runs a standard prompt, measures TTFT and generation speed at multiple context lengths, writes a report |
+| Medium | Audit log performance fields - add `ttft_ms`, `tokens_per_sec`, `prompt_tokens_exact` to the JSONL entries |
+| Low | Context recall profiling - run verbatim function recall tests against the current workspace to determine the maximum reliable context depth for a given model on the current hardware |
 
 ---
 
@@ -413,7 +413,7 @@ quality tradeoff.
 
 ### Current state
 
-- Plugins live in `localm/plugins/` — `coder` is the only plugin
+- Plugins live in `localm/plugins/` - `coder` is the only plugin
 - `TOOL_REGISTRY` is a static dict built at import time
 - No discovery mechanism for external plugins
 
@@ -427,12 +427,12 @@ stable API, one-command install, and sandboxing.
 
 | Priority | Requirement |
 |----------|-------------|
-| High | Plugin discovery — scan `~/.localm/plugins/` at startup; any directory with a `plugin.toml` manifest is loaded |
-| High | Plugin manifest format — `plugin.toml` declares name, version, entry point, tool exports, required localm version |
-| Medium | `localm plugin install <path-or-url>` — clones or copies a plugin, validates the manifest, makes tools available |
-| Medium | `localm plugin list` / `localm plugin remove` — lifecycle management |
-| Medium | Plugin API versioning — `requires_localm` field so incompatible plugins are rejected cleanly |
-| Low | Plugin sandboxing — run plugin tool functions in a subprocess with a restricted import allowlist |
+| High | Plugin discovery - scan `~/.localm/plugins/` at startup; any directory with a `plugin.toml` manifest is loaded |
+| High | Plugin manifest format - `plugin.toml` declares name, version, entry point, tool exports, required localm version |
+| Medium | `localm plugin install <path-or-url>` - clones or copies a plugin, validates the manifest, makes tools available |
+| Medium | `localm plugin list` / `localm plugin remove` - lifecycle management |
+| Medium | Plugin API versioning - `requires_localm` field so incompatible plugins are rejected cleanly |
+| Low | Plugin sandboxing - run plugin tool functions in a subprocess with a restricted import allowlist |
 
 ---
 
@@ -441,9 +441,9 @@ stable API, one-command install, and sandboxing.
 ### Current state
 
 - Python package installable via `uv pip install -e .`
-- DLL discovery via `_loader.py` — searches StableMatrix, Ollama, and common
+- DLL discovery via `_loader.py` - searches StableMatrix, Ollama, and common
   install paths for `llama.dll` / `libllama.so`
-- No bundled binary — users need a working Python environment and the DLL
+- No bundled binary - users need a working Python environment and the DLL
   separately
 
 ### Professional expectation
@@ -456,11 +456,11 @@ user to find the right DLL manually.
 
 | Priority | Requirement |
 |----------|-------------|
-| High | PyPI publish — package to PyPI so `pip install localm` works; include `localm[gpu]` and `localm[cpu]` extras |
-| High | GPU auto-detection — at install time or first run, detect ROCm/CUDA availability and download the matching DLL if absent |
-| Medium | Windows installer — produces a signed `.exe` installer including Python, the DLL, and the GUI |
-| Medium | `localm doctor` command — checks DLL presence, Python version, GPU driver, available VRAM, prints a health report with fix suggestions |
-| Low | Winget / Homebrew manifest — register `localm` in winget-pkgs and Homebrew |
+| High | PyPI publish - package to PyPI so `pip install localm` works; include `localm[gpu]` and `localm[cpu]` extras |
+| High | GPU auto-detection - at install time or first run, detect ROCm/CUDA availability and download the matching DLL if absent |
+| Medium | Windows installer - produces a signed `.exe` installer including Python, the DLL, and the GUI |
+| Medium | `localm doctor` command - checks DLL presence, Python version, GPU driver, available VRAM, prints a health report with fix suggestions |
+| Low | Winget / Homebrew manifest - register `localm` in winget-pkgs and Homebrew |
 
 ---
 
@@ -476,13 +476,13 @@ coder interface, plugin/skills manager, polish.
 
 | Priority | Requirement |
 |----------|-------------|
-| High | First-run setup wizard — detects GPU, offers to download a starter model, configures the server port |
+| High | First-run setup wizard - detects GPU, offers to download a starter model, configures the server port |
 | High | Live tokens/sec indicator during generation |
-| Medium | Model performance card — shows benchmark results alongside each model in the model list |
-| Medium | Diff viewer for coder sessions — side-by-side display of every file the agent touched |
-| Medium | Prompt library — save and reuse system prompts and common task templates |
-| Low | Image generation gallery — grid view of past generations with metadata on hover |
-| Low | Log viewer tab — tail the audit log and server log in real time |
+| Medium | Model performance card - shows benchmark results alongside each model in the model list |
+| Medium | Diff viewer for coder sessions - side-by-side display of every file the agent touched |
+| Medium | Prompt library - save and reuse system prompts and common task templates |
+| Low | Image generation gallery - grid view of past generations with metadata on hover |
+| Low | Log viewer tab - tail the audit log and server log in real time |
 
 ---
 
@@ -493,11 +493,11 @@ coder interface, plugin/skills manager, polish.
 | Inference engine | Good | No KV cache persistence; no inference timing metrics |
 | Model management | Good | No resumable downloads; no split GGUF; no disk space check |
 | HTTP API | Solid | Token counts are estimates; no auth; no embeddings endpoint |
-| Coding agent — context | Good | No semantic search; compaction produces free prose |
-| Coding agent — tools | Good | No test runner tool; no git commit tool |
-| Coding agent — loop quality | Good | No self-verification; no parallel tool execution |
-| Coding agent — UX | Strong | No `--scope` constraint; no cost estimation |
-| Coding agent — integrations | Partial | MCP not implemented; no GitHub tools |
+| Coding agent - context | Good | No semantic search; compaction produces free prose |
+| Coding agent - tools | Good | No test runner tool; no git commit tool |
+| Coding agent - loop quality | Good | No self-verification; no parallel tool execution |
+| Coding agent - UX | Strong | No `--scope` constraint; no cost estimation |
+| Coding agent - integrations | Partial | MCP not implemented; no GitHub tools |
 | Image generation | Good | No generation history; single backend (ComfyUI only) |
 | Privacy / security | Strong | Path confinement not enforced; shell uses string mode |
 | Observability | Partial | No live tok/s; no VRAM display; no benchmark command |

@@ -6,7 +6,7 @@ events (tokens, tool calls, results) are pushed onto a per-session queue that
 the web layer drains as an SSE stream. Destructive-tool confirmations block the
 agent thread until the browser answers (or a timeout rejects them).
 
-Everything here is plain threading — no asyncio. The web layer bridges the
+Everything here is plain threading - no asyncio. The web layer bridges the
 queue into the event loop.
 """
 
@@ -35,7 +35,7 @@ def _confirm_timeout() -> float:
         return _CONFIRM_TIMEOUT_S
 
 # Queue size: generous, but bounded so a disconnected client can't grow memory
-# without limit. When full, oldest events are dropped (tokens are recoverable —
+# without limit. When full, oldest events are dropped (tokens are recoverable -
 # the final event always carries the full text).
 _QUEUE_MAX = 10_000
 
@@ -80,7 +80,7 @@ class CoderSession:
         self.history: list = []
         self.busy = False
         self.closed = False
-        # Tools the user marked "always allow" on an approval card — those
+        # Tools the user marked "always allow" on an approval card - those
         # skip the confirmation flow for the rest of this session.
         self.allowed_tools: set[str] = set()
         self._pending: Optional[_PendingConfirm] = None
@@ -176,7 +176,7 @@ class CoderSession:
         })
         if not answered:
             self._push({"type": "info",
-                        "text": f"Confirmation for {call.name} timed out — rejected."})
+                        "text": f"Confirmation for {call.name} timed out - rejected."})
             return False
         return pending.approved
 
@@ -251,7 +251,7 @@ class CoderSession:
                 with self._lock:
                     self.busy = False
                 # A message queued in the task's final moments would otherwise
-                # sit until the user sends again — run it as a follow-up task.
+                # sit until the user sends again - run it as a follow-up task.
                 leftover = self.agent._drain_queued()
                 if leftover and not self.closed:
                     self._push({"type": "info",
@@ -312,7 +312,7 @@ class CoderSession:
         """Resolve a pending confirmation. False if id doesn't match.
 
         ``always_allow`` (only honoured on approval) whitelists the tool for
-        the rest of the session — later calls skip the confirmation flow."""
+        the rest of the session - later calls skip the confirmation flow."""
         with self._lock:
             pending = self._pending
         if pending is None or pending.id != confirm_id:

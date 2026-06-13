@@ -90,7 +90,7 @@ class TestCoderSession:
         assert final["ok"] is True
 
     def test_busy_queues_second_message(self, tmp_path):
-        """Sending mid-task no longer bounces — the message is queued as a
+        """Sending mid-task no longer bounces - the message is queued as a
         steering note and surfaced in the feed with queued=True."""
         class SlowBackend(ScriptedBackend):
             def chat_stream(self, messages, **kw):
@@ -189,7 +189,7 @@ class TestCoderSession:
 
 class TestConfirmResolution:
     """Every answered confirmation must leave a confirm_resolved event in the
-    stream AND the replay buffer — otherwise a reloaded page replays the
+    stream AND the replay buffer - otherwise a reloaded page replays the
     confirm_request with live approve/reject buttons."""
 
     def _request(self, tmp_path, fname):
@@ -502,7 +502,7 @@ class TestModelLessServer:
         assert app_no_engine.get("/health").status_code == 503
 
     def test_gui_models_lists_registry_without_engine(self):
-        """/api/models reads the registry, not the engine — works model-less."""
+        """/api/models reads the registry, not the engine - works model-less."""
         app = FastAPI()
 
         async def switch_model(name):
@@ -587,7 +587,7 @@ class TestSessionExtras:
             # (no model behind these tests)
             import localm.plugins.gui.web  # noqa: F401
             # fetch via the manager closure: reach through the route list
-            # is brittle — instead use the documented API shape: events with
+            # is brittle - instead use the documented API shape: events with
             # replay after pushing through a message is covered by the
             # CoderSession unit tests; here we just check the marker frame.
             collected = []
@@ -1002,12 +1002,12 @@ class TestVoiceEndpoint:
         assert r.json()["text"] == "hello world"
 
     def test_missing_package_is_501(self, gui_app):
-        """faster-whisper is not installed in the test venv — the real
+        """faster-whisper is not installed in the test venv - the real
         VoiceError install-hint path must surface as 501."""
         import base64
         try:
             import faster_whisper  # noqa: F401
-            pytest.skip("faster-whisper installed — hint path unreachable")
+            pytest.skip("faster-whisper installed - hint path unreachable")
         except ImportError:
             pass
         app, _ = gui_app

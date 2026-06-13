@@ -1,4 +1,4 @@
-"""Tests for localm.netpolicy — the network policy for model-initiated requests."""
+"""Tests for localm.netpolicy - the network policy for model-initiated requests."""
 
 from unittest.mock import patch
 

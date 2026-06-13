@@ -10,11 +10,11 @@ kill everything.
 Config keys (set via ``localm config``, the GUI Settings page, or /v1/config)
 ------------------------------------------------------------------------------
 net_mode           "off" | "ask" | "allow"   (default "ask")
-                   off   — every policy-routed request fails fast
-                   ask   — allowed, but surfaces that support confirmation
+                   off   - every policy-routed request fails fast
+                   ask   - allowed, but surfaces that support confirmation
                            ask first (the coder routes network tools through
                            its destructive-tool approval flow)
-                   allow — no confirmation
+                   allow - no confirmation
                    The LOCALM_NET_MODE env var overrides the config value.
 net_allow          list of domains (or comma-separated string). Empty = any
                    domain. "example.com" matches example.com and *.example.com.
@@ -57,7 +57,7 @@ _USER_AGENT = "Mozilla/5.0 (compatible; localm/0.1; +https://github.com/localm)"
 
 class NetworkPolicyError(Exception):
     """A request was refused by the network policy. The message says why
-    and how to change the policy — safe to show to the model and the user."""
+    and how to change the policy - safe to show to the model and the user."""
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +140,7 @@ def check_url(url: str) -> None:
 def _check_public_address(host: str) -> None:
     """SSRF guard: refuse hosts that resolve to loopback / private /
     link-local / reserved addresses (cloud metadata, router admin pages,
-    the localm API itself…). Unresolvable hosts pass — the fetch will fail
+    the localm API itself…). Unresolvable hosts pass - the fetch will fail
     with a normal DNS error anyway."""
     try:
         infos = socket.getaddrinfo(host, None)
@@ -173,7 +173,7 @@ def safe_fetch(
     Policy-checked GET. Returns (final_url, content_type, body_text).
 
     Redirects are followed manually so every hop is re-validated against the
-    policy — a public page cannot bounce the agent into 127.0.0.1. The body
+    policy - a public page cannot bounce the agent into 127.0.0.1. The body
     is capped at max_bytes.
 
     Raises NetworkPolicyError (policy refusal) or requests exceptions.
@@ -323,7 +323,7 @@ class _DDGParser(html.parser.HTMLParser):
     """Parse DuckDuckGo's html.duckduckgo.com result page.
 
     Result anchors carry class ``result__a``; snippets ``result__snippet``.
-    Anchor hrefs are //duckduckgo.com/l/?uddg=<encoded-target> redirects —
+    Anchor hrefs are //duckduckgo.com/l/?uddg=<encoded-target> redirects -
     the real URL is extracted from the uddg parameter."""
 
     def __init__(self):
