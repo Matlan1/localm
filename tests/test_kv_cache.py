@@ -4,6 +4,7 @@ Tests for persistent KV cache prefix reuse in the native llama.cpp wrapper.
 The native DLL is never loaded — the api module is mocked throughout.
 """
 
+import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -57,6 +58,9 @@ def _bare_llama() -> LlamaCpp:
     llm._cached_tokens = []
     llm._ctx_capacity = 4096
     llm._kv_supported = None
+    # Native-call serialization primitives normally set up in __init__.
+    llm._gen_lock = threading.RLock()
+    llm._stop = threading.Event()
     _LIVE_FAKES.append(llm)
     return llm
 
