@@ -68,6 +68,34 @@ rem  project never depends on a folder elsewhere on disk. Installed empty here;
 rem  `localm setup-llama` downloads/copies the actual binaries into it.
 uv pip install -p .venv -e ".\runtime"
 
+rem ---- provision the native llama.cpp binaries ------------------------------
+rem  The DLLs (llama.dll + ggml + ROCm runtime) are large and license- and
+rem  provenance-sensitive, so they are never committed to git - a clone does
+rem  not carry them. Place them in this venv now so the install is runnable.
+if "%FLAVOUR%"=="gpu" goto provision_gpu
+echo.
+echo  CPU GGUF inference needs a CPU-built llama.dll (the default prebuilt is a
+echo  GPU build). Provision it yourself with:
+echo     .venv\Scripts\localm setup-llama --from ^<your cpu llama.cpp build dir^>
+echo.
+goto provision_done
+:provision_gpu
+echo.
+echo  Native llama.cpp binaries are not in the repo and must be placed in this
+echo  venv once. How do you want to provide them?
+echo    [1] Download the default gfx1030 prebuilt   one network fetch, lemonade-sdk
+echo    [2] Copy from your OWN llama.cpp build dir   no download
+echo    [3] Skip for now
+choice /c 123 /n /m "  Pick 1, 2 or 3: "
+set "LLAMAPICK=%errorlevel%"
+if "%LLAMAPICK%"=="1" .venv\Scripts\localm setup-llama
+if "%LLAMAPICK%"=="2" (
+    set /p "LLAMABUILD=  Path to your build dir with llama.dll: "
+    .venv\Scripts\localm setup-llama --from "!LLAMABUILD!"
+)
+if "%LLAMAPICK%"=="3" echo  Skipped - provision later: .venv\Scripts\localm setup-llama
+:provision_done
+
 rem ---- choose where data lives ----------------------------------------------
 echo.
 echo  Where should localm keep its data (models, config, logs, images)?
@@ -126,10 +154,8 @@ echo        .venv\Scripts\localm pull ^<model^>
 echo        .venv\Scripts\localm gui
 echo.
 if "%FLAVOUR%"=="gpu" (
-    echo  GPU inference needs the native llama.cpp binaries. Provision them into
-    echo  this venv ^(self-contained - no external folder^):
-    echo        .venv\Scripts\localm setup-llama
-    echo  ^(downloads a prebuilt, or use --from ^<your llama.cpp build dir^>^)
+    echo  Re-provision or update the native binaries any time with:
+    echo        .venv\Scripts\localm setup-llama --force
     echo.
 )
 echo  Tip: avoid "uv tool install" for this project - tool installs are
