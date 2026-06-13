@@ -802,6 +802,94 @@ def _register(
     save_registry(reg)
 
 
+def _unique_registry_name(reg: dict, base: str) -> str:
+    """Return a registry-safe name derived from ``base``, avoiding collisions."""
+    base = re.sub(r"[^A-Za-z0-9._-]+", "-", base).strip("-") or "model"
+    if base not in reg:
+        return base
+    i = 2
+    while f"{base}-{i}" in reg:
+        i += 1
+    return f"{base}-{i}"
+
+
+def sync_models_dir(prune: bool = True) -> tuple[int, int]:
+    """Reconcile the registry with the models directory.
+
+    Scans ``MODELS_DIR`` for models that aren't registered yet — loose GGUF
+    files (split GGUFs are registered by their first part) and HuggingFace
+    directories (any subfolder containing ``config.json``) — and registers them.
+    When ``prune`` is True, registry entries whose file lives under
+    ``MODELS_DIR`` but no longer exists are dropped, so models deleted since the
+    last run disappear from the list too. Runs without prompting; returns
+    ``(added, removed)``. Safe to call on every launch.
+    """
+    ensure_dirs()
+    reg = load_registry()
+
+    known = {
+        str(Path(entry["path"]).resolve())
+        for entry in reg.values()
+        if entry.get("path")
+    }
+
+    added = 0
+    if MODELS_DIR.is_dir():
+        for child in sorted(MODELS_DIR.iterdir()):
+            try:
+                # HuggingFace model directory.
+                if child.is_dir() and (child / "config.json").is_file():
+                    resolved = str(child.resolve())
+                    if resolved in known:
+                        continue
+                    _register(_unique_registry_name(reg, child.name), child)
+                    reg = load_registry()
+                    known.add(resolved)
+                    added += 1
+            except OSError:
+                continue
+
+        for child in sorted(MODELS_DIR.glob("*.gguf")):
+            try:
+                if not child.is_file():
+                    continue
+                # For split GGUFs, only register the first part.
+                parts = split_gguf_parts(child.name)
+                if parts and child.name != parts[0]:
+                    continue
+                resolved = str(child.resolve())
+                if resolved in known:
+                    continue
+                _register(_unique_registry_name(reg, child.stem), child)
+                reg = load_registry()
+                known.add(resolved)
+                added += 1
+            except OSError:
+                continue
+
+    removed = 0
+    if prune:
+        reg = load_registry()
+        models_root = MODELS_DIR.resolve()
+        gone = []
+        for name, entry in reg.items():
+            path_str = entry.get("path")
+            if not path_str:
+                continue
+            path = Path(path_str)
+            # Only prune entries that live under the managed models folder, so
+            # externally-added models on detachable drives are left alone.
+            if models_root in path.resolve().parents and not path.exists():
+                gone.append(name)
+        if gone:
+            for name in gone:
+                del reg[name]
+            save_registry(reg)
+            removed = len(gone)
+
+    return added, removed
+
+
 def _register_with_dedup(
     model_name: str,
     p: Path,
