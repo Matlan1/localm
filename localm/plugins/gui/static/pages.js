@@ -1,4 +1,4 @@
-/* localm GUI — Models / Images / Plugins / Settings pages.
+/* localm GUI - Models / Images / Plugins / Settings pages.
    Relies on helpers from app.js ($, el, authHeaders, toast, streamJob,
    fetchImageURL, openModal, refreshModels, modelCache, switchModel).
    Untrusted strings only ever reach the DOM via textContent. */
@@ -45,7 +45,7 @@ async function refreshModelsPage() {
   const box = $("models-table");
   box.replaceChildren();
   if (!modelCache.models.length) {
-    box.appendChild(el("div", "sub", "No models registered yet — pull one above."));
+    box.appendChild(el("div", "sub", "No models registered yet - pull one above."));
     return;
   }
   const table = el("table", "data-table");
@@ -125,12 +125,12 @@ async function showModelDetail(name) {
     headers: authHeaders() });
   const data = await r.json();
   if (!r.ok) { toast(data.detail || "Lookup failed", true); return; }
-  openModal("Model — " + name, (body) => {
+  openModal("Model - " + name, (body) => {
     const rows = [
       ["Path", data.path],
       ["Source", data.source],
       ["Size", fmtSize(data.size_bytes)],
-      ["SHA256", data.sha256 || "(not computed yet — hashes lazily on use)"],
+      ["SHA256", data.sha256 || "(not computed yet - hashes lazily on use)"],
       ["Aliases", data.aliases.length ? data.aliases.join(", ") : "(none)"],
       ["Status", data.active ? (data.loaded ? "active, loaded" : "active, not loaded") : "registered"],
     ];
@@ -167,7 +167,7 @@ async function discoverSearch() {
     if (!r.ok) throw new Error(data.detail || r.statusText);
     $("disc-vram").textContent = data.vram.total
       ? `Badges compare each file against your ${(data.vram.total / GIB).toFixed(0)} GB total VRAM (weights + ~1.5 GB overhead).`
-      : "No GPU VRAM detected — sizes shown without fit badges.";
+      : "No GPU VRAM detected - sizes shown without fit badges.";
     box.replaceChildren();
     if (!data.results.length) {
       box.appendChild(el("div", "sub", "(no GGUF repos found)"));
@@ -217,7 +217,7 @@ async function discoverFiles(repo, filesBox, btn) {
       row.appendChild(el("span", "fname", f.file));
       const pull = el("button", "", "pull");
       pull.onclick = () => {
-        // Prefill the pull form — the user confirms (and can set an alias)
+        // Prefill the pull form - the user confirms (and can set an alias)
         // before anything downloads. The suggested alias mirrors the
         // server's default name (file name without .gguf).
         $("pull-spec").value = `${repo}:${f.file}`;
@@ -273,7 +273,7 @@ $("pull-start").onclick = async () => {
         pct.textContent =
           `${ev.pct.toFixed(0)}%  ·  ${fmtBytes(ev.downloaded)} / ${fmtBytes(ev.total)}`;
       } else {
-        // Unknown total — busy bar with a running byte count
+        // Unknown total - busy bar with a running byte count
         bar.classList.add("indeterminate");
         bar.style.width = "100%";
         pct.textContent = "downloading…  " + fmtBytes(ev.downloaded);
@@ -363,7 +363,7 @@ function renderImageGrid() {
       .catch(() => thumb.remove());
     thumb.appendChild(img);
 
-    // selection checkbox (top-left) — selected thumbs stay marked
+    // selection checkbox (top-left) - selected thumbs stay marked
     const sel = document.createElement("input");
     sel.type = "checkbox";
     sel.className = "thumb-sel";
@@ -415,7 +415,7 @@ function renderImageGrid() {
   }
 }
 
-/** Bulk actions bar — appears above the grid while a selection exists. */
+/** Bulk actions bar - appears above the grid while a selection exists. */
 function renderImgBulkBar() {
   const bar = $("img-bulk");
   const n = imgState.selected.size;
@@ -480,7 +480,7 @@ function showImageDetail(item) {
     useInput.onclick = () => {
       $("img-input").value = item.path || item.name;
       closeModal();
-      toast("Set as img2img input — adjust denoise and generate");
+      toast("Set as img2img input - adjust denoise and generate");
     };
     actions.appendChild(useInput);
 
@@ -501,7 +501,7 @@ function showImageDetail(item) {
         renderAttachChips();
         closeModal();
         showView("chat");
-        toast("Image attached — type your message");
+        toast("Image attached - type your message");
       } catch (e) {
         toast("Attach failed: " + e.message, true);
       }
@@ -519,7 +519,7 @@ function showImageDetail(item) {
         $("img-denoise").value = item.meta.denoise ?? "";
         $("img-input").value = item.meta.input_image || "";
         closeModal();
-        toast("Settings restored — tweak and generate");
+        toast("Settings restored - tweak and generate");
       };
       actions.appendChild(reuse);
     }
@@ -618,7 +618,7 @@ function showImageDetail(item) {
   });
 }
 
-/* reload-after-generation toggle — mirrors the reload_llm_after_imagine
+/* reload-after-generation toggle - mirrors the reload_llm_after_imagine
    server config key */
 
 async function refreshReloadToggle() {
@@ -638,7 +638,7 @@ $("img-reload-llm").onchange = async () => {
   });
   if (r.ok) {
     toast(value ? "Chat model reloads after each generation"
-                : "ComfyUI stays loaded — chat model reloads on next message");
+                : "ComfyUI stays loaded - chat model reloads on next message");
   } else {
     toast("Could not save setting", true);
     $("img-reload-llm").checked = !value;
@@ -758,7 +758,7 @@ $("plugin-install").onclick = async () => {
   });
   const data = await r.json();
   if (r.ok) {
-    toast(`Installed '${data.name}' ${data.version} — restart localm gui to load its command`);
+    toast(`Installed '${data.name}' ${data.version} - restart localm gui to load its command`);
     $("plugin-source").value = "";
     refreshPluginsPage();
   } else {
@@ -837,7 +837,7 @@ $("config-save").onclick = async () => {
   });
   const data = await r.json();
   if (r.ok) {
-    toast("Saved — engine values apply on the next model load");
+    toast("Saved - engine values apply on the next model load");
     _configSnapshot = data;
   } else {
     toast(data.detail || "Save failed", true);
@@ -848,7 +848,7 @@ $("gui-key-save").onclick = () => {
   const key = $("gui-api-key").value.trim();
   if (key) localStorage.setItem("localm.apiKey", key);
   else localStorage.removeItem("localm.apiKey");
-  toast("Key saved — reloading");
+  toast("Key saved - reloading");
   setTimeout(() => location.reload(), 600);
 };
 
@@ -973,7 +973,7 @@ async function refreshVideoHistory() {
     return;
   }
   if (!data.videos.length) {
-    box.appendChild(el("div", "sub", "No clips yet — generate one above."));
+    box.appendChild(el("div", "sub", "No clips yet - generate one above."));
     return;
   }
   for (const item of data.videos) {
@@ -1058,7 +1058,7 @@ async function refreshMusicHistory() {
     return;
   }
   if (!data.tracks.length) {
-    box.appendChild(el("div", "sub", "No tracks yet — generate one above."));
+    box.appendChild(el("div", "sub", "No tracks yet - generate one above."));
     return;
   }
   for (const item of data.tracks) {
@@ -1149,7 +1149,7 @@ async function refreshKnowledgePage() {
   }
   if (!data.collections.length) {
     box.appendChild(el("div", "sub",
-      "No collections yet — create one above, then add files or folders to it."));
+      "No collections yet - create one above, then add files or folders to it."));
     return;
   }
   const table = el("table", "data-table");
@@ -1186,7 +1186,7 @@ async function refreshKnowledgePage() {
 
     const del = el("button", "danger", "delete");
     del.onclick = async () => {
-      if (!confirm(`Delete collection '${c.name}'? Only the index is removed — ` +
+      if (!confirm(`Delete collection '${c.name}'? Only the index is removed - ` +
                    "your original files are untouched.")) return;
       const r = await fetch(
         "/api/rag/collections/" + encodeURIComponent(c.name), {
@@ -1212,13 +1212,13 @@ $("kb-create").onclick = async () => {
   const data = await r.json();
   if (!r.ok) { toast(data.detail || "Create failed", true); return; }
   $("kb-name").value = "";
-  toast(`Collection '${data.name}' created — now add files or folders`);
+  toast(`Collection '${data.name}' created - now add files or folders`);
   refreshKnowledgePage();
 };
 
 async function kbAddDocs(name) {
   const path = prompt(
-    `Add documents to '${name}' — file or folder path on this machine\n` +
+    `Add documents to '${name}' - file or folder path on this machine\n` +
     "(folders are indexed recursively; txt/md/pdf/docx/html/code):",
     localStorage.getItem("localm.kbAddPath") || "");
   if (!path || !path.trim()) return;
@@ -1253,7 +1253,7 @@ async function kbInfoModal(name) {
                         { headers: authHeaders() });
   const data = await r.json();
   if (!r.ok) { toast(data.detail || "Load failed", true); return; }
-  openModal("Collection — " + name, (body) => {
+  openModal("Collection - " + name, (body) => {
     body.appendChild(el("div", "sub",
       `${data.n_docs} documents · ${data.n_chunks} chunks · ` +
       (data.has_vectors ? "hybrid retrieval (BM25 + embeddings)"
@@ -1276,13 +1276,13 @@ async function kbInfoModal(name) {
       body.appendChild(row);
     }
     if (!data.docs.length) {
-      body.appendChild(el("div", "sub", "(empty — use add docs)"));
+      body.appendChild(el("div", "sub", "(empty - use add docs)"));
     }
   });
 }
 
 function kbSearchModal(name) {
-  openModal("Search — " + name, (body) => {
+  openModal("Search - " + name, (body) => {
     const row = el("div", "row");
     const input = document.createElement("input");
     input.type = "text";
@@ -1333,7 +1333,7 @@ $("gui-clear-convs").onclick = async () => {
     ? "from this browser AND the server store" : "from this browser";
   if (!confirm(`Delete all saved conversations ${where}?`)) return;
   if (chat.persist) {
-    // Server store is the source of truth — clear it too or they come back.
+    // Server store is the source of truth - clear it too or they come back.
     await Promise.allSettled(chat.conversations.map((c) =>
       fetch("/api/conversations/" + encodeURIComponent(c.id), {
         method: "DELETE", headers: authHeaders(),

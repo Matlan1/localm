@@ -12,7 +12,7 @@ Handles standard ``patch -u`` output:
 
 File-header lines (``---``/``+++``) and ``\\ No newline at end of file``
 markers are tolerated but ignored.  Line numbers in ``@@`` headers are
-used only as *hints* — the applier does a fuzzy search (±20 lines) so
+used only as *hints* - the applier does a fuzzy search (±20 lines) so
 that minor off-by-one errors from the LLM are silently corrected.
 
 Public API
@@ -77,7 +77,7 @@ def _parse_hunks(diff_text: str) -> List[_Hunk]:
             # Inside a hunk
             m = _HUNK_RE.match(line)
             if m:
-                # New hunk starts — save current and open next
+                # New hunk starts - save current and open next
                 assert current is not None
                 hunks.append(current)
                 old_start = int(m.group(1))
@@ -87,7 +87,7 @@ def _parse_hunks(diff_text: str) -> List[_Hunk]:
                 assert current is not None
                 current.lines.append(line)
             elif line.startswith("\\"):
-                # "\ No newline at end of file" — silently ignore
+                # "\ No newline at end of file" - silently ignore
                 pass
             # Blank / unrecognised lines are silently skipped
 
@@ -122,7 +122,7 @@ def _find_hunk_position(
     n = len(old_lines)
 
     if n == 0:
-        # Pure insertion — no context to match; trust the hint
+        # Pure insertion - no context to match; trust the hint
         return max(0, hunk.old_start - 1)
 
     def matches(pos: int) -> bool:
@@ -181,7 +181,7 @@ def apply_diff(original_text: str, diff_text: str) -> str:
         if pos is None:
             old_ctx = "\n".join(_old_side(hunk)[:6])
             raise PatchError(
-                f"Hunk {idx + 1} (near line {hunk.old_start}) could not be applied — "
+                f"Hunk {idx + 1} (near line {hunk.old_start}) could not be applied - "
                 f"context does not match the file.\n"
                 f"Expected:\n{old_ctx}\n"
                 "Hint: re-read the file and regenerate the diff."

@@ -1,7 +1,7 @@
 """
 Persistent document collections ("knowledge bases").
 
-Layout — one directory per collection under ``<data dir>/rag/``:
+Layout - one directory per collection under ``<data dir>/rag/``:
 
     rag/<name>/meta.json      {"name", "created", "docs": {path: {mtime, size, chunks}}}
     rag/<name>/chunks.jsonl   one chunk per line: {"source", "pos", "text"}
@@ -9,7 +9,7 @@ Layout — one directory per collection under ``<data dir>/rag/``:
                               aligned with chunks.jsonl line order
 
 Collections are explicit user data (like generated images): indexing writes
-to disk in every session mode. Rewrites are whole-file + atomic rename —
+to disk in every session mode. Rewrites are whole-file + atomic rename -
 corpora here are home-scale (thousands of chunks, not millions).
 
 Retrieval is hybrid: BM25 always; when vectors exist for (almost) all chunks
@@ -205,7 +205,7 @@ class Collection:
                         vectors = vecs
                 except Exception as e:
                     embed_broken = True
-                    say(f"embeddings unavailable ({e}) — indexing lexical-only")
+                    say(f"embeddings unavailable ({e}) - indexing lexical-only")
 
             # Replace any previous chunks (and vectors) for this document
             if known:

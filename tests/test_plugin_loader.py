@@ -1,4 +1,4 @@
-"""Tests for localm.plugins.loader — external plugin discovery and management."""
+"""Tests for localm.plugins.loader - external plugin discovery and management."""
 
 import sys
 import textwrap

@@ -1,7 +1,7 @@
 """
 Tests for persistent KV cache prefix reuse in the native llama.cpp wrapper.
 
-The native DLL is never loaded — the api module is mocked throughout.
+The native DLL is never loaded - the api module is mocked throughout.
 """
 
 import threading
@@ -48,7 +48,7 @@ def _bare_llama() -> LlamaCpp:
     """Construct a LlamaCpp without running __init__ (no DLL access)."""
     llm = LlamaCpp.__new__(LlamaCpp)
     llm._n_ctx = 4096
-    llm._n_ctx_max = None     # unlimited — preserves the original test scenarios
+    llm._n_ctx_max = None     # unlimited - preserves the original test scenarios
     llm._n_ctx_grow = 4096
     llm._seed = 1234
     llm._verbose = False
@@ -69,7 +69,7 @@ def _bare_llama() -> LlamaCpp:
 def _neutralise_fake_pointers():
     """
     Null out the fake model/ctx pointers before each object is garbage
-    collected — otherwise __del__ → close() passes them to the real
+    collected - otherwise __del__ → close() passes them to the real
     llama_free and crashes the interpreter with an access violation.
     """
     yield
@@ -276,7 +276,7 @@ class TestFreshContextPath:
 
 
 # ---------------------------------------------------------------------------
-#  Sampler chain — repetition penalty
+#  Sampler chain - repetition penalty
 # ---------------------------------------------------------------------------
 
 class TestRepeatPenaltySampler:

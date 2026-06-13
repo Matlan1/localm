@@ -1,5 +1,5 @@
 """
-localm.image_gen — local image generation via ComfyUI FLUX.
+localm.image_gen - local image generation via ComfyUI FLUX.
 
 Public API::
 

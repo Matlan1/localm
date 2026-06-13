@@ -1,4 +1,4 @@
-"""Tests for localm.discover — HF search, quant parsing, VRAM fit badges.
+"""Tests for localm.discover - HF search, quant parsing, VRAM fit badges.
 All HuggingFace calls are mocked; no real network."""
 
 import pytest

@@ -2,7 +2,7 @@
 Per-project configuration loader for localcoder.
 
 Reads ``.localcoder/config.toml`` from the working directory (or any parent).
-Values are merged under CLI options — CLI flags always win.
+Values are merged under CLI options - CLI flags always win.
 
 Supported keys
 --------------

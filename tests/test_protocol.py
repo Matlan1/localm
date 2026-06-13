@@ -1,4 +1,4 @@
-"""Tests for localm.inference.protocol — UsageInfo and ChatChunk/ChatResponse."""
+"""Tests for localm.inference.protocol - UsageInfo and ChatChunk/ChatResponse."""
 
 import unittest
 

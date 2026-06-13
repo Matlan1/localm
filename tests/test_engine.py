@@ -1,4 +1,4 @@
-"""Tests for localm.inference.engine.Engine — loaded property, auto-reload, idempotent load."""
+"""Tests for localm.inference.engine.Engine - loaded property, auto-reload, idempotent load."""
 
 import unittest
 from unittest.mock import MagicMock, call, patch
@@ -62,7 +62,7 @@ class TestEngineLoadIdempotency(unittest.TestCase):
     def test_load_twice_only_calls_backend_once(self):
         engine = self._make_engine(loaded=False)
         engine.load()
-        engine.load()   # second call — already loaded, should be no-op
+        engine.load()   # second call - already loaded, should be no-op
         engine._backend.load.assert_called_once()
 
     def test_load_when_already_loaded_is_noop(self):
@@ -104,7 +104,7 @@ class TestEngineAutoReload(unittest.TestCase):
         "top_k": 40, "repeat_penalty": 1.1,
     })
     def test_chat_stream_after_unload_auto_reloads(self, _cfg):
-        """Unload then call chat_stream — should auto-reload transparently."""
+        """Unload then call chat_stream - should auto-reload transparently."""
         engine = self._make_engine(loaded=True)
         engine.unload()
         self.assertFalse(engine.loaded)

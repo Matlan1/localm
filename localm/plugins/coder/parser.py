@@ -3,7 +3,7 @@ Parse tool calls from model response text.
 
 Supported formats (in priority order):
 
-1. XML wrapper with JSON body — primary:
+1. XML wrapper with JSON body - primary:
    <tool_call>
    {"name": "read_file", "args": {"path": "src/main.py"}}
    </tool_call>
@@ -59,7 +59,7 @@ _RE_XML = re.compile(
 # the wild: <|tool_call>, <|tool_call|>, closing as <tool_call|> or
 # <|/tool_call>, an optional "call:NAME" prefix (sometimes the literal
 # "call:tool_call"), and whitespace before the JSON. The JSON body itself is
-# usually valid — only the wrapper is broken — so accept any delimiter
+# usually valid - only the wrapper is broken - so accept any delimiter
 # variant and recover the call from the body.
 _RE_VARIANT = re.compile(
     r"<\|?/?tool_call\|?>\s*"
@@ -80,7 +80,7 @@ def _lenient_json(body: str) -> Optional[dict]:
     """
     JSON parse tolerating the mangles local finetunes actually produce:
 
-    - literal newlines/tabs inside string values (strict=False) — models
+    - literal newlines/tabs inside string values (strict=False) - models
       write multi-line file content without escaping it
     - a doubled outer brace:  call:write_file{{"path": "x"}}  (seen from
       Gemma finetunes in the wild; it silently broke tool calling)
@@ -142,7 +142,7 @@ def _try_parse_body(body: str, name_attr: Optional[str]) -> Optional[tuple[str, 
             return None
         return name, args
 
-    # Args-only format: {"path": "..."} — requires name_attr
+    # Args-only format: {"path": "..."} - requires name_attr
     if name_attr:
         return name_attr, obj
 

@@ -54,7 +54,7 @@ def _emit_progress(downloaded: int, total: int, *, phase: str = "download") -> N
 def _download_progress(target_parts: List[Path], total_size: int):
     """Stream JSON download progress while files land under MODELS_DIR.
 
-    Active only in GUI mode (LOCALM_PROGRESS_JSON=1) with a known total — a
+    Active only in GUI mode (LOCALM_PROGRESS_JSON=1) with a known total - a
     no-op otherwise, so the CLI keeps huggingface_hub's tqdm bars. Progress is
     measured from bytes on disk (completed parts + the growing ``.incomplete``
     temp file), which is robust across huggingface_hub versions.
@@ -243,7 +243,7 @@ def get_model_info(name: str):
     # HF model directory
     if direct.is_dir() and (direct / "config.json").exists():
         return direct, None
-    # GGUF file — for split GGUFs, normalise to the first part (llama.cpp
+    # GGUF file - for split GGUFs, normalise to the first part (llama.cpp
     # needs the *-00001-of-N part to load the whole set)
     if direct.is_file() and direct.suffix == ".gguf":
         first = first_split_part(direct.name)
@@ -294,7 +294,7 @@ def list_models() -> None:
         else:
             # File is gone: flagged (kept) unless autoprune deleted it earlier.
             kind = "[red]missing[/red]"
-            size = "[red]—[/red]"
+            size = "[red]-[/red]"
             name_cell = f"[red]{name}[/red]"
 
         table.add_row(name_cell, kind, size, source, str(path))
@@ -389,11 +389,11 @@ def _prompt_predownload_dup(dup_names: List[str], model_name: str) -> str:
 
     names = ", ".join(f"'{n}'" for n in dup_names)
     console.print(
-        f"[yellow]You already have this exact file — registered as "
+        f"[yellow]You already have this exact file - registered as "
         f"{names}[/yellow] [dim](sha256 match via HF metadata)[/dim]"
     )
     if not sys.stdin.isatty():
-        console.print("[dim]Non-interactive session — skipping download. "
+        console.print("[dim]Non-interactive session - skipping download. "
                       "Use --redownload to force.[/dim]")
         return "skip"
     choice = click.prompt(
@@ -427,7 +427,7 @@ def _pull_gguf_file(spec: str, name: Optional[str], redownload: bool = False) ->
     model_name = name or filename.removesuffix(".gguf")
     dest = MODELS_DIR / filename
 
-    # Expected digest from HF metadata — free, no download needed.
+    # Expected digest from HF metadata - free, no download needed.
     # (Only identifies the first part of a split GGUF, which is enough.)
     expected = _hf_file_sha256(repo_id, filename)
 
@@ -451,7 +451,7 @@ def _pull_gguf_file(spec: str, name: Optional[str], redownload: bool = False) ->
 
     ensure_dirs()
 
-    # Disk space pre-flight — HEAD each missing part's CDN URL for Content-Length
+    # Disk space pre-flight - HEAD each missing part's CDN URL for Content-Length
     try:
         import requests as _req
         total_size = 0
@@ -518,11 +518,11 @@ def _pull_hf_snapshot(repo_id: str, name: Optional[str], redownload: bool = Fals
         )
         if same_source:
             console.print(
-                f"[yellow]This repo is already downloaded — registered as "
+                f"[yellow]This repo is already downloaded - registered as "
                 f"{', '.join(repr(n) for n in same_source)}[/yellow]"
             )
             if not sys.stdin.isatty():
-                console.print("[dim]Non-interactive session — skipping. "
+                console.print("[dim]Non-interactive session - skipping. "
                               "Use --redownload to force.[/dim]")
                 return
             import click
@@ -585,7 +585,7 @@ def _sha256_file(path: Path) -> str:
 
 
 # ------------------------------------------------------------------ #
-#  Model identity — duplicate detection (two-tier: path, then sha256)  #
+#  Model identity - duplicate detection (two-tier: path, then sha256)  #
 # ------------------------------------------------------------------ #
 
 def find_aliases_by_path(path: Path, reg: Optional[dict] = None) -> List[str]:
@@ -621,7 +621,7 @@ def _hash_with_notice(path: Path) -> Optional[str]:
     if size_gb > 0.5:
         console.print(
             f"[dim]Hashing {path.name} ({size_gb:.1f} GB) for duplicate "
-            f"detection — one-time cost, stored in the registry…[/dim]"
+            f"detection - one-time cost, stored in the registry…[/dim]"
         )
     return _sha256_file(path)
 
@@ -664,7 +664,7 @@ def _prompt_duplicate_action(existing_names: List[str], reason: str) -> str:
         f"[dim]({reason})[/dim]"
     )
     if not sys.stdin.isatty():
-        console.print("[dim]Non-interactive session — skipping. "
+        console.print("[dim]Non-interactive session - skipping. "
                       "Use 'localm alias' to add a name for it.[/dim]")
         return "skip"
 
@@ -724,7 +724,7 @@ def _pull_url(
     if not _check_disk_space(MODELS_DIR, remaining):
         return
 
-    # Build request — try to resume from where we left off
+    # Build request - try to resume from where we left off
     headers: dict = {}
     if already_have:
         headers["Range"] = f"bytes={already_have}-"
@@ -738,7 +738,7 @@ def _pull_url(
     r = requests.get(url, headers=headers, stream=True, timeout=30)
     r.raise_for_status()
 
-    # Server may ignore the Range header — detect and reset if needed
+    # Server may ignore the Range header - detect and reset if needed
     if already_have and r.status_code == 200:
         # Server returned the full file despite Range request
         already_have = 0
@@ -772,7 +772,7 @@ def _pull_url(
         else:
             console.print(
                 f"[red]SHA256 mismatch![/red] Expected {expected_sha256[:16]}…, "
-                f"got {actual[:16]}… — deleting corrupted file"
+                f"got {actual[:16]}… - deleting corrupted file"
             )
             dest.unlink()
             return
@@ -864,16 +864,16 @@ def _backup_registry() -> Optional[Path]:
 def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
     """Reconcile the registry with the models directory.
 
-    Scans ``MODELS_DIR`` for models that aren't registered yet — loose GGUF
+    Scans ``MODELS_DIR`` for models that aren't registered yet - loose GGUF
     files (split GGUFs are registered by their first part) and HuggingFace
-    directories (any subfolder containing ``config.json``) — and registers them.
+    directories (any subfolder containing ``config.json``) - and registers them.
 
     Registry entries whose file has gone missing are, by default, **flagged**
     (``"missing": true``) rather than deleted, so a temporarily-unavailable model
     (moved file, unplugged drive, sync hiccup) is not silently forgotten. When a
     flagged file reappears, the flag is cleared. Deletion happens only when
-    pruning is enabled — via ``prune=True`` or the ``autoprune_missing_models``
-    config setting — and even then only for files under ``MODELS_DIR`` (external
+    pruning is enabled - via ``prune=True`` or the ``autoprune_missing_models``
+    config setting - and even then only for files under ``MODELS_DIR`` (external
     models are flagged, never deleted). Runs without prompting; safe to call on
     every launch.
     """
@@ -940,7 +940,7 @@ def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
 
     # Guardrail: if pruning would delete *every* managed model at once, the folder
     # is almost certainly unavailable (unmounted drive, wrong path) rather than the
-    # user having deleted everything — refuse to prune and flag instead.
+    # user having deleted everything - refuse to prune and flag instead.
     suspicious = prune and len(managed) >= 2 and len(managed_missing) == len(managed)
 
     flagged = restored = pruned = 0
@@ -956,7 +956,7 @@ def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
         path = Path(path_str)
 
         if path.exists():
-            # A previously-missing model is back — clear the flag.
+            # A previously-missing model is back - clear the flag.
             if entry.pop("missing", None):
                 restored += 1
                 dirty = True
@@ -980,7 +980,7 @@ def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
     if suspicious:
         note = (
             f"Skipped autoprune: all {len(managed)} models under the models folder "
-            "appear missing — is the folder/drive available? Left them flagged "
+            "appear missing - is the folder/drive available? Left them flagged "
             "rather than deleting the registry."
         )
 
@@ -1005,7 +1005,7 @@ def _register_with_dedup(
 
     Two-tier identity: resolved path (instant), then stored sha256 when a
     *digest* for the new file is known. ``on_duplicate`` is one of
-    "ask" / "alias" / "copy" / "move" / "register" / "skip" — "ask" prompts
+    "ask" / "alias" / "copy" / "move" / "register" / "skip" - "ask" prompts
     interactively and degrades to "skip" without a TTY.
     """
     import click
@@ -1013,7 +1013,7 @@ def _register_with_dedup(
     reg = load_registry()
     aliases = find_aliases_by_path(p, reg)
 
-    # Same name, same file — true no-op (but backfill a fresh digest)
+    # Same name, same file - true no-op (but backfill a fresh digest)
     if model_name in aliases:
         console.print(
             f"[yellow]'{model_name}' is already registered for this exact "
@@ -1027,7 +1027,7 @@ def _register_with_dedup(
             console.print(f"[dim]Also registered as: {', '.join(others)}[/dim]")
         return
 
-    # Same name, DIFFERENT file — real conflict, never overwrite silently
+    # Same name, DIFFERENT file - real conflict, never overwrite silently
     if model_name in reg:
         old_path = reg[model_name].get("path", "?")
         console.print(
@@ -1039,7 +1039,7 @@ def _register_with_dedup(
                 console.print("[dim]Skipped.[/dim]")
                 return
         else:
-            console.print("[dim]Non-interactive session — skipped. "
+            console.print("[dim]Non-interactive session - skipped. "
                           "Pick another name with -n.[/dim]")
             return
 
@@ -1095,19 +1095,19 @@ def remove_model(name: str) -> None:
     path = Path(reg[name]["path"])
 
     # Alias-aware: if other names still point at this file, only unregister
-    # this name — never delete a file out from under another alias.
+    # this name - never delete a file out from under another alias.
     other_aliases = [a for a in find_aliases_by_path(path, reg) if a != name]
     if other_aliases:
         del reg[name]
         save_registry(reg)
         console.print(
             f"[green]✓[/green] Removed [bold]{name}[/bold] "
-            f"[dim](file kept — still registered as: "
+            f"[dim](file kept - still registered as: "
             f"{', '.join(other_aliases)})[/dim]"
         )
         return
 
-    # Only delete files that live inside ~/.localm/models/ — never touch
+    # Only delete files that live inside ~/.localm/models/ - never touch
     # externally registered paths (Ollama blobs, user model dirs, etc.)
     owned = path.is_relative_to(MODELS_DIR) if hasattr(path, "is_relative_to") else \
             str(path).startswith(str(MODELS_DIR))
@@ -1125,7 +1125,7 @@ def remove_model(name: str) -> None:
                     part_path.unlink()
                     console.print(f"[dim]Deleted {part_path}[/dim]")
     elif path.exists():
-        console.print(f"[dim]Unregistered (file not deleted — lives outside ~/.localm/models)[/dim]")
+        console.print(f"[dim]Unregistered (file not deleted - lives outside ~/.localm/models)[/dim]")
     del reg[name]
     save_registry(reg)
     console.print(f"[green]✓[/green] Removed [bold]{name}[/bold]")
@@ -1202,7 +1202,7 @@ def add_local(
     if ollama is not None:
         blob_path, suggested = ollama
         model_name = name or suggested
-        # Ollama blob filenames already ARE the sha256 digest — store it free
+        # Ollama blob filenames already ARE the sha256 digest - store it free
         digest = blob_path.name.removeprefix("sha256-") \
             if blob_path.name.startswith("sha256-") else None
         _register_with_dedup(

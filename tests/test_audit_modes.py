@@ -1,4 +1,4 @@
-"""Tests for localm.audit — mode resolution and per-surface enforcement."""
+"""Tests for localm.audit - mode resolution and per-surface enforcement."""
 
 import json
 from unittest.mock import MagicMock, patch

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "localm"
 version = "0.1.0"
-description = "Local AI platform — offline LLM inference, model management, and extensible agent plugins"
+description = "Local AI platform - offline LLM inference, model management, and extensible agent plugins"
 readme = "README.md"
 license = { text = "MIT" }
 keywords = ["llm", "gguf", "llama", "local", "offline", "inference", "agent", "mcp"]
@@ -36,7 +36,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# AI coding agent — offline agentic loop, tool use, project map
+# AI coding agent - offline agentic loop, tool use, project map
 # Install with:  pip install "localm[coder]"
 # Invoke via:    localm coder --model <name>  OR  localcoder --model <name>
 coder = [
@@ -44,7 +44,7 @@ coder = [
     "requests>=2.31",
 ]
 
-# AMD RDNA2 (RX 6xxx) GPU stack — ROCm 7.13.0, Python 3.12, Windows
+# AMD RDNA2 (RX 6xxx) GPU stack - ROCm 7.13.0, Python 3.12, Windows
 # Install with:  uv pip install -e ".[gpu]"  (requires Python 3.12 venv)
 gpu = [
     "transformers[kernels]~=5.10",
@@ -56,7 +56,7 @@ gpu = [
     "rocm-sdk-core; sys_platform == 'win32'",
     "rocm-sdk-libraries-gfx103x-all; sys_platform == 'win32'",
 ]
-# In-process GGUF inference — AMD GPU build:
+# In-process GGUF inference - AMD GPU build:
 #   pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/rocm602
 gguf = [
     "llama-cpp-python>=0.2.90",
@@ -65,29 +65,29 @@ gguf = [
 audio = [
     "soundfile>=0.12",
 ]
-# Knowledge collections (chat with your documents) — only PDF parsing needs
+# Knowledge collections (chat with your documents) - only PDF parsing needs
 # a package; txt/md/docx/html/code extraction is stdlib.
 # Install with:  pip install "localm[rag]"
 rag = [
     "pypdf>=4.0",
 ]
-# Speech-to-text for the GUI mic button (Whisper, CPU int8 — no torch).
+# Speech-to-text for the GUI mic button (Whisper, CPU int8 - no torch).
 # Install with:  pip install "localm[voice]"
 voice = [
     "faster-whisper>=1.0",
 ]
-# CPU-only install — the base package already runs GGUF models on CPU via the
+# CPU-only install - the base package already runs GGUF models on CPU via the
 # ctypes binding (only llama.dll + ggml*.dll needed). This extra exists so
 # `pip install "localm[cpu]"` is an explicit, documented choice.
 cpu = []
-# Abliterate models with Heretic. No new dependencies — the plugin only shells
+# Abliterate models with Heretic. No new dependencies - the plugin only shells
 # out to Heretic (a separate AGPL program; not bundled) and uses git + uv, which
 # the user already has. This extra exists as an explicit opt-in marker.
 abliterate = []
 
 [project.scripts]
 localm    = "localm.cli:main"
-# backward-compat alias — installed only when the [coder] extra is present.
+# backward-compat alias - installed only when the [coder] extra is present.
 # pip/uv honours this because the package is installed; the command always
 # works as long as localm[coder] was requested.
 localcoder = "localm.plugins.coder.cli:main"

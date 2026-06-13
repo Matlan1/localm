@@ -159,13 +159,13 @@ def ensure_dirs() -> None:
     MODELS_DIR.mkdir(exist_ok=True)
 
 
-# Registry and config are mutated from several places at once — the GUI server
+# Registry and config are mutated from several places at once - the GUI server
 # threads, the `localm pull` subprocess the GUI spawns, and sync_models_dir on
 # every launch. A plain open("w")+json.dump truncates the file before writing,
 # so a crash, a job cancel (SIGTERM), or simple interleaving could leave a
 # half-written file that the next unguarded json.load() would choke on, hiding
 # every registered model app-wide. The helpers below make every write atomic
-# (write a temp file in the same dir, fsync, then os.replace — readers see only
+# (write a temp file in the same dir, fsync, then os.replace - readers see only
 # the old or the new complete file, never a torn one) and make every read
 # crash-proof (fall back to the .bak snapshot, then to the default).
 _io_lock = threading.RLock()
@@ -192,7 +192,7 @@ def _atomic_write_json(path: Path, data) -> None:
 
 def _read_json(path: Path, default):
     """Read JSON from *path*, falling back to its .bak then *default* on any
-    corruption — a damaged file must never take the whole app down."""
+    corruption - a damaged file must never take the whole app down."""
     for candidate in (path, path.with_name(path.name + ".bak")):
         if not candidate.is_file():
             continue
@@ -242,7 +242,7 @@ def update_registry(mutator: Callable[[dict], None]) -> dict:
     persisted with a single atomic write. Use this instead of a bare
     load_registry()/save_registry() pair wherever a lost update would matter,
     so two in-process writers can't clobber each other. (Cross-process writers
-    — e.g. a CLI `pull` running alongside the GUI — are still last-writer-wins,
+    - e.g. a CLI `pull` running alongside the GUI - are still last-writer-wins,
     but each write stays atomic and non-corrupting.)"""
     with _io_lock:
         reg = _read_json(REGISTRY_FILE, {})

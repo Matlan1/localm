@@ -128,25 +128,25 @@ GUI gaps identified by comparing against LM Studio, Jan, Open WebUI.
 
 ### Round 3 (shipped 2026-06-11)
 
-- [x] Fix: answered approval cards replayed as still-pending after a page reload — `confirm_resolved` event now recorded in the stream and replay buffer; cards resolve idempotently (covers approve, reject, timeout, and stop)
+- [x] Fix: answered approval cards replayed as still-pending after a page reload - `confirm_resolved` event now recorded in the stream and replay buffer; cards resolve idempotently (covers approve, reject, timeout, and stop)
 - [x] Remember the active page across reloads (`localm.activeView`; never written in privacy mode)
 - [x] Server-side chat conversation persistence in non-privacy modes: `PUT/GET/DELETE /api/conversations`, stored in `<data dir>/chats/`, merged with the localStorage cache at load; privacy mode unchanged (memory only, 403 on the store)
 - [x] Coder session history browser: `GET /api/coder/history[/{name}]` lists past audit logs (`~/.localm/sessions/*.jsonl`) incl. pre-restart sessions; history button in the coder bar + "past sessions" on the setup form
 - [x] Settings "clear conversations" also clears the server store when persistence is on
 
-### Round 4 (shipped 2026-06-11) — internet access
+### Round 4 (shipped 2026-06-11) - internet access
 
-- [x] `localm/netpolicy.py`: single policy choke point for model-initiated requests — net_mode off/ask/allow (+ `LOCALM_NET_MODE` env), net_allow/net_deny domain suffix rules, private/loopback/link-local SSRF guard with `net_allow_private` escape hatch, per-hop redirect re-validation, size caps
+- [x] `localm/netpolicy.py`: single policy choke point for model-initiated requests - net_mode off/ask/allow (+ `LOCALM_NET_MODE` env), net_allow/net_deny domain suffix rules, private/loopback/link-local SSRF guard with `net_allow_private` escape hatch, per-hop redirect re-validation, size caps
 - [x] Coder: `web_search` tool (DuckDuckGo no-key default, SearXNG via `net_search_url`); `fetch_url` rerouted through the policy; both gated in the agent (off = fail fast, ask = approval flow); privacy-mode stderr audit
 - [x] `/api/web/search` + `/api/web/fetch` endpoints (403 on policy refusal)
-- [x] Chat: `/web <query>` command and a per-conversation "Web access" toggle — the model emits `<tool_call>` web requests, the GUI executes them through the policy and injects results as visible dimmed "Web" messages (max 3 rounds per send)
+- [x] Chat: `/web <query>` command and a per-conversation "Web access" toggle - the model emits `<tool_call>` web requests, the GUI executes them through the policy and injects results as visible dimmed "Web" messages (max 3 rounds per send)
 - [x] Behaviour change: `fetch_url` to localhost/private addresses is now blocked by default (`net_allow_private true` restores it)
 
-### Round 15 (shipped 2026-06-12) — coder overhaul (QoL round)
+### Round 15 (shipped 2026-06-12) - coder overhaul (QoL round)
 
 Agent core (both surfaces):
 - [x] Changed-files tracker: every successful write/edit/patch/notebook-edit recorded with its first-seen original; `changed_files()` + `session_diff()` produce cumulative per-file and whole-session diffs (original → current, not edit-by-edit)
-- [x] Mid-task steering: `queue_message()` (thread-safe) injects user messages at the next turn boundary as a steering note — no more "agent is busy" wall; leftovers run as a follow-up task
+- [x] Mid-task steering: `queue_message()` (thread-safe) injects user messages at the next turn boundary as a steering note - no more "agent is busy" wall; leftovers run as a follow-up task
 - [x] Circuit breaker: 4 identical consecutive tool failures abort the task with the conversation intact (hints still escalate at 2 and 3)
 - [x] Context meter: turn events carry `ctx_ratio`; CLI turn divider and GUI usage line show `ctx N%` (colored in the CLI)
 - [x] Parallel batch timeout (120 s): one hung non-destructive tool no longer blocks the whole batch
@@ -157,7 +157,7 @@ Agent core (both surfaces):
 
 CLI REPL:
 - [x] `/changes` (files touched) + `/diff [path]` (cumulative session diff, syntax-colored)
-- [x] Tab completion for slash commands and project paths; persistent REPL history in `.localcoder/repl_history` (log/full modes only — never privacy)
+- [x] Tab completion for slash commands and project paths; persistent REPL history in `.localcoder/repl_history` (log/full modes only - never privacy)
 - [x] `/undo` reports remaining stack depth; `/help` covers everything (and the `\exit` markup typo is gone)
 
 GUI:
@@ -168,74 +168,74 @@ GUI:
 - [x] Dry-run toggle at session setup; final feed line counts changed files; `export` downloads the feed as markdown; audit-log viewer gains a filter box
 - [x] Tests: 52 new (agent QoL, tools QoL, GUI session/endpoints) + audit holes closed: checkpoint/resume, undo stack, parallel ordering/timeout, retry streaks, stop midstream, read_env redaction, edit_notebook_cell, patch-mode guard
 
-### Round 14 (shipped 2026-06-12) — video generation
+### Round 14 (shipped 2026-06-12) - video generation
 
-- [x] `localm/video_gen/` — Wan 2.2 TI2V 5B workflow (`wan_workflow.json`, public Comfy-Org stack; gitignored `wan_workflow_local.json` override) + `generate_video()` via ComfyUI: duration snapped to Wan's 4k+1 frame rule (~5 s native at 24 fps, up to 20 s accepted), text-to-video or image-to-video (`start_image` via the shared upload helper), MP4 output, privacy-gated sidecar, VRAM handoff
+- [x] `localm/video_gen/` - Wan 2.2 TI2V 5B workflow (`wan_workflow.json`, public Comfy-Org stack; gitignored `wan_workflow_local.json` override) + `generate_video()` via ComfyUI: duration snapped to Wan's 4k+1 frame rule (~5 s native at 24 fps, up to 20 s accepted), text-to-video or image-to-video (`start_image` via the shared upload helper), MP4 output, privacy-gated sidecar, VRAM handoff
 - [x] API endpoints: `POST /api/video` (progress-streamed job), `GET /api/video/history`, `GET/DELETE /api/video/file/{name}` (confined), `POST /api/video/file/{name}/move`
 - [x] GUI "Video" page: prompt/negative/duration/fps/size/seed/steps/CFG/start-image form → job log → inline `<video>` player; history with play/move/delete; `videoMoveDest` scrubbed under the privacy contract
 - [x] `/video <prompt>` in chat: inline clip with a video-player message (messages gain a `video` field, rendered like `audio` via blob URLs)
 - [x] CLI: `localm video "prompt" [-d s] [--fps n] [--width/--height] [--image start.png] [-o out.mp4] [--seed/--steps/--cfg]`
 - [x] Tests: frame snapping, fail-fast before LLM unload, mocked end-to-end with sidecar privacy, save-node output-key variants (`images`/`gifs`/`videos`), endpoint validation + path confinement
 - [x] Verified end-to-end 2026-06-12 against a real ComfyUI with the Wan 2.2 5B files: 1 s clip at the native 1280x704, 20 steps → crisp, on-prompt h264 MP4 in ~7.5 min on a 16 GB RDNA2 card (~13.5 s/step + model load); privacy mode left no sidecar; measured timings in docs/video.md
-- [x] Quality lesson from the e2e run, folded into template + docs + GUI: the 5B is **720p-native** — sub-native resolutions (e.g. 640x368) produce washed-out mush, so the template default is now 1280x704 and "iterate by shortening the clip, never by shrinking the frame"
+- [x] Quality lesson from the e2e run, folded into template + docs + GUI: the 5B is **720p-native** - sub-native resolutions (e.g. 640x368) produce washed-out mush, so the template default is now 1280x704 and "iterate by shortening the clip, never by shrinking the frame"
 - [x] Post-download cleanup: the duplicate clip in ComfyUI's own output dir is deleted when `COMFY_OUTPUT_DIR`/`comfy_output_dir` is set (same behaviour as image generation; found during the e2e run, then verified live on the second render)
 
-### Round 13 (shipped 2026-06-12) — music surfaces
+### Round 13 (shipped 2026-06-12) - music surfaces
 
 - [x] Music nav page: tags/lyrics/duration (arbitrary seconds)/seed/steps/CFG form → progress-streamed job → inline player; history with play / move-to-folder / delete
 - [x] `/music <tags>` in chat: inline generation with an audio-player message (messages gain an `audio` field; bearer-protected files load as blob URLs)
 - [x] `localm music "tags" [--lyrics file] [-d seconds] [-o out.flac] [--seed/--steps/--cfg]` with a clear ComfyUI-not-running hint
 - [x] `imgMoveDest`/`musicMoveDest` localStorage keys gated + scrubbed under the privacy contract
 
-### Round 12 (shipped 2026-06-12) — voice
+### Round 12 (shipped 2026-06-12) - voice
 
-- [x] `localm/voice.py` + `[voice]` extra: Whisper STT via faster-whisper (CPU int8 — runs on the GGUF-only base install, no torch); model from config `voice_stt_model` (default "base"), downloaded once on first use, then fully offline
+- [x] `localm/voice.py` + `[voice]` extra: Whisper STT via faster-whisper (CPU int8 - runs on the GGUF-only base install, no torch); model from config `voice_stt_model` (default "base"), downloaded once on first use, then fully offline
 - [x] `POST /api/voice/transcribe` (in-memory decode, never touches disk → privacy-clean; 501 with install hint when the extra is missing)
 - [x] 🎤 mic button in the composer (MediaRecorder, click to start/stop, transcript lands in the input)
-- [x] TTS with zero backend: 🔊 read-aloud per reply (toggle to stop) + "Speak replies aloud" drawer checkbox — browser speechSynthesis, offline by construction
+- [x] TTS with zero backend: 🔊 read-aloud per reply (toggle to stop) + "Speak replies aloud" drawer checkbox - browser speechSynthesis, offline by construction
 
-### Round 11 (shipped 2026-06-12) — assistant memory
+### Round 11 (shipped 2026-06-12) - assistant memory
 
 - [x] `<data dir>/chat-memory.md`: plain markdown the user can read/edit; `GET/PUT /api/memory` + `POST /api/memory/append`; size-capped; clearing deletes the file
 - [x] 🧠 drawer toggle injects memory into the system prompt across all chats; `/remember <fact>` appends a bullet; `/memory` opens a view/edit modal
-- [x] Privacy semantics: writes 403 in privacy mode (memory persists conversation-derived facts), reads stay allowed — privacy means no new traces, not amnesia
+- [x] Privacy semantics: writes 403 in privacy mode (memory persists conversation-derived facts), reads stay allowed - privacy means no new traces, not amnesia
 
-### Round 10 (shipped 2026-06-12) — prompt library / personas
+### Round 10 (shipped 2026-06-12) - prompt library / personas
 
 - [x] `/api/prompts` CRUD on `<data dir>/prompts.json` (atomic writes; explicit user assets, available in every session mode)
 - [x] Params drawer: persona select applies system prompt + sampling defaults; save… captures the current drawer values under a name; delete removes the saved persona without touching the drawer
 - [x] `/persona <name>` slash command (case-insensitive; bare `/persona` lists what's saved)
 
-### Round 9 (shipped 2026-06-12) — message branching
+### Round 9 (shipped 2026-06-12) - message branching
 
 - [x] Fork-point model: `conv.messages` stays the live linear branch (compaction, retrieval injection, export, and the API mapping untouched); alternative timelines park in `conv.branches` records keyed by the preceding message's id
 - [x] Edit-and-fork: editing a sent message parks the old tail as a sibling instead of destroying it; regenerate parks the old reply as a variant
 - [x] ‹ k/N › navigation in the message meta row at any fork point; switching writes the live tail back into its slot and splices in the chosen sibling
-- [x] Branches persist through the conversation store; cleared by `/clear`; fork records anchored in compacted-away history are pruned (conservatively — anchors inside parked tails are kept)
+- [x] Branches persist through the conversation store; cleared by `/clear`; fork records anchored in compacted-away history are pruned (conservatively - anchors inside parked tails are kept)
 
-### Round 8 (shipped 2026-06-12) — conversation organization
+### Round 8 (shipped 2026-06-12) - conversation organization
 
 - [x] Sidebar search across ALL chats: matches titles and message content; content hits show a one-line snippet; searching auto-expands collapsed groups so matches are never hidden
-- [x] 📌 pin-to-top and 📁 folders (hover buttons + `/pin`, `/folder <name>` slash commands); folders render as collapsible groups, collapse state remembered (scrubbed in privacy mode — folder names are conversation-derived)
+- [x] 📌 pin-to-top and 📁 folders (hover buttons + `/pin`, `/folder <name>` slash commands); folders render as collapsible groups, collapse state remembered (scrubbed in privacy mode - folder names are conversation-derived)
 - [x] `pinned`/`folder` persist through the conversation store (`ConversationUpsert` extended; old stored chats get safe defaults)
 
-### Round 7 (shipped 2026-06-12) — model discovery
+### Round 7 (shipped 2026-06-12) - model discovery
 
-- [x] `localm/discover.py`: HF model search (empty query = most downloaded GGUF — dynamic "starter picks", no hardcoded model names), repo tree parsing with quant-label extraction and split-GGUF grouping (sizes summed, first part = pull spec)
-- [x] "Fits your VRAM" badges vs **total** VRAM (capacity, not currently-free — the active model occupies the GPU while browsing) using the GGUF preflight overhead estimate; VRAM detection works without torch: torch → nvidia-smi → Windows display-adapter registry (`qwMemorySize`)
-- [x] `/api/discover/search` + `/api/discover/files` (403 on net_mode=off — the kill switch covers discovery even though model downloads are otherwise outside the network policy)
+- [x] `localm/discover.py`: HF model search (empty query = most downloaded GGUF - dynamic "starter picks", no hardcoded model names), repo tree parsing with quant-label extraction and split-GGUF grouping (sizes summed, first part = pull spec)
+- [x] "Fits your VRAM" badges vs **total** VRAM (capacity, not currently-free - the active model occupies the GPU while browsing) using the GGUF preflight overhead estimate; VRAM detection works without torch: torch → nvidia-smi → Windows display-adapter registry (`qwMemorySize`)
+- [x] `/api/discover/search` + `/api/discover/files` (403 on net_mode=off - the kill switch covers discovery even though model downloads are otherwise outside the network policy)
 - [x] Models page "Find models" card: lazy search (no network call until asked), downloads/likes, expandable per-quant list with colored fit badges and one-click pull into the existing progress flow
 - [x] CLI: `localm search [query…]` and `localm search owner/repo --files`
 
-### Round 6 (shipped 2026-06-12) — knowledge / RAG
+### Round 6 (shipped 2026-06-12) - knowledge / RAG
 
 - [x] `localm/rag/` package: extraction (txt/md/code/html/docx/ipynb stdlib; pdf via the `[rag]` extra), paragraph-aware chunking, pure-stdlib BM25, JSON collection store under `<data dir>/rag/` with mtime-based re-indexing and atomic rewrites
-- [x] Lexical-first retrieval by design: the ctypes GGUF binding has no embedding support, so BM25 is the always-on baseline; embeddings (via the server's own `/v1/embeddings`) are stored when available and blended 50/50 — failures degrade, never break
-- [x] `/api/rag/*`: collection CRUD, indexing as a progress-streamed job, query, remove-doc, and `/api/rag/extract` (uploaded attachment → text entirely in memory — privacy-mode chats can use documents trace-free)
+- [x] Lexical-first retrieval by design: the ctypes GGUF binding has no embedding support, so BM25 is the always-on baseline; embeddings (via the server's own `/v1/embeddings`) are stored when available and blended 50/50 - failures degrade, never break
+- [x] `/api/rag/*`: collection CRUD, indexing as a progress-streamed job, query, remove-doc, and `/api/rag/extract` (uploaded attachment → text entirely in memory - privacy-mode chats can use documents trace-free)
 - [x] GUI: Knowledge page (create/index/search/inspect/delete), chat params-drawer collection selector with cited excerpt injection, paperclip accepts documents alongside images ("Doc"/"Sources" dimmed messages)
 - [x] CLI: `localm rag add/list/query/rm`; `[rag]` extra (pypdf only)
 
-### Round 5 (shipped 2026-06-11) — onboarding with no models
+### Round 5 (shipped 2026-06-11) - onboarding with no models
 
 - [x] `localm gui` opens model-less on an empty registry (engine starts when the user loads a model) instead of `exit(1)`; `/v1/models` + `/health` null-safe
 - [x] `localm gui --pull SPEC` deep-links the browser to the Models page (`?view=models&pull=…`) and auto-starts the download with the existing progress UI; query string stripped after handling
@@ -255,12 +255,12 @@ GUI:
 
 Backend scaffold is in place; the user-facing parts are still to do.
 
-- [x] `localm/music_gen/` — ACE-Step workflow (`ace_workflow.json`) + `generate_music()` via ComfyUI (arbitrary track length in seconds, lyrics or instrumental, FLAC output, sidecar metadata, VRAM handoff)
+- [x] `localm/music_gen/` - ACE-Step workflow (`ace_workflow.json`) + `generate_music()` via ComfyUI (arbitrary track length in seconds, lyrics or instrumental, FLAC output, sidecar metadata, VRAM handoff)
 - [x] API endpoints: `POST /api/music`, `GET /api/music/history`, `GET/DELETE /api/music/file/{name}`, `POST /api/music/file/{name}/move`
 - [x] GUI "Music" page: tags/lyrics/duration form, job log, inline audio player, history with play/move/delete (shipped 2026-06-12, Round 13)
-- [x] `/music` slash command in chat — default-length instrumental with an inline player message (Round 13)
+- [x] `/music` slash command in chat - default-length instrumental with an inline player message (Round 13)
 - [x] CLI command `localm music "tags" --lyrics file --duration 180` (Round 13)
-- [ ] Verify end-to-end against a ComfyUI install with `ace_step_v1_3.5b.safetensors`; document model download in README — **needs a manual run on a machine with the model**; all surfaces are mock-tested
+- [ ] Verify end-to-end against a ComfyUI install with `ace_step_v1_3.5b.safetensors`; document model download in README - **needs a manual run on a machine with the model**; all surfaces are mock-tested
 
 ---
 
@@ -281,7 +281,7 @@ Backend scaffold is in place; the user-facing parts are still to do.
 
 Gap analysis vs the polished consumer suites (LM Studio, Msty, Jan, Open
 WebUI, GPT4All, AnythingLLM), 2026-06-11. Goal: everything below, eventually.
-Persistence-touching items are always gated on `effective_mode()` — privacy
+Persistence-touching items are always gated on `effective_mode()` - privacy
 mode stays trace-free.
 
 ### High impact
@@ -313,7 +313,7 @@ mode stays trace-free.
 - [ ] One-file backup / export-import of all user data (chats, prompts, settings)
 - [ ] i18n, accessibility pass, mobile/PWA layout
 - [ ] Profiles / multi-user accounts (likely out of scope for home use)
-- [ ] Native shell, tray, auto-update, installer — tracked above as the Tauri 2 item
+- [ ] Native shell, tray, auto-update, installer - tracked above as the Tauri 2 item
 
 ## Future Benchmarking (Under Review)
 

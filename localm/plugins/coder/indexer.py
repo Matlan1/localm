@@ -3,7 +3,7 @@ Project map / codebase index.
 
 Scans the working directory at agent startup and produces a compact,
 human+LLM-readable summary of the codebase.  This is injected into the
-agent's context so it knows what files exist and what they contain —
+agent's context so it knows what files exist and what they contain -
 without having to ``list_dir`` or ``read_file`` every turn.
 
 The map includes:
@@ -157,7 +157,7 @@ class FileSummary:
             syms = ", ".join(self.symbols[:8])
             if len(self.symbols) > 8:
                 syms += f", +{len(self.symbols) - 8}"
-            sym_str = f"  — {syms}"
+            sym_str = f"  - {syms}"
         lines_str = f" ({self.lines}L)" if self.lines else ""
         return f"  {self.path}{lines_str} {lang_tag}{sym_str}"
 
@@ -179,7 +179,7 @@ def _load_gitignore_patterns(root: Path) -> list[str]:
 
 
 def _is_ignored(rel: Path, patterns: list[str]) -> bool:
-    """Very simple gitignore check — handles exact names and * globs."""
+    """Very simple gitignore check - handles exact names and * globs."""
     name = rel.name
     parts = rel.parts
     for pat in patterns:
@@ -305,14 +305,14 @@ class ProjectMap:
         for f in self.files:
             line = f.one_line()
             if chars_used + len(line) + 1 > _MAX_MAP_CHARS:
-                lines.append("  … (truncated — use list_dir / search_files to explore further)")
+                lines.append("  … (truncated - use list_dir / search_files to explore further)")
                 self.truncated = True
                 break
             lines.append(line)
             chars_used += len(line) + 1
 
         if self.truncated:
-            lines.append("  (index truncated — some files not shown)")
+            lines.append("  (index truncated - some files not shown)")
 
         return "\n".join(lines)
 

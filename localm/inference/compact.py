@@ -4,7 +4,7 @@ Conversation compaction for chat sessions.
 When a chat history approaches the context ceiling, older turns are
 summarised by the model itself and replaced with a compact summary
 exchange, keeping the most recent turns verbatim. If summarisation fails
-for any reason (model error, empty output), the fallback is a hard trim —
+for any reason (model error, empty output), the fallback is a hard trim -
 older messages are simply dropped with a visible note. Either way the
 function never raises and always returns a usable history: chat keeps
 working instead of dying at the ceiling.
@@ -90,7 +90,7 @@ def compact_messages(
     messages. Returns (new_messages, changed).
 
     *generate(messages, max_tokens)* runs the model and returns its text.
-    Any failure inside it triggers the hard-trim fallback — this function
+    Any failure inside it triggers the hard-trim fallback - this function
     never raises.
     """
     head, older, recent = _split(messages)
@@ -123,7 +123,7 @@ def compact_messages(
              "content": "Understood. Continuing from this summary."},
         ]
     else:
-        # Hard trim — drop the middle entirely, but say so
+        # Hard trim - drop the middle entirely, but say so
         bridge = [
             {"role": "user", "content": _TRIM_NOTE},
             {"role": "assistant", "content": "Understood."},

@@ -1,4 +1,4 @@
-"""Tests for localm.inference.http_server — unload/load endpoints and usage in responses."""
+"""Tests for localm.inference.http_server - unload/load endpoints and usage in responses."""
 
 import json
 import unittest

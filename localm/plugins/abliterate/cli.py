@@ -1,4 +1,4 @@
-"""``localm abliterate`` — decensor a model with Heretic, then register it.
+"""``localm abliterate`` - decensor a model with Heretic, then register it.
 
 NOTICE: This command invokes Heretic
 (https://github.com/Matlan1/heretic-win-AMD), licensed under AGPL-3.0-or-later,
@@ -178,7 +178,7 @@ def _register_result(target: Path, reg_name: str) -> None:
     gguf = next(iter(sorted(target.glob("*.gguf"))), None) if target.is_dir() else None
 
     if gguf is not None:
-        # The GGUF is the better runtime fit on limited VRAM — register it as the
+        # The GGUF is the better runtime fit on limited VRAM - register it as the
         # primary name, and the safetensors directory under a "-hf" suffix.
         add_local(str(gguf), name=reg_name, on_duplicate="register")
         console.print(f"[green]✓[/green] Registered GGUF as [bold]{reg_name}[/bold].")

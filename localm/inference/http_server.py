@@ -35,11 +35,11 @@ from localm.inference.protocol import (
 # Global engine reference set by serve()
 _engine: Engine | None = None
 
-# Inference serialisation — only one request runs inference at a time.
+# Inference serialisation - only one request runs inference at a time.
 # Additional requests queue behind this semaphore.
 _inference_sem: asyncio.Semaphore | None = None
 
-# Optional bearer-token auth — enabled when LOCALM_API_KEY is set.
+# Optional bearer-token auth - enabled when LOCALM_API_KEY is set.
 _bearer_scheme = HTTPBearer(auto_error=False)
 
 
@@ -54,7 +54,7 @@ def _require_auth(
     """
     api_key = os.environ.get("LOCALM_API_KEY")
     if not api_key:
-        return  # no key configured — dev/local mode, skip auth
+        return  # no key configured - dev/local mode, skip auth
     # Constant-time compare so a network attacker can't recover the key byte
     # by byte from response-timing differences.
     import hmac
@@ -82,7 +82,7 @@ def create_app(engine: Engine) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         global _inference_sem
-        # Semaphore created inside the running event loop — Python 3.10+ safe
+        # Semaphore created inside the running event loop - Python 3.10+ safe
         _inference_sem = asyncio.Semaphore(1)
         yield
         _audit.close()
@@ -150,7 +150,7 @@ def create_app(engine: Engine) -> FastAPI:
 
     @app.get("/v1/models")
     async def list_models():
-        # The GUI can run with no engine yet (fresh install, empty registry —
+        # The GUI can run with no engine yet (fresh install, empty registry -
         # the user adds a model from the Models page). Report an empty list.
         if _engine is None:
             return {"object": "list", "data": []}
@@ -264,7 +264,7 @@ def create_app(engine: Engine) -> FastAPI:
         # the coder default is resolved per new session.
         cfg["effective_mode"] = _mode.value
         cfg["effective_coder_mode"] = effective_mode("coder").value
-        # Resolved context ceiling (VRAM-derived when ctx_auto) — the GUI
+        # Resolved context ceiling (VRAM-derived when ctx_auto) - the GUI
         # bases its compaction threshold on this, not the static config.
         eff_ctx = getattr(_engine, "effective_ctx_max", None) if _engine else None
         cfg["effective_ctx_max"] = eff_ctx if isinstance(eff_ctx, int) else None
@@ -283,7 +283,7 @@ def create_app(engine: Engine) -> FastAPI:
         return cfg
 
     # ---------------------------------------------------------------- #
-    #  Model lifecycle — unload / load                                   #
+    #  Model lifecycle - unload / load                                   #
     # ---------------------------------------------------------------- #
 
     @app.post("/v1/models/unload", dependencies=[Depends(_require_auth)])
@@ -312,7 +312,7 @@ def create_app(engine: Engine) -> FastAPI:
         """
         Explicitly reload the model into memory.
 
-        Normally you don't need this — /v1/chat/completions reloads
+        Normally you don't need this - /v1/chat/completions reloads
         automatically if the model was unloaded.  Use this endpoint if you
         want to pre-warm the model before the first inference request.
         """
@@ -456,7 +456,7 @@ def create_app(engine: Engine) -> FastAPI:
 # ------------------------------------------------------------------ #
 
 def _engine_finish_reason(engine) -> str:
-    """Why the last generation ended — "stop" unless the backend reported a
+    """Why the last generation ended - "stop" unless the backend reported a
     real string (mocks and minimal engines without the attribute count as stop)."""
     fr = getattr(engine, "last_finish_reason", "stop")
     return fr if isinstance(fr, str) else "stop"
@@ -548,7 +548,7 @@ async def _stream_sse(
             for token in engine.chat_stream(messages, **gen_kwargs):
                 loop.call_soon_threadsafe(token_queue.put_nowait, token)
         except Exception as e:
-            # Log it (debug log included) and surface it to the client —
+            # Log it (debug log included) and surface it to the client -
             # a silent thread death looks like an empty reply.
             from localm.debuglog import logger as _dbg
             _dbg.exception("generation thread failed")
@@ -561,7 +561,7 @@ async def _stream_sse(
 
     import threading
 
-    # Serialise inference — only one request runs at a time
+    # Serialise inference - only one request runs at a time
     async with sem:
         gen_start = time.perf_counter()
         first_token_at: float | None = None
@@ -593,7 +593,7 @@ async def _stream_sse(
 
     _audit_exchange(audit, transcript, messages, "".join(completion_parts))
 
-    # Count tokens on the full completion text — more accurate and efficient
+    # Count tokens on the full completion text - more accurate and efficient
     completion_tokens = engine.count_tokens("".join(completion_parts))
 
     usage = UsageInfo(
@@ -705,7 +705,7 @@ async def _complete(
     def _run():
         return "".join(engine.chat_stream(messages, **gen_kwargs))
 
-    # Serialise inference — only one request runs at a time
+    # Serialise inference - only one request runs at a time
     async with sem:
         gen_start = time.perf_counter()
         text = await loop.run_in_executor(None, _run)
@@ -773,7 +773,7 @@ def _protocol_messages_to_dicts(messages: List[Message]) -> list:
 # ------------------------------------------------------------------ #
 
 def serve(engine: Engine, host: str = "127.0.0.1", port: int = 8642) -> None:
-    """Start the server — blocks until Ctrl+C."""
+    """Start the server - blocks until Ctrl+C."""
     import uvicorn
 
     app = create_app(engine)

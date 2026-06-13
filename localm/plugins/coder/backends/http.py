@@ -1,5 +1,5 @@
 """
-HTTP backend — connects to any OpenAI-compatible inference endpoint.
+HTTP backend - connects to any OpenAI-compatible inference endpoint.
 
 Covers:
   - localm serve (offline, local model)

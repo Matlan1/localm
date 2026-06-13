@@ -1,5 +1,5 @@
 """
-Agent — the core agentic loop.
+Agent - the core agentic loop.
 
 Flow per turn:
     1. Call the LLM with the current message history
@@ -55,7 +55,7 @@ from .display import (
 from .audit import AuditLog, AuditLogT, NullAuditLog, SessionMode, make_audit_log
 from .prompts import build_system_prompt
 
-# Tools that mutate files — trigger a project map refresh after they run
+# Tools that mutate files - trigger a project map refresh after they run
 _MUTATING_TOOLS: frozenset[str] = frozenset({"write_file", "edit_file", "run_shell"})
 
 # Tools whose file changes can be undone (we snapshot before they run).
@@ -236,7 +236,7 @@ class Agent:
 
         # MCP: start configured servers and register their tools BEFORE the
         # system prompt is built so the model learns about them. Failures
-        # warn and continue — external servers must never break the agent.
+        # warn and continue - external servers must never break the agent.
         self._mcp_docs: str = ""
         try:
             from .mcp import register_mcp_tools
@@ -299,7 +299,7 @@ class Agent:
         """
         Queue a steering message for delivery at the next turn boundary.
 
-        Thread-safe — the GUI calls this from the request thread while the
+        Thread-safe - the GUI calls this from the request thread while the
         agent loop runs in its own thread. The message is injected into the
         conversation before the next LLM call, so the user can redirect a
         running task ("also add logging", "skip the tests") without stopping
@@ -330,7 +330,7 @@ class Agent:
         *created* means the file did not exist before this session touched it
         and *exists* is its current on-disk state (False = since deleted).
         """
-        # Snapshot first — the GUI reads this from another thread while the
+        # Snapshot first - the GUI reads this from another thread while the
         # agent loop may be inserting entries.
         snapshot = dict(self._changed_files)
         out = []
@@ -351,7 +351,7 @@ class Agent:
         Cumulative unified diff of everything this session changed.
 
         Compares each tracked file's first-seen original content against its
-        current on-disk state — so three successive edits to one file show as
+        current on-disk state - so three successive edits to one file show as
         one combined diff. Pass *path* for a single file, None for all.
         Returns "" when nothing was changed (or the path is untracked).
         """
@@ -418,7 +418,7 @@ class Agent:
     def save_checkpoint(self) -> None:
         """Persist current conversation state so it can be resumed later.
 
-        No-op in privacy mode — the checkpoint contains the full
+        No-op in privacy mode - the checkpoint contains the full
         conversation, which privacy mode promises never to write to disk."""
         if self.mode == SessionMode.PRIVACY:
             return
@@ -578,7 +578,7 @@ class Agent:
                 # next LLM call so the agent reads them this turn.
                 for queued in self._drain_queued():
                     self._add_user(
-                        "[user steering note — read this before continuing, it "
+                        "[user steering note - read this before continuing, it "
                         f"overrides earlier instructions where they conflict]\n{queued}"
                     )
                     self._emit("info", text="steering note delivered to the agent")
@@ -613,7 +613,7 @@ class Agent:
                         )
                         if not confirm("  Keep going?"):
                             final_response = (
-                                f"[stopped by user after {task_turns} turns — "
+                                f"[stopped by user after {task_turns} turns - "
                                 "task exceeded its turn budget]"
                             )
                             self._last_run_ok = False
@@ -621,7 +621,7 @@ class Agent:
                     else:
                         self._emit(
                             "info",
-                            text=f"Turn budget exceeded ({task_turns}/{self.turn_budget}) — "
+                            text=f"Turn budget exceeded ({task_turns}/{self.turn_budget}) - "
                                  "asking the agent to surface blockers instead of guessing.",
                         )
                         self._add_user(
@@ -653,7 +653,7 @@ class Agent:
 
                 if not calls:
                     # Self-verification: don't accept a final answer while code
-                    # changes sit unverified — nudge the agent to check its work.
+                    # changes sit unverified - nudge the agent to check its work.
                     # Fires at most once per task to avoid infinite loops.
                     if (
                         self.self_verify
@@ -695,7 +695,7 @@ class Agent:
 
                 self._add_assistant(response)
 
-                # Execute tools — run non-destructive batches in parallel
+                # Execute tools - run non-destructive batches in parallel
                 result_blocks = self._execute_tools(calls, interactive=interactive)
 
                 # Feed all results back as a user message, compressing large
@@ -705,14 +705,14 @@ class Agent:
                 self._add_user(combined)
 
                 # Circuit breaker: a tool that keeps failing identically wastes
-                # the whole turn budget — stop and hand control back instead.
+                # the whole turn budget - stop and hand control back instead.
                 if self._abort_streak_tool:
                     tool = self._abort_streak_tool
                     self._abort_streak_tool = None
                     streak = self._consecutive_errors.get(tool, 0)
                     final_response = (
                         f"[circuit breaker: {tool} failed {streak} times in a "
-                        "row — stopping so you can take a look instead of "
+                        "row - stopping so you can take a look instead of "
                         "burning more turns. The conversation is intact; "
                         "adjust the approach and continue.]"
                     )
@@ -731,19 +731,19 @@ class Agent:
             if interactive and self._messages:
                 if self.mode == SessionMode.PRIVACY:
                     print_info(
-                        "(interrupted — privacy mode, no checkpoint saved; "
+                        "(interrupted - privacy mode, no checkpoint saved; "
                         "/resume is unavailable.)"
                     )
                 else:
                     self.save_checkpoint()
                     print_info(
-                        "(interrupted — progress saved. "
+                        "(interrupted - progress saved. "
                         "Type /resume to continue or start a new task.)"
                     )
             raise
 
         else:
-            # Clean finish — discard any stale checkpoint
+            # Clean finish - discard any stale checkpoint
             self.clear_checkpoint()
 
         return final_response
@@ -787,7 +787,7 @@ class Agent:
             else:
                 # Parallel execution for non-destructive batch. The pool is
                 # shut down without waiting so one hung tool (network fetch,
-                # slow disk) cannot block the whole batch past the deadline —
+                # slow disk) cannot block the whole batch past the deadline -
                 # the stuck thread is abandoned and reported as a timeout.
                 ordered: dict[int, str] = {}
                 pool = ThreadPoolExecutor(max_workers=min(len(group), 8))
@@ -815,7 +815,7 @@ class Agent:
                             result = ToolResult.error(
                                 f"{call.name} did not finish within "
                                 f"{self._PARALLEL_BATCH_TIMEOUT_S}s (parallel "
-                                "batch timeout) — try a narrower target."
+                                "batch timeout) - try a narrower target."
                             )
                             ordered[i] = result.to_xml(call.name)
                             if interactive:
@@ -843,7 +843,7 @@ class Agent:
             return _DEFAULT_CTX_TOKENS
 
     def _fill_ratio(self) -> float:
-        """Fraction of estimated context window currently consumed (0.0 – 1.0+)."""
+        """Fraction of estimated context window currently consumed (0.0 - 1.0+)."""
         estimated = self.context_chars() // 4
         return estimated / max(1, self._ctx_window_tokens())
 
@@ -862,7 +862,7 @@ class Agent:
         tool: str     = entry["tool"]
         try:
             if old is None:
-                # File didn't exist before — delete it
+                # File didn't exist before - delete it
                 if path.exists():
                     path.unlink()
                 return f"Undid {tool}: deleted {path} (file was new)"
@@ -924,7 +924,7 @@ ws     ::= [ \t\n\r]*
                 '  "summary": a concise narrative (≤200 words) of decisions, edits, and fixes\n'
                 '  "changed_files": list of file paths that were created or modified\n'
                 '  "open_tasks": list of tasks or problems still unresolved\n\n'
-                "Respond with valid JSON only — no prose outside the JSON object.\n\n"
+                "Respond with valid JSON only - no prose outside the JSON object.\n\n"
                 f"{excerpt}"
             )
         else:
@@ -994,7 +994,7 @@ ws     ::= [ \t\n\r]*
             dropped = len(block) - self._COMPRESS_HEAD_CHARS - self._COMPRESS_TAIL_CHARS
             compressed.append(
                 block[: self._COMPRESS_HEAD_CHARS]
-                + f"\n[... {dropped} chars of tool output elided to save context — "
+                + f"\n[... {dropped} chars of tool output elided to save context - "
                 "re-run the tool on a narrower target if you need the middle ...]\n"
                 + block[-self._COMPRESS_TAIL_CHARS:]
             )
@@ -1081,7 +1081,7 @@ ws     ::= [ \t\n\r]*
                     buf = buf[end:]
                     in_call = False
         if buf:
-            yield buf, in_call   # unclosed tag at stream end — display as-is
+            yield buf, in_call   # unclosed tag at stream end - display as-is
 
     def _call_llm(self, messages: list[dict], interactive: bool) -> str:
         if self.on_event is not None:
@@ -1118,7 +1118,7 @@ ws     ::= [ \t\n\r]*
             self._audit.llm(full, tokens=self._total_tokens)
             return full
         else:
-            # Silent call — used by sub-agents and non-interactive mode
+            # Silent call - used by sub-agents and non-interactive mode
             result = self.backend.chat(messages, **self.gen_kwargs)
             self._accumulate_usage()
             self._audit.llm(result, tokens=self._total_tokens)
@@ -1155,7 +1155,7 @@ ws     ::= [ \t\n\r]*
 
         # Patch-mode: intercept write tools, accumulate diffs, don't touch disk.
         # A write tool the interceptor can't express as a diff must NOT fall
-        # through to a real disk write — patch-mode promises no changes.
+        # through to a real disk write - patch-mode promises no changes.
         if self.patch_mode and call.name in _UNDOABLE_TOOLS:
             chunk = self._patch_mode_intercept(call)
             if chunk is not None:
@@ -1169,14 +1169,14 @@ ws     ::= [ \t\n\r]*
             else:
                 result = ToolResult.error(
                     f"[patch-mode] {call.name} cannot be captured as a diff "
-                    "(no change, or unsupported operation) — skipped. Use "
+                    "(no change, or unsupported operation) - skipped. Use "
                     "write_file/edit_file/patch_file in patch mode."
                 )
                 if interactive:
                     console.print("    [dim yellow][patch-mode] skipped[/dim yellow]")
             return result
 
-        # Scope check — reject file operations that fall outside the active glob
+        # Scope check - reject file operations that fall outside the active glob
         if self.scope and call.name in _SCOPED_TOOLS:
             path_arg = call.args.get("path", "")
             if path_arg:
@@ -1194,7 +1194,7 @@ ws     ::= [ \t\n\r]*
         # Dry-run: show destructive calls but don't execute them
         if self.dry_run and tool_def.destructive:
             result = ToolResult.success(
-                f"[dry-run] {call.name} — skipped",
+                f"[dry-run] {call.name} - skipped",
                 summary=f"[dry-run] {call.name}",
             )
             if interactive:
@@ -1280,7 +1280,7 @@ ws     ::= [ \t\n\r]*
                 result = ToolResult.error(
                     result.output
                     + "\n\n[Hint: this tool has failed twice in a row. "
-                    "Try a different approach — check paths, arguments, or preconditions.]"
+                    "Try a different approach - check paths, arguments, or preconditions.]"
                 )
             elif streak >= 3:
                 result = ToolResult.error(
@@ -1347,7 +1347,7 @@ ws     ::= [ \t\n\r]*
             new_str = call.args.get("new", "")
             new_text = old_text.replace(old_str, new_str, 1)
         elif call.name == "patch_file":
-            # diff is already a unified diff — wrap it as-is
+            # diff is already a unified diff - wrap it as-is
             diff = call.args.get("diff", "")
             return diff if diff else None
         else:
@@ -1413,7 +1413,7 @@ ws     ::= [ \t\n\r]*
         if call.name == "patch_file":
             path_arg = call.args.get("path", "")
             patch    = call.args.get("diff", "")
-            # The patch is already a unified diff — display it directly
+            # The patch is already a unified diff - display it directly
             from .display import console as _con
             from rich.syntax import Syntax
             _con.print()
@@ -1522,7 +1522,7 @@ ws     ::= [ \t\n\r]*
         )
 
         lines: list[str] = [
-            f"# localcoder Session — {ts_human}",
+            f"# localcoder Session - {ts_human}",
             "",
             f"**Model**: {self._model_name or 'unknown'}  ",
             f"**Working directory**: {self.cwd}  ",
@@ -1540,7 +1540,7 @@ ws     ::= [ \t\n\r]*
             role    = msg.get("role", "")
             content = msg.get("content", "")
             if not isinstance(content, str):
-                # multipart — join text parts
+                # multipart - join text parts
                 content = " ".join(
                     p.get("text", "")
                     for p in content
