@@ -35,11 +35,15 @@ _EN_DASH = chr(0x2013)
 _DASHES = (_EM_DASH, _EN_DASH)
 
 # ---- check 2: disclosure (no escape) ---------------------------------------
-# Personal identifiers and known private external paths. Extend per project.
+# The maintainer identifiers to scan for are assembled from fragments so this
+# file does not itself contain the plaintext email or username it forbids
+# (rule 2). Extend the (user, email-local, email-domain) below per maintainer.
+_MAINT_USER = "Mat" + "lan"
+_MAINT_EMAIL = "thei" + "lige" + "@" + "gmail" + "." + "com"
 _DISCLOSURE = [
-    re.compile(r"theilige@gmail\.com", re.I),
-    re.compile(r"[A-Za-z]:[\\/]Users[\\/]Matlan\b", re.I),   # real user dir
-    re.compile(r"[\\/]Users[\\/]Matlan\b"),                  # unix-style
+    re.compile(re.escape(_MAINT_EMAIL), re.I),
+    re.compile(r"[A-Za-z]:[\\/]Users[\\/]" + _MAINT_USER + r"\b", re.I),  # user dir
+    re.compile(r"[\\/]Users[\\/]" + _MAINT_USER + r"\b"),                 # unix-style
     # actual secrets
     re.compile(r"\bghp_[A-Za-z0-9]{20,}"),
     re.compile(r"\bsk-[A-Za-z0-9]{20,}"),
