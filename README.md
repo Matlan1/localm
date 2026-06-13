@@ -357,30 +357,50 @@ A plugin is a folder with a `plugin.toml` manifest and Python files. It can add 
 
 ## GPU Setup (AMD)
 
-localm auto-detects the GPU DLL directory by scanning:
+The native llama.cpp binaries live **inside this install** — packaged as the
+`localm-llama-runtime` wheel in the venv — so the project never depends on a
+folder elsewhere on disk. Provision them once:
 
-1. `LLAMA_CPP_LIB` environment variable (explicit path to `llama.dll`)
-2. `D:\projects\llama-gfx1030-prebuilt\` (default gfx1030 build location)
-3. `D:\projects\llama.cpp\build\bin\`
+```bash
+localm setup-llama                      # download the default gfx1030 prebuilt
+localm setup-llama --from <build-dir>   # or copy your own llama.cpp build
+```
 
-The DLL loading order is: `ggml.dll` → `ggml-base.dll` → `ggml-cpu.dll` → `ggml-hip.dll` → `llama.dll`.
+This places `llama.dll` + `ggml-*.dll` (and, for the prebuilt, the matched ROCm
+runtime + `llama-cli`/`llama-server`) into `runtime/localm_llama_runtime/lib/`
+and installs the wheel. The ROCm runtime they need at load time
+(`amdhip64`, `rocm_kpack`, `rocblas`, …) comes from the `rocm-sdk` wheels the
+`[gpu]` extra already installed into the same venv.
 
-Before loading a model, localm checks free VRAM against the model size and warns when it will not fit, instead of crashing mid-load. KV cache prefix reuse keeps multi-turn chat fast by only prefilling the new suffix of the conversation.
+localm resolves the binary directory in order: `LLAMA_CPP_LIB` env →
+`binary_dir` config → the bundled runtime wheel → (deprecated external dirs, for
+backward compatibility only). ggml deps load before `llama.dll`, and the venv's
+`_rocm_sdk_*/bin` dirs are added to the DLL search path automatically.
 
-To use a custom build:
+Before loading a model, localm checks free VRAM against the model size and warns
+when it will not fit, instead of crashing mid-load. KV cache prefix reuse keeps
+multi-turn chat fast by only prefilling the new suffix of the conversation.
+
+To use a one-off custom build without provisioning the wheel:
 ```bash
 set LLAMA_CPP_LIB=C:\path\to\llama.dll
 localm run mymodel --prompt "..."
 ```
+
+> Source of the default prebuilt and from-source build instructions for gfx1030
+> (RDNA2): see `rocm-canary-forge/windows-native`.
 
 ---
 
 ## Architecture
 
 ```
+runtime/                      # localm-llama-runtime wheel: native llama.cpp
+│                             #   binaries bundled in the venv (self-contained)
 localm/
 ├── cli.py                    # Click commands
 ├── config.py                 # ~/.localm/ paths, config, port range
+├── setup_llama.py            # `localm setup-llama` — provision native binaries
 ├── model_manager.py          # registry, pull, dedup, aliases, Ollama manifests
 ├── image_gen/
 │   └── comfy.py              # ComfyUI FLUX pipeline driver

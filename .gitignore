@@ -67,3 +67,11 @@ tests/test_flux_generation.py
 # Local crash/chat logs kept out of the repo
 chatlogs_errorlogs/
 .commitmsg.txt
+
+# Native llama.cpp binaries — provisioned locally by `localm setup-llama`,
+# never committed (large, GPU/platform-specific, license-encumbered).
+runtime/localm_llama_runtime/lib/*
+!runtime/localm_llama_runtime/lib/.gitkeep
+!runtime/localm_llama_runtime/lib/.gitignore
+runtime/*.egg-info/
+runtime/build/

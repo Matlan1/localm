@@ -52,14 +52,16 @@ MODELS_DIR = HOME_DIR / "models"
 REGISTRY_FILE = HOME_DIR / "registry.json"
 CONFIG_FILE = HOME_DIR / "config.json"
 
-# Prefer the newer prebuilt, fall back to the locally compiled build
-_BINARY_CANDIDATES = [
+# Deprecated external prebuilt dirs — checked LAST, kept only so a machine that
+# still has them keeps working. The self-contained location is the
+# localm-llama-runtime wheel installed in this venv (see find_binary_dir).
+_LEGACY_BINARY_DIRS = [
     Path(r"D:\projects\llama-gfx1030-prebuilt"),
     Path(r"D:\projects\llama.cpp\build\bin"),
 ]
 
 DEFAULT_CONFIG: dict = {
-    "binary_dir": None,    # None = auto-detect from _BINARY_CANDIDATES
+    "binary_dir": None,    # None = auto-detect (runtime wheel, then legacy dirs)
     "n_ctx": 4096,         # initial context window (grows on demand)
     "n_ctx_max": 16384,    # ceiling the window may grow to (0 = unlimited)
     "n_ctx_grow": 4096,    # growth step — window expands in multiples of this
@@ -259,15 +261,27 @@ def update_registry(mutator: Callable[[dict], None]) -> dict:
 
 
 def find_binary_dir() -> Optional[Path]:
-    """Return the directory containing llama-server.exe, or None."""
+    """Return the directory containing the llama.cpp executables
+    (llama-server.exe / llama-cli.exe) for the subprocess fallback, or None.
+
+    Project-local resolution: the configured binary_dir, then the
+    localm-llama-runtime wheel bundled in this venv, then the deprecated
+    external prebuilt dirs."""
     cfg = load_config()
+    candidates = []
     if cfg.get("binary_dir"):
-        p = Path(cfg["binary_dir"])
-        if (p / "llama-server.exe").exists():
+        candidates.append(Path(cfg["binary_dir"]))
+    try:
+        import localm_llama_runtime
+        d = localm_llama_runtime.lib_dir()
+        if d:
+            candidates.append(Path(d))
+    except Exception:
+        pass
+    candidates.extend(_LEGACY_BINARY_DIRS)
+    for p in candidates:
+        if (p / "llama-server.exe").exists() or (p / "llama-cli.exe").exists():
             return p
-    for candidate in _BINARY_CANDIDATES:
-        if (candidate / "llama-server.exe").exists():
-            return candidate
     return None
 
 
