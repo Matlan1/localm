@@ -142,7 +142,7 @@ def build_tools(engines: EngineCache, enable_images: bool = True) -> Dict[str, d
                 size = "dir (HF format)"
             elif p.is_file():
                 b = p.stat().st_size
-                size = f"{b/1e9:.2f} GB" if b >= 1e9 else f"{b/1e6:.0f} MB"
+                size = f"{b/1024**3:.2f} GB" if b >= 1024**3 else f"{b/1024**2:.0f} MB"
             else:
                 size = "missing"
             lines.append(f"{name}  [{size}]  {info.get('source', 'local')}")
