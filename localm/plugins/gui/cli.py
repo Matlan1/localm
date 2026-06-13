@@ -93,6 +93,8 @@ def main(model, host, port, ctx, gpu_layers, no_browser, pull_spec, debug, mode)
         if _sync.pruned:
             _bits.append(f"{_sync.pruned} pruned")
         console.print(f"[dim]Models folder synced: {', '.join(_bits)}.[/dim]")
+    if _sync.note:
+        console.print(f"[yellow]{_sync.note}[/yellow]")
 
     registry = load_registry()
     model_less = False

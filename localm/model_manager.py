@@ -22,6 +22,7 @@ from rich.table import Table
 
 from .config import (
     MODELS_DIR,
+    REGISTRY_FILE,
     ensure_dirs,
     load_config,
     load_registry,
@@ -837,10 +838,26 @@ class ModelSyncResult(NamedTuple):
     flagged: int = 0        # entries newly marked missing (file gone)
     restored: int = 0       # entries whose file reappeared (flag cleared)
     pruned: int = 0         # entries deleted (only when autoprune is enabled)
+    note: str = ""          # a warning to surface (e.g. autoprune guardrail tripped)
 
     @property
     def changed(self) -> bool:
         return bool(self.added or self.flagged or self.restored or self.pruned)
+
+
+def _backup_registry() -> Optional[Path]:
+    """Snapshot the registry to ``registry.json.bak`` (one-step revert).
+
+    Returns the backup path, or None if there was no registry file to copy.
+    """
+    if not REGISTRY_FILE.exists():
+        return None
+    backup = REGISTRY_FILE.with_name(REGISTRY_FILE.name + ".bak")
+    try:
+        shutil.copy2(REGISTRY_FILE, backup)
+        return backup
+    except OSError:
+        return None
 
 
 def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
@@ -908,7 +925,26 @@ def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
     # Reconcile missing / restored / pruned against the (possibly grown) registry.
     reg = load_registry()
     models_root = MODELS_DIR.resolve()
+
+    def _under_models_dir(p: Path) -> bool:
+        return models_root in p.resolve().parents
+
+    # Managed models = those whose file lives under the models folder.
+    managed = [
+        name
+        for name, entry in reg.items()
+        if entry.get("path") and _under_models_dir(Path(entry["path"]))
+    ]
+    managed_missing = [n for n in managed if not Path(reg[n]["path"]).exists()]
+
+    # Guardrail: if pruning would delete *every* managed model at once, the folder
+    # is almost certainly unavailable (unmounted drive, wrong path) rather than the
+    # user having deleted everything — refuse to prune and flag instead.
+    suspicious = prune and len(managed) >= 2 and len(managed_missing) == len(managed)
+
     flagged = restored = pruned = 0
+    note = ""
+    backed_up = False
     dirty = False
 
     for name in list(reg.keys()):
@@ -917,10 +953,8 @@ def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
         if not path_str:
             continue
         path = Path(path_str)
-        exists = path.exists()
-        under_models_dir = models_root in path.resolve().parents
 
-        if exists:
+        if path.exists():
             # A previously-missing model is back — clear the flag.
             if entry.pop("missing", None):
                 restored += 1
@@ -928,7 +962,12 @@ def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
             continue
 
         # File is gone.
-        if prune and under_models_dir:
+        if prune and not suspicious and _under_models_dir(path):
+            if not backed_up:
+                # Snapshot the registry before the first deletion so the sync can
+                # be reverted one step if it goes wrong.
+                _backup_registry()
+                backed_up = True
             del reg[name]
             pruned += 1
             dirty = True
@@ -937,10 +976,19 @@ def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
             flagged += 1
             dirty = True
 
+    if suspicious:
+        note = (
+            f"Skipped autoprune: all {len(managed)} models under the models folder "
+            "appear missing — is the folder/drive available? Left them flagged "
+            "rather than deleting the registry."
+        )
+
     if dirty:
         save_registry(reg)
 
-    return ModelSyncResult(added=added, flagged=flagged, restored=restored, pruned=pruned)
+    return ModelSyncResult(
+        added=added, flagged=flagged, restored=restored, pruned=pruned, note=note
+    )
 
 
 def _register_with_dedup(
