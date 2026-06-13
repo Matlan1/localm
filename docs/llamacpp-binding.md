@@ -14,19 +14,27 @@
 
 ## DLL Loading (`_loader.py`)
 
-The loader searches for `llama.dll` in this order:
+The loader resolves the native binary directory from project-local locations
+only - never a sibling folder elsewhere on disk - in this order:
 
-1. `LLAMA_CPP_LIB` environment variable (explicit path)
-2. `D:\projects\llama-gfx1030-prebuilt\` (AMD gfx1030 prebuilt)
-3. `D:\projects\llama.cpp\build\bin\` (local build)
+1. `LLAMA_CPP_LIB` environment variable (explicit path to `llama.dll`, for
+   one-off use)
+2. the `binary_dir` config key in `~/.localm/config.json`
+3. the `localm-llama-runtime` wheel bundled in this venv, populated by
+   `localm setup-llama`
 
-Before loading `llama.dll`, all upstream ggml DLLs are pre-loaded in dependency order so Windows symbol resolution succeeds:
+If none resolve, `load_lib()` raises with instructions to run `localm
+setup-llama` (which downloads a prebuilt into the venv, or copies your own
+build with `--from <dir>`).
+
+Before loading `llama.dll`, the binary directory and the venv's bundled ROCm
+runtime directories (the `rocm-sdk` wheels: amdhip64, rocm_kpack, rocblas, ...)
+are added to the OS DLL search path, then all upstream ggml DLLs are pre-loaded
+in dependency order so Windows symbol resolution succeeds:
 
 ```
-ggml.dll → ggml-base.dll → ggml-cpu.dll → ggml-hip.dll → llama.dll
+ggml-base.dll → ggml-cpu.dll → ggml-hip.dll → ggml.dll → llama.dll
 ```
-
-The binary directory is prepended to `os.environ["PATH"]` so Windows finds any further runtime DLLs (e.g. HIP runtime) automatically.
 
 `load_lib()` is idempotent: it caches `_loaded_lib` and returns immediately on repeat calls.
 

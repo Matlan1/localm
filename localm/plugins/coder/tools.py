@@ -1523,7 +1523,7 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
             "denoise":      {"type": "float",  "description": "img2img only - how much to change the input (0.0=no change, 1.0=completely new). Default 0.75.", "required": False},
             "seed":         {"type": "int",    "description": "Noise seed for reproducible output. Each result reports its seed; pass it back to reproduce or tweak.", "required": False},
             "guidance":        {"type": "float",  "description": "Guidance scale (default: 3.5). Lower values (2.5-3.0) improve photorealism.", "required": False},
-            "negative_prompt": {"type": "string", "description": "Things to steer away from, e.g. 'old, mature, middle-aged'. Applied via ConditioningConcat.", "required": False},
+            "negative_prompt": {"type": "string", "description": "Things to keep OUT of the image, e.g. 'blurry, watermark, text'. Applied as a real negative branch via classifier-free guidance (CFGGuider).", "required": False},
             "lora_name":          {"type": "string", "description": "LoRA filename to load (optional).", "required": False},
             "lora_strength_model":{"type": "float",  "description": "LoRA strength on the UNet (default: 1.0). Main lever for unlock/style LoRAs.", "required": False},
             "lora_strength_clip": {"type": "float",  "description": "LoRA strength on the text encoder (default: 0.5).", "required": False},
