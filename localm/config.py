@@ -119,6 +119,9 @@ DEFAULT_CONFIG: dict = {
     # Model sizes: tiny / base / small / medium — bigger = better + slower.
     "voice_stt_model": "base",
     "voice_stt_language": None,  # None = auto-detect; or "en", "de", …
+    # Path to a Heretic checkout for the `abliterate` plugin (a separate AGPL
+    # program, run via subprocess). None = auto-detect / offer to clone.
+    "heretic_path": None,
 }
 
 # localm claims 8642-8741 — far from ComfyUI (8188), A1111 (7860),
