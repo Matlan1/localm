@@ -80,6 +80,10 @@ voice = [
 # ctypes binding (only llama.dll + ggml*.dll needed). This extra exists so
 # `pip install "localm[cpu]"` is an explicit, documented choice.
 cpu = []
+# Abliterate models with Heretic. No new dependencies — the plugin only shells
+# out to Heretic (a separate AGPL program; not bundled) and uses git + uv, which
+# the user already has. This extra exists as an explicit opt-in marker.
+abliterate = []
 
 [project.scripts]
 localm    = "localm.cli:main"
@@ -87,6 +91,7 @@ localm    = "localm.cli:main"
 # pip/uv honours this because the package is installed; the command always
 # works as long as localm[coder] was requested.
 localcoder = "localm.plugins.coder.cli:main"
+localabliterate = "localm.plugins.abliterate.cli:main"
 
 [tool.uv]
 exclude-newer-package = { rocm = false, rocm-sdk-core = false, rocm-sdk-libraries-gfx103x-all = false, torch = false, torchvision = false, transformers = false }
