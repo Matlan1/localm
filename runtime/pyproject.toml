@@ -1,9 +1,9 @@
-# localm-llama-runtime — the native llama.cpp inference binaries, packaged as a
+# localm-llama-runtime - the native llama.cpp inference binaries, packaged as a
 # wheel so localm carries its own runtime inside its venv instead of depending
 # on an external folder on disk.
 #
 # The binaries themselves (llama.dll + ggml-*.dll + the matched ROCm runtime, or
-# the .so/.dylib equivalents) are NOT committed — they are large, platform- and
+# the .so/.dylib equivalents) are NOT committed - they are large, platform- and
 # GPU-specific, and license-encumbered. Populate localm_llama_runtime/lib/ with
 # `localm setup-llama` (downloads a prebuilt) or `--from <build-dir>`.
 #

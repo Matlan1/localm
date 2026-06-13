@@ -73,7 +73,7 @@ def remember(cwd: Path, text: str) -> Path:
         sep = "" if existing.endswith("\n") else "\n"
         new_content = existing + sep + bullet + "\n"
     else:
-        # First entry — create with a header
+        # First entry - create with a header
         p.parent.mkdir(parents=True, exist_ok=True)
         new_content = f"# Project Memory\n\n{bullet}\n"
 

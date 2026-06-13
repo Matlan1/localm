@@ -65,7 +65,7 @@ class BaseBackend(ABC):
         """
         Return embedding vectors for a list of texts.
 
-        Raises ``NotImplementedError`` by default — not all models support
+        Raises ``NotImplementedError`` by default - not all models support
         embedding.  For quality embeddings, use a dedicated embedding model
         (nomic-embed, bge-*, e5-*) rather than a chat/instruct model.
         """

@@ -27,7 +27,7 @@ from .display import (
 )
 
 
-# localm's claimed range (see localm.config.PORT_RANGE) — stays clear of
+# localm's claimed range (see localm.config.PORT_RANGE) - stays clear of
 # ComfyUI (8188), A1111 (7860), and the 8000/8080/8888 dev-server crowd.
 _DEFAULT_PORT = 8642
 _PORT_RANGE_END = 8741
@@ -75,7 +75,7 @@ class ManagedServer:
         Returns True if the server is ready, False on timeout.
         """
         if _port_open(self.host, self.port):
-            print_info(f"Port {self.port} already open — using existing server")
+            print_info(f"Port {self.port} already open - using existing server")
             return True
 
         print_server_starting(self.model, self.port)

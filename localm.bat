@@ -1,10 +1,10 @@
 @echo off
-rem localm launcher — double-click to open an interactive chat.
+rem localm launcher - double-click to open an interactive chat.
 rem Picks the first registered model unless you set LOCALM_MODEL.
 cd /d "%~dp0"
 title localm
 
-rem Prefer this clone's own .venv (created by setup.bat) — self-contained
+rem Prefer this clone's own .venv (created by setup.bat) - self-contained
 set "PY=python"
 if exist ".venv\Scripts\python.exe" set "PY=.venv\Scripts\python.exe"
 

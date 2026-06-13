@@ -7,7 +7,7 @@ A plugin is a Python package under ``localm.plugins`` that:
 
 Built-in plugins
 ----------------
-coder  — offline AI coding agent (``pip install localm[coder]``)
+coder  - offline AI coding agent (``pip install localm[coder]``)
          Invoked as: ``localm coder`` or the backward-compat alias ``localcoder``
 """
 
@@ -18,7 +18,7 @@ class Plugin:
     """
     Minimal interface every plugin should satisfy.
 
-    Plugins are not required to subclass this — they only need to expose
+    Plugins are not required to subclass this - they only need to expose
     a Click command called ``cli_command``.  This base class serves as
     documentation and an optional convenience base.
     """

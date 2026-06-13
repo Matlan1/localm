@@ -2,8 +2,8 @@
 Tests for bearer-token authentication in localm.inference.http_server.
 
 Covers:
-  - Open mode (no LOCALM_API_KEY set) — all requests allowed
-  - Protected mode (LOCALM_API_KEY set) — wrong/missing token → 401, correct → 200
+  - Open mode (no LOCALM_API_KEY set) - all requests allowed
+  - Protected mode (LOCALM_API_KEY set) - wrong/missing token → 401, correct → 200
   - Unprotected endpoints (/health, /v1/models) stay open in both modes
 
 Key invariant: _require_auth reads os.environ at REQUEST time, so env vars

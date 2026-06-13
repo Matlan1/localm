@@ -1,4 +1,4 @@
-"""Minimal BM25 ranking — pure stdlib, fast enough for home-scale corpora.
+"""Minimal BM25 ranking - pure stdlib, fast enough for home-scale corpora.
 
 A few thousand chunks score in single-digit milliseconds; this is the
 always-available retrieval baseline (the ctypes GGUF binding has no

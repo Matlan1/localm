@@ -48,7 +48,7 @@ Struct layouts were derived by probing `llama_model_default_params()` and `llama
 | 40 | ptr | `progress_callback` | NULL |
 | 48 | ptr | `progress_callback_user_data` | NULL |
 | 56 | ptr | `kv_overrides` | NULL |
-| 64–71 | 8×bool | flags: `vocab_only`, `use_mmap`, `use_direct_io`, `use_mlock`, `check_tensors`, `use_extra_bufts`, `no_host`, `no_alloc` | |
+| 64-71 | 8×bool | flags: `vocab_only`, `use_mmap`, `use_direct_io`, `use_mlock`, `check_tensors`, `use_extra_bufts`, `no_host`, `no_alloc` | |
 
 ### `LlamaContextParams` (152 bytes)
 

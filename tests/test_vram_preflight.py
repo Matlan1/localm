@@ -76,7 +76,7 @@ class TestVramPreflight:
 
 class TestVramReport:
     """The post-load VRAM line must use driver-level numbers (mem_get_info),
-    never torch allocator counters — llama.dll allocates outside torch, so
+    never torch allocator counters - llama.dll allocates outside torch, so
     memory_allocated() reads 0.00 GB no matter what the model occupies."""
 
     def _fake_torch(self, free_total_per_device):

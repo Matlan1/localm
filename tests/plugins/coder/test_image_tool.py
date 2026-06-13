@@ -80,7 +80,7 @@ class TestFluxImageTool(unittest.TestCase):
 
     @patch("urllib.request.urlopen")
     def test_generate_image_connection_failure(self, mock_urlopen):
-        # Force a connection refusal — the fail-fast probe catches it now
+        # Force a connection refusal - the fail-fast probe catches it now
         mock_urlopen.side_effect = urllib.error.URLError("Connection refused")
 
         # Execute the tool

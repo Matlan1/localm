@@ -1,4 +1,4 @@
-"""Model factory — picks the right backend and exposes a unified inference API."""
+"""Model factory - picks the right backend and exposes a unified inference API."""
 
 from __future__ import annotations
 

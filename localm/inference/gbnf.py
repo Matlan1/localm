@@ -64,7 +64,7 @@ ws     ::= ([ \t\n\r])*
 # separated by optional whitespace. Useful when you want the model to *only*
 # emit tool calls and nothing else (e.g. a routing step).
 #
-# Normal conversational turns — which mix free text with tool calls — cannot
+# Normal conversational turns - which mix free text with tool calls - cannot
 # be constrained this way without restricting the model too aggressively.
 # Use the text parser for those turns.
 TOOL_CALLS_ONLY = r"""

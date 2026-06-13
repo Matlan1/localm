@@ -150,12 +150,12 @@ class TestGenerateVideo:
         assert ok
         wf = captured["workflow"]
         assert wf["5"]["inputs"]["text"]          # template negative intact
-        assert wf["6"]["inputs"]["width"] == 1280  # native 720p — see docs
+        assert wf["6"]["inputs"]["width"] == 1280  # native 720p - see docs
         assert wf["8"]["inputs"]["steps"] == 30
 
     @pytest.mark.parametrize("key", ["videos", "gifs", "images"])
     def test_all_save_node_output_keys_found(self, tmp_path, key):
-        """SaveVideo reports under 'images', VHS under 'gifs' — the poller
+        """SaveVideo reports under 'images', VHS under 'gifs' - the poller
         must find the clip regardless of which save node the graph uses."""
         ok, msg, _ = self._run(tmp_path, output_key=key)
         assert ok, msg

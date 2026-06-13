@@ -1,5 +1,5 @@
 """
-Back-compat shim — the session-mode/audit machinery moved to
+Back-compat shim - the session-mode/audit machinery moved to
 :mod:`localm.audit` so the core CLI and HTTP server can use it too.
 
 The module-alias trick below makes this name point at the SAME module

@@ -263,7 +263,7 @@ class TestGitLog:
 
 
 # ---------------------------------------------------------------------------
-#  Integration tests — require real git in PATH
+#  Integration tests - require real git in PATH
 # ---------------------------------------------------------------------------
 
 @pytest.mark.integration

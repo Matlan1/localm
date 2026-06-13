@@ -4,20 +4,20 @@ System prompt templates for localcoder agents.
 Per-model-family tuning is applied by ``build_system_prompt`` based on the
 ``model_name`` parameter.  Families:
 
-  gemma     — gemma / gemma2 / gemma3 / gemma4
+  gemma     - gemma / gemma2 / gemma3 / gemma4
               Informs the model that its native <|tool_call> format is also
               accepted (parser.py handles both XML and native).
 
-  thinking  — deepseek-r1 / qwq / qwen3 (thinking/reasoning variants)
+  thinking  - deepseek-r1 / qwq / qwen3 (thinking/reasoning variants)
               Adds an explicit <think>…</think> scratchpad instruction before
               the tool-use section; these models produce better results when
               given an explicit reasoning channel.
 
-  small     — phi / phi2 / phi3 / phi4 / phi-mini / tiny
+  small     - phi / phi2 / phi3 / phi4 / phi-mini / tiny
               Compressed prompt: condensed tool list + 5-rule set.  Smaller
               context window means every token counts.
 
-  default   — llama / mistral / qwen2 / codellama / and everything else
+  default   - llama / mistral / qwen2 / codellama / and everything else
               Standard XML tool-call format with the full tool list.
 """
 
@@ -58,7 +58,7 @@ def detect_model_family(model_name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-#  Shared tool documentation — generated from TOOL_REGISTRY so the prompt can
+#  Shared tool documentation - generated from TOOL_REGISTRY so the prompt can
 #  never drift out of sync with the tools that actually exist.
 # ---------------------------------------------------------------------------
 
@@ -93,7 +93,7 @@ _TYPE_PLACEHOLDERS = {"string": "...", "int": 1, "float": 1.0, "bool": False, "a
 
 
 def _tool_params(tool) -> dict:
-    """The tool's param schema — {} for stand-ins without one (e.g. test mocks)."""
+    """The tool's param schema - {} for stand-ins without one (e.g. test mocks)."""
     params = getattr(tool, "params", None)
     return params if isinstance(params, dict) else {}
 
@@ -117,7 +117,7 @@ def _full_tool_docs() -> str:
     for name, tool in TOOL_REGISTRY.items():
         example = json.dumps({"name": name, "args": _example_args(name, tool)},
                              ensure_ascii=False)
-        lines = [f"## {name} — {tool.description}", example]
+        lines = [f"## {name} - {tool.description}", example]
         optional = [f"{n} ({s.get('type', 'string')})"
                     for n, s in _tool_params(tool).items() if not s.get("required")]
         if optional:
@@ -127,7 +127,7 @@ def _full_tool_docs() -> str:
 
 
 def _brief_tool_docs() -> str:
-    """Condensed list for small models — one line per tool, no JSON examples."""
+    """Condensed list for small models - one line per tool, no JSON examples."""
     from .tools import TOOL_REGISTRY
     lines = []
     for name, tool in TOOL_REGISTRY.items():
@@ -136,7 +136,7 @@ def _brief_tool_docs() -> str:
         opt = [f"[{n}]" for n, s in params.items() if not s.get("required")]
         sig = ", ".join(req + opt)
         first_sentence = str(tool.description).split(". ")[0].rstrip(".")
-        lines.append(f"{name}({sig}) — {first_sentence}")
+        lines.append(f"{name}({sig}) - {first_sentence}")
     return "\n".join(lines)
 
 
@@ -151,7 +151,7 @@ def _tool_call_block(family: str) -> str:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 TOOL USE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Call a tool by writing EXACTLY one of these formats — nothing else:
+Call a tool by writing EXACTLY one of these formats - nothing else:
 
 Preferred (XML):
 <tool_call>
@@ -177,12 +177,12 @@ Call a tool using this EXACT format:
 
 Result arrives in <tool_result>, then continue."""
 
-    # default + thinking — identical call format
+    # default + thinking - identical call format
     return """\
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 TOOL USE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Call a tool by writing EXACTLY this format — nothing else:
+Call a tool by writing EXACTLY this format - nothing else:
 
 <tool_call>
 {"name": "TOOL_NAME", "args": {...}}
@@ -224,10 +224,10 @@ RULES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 RULES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-1. Always read_file before edit_file or patch_file — you need the exact text.
+1. Always read_file before edit_file or patch_file - you need the exact text.
 2. Use relative paths unless an absolute path is necessary.
 3. Prefer edit_file for single small changes; patch_file for multi-hunk edits; write_file for new files or complete rewrites.
-4. Prefer the focused tool over run_shell: grep/search_files to find things, list_dir/tree to explore, run_tests for tests, git_* for git — their output is structured and they need no shell quoting.
+4. Prefer the focused tool over run_shell: grep/search_files to find things, list_dir/tree to explore, run_tests for tests, git_* for git - their output is structured and they need no shell quoting.
 5. Run tests after code changes (run_tests, or run_shell for custom commands).
 6. For complex tasks, use spawn_agent to delegate focused sub-tasks.
 7. When you are done, give a concise summary of what you changed and why.
@@ -281,7 +281,7 @@ def build_system_prompt(
     think_hint = _thinking_hint(family)
     rules      = _rules_section(family)
 
-    # Identity line — terser for small models
+    # Identity line - terser for small models
     if family == "small":
         identity = (
             f"You are {agent_name}, an AI coding assistant.\n"
@@ -315,7 +315,7 @@ def build_subagent_system_prompt(
     role: str,
     model_name: str = "",
 ) -> str:
-    """Leaner prompt for sub-agents — focused on their specific role."""
+    """Leaner prompt for sub-agents - focused on their specific role."""
     family = detect_model_family(model_name) if model_name else "default"
     think_hint = _thinking_hint(family)
 
@@ -343,5 +343,5 @@ def build_subagent_system_prompt(
         f"patch_file, run_shell, list_dir, search_files, grep). Use them as needed.\n\n"
         f"Call tools with:\n{call_fmt}\n\n"
         f"Complete your assigned task, then return a clear summary of findings or changes.\n"
-        f"Do not ask questions — make sensible decisions and document your reasoning.\n"
+        f"Do not ask questions - make sensible decisions and document your reasoning.\n"
     )

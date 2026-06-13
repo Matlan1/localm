@@ -1,7 +1,7 @@
 """
 Tests for tool_fetch_url / tool_web_search in localm.plugins.coder.tools.
 
-Both route through localm.netpolicy. All network calls are mocked — no real
+Both route through localm.netpolicy. All network calls are mocked - no real
 HTTP is made. The policy itself is tested in tests/test_netpolicy.py; here we
 test the tool-level behaviour (stripping, truncation, errors, privacy audit,
 and that policy refusals surface as tool errors).

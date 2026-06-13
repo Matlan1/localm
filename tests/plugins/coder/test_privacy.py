@@ -34,7 +34,7 @@ class TestSuppressReadlineHistory:
 
     def test_handles_attributeerror_gracefully(self):
         """readline present but without set_history_length should not crash."""
-        mock_rl = MagicMock(spec=[])   # empty spec — no attributes
+        mock_rl = MagicMock(spec=[])   # empty spec - no attributes
         with patch.dict("sys.modules", {"readline": mock_rl}):
             suppress_readline_history()   # must not raise
 
@@ -110,7 +110,7 @@ class TestSubprocessPrivacyEnv:
 # ---------------------------------------------------------------------------
 
 class TestWarnExternalProvider:
-    # console is imported at module level in privacy.py — patch it there
+    # console is imported at module level in privacy.py - patch it there
     _PATCH = "localm.plugins.coder.privacy.console"
 
     def test_prints_warning_for_openai(self):
@@ -329,7 +329,7 @@ class TestHistoryPaths:
 
 
 # ---------------------------------------------------------------------------
-#  tool_run_shell — _privacy flag propagation
+#  tool_run_shell - _privacy flag propagation
 # ---------------------------------------------------------------------------
 
 class TestRunShellPrivacy:
@@ -380,7 +380,7 @@ class TestRunShellPrivacy:
 # ---------------------------------------------------------------------------
 
 class TestSpawnAgentModeInheritance:
-    # Agent is imported locally inside tool_spawn_agent — patch at definition
+    # Agent is imported locally inside tool_spawn_agent - patch at definition
     _PATCH = "localm.plugins.coder.agent.Agent"
 
     def test_child_inherits_privacy_mode(self, tmp_path):

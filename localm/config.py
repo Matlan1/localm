@@ -12,9 +12,9 @@ def _detect_home() -> Path:
     Resolve the localm data directory (config, registry, models, logs,
     sessions, generated images/music).
 
-    Priority — each install is self-contained and agnostic of others:
+    Priority - each install is self-contained and agnostic of others:
       1. LOCALM_HOME env var (explicit override / custom install location)
-      2. Portable mode: a checkout carrying its own data — when this package
+      2. Portable mode: a checkout carrying its own data - when this package
          sits in a source tree (pyproject.toml next to it) that contains a
          ``localm-home.cfg`` (one line: the data path) or a ``home``
          directory, that wins.  Created by setup.bat's "keep data in this
@@ -43,7 +43,7 @@ def _detect_home() -> Path:
 
 
 def home_dir() -> Path:
-    """Lazy variant of HOME_DIR — resolves the data dir at call time."""
+    """Lazy variant of HOME_DIR - resolves the data dir at call time."""
     return _detect_home()
 
 
@@ -52,21 +52,14 @@ MODELS_DIR = HOME_DIR / "models"
 REGISTRY_FILE = HOME_DIR / "registry.json"
 CONFIG_FILE = HOME_DIR / "config.json"
 
-# Deprecated external prebuilt dirs — checked LAST, kept only so a machine that
-# still has them keeps working. The self-contained location is the
-# localm-llama-runtime wheel installed in this venv (see find_binary_dir).
-_LEGACY_BINARY_DIRS = [
-    Path(r"D:\projects\llama-gfx1030-prebuilt"),
-    Path(r"D:\projects\llama.cpp\build\bin"),
-]
 
 DEFAULT_CONFIG: dict = {
     "binary_dir": None,    # None = auto-detect (runtime wheel, then legacy dirs)
     "n_ctx": 4096,         # initial context window (grows on demand)
     "n_ctx_max": 16384,    # ceiling the window may grow to (0 = unlimited)
-    "n_ctx_grow": 4096,    # growth step — window expands in multiples of this
+    "n_ctx_grow": 4096,    # growth step - window expands in multiples of this
     # Size the context ceiling from free VRAM at model load (clamped to
-    # 4k–64k). The window still starts at n_ctx and grows on demand; set
+    # 4k-64k). The window still starts at n_ctx and grows on demand; set
     # to false to use the fixed n_ctx_max instead.
     "ctx_auto": True,
     "n_gpu_layers": 99,    # 99 = offload everything to GPU
@@ -83,7 +76,7 @@ DEFAULT_CONFIG: dict = {
     "cors_origins": None,     # None = localhost only; list of origins; or "*"
     # Command that starts your ComfyUI install (e.g. a launch .bat). When set,
     # the image/music/video generators start ComfyUI automatically if it is
-    # not running — from the GUI, the CLI, or the coder's generate_image tool.
+    # not running - from the GUI, the CLI, or the coder's generate_image tool.
     "comfy_launch_cmd": None,
     # Working directory for comfy_launch_cmd (launchers that assume their own
     # folder, e.g. plain "python main.py" inside a ComfyUI checkout).
@@ -106,7 +99,7 @@ DEFAULT_CONFIG: dict = {
     "coder_confirm_timeout": 600,
     # After an image is generated, ask ComfyUI to release its VRAM and reload
     # the chat model so the next reply is instant. Turn off when generating
-    # many images in a row — the chat model then reloads lazily on the next
+    # many images in a row - the chat model then reloads lazily on the next
     # chat message instead.
     "reload_llm_after_imagine": True,
     # Network policy for model-initiated requests (coder fetch_url/web_search,
@@ -120,7 +113,7 @@ DEFAULT_CONFIG: dict = {
     "net_allow_private": False, # True = permit loopback/private targets (SSRF guard off)
     "net_search_url": None,     # SearXNG base URL; None = DuckDuckGo (no key)
     # Speech-to-text (GUI mic button; needs the [voice] extra).
-    # Model sizes: tiny / base / small / medium — bigger = better + slower.
+    # Model sizes: tiny / base / small / medium - bigger = better + slower.
     "voice_stt_model": "base",
     "voice_stt_language": None,  # None = auto-detect; or "en", "de", …
     # Path to a Heretic checkout for the `abliterate` plugin (a separate AGPL
@@ -132,7 +125,7 @@ DEFAULT_CONFIG: dict = {
     "autoprune_missing_models": False,
 }
 
-# localm claims 8642-8741 — far from ComfyUI (8188), A1111 (7860),
+# localm claims 8642-8741 - far from ComfyUI (8188), A1111 (7860),
 # Ollama (11434), and the 8000/8080/8888 dev-server crowd.
 PORT_RANGE = (8642, 8741)
 
@@ -166,13 +159,13 @@ def ensure_dirs() -> None:
     MODELS_DIR.mkdir(exist_ok=True)
 
 
-# Registry and config are mutated from several places at once — the GUI server
+# Registry and config are mutated from several places at once - the GUI server
 # threads, the `localm pull` subprocess the GUI spawns, and sync_models_dir on
 # every launch. A plain open("w")+json.dump truncates the file before writing,
 # so a crash, a job cancel (SIGTERM), or simple interleaving could leave a
 # half-written file that the next unguarded json.load() would choke on, hiding
 # every registered model app-wide. The helpers below make every write atomic
-# (write a temp file in the same dir, fsync, then os.replace — readers see only
+# (write a temp file in the same dir, fsync, then os.replace - readers see only
 # the old or the new complete file, never a torn one) and make every read
 # crash-proof (fall back to the .bak snapshot, then to the default).
 _io_lock = threading.RLock()
@@ -199,7 +192,7 @@ def _atomic_write_json(path: Path, data) -> None:
 
 def _read_json(path: Path, default):
     """Read JSON from *path*, falling back to its .bak then *default* on any
-    corruption — a damaged file must never take the whole app down."""
+    corruption - a damaged file must never take the whole app down."""
     for candidate in (path, path.with_name(path.name + ".bak")):
         if not candidate.is_file():
             continue
@@ -249,7 +242,7 @@ def update_registry(mutator: Callable[[dict], None]) -> dict:
     persisted with a single atomic write. Use this instead of a bare
     load_registry()/save_registry() pair wherever a lost update would matter,
     so two in-process writers can't clobber each other. (Cross-process writers
-    — e.g. a CLI `pull` running alongside the GUI — are still last-writer-wins,
+    - e.g. a CLI `pull` running alongside the GUI - are still last-writer-wins,
     but each write stays atomic and non-corrupting.)"""
     with _io_lock:
         reg = _read_json(REGISTRY_FILE, {})
@@ -264,9 +257,10 @@ def find_binary_dir() -> Optional[Path]:
     """Return the directory containing the llama.cpp executables
     (llama-server.exe / llama-cli.exe) for the subprocess fallback, or None.
 
-    Project-local resolution: the configured binary_dir, then the
-    localm-llama-runtime wheel bundled in this venv, then the deprecated
-    external prebuilt dirs."""
+    Project-local resolution only: the user-configured binary_dir, then the
+    localm-llama-runtime wheel bundled in this venv. No absolute path is ever
+    assumed as a default; an unprovisioned install resolves to None and the
+    user runs `localm setup-llama` (or sets binary_dir)."""
     cfg = load_config()
     candidates = []
     if cfg.get("binary_dir"):
@@ -278,7 +272,6 @@ def find_binary_dir() -> Optional[Path]:
             candidates.append(Path(d))
     except Exception:
         pass
-    candidates.extend(_LEGACY_BINARY_DIRS)
     for p in candidates:
         if (p / "llama-server.exe").exists() or (p / "llama-cli.exe").exists():
             return p

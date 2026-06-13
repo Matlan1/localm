@@ -1,7 +1,7 @@
 """
 ComfyUI FLUX image generation.
 
-Standalone module — usable from the localcoder agent tool, the CLI,
+Standalone module - usable from the localcoder agent tool, the CLI,
 or any other caller.  No coder-plugin dependencies.
 """
 
@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Optional
 
 
-# Your personal workflow (untracked — which models/encoders you use stays
+# Your personal workflow (untracked - which models/encoders you use stays
 # private). Falls back to the committed example template, which uses the
 # vanilla public FLUX stack; export your own from ComfyUI (Save → API format)
 # as flux_workflow.json to customise.
@@ -39,7 +39,7 @@ def _localm_unload(localm_url: Optional[str] = None) -> None:
     Ask a localm server to release its model from GPU memory.
 
     Reads LOCALM_URL from the environment if *localm_url* is not given.
-    Silent no-op when the variable is unset or the request fails — never
+    Silent no-op when the variable is unset or the request fails - never
     blocks image generation if localm is not in the picture.
     """
     url = (localm_url or os.environ.get("LOCALM_URL", "")).rstrip("/")
@@ -100,7 +100,7 @@ def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
     """
     Make sure ComfyUI is reachable, launching it when configured.
 
-    Used by every generator (image, music, video) from any caller — GUI,
+    Used by every generator (image, music, video) from any caller - GUI,
     CLI, or the coder's generate_image tool. When ComfyUI is down and the
     ``comfy_launch_cmd`` config is set, the command is started (optionally
     in ``comfy_workdir``) and polled until the API answers.
@@ -133,11 +133,11 @@ def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
             "Start ComfyUI first (default: http://127.0.0.1:8188), set the "
             "FLUX_API_URL environment variable if it runs elsewhere, or let "
             "localm start it for you:\n"
-            '  localm config comfy_launch_cmd "D:\\path\\to\\launch-comfyui.bat"\n'
-            '  localm config comfy_workdir "D:\\path\\to\\ComfyUI"   (optional cwd)'
+            '  localm config comfy_launch_cmd "<path>\\launch-comfyui.bat"\n'
+            '  localm config comfy_workdir "<path>\\ComfyUI"   (optional cwd)'
         )
 
-    _say(f"ComfyUI not running — launching: {launch_cmd}")
+    _say(f"ComfyUI not running - launching: {launch_cmd}")
     # The command is the user's own config value (their launcher script).
     # On Windows pass `cmd /S /c "<line>"` as a single string: /S strips the
     # outer quotes and runs the line verbatim, so quoted executable paths
@@ -166,7 +166,7 @@ def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
             last_said = elapsed
         _t.sleep(2)
     return False, (
-        f"ComfyUI did not come up within {wait_seconds // 60} minutes — "
+        f"ComfyUI did not come up within {wait_seconds // 60} minutes - "
         "check the launcher window for errors."
     )
 
@@ -175,7 +175,7 @@ def comfy_http_error_detail(e: "urllib.error.HTTPError") -> str:
     """
     Human-readable detail from a ComfyUI /prompt error response.
 
-    A 400 from /prompt means the workflow failed validation — not a
+    A 400 from /prompt means the workflow failed validation - not a
     connectivity problem. The response body is JSON naming the failing
     node and why (a model file missing from ComfyUI's models directory
     is the usual cause). Shared by image, music, and video generation.
@@ -189,7 +189,7 @@ def comfy_http_error_detail(e: "urllib.error.HTTPError") -> str:
     if err.get("message"):
         msg = err["message"]
         if err.get("details"):
-            msg += f" — {err['details']}"
+            msg += f" - {err['details']}"
         lines.append(msg)
     for node_id, info in (body.get("node_errors") or {}).items():
         cls = info.get("class_type") or f"node {node_id}"
@@ -209,7 +209,7 @@ def _image_dimensions(path: Path) -> tuple[int, int]:
         if data[:8] == b"\x89PNG\r\n\x1a\n":
             return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
         if data[:2] == b"\xff\xd8":
-            # JPEG — scan for SOF0/SOF2 markers
+            # JPEG - scan for SOF0/SOF2 markers
             full = path.read_bytes()
             i = 2
             while i < len(full) - 8:
@@ -290,7 +290,7 @@ def generate_image(
     ----------
     prompt
         Descriptive text prompt.  For img2img, describe what to *change*
-        rather than the full scene — the base image already provides structure.
+        rather than the full scene - the base image already provides structure.
     output_path
         Destination file (PNG).  Parent directories are created if needed.
     api_url
@@ -329,7 +329,7 @@ def generate_image(
         This is the main lever for unlock/style LoRAs.
     lora_strength_clip
         How strongly the LoRA patches the text encoder (default 0.5).
-        Lower than model strength is usually correct for unlock LoRAs —
+        Lower than model strength is usually correct for unlock LoRAs -
         the base CLIP already understands the vocabulary.
     input_image
         Path to an existing image to use as the starting point (img2img mode).
@@ -348,7 +348,7 @@ def generate_image(
         Timeout waiting for ComfyUI to finish (default 10 minutes).
     write_sidecar
         Write a ``<output>.json`` sidecar with the prompt and settings so
-        the image can be reproduced.  Pass False in privacy mode — the
+        the image can be reproduced.  Pass False in privacy mode - the
         prompt then never touches disk.
 
     Returns
@@ -361,7 +361,7 @@ def generate_image(
 
     _con = Console()
 
-    # 0. Make sure ComfyUI is up (auto-launching when configured) — BEFORE
+    # 0. Make sure ComfyUI is up (auto-launching when configured) - BEFORE
     # unloading the LLM, so a dead image server doesn't cost the user a
     # pointless model unload + reload
     ok, msg = ensure_comfy(api_url, on_progress=lambda t: _con.print(f"[dim]{t}[/dim]"))
@@ -410,12 +410,12 @@ def generate_image(
 
         w, h = _image_dimensions(input_image)
 
-        # LoadImage node — ComfyUI loads from its own input/ dir by filename
+        # LoadImage node - ComfyUI loads from its own input/ dir by filename
         workflow["40"] = {
             "inputs": {"image": uploaded_name, "upload": "image"},
             "class_type": "LoadImage",
         }
-        # VAEEncode — encode the loaded image into latent space
+        # VAEEncode - encode the loaded image into latent space
         workflow["41"] = {
             "inputs": {"pixels": ["40", 0], "vae": ["10", 0]},
             "class_type": "VAEEncode",
@@ -430,7 +430,7 @@ def generate_image(
         # Set denoise on the scheduler
         workflow["17"]["inputs"]["denoise"] = denoise if denoise is not None else 0.75
 
-    # 5. Inject prompt — node "6" first (default template), then scan
+    # 5. Inject prompt - node "6" first (default template), then scan
     injected = False
     if "6" in workflow and workflow["6"].get("inputs", {}).get("text") is not None:
         workflow["6"]["inputs"]["text"] = prompt
@@ -479,12 +479,12 @@ def generate_image(
     #    A negative prompt only works if the model sees a SEPARATE negative
     #    conditioning and subtracts it (cfg > 1). The default workflow uses a
     #    BasicGuider, which has only a positive `conditioning` input and runs
-    #    at an implicit cfg of 1 — it has no way to express a negative. We swap
+    #    at an implicit cfg of 1 - it has no way to express a negative. We swap
     #    it for a CFGGuider (model, positive, negative, cfg) and build a
     #    dedicated negative branch.
     #
     #    Do NOT use ConditioningConcat here: it APPENDS the negative tokens to
-    #    the positive prompt, which makes the model draw those things *more* —
+    #    the positive prompt, which makes the model draw those things *more* -
     #    the exact opposite of a negative prompt.
     if negative_prompt:
         neg_cfg = cfg if cfg is not None else 3.5
@@ -523,7 +523,7 @@ def generate_image(
                 "cfg": neg_cfg,
             }
 
-    # 9. Set seed (use provided value or randomise) — on every noise/sampler
+    # 9. Set seed (use provided value or randomise) - on every noise/sampler
     # node, so workflows with more than one of them stay reproducible
     seed = seed if seed is not None else random.randint(1, 10 ** 12)
     for node in workflow.values():
@@ -556,7 +556,7 @@ def generate_image(
             f"ComfyUI rejected the workflow (HTTP {e.code}):\n"
             f"{comfy_http_error_detail(e)}\n"
             "A model file missing from ComfyUI's models directory is the "
-            "usual cause — check the names in your workflow template."
+            "usual cause - check the names in your workflow template."
         )
     except urllib.error.URLError as e:
         return False, (
@@ -614,7 +614,7 @@ def generate_image(
     if not filename:
         return False, (
             "Generation finished but no output image was found in ComfyUI history.\n"
-            "Check the ComfyUI console — a SaveImage node error is likely."
+            "Check the ComfyUI console - a SaveImage node error is likely."
         )
 
     # 11. Fetch image from ComfyUI /view, save locally, strip metadata
@@ -648,7 +648,7 @@ def generate_image(
 
         # Delete the original from ComfyUI's output directory so no second
         # copy lingers there. Only possible when the user tells us where it
-        # is (COMFY_OUTPUT_DIR env var or "comfy_output_dir" config key) —
+        # is (COMFY_OUTPUT_DIR env var or "comfy_output_dir" config key) -
         # there is no portable default.
         comfy_out = os.environ.get("COMFY_OUTPUT_DIR")
         if not comfy_out:
@@ -670,7 +670,7 @@ def generate_image(
         # Skipped entirely in privacy mode (write_sidecar=False).
         if not write_sidecar:
             return True, (f"Image saved to {output_path} "
-                          f"(seed {seed} — reuse it to reproduce)")
+                          f"(seed {seed} - reuse it to reproduce)")
         try:
             sidecar = {
                 "prompt": prompt,
@@ -697,7 +697,7 @@ def generate_image(
         except Exception:
             pass
 
-        return True, f"Image saved to {output_path} (seed {seed} — reuse it to reproduce)"
+        return True, f"Image saved to {output_path} (seed {seed} - reuse it to reproduce)"
 
     except Exception as e:
         return False, f"Failed to download generated image from ComfyUI: {e}"

@@ -26,7 +26,7 @@ llama_seq_id  = ctypes.c_int32   # sequence id
 
 
 # ---------------------------------------------------------------------------
-# llama_model_params  (72 bytes — probed)
+# llama_model_params  (72 bytes - probed)
 #
 # This is the NEW layout that includes 'devices' and 'tensor_buft_overrides'
 # at the beginning (added in recent llama.cpp).  Verified by probing the
@@ -79,7 +79,7 @@ assert ctypes.sizeof(LlamaModelParams) == 72, (
 
 
 # ---------------------------------------------------------------------------
-# llama_context_params  (152 bytes — probed)
+# llama_context_params  (152 bytes - probed)
 #
 # Added vs the old layout:
 #   n_rs_seq, n_outputs_max, ctx_type, flash_attn_type,

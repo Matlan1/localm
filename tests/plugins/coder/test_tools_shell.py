@@ -108,12 +108,12 @@ class TestRunShell:
         with patch("localm.plugins.coder.tools.subprocess.run", side_effect=fake_run):
             tool_run_shell(tmp_path, "git status")   # git resolves via PATH
 
-        # Must NOT go through cmd/sh — first token is the executable
+        # Must NOT go through cmd/sh - first token is the executable
         assert captured_cmd[0] == "git"
         assert "status" in captured_cmd
 
     def test_shell_builtin_routed_through_shell(self, tmp_path):
-        """echo/dir/type have no executable on disk — must use the shell,
+        """echo/dir/type have no executable on disk - must use the shell,
         otherwise argument-list mode fails with 'file not found'."""
         captured_cmd = []
 
@@ -186,7 +186,7 @@ class TestNeedsShell:
 
 class TestDetectTestRunner:
     def test_detects_pytest_for_python_project(self, tmp_path):
-        # Empty dir — defaults to pytest
+        # Empty dir - defaults to pytest
         cmd = _detect_test_runner(tmp_path)
         assert "pytest" in " ".join(cmd)
 

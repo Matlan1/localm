@@ -1,6 +1,6 @@
-/* localm GUI — vanilla JS, no build step.
+/* localm GUI - vanilla JS, no build step.
    Talks to the localm FastAPI server: /v1 (OpenAI-compatible) + /api (GUI).
-   All model/agent-originating strings go through textContent or DOMPurify —
+   All model/agent-originating strings go through textContent or DOMPurify -
    never raw innerHTML. pages.js builds on the helpers defined here. */
 
 "use strict";
@@ -43,13 +43,13 @@ function splitThink(text) {
   };
 }
 
-/** Reply text with reasoning blocks removed — what gets sent back to the
+/** Reply text with reasoning blocks removed - what gets sent back to the
  *  model on later turns. */
 function stripThink(text) {
   return (text || "").replace(/<think>[\s\S]*?(<\/think>|$)/g, "").trim();
 }
 
-/** Replace raw <tool_call> JSON blocks with a compact human-readable note —
+/** Replace raw <tool_call> JSON blocks with a compact human-readable note -
  *  shown while the web-access loop executes the request. */
 function formatToolCalls(text) {
   return (text || "").replace(
@@ -102,7 +102,7 @@ function renderMarkdown(target, text) {
         throwOnError: false,
         ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code"],
       });
-    } catch (e) { /* malformed TeX mid-stream — final render fixes it */ }
+    } catch (e) { /* malformed TeX mid-stream - final render fixes it */ }
   }
   target.querySelectorAll("pre code").forEach((block) => {
     try { hljs.highlightElement(block); } catch (e) { /* unknown lang */ }
@@ -174,7 +174,7 @@ async function streamJob(jobId, onLine, onProgress) {
   return endEvent || { status: "failed" };
 }
 
-// Sizes are shown in binary units (GiB/MiB/KiB) but labelled GB/MB/KB — the
+// Sizes are shown in binary units (GiB/MiB/KiB) but labelled GB/MB/KB - the
 // GPU/LLM convention: matches the VRAM printed on the card, llama.cpp's logs,
 // and HuggingFace quant tables. (The driver reports e.g. 16 GiB; showing
 // decimal GB would read a confusing 17.2 for the same card.)
@@ -231,7 +231,7 @@ function showView(name) {
     $("view-" + v).classList.toggle("active", v === name);
     $("nav-" + v).classList.toggle("active", v === name);
   }
-  // Remembered across reloads — but never in privacy mode (no traces).
+  // Remembered across reloads - but never in privacy mode (no traces).
   if (!chat.privacy) localStorage.setItem("localm.activeView", name);
   // Lazy page refreshes live in pages.js
   if (window.onViewShown) window.onViewShown(name);
@@ -312,7 +312,7 @@ const chat = {
   abort: null,
   attachments: [],   // image attachments: {name, dataUri}
   docs: [],          // document attachments: {name, text, chars, truncated}
-  ctxMax: 16384,     // context ceiling — refreshed from /v1/config
+  ctxMax: 16384,     // context ceiling - refreshed from /v1/config
   privacy: false,    // server in privacy mode → conversations not persisted
   persist: false,    // non-privacy: conversations sync to the server store
 };
@@ -360,7 +360,7 @@ async function compactConversation(conv) {
       const data = await r.json();
       summary = (data.choices?.[0]?.message?.content || "").trim();
     }
-  } catch (e) { /* summarisation unavailable — hard trim below */ }
+  } catch (e) { /* summarisation unavailable - hard trim below */ }
 
   const bridge = summary
     ? [{ role: "user", content: "[Conversation summary]\n" + summary },
@@ -391,10 +391,10 @@ async function refreshCtxLimit() {
     if (r.ok) {
       const cfg = await r.json();
       // Prefer the resolved ceiling (VRAM-derived under ctx_auto) over the
-      // static config value — compaction should track what the model can
+      // static config value - compaction should track what the model can
       // actually hold.
       chat.ctxMax = cfg.effective_ctx_max ?? cfg.n_ctx_max ?? 16384;
-      // Privacy mode: conversations live in memory only — wipe anything a
+      // Privacy mode: conversations live in memory only - wipe anything a
       // previous non-privacy session left behind and show the hint.
       chat.privacy = cfg.effective_mode === "privacy";
       if (chat.privacy) {
@@ -411,7 +411,7 @@ async function refreshCtxLimit() {
           const hint = document.createElement("div");
           hint.id = "privacy-hint";
           hint.className = "privacy-hint";
-          hint.textContent = "privacy mode — this session only";
+          hint.textContent = "privacy mode - this session only";
           hint.title = "The server runs in privacy mode: conversations are " +
             "not saved (here or on disk) and vanish on reload. Export still works.";
           h.after(hint);
@@ -458,7 +458,7 @@ function pushConversation(conv) {
                                branches: conv.branches || [],
                                messages: conv.messages }),
       });
-    } catch (e) { /* offline — localStorage still has the copy */ }
+    } catch (e) { /* offline - localStorage still has the copy */ }
   }, 600));
 }
 
@@ -508,7 +508,7 @@ async function initServerConversations() {
         "browser reloads and profile wipes.";
       h.after(hint);
     }
-  } catch (e) { /* store unavailable — localStorage keeps working */ }
+  } catch (e) { /* store unavailable - localStorage keeps working */ }
 }
 
 function currentConv() {
@@ -524,7 +524,7 @@ function newConversation() {
   renderChat();
 }
 
-/* message content helpers — content is a string or OpenAI multipart list */
+/* message content helpers - content is a string or OpenAI multipart list */
 function msgText(m) {
   if (typeof m.content === "string") return m.content;
   return (m.content || []).filter((p) => p.type === "text").map((p) => p.text).join("");
@@ -710,7 +710,7 @@ function addMessageRow(container, role, text, opts = {}) {
     const img = document.createElement("img");
     img.className = "msg-img";
     if (url.startsWith("/api/")) {
-      // server-side generated image — fetch with auth headers
+      // server-side generated image - fetch with auth headers
       fetchImageURL(url).then((u) => (img.src = u)).catch(() => img.remove());
     } else {
       img.src = url;   // data: URI from the user's own attachment
@@ -721,7 +721,7 @@ function addMessageRow(container, role, text, opts = {}) {
     const player = document.createElement("audio");
     player.controls = true;
     player.style.width = "100%";
-    // bearer-protected file — fetch as a blob with auth headers
+    // bearer-protected file - fetch as a blob with auth headers
     fetchImageURL(url).then((u) => (player.src = u)).catch(() => player.remove());
     body.appendChild(player);
   }
@@ -775,7 +775,7 @@ function buildEmptyHint() {
   div.appendChild(big);
   div.appendChild(document.createTextNode(
     "Chat with your local model. Everything stays on this machine."));
-  const tip = el("div", "", "Type / for commands — /imagine generates images locally.");
+  const tip = el("div", "", "Type / for commands - /imagine generates images locally.");
   tip.style.marginTop = "10px";
   tip.style.fontSize = "13px";
   div.appendChild(tip);
@@ -816,7 +816,7 @@ function renderChat() {
       };
     }
     const noteSuffix = m.truncated
-      ? "\n\n*[stopped at the max-tokens limit — raise “Max tokens” in ⚙ parameters, or reply “continue”]*"
+      ? "\n\n*[stopped at the max-tokens limit - raise “Max tokens” in ⚙ parameters, or reply “continue”]*"
       : "";
     addMessageRow(box, m.role, msgText(m) + noteSuffix, {
       images: msgImages(m),
@@ -891,7 +891,7 @@ function switchBranch(conv, index, dir) {
 }
 
 /** Drop fork records whose parent message no longer exists anywhere
- *  (active branch or any parked tail) — called after compaction rewrites
+ *  (active branch or any parked tail) - called after compaction rewrites
  *  old history. */
 function pruneBranches(conv) {
   if (!conv.branches || !conv.branches.length) return;
@@ -1031,7 +1031,7 @@ function parseWebCall(text) {
     if (call && (call.name === "web_search" || call.name === "fetch_url")) {
       return call;
     }
-  } catch (e) { /* not valid JSON — treat as plain text */ }
+  } catch (e) { /* not valid JSON - treat as plain text */ }
   return null;
 }
 
@@ -1089,7 +1089,7 @@ const voice = { rec: null, chunks: [], available: true, reason: "",
 async function refreshVoiceStatus() {
   try {
     const r = await fetch("/api/voice/status", { headers: authHeaders() });
-    if (!r.ok) return;   // old server without the endpoint — leave enabled
+    if (!r.ok) return;   // old server without the endpoint - leave enabled
     const data = await r.json();
     voice.available = data.available;
     voice.reason = data.reason || "";
@@ -1098,7 +1098,7 @@ async function refreshVoiceStatus() {
     const btn = $("chat-mic");
     btn.classList.toggle("unavailable", !data.available);
     if (!data.available) btn.title = data.reason;
-  } catch (e) { /* server unreachable — status refreshes on next load */ }
+  } catch (e) { /* server unreachable - status refreshes on next load */ }
 }
 
 function blobToB64(blob) {
@@ -1122,12 +1122,12 @@ async function toggleMic() {
   }
   if (!voice.modelCached) {
     // Transcription is fully local, but the FIRST use fetches the Whisper
-    // model from HuggingFace — make that one network access explicit.
+    // model from HuggingFace - make that one network access explicit.
     if (!confirm(
         `First use downloads the Whisper "${voice.model}" speech model ` +
         "from HuggingFace (one-time). Transcription itself runs fully " +
         "offline afterwards. Download now?")) return;
-    voice.modelCached = true;   // consent given — don't re-ask this session
+    voice.modelCached = true;   // consent given - don't re-ask this session
   }
   if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
     toast("This browser does not support audio recording", true);
@@ -1170,7 +1170,7 @@ async function toggleMic() {
   };
   voice.rec.start();
   btn.classList.add("recording");
-  toast("Recording — click 🎤 again to stop");
+  toast("Recording - click 🎤 again to stop");
 }
 
 $("chat-mic").onclick = toggleMic;
@@ -1221,10 +1221,10 @@ async function rememberFact(fact) {
 }
 
 function openMemoryModal() {
-  openModal("Memory — what the model knows about you", (body) => {
+  openModal("Memory - what the model knows about you", (body) => {
     body.appendChild(el("div", "sub", memory.writable
       ? "Injected into the system prompt while the 🧠 toggle is on. " +
-        "Edit freely — it's a plain markdown file in the localm data directory."
+        "Edit freely - it's a plain markdown file in the localm data directory."
       : "Read-only: privacy mode blocks memory writes (no new traces). " +
         "Existing memory is still injected while the 🧠 toggle is on."));
     const ta = document.createElement("textarea");
@@ -1356,7 +1356,7 @@ async function runCompletion(conv, webDepth = 0) {
   let sysText = params.system || "";
   if ($("p-memory").checked && memory.text.trim()) {
     sysText = (sysText ? sysText + "\n\n" : "") +
-      "Long-term memory — things to remember about the user:\n" +
+      "Long-term memory - things to remember about the user:\n" +
       memory.text.trim();
   }
   if (webEnabled) {
@@ -1364,7 +1364,7 @@ async function runCompletion(conv, webDepth = 0) {
   }
   if (sysText) messages.push({ role: "system", content: sysText });
   // Server-generated images (/api/ URLs from /imagine) must not be sent to
-  // the model as image parts — replace those messages with a text note.
+  // the model as image parts - replace those messages with a text note.
   const mapped = conv.messages.map((m) => {
     if (Array.isArray(m.content) &&
         m.content.some((p) => p.type === "image_url" &&
@@ -1372,7 +1372,7 @@ async function runCompletion(conv, webDepth = 0) {
       return { role: m.role,
                content: msgText(m) + "\n[An image was generated and shown to the user.]" };
     }
-    // Reasoning blocks are display-only — never resend them as context.
+    // Reasoning blocks are display-only - never resend them as context.
     if (m.role === "assistant" && typeof m.content === "string") {
       return { role: m.role, content: stripThink(m.content) };
     }
@@ -1450,7 +1450,7 @@ async function runCompletion(conv, webDepth = 0) {
   if (finishReason === "length") {
     // The reply was cut by the max-tokens budget, not finished by the model.
     reply.truncated = true;
-    toast("Reply hit the max-tokens limit — raise “Max tokens” in ⚙ parameters, or reply “continue”", true);
+    toast("Reply hit the max-tokens limit - raise “Max tokens” in ⚙ parameters, or reply “continue”", true);
   }
   conv.messages.push(reply);
   saveConversations(conv);
@@ -1463,7 +1463,7 @@ async function runCompletion(conv, webDepth = 0) {
   renderChat();
 
   // Web-access loop: when the model requested a search/page and the toggle
-  // is on, run it and let the model continue — bounded rounds per send.
+  // is on, run it and let the model continue - bounded rounds per send.
   const nextCall = (webEnabled && webDepth < WEB_MAX_ROUNDS)
     ? parseWebCall(full) : null;
   if (nextCall) {
@@ -1527,7 +1527,7 @@ async function refreshKbSelect() {
       sel.appendChild(opt);
     }
     if ([...sel.options].some((o) => o.value === current)) sel.value = current;
-  } catch (e) { /* server unreachable — selector stays as-is */ }
+  } catch (e) { /* server unreachable - selector stays as-is */ }
 }
 
 async function sendChat() {
@@ -1607,7 +1607,7 @@ $("chat-send").onclick = () => {
  *  (the menu's own keydown handler picks the highlighted command). */
 function composerEnterToSend(e, send) {
   if (e.key !== "Enter" || e.isComposing) return;
-  if (e.shiftKey) return;   // newline — the textarea's default behaviour
+  if (e.shiftKey) return;   // newline - the textarea's default behaviour
   const menu = e.target.closest(".composer-wrap")?.querySelector(".slash-menu");
   if (menu && menu.style.display !== "none") return;
   e.preventDefault();
@@ -1630,7 +1630,7 @@ $("compact-conv").onclick = async () => {
 $("new-conv").onclick = () => { newConversation(); showView("chat"); };
 
 /* ================================================================ */
-/*  Coder — multi-session                                            */
+/*  Coder - multi-session                                            */
 /* ================================================================ */
 
 const coder = {
@@ -1653,7 +1653,7 @@ function renderSessionSelect() {
   const sel = $("session-select");
   sel.replaceChildren();
   // In setup mode (no active session) a placeholder holds the selection, so
-  // picking any real session fires onchange — even when only one exists.
+  // picking any real session fires onchange - even when only one exists.
   if (!coder.activeId && coder.sessions.size) {
     const opt = document.createElement("option");
     opt.value = "";
@@ -1676,7 +1676,7 @@ function showCoderUI(hasSession) {
   // Keep the bar while other sessions exist so they stay reachable
   $("coder-bar").classList.toggle("open", hasSession || coder.sessions.size > 0);
   if (!hasSession) {
-    // Setup mode: park every session feed and clear the session labels —
+    // Setup mode: park every session feed and clear the session labels -
     // the form must not render on top of a previous session's transcript.
     // Remember where we came from so "back to session" can return there.
     if (coder.activeId && coder.sessions.has(coder.activeId)) {
@@ -1759,7 +1759,7 @@ function renderDiff(text) {
   return pre;
 }
 
-/** Args worth showing next to a diff — the bulky text fields ARE the diff. */
+/** Args worth showing next to a diff - the bulky text fields ARE the diff. */
 function slimArgs(args) {
   const slim = {};
   for (const [k, v] of Object.entries(args || {})) {
@@ -1795,7 +1795,7 @@ function buildToolCard(ev) {
   return card;
 }
 
-/** Mark a confirm card as resolved. Idempotent — fed both by the local
+/** Mark a confirm card as resolved. Idempotent - fed both by the local
  *  button click and by the confirm_resolved event from the server (which is
  *  also what replay sends for already-answered confirmations). */
 function resolveConfirmCard(s, confirmId, approved, timedOut) {
@@ -1803,7 +1803,7 @@ function resolveConfirmCard(s, confirmId, approved, timedOut) {
   if (!entry || entry.card.classList.contains("answered")) return;
   entry.card.classList.add("answered");
   entry.title.textContent = timedOut
-    ? "✗ Timed out — rejected " + entry.tool
+    ? "✗ Timed out - rejected " + entry.tool
     : (approved ? "✓ Approved " : "✗ Rejected ") + entry.tool;
 }
 
@@ -1841,7 +1841,7 @@ function buildConfirmCard(s, ev) {
         }),
       });
       if (!r.ok) {
-        // Already answered elsewhere (another tab) or timed out server-side —
+        // Already answered elsewhere (another tab) or timed out server-side -
         // the confirm_resolved event carries the real outcome.
         toast("Confirmation was no longer pending", true);
         return;
@@ -1948,7 +1948,7 @@ function handleCoderEvent(s, ev) {
       if (s.info.id === coder.activeId) $("coder-state").textContent = "idle";
       renderSessionSelect();
       let finalLine = (ev.ok ? "Task finished" : "Task ended") +
-        ` — ${ev.turns} turns, ${ev.total_tokens} tokens`;
+        ` - ${ev.turns} turns, ${ev.total_tokens} tokens`;
       if (ev.changed_files?.length) {
         finalLine += ` · ${ev.changed_files.length} file(s) changed (see "files")`;
       }
@@ -2063,7 +2063,7 @@ async function reattachSessions() {
   } catch (e) { /* server unreachable; startup poller will retry models anyway */ }
 }
 
-/* coder file attachments — extracted to text server-side (same in-memory
+/* coder file attachments - extracted to text server-side (same in-memory
  * /api/rag/extract path as chat docs) and prepended to the task message,
  * so the agent sees the content without needing the file inside cwd. */
 
@@ -2139,14 +2139,14 @@ async function sendCoderTask() {
     if (!r.ok) throw new Error(data.detail || r.statusText);
     if (data.status === "queued") {
       // Mid-task steering: the agent reads it at the next turn boundary
-      toast("Queued — the agent picks it up at the next turn");
+      toast("Queued - the agent picks it up at the next turn");
     } else {
       s.busy = true;
       $("coder-state").textContent = "working…";
       renderSessionSelect();
     }
     // The user message arrives back through the event stream (so replay
-    // works after a page reload) — no client-side row here.
+    // works after a page reload) - no client-side row here.
     input.value = "";
     autoGrow(input);
     coder.docs = [];
@@ -2219,7 +2219,7 @@ function pickDirectory(title, startPath = "") {
       let current = "";
 
       useBtn.onclick = () => { if (current) finish(current); };
-      // Dismissing the modal (×, backdrop) resolves null — poll visibility
+      // Dismissing the modal (×, backdrop) resolves null - poll visibility
       // since the close handlers are owned by the shared modal chrome.
       const watch = setInterval(() => {
         if ($("modal").style.display === "none") {
@@ -2280,7 +2280,7 @@ $("coder-stop").onclick = async () => {
   if (!s) return;
   await fetch(`/api/coder/sessions/${s.info.id}/stop`, {
     method: "POST", headers: authHeaders() });
-  toast("Stop requested — agent halts at the next safe point");
+  toast("Stop requested - agent halts at the next safe point");
 };
 $("coder-end").onclick = endCoderSession;
 
@@ -2358,7 +2358,7 @@ async function openFilesModal() {
     toast("Could not load changed files: " + e.message, true);
     return;
   }
-  openModal("Files changed — " + sessionLabel(s.info), (body) => {
+  openModal("Files changed - " + sessionLabel(s.info), (body) => {
     if (!data.files.length) {
       body.appendChild(el("div", "sub", "No files changed this session."));
       return;
@@ -2382,7 +2382,7 @@ async function openFilesModal() {
       const row = el("div", "log-entry clickable");
       row.appendChild(el("span", "t", f.created ? "new" : "edit"));
       row.appendChild(document.createTextNode(
-        `${f.path} — ${f.writes} write(s)` + (f.exists ? "" : " (deleted since)")));
+        `${f.path} - ${f.writes} write(s)` + (f.exists ? "" : " (deleted since)")));
       row.onclick = () => showDiff(f.path);
       body.appendChild(row);
     }
@@ -2393,13 +2393,13 @@ async function openFilesModal() {
   });
 }
 
-/** Download the active session's feed as markdown (explicit user action —
+/** Download the active session's feed as markdown (explicit user action -
  *  works in privacy mode too, same contract as chat /export). */
 function exportCoderSession() {
   const s = activeSession();
   const log = s?.eventLog || [];
   if (!log.length) { toast("Nothing to export yet", true); return; }
-  const lines = [`# Coder session — ${sessionLabel(s.info)}`, ""];
+  const lines = [`# Coder session - ${sessionLabel(s.info)}`, ""];
   for (const ev of log) {
     if (ev.type === "user") {
       lines.push(`**You${ev.queued ? " (queued)" : ""}**: ${ev.text}`, "");
@@ -2433,7 +2433,7 @@ $("coder-log").onclick = async () => {
     headers: authHeaders() });
   const data = await r.json();
   if (!r.ok) { toast(data.detail || "No log available", true); return; }
-  showAuditModal("Audit log — " + sessionLabel(s.info), data);
+  showAuditModal("Audit log - " + sessionLabel(s.info), data);
 };
 
 /** Past coder sessions: audit logs left behind by log/full-mode sessions,
@@ -2453,7 +2453,7 @@ async function openSessionHistory() {
     }
     if (!data.logs.length) {
       body.appendChild(el("div", "sub",
-        "No session logs yet — start a session with persistence set to " +
+        "No session logs yet - start a session with persistence set to " +
         "log or full, and its audit trail will appear here."));
       return;
     }
@@ -2470,7 +2470,7 @@ async function openSessionHistory() {
             { headers: authHeaders() });
           const entries = await r.json();
           if (!r.ok) throw new Error(entries.detail || r.statusText);
-          showAuditModal("Session — " + item.name, entries);
+          showAuditModal("Session - " + item.name, entries);
         } catch (e) {
           toast("Could not open log: " + e.message, true);
         }
@@ -2490,7 +2490,7 @@ $("setup-history").onclick = openSessionHistory;
 const CHAT_COMMANDS = [
   { cmd: "imagine", hint: "generate an image with FLUX", args: "<prompt>" },
   { cmd: "music", hint: "generate a music track (ACE-Step, 120s instrumental)", args: "<style tags>" },
-  { cmd: "video", hint: "generate a short video clip (Wan, ~5s — slow)", args: "<prompt>" },
+  { cmd: "video", hint: "generate a short video clip (Wan, ~5s - slow)", args: "<prompt>" },
   { cmd: "web", hint: "search the web, then answer with sources", args: "<query>" },
   { cmd: "clear", hint: "clear this conversation" },
   { cmd: "compact", hint: "summarise older messages to free context" },
@@ -2551,7 +2551,7 @@ async function runImagineInChat(promptText) {
       renderChat();
     } else {
       body.textContent = "Image generation " + end.status +
-        " — see the Images page for details.";
+        " - see the Images page for details.";
     }
   } catch (e) {
     body.textContent = "Image generation failed: " + e.message;
@@ -2559,7 +2559,7 @@ async function runImagineInChat(promptText) {
   }
 }
 
-/** /web <query> — explicit, user-initiated web grounding: search, inject the
+/** /web <query> - explicit, user-initiated web grounding: search, inject the
  *  results into the conversation, and let the model answer from them. */
 async function runWebInChat(query) {
   if (!query) { toast("Usage: /web <query>", true); return; }
@@ -2588,7 +2588,7 @@ async function runWebInChat(query) {
   await runCompletion(conv);
 }
 
-/** /music <tags> — generate a default-length instrumental inline; the Music
+/** /music <tags> - generate a default-length instrumental inline; the Music
  *  page has the full form (lyrics, duration, seed…). */
 async function runMusicInChat(tags) {
   if (!tags) { toast("Usage: /music <style tags>", true); return; }
@@ -2622,7 +2622,7 @@ async function runMusicInChat(tags) {
       renderChat();
     } else {
       body.textContent = "Music generation " + end.status +
-        " — see the Music page for details.";
+        " - see the Music page for details.";
     }
   } catch (e) {
     body.textContent = "Music generation failed: " + e.message;
@@ -2630,7 +2630,7 @@ async function runMusicInChat(tags) {
   }
 }
 
-/** /video <prompt> — generate a default-length (~5s) clip inline; the Video
+/** /video <prompt> - generate a default-length (~5s) clip inline; the Video
  *  page has the full form (negative, duration, size, start image…). */
 async function runVideoInChat(promptText) {
   if (!promptText) { toast("Usage: /video <prompt>", true); return; }
@@ -2641,7 +2641,7 @@ async function runVideoInChat(promptText) {
   renderChat();
   const box = $("chat-messages");
   const { body } = addMessageRow(box, "assistant", "");
-  body.textContent = "Generating clip… (video is slow — expect several minutes)";
+  body.textContent = "Generating clip… (video is slow - expect several minutes)";
   box.scrollTop = box.scrollHeight;
   try {
     const r = await fetch("/api/video", {
@@ -2664,7 +2664,7 @@ async function runVideoInChat(promptText) {
       renderChat();
     } else {
       body.textContent = "Video generation " + end.status +
-        " — see the Video page for details.";
+        " - see the Video page for details.";
     }
   } catch (e) {
     body.textContent = "Video generation failed: " + e.message;
@@ -2702,7 +2702,7 @@ function execChatCommand(cmd, arg) {
       if (!arg) {
         const names = personaCache.map((p) => p.name);
         toast(names.length ? "Personas: " + names.join(", ")
-                           : "No personas saved yet — use the drawer's save…",
+                           : "No personas saved yet - use the drawer's save…",
               !names.length);
         return true;
       }
@@ -2851,7 +2851,7 @@ refreshPersonas();
 refreshMemory();
 refreshVoiceStatus();
 setInterval(refreshModels, 30000);
-// The resolved ctx ceiling only exists once a model has loaded — keep the
+// The resolved ctx ceiling only exists once a model has loaded - keep the
 // compaction threshold in sync as models load or switch.
 setInterval(refreshCtxLimit, 30000);
 renderConvList();

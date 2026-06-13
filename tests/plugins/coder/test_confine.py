@@ -1,7 +1,7 @@
 """
 Tests for _confine() path traversal protection and _verify_syntax().
 
-_confine() is the security boundary for all file tools — it must reliably
+_confine() is the security boundary for all file tools - it must reliably
 reject any path that resolves outside cwd.
 """
 
@@ -14,7 +14,7 @@ from localm.plugins.coder.tools import _confine, _verify_syntax
 
 
 # ---------------------------------------------------------------------------
-#  _confine — happy paths
+#  _confine - happy paths
 # ---------------------------------------------------------------------------
 
 class TestConfineAllowed:
@@ -36,13 +36,13 @@ class TestConfineAllowed:
         assert result == target.resolve()
 
     def test_non_existent_file_still_confined(self, tmp_path):
-        # File doesn't have to exist — just must be within cwd
+        # File doesn't have to exist - just must be within cwd
         result = _confine(tmp_path, "new_file_not_created_yet.py")
         assert result.parent == tmp_path.resolve()
 
 
 # ---------------------------------------------------------------------------
-#  _confine — rejected paths
+#  _confine - rejected paths
 # ---------------------------------------------------------------------------
 
 class TestConfineRejected:
@@ -80,7 +80,7 @@ class TestConfineRejected:
 
 
 # ---------------------------------------------------------------------------
-#  _verify_syntax — Python
+#  _verify_syntax - Python
 # ---------------------------------------------------------------------------
 
 class TestVerifySyntaxPython:
@@ -117,7 +117,7 @@ class TestVerifySyntaxPython:
 
 
 # ---------------------------------------------------------------------------
-#  _verify_syntax — JSON
+#  _verify_syntax - JSON
 # ---------------------------------------------------------------------------
 
 class TestVerifySyntaxJSON:
@@ -143,7 +143,7 @@ class TestVerifySyntaxJSON:
 
 
 # ---------------------------------------------------------------------------
-#  _verify_syntax — TOML
+#  _verify_syntax - TOML
 # ---------------------------------------------------------------------------
 
 class TestVerifySyntaxTOML:
@@ -161,7 +161,7 @@ class TestVerifySyntaxTOML:
 
 
 # ---------------------------------------------------------------------------
-#  _verify_syntax — unknown extension
+#  _verify_syntax - unknown extension
 # ---------------------------------------------------------------------------
 
 class TestVerifySyntaxUnknown:

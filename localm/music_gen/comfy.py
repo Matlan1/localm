@@ -3,7 +3,7 @@ ComfyUI ACE-Step music generation.
 
 Mirrors localm.image_gen.comfy: standalone module, reachable from the GUI,
 the CLI, or any other caller.  Uses the same ComfyUI server as image
-generation — the checkpoint (``ace_step_v1_3.5b.safetensors``) must be in
+generation - the checkpoint (``ace_step_v1_3.5b.safetensors``) must be in
 ComfyUI's ``models/checkpoints`` directory (ComfyUI ships native ACE-Step
 support since v0.3.34).
 
@@ -23,7 +23,7 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
-# Shared ComfyUI plumbing lives in image_gen — one server, one set of helpers
+# Shared ComfyUI plumbing lives in image_gen - one server, one set of helpers
 from localm.image_gen.comfy import (
     _localm_unload,
     comfy_http_error_detail,
@@ -68,7 +68,7 @@ def generate_music(
     Parameters
     ----------
     tags
-        Comma-separated style description — genre, mood, instruments, BPM,
+        Comma-separated style description - genre, mood, instruments, BPM,
         vocal type (e.g. ``"synthwave, 80s, female vocals, 120 bpm, dreamy"``).
     output_path
         Destination file (.flac).  Parent directories are created if needed.
@@ -76,7 +76,7 @@ def generate_music(
         Song lyrics, optionally with section markers like ``[verse]`` /
         ``[chorus]``.  None or empty generates an instrumental track.
     duration_seconds
-        Track length in seconds — arbitrary; the latent is sized from it.
+        Track length in seconds - arbitrary; the latent is sized from it.
         Long tracks take proportionally longer and use more VRAM.
     api_url
         ComfyUI base URL; defaults to the shared image-gen URL resolution
@@ -85,7 +85,7 @@ def generate_music(
         Noise seed for reproducible output.  Randomised if not given.
     steps / cfg
         Sampler settings.  The defaults (50 / 5.0) match the official
-        ComfyUI ACE-Step template — raise steps for more polish.
+        ComfyUI ACE-Step template - raise steps for more polish.
     lyrics_strength
         How strongly the lyrics steer generation (0..1).
     ckpt_name
@@ -93,7 +93,7 @@ def generate_music(
     localm_url
         localm server /v1 URL to unload before generation (VRAM handoff).
     max_poll_seconds
-        Timeout waiting for ComfyUI (default 30 minutes — long tracks are slow).
+        Timeout waiting for ComfyUI (default 30 minutes - long tracks are slow).
     on_progress
         Optional ``Callable[[str], None]`` for status lines.
 
@@ -112,7 +112,7 @@ def generate_music(
     if duration_seconds <= 0:
         return False, "Duration must be positive."
 
-    # Make sure ComfyUI is up (auto-launching when configured) — before
+    # Make sure ComfyUI is up (auto-launching when configured) - before
     # costing the user an LLM unload
     ok, msg = ensure_comfy(api_url, on_progress=_say)
     if not ok:
@@ -150,7 +150,7 @@ def generate_music(
         if not prompt_id:
             return False, (
                 "ComfyUI accepted the request but returned no prompt_id.\n"
-                "Check the ComfyUI console for workflow validation errors — a "
+                "Check the ComfyUI console for workflow validation errors - a "
                 "missing ace_step_v1_3.5b.safetensors checkpoint is the usual "
                 "cause (download it into ComfyUI/models/checkpoints)."
             )
@@ -158,7 +158,7 @@ def generate_music(
         return False, (
             f"ComfyUI rejected the ACE-Step workflow (HTTP {e.code}):\n"
             f"{comfy_http_error_detail(e)}\n"
-            "The usual cause is a missing checkpoint — ACE-Step needs "
+            "The usual cause is a missing checkpoint - ACE-Step needs "
             "ace_step_v1_3.5b.safetensors in ComfyUI/models/checkpoints "
             "(or your own checkpoint via ace_workflow_local.json), and "
             "ComfyUI v0.3.34+ for the ACE-Step nodes."
@@ -198,7 +198,7 @@ def generate_music(
     if not audio_info:
         return False, (
             "Generation finished but no audio output was found in ComfyUI "
-            "history. Check the ComfyUI console — a SaveAudio node error or "
+            "history. Check the ComfyUI console - a SaveAudio node error or "
             "an outdated ComfyUI (need v0.3.34+ for ACE-Step) is likely."
         )
 
@@ -215,12 +215,12 @@ def generate_music(
     except Exception as e:
         return False, f"Failed to download generated track from ComfyUI: {e}"
 
-    # Sidecar JSON — everything needed to reproduce or tweak the track.
+    # Sidecar JSON - everything needed to reproduce or tweak the track.
     # Skipped entirely in privacy mode (write_sidecar=False) so the prompt
     # and lyrics never touch disk.
     if not write_sidecar:
         return True, (f"Track saved to {output_path} "
-                      f"(seed {seed} — reuse it to reproduce)")
+                      f"(seed {seed} - reuse it to reproduce)")
     try:
         sidecar = {
             "tags": tags,
@@ -243,5 +243,5 @@ def generate_music(
 
     return True, (
         f"Track saved to {output_path} "
-        f"(seed {seed} — reuse it to reproduce)"
+        f"(seed {seed} - reuse it to reproduce)"
     )

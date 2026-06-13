@@ -1,5 +1,5 @@
 """
-GUI web layer — API routes and static file serving, attached to the
+GUI web layer - API routes and static file serving, attached to the
 existing localm FastAPI inference app.
 
 Routes (all under /api, bearer-protected when LOCALM_API_KEY is set):
@@ -34,7 +34,7 @@ from .sessions import CoderSession, SessionManager
 
 STATIC_DIR = Path(__file__).parent / "static"
 
-# SSE keepalive interval — must beat proxy/browser idle timeouts
+# SSE keepalive interval - must beat proxy/browser idle timeouts
 _KEEPALIVE_S = 15
 
 
@@ -161,7 +161,7 @@ class RagRemoveDocRequest(BaseModel):
 
 class RagExtractRequest(BaseModel):
     filename: str
-    content_b64: str              # in-memory extraction — no disk writes
+    content_b64: str              # in-memory extraction - no disk writes
     max_chars: int = 24_000
 
 
@@ -200,12 +200,12 @@ def attach_gui(
     Parameters
     ----------
     self_url:
-        Base URL of this server's own /v1 API — coder agents talk to the
+        Base URL of this server's own /v1 API - coder agents talk to the
         model through it (e.g. ``http://127.0.0.1:8642/v1``).
     switch_model:
-        ``Callable[[str], Awaitable[None]]`` — swaps the active engine.
+        ``Callable[[str], Awaitable[None]]`` - swaps the active engine.
     active_model:
-        ``Callable[[], str]`` — name of the currently served model.
+        ``Callable[[], str]`` - name of the currently served model.
     """
     manager = SessionManager()
 
@@ -286,7 +286,7 @@ def attach_gui(
         session_mode = req.mode or effective_mode("coder").value
 
         loop = asyncio.get_running_loop()
-        # Agent construction scans the project (map build) — keep it off the loop
+        # Agent construction scans the project (map build) - keep it off the loop
         session = await loop.run_in_executor(None, lambda: CoderSession(
             cwd.resolve(),
             backend,
@@ -316,7 +316,7 @@ def attach_gui(
 
         async def _stream():
             if replay:
-                # Snapshot history, then drop anything still queued — those
+                # Snapshot history, then drop anything still queued - those
                 # events are part of the snapshot and must not arrive twice.
                 snapshot = list(session.history)
                 while True:
@@ -389,7 +389,7 @@ def attach_gui(
         status = session.send_message(req.text)
         if status == "closed":
             raise HTTPException(409, "Session is closed")
-        # "started" begins a task; "queued" steers the running one — the text
+        # "started" begins a task; "queued" steers the running one - the text
         # is injected into the conversation at the next turn boundary.
         return {"status": status}
 
@@ -415,7 +415,7 @@ def attach_gui(
     async def session_files_diff(session_id: str, path: str = ""):
         """Cumulative unified diff of session changes (?path= for one file).
 
-        Diffs only files the agent's tracker recorded — arbitrary paths
+        Diffs only files the agent's tracker recorded - arbitrary paths
         cannot be read through this endpoint."""
         session = _get_session(session_id)
         loop = asyncio.get_running_loop()
@@ -444,7 +444,7 @@ def attach_gui(
         """Subdirectories of *path*, for the coder setup directory picker.
 
         An empty path lists drive roots on Windows (filesystem root
-        elsewhere). Only directory names leave the server — no file
+        elsewhere). Only directory names leave the server - no file
         names or contents. The GUI is localhost + bearer-auth, and the
         coder agent this picker feeds can read those directories anyway.
         """
@@ -500,7 +500,7 @@ def attach_gui(
         if req.model not in load_registry():
             raise HTTPException(404, f"Model not registered: {req.model}")
         if req.model == active_model():
-            raise HTTPException(409, "Cannot remove the active model — switch first")
+            raise HTTPException(409, "Cannot remove the active model - switch first")
         job = jobs.start_cli("remove", ["rm", req.model, "--yes"])
         return {"job_id": job.id}
 
@@ -574,12 +574,12 @@ def attach_gui(
         if not load_config().get("reload_llm_after_imagine", True):
             job.push({"type": "line", "text":
                       "Keeping ComfyUI loaded (reload_llm_after_imagine is "
-                      "off) — the chat model reloads on the next message."})
+                      "off) - the chat model reloads on the next message."})
             return
         from localm.image_gen.comfy import free_comfy_vram
         if not free_comfy_vram():
             job.push({"type": "line", "text":
-                      "ComfyUI kept its models in VRAM (no /free support) — "
+                      "ComfyUI kept its models in VRAM (no /free support) - "
                       "the chat model will reload on the next message instead."})
             return
         job.push({"type": "line", "text": "Reloading the chat model…"})
@@ -661,7 +661,7 @@ def attach_gui(
         return resolved
 
     def _confined_file(base: Path, name: str, kind: str) -> Path:
-        """_confined_name plus an existence check — for files being read."""
+        """_confined_name plus an existence check - for files being read."""
         resolved = _confined_name(base, name)
         if not resolved.is_file():
             raise HTTPException(404, f"No such {kind}")
@@ -688,7 +688,7 @@ def attach_gui(
               dependencies=[Depends(_require_auth)])
     async def imagine_move(name: str, req: MoveImageRequest):
         """Move a generated image (and its metadata sidecar) to a folder on
-        this machine — e.g. into a project or pictures directory."""
+        this machine - e.g. into a project or pictures directory."""
         import shutil
         path = _image_path(name)
         dest_dir = Path(req.dest).expanduser()
@@ -887,7 +887,7 @@ def attach_gui(
                 return False
             job.push({"type": "line", "text":
                       f"Submitting Wan workflow to ComfyUI "
-                      f"({req.seconds:.0f}s clip — video is slow, be patient)…"})
+                      f"({req.seconds:.0f}s clip - video is slow, be patient)…"})
             kwargs = {}
             for field in ("negative_prompt", "seconds", "fps", "width",
                           "height", "seed", "steps", "cfg"):
@@ -1050,7 +1050,7 @@ def attach_gui(
                     data["id"] = p.stem
                     items.append(data)
                 except Exception:
-                    continue   # corrupt file — skip, never block the list
+                    continue   # corrupt file - skip, never block the list
         items.sort(key=lambda c: c.get("updated_at", 0), reverse=True)
         return {"enabled": True, "conversations": items[:200]}
 
@@ -1092,7 +1092,7 @@ def attach_gui(
     # Search and fetch for the chat surface, enforced by localm.netpolicy
     # (net_mode, net_allow/net_deny, SSRF guard). Callers are either the
     # user's explicit /web command or the per-conversation web-access toggle
-    # — both are direct consent, so "ask" mode does not re-prompt here; only
+    # - both are direct consent, so "ask" mode does not re-prompt here; only
     # "off" blocks. Domain rules and the private-address guard always apply.
 
     @app.post("/api/web/search", dependencies=[Depends(_require_auth)])
@@ -1129,7 +1129,7 @@ def attach_gui(
     # ----------------------------- voice --------------------------- #
     # Whisper STT for the mic button. Audio is decoded in memory and never
     # written to disk, so privacy mode stays trace-free. TTS needs no
-    # endpoint — the browser's speechSynthesis is offline by construction.
+    # endpoint - the browser's speechSynthesis is offline by construction.
 
     @app.get("/api/voice/status", dependencies=[Depends(_require_auth)])
     async def voice_status():
@@ -1165,13 +1165,13 @@ def attach_gui(
     # user can read and edit, injected into the system prompt when the
     # drawer toggle is on. LOCALCODER.md is the coder-side analogue.
     #
-    # Privacy semantics: privacy mode means "no new traces", not amnesia —
+    # Privacy semantics: privacy mode means "no new traces", not amnesia -
     # READING memory written by earlier non-privacy sessions is allowed,
     # but WRITES (which would persist conversation-derived facts) return
     # 403 while privacy is active.
 
     memory_file = home_dir() / "chat-memory.md"
-    _MEMORY_MAX = 64_000   # characters — keep injection bounded
+    _MEMORY_MAX = 64_000   # characters - keep injection bounded
 
     def _memory_writable() -> bool:
         from localm.audit import SessionMode, effective_mode
@@ -1280,13 +1280,13 @@ def attach_gui(
 
     # --------------------------- knowledge ------------------------ #
     # Document collections for retrieval-augmented chat (localm.rag).
-    # Collections are explicit user data — indexing writes to <data dir>/rag/
+    # Collections are explicit user data - indexing writes to <data dir>/rag/
     # in every session mode, like generated images. /api/rag/extract is the
     # exception: it converts an uploaded attachment to text entirely in
     # memory, so privacy-mode chats can use documents without leaving traces.
 
     def _self_embed(texts: list) -> list:
-        """Embed via this server's own /v1/embeddings — the endpoint holds
+        """Embed via this server's own /v1/embeddings - the endpoint holds
         the inference semaphore, so indexing never races a chat reply.
         Raises when the backend has no embedding support (GGUF ctypes
         binding); callers degrade to lexical-only."""
@@ -1366,7 +1366,7 @@ def attach_gui(
             summary = (f"done: {result['added']} added, "
                        f"{result['updated']} updated, "
                        f"{result['skipped']} unchanged, "
-                       f"{len(result['failed'])} failed — "
+                       f"{len(result['failed'])} failed - "
                        f"{result['chunks']} chunks total")
             job.push({"type": "line", "text": summary})
             for f in result["failed"][:10]:
@@ -1421,7 +1421,7 @@ def attach_gui(
     # --------------------- coder session history ------------------ #
     # Read-only browser for past audit logs (~/.localm/sessions/*.jsonl,
     # written in log/full modes). Live sessions have /log; this lists what
-    # earlier sessions — including ones from before a server restart — left
+    # earlier sessions - including ones from before a server restart - left
     # behind. Privacy mode writes no logs, so the list is simply empty.
 
     @app.get("/api/coder/history", dependencies=[Depends(_require_auth)])

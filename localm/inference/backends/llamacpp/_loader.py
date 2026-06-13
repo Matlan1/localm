@@ -1,9 +1,9 @@
 """
 DLL bootstrap for the llama.cpp native backend.
 
-Resolves the native binary directory from project-local locations only — an
+Resolves the native binary directory from project-local locations only - an
 explicit override, the config, or the ``localm-llama-runtime`` wheel installed
-in this venv — never a sibling folder elsewhere on disk. Adds the venv's
+in this venv - never a sibling folder elsewhere on disk. Adds the venv's
 rocm-sdk runtime dirs (amdhip64/rocm_kpack/rocblas/…) to the DLL search path so
 a llama build that bundles only llama.dll + ggml-*.dll still finds its runtime.
 
@@ -20,14 +20,6 @@ from pathlib import Path
 from typing import List, Optional
 
 _loaded_lib: Optional[ctypes.CDLL] = None
-
-# Legacy external prebuilt directories. Deprecated and checked LAST — kept only
-# so an existing machine that still has them keeps working. The self-contained
-# path is the runtime wheel.
-_LEGACY_DIRS = [
-    Path(r"D:\projects\llama-gfx1030-prebuilt"),
-    Path(r"D:\projects\llama.cpp\build\bin"),
-]
 
 
 def _candidate_dirs() -> List[Path]:
@@ -57,7 +49,6 @@ def _candidate_dirs() -> List[Path]:
     except Exception:
         pass
 
-    dirs.extend(_LEGACY_DIRS)
     return dirs
 
 
@@ -76,7 +67,7 @@ def runtime_binary_dir() -> Optional[Path]:
 def rocm_runtime_dirs() -> List[Path]:
     """ROCm runtime DLL directories inside this venv (the rocm-sdk wheels).
 
-    These hold amdhip64_7.dll, rocm_kpack.dll, rocblas.dll, hipblas.dll, … —
+    These hold amdhip64_7.dll, rocm_kpack.dll, rocblas.dll, hipblas.dll, … -
     the libraries a HIP-linked llama.dll needs at load time. Globbed (not
     hardcoded) so any gfx target's package is picked up."""
     found: List[Path] = []
@@ -126,11 +117,11 @@ def load_lib() -> ctypes.CDLL:
     binary_dir = runtime_binary_dir()
     if explicit and not binary_dir:
         # An explicit path that points straight at the file but whose parent
-        # lacks the usual layout — still honour it.
+        # lacks the usual layout - still honour it.
         binary_dir = Path(explicit).parent
     if binary_dir is None or not (binary_dir / "llama.dll").exists():
         raise RuntimeError(
-            "Cannot find llama.dll — the native inference runtime is not "
+            "Cannot find llama.dll - the native inference runtime is not "
             "provisioned.\n"
             "Run:  localm setup-llama        (downloads a prebuilt into this venv)\n"
             "  or: localm setup-llama --from <your llama.cpp build dir>\n"
