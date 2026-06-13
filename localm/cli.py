@@ -919,6 +919,8 @@ def list_cmd():
         if result.pruned:
             bits.append(f"{result.pruned} pruned")
         console.print(f"[dim]Models folder synced: {', '.join(bits)}.[/dim]")
+    if result.note:
+        console.print(f"[yellow]{result.note}[/yellow]")
     list_models()
 
 
