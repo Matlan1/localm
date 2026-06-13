@@ -9,7 +9,7 @@ localm coder "add type hints to utils.py"
 localm serve mymodel
 ```
 
-Everything that does not strictly need the internet works fully offline. Online providers (OpenAI, Anthropic) exist as explicit opt-ins for the coder agent and are never a default. When a task does need the web (current docs, the weather), the coder and chat can search and fetch pages through a single policy choke point — `off` / `ask` / `allow` modes, domain allow/deny lists, SSRF guard ([guide](docs/network.md)).
+Everything that does not strictly need the internet works fully offline. Online providers (OpenAI, Anthropic) exist as explicit opt-ins for the coder agent and are never a default. When a task does need the web (current docs, the weather), the coder and chat can search and fetch pages through a single policy choke point - `off` / `ask` / `allow` modes, domain allow/deny lists, SSRF guard ([guide](docs/network.md)).
 
 ---
 
@@ -35,7 +35,7 @@ Everything that does not strictly need the internet works fully offline. Online 
 | **Web GUI** | `localm gui`: chat, coder agent, model manager, image/music/video generation, plugins, and settings in the browser; zero build step, fully offline ([guide](docs/gui.md)) |
 | **Coding agent** | `localm coder` / `localcoder`: agentic loop with file, shell, search, test, and image tools; mid-task steering, cumulative session diffs (`/changes`, `/diff`), circuit breaker on repeated failures, tab-completed REPL |
 | **Web access (opt-in)** | `web_search` + `fetch_url` for coder and chat via one network policy: `off`/`ask`/`allow`, domain allow/deny, private-address SSRF guard ([guide](docs/network.md)) |
-| **Knowledge (RAG)** | Chat with your documents: attach files in chat (in-memory, privacy-clean) or index folders into collections with cited retrieval — BM25 always, embeddings blended in when the backend supports them ([guide](docs/rag.md)) |
+| **Knowledge (RAG)** | Chat with your documents: attach files in chat (in-memory, privacy-clean) or index folders into collections with cited retrieval - BM25 always, embeddings blended in when the backend supports them ([guide](docs/rag.md)) |
 | **Voice** | 🎤 local Whisper speech-to-text into the composer (`localm[voice]` extra, CPU, no torch) and 🔊 read-aloud via the browser's offline voices |
 | **MCP client** | The coder consumes external MCP tool servers from `.localcoder/config.toml` |
 | **MCP server** | `localm mcp` exposes your local models to Claude Desktop and other MCP clients ([guide](docs/mcp.md)) |
@@ -71,9 +71,9 @@ Everything that does not strictly need the internet works fully offline. Online 
 `setup.bat`. It creates a private `.venv` inside the clone, installs localm into
 it (you pick the full AMD-GPU flavour or base), and asks where data should live:
 
-- **inside the clone** (`.\home`) — fully portable; multiple clones on one
+- **inside the clone** (`.\home`) - fully portable; multiple clones on one
   machine are completely independent,
-- **shared** (`~/.localm`) — clones share models and settings, or
+- **shared** (`~/.localm`) - clones share models and settings, or
 - **a custom path** (recorded in `localm-home.cfg`).
 
 Nothing is installed globally and PATH is untouched. The `LOCALM_HOME` env var
@@ -101,7 +101,7 @@ use the clone's own `.venv` automatically.
 first model three ways: *from file…* / *from folder…* register a GGUF or a
 HuggingFace directory already on disk, and *from URL…* opens the Web GUI on its
 Models page and downloads the model there with a live progress bar. You can
-also just launch the Web GUI with nothing registered — it opens straight to the
+also just launch the Web GUI with nothing registered - it opens straight to the
 Models page so you can pull or import from the browser.
 
 ---
@@ -197,7 +197,7 @@ The agent auto-starts `localm serve` when needed, plans with tool calls (read, w
 
 ### Session privacy modes (all surfaces)
 
-Every surface — terminal chat (`localm run`), the API server (`localm serve`), the web GUI (`localm gui`), and the coder agent — honours the same three persistence modes:
+Every surface - terminal chat (`localm run`), the API server (`localm serve`), the web GUI (`localm gui`), and the coder agent - honours the same three persistence modes:
 
 | mode | what is written |
 |---|---|
@@ -207,7 +207,7 @@ Every surface — terminal chat (`localm run`), the API server (`localm serve`),
 
 Resolution order: `--mode` flag > project `.localcoder/config.toml` (coder only) > per-surface config (`chat_mode` / `coder_mode`) > global config `mode` > `privacy`. Set them in `~/.localm/config.json`, the GUI Settings page, or the launcher's Privacy card (global + chat/coder overrides).
 
-What privacy mode cannot suppress: OS-level process logs, DNS/network traces, files you explicitly ask the agent to write — and `--debug`, which is an explicit toggle that records requests and raw model output into its log (a warning is printed when both are active).
+What privacy mode cannot suppress: OS-level process logs, DNS/network traces, files you explicitly ask the agent to write - and `--debug`, which is an explicit toggle that records requests and raw model output into its log (a warning is printed when both are active).
 
 ### Serve your models over MCP
 
@@ -229,7 +229,7 @@ localm abliterate --model ./model.gguf --export-gguf q5_k_m  # also emit a GGUF
 localm abliterate --model <id> --print-command               # preview, don't launch
 ```
 
-Heretic is a **separate program** (AGPL-3.0) — localm never bundles or imports it,
+Heretic is a **separate program** (AGPL-3.0) - localm never bundles or imports it,
 only runs it. If it isn't found, localm offers to clone the fork into a gitignored
 `.heretic/` under your data dir; point at an existing checkout with the
 `heretic_path` config key (or the `LOCALM_HERETIC_PATH` env var). Heretic runs in
@@ -279,7 +279,7 @@ localm info                          # paths + current config
 `localm list`, `localm gui`, and the desktop launcher auto-scan the models folder
 on start: new GGUF files and HuggingFace directories (any with a `config.json`)
 are registered automatically, and entries whose file has gone missing are
-**flagged** (shown in `localm list`), not deleted — so a temporarily-unavailable
+**flagged** (shown in `localm list`), not deleted - so a temporarily-unavailable
 model (unmounted drive, moved file) isn't forgotten. Set
 `autoprune_missing_models true` to delete missing entries instead; even then only
 files under the models folder are removed, and a registry backup is written first.
@@ -357,8 +357,8 @@ A plugin is a folder with a `plugin.toml` manifest and Python files. It can add 
 
 ## GPU Setup (AMD)
 
-The native llama.cpp binaries live **inside this install** — packaged as the
-`localm-llama-runtime` wheel in the venv — so the project never depends on a
+The native llama.cpp binaries live **inside this install** - packaged as the
+`localm-llama-runtime` wheel in the venv - so the project never depends on a
 folder elsewhere on disk. Provision them once:
 
 ```bash
@@ -373,8 +373,9 @@ and installs the wheel. The ROCm runtime they need at load time
 `[gpu]` extra already installed into the same venv.
 
 localm resolves the binary directory in order: `LLAMA_CPP_LIB` env →
-`binary_dir` config → the bundled runtime wheel → (deprecated external dirs, for
-backward compatibility only). ggml deps load before `llama.dll`, and the venv's
+`binary_dir` config → the bundled runtime wheel. No absolute path is ever
+assumed as a default; an unprovisioned install resolves to nothing and points
+you at `localm setup-llama`. ggml deps load before `llama.dll`, and the venv's
 `_rocm_sdk_*/bin` dirs are added to the DLL search path automatically.
 
 Before loading a model, localm checks free VRAM against the model size and warns
@@ -400,7 +401,7 @@ runtime/                      # localm-llama-runtime wheel: native llama.cpp
 localm/
 ├── cli.py                    # Click commands
 ├── config.py                 # ~/.localm/ paths, config, port range
-├── setup_llama.py            # `localm setup-llama` — provision native binaries
+├── setup_llama.py            # `localm setup-llama` - provision native binaries
 ├── model_manager.py          # registry, pull, dedup, aliases, Ollama manifests
 ├── image_gen/
 │   └── comfy.py              # ComfyUI FLUX pipeline driver
