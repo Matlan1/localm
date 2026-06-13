@@ -42,6 +42,10 @@ config.json
 home/
 localm-home.cfg
 
+# Heretic checkout fetched by the abliterate plugin (AGPL-3.0; never committed)
+.heretic/
+**/.heretic/
+
 # Personal ComfyUI workflows (which models/encoders we use stays private —
 # the committed *.example.json templates use the vanilla public stack)
 localm/image_gen/flux_workflow.json

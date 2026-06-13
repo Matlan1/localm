@@ -7,7 +7,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import List, NamedTuple, Optional
 
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -20,7 +20,14 @@ from rich.progress import (
 )
 from rich.table import Table
 
-from .config import MODELS_DIR, ensure_dirs, load_registry, save_registry
+from .config import (
+    MODELS_DIR,
+    REGISTRY_FILE,
+    ensure_dirs,
+    load_config,
+    load_registry,
+    save_registry,
+)
 
 console = Console()
 
@@ -277,17 +284,28 @@ def list_models() -> None:
         if path.is_dir():
             kind = "hf"
             size = "[dim]dir[/dim]"
+            name_cell = name
         elif path.exists():
             kind = "gguf"
             b = path.stat().st_size
             size = f"{b/1024**3:.2f} GB" if b >= 1024**3 else f"{b/1024**2:.0f} MB"
+            name_cell = name
         else:
-            kind = "?"
-            size = "[red]missing[/red]"
+            # File is gone: flagged (kept) unless autoprune deleted it earlier.
+            kind = "[red]missing[/red]"
+            size = "[red]—[/red]"
+            name_cell = f"[red]{name}[/red]"
 
-        table.add_row(name, kind, size, source, str(path))
+        table.add_row(name_cell, kind, size, source, str(path))
 
     console.print(table)
+
+    if any(not Path(i["path"]).exists() for i in reg.values()):
+        console.print(
+            "[dim]Models marked [red]missing[/red] have no file on disk. "
+            "Set [bold]autoprune_missing_models true[/bold] to drop them "
+            "automatically, or re-add the file.[/dim]"
+        )
 
 
 def pull_model(
@@ -800,6 +818,177 @@ def _register(
         entry["sha256"] = sha256.lower()
     reg[name] = entry
     save_registry(reg)
+
+
+def _unique_registry_name(reg: dict, base: str) -> str:
+    """Return a registry-safe name derived from ``base``, avoiding collisions."""
+    base = re.sub(r"[^A-Za-z0-9._-]+", "-", base).strip("-") or "model"
+    if base not in reg:
+        return base
+    i = 2
+    while f"{base}-{i}" in reg:
+        i += 1
+    return f"{base}-{i}"
+
+
+class ModelSyncResult(NamedTuple):
+    """Outcome of :func:`sync_models_dir`."""
+
+    added: int = 0          # new models discovered and registered
+    flagged: int = 0        # entries newly marked missing (file gone)
+    restored: int = 0       # entries whose file reappeared (flag cleared)
+    pruned: int = 0         # entries deleted (only when autoprune is enabled)
+    note: str = ""          # a warning to surface (e.g. autoprune guardrail tripped)
+
+    @property
+    def changed(self) -> bool:
+        return bool(self.added or self.flagged or self.restored or self.pruned)
+
+
+def _backup_registry() -> Optional[Path]:
+    """Snapshot the registry to ``registry.json.bak`` (one-step revert).
+
+    Returns the backup path, or None if there was no registry file to copy.
+    """
+    if not REGISTRY_FILE.exists():
+        return None
+    backup = REGISTRY_FILE.with_name(REGISTRY_FILE.name + ".bak")
+    try:
+        shutil.copy2(REGISTRY_FILE, backup)
+        return backup
+    except OSError:
+        return None
+
+
+def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
+    """Reconcile the registry with the models directory.
+
+    Scans ``MODELS_DIR`` for models that aren't registered yet — loose GGUF
+    files (split GGUFs are registered by their first part) and HuggingFace
+    directories (any subfolder containing ``config.json``) — and registers them.
+
+    Registry entries whose file has gone missing are, by default, **flagged**
+    (``"missing": true``) rather than deleted, so a temporarily-unavailable model
+    (moved file, unplugged drive, sync hiccup) is not silently forgotten. When a
+    flagged file reappears, the flag is cleared. Deletion happens only when
+    pruning is enabled — via ``prune=True`` or the ``autoprune_missing_models``
+    config setting — and even then only for files under ``MODELS_DIR`` (external
+    models are flagged, never deleted). Runs without prompting; safe to call on
+    every launch.
+    """
+    if prune is None:
+        prune = bool(load_config().get("autoprune_missing_models", False))
+
+    ensure_dirs()
+    reg = load_registry()
+
+    known = {
+        str(Path(entry["path"]).resolve())
+        for entry in reg.values()
+        if entry.get("path")
+    }
+
+    added = 0
+    if MODELS_DIR.is_dir():
+        for child in sorted(MODELS_DIR.iterdir()):
+            try:
+                # HuggingFace model directory.
+                if child.is_dir() and (child / "config.json").is_file():
+                    resolved = str(child.resolve())
+                    if resolved in known:
+                        continue
+                    _register(_unique_registry_name(reg, child.name), child)
+                    reg = load_registry()
+                    known.add(resolved)
+                    added += 1
+            except OSError:
+                continue
+
+        for child in sorted(MODELS_DIR.glob("*.gguf")):
+            try:
+                if not child.is_file():
+                    continue
+                # For split GGUFs, only register the first part.
+                parts = split_gguf_parts(child.name)
+                if parts and child.name != parts[0]:
+                    continue
+                resolved = str(child.resolve())
+                if resolved in known:
+                    continue
+                _register(_unique_registry_name(reg, child.stem), child)
+                reg = load_registry()
+                known.add(resolved)
+                added += 1
+            except OSError:
+                continue
+
+    # Reconcile missing / restored / pruned against the (possibly grown) registry.
+    reg = load_registry()
+    models_root = MODELS_DIR.resolve()
+
+    def _under_models_dir(p: Path) -> bool:
+        return models_root in p.resolve().parents
+
+    # Managed models = those whose file lives under the models folder.
+    managed = [
+        name
+        for name, entry in reg.items()
+        if entry.get("path") and _under_models_dir(Path(entry["path"]))
+    ]
+    managed_missing = [n for n in managed if not Path(reg[n]["path"]).exists()]
+
+    # Guardrail: if pruning would delete *every* managed model at once, the folder
+    # is almost certainly unavailable (unmounted drive, wrong path) rather than the
+    # user having deleted everything — refuse to prune and flag instead.
+    suspicious = prune and len(managed) >= 2 and len(managed_missing) == len(managed)
+
+    flagged = restored = pruned = 0
+    note = ""
+    backed_up = False
+    dirty = False
+
+    for name in list(reg.keys()):
+        entry = reg[name]
+        path_str = entry.get("path")
+        if not path_str:
+            continue
+        path = Path(path_str)
+
+        if path.exists():
+            # A previously-missing model is back — clear the flag.
+            if entry.pop("missing", None):
+                restored += 1
+                dirty = True
+            continue
+
+        # File is gone.
+        if prune and not suspicious and _under_models_dir(path):
+            if not backed_up:
+                # Snapshot the registry before the first deletion so the sync can
+                # be reverted one step if it goes wrong.
+                _backup_registry()
+                backed_up = True
+            del reg[name]
+            pruned += 1
+            dirty = True
+        elif not entry.get("missing"):
+            entry["missing"] = True
+            flagged += 1
+            dirty = True
+
+    if suspicious:
+        note = (
+            f"Skipped autoprune: all {len(managed)} models under the models folder "
+            "appear missing — is the folder/drive available? Left them flagged "
+            "rather than deleting the registry."
+        )
+
+    if dirty:
+        save_registry(reg)
+
+    return ModelSyncResult(
+        added=added, flagged=flagged, restored=restored, pruned=pruned, note=note
+    )
 
 
 def _register_with_dedup(

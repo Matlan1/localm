@@ -15,8 +15,8 @@ from rich.panel import Panel
 
 from .config import HOME_DIR, find_binary_dir, load_config, save_config
 from .model_manager import (
-    add_local, get_model_info, get_model_path, list_models, pull_model,
-    remove_model, show_shortcuts,
+    add_local, get_model_info, list_models, pull_model,
+    remove_model, show_shortcuts, sync_models_dir,
 )
 
 console = Console()
@@ -906,7 +906,21 @@ def video_cmd(prompt, negative, duration, fps, width, height, input_image,
 
 @main.command("list")
 def list_cmd():
-    """List registered models."""
+    """List registered models (auto-detecting changes in the models folder)."""
+    result = sync_models_dir()
+    if result.changed:
+        bits = []
+        if result.added:
+            bits.append(f"{result.added} new")
+        if result.flagged:
+            bits.append(f"{result.flagged} missing")
+        if result.restored:
+            bits.append(f"{result.restored} restored")
+        if result.pruned:
+            bits.append(f"{result.pruned} pruned")
+        console.print(f"[dim]Models folder synced: {', '.join(bits)}.[/dim]")
+    if result.note:
+        console.print(f"[yellow]{result.note}[/yellow]")
     list_models()
 
 
@@ -1365,6 +1379,21 @@ except ImportError:
             '[yellow]The coder plugin is not installed.[/yellow]\n'
             'Enable it with:  [bold]pip install "localm[coder]"[/bold]\n'
             '  or (editable):  [bold]pip install -e ".[coder]"[/bold]'
+        )
+
+# Abliterate plugin — decensor a model with Heretic (run as a separate program)
+# and register the result. Gated behind ``pip install "localm[abliterate]"``.
+try:
+    from .plugins.abliterate.cli import main as _abliterate_main
+    main.add_command(_abliterate_main, name="abliterate")
+except ImportError:
+    @main.command("abliterate", context_settings={"ignore_unknown_options": True})
+    def _abliterate_stub(**_):
+        """Decensor a model with Heretic (run: pip install "localm[abliterate]" to enable)."""
+        console.print(
+            '[yellow]The abliterate plugin is not installed.[/yellow]\n'
+            'Enable it with:  [bold]pip install "localm[abliterate]"[/bold]\n'
+            '  or (editable):  [bold]pip install -e ".[abliterate]"[/bold]'
         )
 
 
