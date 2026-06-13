@@ -15,6 +15,17 @@ Everything that does not strictly need the internet works fully offline. Online 
 
 ## Features
 
+- **Local model inference.** GGUF files load through a small ctypes binding to `llama.dll`, so there's no llama-cpp-python to install. HuggingFace models work too, and it works out whether to run on your AMD or NVIDIA GPU (or fall back to CPU) from what actually loads at startup.
+- **Pick how you talk to it.** A browser GUI, a plain terminal chat, and an OpenAI-compatible server for when you want other apps to connect.
+- **A coding agent that does the work.** `localm coder` works through a task with tools for files, the shell, search, and tests, and you can redirect it mid-run or review what it touched with session diffs. It speaks MCP both ways, so localm can expose your models to clients like Claude Desktop, and the coder can pull in external MCP tool servers.
+- **Built-in generation.** Through a local ComfyUI it can make images with FLUX, music of any length with ACE-Step, and short video clips from a prompt or a still with Wan 2.2.
+- **Bring your own data.** Attach files or index whole folders and chat against them with citations, talk to it using local Whisper, or hand it an image to look at.
+- **Model management that stays out of the way.** Pull from HuggingFace with aliases and SHA256 dedup, browse quants with a note on whether they fit your VRAM, and let it register whatever you drop into the models folder. Abliteration is a single command that passes a model to Heretic and registers what comes back.
+- **Offline first.** Nothing leaves your machine unless you allow it. The optional online parts, meaning cloud providers for the coder and web access for fetching pages, are opt-in and run through one network policy you set.
+
+<details>
+<summary>Full feature list</summary>
+
 | Feature | Details |
 |---|---|
 | **GGUF inference** | Pure-Python ctypes wrapper around `llama.dll`, no llama-cpp-python required |
@@ -39,6 +50,8 @@ Everything that does not strictly need the internet works fully offline. Online 
 | **Plugins** | Drop a folder with `plugin.toml` into `~/.localm/plugins/` to add CLI commands and agent tools |
 | **Multimodal** | Image attachment via `--image` or `/image` (requires mmproj GGUF) |
 | **Ollama interop** | Register Ollama blobs directly via `localm add <manifest-dir>` |
+
+</details>
 
 ---
 
