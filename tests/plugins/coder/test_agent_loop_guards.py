@@ -174,6 +174,61 @@ class TestSelfVerificationNudge:
 
 
 # ---------------------------------------------------------------------------
+#  Tool-call repair turn (parser runs for real here)
+# ---------------------------------------------------------------------------
+
+class TestRepairTurn:
+    def _repairs(self, agent):
+        return [
+            m for m in agent._messages
+            if m["role"] == "user" and "[tool-call format]" in str(m.get("content", ""))
+        ]
+
+    def test_repair_fires_then_accepts_reformatted_answer(self, tmp_path):
+        agent = _make_agent(tmp_path)
+        # First: a truncated tool call that cannot parse but clearly tried.
+        # Then: a plain final answer.
+        responses = iter(['{"name": "read_file", "args": {"path"', "Done."])
+        with patch.object(agent, "_call_llm",
+                          side_effect=lambda *a, **k: next(responses)):
+            result = agent.run_task("read a file")
+        assert result == "Done."
+        assert len(self._repairs(agent)) == 1
+
+    def test_repair_fires_only_once(self, tmp_path):
+        agent = _make_agent(tmp_path)
+        # The model keeps emitting the same unparseable attempt: repair fires
+        # once, then the next one is accepted as the final answer (no loop).
+        with patch.object(agent, "_call_llm",
+                          return_value='{"name": "read_file", "args": {"path"'):
+            agent.run_task("task")
+        assert len(self._repairs(agent)) == 1
+
+    def test_no_repair_on_plain_answer(self, tmp_path):
+        agent = _make_agent(tmp_path)
+        with patch.object(agent, "_call_llm", return_value="Here is the answer."):
+            result = agent.run_task("task")
+        assert result == "Here is the answer."
+        assert self._repairs(agent) == []
+
+    def test_bare_json_call_parses_without_repair(self, tmp_path):
+        """A well-formed bare JSON call now parses and runs - no repair turn."""
+        agent = _make_agent(tmp_path)
+        responses = iter([
+            '{"name": "read_file", "args": {"path": "a.py"}}',
+            "Done.",
+        ])
+        with patch.object(agent, "_call_llm",
+                          side_effect=lambda *a, **k: next(responses)), \
+             patch.object(agent, "_execute_tools",
+                          return_value=["<result>ok</result>"]) as ex:
+            result = agent.run_task("read a.py")
+        assert result == "Done."
+        ex.assert_called_once()          # the bare JSON was dispatched as a call
+        assert self._repairs(agent) == []
+
+
+# ---------------------------------------------------------------------------
 #  Uncertainty escalation (turn budget)
 # ---------------------------------------------------------------------------
 

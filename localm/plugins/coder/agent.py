@@ -33,7 +33,9 @@ from typing import Optional
 from .backends.base import BaseLLMBackend
 from .indexer import ProjectMap
 from .memory import load_memory, remember, forget
-from .parser import ToolCall, parse_tool_calls, split_response
+from .parser import (
+    ToolCall, looks_like_tool_attempt, parse_tool_calls, split_response,
+)
 from .tools import TOOL_REGISTRY, ToolResult
 from .display import (
     confirm,
@@ -255,13 +257,36 @@ class Agent:
         except Exception as e:
             print_warning(f"MCP setup failed: {e}")
 
+        # External plugin tools: register any tools exported by installed
+        # plugins, the same way as MCP and before the prompt is built. External
+        # code defaults to "destructive" (needs confirmation). Failures warn.
+        self._plugin_docs: str = ""
+        try:
+            from .plugin_tools import register_plugin_tools
+            plugin_names, plugin_warnings = register_plugin_tools()
+            for w in plugin_warnings:
+                print_warning(w)
+            if plugin_names:
+                lines = [
+                    f"- {n}: {TOOL_REGISTRY[n].description}"
+                    for n in plugin_names if n in TOOL_REGISTRY
+                ]
+                self._plugin_docs = (
+                    "EXTERNAL PLUGIN TOOLS (call exactly like built-in tools)\n"
+                    + "\n".join(lines)
+                )
+        except Exception as e:
+            print_warning(f"Plugin tool setup failed: {e}")
+
         self._system_prompt: str = build_system_prompt(
             cwd,
             agent_name=name,
             project_map=self._project_map,
             memory=self._memory,
             model_name=self._model_name,
-            extra_tool_docs=self._mcp_docs,
+            extra_tool_docs="\n\n".join(
+                d for d in (self._mcp_docs, self._plugin_docs) if d
+            ),
         )
 
         # Register OpenAI-format tool definitions when the backend supports it
@@ -565,6 +590,7 @@ class Agent:
         start_turns = self._turns          # turns used by *this* task only
         verify_nudged = False              # self-verification fires at most once per task
         budget_escalated = False           # uncertainty escalation fires at most once per task
+        repair_nudged = False              # tool-call reformat fires at most once per task
 
         try:
             while self._turns < self.max_turns:
@@ -649,7 +675,10 @@ class Agent:
                     break
 
                 # ---- parse tool calls ------------------------------------
-                calls = parse_tool_calls(response)
+                # Pass the known tool names so the lenient, name-gated formats
+                # (bare JSON and ```json / bare fences) are recognised without
+                # mistaking a JSON example in prose for a call.
+                calls = parse_tool_calls(response, tool_names=set(TOOL_REGISTRY))
 
                 if not calls:
                     # Self-verification: don't accept a final answer while code
@@ -675,6 +704,36 @@ class Agent:
                             print_info(
                                 "(self-verification: asking agent to verify "
                                 f"changes to {files})"
+                            )
+                        continue
+
+                    # Repair turn: the response looks like a tool call that
+                    # failed to parse (a marker/fence, or a name+args object the
+                    # lenient parser still could not recover - malformed JSON,
+                    # an unknown tool name, or Python-style tool_code). Re-prompt
+                    # once with the exact format instead of printing the broken
+                    # call as the final answer.
+                    if (
+                        not repair_nudged
+                        and self._turns < self.max_turns
+                        and looks_like_tool_attempt(response)
+                    ):
+                        repair_nudged = True
+                        self._add_assistant(response)
+                        self._add_user(
+                            "[tool-call format] That looked like a tool call, "
+                            "but I could not parse it. Re-emit it in EXACTLY "
+                            "this format and nothing else:\n"
+                            "<tool_call>\n"
+                            '{"name": "TOOL_NAME", "args": {"PARAM": "VALUE"}}\n'
+                            "</tool_call>\n"
+                            "Use one of the available tools by its exact name. "
+                            "If you did NOT mean to call a tool, ignore this and "
+                            "give your final answer as plain text."
+                        )
+                        if interactive:
+                            print_info(
+                                "(re-prompting: tool call could not be parsed)"
                             )
                         continue
 
