@@ -2,13 +2,13 @@
 Speech-to-text for the GUI chat: Whisper via faster-whisper (CPU int8).
 
 faster-whisper was chosen over openai-whisper/torch because it runs well on
-CPU with int8 quantization and ships as plain wheels — no torch required, so
+CPU with int8 quantization and ships as plain wheels - no torch required, so
 it works on the GGUF-only base install. It is still optional:
 
     pip install "localm[voice]"
 
 The model (config ``voice_stt_model``, default "base") is downloaded from
-HuggingFace into faster-whisper's cache on FIRST use — that one download is
+HuggingFace into faster-whisper's cache on FIRST use - that one download is
 the only network access; transcription itself is fully local and offline.
 
 Text-to-speech needs no backend at all: the GUI uses the browser's built-in
@@ -31,7 +31,7 @@ class VoiceError(Exception):
 
 
 def stt_available() -> tuple[bool, str]:
-    """(available, reason) — lets the GUI grey out the mic button up front
+    """(available, reason) - lets the GUI grey out the mic button up front
     instead of letting the user record and only then failing."""
     try:
         import faster_whisper  # noqa: F401
@@ -43,7 +43,7 @@ def stt_available() -> tuple[bool, str]:
 
 
 def stt_model_cached() -> tuple[bool, str]:
-    """(cached, model_name) — is the configured Whisper model already in the
+    """(cached, model_name) - is the configured Whisper model already in the
     local HuggingFace cache? First use otherwise downloads it; the GUI asks
     for consent before triggering that one network access."""
     from pathlib import Path
@@ -67,7 +67,7 @@ def stt_model_cached() -> tuple[bool, str]:
 
 
 def transcribe_bytes(data: bytes, language: Optional[str] = None) -> str:
-    """Transcribe an audio blob (webm/ogg/wav/mp3 — anything PyAV decodes).
+    """Transcribe an audio blob (webm/ogg/wav/mp3 - anything PyAV decodes).
     Loads and caches the Whisper model on first call."""
     try:
         from faster_whisper import WhisperModel
@@ -91,7 +91,7 @@ def transcribe_bytes(data: bytes, language: Optional[str] = None) -> str:
                 _model = None
                 raise VoiceError(
                     f"Could not load Whisper model '{name}': {e}. The first "
-                    "use downloads it from HuggingFace — check the network, "
+                    "use downloads it from HuggingFace - check the network, "
                     "or set a different model: localm config voice_stt_model tiny")
         model = _model
 

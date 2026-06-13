@@ -1,19 +1,19 @@
 """
-MCP server over stdio — exposes localm to any MCP client.
+MCP server over stdio - exposes localm to any MCP client.
 
 Protocol: JSON-RPC 2.0, newline-delimited JSON on stdin/stdout (the MCP
-stdio transport — the mirror image of plugins/coder/mcp.py, which is the
+stdio transport - the mirror image of plugins/coder/mcp.py, which is the
 client side).
 
 CRITICAL INVARIANT: stdout carries ONLY protocol messages. Everything in
 this process that would normally print (model loading banners, VRAM info,
-rich progress) must go to stderr — see _redirect_consoles_to_stderr().
+rich progress) must go to stderr - see _redirect_consoles_to_stderr().
 
 Tools exposed:
-    chat            — generate a response with a local model
-    list_models     — registered model names with type and size
-    embed           — embedding vectors (models that support it)
-    generate_image  — local FLUX via ComfyUI (omit with --no-images)
+    chat            - generate a response with a local model
+    list_models     - registered model names with type and size
+    embed           - embedding vectors (models that support it)
+    generate_image  - local FLUX via ComfyUI (omit with --no-images)
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ SERVER_VERSION = "0.1.0"
 
 
 def _log(msg: str) -> None:
-    """Server-side logging — stderr only, stdout belongs to the protocol."""
+    """Server-side logging - stderr only, stdout belongs to the protocol."""
     print(f"[localm-mcp] {msg}", file=sys.stderr, flush=True)
 
 
@@ -67,7 +67,7 @@ class EngineCache:
         self.default_model = default_model
         self._engine = None
         self._loaded_name: Optional[str] = None
-        # Injection point for tests — real factory builds a localm Engine
+        # Injection point for tests - real factory builds a localm Engine
         self._factory = engine_factory or self._build_engine
 
     @staticmethod
@@ -314,7 +314,7 @@ class MCPStdioServer:
         """Blocking loop: read newline-delimited JSON until EOF."""
         stdin = stdin or sys.stdin
         stdout = stdout or sys.stdout
-        _log("ready — waiting for MCP client")
+        _log("ready - waiting for MCP client")
         for line in stdin:
             line = line.strip()
             if not line:
@@ -328,7 +328,7 @@ class MCPStdioServer:
             if response is not None:
                 stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
                 stdout.flush()
-        _log("stdin closed — shutting down")
+        _log("stdin closed - shutting down")
 
 
 def serve_stdio(model: Optional[str] = None, enable_images: bool = True) -> None:

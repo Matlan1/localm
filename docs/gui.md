@@ -14,7 +14,7 @@ The selected model preloads in a background thread at startup, so the first
 reply does not pay the load cost.
 
 **Starting with no models.** On a fresh install `localm gui` (no model
-argument, empty registry) still opens — it lands on the Models page so you can
+argument, empty registry) still opens - it lands on the Models page so you can
 pull or import a first model from the browser; the engine starts once you load
 one. `localm gui --pull <spec>` goes further and begins downloading `<spec>` (a
 HuggingFace repo, `repo:file.gguf`, or an https URL) immediately, with progress
@@ -31,7 +31,7 @@ same flows (file / folder / URL).
   access" checkbox in the parameters drawer lets the model search and read
   pages on its own mid-conversation (bounded rounds; every request and result
   is shown as a dimmed "Web" message). Both run through the server's network
-  policy — see [network.md](network.md). Off by default; without them chat is
+  policy - see [network.md](network.md). Off by default; without them chat is
   fully offline.
 - Documents: the paperclip attaches PDFs, docx, text, and code files alongside
   images. They are converted to text in memory (nothing written to disk, so
@@ -39,27 +39,27 @@ same flows (file / folder / URL).
   reads before your question.
 - Knowledge: pick an indexed collection in the parameters drawer and every
   question is answered against the most relevant excerpts, cited as `[1]`
-  (file + line). Collections are managed on the Knowledge page — see
+  (file + line). Collections are managed on the Knowledge page - see
   [rag.md](rag.md).
 - Model selector in the sidebar lists every registered model. Switching loads the new model and unloads the old one (the switch waits for any in-flight request to finish).
 - Streaming responses with markdown and highlighted code blocks, copy buttons on messages and code.
 - The parameters drawer sets temperature, top-p, max tokens, seed, and a system prompt per conversation.
 - Personas: save the current system prompt + sampling values under a name
   (drawer → save…), then apply them from the drawer select or with
-  `/persona <name>`. Stored in `prompts.json` in the localm data directory —
+  `/persona <name>`. Stored in `prompts.json` in the localm data directory -
   explicit user assets, available in every session mode.
 - Memory: `/remember <fact>` adds a line to `chat-memory.md` in the data
   directory; `/memory` views or edits the whole file; the 🧠 drawer toggle
   injects it into the system prompt so the model knows it across every chat.
   Privacy semantics: privacy mode blocks memory **writes** (no new traces)
-  but still injects what earlier non-privacy sessions saved — privacy means
+  but still injects what earlier non-privacy sessions saved - privacy means
   no traces, not amnesia.
 - Voice: the 🎤 button records from the microphone and transcribes locally
   with Whisper into the composer (needs `pip install "localm[voice]"`; the
   model downloads once on first use, then everything is offline; recordings
   are processed in memory, never written to disk). Every reply has a 🔊
   read-aloud button, and the "Speak replies aloud" drawer toggle reads each
-  finished reply automatically — both use the browser's built-in offline
+  finished reply automatically - both use the browser's built-in offline
   voices, no setup at all.
 - Conversation persistence follows the session mode. In `privacy` (the default) conversations live in memory only and vanish on reload. In `log`/`full` they are saved to `chats/` in the localm data directory (with localStorage as a cache), so they survive reloads, browser profile wipes, and server restarts. Deleting one removes it everywhere.
 - The sidebar search filters chats by title **and** message content (content
@@ -72,7 +72,7 @@ same flows (file / folder / URL).
   fork point. Branches persist with the conversation; export and the model's
   context always use the currently selected branch, and forks anchored in
   history that gets compacted away are pruned.
-- The page you were on (chat, coder, models, …) is restored after a reload — except in privacy mode, which leaves no trace of it.
+- The page you were on (chat, coder, models, …) is restored after a reload - except in privacy mode, which leaves no trace of it.
 - The usage line under the composer shows total tokens, time to first token, and tokens per second for the last reply.
 
 ## Coder
@@ -83,19 +83,19 @@ What you see in the feed:
 
 - The agent's reasoning streams live.
 - Every tool call becomes a card showing its arguments (and the diff, for
-  file writes — both at once). Click to expand; the result line shows the
+  file writes - both at once). Click to expand; the result line shows the
   outcome and how long the tool took.
 - Destructive actions (file writes, shell commands) pause the agent and show
   an approval card with a unified diff of exactly what would change. Approve
-  or reject from the browser — or tick **always allow <tool> this session**
+  or reject from the browser - or tick **always allow <tool> this session**
   on approval and that tool skips the flow for the rest of the session.
   Unanswered approvals time out (default 10 minutes, configurable with
   `localm config coder_confirm_timeout <seconds>`) and are rejected. Answered
-  approvals keep showing their outcome — including after a page reload, and
+  approvals keep showing their outcome - including after a page reload, and
   in other tabs attached to the same session.
 - Auto-approve can be enabled at session start if you trust the task, and
   **dry run** makes destructive tools report what they would do without
-  touching anything — a safe way to preview an agent's plan.
+  touching anything - a safe way to preview an agent's plan.
 - **You can keep typing while the agent works**: a message sent mid-task is
   queued and injected at the next turn boundary as a steering note ("also add
   logging", "skip the tests"), shown in the feed with a *Queued* label.
@@ -119,11 +119,11 @@ Stop asks the agent to halt at the next safe point. End session terminates it.
   changed.
 - The bar's undo button reverts the last file write, compact summarises old
   turns to free context, **export** downloads the session feed as markdown,
-  and log opens the JSONL audit trail (log/full modes) — with a filter box
+  and log opens the JSONL audit trail (log/full modes) - with a filter box
   to narrow entries by tool name, type, or text.
 - The history button (also "past sessions" on the setup form) lists the audit
-  logs earlier log/full-mode sessions left behind — including sessions from
-  before a server restart — and opens them in the same log viewer.
+  logs earlier log/full-mode sessions left behind - including sessions from
+  before a server restart - and opens them in the same log viewer.
 - Session setup accepts a model (switches the engine), max turns, temperature,
   a scope glob that confines file tools, and the dry-run toggle.
 - Typing `/` opens the coder command menu (`/undo`, `/files`, `/compact`,
@@ -138,34 +138,34 @@ Stop asks the agent to halt at the next safe point. End session terminates it.
 - **Models**: search HuggingFace for GGUF models right on the page (empty
   query shows the most downloaded), expand a repo to see every quantization
   with its size and a "fits your VRAM" badge (compared against total VRAM,
-  measured via torch, nvidia-smi, or the Windows display-adapter registry —
+  measured via torch, nvidia-smi, or the Windows display-adapter registry -
   no torch required), and pull any file with one click. Plus: pull by spec
   with live progress, switch the active engine, add aliases, inspect
   path/hash/size, and remove models (alias-aware, never the active one).
-  Search is lazy — no network request until you ask.
+  Search is lazy - no network request until you ask.
 - **Images**: drive the local ComfyUI FLUX pipeline; prompt, negative prompt,
   seed, guidance, img2img with denoise; history grid with per-image metadata
   from the sidecar files. If ComfyUI is not running, the job says how to
   start it, or starts it automatically when `comfy_launch_cmd` is set in the
   config. After a successful generation, ComfyUI is asked to release its
   models and the chat model reloads so the next reply is instant.
-- **Music**: generate tracks with the local ComfyUI ACE-Step workflow — style
+- **Music**: generate tracks with the local ComfyUI ACE-Step workflow - style
   tags, optional lyrics ([verse]/[chorus] markers), and an **arbitrary track
   length in seconds**; seed/steps/CFG for control. Same VRAM handover as image
   generation. History with inline playback, move-to-folder, and delete.
   `/music <tags>` in chat generates a default-length instrumental inline, and
   `localm music "tags" --lyrics song.txt -d 180` does it from the terminal.
-- **Video**: generate short clips with the local ComfyUI Wan 2.2 workflow —
+- **Video**: generate short clips with the local ComfyUI Wan 2.2 workflow -
   prompt + negative, duration (snapped to the model's frame rule; ~5 s is the
   native length), fps, resolution, seed/steps/CFG, and an optional start image
   (image-to-video). Same VRAM handover; history with inline playback,
   move-to-folder, and delete. `/video <prompt>` in chat generates a default
   ~5 s clip inline, and `localm video "prompt"` does it from the terminal.
-  Video is the slowest generator — see [docs/video.md](video.md) for model
+  Video is the slowest generator - see [docs/video.md](video.md) for model
   setup and honest timing expectations.
 - **Knowledge**: create document collections, index files or folders with live
   progress, inspect/remove indexed documents, test-search a collection, and
-  delete collections (index only — original files untouched). Collections show
+  delete collections (index only - original files untouched). Collections show
   `hybrid` when embeddings are available, `BM25` otherwise.
 - **Plugins**: list installed plugins, install from a local folder, remove.
 - **Settings**: edit the server config (`~/.localm/config.json`) and the GUI's

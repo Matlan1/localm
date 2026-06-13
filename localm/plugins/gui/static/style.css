@@ -1,4 +1,4 @@
-/* localm GUI — dark, quiet, professional */
+/* localm GUI - dark, quiet, professional */
 
 :root {
   --bg:        #0f1115;
@@ -210,7 +210,7 @@ nav button.active { background: var(--accent-soft); color: var(--accent); }
 }
 .msg-row.user .msg-role { color: var(--accent); }
 .msg-row.assistant .msg-role { color: var(--green); }
-/* injected web search/fetch results — visible but visually secondary */
+/* injected web search/fetch results - visible but visually secondary */
 .msg-row.web-note { opacity: 0.7; }
 .msg-row.web-note .msg-body { font-size: 13px; max-height: 180px; overflow-y: auto; }
 .msg-row.web-note .msg-role { color: var(--yellow); }
@@ -727,7 +727,7 @@ pre:hover .copy-btn { opacity: 1; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
-/* selection checkbox — hidden until hover, stays while checked */
+/* selection checkbox - hidden until hover, stays while checked */
 .thumb-sel {
   position: absolute; top: 6px; left: 6px;
   width: 17px; height: 17px; cursor: pointer; margin: 0;

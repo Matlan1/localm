@@ -1,12 +1,12 @@
 """
-Minimal MCP (Model Context Protocol) client — stdio transport, stdlib only.
+Minimal MCP (Model Context Protocol) client - stdio transport, stdlib only.
 
 Lets the coder agent use tools from any MCP server. Servers are declared in
 ``.localcoder/config.toml``:
 
     [mcp.servers.weather]
     command = "python"
-    args = ["C:/tools/weather_server.py"]
+    args = ["path/to/weather_server.py"]
 
     [mcp.servers.db]
     command = "npx"
@@ -16,7 +16,7 @@ Lets the coder agent use tools from any MCP server. Servers are declared in
 Each server is spawned as a child process speaking JSON-RPC 2.0 over
 newline-delimited JSON on stdin/stdout (the MCP stdio transport). Its tools
 are registered into TOOL_REGISTRY as ``mcp_<server>_<tool>`` so the agent
-can call them like any built-in tool. Everything is local and offline —
+can call them like any built-in tool. Everything is local and offline -
 whether a given server talks to the network is up to that server.
 """
 
@@ -130,10 +130,10 @@ class MCPServer:
             try:
                 msg = json.loads(line)
             except json.JSONDecodeError:
-                continue   # servers may log junk to stdout — skip it
+                continue   # servers may log junk to stdout - skip it
             if "id" in msg and ("result" in msg or "error" in msg):
                 self._responses.put(msg)
-            # Server-initiated requests/notifications are ignored — this
+            # Server-initiated requests/notifications are ignored - this
             # client offers no capabilities for the server to call back on.
 
     def _request(self, method: str, params: dict, timeout: float) -> dict:
@@ -142,7 +142,7 @@ class MCPServer:
             req_id = self._next_id
             self._send({"jsonrpc": "2.0", "id": req_id, "method": method,
                         "params": params})
-            # One request in flight at a time — wait for OUR id
+            # One request in flight at a time - wait for OUR id
             import time
             deadline = time.monotonic() + timeout
             while True:
@@ -157,7 +157,7 @@ class MCPServer:
                     continue
                 if msg.get("id") == req_id:
                     return msg
-                # Stale response from an earlier timed-out call — drop it
+                # Stale response from an earlier timed-out call - drop it
 
     def _notify(self, method: str, params: Optional[dict] = None) -> None:
         body: dict = {"jsonrpc": "2.0", "method": method}
@@ -180,7 +180,7 @@ class MCPServer:
         """Invoke one of this server's tools and convert the reply."""
         if not self.alive:
             return ToolResult.error(
-                f"MCP server '{self.name}' has exited — tool unavailable")
+                f"MCP server '{self.name}' has exited - tool unavailable")
         try:
             resp = self._request("tools/call",
                                  {"name": tool_name, "arguments": arguments},
@@ -265,7 +265,7 @@ def register_mcp_tools(cwd: Path) -> tuple[List[str], List[str]]:
     Start every configured MCP server and register its tools.
 
     Returns (registered_tool_names, warnings). A failing server produces a
-    warning, never an exception — MCP problems must not break the agent.
+    warning, never an exception - MCP problems must not break the agent.
     """
     registered: List[str] = []
     warnings: List[str] = []
@@ -304,7 +304,7 @@ def register_mcp_tools(cwd: Path) -> tuple[List[str], List[str]]:
                     f"[MCP:{name}] {tool.get('description', '')}".strip()
                 ),
                 params=_schema_to_params(tool.get("inputSchema", {})),
-                # External code — confirm unless the config marks it trusted
+                # External code - confirm unless the config marks it trusted
                 destructive=not server.trusted,
             )
             registered.append(reg_name)

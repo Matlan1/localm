@@ -1,4 +1,4 @@
-"""localm abliterate plugin — decensor a model with Heretic, then register it.
+"""localm abliterate plugin - decensor a model with Heretic, then register it.
 
 Install with:  pip install "localm[abliterate]"
 Invoke via:    localm abliterate --model <id-or-path>

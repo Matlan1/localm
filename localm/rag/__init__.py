@@ -1,5 +1,5 @@
 """
-localm.rag — chat with your documents, fully offline.
+localm.rag - chat with your documents, fully offline.
 
 Design constraints that shaped this package:
 
@@ -11,7 +11,7 @@ Design constraints that shaped this package:
 - Collections are explicit user data (like generated images): creating and
   indexing one writes to ``<data dir>/rag/<name>/`` in every session mode.
   Transient document *attachments* in chat are extracted in memory and write
-  nothing — they stay privacy-clean.
+  nothing - they stay privacy-clean.
 - Extraction is stdlib wherever possible: txt/md/code directly, .docx via
   zipfile+xml, .html via the netpolicy stripper, .ipynb via json. Only PDF
   needs a third-party parser (pypdf, the ``[rag]`` extra).

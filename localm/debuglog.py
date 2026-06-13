@@ -6,13 +6,13 @@ setting ``LOCALM_DEBUG=1``. When active:
 
 - A timestamped log file is created under ``~/.localm/logs/``.
 - Python logging (logger ``localm``) writes DEBUG records to it.
-- The native llama.cpp stderr stream — normally suppressed to keep chat
-  output clean — is redirected INTO the log file instead of discarded.
+- The native llama.cpp stderr stream - normally suppressed to keep chat
+  output clean - is redirected INTO the log file instead of discarded.
   Native aborts (e.g. batch-size violations) print their reason there,
   which is exactly the information needed to analyse a hard crash.
 - The raw, pre-scrub model output (including internal markers such as
   thinking-channel tags) is written to the log after each generation.
-  Chat output itself stays scrubbed — tags never reach the user.
+  Chat output itself stays scrubbed - tags never reach the user.
 
 The env var is the single source of truth so child processes (jobs,
 managed servers) inherit debug mode automatically. LOCALM_DEBUG holds the
@@ -79,7 +79,7 @@ def _install_thread_hook() -> None:
     Mirror uncaught thread exceptions into the debug log.
 
     Worker threads (generation, jobs, agent sessions) otherwise print their
-    tracebacks only to the console, where they scroll away — the log file
+    tracebacks only to the console, where they scroll away - the log file
     must carry them too.
     """
     import threading

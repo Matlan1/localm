@@ -35,7 +35,7 @@ class TestPrintDiffPreview:
     def test_diff_shows_for_changed_content(self):
         old = "line1\nline2\n"
         new = "line1\nchanged\n"
-        # Should call Syntax — patch it to verify it was called
+        # Should call Syntax - patch it to verify it was called
         with patch("localm.plugins.coder.display.console") as mock_console, \
              patch("localm.plugins.coder.display.Syntax") as mock_syntax:
             print_diff_preview(old, new, "test.py")
@@ -102,7 +102,7 @@ class TestPrintDiffPreview:
 
 
 # ---------------------------------------------------------------------------
-#  Agent._confirm_tool — write_file path
+#  Agent._confirm_tool - write_file path
 # ---------------------------------------------------------------------------
 
 class TestAgentConfirmTool:

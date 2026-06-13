@@ -1,6 +1,6 @@
 # Knowledge: chat with your documents
 
-localm grounds chat replies in your own files — manuals, notes, code, papers —
+localm grounds chat replies in your own files - manuals, notes, code, papers -
 fully offline. Two ways in:
 
 1. **Attach a document to a chat** (one-off): click the paperclip, pick a
@@ -29,7 +29,7 @@ localm rag query manuals "how do I replace the toner"
 localm rag rm manuals
 ```
 
-Collections live in `<data dir>/rag/<name>/` — plain JSON, no database.
+Collections live in `<data dir>/rag/<name>/` - plain JSON, no database.
 Deleting a collection removes only the index; your files are untouched.
 Creating or indexing a collection is an explicit action, so it writes to disk
 in every session mode (like generated images); the privacy contract governs
@@ -40,7 +40,7 @@ in every session mode (like generated images); the privacy contract governs
 - Plain text & code (stdlib): `.txt .md .rst .csv .json .yaml .toml .py .js
   .ts .java .c .cpp .go .rs .sh .sql …`
 - `.html` (tags stripped), `.docx` (stdlib zip+xml), `.ipynb` (cells)
-- `.pdf` — needs the one optional package: `pip install "localm[rag]"`
+- `.pdf` - needs the one optional package: `pip install "localm[rag]"`
 
 Binary formats are refused rather than indexed as mojibake.
 
@@ -50,7 +50,7 @@ The built-in ctypes GGUF binding has **no embedding support**, so localm does
 not assume vectors exist:
 
 - **BM25** over ~1200-character paragraph-aware chunks is the always-on
-  baseline — pure stdlib, deterministic, fast at home scale.
+  baseline - pure stdlib, deterministic, fast at home scale.
 - **Embeddings** are added opportunistically: when you index from the GUI and
   the active backend supports `/v1/embeddings` (HF-format models, or GGUF via
   llama-cpp-python), chunk vectors are stored and queries score as an equal
@@ -64,7 +64,7 @@ to get vectors.
 
 ## Limits worth knowing
 
-- Retrieval quality is bounded by BM25 unless your backend embeds — exact
+- Retrieval quality is bounded by BM25 unless your backend embeds - exact
   words matter more than synonyms in lexical mode.
 - Chunks are capped (4 × ~900 chars injected per question) to fit small
   context windows; the dynamic context growth and auto-compaction handle the

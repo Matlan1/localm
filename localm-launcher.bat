@@ -1,7 +1,7 @@
 @echo off
-rem localm launcher — double-click to open the graphical launcher.
+rem localm launcher - double-click to open the graphical launcher.
 rem Lets you pick GUI / chat / server / coder mode, model, debug, and options.
-rem (Use this instead of launcher.pyw — .pyw files have no association when
+rem (Use this instead of launcher.pyw - .pyw files have no association when
 rem Python comes from uv; this always uses the clone's own .venv.)
 cd /d "%~dp0"
 
@@ -17,5 +17,5 @@ if not errorlevel 1 (
 )
 
 echo No Python environment found.
-echo Run setup.bat first — it creates a private .venv in this folder.
+echo Run setup.bat first - it creates a private .venv in this folder.
 pause

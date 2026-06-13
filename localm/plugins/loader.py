@@ -8,14 +8,14 @@ Plugins live in ``~/.localm/plugins/<name>/`` and are described by a
     name = "myplugin"                 # CLI name: ``localm myplugin``
     version = "0.1.0"
     description = "What it does"
-    entry = "myplugin_cli:main"       # "<module>:<attr>" — attr is a Click command
+    entry = "myplugin_cli:main"       # "<module>:<attr>" - attr is a Click command
 
-    [tools]                           # optional — tool exports for the agent
+    [tools]                           # optional - tool exports for the agent
     exports = ["tool_hello"]
 
 The entry module is imported from the plugin directory itself, so a plugin
 is fully self-contained: a folder with a manifest and one or more .py files.
-Everything works offline — installation is a local directory copy.
+Everything works offline - installation is a local directory copy.
 """
 
 from __future__ import annotations
@@ -118,7 +118,7 @@ def discover_plugins(root: Optional[Path] = None) -> List[PluginManifest]:
     """
     Scan the plugins directory and return manifests for every valid plugin.
 
-    Invalid plugins are skipped silently here — use :func:`discover_errors`
+    Invalid plugins are skipped silently here - use :func:`discover_errors`
     when you want the reasons (e.g. for ``localm plugin list``).
     """
     manifests, _ = _scan(root)
@@ -194,7 +194,7 @@ def register_external_plugins(group) -> List[str]:
     Discover external plugins and add each one's Click command to *group*.
 
     Returns a list of warning strings for plugins that failed to load.
-    Never raises — a broken plugin must not take down the localm CLI.
+    Never raises - a broken plugin must not take down the localm CLI.
     """
     warnings: List[str] = []
     existing = set(group.commands) if hasattr(group, "commands") else set()
@@ -210,7 +210,7 @@ def register_external_plugins(group) -> List[str]:
             existing.add(manifest.name)
         except PluginError as e:
             warnings.append(str(e))
-        except Exception as e:  # defensive — plugin bugs stay contained
+        except Exception as e:  # defensive - plugin bugs stay contained
             warnings.append(f"Plugin {manifest.name!r} failed to register: {e}")
     return warnings
 

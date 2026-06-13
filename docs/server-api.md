@@ -78,7 +78,7 @@ whether it is active and loaded.
 
 `POST /v1/models/unload` releases the model from VRAM (e.g. before image
 generation hands the GPU to ComfyUI); `POST /v1/models/load` reloads it.
-Both wait for any in-flight generation to finish first — freeing the
+Both wait for any in-flight generation to finish first - freeing the
 native context mid-decode would crash the GPU driver. Unloading is
 implicit-recovery: the next chat request reloads automatically.
 

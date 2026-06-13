@@ -1,4 +1,4 @@
-"""Tests for localm.plugins.coder.backends.http — usage capture from responses."""
+"""Tests for localm.plugins.coder.backends.http - usage capture from responses."""
 
 import json
 import unittest
@@ -122,7 +122,7 @@ class TestHTTPBackendChatStream(unittest.TestCase):
         mock_post.return_value = self._make_stream_response(["hello"], {})
         backend = _make_backend()
         list(backend.chat_stream([{"role": "user", "content": "hi"}]))
-        # {} means the server didn't send usage — that's fine
+        # {} means the server didn't send usage - that's fine
         self.assertIsInstance(backend.last_usage, dict)
 
 

@@ -167,7 +167,7 @@ class TestStdioLoop:
         assert responses[1]["result"]["content"][0]["text"] == "reply-from-stub-model"
 
     def test_stdout_is_pure_jsonrpc(self):
-        """Every stdout line must parse as JSON — no log contamination."""
+        """Every stdout line must parse as JSON - no log contamination."""
         server, _ = _server()
         stdin = io.StringIO(json.dumps(
             {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}) + "\n")
@@ -180,7 +180,7 @@ class TestStdioLoop:
 class TestClientServerIntegration:
     def test_own_client_can_drive_own_server(self, tmp_path):
         """localcoder's MCP client talks to localm's MCP server in-process
-        logic via subprocess — the two halves must interoperate."""
+        logic via subprocess - the two halves must interoperate."""
         import subprocess, sys, textwrap
         bridge = tmp_path / "bridge.py"
         bridge.write_text(textwrap.dedent("""\

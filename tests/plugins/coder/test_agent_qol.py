@@ -356,7 +356,7 @@ class TestStopMidstream:
 
     def test_stale_stop_does_not_kill_next_task(self, tmp_path):
         agent = _make_agent(tmp_path, ["Done."])
-        agent.request_stop()              # stale — set before the task starts
+        agent.request_stop()              # stale - set before the task starts
         final = agent.run_task("new task")
         assert final == "Done."
         assert agent.last_run_ok is True

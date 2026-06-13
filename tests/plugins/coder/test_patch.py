@@ -125,7 +125,7 @@ def test_crlf_preserved():
 # ---------------------------------------------------------------------------
 
 def test_fuzzy_line_number_off_by_one():
-    """Hint line number in @@ is 1 off — applier should still find the context."""
+    """Hint line number in @@ is 1 off - applier should still find the context."""
     original = make_file("a", "b", "TARGET", "d", "e")
     diff = (
         "@@ -4,1 +4,1 @@\n"   # wrong: TARGET is at line 3
@@ -138,7 +138,7 @@ def test_fuzzy_line_number_off_by_one():
 
 
 def test_fuzzy_large_offset():
-    """Hint is 15 lines off — still within the fuzz=20 window."""
+    """Hint is 15 lines off - still within the fuzz=20 window."""
     lines = [str(i) for i in range(1, 31)]  # "1" .. "30"
     original = "\n".join(lines) + "\n"
     target_line = "15"
@@ -188,7 +188,7 @@ def test_no_newline_marker_ignored():
 
 
 # ---------------------------------------------------------------------------
-#  Realistic case — multi-hunk Python function edit
+#  Realistic case - multi-hunk Python function edit
 # ---------------------------------------------------------------------------
 
 ORIGINAL_PY = """\

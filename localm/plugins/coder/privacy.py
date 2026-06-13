@@ -4,11 +4,11 @@ Privacy-mode helpers for localcoder.
 When ``--mode privacy`` is active this module is responsible for suppressing
 every data-persistence point that the process can control:
 
-  1. Python readline history (``~/.python_history``) — suppressed at startup.
-  2. Subprocess shell history (bash/sh ``HISTFILE``) — suppressed per call.
-  3. Shell history files cleaned at exit — PSReadLine, bash, zsh history files
+  1. Python readline history (``~/.python_history``) - suppressed at startup.
+  2. Subprocess shell history (bash/sh ``HISTFILE``) - suppressed per call.
+  3. Shell history files cleaned at exit - PSReadLine, bash, zsh history files
      are scrubbed of lines referencing the binary name.
-  4. External-provider warning — printed when prompts would leave the machine.
+  4. External-provider warning - printed when prompts would leave the machine.
 
 Shell history coverage by shell:
   cmd.exe      No persistent history at all.  Nothing to do.
@@ -55,12 +55,12 @@ def suppress_readline_history() -> None:
     We cannot easily remove that handler without touching private internals,
     but we can defuse it:
 
-    * ``set_history_length(0)`` — tells ``write_history_file`` to write 0
+    * ``set_history_length(0)`` - tells ``write_history_file`` to write 0
       entries when it runs.
-    * ``clear_history()`` — empties the in-memory ring immediately so that
+    * ``clear_history()`` - empties the in-memory ring immediately so that
       nothing accumulated before this call leaks either.
     * A second ``atexit`` registration of ``clear_history`` runs *after* ours
-      registers — since atexit is LIFO, ours fires first, clearing the buffer
+      registers - since atexit is LIFO, ours fires first, clearing the buffer
       just before site.py's write handler runs (which then writes 0 entries).
 
     Safe no-op if readline is unavailable (Windows without pyreadline, or
@@ -76,7 +76,7 @@ def suppress_readline_history() -> None:
         # Clears whatever the REPL accumulated just before site.py's write.
         _atexit.register(_rl.clear_history)
     except (ImportError, AttributeError):
-        pass   # readline not available — nothing to suppress
+        pass   # readline not available - nothing to suppress
 
 
 # ---------------------------------------------------------------------------
@@ -94,14 +94,14 @@ def subprocess_privacy_env() -> dict[str, str]:
     sub-shell.
 
     Variables overridden:
-      HISTFILE       — path where bash/zsh writes history on exit.
-      HISTSIZE       — in-memory history depth (0 = disabled in bash).
-      HISTFILESIZE   — max lines written to HISTFILE (0 = truncate to empty).
-      HISTIGNORE     — ``*`` ignores every command in bash history.
-      HISTCONTROL    — ``ignorespace:ignoredups`` (belt-and-suspenders).
-      LESSHISTFILE   — less pager history.
-      MYSQL_HISTFILE — mysql CLI history.
-      SQLITE_HISTORY — sqlite3 CLI history.
+      HISTFILE       - path where bash/zsh writes history on exit.
+      HISTSIZE       - in-memory history depth (0 = disabled in bash).
+      HISTFILESIZE   - max lines written to HISTFILE (0 = truncate to empty).
+      HISTIGNORE     - ``*`` ignores every command in bash history.
+      HISTCONTROL    - ``ignorespace:ignoredups`` (belt-and-suspenders).
+      LESSHISTFILE   - less pager history.
+      MYSQL_HISTFILE - mysql CLI history.
+      SQLITE_HISTORY - sqlite3 CLI history.
 
     We deliberately do NOT set env vars for fish or PowerShell because:
       * fish: non-interactive fish sessions never save history regardless.
@@ -139,7 +139,7 @@ def _psreadline_history_paths() -> list[Path]:
     PowerShell 7 on Windows:
       %APPDATA%\\Microsoft\\Windows\\PowerShell\\PSReadLine\\ConsoleHost_history.txt
 
-    cmd.exe has no persistent history at all — nothing to clean.
+    cmd.exe has no persistent history at all - nothing to clean.
     """
     if sys.platform != "win32":
         return []
@@ -157,7 +157,7 @@ def _unix_history_paths() -> list[Path]:
     Return candidate shell history file paths (Unix/Mac only).
 
     Priority:
-      1. $HISTFILE (set by the parent shell — covers bash, zsh, and others).
+      1. $HISTFILE (set by the parent shell - covers bash, zsh, and others).
       2. Well-known defaults as fallbacks for shells that don't export HISTFILE.
     """
     if sys.platform == "win32":
@@ -229,10 +229,10 @@ def clear_shell_history_traces(binary_name: str = "localcoder") -> int:
     Scrub lines referencing *binary_name* from shell history files on exit.
 
     Cleans:
-      Windows  — PSReadLine ConsoleHost_history.txt
-      Unix     — $HISTFILE, ~/.bash_history, ~/.zsh_history, ~/.history
+      Windows  - PSReadLine ConsoleHost_history.txt
+      Unix     - $HISTFILE, ~/.bash_history, ~/.zsh_history, ~/.history
 
-    cmd.exe has no persistent history — nothing to clean there.
+    cmd.exe has no persistent history - nothing to clean there.
 
     Returns the number of files that were modified.
     """

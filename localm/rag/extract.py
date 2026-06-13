@@ -7,7 +7,7 @@ import re
 import zipfile
 from pathlib import Path
 
-# Hard cap on extracted text per document — protects the chunker and the
+# Hard cap on extracted text per document - protects the chunker and the
 # index from a runaway file. ~8 MB of text is far beyond any useful context.
 MAX_TEXT_CHARS = 8_000_000
 
@@ -34,7 +34,7 @@ def _decode_text(data: bytes) -> str:
     Decode a plain-text file without trusting it to be UTF-8.
 
     Windows editors routinely save "text files" as UTF-16; blindly decoding
-    those as UTF-8 yields NUL-interleaved mojibake that an LLM cannot read —
+    those as UTF-8 yields NUL-interleaved mojibake that an LLM cannot read -
     the attachment then looks present but carries no information.
     """
     if data.startswith((b"\xff\xfe", b"\xfe\xff")):
@@ -52,7 +52,7 @@ def _decode_text(data: bytes) -> str:
     try:
         return data.decode("utf-8")
     except UnicodeDecodeError:
-        # Legacy single-byte encoding — cp1252 maps every byte, nothing is lost
+        # Legacy single-byte encoding - cp1252 maps every byte, nothing is lost
         return data.decode("cp1252", errors="replace")
 
 
@@ -69,7 +69,7 @@ def extract_text(path: Path) -> str:
 
 
 def extract_bytes(data: bytes, filename: str) -> str:
-    """Extract plain text from in-memory file content (chat attachments) —
+    """Extract plain text from in-memory file content (chat attachments) -
     nothing is written to disk, so privacy mode stays trace-free."""
     suffix = Path(filename).suffix.lower()
 
@@ -97,7 +97,7 @@ def extract_bytes(data: bytes, filename: str) -> str:
 
 def _extract_docx(data: bytes, filename: str) -> str:
     """.docx is a zip; the body lives in word/document.xml. Paragraph tags
-    (<w:p>) become newlines, text runs (<w:t>) are concatenated — no
+    (<w:p>) become newlines, text runs (<w:t>) are concatenated - no
     python-docx needed."""
     import io
     try:
@@ -129,7 +129,7 @@ def _extract_ipynb(data: bytes, filename: str) -> str:
     for i, cell in enumerate(nb.get("cells", [])):
         src = "".join(cell.get("source", []))
         if src.strip():
-            parts.append(f"[cell {i} — {cell.get('cell_type', '?')}]\n{src}")
+            parts.append(f"[cell {i} - {cell.get('cell_type', '?')}]\n{src}")
     return "\n\n".join(parts)
 
 

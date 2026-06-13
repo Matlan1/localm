@@ -285,7 +285,7 @@ def llama_chat_apply_template(
     Returns
     -------
     int
-        Number of bytes written.  If > *length*, the buffer was too small —
+        Number of bytes written.  If > *length*, the buffer was too small -
         reallocate and call again.
     """
     fn = _bind(
@@ -475,7 +475,7 @@ def llama_sampler_init_grammar(
 
 
 # ---------------------------------------------------------------------------
-#  KV cache / memory management (newer builds only — probe before use)
+#  KV cache / memory management (newer builds only - probe before use)
 # ---------------------------------------------------------------------------
 
 LlamaMemory = ctypes.c_void_p   # llama_memory_t
@@ -484,7 +484,7 @@ LlamaMemory = ctypes.c_void_p   # llama_memory_t
 def has_memory_api() -> bool:
     """
     True when this llama.cpp build exports the llama_memory_* family
-    (introduced mid-2025). Older DLLs lack it — callers must fall back to
+    (introduced mid-2025). Older DLLs lack it - callers must fall back to
     recreating the context to clear the KV cache.
     """
     lib = load_lib()

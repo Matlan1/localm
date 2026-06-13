@@ -41,7 +41,7 @@ def _complete_model(ctx, param, incomplete):
                    "privacy = nothing saved; log = JSONL audit of chat traffic; "
                    "full = log + markdown transcript.")
 def main(model, host, port, ctx, gpu_layers, no_browser, pull_spec, debug, mode):
-    """Open the localm web GUI — chat and the coder agent in your browser.
+    """Open the localm web GUI - chat and the coder agent in your browser.
 
     \b
     MODEL is optional; defaults to the first registered model. With no model
@@ -74,7 +74,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, pull_spec, debug, mode)
     elif debug:
         console.print(
             "[yellow]⚠  privacy mode + --debug:[/yellow] the debug log records "
-            "requests and raw model output — delete it after analysis if that "
+            "requests and raw model output - delete it after analysis if that "
             "matters.")
 
     from localm.config import load_registry, pick_port
@@ -104,7 +104,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, pull_spec, debug, mode)
             # from the Models page (or via --pull). No engine until then.
             model_less = True
             console.print("[yellow]No models registered yet.[/yellow] "
-                          "Opening the GUI — add one on the Models page"
+                          "Opening the GUI - add one on the Models page"
                           + (" (download starting)…" if pull_spec else "."))
         else:
             model = sorted(registry)[0]
@@ -121,7 +121,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, pull_spec, debug, mode)
 
     chosen_port, was_busy = pick_port(port, host="127.0.0.1" if host == "0.0.0.0" else host)
     if was_busy:
-        console.print(f"[yellow]Requested port busy — using {chosen_port}.[/yellow]")
+        console.print(f"[yellow]Requested port busy - using {chosen_port}.[/yellow]")
 
     from localm.inference.engine import Engine
     from localm.inference import http_server as hs
@@ -175,7 +175,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, pull_spec, debug, mode)
 
     console.print(f"[bold green]localm GUI[/bold green] → {base_url}")
     if model_less:
-        console.print("  model: [yellow]none yet — add one on the Models page[/yellow]")
+        console.print("  model: [yellow]none yet - add one on the Models page[/yellow]")
     else:
         console.print(f"  model: [cyan]{display_name or Path(str(model_path)).stem}[/cyan]")
     console.print("  Ctrl+C to stop")

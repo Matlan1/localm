@@ -1,5 +1,5 @@
 """
-Pure-Python ctypes wrapper around llama.dll — our own llama-cpp-python.
+Pure-Python ctypes wrapper around llama.dll - our own llama-cpp-python.
 
 Usage
 -----

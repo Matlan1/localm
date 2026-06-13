@@ -60,7 +60,7 @@ class ToolResult:
 #  Helpers
 # ---------------------------------------------------------------------------
 
-_MAX_OUTPUT = 8_000   # chars — truncate large outputs to spare context
+_MAX_OUTPUT = 8_000   # chars - truncate large outputs to spare context
 
 def _truncate(text: str, max_chars: int = _MAX_OUTPUT) -> tuple[str, bool]:
     if len(text) <= max_chars:
@@ -179,7 +179,7 @@ def tool_read_file(cwd: Path, path: str, offset: int = 0, limit: int = 0) -> Too
     rel = p.relative_to(cwd) if p.is_relative_to(cwd) else p
 
     # Render Jupyter notebooks as readable text rather than raw JSON
-    # (offset/limit are ignored — cell structure beats line numbers there)
+    # (offset/limit are ignored - cell structure beats line numbers there)
     if p.suffix == ".ipynb":
         try:
             nb   = json.loads(raw)
@@ -189,7 +189,7 @@ def tool_read_file(cwd: Path, path: str, offset: int = 0, limit: int = 0) -> Too
             return ToolResult(
                 ok=True,
                 output=f"<path>{rel}</path>\n<cells>{n}</cells>\n<content>\n{output}\n</content>",
-                summary=f"{rel} — {n} cells{' (truncated)' if trunc else ''}",
+                summary=f"{rel} - {n} cells{' (truncated)' if trunc else ''}",
                 truncated=trunc,
             )
         except Exception:
@@ -210,18 +210,18 @@ def tool_read_file(cwd: Path, path: str, offset: int = 0, limit: int = 0) -> Too
         return ToolResult(
             ok=True,
             output=f"<path>{rel}</path>\n<lines>{range_label}</lines>\n<content>\n{output}\n</content>",
-            summary=f"{rel} — lines {range_label}{' (truncated)' if trunc else ''}",
+            summary=f"{rel} - lines {range_label}{' (truncated)' if trunc else ''}",
             truncated=trunc,
         )
 
     output, trunc = _truncate(raw)
     if trunc:
-        output += ("\n[file truncated — re-read specific parts with "
+        output += ("\n[file truncated - re-read specific parts with "
                    "read_file(path, offset=<start line>, limit=<lines>)]")
     return ToolResult(
         ok=True,
         output=f"<path>{rel}</path>\n<lines>{total_lines}</lines>\n<content>\n{output}\n</content>",
-        summary=f"{rel} — {total_lines} lines{' (truncated)' if trunc else ''}",
+        summary=f"{rel} - {total_lines} lines{' (truncated)' if trunc else ''}",
         truncated=trunc,
     )
 
@@ -244,7 +244,7 @@ def tool_write_file(cwd: Path, path: str, content: str) -> ToolResult:
         f"{verb} {rel} ({lines} lines)",
         summary=f"{verb} {rel} ({lines} lines)",
     )
-    # Soft syntax check — surface obvious errors immediately
+    # Soft syntax check - surface obvious errors immediately
     warn = _verify_syntax(p, content)
     if warn:
         result = ToolResult.success(
@@ -259,7 +259,7 @@ def _verify_syntax(path: Path, content: str) -> Optional[str]:
     Quick offline syntax check for common file types.
 
     Returns a short warning string on failure, or None if everything looks fine.
-    Does not raise — always safe to call after a write.
+    Does not raise - always safe to call after a write.
     """
     suffix = path.suffix.lower()
     if suffix == ".py":
@@ -315,7 +315,7 @@ def tool_edit_file(cwd: Path, path: str, old: str, new: str) -> ToolResult:
             f"Looking for: {wanted}\n"
             f"{hint}"
             "Hint: `old` must match the file exactly (whitespace and "
-            "indentation included) — read the file first and copy the text."
+            "indentation included) - read the file first and copy the text."
         )
 
     count = text.count(old)
@@ -355,7 +355,7 @@ def tool_patch_file(cwd: Path, path: str, diff: str) -> ToolResult:
         +added line
 
     File-header lines (``---``/``+++``) are optional but recommended.
-    Line numbers in ``@@`` headers are used as hints only — minor off-by-one
+    Line numbers in ``@@`` headers are used as hints only - minor off-by-one
     errors are tolerated.  Always read the file before generating the diff.
     """
     from ._patch import apply_diff, PatchError
@@ -432,7 +432,7 @@ def tool_run_shell(
 
     When the command contains no shell operators (pipes, redirects, globs,
     variable expansion, etc.) it is parsed with ``shlex.split`` and run as
-    a plain argument list — no shell injection possible.  Otherwise it falls
+    a plain argument list - no shell injection possible.  Otherwise it falls
     back to the system shell (cmd /C on Windows, /bin/sh -c elsewhere).
 
     In privacy mode (``_privacy=True``) the subprocess environment has
@@ -442,7 +442,7 @@ def tool_run_shell(
 
     shell_cmd: list[str]
     if _needs_shell(command):
-        # Complex command — must go through a shell
+        # Complex command - must go through a shell
         if sys.platform == "win32":
             shell_cmd = ["cmd", "/C", command]
         else:
@@ -451,13 +451,13 @@ def tool_run_shell(
         try:
             shell_cmd = shlex.split(command, posix=(sys.platform != "win32"))
         except ValueError:
-            # Malformed quoting — fall back to shell
+            # Malformed quoting - fall back to shell
             if sys.platform == "win32":
                 shell_cmd = ["cmd", "/C", command]
             else:
                 shell_cmd = ["/bin/sh", "-c", command]
         else:
-            # Shell builtins (echo, dir, type, …) have no executable on disk —
+            # Shell builtins (echo, dir, type, …) have no executable on disk -
             # argument-list mode would fail with "file not found". Detect via
             # PATH lookup and route those through the shell instead.
             import shutil as _shutil
@@ -531,7 +531,7 @@ def tool_list_dir(cwd: Path, path: str = ".") -> ToolResult:
     output = f"{rel}/\n" + "\n".join(lines)
     if len(entries) > 200:
         output += f"\n  ... ({len(entries) - 200} more entries)"
-    return ToolResult.success(output, summary=f"{rel}/ — {len(entries)} entries")
+    return ToolResult.success(output, summary=f"{rel}/ - {len(entries)} entries")
 
 
 def tool_tree(
@@ -578,7 +578,7 @@ def tool_tree(
         for i, entry in enumerate(entries):
             if total >= max_files:
                 lines.append(
-                    f"{prefix}    ... (file limit {max_files} reached — entries "
+                    f"{prefix}    ... (file limit {max_files} reached - entries "
                     "omitted; raise max_files or point tree at a subdirectory)"
                 )
                 return
@@ -666,7 +666,7 @@ def tool_search_files(cwd: Path, pattern: str, path: str = ".") -> ToolResult:
     full_pattern = str(base / pattern) if not Path(pattern).is_absolute() else pattern
     try:
         matches = set(_glob.glob(full_pattern, recursive=True))
-        # Bare filename patterns ("*.py") only match the top level — agents
+        # Bare filename patterns ("*.py") only match the top level - agents
         # almost always mean "anywhere in the project", so search subdirs too
         if not Path(pattern).is_absolute() and "/" not in pattern \
                 and "\\" not in pattern and "**" not in pattern:
@@ -752,7 +752,7 @@ def tool_grep(cwd: Path, pattern: str, path: str = ".", glob: str = "", context:
                 remaining = sum(1 for f in files[file_idx + 1:] if f.is_file())
                 if remaining:
                     capped_note = (
-                        f"\n[output cap reached — {remaining} more file(s) were NOT "
+                        f"\n[output cap reached - {remaining} more file(s) were NOT "
                         "searched; narrow the search with glob= or path= to cover them]"
                     )
                 break
@@ -772,7 +772,7 @@ def tool_grep(cwd: Path, pattern: str, path: str = ".", glob: str = "", context:
 
 
 # ---------------------------------------------------------------------------
-#  spawn_agent — sub-agent tool
+#  spawn_agent - sub-agent tool
 # ---------------------------------------------------------------------------
 
 def tool_spawn_agent(
@@ -1032,7 +1032,7 @@ def tool_generate_image(
     input_image: Optional[str] = None,
     denoise: Optional[float] = None,
 ) -> ToolResult:
-    """Thin wrapper — delegates to localm.image_gen.comfy.generate_image."""
+    """Thin wrapper - delegates to localm.image_gen.comfy.generate_image."""
     import os
     from localm.image_gen.comfy import generate_image
 
@@ -1073,7 +1073,7 @@ def _detect_test_runner(cwd: Path) -> list[str]:
     if (cwd / "package.json").exists():
         lock = "yarn" if (cwd / "yarn.lock").exists() else "npm"
         return [lock, "test", "--passWithNoTests"]
-    # Python — prefer pytest; fall back to unittest
+    # Python - prefer pytest; fall back to unittest
     return ["python", "-m", "pytest", "--tb=short", "-q", "--no-header"]
 
 
@@ -1148,7 +1148,7 @@ def tool_run_tests(
     if ok:
         status = "passed"
     elif proc.returncode == 5 and "pytest" in " ".join(cmd):
-        # pytest exit 5 = no tests collected — not a failure, but worth
+        # pytest exit 5 = no tests collected - not a failure, but worth
         # distinguishing so the agent doesn't "fix" passing code
         ok = True
         status = "no tests found"
@@ -1197,7 +1197,7 @@ def tool_git_commit(
         if "nothing to commit" in out.lower():
             return ToolResult.success(
                 "Nothing to commit, working tree clean.",
-                summary="git commit — nothing to commit",
+                summary="git commit - nothing to commit",
             )
         return ToolResult.error(f"git commit failed: {out}")
 
@@ -1291,7 +1291,7 @@ def tool_search_replace(
     if not changes:
         return ToolResult.success(
             f"No matches for pattern '{pattern}'.",
-            summary="search_replace — 0 matches",
+            summary="search_replace - 0 matches",
         )
 
     total = sum(n for _, _, _, n in changes)
@@ -1337,7 +1337,7 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
         name="read_file",
         fn=tool_read_file,
         description=(
-            "Read the contents of a file. Large files are truncated — "
+            "Read the contents of a file. Large files are truncated - "
             "re-read a specific region with offset/limit."
         ),
         params={
@@ -1520,7 +1520,7 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
             "prompt":       {"type": "string", "description": "What to generate. For img2img, describe what to change rather than the full scene.", "required": True},
             "output_path":  {"type": "string", "description": "Path to save the result (default: output.png)", "required": False},
             "input_image":  {"type": "string", "description": "Path to an existing image to use as the starting point (img2img mode).", "required": False},
-            "denoise":      {"type": "float",  "description": "img2img only — how much to change the input (0.0=no change, 1.0=completely new). Default 0.75.", "required": False},
+            "denoise":      {"type": "float",  "description": "img2img only - how much to change the input (0.0=no change, 1.0=completely new). Default 0.75.", "required": False},
             "seed":         {"type": "int",    "description": "Noise seed for reproducible output. Each result reports its seed; pass it back to reproduce or tweak.", "required": False},
             "guidance":        {"type": "float",  "description": "Guidance scale (default: 3.5). Lower values (2.5-3.0) improve photorealism.", "required": False},
             "negative_prompt": {"type": "string", "description": "Things to steer away from, e.g. 'old, mature, middle-aged'. Applied via ConditioningConcat.", "required": False},
