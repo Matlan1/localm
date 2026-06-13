@@ -1396,6 +1396,10 @@ except ImportError:
             '  or (editable):  [bold]pip install -e ".[abliterate]"[/bold]'
         )
 
+# Provision the native llama.cpp binaries into localm's own venv (self-contained).
+from .setup_llama import main as _setup_llama_main
+main.add_command(_setup_llama_main, name="setup-llama")
+
 
 # ------------------------------------------------------------------ #
 #  Plugin management (external plugins in ~/.localm/plugins/)          #

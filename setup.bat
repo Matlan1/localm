@@ -62,6 +62,12 @@ if errorlevel 1 (
     exit /b 1
 )
 
+rem ---- install the native-runtime wheel (self-contained inference) ----------
+rem  localm-llama-runtime carries llama.dll + ggml inside this venv so the
+rem  project never depends on a folder elsewhere on disk. Installed empty here;
+rem  `localm setup-llama` downloads/copies the actual binaries into it.
+uv pip install -p .venv -e ".\runtime"
+
 rem ---- choose where data lives ----------------------------------------------
 echo.
 echo  Where should localm keep its data (models, config, logs, images)?
@@ -119,6 +125,13 @@ echo    .venv\Scripts\localm  CLI directly, e.g.:
 echo        .venv\Scripts\localm pull ^<model^>
 echo        .venv\Scripts\localm gui
 echo.
+if "%FLAVOUR%"=="gpu" (
+    echo  GPU inference needs the native llama.cpp binaries. Provision them into
+    echo  this venv ^(self-contained — no external folder^):
+    echo        .venv\Scripts\localm setup-llama
+    echo  ^(downloads a prebuilt, or use --from ^<your llama.cpp build dir^>^)
+    echo.
+)
 echo  Tip: avoid "uv tool install" for this project — tool installs are
 echo  global per package name and clones would overwrite each other.
 echo.

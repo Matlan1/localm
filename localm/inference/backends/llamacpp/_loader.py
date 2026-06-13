@@ -1,37 +1,115 @@
 """
 DLL bootstrap for the llama.cpp native backend.
 
-Loads ggml dependency DLLs in the correct order, then loads llama.dll from the
-prebuilt binary directory (D:/projects/llama-gfx1030-prebuilt by default).
+Resolves the native binary directory from project-local locations only — an
+explicit override, the config, or the ``localm-llama-runtime`` wheel installed
+in this venv — never a sibling folder elsewhere on disk. Adds the venv's
+rocm-sdk runtime dirs (amdhip64/rocm_kpack/rocblas/…) to the DLL search path so
+a llama build that bundles only llama.dll + ggml-*.dll still finds its runtime.
 
-The LLAMA_CPP_LIB env-var can override the path to llama.dll.  The caller
-should set LLAMA_CPP_DLL_DIR (or rely on auto-discovery) to locate the ggml
-dependencies.
+Provision the binaries with ``localm setup-llama``. The ``LLAMA_CPP_LIB``
+env-var overrides the path to llama.dll for one-off use.
 """
 
 from __future__ import annotations
 
 import ctypes
 import os
+import sys
 from pathlib import Path
-from typing import Optional
-
-# Order matters: ggml → ggml-base → ggml-cpu → ggml-hip → llama
-_GGML_DEPS = ["ggml.dll", "ggml-base.dll", "ggml-cpu.dll", "ggml-hip.dll"]
+from typing import List, Optional
 
 _loaded_lib: Optional[ctypes.CDLL] = None
 
+# Legacy external prebuilt directories. Deprecated and checked LAST — kept only
+# so an existing machine that still has them keeps working. The self-contained
+# path is the runtime wheel.
+_LEGACY_DIRS = [
+    Path(r"D:\projects\llama-gfx1030-prebuilt"),
+    Path(r"D:\projects\llama.cpp\build\bin"),
+]
 
-def _find_binary_dir() -> Optional[Path]:
-    """Return the prebuilt binary directory, or None if not found."""
-    candidates = [
-        Path(r"D:\projects\llama-gfx1030-prebuilt"),
-        Path(r"D:\projects\llama.cpp\build\bin"),
-    ]
-    for p in candidates:
-        if p.is_dir() and (p / "llama.dll").exists():
-            return p
+
+def _candidate_dirs() -> List[Path]:
+    """Directories that may hold llama.dll, in priority order."""
+    dirs: List[Path] = []
+
+    explicit = os.environ.get("LLAMA_CPP_LIB")
+    if explicit:
+        p = Path(explicit)
+        dirs.append(p.parent if p.suffix else p)
+
+    try:
+        from localm.config import load_config
+        bd = load_config().get("binary_dir")
+        if bd:
+            dirs.append(Path(bd))
+    except Exception:
+        pass
+
+    # The self-contained location: binaries bundled in the venv via the
+    # localm-llama-runtime wheel (populated by `localm setup-llama`).
+    try:
+        import localm_llama_runtime
+        d = localm_llama_runtime.lib_dir()
+        if d:
+            dirs.append(Path(d))
+    except Exception:
+        pass
+
+    dirs.extend(_LEGACY_DIRS)
+    return dirs
+
+
+def runtime_binary_dir() -> Optional[Path]:
+    """The directory llama.dll will be loaded from, or None if unprovisioned.
+    Also used by the subprocess fallback to find llama-cli/llama-server."""
+    for d in _candidate_dirs():
+        try:
+            if d and d.is_dir() and (d / "llama.dll").exists():
+                return d
+        except OSError:
+            continue
     return None
+
+
+def rocm_runtime_dirs() -> List[Path]:
+    """ROCm runtime DLL directories inside this venv (the rocm-sdk wheels).
+
+    These hold amdhip64_7.dll, rocm_kpack.dll, rocblas.dll, hipblas.dll, … —
+    the libraries a HIP-linked llama.dll needs at load time. Globbed (not
+    hardcoded) so any gfx target's package is picked up."""
+    found: List[Path] = []
+    roots = set()
+    try:
+        import site
+        for p in site.getsitepackages():
+            roots.add(Path(p))
+        user = site.getusersitepackages()
+        if user:
+            roots.add(Path(user))
+    except Exception:
+        pass
+    roots.add(Path(sys.prefix) / "Lib" / "site-packages")
+    for root in roots:
+        try:
+            for d in root.glob("_rocm_sdk_*/bin"):
+                if d.is_dir():
+                    found.append(d)
+        except OSError:
+            continue
+    return found
+
+
+def _add_to_dll_path(directory: Path) -> None:
+    """Make *directory* resolvable by the OS loader for transitive DLL deps."""
+    os.environ["PATH"] = str(directory) + os.pathsep + os.environ.get("PATH", "")
+    add = getattr(os, "add_dll_directory", None)
+    if add is not None:
+        try:
+            add(str(directory))
+        except OSError:
+            pass
 
 
 def load_lib() -> ctypes.CDLL:
@@ -44,34 +122,43 @@ def load_lib() -> ctypes.CDLL:
     if _loaded_lib is not None:
         return _loaded_lib
 
-    # Allow explicit override via environment variable
     explicit = os.environ.get("LLAMA_CPP_LIB")
-    if explicit:
-        llama_dll = Path(explicit)
-        binary_dir = llama_dll.parent
-    else:
-        binary_dir = _find_binary_dir()
-        if binary_dir is None:
-            raise RuntimeError(
-                "Cannot find llama.dll. "
-                "Set LLAMA_CPP_LIB=/path/to/llama.dll or place llama.dll in "
-                "D:\\projects\\llama-gfx1030-prebuilt\\."
-            )
-        llama_dll = binary_dir / "llama.dll"
+    binary_dir = runtime_binary_dir()
+    if explicit and not binary_dir:
+        # An explicit path that points straight at the file but whose parent
+        # lacks the usual layout — still honour it.
+        binary_dir = Path(explicit).parent
+    if binary_dir is None or not (binary_dir / "llama.dll").exists():
+        raise RuntimeError(
+            "Cannot find llama.dll — the native inference runtime is not "
+            "provisioned.\n"
+            "Run:  localm setup-llama        (downloads a prebuilt into this venv)\n"
+            "  or: localm setup-llama --from <your llama.cpp build dir>\n"
+            "  or set LLAMA_CPP_LIB=/path/to/llama.dll for a one-off."
+        )
+    llama_dll = binary_dir / "llama.dll"
 
-    # Extend PATH so Windows can find HIP runtime DLLs (amdhip64_7.dll etc.)
-    os.environ["PATH"] = str(binary_dir) + os.pathsep + os.environ.get("PATH", "")
+    # Make the binary dir AND the venv's ROCm runtime resolvable by the loader,
+    # so a HIP-linked llama.dll finds amdhip64/rocm_kpack/rocblas even when the
+    # binary dir bundles only llama.dll + ggml-*.dll.
+    _add_to_dll_path(binary_dir)
+    for d in rocm_runtime_dirs():
+        _add_to_dll_path(d)
 
-    # Load ggml dependencies first so their symbols are resolved when llama.dll loads
-    for name in _GGML_DEPS:
-        path = binary_dir / name
-        if path.exists():
-            try:
-                ctypes.CDLL(str(path))
-            except OSError:
-                pass  # already loaded or not required on this system
+    # Pre-load ggml dependencies in dependency order (base < cpu < hip/vulkan <
+    # ggml.dll, which sorts correctly because '-' < '.'). add_dll_directory
+    # already lets the OS resolve them; this is belt-and-suspenders for builds
+    # without a manifest.
+    try:
+        ggml = sorted(binary_dir.glob("ggml*.dll"))
+    except OSError:
+        ggml = []
+    for path in ggml:
+        try:
+            ctypes.CDLL(str(path))
+        except OSError:
+            pass  # already loaded or not needed on this system
 
-    # Finally load llama.dll
     try:
         _loaded_lib = ctypes.CDLL(str(llama_dll))
     except OSError as e:
