@@ -96,14 +96,20 @@ def _comfy_alive(api_url: str, timeout: float = 3.0) -> bool:
 
 
 def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
-                 wait_seconds: int = 180) -> tuple[bool, str]:
+                 wait_seconds: int = 180,
+                 launch_cmd: Optional[str] = None,
+                 workdir: Optional[str] = None) -> tuple[bool, str]:
     """
     Make sure ComfyUI is reachable, launching it when configured.
 
     Used by every generator (image, music, video) from any caller - GUI,
-    CLI, or the coder's generate_image tool. When ComfyUI is down and the
-    ``comfy_launch_cmd`` config is set, the command is started (optionally
-    in ``comfy_workdir``) and polled until the API answers.
+    CLI, or the coder's generate_image tool. When ComfyUI is down and a launch
+    command is configured, the command is started (optionally in *workdir*) and
+    polled until the API answers.
+
+    *launch_cmd* / *workdir* let a caller pass per-plugin config; when not given
+    they fall back to the global ``comfy_launch_cmd`` / ``comfy_workdir`` config
+    keys (kept for callers not yet migrated to per-plugin config).
 
     Returns (ok, message); the message explains what to configure when
     nothing could be launched.
@@ -126,7 +132,8 @@ def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
         return True, "ComfyUI is running."
 
     cfg = load_config()
-    launch_cmd = cfg.get("comfy_launch_cmd")
+    if not launch_cmd:
+        launch_cmd = cfg.get("comfy_launch_cmd")
     if not launch_cmd:
         return False, (
             f"ComfyUI is not reachable at {api_url}.\n"
@@ -143,7 +150,9 @@ def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
     # outer quotes and runs the line verbatim, so quoted executable paths
     # survive (a `["cmd", "/c", line]` list gets re-quoted by subprocess and
     # mangles them). POSIX uses shlex.
-    workdir = cfg.get("comfy_workdir") or None
+    if workdir is None:
+        workdir = cfg.get("comfy_workdir")
+    workdir = workdir or None
     if _sys.platform == "win32":
         argv: "str | list" = 'cmd /S /c "' + launch_cmd + '"'
     else:
@@ -282,6 +291,9 @@ def generate_image(
     localm_url: Optional[str] = None,
     max_poll_seconds: int = 600,
     write_sidecar: bool = True,
+    launch_cmd: Optional[str] = None,
+    workdir: Optional[str] = None,
+    comfy_output_dir: Optional[str] = None,
 ) -> tuple[bool, str]:
     """
     Generate an image from *prompt* and save it to *output_path*.
@@ -364,7 +376,8 @@ def generate_image(
     # 0. Make sure ComfyUI is up (auto-launching when configured) - BEFORE
     # unloading the LLM, so a dead image server doesn't cost the user a
     # pointless model unload + reload
-    ok, msg = ensure_comfy(api_url, on_progress=lambda t: _con.print(f"[dim]{t}[/dim]"))
+    ok, msg = ensure_comfy(api_url, on_progress=lambda t: _con.print(f"[dim]{t}[/dim]"),
+                           launch_cmd=launch_cmd, workdir=workdir)
     if not ok:
         return False, msg
 
@@ -650,7 +663,7 @@ def generate_image(
         # copy lingers there. Only possible when the user tells us where it
         # is (COMFY_OUTPUT_DIR env var or "comfy_output_dir" config key) -
         # there is no portable default.
-        comfy_out = os.environ.get("COMFY_OUTPUT_DIR")
+        comfy_out = comfy_output_dir or os.environ.get("COMFY_OUTPUT_DIR")
         if not comfy_out:
             try:
                 from localm.config import load_config
