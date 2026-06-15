@@ -60,12 +60,15 @@ what makes runtime load/unload possible.
   core fields, the plugin manifest + host-API interfaces, this doc. Additive,
   tested (`test_scopes.py`, `test_settings_schema.py`, `test_plugin_contract.py`),
   no runtime wiring.
-- **Phase 1 - Permissions:** single `auth.key` -> scoped keystore (`auth.json`:
-  named keys with scopes, hashed); legacy key migrates to an all-scopes owner
-  key; `require_scope(...)` dependency replaces the binary `_require_auth`
-  (default-deny once keys exist, open on loopback when none). Gate plugin install
-  + key management behind `plugins:admin` / `keys:admin`. Fix `/v1/models/{id}`
-  path leak. (Auth foundation already partly built: `localm/auth.py`.)
+- **Phase 1 - Permissions (DONE):** scoped keystore (`auth.json`: named keys with
+  scopes, hashed) added ADDITIVELY - the owner key (env `LOCALM_API_KEY` /
+  `auth.key`) is implicitly `admin`, so no migration. `require_scope(...)` +
+  `_enforce_scope` replace the binary check (default-deny once any key exists,
+  open on loopback when none; owner implies every scope). Privileged routes
+  gated (plugins install/delete -> plugins:admin, GET -> plugins:read; config
+  GET/PATCH -> config:read/write; models load/unload -> models:write) plus a
+  key-management API (`/v1/keys`, keys:admin). `/v1/models/{id}` path leak fixed
+  (basename only).
 - **Phase 2 - Plugin engine (`PluginManager`):** discovery (in-tree + external),
   manifest validation, load/unload (dynamic import + register/unregister, runtime
   route mount/unmount), enable/disable (config-persisted), install (admin +
@@ -107,4 +110,6 @@ what makes runtime load/unload possible.
 
 ## Status
 
-Phase 0 complete on `feat/plugin-architecture`. Next: Phase 1 (permissions).
+Phase 0 + Phase 1 complete and merged. Phase 1 added the scoped keystore,
+`require_scope` enforcement, the `/v1/keys` management API, route gating, and the
+`/v1/models/{id}` path-leak fix (full suite 1118 pass). Next: Phase 2 (plugin engine).
