@@ -1,19 +1,20 @@
 """``localm setup-llama`` - provision the native llama.cpp binaries locally.
 
-Makes localm self-contained: the native inference runtime (llama.dll +
-ggml-*.dll, plus a matched ROCm/CUDA runtime when the prebuilt ships one) is
-placed inside the project's own ``localm-llama-runtime`` wheel rather than
-depending on a folder elsewhere on disk.
+Makes localm self-contained: the native inference runtime (the llama shared
+library + its ggml deps, plus a matched ROCm/CUDA runtime when the prebuilt
+ships one) is placed inside the project's own ``localm-llama-runtime`` wheel
+rather than depending on a folder elsewhere on disk.
 
 Two sources:
-  * ``--download`` (default): fetch a prebuilt release zip and extract its
-    DLLs/EXEs. Defaults to the lemonade-sdk gfx1030 (RDNA2) Windows build.
+  * ``--download`` (default, Windows only for now): fetch a prebuilt release zip
+    and extract it. Defaults to the lemonade-sdk gfx1030 (RDNA2) Windows build.
+    There is no hosted prebuilt for Linux/macOS - build llama.cpp for your GPU
+    and use ``--from`` (see docs/linux-setup.md).
   * ``--from <dir>``: copy the binaries from a local llama.cpp build output
-    (e.g. produced by rocm-canary-forge's build_llamacpp_gfx1030.bat).
+    (e.g. produced by rocm-canary-forge's build script, or a stock cmake build).
 
-After placing the files it installs the runtime wheel editable so the loader
-can import it. The ROCm runtime the binaries need (amdhip64/rocm_kpack/…) is
-already provided by the rocm-sdk wheels in the same venv.
+After placing the files it installs the runtime wheel editable so the loader can
+import it.
 """
 
 from __future__ import annotations
@@ -32,24 +33,36 @@ from rich.console import Console
 
 console = Console(highlight=False)
 
-# Default prebuilt: lemonade-sdk llama.cpp ROCm build for gfx103X (RDNA2).
-# See rocm-canary-forge/windows-native for the provenance of this choice.
+# Default prebuilt: lemonade-sdk llama.cpp ROCm build for gfx103X (RDNA2),
+# Windows-only. See rocm-canary-forge/windows-native for the provenance.
 DEFAULT_URL = (
     "https://github.com/lemonade-sdk/llamacpp-rocm/releases/download/"
     "b1288/llama-b1288-windows-rocm-gfx103X-x64.zip"
 )
 
-# What we copy out of a source (build dir or extracted zip): the loadable
-# library, its ggml deps, the runtime DLLs, and the CLI/server exes for the
-# subprocess fallback.
-_WANTED_SUFFIXES = (".dll", ".exe")
+
+def _lib_name() -> str:
+    """The loadable llama library filename for this platform."""
+    if sys.platform == "win32":
+        return "llama.dll"
+    if sys.platform == "darwin":
+        return "libllama.dylib"
+    return "libllama.so"
+
+
+def _is_wanted(f: Path) -> bool:
+    """Whether to copy *f*: the loadable library, its ggml deps, and the runtime
+    libraries - matched by platform-appropriate naming (incl. versioned .so.N)."""
+    n = f.name.lower()
+    if sys.platform == "win32":
+        return n.endswith(".dll") or n.endswith(".exe")
+    if sys.platform == "darwin":
+        return n.endswith(".dylib")
+    return ".so" in n          # libfoo.so and libfoo.so.1
 
 
 def _repo_runtime_lib() -> Path:
-    """The localm-llama-runtime wheel's lib/ dir.
-
-    Prefer the installed package (editable → points back at the repo). Fall
-    back to locating it relative to the localm source tree."""
+    """The localm-llama-runtime wheel's lib/ dir."""
     try:
         import localm_llama_runtime
         return Path(localm_llama_runtime.LIB_DIR)
@@ -81,11 +94,11 @@ def _download(url: str, dest: Path) -> None:
 
 
 def _copy_binaries(src_dir: Path, target: Path) -> int:
-    """Copy llama/ggml/runtime DLLs + exes from *src_dir* (recursively) into
+    """Copy the llama/ggml/runtime libraries from *src_dir* (recursively) into
     *target*. Returns the number of files copied."""
     n = 0
     for f in src_dir.rglob("*"):
-        if f.is_file() and f.suffix.lower() in _WANTED_SUFFIXES:
+        if f.is_file() and _is_wanted(f):
             shutil.copy2(f, target / f.name)
             n += 1
     return n
@@ -114,14 +127,15 @@ def main(from_dir: Optional[str], url: Optional[str], force: bool) -> None:
     """Download or copy the native llama.cpp binaries into localm's own venv.
 
     \b
-      localm setup-llama                       # download the default prebuilt
-      localm setup-llama --from D:\\src\\llama\\build\\bin
+      localm setup-llama                       # Windows: download the default prebuilt
+      localm setup-llama --from /path/to/llama.cpp/build/bin
       localm setup-llama --url https://.../llama-rocm-gfxXXXX.zip
     """
+    lib_name = _lib_name()
     target = _repo_runtime_lib()
     target.mkdir(parents=True, exist_ok=True)
 
-    already = (target / "llama.dll").exists()
+    already = (target / lib_name).exists()
     if already and not force:
         console.print(f"[green]Already provisioned[/green] at {target}")
         console.print("[dim]Use --force to re-download/replace.[/dim]")
@@ -132,13 +146,20 @@ def main(from_dir: Optional[str], url: Optional[str], force: bool) -> None:
         src = Path(from_dir)
         console.print(f"Copying binaries from [bold]{src}[/bold] …")
         n = _copy_binaries(src, target)
-        if not (target / "llama.dll").exists():
-            console.print("[red]No llama.dll found in the source directory.[/red] "
-                          "Point --from at the build output containing llama.dll.")
+        if not (target / lib_name).exists():
+            console.print(f"[red]No {lib_name} found in the source directory.[/red] "
+                          f"Point --from at the build output containing {lib_name}.")
             sys.exit(1)
         console.print(f"[green]Copied {n} file(s)[/green] into {target}")
     else:
-        download_url = url or DEFAULT_URL
+        download_url = url or (DEFAULT_URL if sys.platform == "win32" else None)
+        if not download_url:
+            console.print(f"[red]No default prebuilt for this platform "
+                          f"({sys.platform}).[/red]")
+            console.print("Build llama.cpp for your GPU and run:  "
+                          "[bold]localm setup-llama --from <build dir>[/bold]  "
+                          "(see docs/linux-setup.md), or pass --url.")
+            sys.exit(1)
         with tempfile.TemporaryDirectory() as tmp:
             zip_path = Path(tmp) / "llama-prebuilt.zip"
             try:
@@ -156,8 +177,8 @@ def main(from_dir: Optional[str], url: Optional[str], force: bool) -> None:
                 console.print("[red]The downloaded file is not a valid zip.[/red]")
                 sys.exit(1)
             n = _copy_binaries(extract_dir, target)
-            if not (target / "llama.dll").exists():
-                console.print("[red]The archive did not contain llama.dll.[/red] "
+            if not (target / lib_name).exists():
+                console.print(f"[red]The archive did not contain {lib_name}.[/red] "
                               "Try a different --url or use --from.")
                 sys.exit(1)
             console.print(f"[green]Extracted {n} binary file(s)[/green] into {target}")

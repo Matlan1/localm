@@ -1,0 +1,4 @@
+# Keep shell scripts LF so they run on Linux/macOS regardless of git autocrlf.
+*.sh text eol=lf
+# Windows batch files must stay CRLF.
+*.bat text eol=crlf
