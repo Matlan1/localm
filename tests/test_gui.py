@@ -531,7 +531,8 @@ class TestStaticFiles:
 
 
 class TestSessionExtras:
-    def test_session_list_and_info(self, gui_app, tmp_path):
+    def test_session_list_and_info(self, gui_app, tmp_path, monkeypatch):
+        monkeypatch.setenv("LOCALM_MODE", "privacy")  # hermetic: ignore ambient config mode
         app, _ = gui_app
         with TestClient(app) as client:
             assert client.get("/api/coder/sessions").json()["sessions"] == []
@@ -552,7 +553,8 @@ class TestSessionExtras:
             assert client.post(f"/api/coder/sessions/{sid}/compact").status_code == 409
             client.delete(f"/api/coder/sessions/{sid}")
 
-    def test_log_404_in_privacy_mode(self, gui_app, tmp_path):
+    def test_log_404_in_privacy_mode(self, gui_app, tmp_path, monkeypatch):
+        monkeypatch.setenv("LOCALM_MODE", "privacy")  # hermetic: ignore ambient config mode
         app, _ = gui_app
         with TestClient(app) as client:
             sid = client.post("/api/coder/sessions",
