@@ -26,6 +26,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from localm import scopes
 from localm.inference.backends.base import (
     IMAGE_UNSUPPORTED_MESSAGE, messages_contain_image,
 )
@@ -46,31 +47,45 @@ _inference_sem: asyncio.Semaphore | None = None
 _bearer_scheme = HTTPBearer(auto_error=False)
 
 
-def _require_auth(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
+def _enforce_scope(
+    credentials: Optional[HTTPAuthorizationCredentials],
+    scope: Optional[str],
 ) -> None:
-    """Validate the Bearer token when LOCALM_API_KEY is set in the environment.
-
-    If the env var is absent the server runs in open/dev mode (no auth check).
-    If the env var is set, every request to a protected endpoint must supply a
-    matching ``Authorization: Bearer <token>`` header.
-    """
-    from localm.auth import get_api_key, require_auth_enabled
-    api_key = get_api_key()   # env LOCALM_API_KEY (non-empty) > auth.key file > None
-    if not api_key:
+    """Shared auth core. Open/dev mode when no key is configured anywhere
+    (unless LOCALM_REQUIRE_AUTH forces fail-closed). Otherwise a valid key is
+    required; *scope* None means 'any valid key', else the key's scopes must
+    grant *scope* (the owner key implies every scope)."""
+    from localm.auth import any_key_configured, require_auth_enabled, verify
+    if not any_key_configured():
         if require_auth_enabled():
-            # Fail closed: auth is required but no key is configured anywhere.
             raise HTTPException(
                 status_code=503,
                 detail="Auth required but no API key configured "
                        "(set one via the launcher or LOCALM_API_KEY)")
-        return  # no key configured - dev/local mode, skip auth
-    # Constant-time compare so a network attacker can't recover the key byte
-    # by byte from response-timing differences.
-    import hmac
-    if credentials is None or not hmac.compare_digest(
-            credentials.credentials, api_key):
+        return  # open/dev mode
+    held = verify(credentials.credentials) if credentials else None
+    if held is None:
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
+    if scope is not None and not scopes.grants(held, scope):
+        raise HTTPException(status_code=403,
+                            detail=f"Key lacks required scope: {scope}")
+
+
+def _require_auth(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
+) -> None:
+    """Require any valid API key (no specific scope)."""
+    _enforce_scope(credentials, None)
+
+
+def require_scope(scope: str):
+    """FastAPI dependency factory: require a key whose scopes grant *scope*.
+    Use as ``dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))]``."""
+    def dep(
+        credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
+    ) -> None:
+        _enforce_scope(credentials, scope)
+    return dep
 
 
 # ------------------------------------------------------------------ #
@@ -210,7 +225,7 @@ def create_app(engine: Engine) -> FastAPI:
             "id": model_id,
             "object": "model",
             "owned_by": "localm",
-            "path": path,
+            "path": Path(path).name if path else "",  # basename only; never leak the absolute path
             "source": entry.get("source", ""),
             "sha256": entry.get("sha256"),
             "size_bytes": size,
@@ -224,7 +239,7 @@ def create_app(engine: Engine) -> FastAPI:
     #  Plugins                                                           #
     # ---------------------------------------------------------------- #
 
-    @app.get("/v1/plugins", dependencies=[Depends(_require_auth)])
+    @app.get("/v1/plugins", dependencies=[Depends(require_scope(scopes.PLUGINS_READ))])
     async def list_plugins():
         from localm.plugins.loader import discover_errors, discover_plugins
         return {
@@ -242,7 +257,7 @@ def create_app(engine: Engine) -> FastAPI:
             "errors": discover_errors(),
         }
 
-    @app.post("/v1/plugins/install", dependencies=[Depends(_require_auth)])
+    @app.post("/v1/plugins/install", dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
     async def install_plugin_ep(body: dict):
         from pathlib import Path as _P
         from localm.plugins.loader import PluginError, install_plugin
@@ -256,7 +271,7 @@ def create_app(engine: Engine) -> FastAPI:
         return {"status": "installed", "name": manifest.name,
                 "version": manifest.version}
 
-    @app.delete("/v1/plugins/{name}", dependencies=[Depends(_require_auth)])
+    @app.delete("/v1/plugins/{name}", dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
     async def remove_plugin_ep(name: str):
         from localm.plugins.loader import PluginError, remove_plugin
         try:
@@ -271,7 +286,7 @@ def create_app(engine: Engine) -> FastAPI:
     #  Config                                                            #
     # ---------------------------------------------------------------- #
 
-    @app.get("/v1/config", dependencies=[Depends(_require_auth)])
+    @app.get("/v1/config", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def get_config():
         from localm.config import load_config
         from localm.audit import effective_mode
@@ -287,7 +302,7 @@ def create_app(engine: Engine) -> FastAPI:
         cfg["effective_ctx_max"] = eff_ctx if isinstance(eff_ctx, int) else None
         return cfg
 
-    @app.patch("/v1/config", dependencies=[Depends(_require_auth)])
+    @app.patch("/v1/config", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def patch_config(body: dict):
         """Update known config keys and persist. Unknown keys are rejected."""
         from localm.config import DEFAULT_CONFIG, load_config, save_config
@@ -300,10 +315,39 @@ def create_app(engine: Engine) -> FastAPI:
         return cfg
 
     # ---------------------------------------------------------------- #
+    #  API keys - scoped keystore (auth.json)                            #
+    # ---------------------------------------------------------------- #
+
+    @app.get("/v1/keys", dependencies=[Depends(require_scope(scopes.KEYS_ADMIN))])
+    async def list_keys_ep():
+        from localm.auth import list_keys
+        return {"keys": list_keys()}
+
+    @app.post("/v1/keys", dependencies=[Depends(require_scope(scopes.KEYS_ADMIN))])
+    async def create_key_ep(body: dict):
+        from localm.auth import create_key
+        scope_list = body.get("scopes", [])
+        if not isinstance(scope_list, list):
+            raise HTTPException(400, "'scopes' must be a list of scope strings")
+        try:
+            created = create_key(body.get("name", ""), scope_list)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        # The plaintext key is returned exactly once - it is never recoverable.
+        return created
+
+    @app.delete("/v1/keys/{key_id}", dependencies=[Depends(require_scope(scopes.KEYS_ADMIN))])
+    async def revoke_key_ep(key_id: str):
+        from localm.auth import revoke_key
+        if not revoke_key(key_id):
+            raise HTTPException(404, f"No such key: {key_id}")
+        return {"status": "revoked", "id": key_id}
+
+    # ---------------------------------------------------------------- #
     #  Model lifecycle - unload / load                                   #
     # ---------------------------------------------------------------- #
 
-    @app.post("/v1/models/unload", dependencies=[Depends(_require_auth)])
+    @app.post("/v1/models/unload", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def unload_model():
         """
         Release the model from GPU/CPU memory.
@@ -324,7 +368,7 @@ def create_app(engine: Engine) -> FastAPI:
             await loop.run_in_executor(None, _engine.unload)
         return {"status": "unloaded", "model": _engine.display_name}
 
-    @app.post("/v1/models/load", dependencies=[Depends(_require_auth)])
+    @app.post("/v1/models/load", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def load_model():
         """
         Explicitly reload the model into memory.
