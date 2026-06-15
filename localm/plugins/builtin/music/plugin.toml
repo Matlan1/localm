@@ -1,0 +1,13 @@
+[plugin]
+name = "music"
+version = "1.0.0"
+description = "Music generation (ComfyUI ACE-Step by default) and a library for the chat surface."
+scope = "music"
+register = "plug"
+data_subdir = "gui_music"
+
+[surface]
+tab_id = "music"
+label = "Music"
+icon = "music"
+group = "studio"
