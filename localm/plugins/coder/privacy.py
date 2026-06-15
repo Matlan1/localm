@@ -45,38 +45,11 @@ from .display import console
 # ---------------------------------------------------------------------------
 #  1. Python readline history suppression (startup)
 # ---------------------------------------------------------------------------
-
-def suppress_readline_history() -> None:
-    """
-    Prevent interactive REPL input from being persisted to ``~/.python_history``.
-
-    Python's ``site.py`` registers an ``atexit`` handler that calls
-    ``readline.write_history_file('~/.python_history')`` on interpreter exit.
-    We cannot easily remove that handler without touching private internals,
-    but we can defuse it:
-
-    * ``set_history_length(0)`` - tells ``write_history_file`` to write 0
-      entries when it runs.
-    * ``clear_history()`` - empties the in-memory ring immediately so that
-      nothing accumulated before this call leaks either.
-    * A second ``atexit`` registration of ``clear_history`` runs *after* ours
-      registers - since atexit is LIFO, ours fires first, clearing the buffer
-      just before site.py's write handler runs (which then writes 0 entries).
-
-    Safe no-op if readline is unavailable (Windows without pyreadline, or
-    when Python was compiled without readline support).
-    """
-    try:
-        import readline as _rl
-        _rl.set_history_length(0)
-        _rl.clear_history()
-
-        import atexit as _atexit
-        # LIFO: registered last → runs first.
-        # Clears whatever the REPL accumulated just before site.py's write.
-        _atexit.register(_rl.clear_history)
-    except (ImportError, AttributeError):
-        pass   # readline not available - nothing to suppress
+# The implementation lives in the kernel (localm.readline_privacy) so the plain
+# ``localm`` chat REPL can suppress history without importing this coder plugin.
+# Re-exported here for the coder's own use and for back-compat (callers and
+# tests import suppress_readline_history from localm.plugins.coder.privacy).
+from localm.readline_privacy import suppress_readline_history  # noqa: F401,E402
 
 
 # ---------------------------------------------------------------------------
