@@ -1,0 +1,14 @@
+[plugin]
+name = "tts"
+version = "1.0.0"
+description = "Text-to-speech (Kokoro neural voices) for reading replies aloud."
+scope = "tts"
+register = "plug"
+
+# Synthesis runs entirely in the browser (static/tts.js loads Kokoro via the
+# vendored kokoro-js and caches the model client-side), so this plugin ships no
+# Python dependency and writes nothing to disk - privacy mode stays trace-free.
+[surface]
+assets_dir = "static"
+client_entry = "tts.js"
+settings_group = "Voice"
