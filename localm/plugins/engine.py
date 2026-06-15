@@ -62,6 +62,7 @@ def parse_spec(plugin_dir: Path, *, builtin: bool = False) -> PluginSpec:
         description=str(p.get("description", "")),
         scope=str(p.get("scope", "") or name),
         requires_extras=list(p.get("requires_extras", []) or []),
+        requires=list(p.get("requires", []) or []),
         capabilities=list(p.get("capabilities", []) or []),
         data_subdir=str(p.get("data_subdir", "")),
         builtin=builtin,
@@ -340,6 +341,33 @@ class PluginManager:
         self._set_enabled(name, False)
         self._unload(name)
 
+    def is_enabled(self, name: str) -> bool:
+        return name in self._enabled_set()
+
+    def missing_requires(self, name: str) -> list:
+        """Plugins that *name* declares it requires but which are not enabled."""
+        if name not in self._specs:
+            self.discover()
+        spec = self._specs.get(name)
+        if not spec:
+            return []
+        enabled = self._enabled_set()
+        return [r for r in spec.requires if r not in enabled]
+
+    def set_enabled_state(self, name: str, on: bool) -> None:
+        """Flip a plugin's enabled flag in config WITHOUT loading/unloading routes.
+        For CLI/headless use, where there is no live app to mount onto (the GUI
+        server picks the state up via load_enabled on its next start). Validates
+        the name and honours protection on disable."""
+        if name not in self._specs:
+            self.discover()
+        if name not in self._specs:
+            raise KeyError(f"no such plugin: {name}")
+        spec = self._specs.get(name)
+        if not on and spec and spec.protected:
+            raise ValueError(f"plugin {name!r} is protected and cannot be disabled")
+        self._set_enabled(name, on)
+
     def install(self, source: Path, *, force: bool = False):
         """Install a third-party plugin from a directory (admin-gated at the
         route level). Does not enable it."""
@@ -400,6 +428,7 @@ class PluginManager:
                 "icon": spec.surface.icon if spec.surface else "",
                 "group": spec.surface.group if spec.surface else "",
                 "requires_extras": spec.requires_extras,
+                "requires": spec.requires,
                 "enabled": name in enabled,
                 "loaded": name in self._loaded,
                 "error": self._errors.get(name) or self._discover_errors.get(name),

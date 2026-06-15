@@ -49,10 +49,25 @@ def main(model, no_images, print_config):
         click.echo(
             "\n# Paste the mcpServers entry into your MCP client's config.\n"
             "# Claude Desktop: %APPDATA%\\Claude\\claude_desktop_config.json\n"
-            "# The client launches/stops the server automatically.",
+            "# The client launches/stops the server automatically.\n"
+            "# First enable the plugin:  localm plugin enable mcp",
             err=False,
         )
         return
+
+    # The MCP server is an optional plugin (Phase 3). It ships disabled, so a
+    # client that launches `localm mcp` gets a clear refusal until the user opts
+    # in - rather than silently exposing the models. --print-config above is
+    # exempt so users can set up the client first, then enable.
+    from localm.config import load_config
+    if "mcp" not in load_config().get("plugins_enabled", []):
+        click.echo(
+            "The MCP server plugin is disabled.\n"
+            "Enable it with:  localm plugin enable mcp\n"
+            "(then your MCP client can launch this server).",
+            err=True,
+        )
+        raise SystemExit(1)
 
     if sys.stdin.isatty():
         click.echo(

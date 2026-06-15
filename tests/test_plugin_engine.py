@@ -169,6 +169,49 @@ def test_enable_unknown_raises(env):
         mgr.enable("nope")
 
 
+def test_set_enabled_state_without_app(env):
+    """CLI/headless toggle: flips config, never touches an app (app is None)."""
+    from localm.config import load_config
+    from localm.plugins.engine import PluginManager
+    plugins = env / "plugins"
+    _make_plugin(plugins, "p1", _ping("p1"))
+    mgr = PluginManager(None, external_root=plugins, builtin_root=None)
+    mgr.set_enabled_state("p1", True)
+    assert mgr.is_enabled("p1")
+    assert "p1" in load_config().get("plugins_enabled", [])
+    mgr.set_enabled_state("p1", False)
+    assert not mgr.is_enabled("p1")
+
+
+def test_set_enabled_state_unknown_raises(env):
+    from localm.plugins.engine import PluginManager
+    mgr = PluginManager(None, external_root=env / "plugins", builtin_root=None)
+    with pytest.raises(KeyError):
+        mgr.set_enabled_state("nope", True)
+
+
+def test_set_enabled_state_protected_cannot_disable(env):
+    from localm.plugins.engine import PluginManager
+    plugins = env / "plugins"
+    _make_plugin(plugins, "core", _ping("core"), toml_extra="protected = true\n")
+    mgr = PluginManager(None, external_root=plugins, builtin_root=None)
+    mgr.set_enabled_state("core", True)
+    with pytest.raises(ValueError):
+        mgr.set_enabled_state("core", False)
+
+
+def test_missing_requires(env):
+    from localm.plugins.engine import PluginManager
+    plugins = env / "plugins"
+    _make_plugin(plugins, "needy", _ping("needy"), toml_extra='requires = ["dep1"]\n')
+    _make_plugin(plugins, "dep1", _ping("dep1"))
+    mgr = PluginManager(None, external_root=plugins, builtin_root=None)
+    mgr.set_enabled_state("needy", True)
+    assert mgr.missing_requires("needy") == ["dep1"]
+    mgr.set_enabled_state("dep1", True)
+    assert mgr.missing_requires("needy") == []
+
+
 def test_parse_spec_rejects_bad_manifest(tmp_path):
     from localm.plugins.engine import parse_spec
     d = tmp_path / "broken"; d.mkdir()
