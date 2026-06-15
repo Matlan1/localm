@@ -759,19 +759,30 @@ class TestJobs:
 
 @pytest.fixture
 def persist_app(tmp_path, monkeypatch):
-    """GUI app whose data dir lives under tmp_path."""
-    # LOCALM_HOME is pinned to tmp_path/.localm by the autouse conftest fixture;
-    # don't delete it (that would fall through to portable mode / the real
-    # ~/.localm and let the test touch real user data).
+    """GUI app with the builtin CHAT plugin installed; data dir under tmp_path.
+    chat became the protected, default-enabled plugin #0 in Phase 3 - installed
+    BEFORE attach_gui so /api/conversations|memory|prompts mount. The config
+    constants are pinned (like music_app) so install()'s enable write stays in
+    the throwaway home."""
+    home = tmp_path / ".localm"
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    import localm.config as _cfg
+    monkeypatch.setattr(_cfg, "HOME_DIR", home)
+    monkeypatch.setattr(_cfg, "MODELS_DIR", home / "models")
+    monkeypatch.setattr(_cfg, "CONFIG_FILE", home / "config.json")
+    monkeypatch.setattr(_cfg, "REGISTRY_FILE", home / "registry.json")
+    from localm.plugins.engine import PluginManager
     app = FastAPI()
+    PluginManager(app, external_root=tmp_path / "noplugins").install("chat")
 
     async def switch_model(name):
         pass
 
     attach_gui(app, self_url="http://127.0.0.1:9/v1",
                switch_model=switch_model, active_model=lambda: "model-a")
-    return app, tmp_path / ".localm" / "chats"
+    return app, home / "chats"
 
 
 class TestConversationStore:
@@ -1191,6 +1202,67 @@ class TestPromptLibrary:
         with TestClient(app) as client:
             assert client.put(f"/api/prompts/{bad}",
                               json={"system": "x"}).status_code == 400
+
+
+class TestChatPlugin:
+    """Chat-as-plugin-#0 specifics: first-run auto-provisioning, the protected
+    refusal of disable/uninstall, and scope gating. The persistence behaviour
+    itself is covered above via the install-based persist_app fixture."""
+
+    @staticmethod
+    def _isolate(tmp_path, monkeypatch):
+        home = tmp_path / ".localm"
+        monkeypatch.setenv("LOCALM_HOME", str(home))
+        monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        import localm.config as _cfg
+        monkeypatch.setattr(_cfg, "HOME_DIR", home)
+        monkeypatch.setattr(_cfg, "MODELS_DIR", home / "models")
+        monkeypatch.setattr(_cfg, "CONFIG_FILE", home / "config.json")
+        monkeypatch.setattr(_cfg, "REGISTRY_FILE", home / "registry.json")
+        return home
+
+    def test_auto_provisions_and_is_active(self, tmp_path, monkeypatch):
+        """On first run the engine copies chat from the store into the installed
+        dir and enables it (preinstalled + default_enabled) with no explicit
+        install() call - so chat ships active out of the box."""
+        self._isolate(tmp_path, monkeypatch)
+        from localm.plugins.engine import PluginManager
+        app = FastAPI()
+        mgr = PluginManager(app, external_root=tmp_path / "noplugins")
+        mgr.load_enabled()                       # first run
+        assert mgr.is_active("chat")
+        assert (tmp_path / "noplugins" / "chat" / "plugin.toml").is_file()
+        with TestClient(app) as client:          # routes mounted by the engine
+            monkeypatch.setenv("LOCALM_MODE", "privacy")
+            r = client.get("/api/conversations")
+            assert r.status_code == 200 and r.json()["enabled"] is False
+
+    def test_protected_refuses_disable_and_uninstall(self, tmp_path, monkeypatch):
+        self._isolate(tmp_path, monkeypatch)
+        from localm.plugins.engine import PluginManager
+        mgr = PluginManager(FastAPI(), external_root=tmp_path / "noplugins")
+        mgr.load_enabled()
+        assert mgr.is_active("chat")
+        for op in ("disable", "uninstall"):
+            with pytest.raises(ValueError):
+                getattr(mgr, op)("chat")
+
+    def test_routes_require_chat_scope(self, persist_app, monkeypatch):
+        """Chat persistence routes are auto-scoped to the 'chat' capability."""
+        from localm import auth, scopes as S
+        app, _ = persist_app
+        made = auth.create_key("reader", [S.MODELS_READ])      # lacks 'chat'
+        with TestClient(app) as client:
+            denied = client.get(
+                "/api/conversations",
+                headers={"Authorization": f"Bearer {made['key']}"})
+            assert denied.status_code == 403
+            monkeypatch.setenv("LOCALM_API_KEY", "ownersecret")  # owner = admin
+            ok = client.get(
+                "/api/conversations",
+                headers={"Authorization": "Bearer ownersecret"})
+            assert ok.status_code == 200
 
 
 # ------------------------------------------------------------------ #
