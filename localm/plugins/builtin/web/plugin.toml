@@ -1,0 +1,6 @@
+[plugin]
+name = "web"
+version = "1.0.0"
+description = "Web search and page fetch for the chat surface (policy-enforced)."
+scope = "web"
+register = "plug"
