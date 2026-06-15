@@ -268,28 +268,48 @@ class PluginManager:
                     self._discover_errors[child.name] = str(e)
         return self._specs
 
-    # ---- enabled-state (persisted in config) -------------------------------
+    # ---- installed/enabled state (two axes, persisted in config) -----------
+    # builtin/ + external dirs are the AVAILABLE catalog (discovered). A plugin
+    # the user has not INSTALLED is catalog-only: never loaded, never surfaced as
+    # one of "their" plugins. Within installed plugins, ENABLED toggles active vs
+    # inactive (WordPress-style). A plugin is active (loaded) iff installed AND
+    # enabled; the invariant enabled subset-of installed is kept by the lifecycle
+    # methods, and load reconciles defensively via the intersection.
+    def _installed_set(self) -> set:
+        from localm.config import load_config
+        return set(load_config().get("plugins_installed", []))
+
+    def _set_installed(self, name: str, on: bool) -> None:
+        self._set_member("plugins_installed", name, on)
+
     def _enabled_set(self) -> set:
         from localm.config import load_config
         return set(load_config().get("plugins_enabled", []))
 
     def _set_enabled(self, name: str, on: bool) -> None:
-        from localm.config import load_config, save_config
-        cfg = load_config()
-        cur = set(cfg.get("plugins_enabled", []))
-        if on:
-            cur.add(name)
-        else:
-            cur.discard(name)
-        cfg["plugins_enabled"] = sorted(cur)
-        save_config(cfg)
+        self._set_member("plugins_enabled", name, on)
+
+    @staticmethod
+    def _set_member(key: str, name: str, on: bool) -> None:
+        """Add/remove *name* in the config list *key* atomically (read-modify-write
+        under the I/O lock), so concurrent toggles of different plugins can't lose
+        each other's update."""
+        from localm.config import update_config
+
+        def _mutate(cfg: dict) -> None:
+            cur = set(cfg.get(key, []))
+            cur.add(name) if on else cur.discard(name)
+            cfg[key] = sorted(cur)
+        update_config(_mutate)
 
     # ---- load / unload (in-process, isolated) ------------------------------
     def load_enabled(self) -> None:
-        """Discover and load every enabled plugin. Never raises - a failing
-        plugin is recorded in errors and skipped."""
+        """Discover and load every active plugin (installed AND enabled). Never
+        raises - a failing plugin is recorded in errors and skipped. The
+        intersection means a stale 'enabled but not installed' config entry is
+        ignored, not loaded."""
         self.discover()
-        for name in self._enabled_set():
+        for name in self._installed_set() & self._enabled_set():
             if name in self._specs and name not in self._loaded:
                 self._safe_load(self._specs[name])
 
@@ -324,15 +344,54 @@ class PluginManager:
         host.unmount()
         sys.modules.pop(uniq, None)     # drop so a re-enable re-imports fresh
 
-    # ---- public lifecycle --------------------------------------------------
+    # ---- public lifecycle (two axes: install/uninstall, enable/disable) -----
+    def install(self, name: str) -> None:
+        """Install a catalog plugin BY NAME (first-party builtin or an already
+        discovered external plugin): mark it installed AND enabled, and load it
+        onto the live app. This is the 'select from the available catalog' action;
+        installing a plugin makes it active by default. If loading fails the config
+        is rolled back (no half-installed state) and the error is re-raised."""
+        if name not in self._specs:
+            self.discover()
+        if name not in self._specs:
+            raise KeyError(f"no such plugin: {name}")
+        if name not in self._loaded:
+            self._load(self._specs[name])     # load first; raises on failure
+        # only persist once the load succeeded, so a failed install leaves no
+        # 'installed+enabled but broken' state behind
+        self._set_installed(name, True)
+        self._set_enabled(name, True)
+
+    def install_external(self, source: Path, *, force: bool = False):
+        """Add a THIRD-PARTY plugin to the catalog by copying its directory into
+        the external plugins dir (admin-gated at the route level), then install it
+        (installed + enabled + loaded). If the copied plugin fails to parse/discover
+        or to load, the copied directory is removed so nothing is orphaned."""
+        from localm.plugins.loader import install_plugin, remove_plugin
+        manifest = install_plugin(Path(source), force=force)
+        self.discover()
+        if manifest.name not in self._specs:
+            remove_plugin(manifest.name)      # bad manifest: clean up the copy
+            raise ValueError(
+                f"plugin {manifest.name!r} was copied but is not loadable "
+                f"(invalid manifest or incompatible api_version)")
+        try:
+            self.install(manifest.name)
+        except Exception:
+            remove_plugin(manifest.name)      # load failed: clean up the copy
+            raise
+        return manifest
+
     def enable(self, name: str) -> None:
         if name not in self._specs:
             self.discover()
         if name not in self._specs:
             raise KeyError(f"no such plugin: {name}")
-        self._set_enabled(name, True)
+        if name not in self._installed_set():
+            raise ValueError(f"plugin {name!r} is not installed; install it first")
         if name not in self._loaded:
-            self._load(self._specs[name])     # surface load errors to the caller
+            self._load(self._specs[name])     # load first; surface errors to caller
+        self._set_enabled(name, True)         # persist only after a successful load
 
     def disable(self, name: str) -> None:
         spec = self._specs.get(name)
@@ -341,47 +400,77 @@ class PluginManager:
         self._set_enabled(name, False)
         self._unload(name)
 
+    def is_installed(self, name: str) -> bool:
+        return name in self._installed_set()
+
     def is_enabled(self, name: str) -> bool:
         return name in self._enabled_set()
 
+    def is_active(self, name: str) -> bool:
+        """A plugin is active (loaded) iff installed AND enabled."""
+        return name in (self._installed_set() & self._enabled_set())
+
     def missing_requires(self, name: str) -> list:
-        """Plugins that *name* declares it requires but which are not enabled."""
+        """Plugins that *name* declares it requires but which are not installed."""
         if name not in self._specs:
             self.discover()
         spec = self._specs.get(name)
         if not spec:
             return []
-        enabled = self._enabled_set()
-        return [r for r in spec.requires if r not in enabled]
+        installed = self._installed_set()
+        return [r for r in spec.requires if r not in installed]
 
-    def set_enabled_state(self, name: str, on: bool) -> None:
-        """Flip a plugin's enabled flag in config WITHOUT loading/unloading routes.
-        For CLI/headless use, where there is no live app to mount onto (the GUI
-        server picks the state up via load_enabled on its next start). Validates
-        the name and honours protection on disable."""
+    def set_installed_state(self, name: str, on: bool, *, enable: bool = True) -> None:
+        """Flip a plugin's installed flag in config WITHOUT loading routes (for
+        CLI/headless use; the GUI server reconciles via load_enabled on its next
+        start). Installing also enables by default; uninstalling also disables.
+        Honours protection on uninstall."""
         if name not in self._specs:
             self.discover()
         if name not in self._specs:
             raise KeyError(f"no such plugin: {name}")
         spec = self._specs.get(name)
         if not on and spec and spec.protected:
+            raise ValueError(f"plugin {name!r} is protected and cannot be uninstalled")
+        self._set_installed(name, on)
+        if on and enable:
+            self._set_enabled(name, True)
+        if not on:
+            self._set_enabled(name, False)
+
+    def set_enabled_state(self, name: str, on: bool) -> None:
+        """Flip a plugin's enabled flag in config WITHOUT loading/unloading routes.
+        For CLI/headless use. Requires the plugin to be installed (you cannot
+        enable a catalog-only plugin); honours protection on disable."""
+        if name not in self._specs:
+            self.discover()
+        if name not in self._specs:
+            raise KeyError(f"no such plugin: {name}")
+        spec = self._specs.get(name)
+        if on and name not in self._installed_set():
+            raise ValueError(f"plugin {name!r} is not installed; install it first")
+        if not on and spec and spec.protected:
             raise ValueError(f"plugin {name!r} is protected and cannot be disabled")
         self._set_enabled(name, on)
 
-    def install(self, source: Path, *, force: bool = False):
-        """Install a third-party plugin from a directory (admin-gated at the
-        route level). Does not enable it."""
-        from localm.plugins.loader import install_plugin
-        manifest = install_plugin(Path(source), force=force)
-        self.discover()
-        return manifest
-
     def uninstall(self, name: str, *, delete_data: bool = False) -> bool:
-        """Uninstall a plugin. User content is kept unless *delete_data* is set;
-        a plugin's on_uninstall hook (if present) is invoked first."""
+        """Uninstall a plugin: unload it, clear its installed + enabled flags, and
+        (for third-party plugins) delete its directory. First-party builtins stay
+        in the bundled catalog so they can be reinstalled. User content is kept
+        unless *delete_data* is set; a plugin's on_uninstall hook runs first.
+        Returns True if the plugin was installed. Raises KeyError for a wholly
+        unknown plugin (not in the catalog and not a stale installed entry)."""
+        if name not in self._specs:
+            self.discover()
         spec = self._specs.get(name)
+        was_installed = name in self._installed_set()
+        if spec is None and not was_installed:
+            raise KeyError(f"no such plugin: {name}")   # truly unknown
         if spec and spec.protected:
             raise ValueError(f"plugin {name!r} is protected and cannot be uninstalled")
+        # (a stale installed entry whose spec is gone still falls through so its
+        # config flags can be cleaned up; a missing plugin cannot be the protected
+        # chat builtin, which is always discoverable)
         # let the plugin clean up its own scaffolding first
         entry = self._loaded.get(name)
         if entry:
@@ -394,11 +483,13 @@ class PluginManager:
                     pass
         self._unload(name)
         self._set_enabled(name, False)
-        from localm.plugins.loader import remove_plugin
-        existed = remove_plugin(name)
+        self._set_installed(name, False)
+        if spec and not spec.builtin:
+            from localm.plugins.loader import remove_plugin
+            remove_plugin(name)        # third-party: delete the copied directory
         if delete_data and spec and spec.data_subdir:
             self._delete_plugin_data(spec)
-        return existed
+        return was_installed
 
     def _delete_plugin_data(self, spec: PluginSpec) -> None:
         import shutil
@@ -413,6 +504,7 @@ class PluginManager:
     # ---- state for the API / GUI -------------------------------------------
     def api_state(self) -> dict:
         self.discover()
+        installed = self._installed_set()
         enabled = self._enabled_set()
         plugins = []
         for name, spec in sorted(self._specs.items()):
@@ -429,7 +521,9 @@ class PluginManager:
                 "group": spec.surface.group if spec.surface else "",
                 "requires_extras": spec.requires_extras,
                 "requires": spec.requires,
+                "installed": name in installed,
                 "enabled": name in enabled,
+                "active": name in (installed & enabled),
                 "loaded": name in self._loaded,
                 "error": self._errors.get(name) or self._discover_errors.get(name),
             })
@@ -456,6 +550,30 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
     async def list_plugins_engine():
         return manager.api_state()
 
+    @app.post("/api/plugins/{name}/install",
+              dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
+    async def install_plugin_engine(name: str):
+        try:
+            manager.install(name)
+        except KeyError:
+            raise HTTPException(404, f"No such plugin: {name}")
+        except Exception as e:
+            raise HTTPException(400, f"Install failed: {e}")
+        return {"status": "installed", "name": name}
+
+    @app.post("/api/plugins/{name}/uninstall",
+              dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
+    async def uninstall_plugin_engine(name: str, delete_data: bool = False):
+        try:
+            manager.uninstall(name, delete_data=delete_data)
+        except KeyError:
+            raise HTTPException(404, f"No such plugin: {name}")
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+        except Exception as e:
+            raise HTTPException(400, f"Uninstall failed: {e}")
+        return {"status": "uninstalled", "name": name}
+
     @app.post("/api/plugins/{name}/enable",
               dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
     async def enable_plugin(name: str):
@@ -463,6 +581,8 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
             manager.enable(name)
         except KeyError:
             raise HTTPException(404, f"No such plugin: {name}")
+        except ValueError as e:
+            raise HTTPException(409, str(e))      # e.g. not installed
         except Exception as e:
             raise HTTPException(400, f"Enable failed: {e}")
         return {"status": "enabled", "name": name}

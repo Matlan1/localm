@@ -79,10 +79,12 @@ def resolve_config(name: str, cfg: dict) -> tuple[dict, Optional[str]]:
     if not (isinstance(src, str) and src in MEDIA_PLUGINS and src != name):
         return own, None
 
+    installed = set(cfg.get("plugins_installed", []) or [])
     enabled = set(cfg.get("plugins_enabled", []) or [])
-    if src not in _plugins(cfg) or src not in enabled:
+    active = installed & enabled
+    if src not in _plugins(cfg) or src not in active:
         return own, (f"'{name}' is set to use '{src}' config, but '{src}' is not "
-                     f"available; using its own settings.")
+                     f"active; using its own settings.")
     if would_cycle(name, src, cfg):
         return own, (f"'{name}' is set to use '{src}' config, but that forms a "
                      f"cycle; using '{name}' own settings.")
