@@ -1,0 +1,13 @@
+[plugin]
+name = "video"
+version = "1.0.0"
+description = "Short-video generation (ComfyUI Wan by default) and a library for the chat surface."
+scope = "video"
+register = "plug"
+data_subdir = "gui_video"
+
+[surface]
+tab_id = "video"
+label = "Video"
+icon = "video"
+group = "studio"
