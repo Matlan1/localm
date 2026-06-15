@@ -521,6 +521,15 @@ def create_app(engine: Engine) -> FastAPI:
             },
         }
 
+    # ---- plugin engine: load enabled plugins + management API ------- #
+    # Wrapped so a plugin-engine failure can never stop the server starting.
+    try:
+        from localm.plugins.engine import attach_engine
+        attach_engine(app, _engine)
+    except Exception:
+        from localm.debuglog import logger as _dbg
+        _dbg.exception("plugin engine attach failed")
+
     return app
 
 
