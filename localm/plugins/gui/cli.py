@@ -57,7 +57,11 @@ def _gui_bind_warning(host: str):
               help="Session persistence [default: config 'mode', else privacy]. "
                    "privacy = nothing saved; log = JSONL audit of chat traffic; "
                    "full = log + markdown transcript.")
-def main(model, host, port, ctx, gpu_layers, no_browser, pull_spec, debug, mode):
+@click.option("--insecure", is_flag=True,
+              help="Allow binding past loopback WITHOUT LOCALM_API_KEY set. This "
+                   "exposes the unauthenticated coder agent (shell + file edits) "
+                   "to the network - only on a trusted, isolated network.")
+def main(model, host, port, ctx, gpu_layers, no_browser, pull_spec, debug, mode, insecure):
     """Open the localm web GUI - chat and the coder agent in your browser.
 
     \b
@@ -190,12 +194,19 @@ def main(model, host, port, ctx, gpu_layers, no_browser, pull_spec, debug, mode)
     elif model_less:
         open_url = f"{base_url}?view=models"
 
-    # Warn loudly before binding past loopback without auth: the GUI exposes
-    # not just the chat API but the coder agent, which can run shell commands
-    # and edit files on this machine.
+    # Refuse to bind past loopback without auth unless explicitly forced: the
+    # GUI exposes not just the chat API but the coder agent, which can run shell
+    # commands and edit files on this machine.
     bind_warning = _gui_bind_warning(host)
+    if bind_warning and not insecure:
+        console.print(f"[bold red]{bind_warning}[/bold red]")
+        console.print(
+            "[bold red]Refusing to start: binding past loopback without auth. "
+            "Set $env:LOCALM_API_KEY first, or pass --insecure to override.[/bold red]")
+        sys.exit(2)
     if bind_warning:
         console.print(f"[bold yellow]{bind_warning}[/bold yellow]")
+        console.print("[bold yellow]  Proceeding anyway (--insecure set).[/bold yellow]")
 
     console.print(f"[bold green]localm GUI[/bold green] → {base_url}")
     if model_less:

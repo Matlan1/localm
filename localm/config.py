@@ -74,6 +74,10 @@ DEFAULT_CONFIG: dict = {
     "confirm_remove": True,   # ask before localm rm deletes files
     "port": 8642,             # default inference server port (auto-bumps if busy)
     "cors_origins": None,     # None = localhost only; list of origins; or "*"
+    # Require a configured API key on protected endpoints. When true the server
+    # refuses requests until a key is set (see localm/auth.py); env override:
+    # LOCALM_REQUIRE_AUTH. Default false = open in local/dev mode on loopback.
+    "require_auth": False,
     # Command that starts your ComfyUI install (e.g. a launch .bat). When set,
     # the image/music/video generators start ComfyUI automatically if it is
     # not running - from the GUI, the CLI, or the coder's generate_image tool.
