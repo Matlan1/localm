@@ -1473,41 +1473,89 @@ def plugin_remove(name):
         console.print(f"[yellow]Plugin {name!r} is not installed[/yellow]")
 
 
-# Engine plugins (builtin + external) - enable/disable/status. These operate on
-# the unified plugin engine's enabled-state (config["plugins_enabled"]); a
-# PluginManager with no app is enough to flip config (no routes are mounted from
-# the CLI - a running GUI server picks HTTP routes up on its next start, while
-# stdio plugins like mcp take effect immediately).
+# Engine plugins (builtin + external) - install/uninstall + enable/disable +
+# status. Two axes: install/uninstall moves a plugin between the available catalog
+# (builtin/ + external dirs) and the user's installed set; enable/disable toggles
+# an installed plugin active/inactive. A PluginManager with no app is enough to
+# flip config (no routes are mounted from the CLI - a running GUI server picks
+# HTTP routes up on its next start, while stdio plugins like mcp take effect
+# immediately). Nothing is installed by default: only what the user selects.
 
 def _engine_manager():
     from .plugins.engine import PluginManager
     return PluginManager(None)
 
 
+def _warn_missing_requires(mgr, name):
+    missing = mgr.missing_requires(name)
+    if missing:
+        cmds = "  ".join(f"localm plugin install {m}" for m in missing)
+        console.print(
+            f"[yellow]Note:[/yellow] {name!r} declares it needs "
+            f"{', '.join(missing)}, which {'is' if len(missing) == 1 else 'are'} "
+            f"not installed. Install with:  {cmds}")
+
+
+@plugin.command("install")
+@click.argument("name")
+def plugin_install_engine(name):
+    """Install (select) an engine plugin from the available catalog.
+
+    Installs and enables it. For plugins with extra dependencies, also run the
+    matching pip extra, e.g. pip install "localm[coder]".
+    """
+    mgr = _engine_manager()
+    try:
+        mgr.set_installed_state(name, True)
+    except KeyError:
+        console.print(f"[red]No such plugin: {name}[/red]")
+        sys.exit(1)
+    console.print(f"[green]Installed[/green] plugin [bold]{name}[/bold]")
+    _warn_missing_requires(mgr, name)
+
+
+@plugin.command("uninstall")
+@click.argument("name")
+@click.option("--delete-data", is_flag=True,
+              help="Also delete this plugin's stored data (default: keep it).")
+def plugin_uninstall_engine(name, delete_data):
+    """Uninstall (deselect) an engine plugin. Keeps its data unless --delete-data."""
+    mgr = _engine_manager()
+    try:
+        was = mgr.uninstall(name, delete_data=delete_data)
+    except KeyError:
+        console.print(f"[red]No such plugin: {name}[/red]")
+        sys.exit(1)
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        sys.exit(1)
+    if was:
+        console.print(f"[yellow]Uninstalled[/yellow] plugin [bold]{name}[/bold]")
+    else:
+        console.print(f"[dim]Plugin {name!r} was not installed.[/dim]")
+
+
 @plugin.command("enable")
 @click.argument("name")
 def plugin_enable(name):
-    """Enable an engine plugin (image, music, video, voice, web, rag, mcp, ...)."""
+    """Enable an installed engine plugin (must be installed first)."""
     mgr = _engine_manager()
     try:
         mgr.set_enabled_state(name, True)
     except KeyError:
         console.print(f"[red]No such plugin: {name}[/red]")
         sys.exit(1)
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        sys.exit(1)
     console.print(f"[green]Enabled[/green] plugin [bold]{name}[/bold]")
-    missing = mgr.missing_requires(name)
-    if missing:
-        cmds = "  ".join(f"localm plugin enable {m}" for m in missing)
-        console.print(
-            f"[yellow]Note:[/yellow] {name!r} declares it needs "
-            f"{', '.join(missing)}, which {'is' if len(missing) == 1 else 'are'} "
-            f"not enabled. Enable with:  {cmds}")
+    _warn_missing_requires(mgr, name)
 
 
 @plugin.command("disable")
 @click.argument("name")
 def plugin_disable(name):
-    """Disable an engine plugin."""
+    """Disable an installed engine plugin (keeps it installed)."""
     mgr = _engine_manager()
     try:
         mgr.set_enabled_state(name, False)
@@ -1522,16 +1570,33 @@ def plugin_disable(name):
 
 @plugin.command("status")
 def plugin_status():
-    """Show engine plugins (builtin + external) and their enabled state."""
+    """Show engine plugins: installed/available and their enabled state."""
     state = _engine_manager().api_state()
     plugins = state.get("plugins", [])
     if not plugins:
         console.print("[dim]No engine plugins discovered.[/dim]")
         return
+    console.print("[bold]Installed[/bold]")
+    any_installed = False
     for p in plugins:
-        mark = "[green]on [/green]" if p["enabled"] else "[dim]off[/dim]"
+        if not p.get("installed"):
+            continue
+        any_installed = True
+        mark = "[green]on [/green]" if p.get("active") else "[yellow]off[/yellow]"
         desc = f" - {p['description']}" if p.get("description") else ""
         console.print(f"  {mark} [bold]{p['name']}[/bold]{desc}")
+    if not any_installed:
+        console.print("  [dim](none - only chat is active by default)[/dim]")
+    console.print("[bold]Available[/bold] (not installed)")
+    any_available = False
+    for p in plugins:
+        if p.get("installed"):
+            continue
+        any_available = True
+        desc = f" - {p['description']}" if p.get("description") else ""
+        console.print(f"  [dim]+[/dim]  [bold]{p['name']}[/bold]{desc}")
+    if not any_available:
+        console.print("  [dim](none)[/dim]")
 
 
 # Register external plugin commands at import time so they show in --help.

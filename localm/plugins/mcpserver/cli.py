@@ -50,7 +50,7 @@ def main(model, no_images, print_config):
             "\n# Paste the mcpServers entry into your MCP client's config.\n"
             "# Claude Desktop: %APPDATA%\\Claude\\claude_desktop_config.json\n"
             "# The client launches/stops the server automatically.\n"
-            "# First enable the plugin:  localm plugin enable mcp",
+            "# First install the plugin:  localm plugin install mcp",
             err=False,
         )
         return
@@ -60,10 +60,12 @@ def main(model, no_images, print_config):
     # in - rather than silently exposing the models. --print-config above is
     # exempt so users can set up the client first, then enable.
     from localm.config import load_config
-    if "mcp" not in load_config().get("plugins_enabled", []):
+    _cfg = load_config()
+    if ("mcp" not in _cfg.get("plugins_installed", [])
+            or "mcp" not in _cfg.get("plugins_enabled", [])):
         click.echo(
-            "The MCP server plugin is disabled.\n"
-            "Enable it with:  localm plugin enable mcp\n"
+            "The MCP server plugin is not active.\n"
+            "Install it with:  localm plugin install mcp\n"
             "(then your MCP client can launch this server).",
             err=True,
         )
