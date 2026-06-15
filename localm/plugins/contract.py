@@ -46,6 +46,7 @@ class PluginSpec:
     description: str = ""
     scope: str = ""                          # capability scope; defaults to name
     requires_extras: list = field(default_factory=list)   # pip extras to install
+    requires: list = field(default_factory=list)          # other plugins this needs
     capabilities: list = field(default_factory=list)      # declared; shown at install
     data_subdir: str = ""                    # under the data dir; "" = none
     builtin: bool = False                    # ships in-tree

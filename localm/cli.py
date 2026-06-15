@@ -1473,6 +1473,67 @@ def plugin_remove(name):
         console.print(f"[yellow]Plugin {name!r} is not installed[/yellow]")
 
 
+# Engine plugins (builtin + external) - enable/disable/status. These operate on
+# the unified plugin engine's enabled-state (config["plugins_enabled"]); a
+# PluginManager with no app is enough to flip config (no routes are mounted from
+# the CLI - a running GUI server picks HTTP routes up on its next start, while
+# stdio plugins like mcp take effect immediately).
+
+def _engine_manager():
+    from .plugins.engine import PluginManager
+    return PluginManager(None)
+
+
+@plugin.command("enable")
+@click.argument("name")
+def plugin_enable(name):
+    """Enable an engine plugin (image, music, video, voice, web, rag, mcp, ...)."""
+    mgr = _engine_manager()
+    try:
+        mgr.set_enabled_state(name, True)
+    except KeyError:
+        console.print(f"[red]No such plugin: {name}[/red]")
+        sys.exit(1)
+    console.print(f"[green]Enabled[/green] plugin [bold]{name}[/bold]")
+    missing = mgr.missing_requires(name)
+    if missing:
+        cmds = "  ".join(f"localm plugin enable {m}" for m in missing)
+        console.print(
+            f"[yellow]Note:[/yellow] {name!r} declares it needs "
+            f"{', '.join(missing)}, which {'is' if len(missing) == 1 else 'are'} "
+            f"not enabled. Enable with:  {cmds}")
+
+
+@plugin.command("disable")
+@click.argument("name")
+def plugin_disable(name):
+    """Disable an engine plugin."""
+    mgr = _engine_manager()
+    try:
+        mgr.set_enabled_state(name, False)
+    except KeyError:
+        console.print(f"[red]No such plugin: {name}[/red]")
+        sys.exit(1)
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        sys.exit(1)
+    console.print(f"[yellow]Disabled[/yellow] plugin [bold]{name}[/bold]")
+
+
+@plugin.command("status")
+def plugin_status():
+    """Show engine plugins (builtin + external) and their enabled state."""
+    state = _engine_manager().api_state()
+    plugins = state.get("plugins", [])
+    if not plugins:
+        console.print("[dim]No engine plugins discovered.[/dim]")
+        return
+    for p in plugins:
+        mark = "[green]on [/green]" if p["enabled"] else "[dim]off[/dim]"
+        desc = f" - {p['description']}" if p.get("description") else ""
+        console.print(f"  {mark} [bold]{p['name']}[/bold]{desc}")
+
+
 # Register external plugin commands at import time so they show in --help.
 # A broken plugin must never take down the CLI - warnings only.
 try:
