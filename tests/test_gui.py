@@ -1167,8 +1167,36 @@ class TestPromptLibrary:
 #  Knowledge endpoints (/api/rag/*)                                    #
 # ------------------------------------------------------------------ #
 
+@pytest.fixture
+def rag_app(tmp_path, monkeypatch):
+    """GUI app (for the shared job manager + /api/jobs SSE) with the builtin rag
+    plugin enabled. rag became a plugin in Phase 3; its handlers read the shared
+    services (jobs / self_url / active_model) that attach_gui puts on app.state.
+    The plugin is enabled BEFORE attach_gui so its routes sit ahead of the
+    catch-all "/" static mount - the production order (plugins, then GUI)."""
+    home = tmp_path / ".localm"
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    import localm.config as _cfg
+    monkeypatch.setattr(_cfg, "HOME_DIR", home)
+    monkeypatch.setattr(_cfg, "MODELS_DIR", home / "models")
+    monkeypatch.setattr(_cfg, "CONFIG_FILE", home / "config.json")
+    monkeypatch.setattr(_cfg, "REGISTRY_FILE", home / "registry.json")
+
+    from localm.plugins.engine import PluginManager
+    app = FastAPI()
+    PluginManager(app, external_root=tmp_path / "noplugins").enable("rag")
+
+    async def switch_model(name):
+        pass
+    attach_gui(app, self_url="http://127.0.0.1:9/v1",
+               switch_model=switch_model, active_model=lambda: "model-a")
+    return app, home
+
+
 class TestRagEndpoints:
-    """persist_app monkeypatches Path.home → collections land under tmp."""
+    """rag_app enables the rag plugin; collections land under tmp/.localm/rag."""
 
     @staticmethod
     def _wait_job(client, job_id, timeout=30):
@@ -1190,8 +1218,8 @@ class TestRagEndpoints:
                     break
         return end, lines
 
-    def test_create_list_detail_delete(self, persist_app):
-        app, _ = persist_app
+    def test_create_list_detail_delete(self, rag_app):
+        app, _ = rag_app
         with TestClient(app) as client:
             assert client.get("/api/rag/collections").json() == {"collections": []}
             r = client.post("/api/rag/collections", json={"name": "kb1"})
@@ -1210,8 +1238,8 @@ class TestRagEndpoints:
             assert client.delete("/api/rag/collections/kb1").status_code == 200
             assert client.delete("/api/rag/collections/kb1").status_code == 404
 
-    def test_add_and_query_roundtrip(self, persist_app, tmp_path):
-        app, _ = persist_app
+    def test_add_and_query_roundtrip(self, rag_app, tmp_path):
+        app, _ = rag_app
         docs = tmp_path / "kdocs"
         docs.mkdir()
         (docs / "gpu.md").write_text(
@@ -1246,9 +1274,9 @@ class TestRagEndpoints:
             assert client.post("/api/rag/collections/kb/remove-doc",
                                json={"path": src}).status_code == 200
 
-    def test_extract_endpoint(self, persist_app):
+    def test_extract_endpoint(self, rag_app):
         import base64
-        app, _ = persist_app
+        app, _ = rag_app
         with TestClient(app) as client:
             b64 = base64.b64encode("hello attachment".encode()).decode()
             r = client.post("/api/rag/extract",
@@ -1266,10 +1294,10 @@ class TestRagEndpoints:
                                json={"filename": "x.exe",
                                      "content_b64": exe}).status_code == 422
 
-    def test_extract_writes_nothing_to_disk(self, persist_app, tmp_path):
+    def test_extract_writes_nothing_to_disk(self, rag_app, tmp_path):
         """Privacy guarantee: attachment extraction is in-memory only."""
         import base64
-        app, _ = persist_app
+        app, _ = rag_app
         home = tmp_path / ".localm"
         before = {str(p) for p in home.rglob("*")} if home.exists() else set()
         with TestClient(app) as client:

@@ -1,0 +1,7 @@
+[plugin]
+name = "rag"
+version = "1.0.0"
+description = "Document collections for retrieval-augmented chat (knowledge base)."
+scope = "rag"
+register = "plug"
+data_subdir = "rag"
