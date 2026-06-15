@@ -159,6 +159,18 @@ def main(
       localcoder --online --model gpt-4o "review this code"
       localcoder --anthropic --model claude-opus-4-5 "add tests"
     """
+    # The coder is an optional plugin (Phase 3); it ships uninstalled. Running
+    # `localm coder` / `localcoder` before it is installed+enabled gets a clear
+    # refusal rather than a half-working agent.
+    from localm.plugins.engine import PluginManager
+    if not PluginManager(None).is_active("coder"):     # installed (on disk) AND enabled
+        click.echo(
+            "The coder plugin is not active.\n"
+            "Install it with:  localm plugin install coder",
+            err=True,
+        )
+        raise SystemExit(1)
+
     work_dir = Path(cwd).resolve() if cwd else Path.cwd()
 
     # ------------------------------------------------------------------ #

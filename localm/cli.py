@@ -118,7 +118,7 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
         os.environ[MODE_ENV_VAR] = mode.lower()
     session_mode = effective_mode("chat")
     if session_mode == SessionMode.PRIVACY:
-        from .plugins.coder.privacy import suppress_readline_history
+        from .readline_privacy import suppress_readline_history
         suppress_readline_history()
         if debug:
             console.print(
@@ -1383,9 +1383,10 @@ except ImportError:
     def _coder_stub(**_):
         """Offline AI coding agent (run: pip install "localm[coder]" to enable)."""
         console.print(
-            '[yellow]The coder plugin is not installed.[/yellow]\n'
-            'Enable it with:  [bold]pip install "localm[coder]"[/bold]\n'
-            '  or (editable):  [bold]pip install -e ".[coder]"[/bold]'
+            '[yellow]The coder plugin could not be loaded.[/yellow]\n'
+            'Install its dependencies with:  [bold]pip install "localm[coder]"[/bold]\n'
+            '  or (editable):  [bold]pip install -e ".[coder]"[/bold]\n'
+            'then activate it with:  [bold]localm plugin install coder[/bold]'
         )
 
 # Abliterate plugin - decensor a model with Heretic (run as a separate program)
