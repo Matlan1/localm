@@ -98,12 +98,11 @@ def test_install_mounts_routes_disable_unmounts(env):
 
 def test_enable_requires_install_first(env):
     from localm.plugins.engine import PluginManager
-    plugins = env / "plugins"
-    _make_plugin(plugins, "p1", _ping("p1"))
-    mgr = PluginManager(FastAPI(), external_root=plugins, builtin_root=None)
-    mgr.discover()
+    store = env / "store"
+    _make_plugin(store, "p1", _ping("p1"))               # available, not installed
+    mgr = PluginManager(FastAPI(), store_root=store, installed_root=env / "installed")
     with pytest.raises(ValueError):
-        mgr.enable("p1")                                       # not installed
+        mgr.enable("p1")                                  # in the store but not installed
 
 
 def test_uninstall_external_clears_axes_and_removes_dir(env):
@@ -171,20 +170,22 @@ def test_enable_after_catchall_mount_is_not_shadowed(env, tmp_path):
         assert c.get("/api/late/ping").status_code == 404
 
 
-def test_install_enabled_state_persists_in_config(env):
+def test_install_places_dir_and_persists_enabled(env):
+    """install copies the plugin from the store into the installed folder
+    (physical 'installed') and enables it; disable keeps it on disk."""
     from localm.plugins.engine import PluginManager
     from localm.config import load_config
-    plugins = env / "plugins"
-    _make_plugin(plugins, "p1", _ping("p1"))
-    mgr = PluginManager(FastAPI(), external_root=plugins, builtin_root=None)
+    store = env / "store"
+    inst = env / "installed"
+    _make_plugin(store, "p1", _ping("p1"))
+    mgr = PluginManager(FastAPI(), store_root=store, installed_root=inst)
     mgr.install("p1")
-    cfg = load_config()
-    assert "p1" in cfg.get("plugins_installed", [])
-    assert "p1" in cfg.get("plugins_enabled", [])
+    assert (inst / "p1" / "plugin.toml").is_file()       # physically installed
+    assert mgr.is_installed("p1")
+    assert "p1" in load_config().get("plugins_enabled", [])
     mgr.disable("p1")
-    cfg = load_config()
-    assert "p1" in cfg.get("plugins_installed", [])      # still installed
-    assert "p1" not in cfg.get("plugins_enabled", [])
+    assert (inst / "p1").is_dir()                         # stays installed (on disk)
+    assert "p1" not in load_config().get("plugins_enabled", [])
 
 
 def test_load_enabled_isolates_failures(env):
@@ -195,8 +196,7 @@ def test_load_enabled_isolates_failures(env):
                  'def register(host):\n    raise RuntimeError("boom")\ndef unregister():\n    pass\n')
     _make_plugin(plugins, "good", _ping("good"))
     cfg = load_config()
-    cfg["plugins_installed"] = ["bad", "good"]
-    cfg["plugins_enabled"] = ["bad", "good"]
+    cfg["plugins_enabled"] = ["bad", "good"]   # installed = physical (both on disk)
     save_config(cfg)
     app = FastAPI()
     mgr = PluginManager(app, external_root=plugins, builtin_root=None)
@@ -254,45 +254,46 @@ def test_enable_rolls_back_on_load_failure(env):
     """enable() on an installed plugin whose load fails must not persist enabled."""
     from localm.config import load_config
     from localm.plugins.engine import PluginManager
-    plugins = env / "plugins"
-    _make_plugin(plugins, "broken",
+    store = env / "store"
+    inst = env / "installed"
+    _make_plugin(store, "broken",
                  'def register(host):\n    raise RuntimeError("boom")\n'
                  'def unregister():\n    pass\n')
-    mgr = PluginManager(FastAPI(), external_root=plugins, builtin_root=None)
-    mgr.set_installed_state("broken", True, enable=False)   # installed, not loaded
+    mgr = PluginManager(FastAPI(), store_root=store, installed_root=inst)
+    mgr.set_installed_state("broken", True, enable=False)   # copy store->installed, not enabled
     with pytest.raises(RuntimeError):
         mgr.enable("broken")
-    cfg = load_config()
-    assert "broken" in cfg.get("plugins_installed", [])     # stays installed
-    assert "broken" not in cfg.get("plugins_enabled", [])   # enable rolled back
+    assert (inst / "broken").is_dir()                       # stays installed
+    assert "broken" not in load_config().get("plugins_enabled", [])  # enable rolled back
 
 
 def test_set_installed_state_without_app(env):
-    """CLI/headless toggle: flips config, never touches an app (app is None).
-    Install sets installed + enabled; uninstall clears both."""
-    from localm.config import load_config
+    """CLI/headless toggle (app is None): install copies store->installed + enables;
+    disable keeps it on disk; uninstall removes the dir."""
     from localm.plugins.engine import PluginManager
-    plugins = env / "plugins"
-    _make_plugin(plugins, "p1", _ping("p1"))
-    mgr = PluginManager(None, external_root=plugins, builtin_root=None)
+    store = env / "store"
+    inst = env / "installed"
+    _make_plugin(store, "p1", _ping("p1"))
+    mgr = PluginManager(None, store_root=store, installed_root=inst)
     mgr.set_installed_state("p1", True)
     assert mgr.is_installed("p1") and mgr.is_enabled("p1")
-    assert "p1" in load_config().get("plugins_installed", [])
-    # disable keeps installed
+    assert (inst / "p1").is_dir()
+    # disable keeps it installed (on disk)
     mgr.set_enabled_state("p1", False)
     assert mgr.is_installed("p1") and not mgr.is_enabled("p1")
-    # uninstall clears both
+    # uninstall removes the dir and clears enabled
     mgr.set_installed_state("p1", False)
     assert not mgr.is_installed("p1") and not mgr.is_enabled("p1")
+    assert not (inst / "p1").exists()
 
 
 def test_set_enabled_state_requires_install(env):
     from localm.plugins.engine import PluginManager
-    plugins = env / "plugins"
-    _make_plugin(plugins, "p1", _ping("p1"))
-    mgr = PluginManager(None, external_root=plugins, builtin_root=None)
+    store = env / "store"
+    _make_plugin(store, "p1", _ping("p1"))
+    mgr = PluginManager(None, store_root=store, installed_root=env / "installed")
     with pytest.raises(ValueError):
-        mgr.set_enabled_state("p1", True)        # not installed
+        mgr.set_enabled_state("p1", True)        # available but not installed
 
 
 def test_set_installed_state_unknown_raises(env):
@@ -304,20 +305,54 @@ def test_set_installed_state_unknown_raises(env):
 
 def test_set_installed_state_protected_cannot_uninstall(env):
     from localm.plugins.engine import PluginManager
-    plugins = env / "plugins"
-    _make_plugin(plugins, "core", _ping("core"), toml_extra="protected = true\n")
-    mgr = PluginManager(None, external_root=plugins, builtin_root=None)
+    store = env / "store"
+    _make_plugin(store, "core", _ping("core"), toml_extra="protected = true\n")
+    mgr = PluginManager(None, store_root=store, installed_root=env / "installed")
     mgr.set_installed_state("core", True)
     with pytest.raises(ValueError):
         mgr.set_installed_state("core", False)
 
 
+def test_set_enabled_state_protected_cannot_disable(env):
+    from localm.plugins.engine import PluginManager
+    store = env / "store"
+    _make_plugin(store, "core", _ping("core"), toml_extra="protected = true\n")
+    mgr = PluginManager(None, store_root=store, installed_root=env / "installed")
+    mgr.set_installed_state("core", True)
+    with pytest.raises(ValueError):
+        mgr.set_enabled_state("core", False)
+
+
+def test_uninstall_protected_raises(env):
+    from localm.plugins.engine import PluginManager
+    store = env / "store"
+    _make_plugin(store, "core", _ping("core"), toml_extra="protected = true\n")
+    mgr = PluginManager(FastAPI(), store_root=store, installed_root=env / "installed")
+    mgr.install("core")
+    with pytest.raises(ValueError):
+        mgr.uninstall("core")
+
+
+def test_set_installed_state_rejects_broken_manifest(env):
+    """CLI install copies the plugin, validates it, and rolls back a broken one."""
+    from localm.plugins.engine import PluginManager
+    store = env / "store"
+    inst = env / "installed"
+    d = store / "broken"
+    d.mkdir(parents=True)
+    (d / "plugin.toml").write_text("this is not valid toml [[[", encoding="utf-8")
+    mgr = PluginManager(None, store_root=store, installed_root=inst)
+    with pytest.raises(ValueError):
+        mgr.set_installed_state("broken", True)
+    assert not (inst / "broken").exists()       # rolled back, not orphaned
+
+
 def test_missing_requires(env):
     from localm.plugins.engine import PluginManager
-    plugins = env / "plugins"
-    _make_plugin(plugins, "needy", _ping("needy"), toml_extra='requires = ["dep1"]\n')
-    _make_plugin(plugins, "dep1", _ping("dep1"))
-    mgr = PluginManager(None, external_root=plugins, builtin_root=None)
+    store = env / "store"
+    _make_plugin(store, "needy", _ping("needy"), toml_extra='requires = ["dep1"]\n')
+    _make_plugin(store, "dep1", _ping("dep1"))
+    mgr = PluginManager(None, store_root=store, installed_root=env / "installed")
     mgr.set_installed_state("needy", True)
     assert mgr.missing_requires("needy") == ["dep1"]
     mgr.set_installed_state("dep1", True)

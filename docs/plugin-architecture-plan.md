@@ -15,8 +15,27 @@ the same contract.
 
 ## Locked decisions
 
-- **Kernel (not pluggable):** server, plugin engine/host, auth/permissions,
-  settings, inference engine + model manager. **Chat = built-in protected plugin.**
+- **localm is just a local model + chat + the plugin engine.** "local(l)m". The
+  kernel = model loader + plugin engine. Everything else is a plugin. **Chat is a
+  plugin too** - the one that is PREINSTALLED and UNREMOVABLE (protected #0): it
+  ships installed + enabled and cannot be uninstalled or disabled, but uses the
+  same plugin contract as everything else (not special kernel code).
+- **Store -> installed (plugins are not bundled-active).** A bundled STORE shelf
+  holds the first-party plugins; core never imports it. INSTALL copies a plugin
+  from the store into the INSTALLED-PLUGINS folder (`~/.localm/plugins`), or
+  fetches it from the plugin's GitHub repo if missing from the store. localm
+  discovers and loads ONLY from the installed folder, so an uninstalled plugin is
+  invisible to running localm. Uninstall deletes it. "Installed" = physically
+  present in the installed folder (not a config flag); enable/disable is a config
+  toggle WITHIN installed; active = installed AND enabled. Plugins may depend on
+  other plugins.
+- **Core's only knowledge of uninstalled plugins = a static catalog**
+  (`localm/plugins/catalog.py`): command -> plugin + GitHub repo + pip extra. Used
+  to suggest "that needs the X plugin - install it?" (toggleable) and to resolve
+  the install source. No plugin code; just data.
+- **Dependencies follow install (pip extras):** a plugin's heavy deps live behind
+  its `[extra]`, pulled on install, so a chat-only / CLI-only user never installs
+  torch/ComfyUI stacks.
 - **Lifecycle:** one in-process engine. Enable/disable/install/uninstall happen
   **without restarting the server or reloading the model** (model lifecycle is
   decoupled from plugin lifecycle).
@@ -39,17 +58,20 @@ the same contract.
   no routes, no tab, no command, nothing "present ready to use". The user opts in
   via first-run selection or the Plugins page. (During development a plugin may be
   installed only to test it.)
-- **Two axes (install/uninstall, enable/disable):** `builtin/` + the external dir
-  are the AVAILABLE catalog (discovered, inert). `config["plugins_installed"]` is
-  the user's selected set; `config["plugins_enabled"]` toggles an installed plugin
-  active vs inactive (you can keep a plugin installed but disabled). A plugin is
-  active (loaded) iff installed AND enabled; installing also enables by default,
-  uninstalling clears both. Uninstall keeps a builtin in the bundled catalog (so it
-  can be reinstalled) but deletes a third-party plugin's copied directory; user
-  data is kept unless an explicit delete-data is requested. Engine API:
-  `install`/`uninstall`/`enable`/`disable` (+ config-only `set_installed_state`/
-  `set_enabled_state` for CLI) and `/api/plugins/{name}/{install,uninstall,enable,
-  disable}`; CLI `localm plugin install/uninstall/enable/disable/status`.
+- **Two axes (install/uninstall, enable/disable):** the bundled store shelf
+  (`localm/plugins/builtin/`, never loaded) holds the available catalog. INSTALL
+  copies a plugin into the installed folder (`~/.localm/plugins`); discovery and
+  loading look ONLY there. "Installed" is therefore PHYSICAL presence in the
+  installed folder, NOT a config flag. `config["plugins_enabled"]` toggles an
+  installed plugin active vs inactive (you can keep a plugin installed but
+  disabled). A plugin is active (loaded) iff installed (on disk) AND enabled;
+  installing also enables by default; uninstalling deletes the installed dir (a
+  builtin reverts to merely available in the store; a third-party plugin is gone
+  entirely) and clears enabled; user data is kept unless an explicit delete-data
+  is requested. Engine API: `install`/`uninstall`/`enable`/`disable` (+ config-
+  only `set_installed_state`/`set_enabled_state` for CLI) and
+  `/api/plugins/{name}/{install,uninstall,enable,disable}`; CLI
+  `localm plugin install/uninstall/enable/disable/status`.
 - **Dependencies follow install (pip extras):** a plugin's heavy deps live behind
   its pip extra (e.g. `localm[coder]`), so a chat-only user never installs torch/
   ComfyUI stacks. The small plugin code ships in the wheel but stays inert until
