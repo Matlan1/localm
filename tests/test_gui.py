@@ -892,9 +892,26 @@ class TestNetworkToolGating:
 #  Web endpoints (/api/web/*)                                         #
 # ------------------------------------------------------------------ #
 
+@pytest.fixture
+def web_app(tmp_path, monkeypatch):
+    """A bare app with the builtin web plugin loaded (open mode). web became a
+    plugin in Phase 3, so its routes are mounted by enabling it - not attach_gui."""
+    monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    import localm.config as _cfg
+    monkeypatch.setattr(_cfg, "HOME_DIR", tmp_path)
+    monkeypatch.setattr(_cfg, "MODELS_DIR", tmp_path / "models")
+    monkeypatch.setattr(_cfg, "CONFIG_FILE", tmp_path / "config.json")
+    monkeypatch.setattr(_cfg, "REGISTRY_FILE", tmp_path / "registry.json")
+    from localm.plugins.engine import PluginManager
+    app = FastAPI()
+    PluginManager(app, external_root=tmp_path / "noplugins").enable("web")
+    return app
+
+
 class TestWebEndpoints:
-    def test_search_success_and_empty_query(self, gui_app, monkeypatch):
-        app, _ = gui_app
+    def test_search_success_and_empty_query(self, web_app, monkeypatch):
+        app = web_app
         monkeypatch.setattr(
             "localm.netpolicy.web_search",
             lambda q, max_results=5: [
@@ -905,9 +922,9 @@ class TestWebEndpoints:
             assert client.post("/api/web/search",
                                json={"query": "  "}).status_code == 400
 
-    def test_search_policy_refusal_is_403(self, gui_app, monkeypatch):
+    def test_search_policy_refusal_is_403(self, web_app, monkeypatch):
         from localm.netpolicy import NetworkPolicyError
-        app, _ = gui_app
+        app = web_app
 
         def deny(q, max_results=5):
             raise NetworkPolicyError("Network access is disabled (net_mode=off).")
@@ -917,8 +934,8 @@ class TestWebEndpoints:
         assert r.status_code == 403
         assert "disabled" in r.json()["detail"]
 
-    def test_fetch_truncation_and_failure(self, gui_app, monkeypatch):
-        app, _ = gui_app
+    def test_fetch_truncation_and_failure(self, web_app, monkeypatch):
+        app = web_app
         monkeypatch.setattr("localm.netpolicy.fetch_text",
                             lambda url, **kw: (url, "y" * 2000))
         with TestClient(app) as client:

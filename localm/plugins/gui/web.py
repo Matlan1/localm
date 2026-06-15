@@ -131,16 +131,6 @@ class ConversationUpsert(BaseModel):
     messages: list = []
 
 
-class WebSearchRequest(BaseModel):
-    query: str
-    max_results: int = 5
-
-
-class WebFetchRequest(BaseModel):
-    url: str
-    max_chars: int = 8000
-
-
 class RagCreateRequest(BaseModel):
     name: str
 
@@ -1083,43 +1073,8 @@ def attach_gui(
             return {"status": "deleted", "id": conv_id}
         return {"status": "absent", "id": conv_id}
 
-    # -------------------------- web access ------------------------ #
-    # Search and fetch for the chat surface, enforced by localm.netpolicy
-    # (net_mode, net_allow/net_deny, SSRF guard). Callers are either the
-    # user's explicit /web command or the per-conversation web-access toggle
-    # - both are direct consent, so "ask" mode does not re-prompt here; only
-    # "off" blocks. Domain rules and the private-address guard always apply.
-
-    @app.post("/api/web/search", dependencies=[Depends(_require_auth)])
-    async def web_search_endpoint(req: WebSearchRequest):
-        from localm.netpolicy import NetworkPolicyError, web_search
-        if not req.query.strip():
-            raise HTTPException(400, "Empty query")
-        loop = asyncio.get_running_loop()
-        try:
-            results = await loop.run_in_executor(
-                None, lambda: web_search(req.query, max_results=req.max_results))
-        except NetworkPolicyError as e:
-            raise HTTPException(403, str(e))
-        except Exception as e:
-            raise HTTPException(502, f"Search failed: {e}")
-        return {"query": req.query, "results": results}
-
-    @app.post("/api/web/fetch", dependencies=[Depends(_require_auth)])
-    async def web_fetch_endpoint(req: WebFetchRequest):
-        from localm.netpolicy import NetworkPolicyError, fetch_text
-        loop = asyncio.get_running_loop()
-        try:
-            final_url, text = await loop.run_in_executor(
-                None, lambda: fetch_text(req.url))
-        except NetworkPolicyError as e:
-            raise HTTPException(403, str(e))
-        except Exception as e:
-            raise HTTPException(502, f"Fetch failed: {e}")
-        max_chars = max(500, min(req.max_chars, 60_000))
-        return {"url": final_url,
-                "text": text[:max_chars],
-                "truncated": len(text) > max_chars}
+    # Web search and fetch (/api/web/*) moved to the builtin "web" plugin
+    # (localm/plugins/builtin/web) in Phase 3; it ships disabled by default.
 
     # ----------------------- assistant memory --------------------- #
     # ChatGPT-style persistent memory for chat: a plain markdown file the
