@@ -32,10 +32,30 @@ the same contract.
   libllama.so / libllama.dylib); GPU = ROCm + CUDA + CPU on Linux, ROCm on Windows;
   install via setup.bat / setup.sh / one-click install.sh. Every plugin (Phase 3+)
   must stay cross-platform (declare platform-specific extras; no OS-only paths).
-- **Defaults (plugins, not plug-outs):** ONLY chat is enabled by default (the
+- **Defaults (nothing installed but chat):** ONLY chat is active by default (the
   protected builtin plugin #0); the model manager stays kernel/core (not a plugin).
-  EVERY other plugin ships DISABLED - the user opts in via first-run selection or
-  the Plugins page. (During development a plugin may be enabled only to test it.)
+  EVERY other plugin is AVAILABLE but NOT INSTALLED out of the box - it lives in
+  the catalog until the user selects it. A not-installed plugin is fully inert:
+  no routes, no tab, no command, nothing "present ready to use". The user opts in
+  via first-run selection or the Plugins page. (During development a plugin may be
+  installed only to test it.)
+- **Two axes (install/uninstall, enable/disable):** `builtin/` + the external dir
+  are the AVAILABLE catalog (discovered, inert). `config["plugins_installed"]` is
+  the user's selected set; `config["plugins_enabled"]` toggles an installed plugin
+  active vs inactive (you can keep a plugin installed but disabled). A plugin is
+  active (loaded) iff installed AND enabled; installing also enables by default,
+  uninstalling clears both. Uninstall keeps a builtin in the bundled catalog (so it
+  can be reinstalled) but deletes a third-party plugin's copied directory; user
+  data is kept unless an explicit delete-data is requested. Engine API:
+  `install`/`uninstall`/`enable`/`disable` (+ config-only `set_installed_state`/
+  `set_enabled_state` for CLI) and `/api/plugins/{name}/{install,uninstall,enable,
+  disable}`; CLI `localm plugin install/uninstall/enable/disable/status`.
+- **Dependencies follow install (pip extras):** a plugin's heavy deps live behind
+  its pip extra (e.g. `localm[coder]`), so a chat-only user never installs torch/
+  ComfyUI stacks. The small plugin code ships in the wheel but stays inert until
+  installed; the heavy deps are what is genuinely absent. First-run / the Plugins
+  page orchestrate the matching `pip install <extra>` on select (Phase 6), reusing
+  the robust setup-script path (vendor index, etc.) - not a naive runtime pip.
 
 ## Two shared foundations (consumed by everything)
 
@@ -68,12 +88,13 @@ what makes runtime load/unload possible.
 How plugins reach a user, and how they contribute commands and tools.
 
 - **Distribution model (available, not installed).** There is no "default set"
-  that ships enabled. The kernel knows a **catalog** of first-party plugins
+  that ships installed. The kernel knows a **catalog** of first-party plugins
   (the builtins in `localm/plugins/builtin/`); each is installable but ships
-  DISABLED. Only chat is active out of the box. The user opts in two ways:
+  NOT INSTALLED. Only chat is active out of the box. The user opts in two ways:
   first-run selection (pick from the catalog during setup) or the Plugins page
-  later. "Disabled by default" therefore means "present in the catalog but not
-  active", not "absent from disk".
+  later. A not-installed plugin is catalog-only and fully inert; its heavy deps
+  (behind a pip extra) are not pulled until install. See "Two axes" and
+  "Dependencies follow install" under Locked decisions for the mechanics.
 - **Third-party install location (in-app, admin-gated).** Third-party plugins
   are installed from inside the running app via the Plugins page (admin scope +
   capability-consent prompt), NOT bundled into the installer. The installer/

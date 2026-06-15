@@ -38,34 +38,58 @@ def cli_env(tmp_path, monkeypatch):
     return climod
 
 
-def test_enable_disable_roundtrip(cli_env):
+def test_install_uninstall_roundtrip(cli_env):
     from localm.config import load_config
+    r = CliRunner().invoke(cli_env.main, ["plugin", "install", "dep1"])
+    assert r.exit_code == 0 and "Installed" in r.output
+    cfg = load_config()
+    assert "dep1" in cfg.get("plugins_installed", [])
+    assert "dep1" in cfg.get("plugins_enabled", [])     # install enables by default
+    r = CliRunner().invoke(cli_env.main, ["plugin", "uninstall", "dep1"])
+    assert r.exit_code == 0 and "Uninstalled" in r.output
+    cfg = load_config()
+    assert "dep1" not in cfg.get("plugins_installed", [])
+    assert "dep1" not in cfg.get("plugins_enabled", [])
+
+
+def test_enable_disable_within_installed(cli_env):
+    from localm.config import load_config
+    CliRunner().invoke(cli_env.main, ["plugin", "install", "dep1"])
+    r = CliRunner().invoke(cli_env.main, ["plugin", "disable", "dep1"])
+    assert r.exit_code == 0 and "Disabled" in r.output
+    cfg = load_config()
+    assert "dep1" in cfg.get("plugins_installed", [])    # stays installed
+    assert "dep1" not in cfg.get("plugins_enabled", [])
     r = CliRunner().invoke(cli_env.main, ["plugin", "enable", "dep1"])
     assert r.exit_code == 0 and "Enabled" in r.output
     assert "dep1" in load_config().get("plugins_enabled", [])
-    r = CliRunner().invoke(cli_env.main, ["plugin", "disable", "dep1"])
-    assert r.exit_code == 0 and "Disabled" in r.output
-    assert "dep1" not in load_config().get("plugins_enabled", [])
 
 
-def test_enable_unknown_is_error(cli_env):
-    r = CliRunner().invoke(cli_env.main, ["plugin", "enable", "ghost"])
+def test_enable_before_install_is_error(cli_env):
+    r = CliRunner().invoke(cli_env.main, ["plugin", "enable", "dep1"])
+    assert r.exit_code == 1
+    assert "not installed" in r.output.lower()
+
+
+def test_install_unknown_is_error(cli_env):
+    r = CliRunner().invoke(cli_env.main, ["plugin", "install", "ghost"])
     assert r.exit_code == 1
     assert "No such plugin" in r.output
 
 
-def test_enable_warns_missing_requires_with_real_names(cli_env):
+def test_install_warns_missing_requires_with_real_names(cli_env):
     """The dependency warning must name the actual missing plugin AND give the
-    exact enable command (no literal <name> placeholder)."""
-    r = CliRunner().invoke(cli_env.main, ["plugin", "enable", "needy"])
+    exact install command (no literal <name> placeholder)."""
+    r = CliRunner().invoke(cli_env.main, ["plugin", "install", "needy"])
     assert r.exit_code == 0
     assert "dep1" in r.output
-    assert "localm plugin enable dep1" in r.output
+    assert "localm plugin install dep1" in r.output
     assert "<name>" not in r.output
 
 
-def test_status_lists_plugins(cli_env):
-    CliRunner().invoke(cli_env.main, ["plugin", "enable", "dep1"])
+def test_status_shows_installed_and_available(cli_env):
+    CliRunner().invoke(cli_env.main, ["plugin", "install", "dep1"])
     r = CliRunner().invoke(cli_env.main, ["plugin", "status"])
     assert r.exit_code == 0
-    assert "needy" in r.output and "dep1" in r.output
+    assert "Installed" in r.output and "Available" in r.output
+    assert "dep1" in r.output and "needy" in r.output

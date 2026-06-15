@@ -5,8 +5,10 @@ only exercises localm.plugins.media_config dict logic."""
 from localm.plugins import media_config as mc
 
 
-def _cfg(plugins, enabled=None):
-    return {"plugins": plugins, "plugins_enabled": enabled or list(plugins)}
+def _cfg(plugins, enabled=None, installed=None):
+    inst = installed if installed is not None else list(plugins)
+    en = enabled if enabled is not None else list(inst)
+    return {"plugins": plugins, "plugins_installed": inst, "plugins_enabled": en}
 
 
 def test_own_block_when_no_sharing():
@@ -70,6 +72,18 @@ def test_source_not_enabled_falls_back_with_warning():
     }, enabled=["music"])           # image installed but NOT enabled
     block, warn = mc.resolve_config("music", cfg)
     assert warn and "image" in warn
+    assert block["comfy"]["api_url"] == "http://own-music"
+
+
+def test_source_installed_but_disabled_falls_back():
+    """Two-axis: a source that is installed but DISABLED is not active, so the
+    sharer must fall back to its own config (not silently use a dormant source)."""
+    cfg = _cfg({
+        "image": {"comfy": {"api_url": "http://image"}},
+        "music": {"use_config_from": "image", "comfy": {"api_url": "http://own-music"}},
+    }, installed=["image", "music"], enabled=["music"])     # image installed, disabled
+    block, warn = mc.resolve_config("music", cfg)
+    assert warn and "not active" in warn
     assert block["comfy"]["api_url"] == "http://own-music"
 
 
