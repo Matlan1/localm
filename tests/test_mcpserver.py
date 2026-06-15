@@ -242,11 +242,8 @@ class TestMcpCliGate:
 
     def test_serves_when_installed(self, cfg_env, monkeypatch):
         from click.testing import CliRunner
-        from localm.config import load_config, save_config
-        cfg = load_config()
-        cfg["plugins_installed"] = ["mcp"]
-        cfg["plugins_enabled"] = ["mcp"]
-        save_config(cfg)
+        from localm.plugins.engine import PluginManager
+        PluginManager(None).set_installed_state("mcp", True)   # copy store->installed + enable
         called = {}
         import localm.plugins.mcpserver.server as server
         monkeypatch.setattr(server, "serve_stdio",
@@ -256,13 +253,13 @@ class TestMcpCliGate:
         assert result.exit_code == 0
         assert called.get("ok") is True
 
-    def test_installed_but_disabled_refuses(self, cfg_env, monkeypatch):
+    def test_installed_but_disabled_refuses(self, cfg_env):
         """Installed-but-disabled (the two-axis case) must NOT serve."""
         from click.testing import CliRunner
-        from localm.config import load_config, save_config
-        cfg = load_config()
-        cfg["plugins_installed"] = ["mcp"]      # installed but not enabled
-        save_config(cfg)
+        from localm.plugins.engine import PluginManager
+        mgr = PluginManager(None)
+        mgr.set_installed_state("mcp", True)
+        mgr.set_enabled_state("mcp", False)                   # installed, disabled
         from localm.plugins.mcpserver.cli import main
         result = CliRunner().invoke(main, [])
         assert result.exit_code == 1
@@ -271,7 +268,7 @@ class TestMcpCliGate:
     def test_mcp_plugin_available_not_installed_by_default(self, cfg_env):
         from localm.plugins.engine import PluginManager
         state = {p["name"]: p for p in PluginManager(None).api_state()["plugins"]}
-        assert "mcp" in state                   # in the catalog
+        assert "mcp" in state                   # in the available catalog
         assert state["mcp"]["installed"] is False
-        assert state["mcp"]["enabled"] is False
+        assert state["mcp"]["available"] is True
         assert state["mcp"]["scope"] == "mcp"

@@ -19,9 +19,10 @@ def cli_env(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "CONFIG_FILE", tmp_path / "config.json")
     monkeypatch.setattr(cfg, "REGISTRY_FILE", tmp_path / "registry.json")
 
-    plugins = tmp_path / "plugins"
+    store = tmp_path / "store"          # the available catalog (bundled shelf)
+    installed = tmp_path / "installed"  # where install copies them
     for name, extra in (("needy", 'requires = ["dep1"]\n'), ("dep1", "")):
-        d = plugins / name
+        d = store / name
         d.mkdir(parents=True)
         (d / "plugin.toml").write_text(
             f'[plugin]\nname = "{name}"\nscope = "{name}"\nregister = "plug"\n{extra}',
@@ -34,22 +35,21 @@ def cli_env(tmp_path, monkeypatch):
     from localm.plugins.engine import PluginManager
     monkeypatch.setattr(
         climod, "_engine_manager",
-        lambda: PluginManager(None, external_root=plugins, builtin_root=None))
-    return climod
+        lambda: PluginManager(None, store_root=store, installed_root=installed))
+    from types import SimpleNamespace
+    return SimpleNamespace(main=climod.main, store=store, installed=installed)
 
 
 def test_install_uninstall_roundtrip(cli_env):
     from localm.config import load_config
     r = CliRunner().invoke(cli_env.main, ["plugin", "install", "dep1"])
     assert r.exit_code == 0 and "Installed" in r.output
-    cfg = load_config()
-    assert "dep1" in cfg.get("plugins_installed", [])
-    assert "dep1" in cfg.get("plugins_enabled", [])     # install enables by default
+    assert (cli_env.installed / "dep1").is_dir()          # physically installed
+    assert "dep1" in load_config().get("plugins_enabled", [])   # enabled by default
     r = CliRunner().invoke(cli_env.main, ["plugin", "uninstall", "dep1"])
     assert r.exit_code == 0 and "Uninstalled" in r.output
-    cfg = load_config()
-    assert "dep1" not in cfg.get("plugins_installed", [])
-    assert "dep1" not in cfg.get("plugins_enabled", [])
+    assert not (cli_env.installed / "dep1").exists()      # dir removed
+    assert "dep1" not in load_config().get("plugins_enabled", [])
 
 
 def test_enable_disable_within_installed(cli_env):
@@ -57,9 +57,8 @@ def test_enable_disable_within_installed(cli_env):
     CliRunner().invoke(cli_env.main, ["plugin", "install", "dep1"])
     r = CliRunner().invoke(cli_env.main, ["plugin", "disable", "dep1"])
     assert r.exit_code == 0 and "Disabled" in r.output
-    cfg = load_config()
-    assert "dep1" in cfg.get("plugins_installed", [])    # stays installed
-    assert "dep1" not in cfg.get("plugins_enabled", [])
+    assert (cli_env.installed / "dep1").is_dir()          # stays installed (on disk)
+    assert "dep1" not in load_config().get("plugins_enabled", [])
     r = CliRunner().invoke(cli_env.main, ["plugin", "enable", "dep1"])
     assert r.exit_code == 0 and "Enabled" in r.output
     assert "dep1" in load_config().get("plugins_enabled", [])
