@@ -11,7 +11,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from localm.plugins.gui.sessions import CoderSession, SessionManager
+from localm.plugins.coder.sessions import CoderSession, SessionManager
 from localm.plugins.gui.web import attach_gui
 
 
@@ -399,16 +399,46 @@ class TestModelEndpoints:
         assert switched == ["model-b"]
 
 
+@pytest.fixture
+def coder_app(tmp_path, monkeypatch):
+    """GUI app with the builtin coder plugin installed; isolated home.
+    coder became a plugin in Phase 3 - installed BEFORE attach_gui (production
+    order: the engine mounts /api/coder routes first, then attach_gui publishes
+    app.state.coder_sessions / switch_model, which the routes read lazily)."""
+    home = tmp_path / ".localm"
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    import localm.config as _cfg
+    monkeypatch.setattr(_cfg, "HOME_DIR", home)
+    monkeypatch.setattr(_cfg, "MODELS_DIR", home / "models")
+    monkeypatch.setattr(_cfg, "CONFIG_FILE", home / "config.json")
+    monkeypatch.setattr(_cfg, "REGISTRY_FILE", home / "registry.json")
+    from localm.plugins.engine import PluginManager
+    app = FastAPI()
+    PluginManager(app, external_root=tmp_path / "noplugins").install("coder")
+
+    switched = []
+
+    async def switch_model(name):
+        switched.append(name)
+
+    attach_gui(app, self_url="http://127.0.0.1:9/v1",
+               switch_model=switch_model,
+               active_model=lambda: switched[-1] if switched else "model-a")
+    return app, switched
+
+
 class TestCoderEndpoints:
-    def test_create_session_rejects_bad_cwd(self, gui_app):
-        app, _ = gui_app
+    def test_create_session_rejects_bad_cwd(self, coder_app):
+        app, _ = coder_app
         with TestClient(app) as client:
             r = client.post("/api/coder/sessions",
                             json={"cwd": "Z:/definitely/not/here"})
         assert r.status_code == 400
 
-    def test_create_and_delete_session(self, gui_app, tmp_path):
-        app, _ = gui_app
+    def test_create_and_delete_session(self, coder_app, tmp_path):
+        app, _ = coder_app
         with TestClient(app) as client:
             r = client.post("/api/coder/sessions", json={"cwd": str(tmp_path)})
             assert r.status_code == 200
@@ -426,8 +456,8 @@ class TestCoderEndpoints:
             assert client.delete(f"/api/coder/sessions/{sid}").status_code == 200
             assert client.delete(f"/api/coder/sessions/{sid}").status_code == 404
 
-    def test_files_endpoints_and_dry_run_flag(self, gui_app, tmp_path):
-        app, _ = gui_app
+    def test_files_endpoints_and_dry_run_flag(self, coder_app, tmp_path):
+        app, _ = coder_app
         with TestClient(app) as client:
             info = client.post("/api/coder/sessions",
                                json={"cwd": str(tmp_path),
@@ -445,16 +475,16 @@ class TestCoderEndpoints:
                            params={"path": "never.txt"})
             assert r.status_code == 404
 
-    def test_unknown_session_404(self, gui_app):
-        app, _ = gui_app
+    def test_unknown_session_404(self, coder_app):
+        app, _ = coder_app
         with TestClient(app) as client:
             assert client.post("/api/coder/sessions/zzz/message",
                                json={"text": "hi"}).status_code == 404
             assert client.post("/api/coder/sessions/zzz/stop").status_code == 404
             assert client.delete("/api/coder/sessions/zzz").status_code == 404
 
-    def test_event_stream_ends_on_closed(self, gui_app, tmp_path):
-        app, _ = gui_app
+    def test_event_stream_ends_on_closed(self, coder_app, tmp_path):
+        app, _ = coder_app
         with TestClient(app) as client:
             sid = client.post("/api/coder/sessions",
                               json={"cwd": str(tmp_path)}).json()["id"]
@@ -531,9 +561,9 @@ class TestStaticFiles:
 
 
 class TestSessionExtras:
-    def test_session_list_and_info(self, gui_app, tmp_path, monkeypatch):
+    def test_session_list_and_info(self, coder_app, tmp_path, monkeypatch):
         monkeypatch.setenv("LOCALM_MODE", "privacy")  # hermetic: ignore ambient config mode
-        app, _ = gui_app
+        app, _ = coder_app
         with TestClient(app) as client:
             assert client.get("/api/coder/sessions").json()["sessions"] == []
             sid = client.post("/api/coder/sessions",
@@ -544,8 +574,8 @@ class TestSessionExtras:
             assert sessions[0]["mode"] == "privacy"
             client.delete(f"/api/coder/sessions/{sid}")
 
-    def test_undo_with_nothing_to_undo_is_409(self, gui_app, tmp_path):
-        app, _ = gui_app
+    def test_undo_with_nothing_to_undo_is_409(self, coder_app, tmp_path):
+        app, _ = coder_app
         with TestClient(app) as client:
             sid = client.post("/api/coder/sessions",
                               json={"cwd": str(tmp_path)}).json()["id"]
@@ -553,25 +583,25 @@ class TestSessionExtras:
             assert client.post(f"/api/coder/sessions/{sid}/compact").status_code == 409
             client.delete(f"/api/coder/sessions/{sid}")
 
-    def test_log_404_in_privacy_mode(self, gui_app, tmp_path, monkeypatch):
+    def test_log_404_in_privacy_mode(self, coder_app, tmp_path, monkeypatch):
         monkeypatch.setenv("LOCALM_MODE", "privacy")  # hermetic: ignore ambient config mode
-        app, _ = gui_app
+        app, _ = coder_app
         with TestClient(app) as client:
             sid = client.post("/api/coder/sessions",
                               json={"cwd": str(tmp_path)}).json()["id"]
             assert client.get(f"/api/coder/sessions/{sid}/log").status_code == 404
             client.delete(f"/api/coder/sessions/{sid}")
 
-    def test_create_with_unknown_model_404(self, gui_app, tmp_path):
-        app, _ = gui_app
+    def test_create_with_unknown_model_404(self, coder_app, tmp_path):
+        app, _ = coder_app
         with patch("localm.config.load_registry", return_value=_FAKE_REGISTRY):
             with TestClient(app) as client:
                 r = client.post("/api/coder/sessions",
                                 json={"cwd": str(tmp_path), "model": "ghost"})
         assert r.status_code == 404
 
-    def test_create_with_model_switches_engine(self, gui_app, tmp_path):
-        app, switched = gui_app
+    def test_create_with_model_switches_engine(self, coder_app, tmp_path):
+        app, switched = coder_app
         with patch("localm.config.load_registry", return_value=_FAKE_REGISTRY):
             with TestClient(app) as client:
                 r = client.post("/api/coder/sessions",
@@ -580,8 +610,8 @@ class TestSessionExtras:
                 client.delete(f"/api/coder/sessions/{r.json()['id']}")
         assert switched == ["model-b"]
 
-    def test_replay_rebuilds_history(self, gui_app, tmp_path):
-        app, _ = gui_app
+    def test_replay_rebuilds_history(self, coder_app, tmp_path):
+        app, _ = coder_app
         with TestClient(app) as client:
             sid = client.post("/api/coder/sessions",
                               json={"cwd": str(tmp_path)}).json()["id"]
@@ -1321,13 +1351,13 @@ class TestCoderHistory:
         log.write_text(json.dumps(entry) + "\nnot json\n", encoding="utf-8")
         return log, entry
 
-    def test_history_lists_and_reads_logs(self, gui_app, tmp_path, monkeypatch):
+    def test_history_lists_and_reads_logs(self, coder_app, tmp_path, monkeypatch):
         import localm.audit as audit_mod
         sessions_dir = tmp_path / "sessions"
         log, entry = self._fake_log(sessions_dir)
         monkeypatch.setattr(audit_mod, "_SESSIONS_DIR", sessions_dir)
         monkeypatch.setenv("LOCALM_MODE", "log")
-        app, _ = gui_app
+        app, _ = coder_app
         with TestClient(app) as client:
             data = client.get("/api/coder/history").json()
             assert data["enabled"] is True
@@ -1335,27 +1365,100 @@ class TestCoderHistory:
             parsed = client.get(f"/api/coder/history/{log.name}").json()
         assert parsed["entries"] == [entry]     # malformed line skipped
 
-    def test_history_enabled_false_in_privacy(self, gui_app, tmp_path, monkeypatch):
+    def test_history_enabled_false_in_privacy(self, coder_app, tmp_path, monkeypatch):
         import localm.audit as audit_mod
         monkeypatch.setattr(audit_mod, "_SESSIONS_DIR", tmp_path / "none")
         monkeypatch.setenv("LOCALM_MODE", "privacy")
-        app, _ = gui_app
+        app, _ = coder_app
         with TestClient(app) as client:
             data = client.get("/api/coder/history").json()
         assert data == {"enabled": False, "logs": []}
 
-    def test_history_rejects_bad_names(self, gui_app, tmp_path, monkeypatch):
+    def test_history_rejects_bad_names(self, coder_app, tmp_path, monkeypatch):
         import localm.audit as audit_mod
         sessions_dir = tmp_path / "sessions"
         self._fake_log(sessions_dir)
         # plant a sibling the traversal would reach
         (tmp_path / "secret.jsonl").write_text("{}", encoding="utf-8")
         monkeypatch.setattr(audit_mod, "_SESSIONS_DIR", sessions_dir)
-        app, _ = gui_app
+        app, _ = coder_app
         with TestClient(app) as client:
             assert client.get("/api/coder/history/notes.txt").status_code == 400
             r = client.get("/api/coder/history/..%5Csecret.jsonl")
             assert r.status_code in (400, 404)
+
+
+class TestCoderPlugin:
+    """Coder-as-plugin specifics: 503 without the GUI, scope gating on the
+    high-privilege routes, the CLI is_active gate, and the severed kernel
+    coupling. Route behaviour itself is covered above via the install-based
+    coder_app fixture."""
+
+    @staticmethod
+    def _isolate(tmp_path, monkeypatch):
+        home = tmp_path / ".localm"
+        monkeypatch.setenv("LOCALM_HOME", str(home))
+        monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+        import localm.config as _cfg
+        monkeypatch.setattr(_cfg, "HOME_DIR", home)
+        monkeypatch.setattr(_cfg, "MODELS_DIR", home / "models")
+        monkeypatch.setattr(_cfg, "CONFIG_FILE", home / "config.json")
+        monkeypatch.setattr(_cfg, "REGISTRY_FILE", home / "registry.json")
+        return home
+
+    def test_coder_without_gui_is_503(self, tmp_path, monkeypatch):
+        """The engine mounts /api/coder routes even with no GUI; they must 503
+        (not 500) when attach_gui never published the session manager."""
+        self._isolate(tmp_path, monkeypatch)
+        from localm.plugins.engine import PluginManager
+        app = FastAPI()
+        PluginManager(app, external_root=tmp_path / "noplugins").install("coder")
+        with TestClient(app) as client:        # NOTE: no attach_gui
+            r = client.post("/api/coder/sessions", json={"cwd": str(tmp_path)})
+            assert r.status_code == 503
+
+    def test_routes_require_coder_scope(self, coder_app, monkeypatch):
+        """The agentic coder is shell-exec + file-write; the engine gates every
+        /api/coder route on the 'coder' capability scope."""
+        from localm import auth, scopes as S
+        app, _ = coder_app
+        made = auth.create_key("reader", [S.CHAT])              # lacks 'coder'
+        with TestClient(app) as client:
+            denied = client.get(
+                "/api/coder/sessions",
+                headers={"Authorization": f"Bearer {made['key']}"})
+            assert denied.status_code == 403
+            monkeypatch.setenv("LOCALM_API_KEY", "ownersecret")  # owner = admin
+            ok = client.get(
+                "/api/coder/sessions",
+                headers={"Authorization": "Bearer ownersecret"})
+            assert ok.status_code == 200
+
+    def test_cli_gated_when_inactive(self, tmp_path, monkeypatch):
+        """`localm coder` / `localcoder` refuse cleanly until the plugin is
+        installed+enabled (mirrors the mcp server gate)."""
+        self._isolate(tmp_path, monkeypatch)
+        from click.testing import CliRunner
+        from localm.plugins.coder.cli import main
+        result = CliRunner().invoke(main, ["noop"])
+        assert result.exit_code == 1
+        assert "not active" in result.output.lower()
+        assert "localm plugin install coder" in result.output
+
+    def test_readline_privacy_util_does_not_import_coder(self):
+        """The kernel chat REPL suppresses readline history via the kernel
+        module, so importing it never drags the coder plugin in."""
+        import subprocess as _sp
+        import sys as _sys
+        code = (
+            "import importlib, sys\n"
+            "importlib.import_module('localm.readline_privacy')\n"
+            "bad = [m for m in sys.modules if m.startswith('localm.plugins.coder')]\n"
+            "assert not bad, bad\n"
+        )
+        r = _sp.run([_sys.executable, "-c", code], capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
 
 
 # ------------------------------------------------------------------ #
