@@ -51,6 +51,7 @@ class PluginSpec:
     data_subdir: str = ""                    # under the data dir; "" = none
     builtin: bool = False                    # ships in-tree
     protected: bool = False                  # cannot be disabled/uninstalled (chat)
+    default_enabled: bool = False            # auto-enabled on first run (preinstalled #0)
     surface: Surface = field(default_factory=Surface)
     cli_entry: str = ""                      # legacy "module:attr" Click command
     register_entry: str = ""                 # "module:attr" -> register(host)

@@ -67,6 +67,7 @@ def parse_spec(plugin_dir: Path, *, builtin: bool = False) -> PluginSpec:
         data_subdir=str(p.get("data_subdir", "")),
         builtin=builtin,
         protected=bool(p.get("protected", False)),
+        default_enabled=bool(p.get("default_enabled", False)),
         surface=surface,
         cli_entry=str(p.get("cli", "")),
         register_entry=str(p.get("register", "")),
@@ -359,11 +360,36 @@ class PluginManager:
         """Discover INSTALLED plugins and load every active one (installed AND
         enabled). Never raises - a failing plugin is recorded in errors and
         skipped. A 'enabled' config entry for a plugin not on disk is ignored."""
+        self._ensure_preinstalled()                # first-run: provision chat etc.
         self.discover()
         enabled = self._enabled_set()
         for name in sorted(self._specs):           # _specs == installed (on disk)
             if name in enabled and name not in self._loaded:
                 self._safe_load(self._specs[name])
+
+    def _ensure_preinstalled(self) -> None:
+        """First-run provisioning for preinstalled plugins (chat is plugin #0).
+        Copy each from the store into the installed folder if absent, and enable
+        those marked default_enabled at that first provisioning - so chat ships
+        installed + enabled and self-heals if its directory is removed, while a
+        user's later disable of a non-protected default_enabled plugin is honoured.
+        Best-effort: a missing store source (e.g. a synthetic test store) is
+        recorded and skipped, never fatal."""
+        from localm.plugins import catalog as _cat
+        for name in _cat.preinstalled():
+            if (self._installed_dir(name) / "plugin.toml").is_file():
+                continue                            # already installed on disk
+            try:
+                self._provision_from_store(name)
+            except Exception as e:                  # no store source / copy failed
+                self._discover_errors[name] = f"preinstall: {e}"
+                continue
+            try:
+                spec = parse_spec(self._installed_dir(name))
+                if spec.default_enabled and name not in self._enabled_set():
+                    self._set_enabled(name, True)
+            except Exception:
+                pass
 
     def _safe_load(self, spec: PluginSpec) -> None:
         try:
