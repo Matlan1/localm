@@ -219,47 +219,72 @@ class PluginHost:
 #  Manager: discovery + lifecycle                                             #
 # --------------------------------------------------------------------------- #
 
-def _builtin_root() -> Optional[Path]:
+_UNSET = object()      # sentinel: distinguish "builtin_root not passed" from "=None"
+
+
+def _store_root() -> Optional[Path]:
+    """The bundled STORE shelf: first-party plugins ship here but are NOT loaded
+    from here. Core only reads it to copy a plugin into the installed folder on
+    install. (Directory still named 'builtin' on disk.)"""
     d = Path(__file__).resolve().parent / "builtin"
     return d if d.is_dir() else None
 
 
 class PluginManager:
-    """Discovers plugins (first-party in-tree + third-party), and loads /
-    unloads / enables / disables / installs them at runtime on *app*."""
+    """Discovers INSTALLED plugins (in the installed folder) and loads / unloads /
+    enables / disables them at runtime on *app*; installs plugins by copying them
+    from the bundled store (or their GitHub repo) into the installed folder.
+
+    Two locations: the STORE (bundled shelf, ``store_root``, read only on install)
+    and the INSTALLED folder (``installed_root``, the ONLY place discovery/loading
+    looks). A plugin not in the installed folder does not exist as far as localm is
+    concerned. "Installed" therefore means physically present in installed_root;
+    "enabled" is a config toggle within installed; active = installed AND enabled.
+    """
 
     def __init__(self, app, inference_engine=None,
-                 builtin_root: Optional[Path] = None,
+                 store_root: Optional[Path] = None,
+                 installed_root: Optional[Path] = None,
+                 # back-compat aliases for the old keywords (builtin_root was the
+                 # store; external_root was the installed/discovery dir)
+                 builtin_root: "Optional[Path] | object" = _UNSET,
                  external_root: Optional[Path] = None) -> None:
         self.app = app
         self.inference_engine = inference_engine
-        self._builtin_root = builtin_root if builtin_root is not None else _builtin_root()
-        if external_root is not None:
-            self._external_root = external_root
+        if store_root is not None:
+            self._store_root = store_root
+        elif builtin_root is not _UNSET:          # explicit (incl. None = "no store")
+            self._store_root = builtin_root
+        else:
+            self._store_root = _store_root()
+        root = installed_root if installed_root is not None else external_root
+        if root is not None:
+            self._installed_root = root
         else:
             from localm.plugins.loader import plugins_dir
-            self._external_root = plugins_dir()
+            self._installed_root = plugins_dir()
         self._specs: dict[str, PluginSpec] = {}
         self._loaded: dict[str, tuple] = {}     # name -> (spec, module, host, uniq)
         self._errors: dict[str, str] = {}            # load/runtime errors (persist)
         self._discover_errors: dict[str, str] = {}   # bad manifests (reset each discover)
 
-    # ---- discovery ---------------------------------------------------------
+    # ---- discovery (INSTALLED folder only) ---------------------------------
     def discover(self) -> dict[str, PluginSpec]:
+        """Discover INSTALLED plugins only (the installed folder). The store shelf
+        is never discovered - it is just the source for install()."""
         self._specs = {}
         self._discover_errors = {}
-        for root, builtin in ((self._builtin_root, True), (self._external_root, False)):
-            if not root:
-                continue
+        root = self._installed_root
+        if root:
             try:
                 children = sorted(Path(root).glob("*"))
             except OSError:
-                continue
+                children = []
             for child in children:
                 if not child.is_dir() or not (child / "plugin.toml").is_file():
                     continue
                 try:
-                    spec = parse_spec(child, builtin=builtin)
+                    spec = parse_spec(child, builtin=False)
                     if not spec.compatible():
                         raise ValueError(
                             f"api_version {spec.api_version} != {API_VERSION}")
@@ -268,49 +293,76 @@ class PluginManager:
                     self._discover_errors[child.name] = str(e)
         return self._specs
 
-    # ---- installed/enabled state (two axes, persisted in config) -----------
-    # builtin/ + external dirs are the AVAILABLE catalog (discovered). A plugin
-    # the user has not INSTALLED is catalog-only: never loaded, never surfaced as
-    # one of "their" plugins. Within installed plugins, ENABLED toggles active vs
-    # inactive (WordPress-style). A plugin is active (loaded) iff installed AND
-    # enabled; the invariant enabled subset-of installed is kept by the lifecycle
-    # methods, and load reconciles defensively via the intersection.
-    def _installed_set(self) -> set:
-        from localm.config import load_config
-        return set(load_config().get("plugins_installed", []))
+    def _store_dir(self, name: str) -> Optional[Path]:
+        if not self._store_root:
+            return None
+        d = Path(self._store_root) / name
+        return d if (d / "plugin.toml").is_file() else None
 
-    def _set_installed(self, name: str, on: bool) -> None:
-        self._set_member("plugins_installed", name, on)
+    def store_catalog(self) -> dict[str, PluginSpec]:
+        """Parse the bundled store shelf (the available first-party plugins). Used
+        only to present the catalog / resolve an install source - never loaded."""
+        out: dict[str, PluginSpec] = {}
+        if not self._store_root:
+            return out
+        try:
+            children = sorted(Path(self._store_root).glob("*"))
+        except OSError:
+            return out
+        for child in children:
+            if not child.is_dir() or not (child / "plugin.toml").is_file():
+                continue
+            try:
+                spec = parse_spec(child, builtin=True)
+                out[spec.name] = spec
+            except Exception:
+                pass
+        return out
+
+    # ---- installed/enabled state -------------------------------------------
+    # "Installed" is PHYSICAL: a plugin is installed iff its directory is present
+    # in the installed folder (discoverable). It is NOT a config flag. "Enabled"
+    # is a config toggle WITHIN installed (WordPress-style): a plugin is active
+    # (loaded) iff installed AND enabled. Load reconciles defensively via the
+    # intersection, so a stale 'enabled' entry for a plugin no longer on disk is
+    # ignored.
+    def _installed_set(self) -> set:
+        """Names physically present in the installed folder (have a plugin.toml)."""
+        root = self._installed_root
+        out = set()
+        if root:
+            try:
+                for child in Path(root).glob("*"):
+                    if child.is_dir() and (child / "plugin.toml").is_file():
+                        out.add(child.name)
+            except OSError:
+                pass
+        return out
 
     def _enabled_set(self) -> set:
         from localm.config import load_config
         return set(load_config().get("plugins_enabled", []))
 
     def _set_enabled(self, name: str, on: bool) -> None:
-        self._set_member("plugins_enabled", name, on)
-
-    @staticmethod
-    def _set_member(key: str, name: str, on: bool) -> None:
-        """Add/remove *name* in the config list *key* atomically (read-modify-write
-        under the I/O lock), so concurrent toggles of different plugins can't lose
-        each other's update."""
+        """Add/remove *name* in config["plugins_enabled"] atomically (read-modify-
+        write under the I/O lock), so concurrent toggles can't lose updates."""
         from localm.config import update_config
 
         def _mutate(cfg: dict) -> None:
-            cur = set(cfg.get(key, []))
+            cur = set(cfg.get("plugins_enabled", []))
             cur.add(name) if on else cur.discard(name)
-            cfg[key] = sorted(cur)
+            cfg["plugins_enabled"] = sorted(cur)
         update_config(_mutate)
 
     # ---- load / unload (in-process, isolated) ------------------------------
     def load_enabled(self) -> None:
-        """Discover and load every active plugin (installed AND enabled). Never
-        raises - a failing plugin is recorded in errors and skipped. The
-        intersection means a stale 'enabled but not installed' config entry is
-        ignored, not loaded."""
+        """Discover INSTALLED plugins and load every active one (installed AND
+        enabled). Never raises - a failing plugin is recorded in errors and
+        skipped. A 'enabled' config entry for a plugin not on disk is ignored."""
         self.discover()
-        for name in self._installed_set() & self._enabled_set():
-            if name in self._specs and name not in self._loaded:
+        enabled = self._enabled_set()
+        for name in sorted(self._specs):           # _specs == installed (on disk)
+            if name in enabled and name not in self._loaded:
                 self._safe_load(self._specs[name])
 
     def _safe_load(self, spec: PluginSpec) -> None:
@@ -344,58 +396,105 @@ class PluginManager:
         host.unmount()
         sys.modules.pop(uniq, None)     # drop so a re-enable re-imports fresh
 
-    # ---- public lifecycle (two axes: install/uninstall, enable/disable) -----
+    # ---- provisioning helpers ----------------------------------------------
+    def _installed_dir(self, name: str) -> Path:
+        return Path(self._installed_root) / name
+
+    def _provision_from_store(self, name: str) -> None:
+        """Copy the plugin from the bundled store into the installed folder (or,
+        if missing from the store, fetch it from its GitHub repo). No-op if it is
+        already installed. Raises KeyError when no source exists."""
+        import shutil
+        dest = self._installed_dir(name)
+        if (dest / "plugin.toml").is_file():
+            return                                   # already installed on disk
+        src = self._store_dir(name)
+        if src is not None:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(src, dest)
+            return
+        from localm.plugins import catalog as _cat
+        entry = _cat.get(name)
+        url = entry.source_url() if entry else ""
+        if url:
+            raise NotImplementedError(
+                f"plugin {name!r} is not in the bundled store; fetching it from "
+                f"{url} is not wired up yet")
+        raise KeyError(f"no such plugin: {name}")
+
+    def _remove_installed_dir(self, name: str) -> None:
+        import shutil
+        d = self._installed_dir(name)
+        try:
+            if d.is_dir():
+                shutil.rmtree(d)
+        except OSError:
+            pass
+
+    def _is_protected(self, name: str) -> bool:
+        from localm.plugins import catalog as _cat
+        spec = self._specs.get(name)
+        return bool(spec and spec.protected) or name in _cat.protected()
+
+    # ---- public lifecycle (install/uninstall = store<->installed) -----------
     def install(self, name: str) -> None:
-        """Install a catalog plugin BY NAME (first-party builtin or an already
-        discovered external plugin): mark it installed AND enabled, and load it
-        onto the live app. This is the 'select from the available catalog' action;
-        installing a plugin makes it active by default. If loading fails the config
-        is rolled back (no half-installed state) and the error is re-raised."""
+        """Install a plugin: copy it from the bundled store (or its GitHub repo)
+        into the installed folder, then load + enable it on the live app. Rolls
+        back the copy if it does not load. KeyError if no such plugin exists."""
+        self._provision_from_store(name)             # may raise KeyError
+        self.discover()
         if name not in self._specs:
-            self.discover()
-        if name not in self._specs:
-            raise KeyError(f"no such plugin: {name}")
-        if name not in self._loaded:
-            self._load(self._specs[name])     # load first; raises on failure
-        # only persist once the load succeeded, so a failed install leaves no
-        # 'installed+enabled but broken' state behind
-        self._set_installed(name, True)
+            detail = self._discover_errors.get(name, "bad manifest")
+            self._remove_installed_dir(name)
+            raise ValueError(f"plugin {name!r} could not be installed: {detail}")
+        try:
+            if name not in self._loaded:
+                self._load(self._specs[name])
+        except Exception:
+            self._remove_installed_dir(name)         # roll back the copy
+            raise
         self._set_enabled(name, True)
 
     def install_external(self, source: Path, *, force: bool = False):
-        """Add a THIRD-PARTY plugin to the catalog by copying its directory into
-        the external plugins dir (admin-gated at the route level), then install it
-        (installed + enabled + loaded). If the copied plugin fails to parse/discover
-        or to load, the copied directory is removed so nothing is orphaned."""
-        from localm.plugins.loader import install_plugin, remove_plugin
-        manifest = install_plugin(Path(source), force=force)
-        self.discover()
-        if manifest.name not in self._specs:
-            remove_plugin(manifest.name)      # bad manifest: clean up the copy
-            raise ValueError(
-                f"plugin {manifest.name!r} was copied but is not loadable "
-                f"(invalid manifest or incompatible api_version)")
+        """Install a THIRD-PARTY plugin from an arbitrary source directory: copy it
+        into the installed folder, then load + enable. Rolls back on failure."""
+        import shutil
+        src = Path(source)
+        spec0 = parse_spec(src)                       # validate + name (raises)
+        name = spec0.name
+        dest = self._installed_dir(name)
+        if dest.exists():
+            if not force:
+                raise ValueError(f"plugin {name!r} is already installed")
+            self._remove_installed_dir(name)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(src, dest)
         try:
-            self.install(manifest.name)
+            self.discover()
+            if name not in self._specs:
+                detail = self._discover_errors.get(name, "bad manifest")
+                raise ValueError(f"plugin {name!r} is not loadable: {detail}")
+            if name not in self._loaded:
+                self._load(self._specs[name])
         except Exception:
-            remove_plugin(manifest.name)      # load failed: clean up the copy
+            self._remove_installed_dir(name)
             raise
-        return manifest
+        self._set_enabled(name, True)
+        return spec0
 
     def enable(self, name: str) -> None:
+        self.discover()
         if name not in self._specs:
-            self.discover()
-        if name not in self._specs:
+            from localm.plugins import catalog as _cat
+            if _cat.get(name) or self._store_dir(name):
+                raise ValueError(f"plugin {name!r} is not installed; install it first")
             raise KeyError(f"no such plugin: {name}")
-        if name not in self._installed_set():
-            raise ValueError(f"plugin {name!r} is not installed; install it first")
         if name not in self._loaded:
-            self._load(self._specs[name])     # load first; surface errors to caller
-        self._set_enabled(name, True)         # persist only after a successful load
+            self._load(self._specs[name])             # load first; surface errors
+        self._set_enabled(name, True)
 
     def disable(self, name: str) -> None:
-        spec = self._specs.get(name)
-        if spec and spec.protected:
+        if self._is_protected(name):
             raise ValueError(f"plugin {name!r} is protected and cannot be disabled")
         self._set_enabled(name, False)
         self._unload(name)
@@ -407,71 +506,65 @@ class PluginManager:
         return name in self._enabled_set()
 
     def is_active(self, name: str) -> bool:
-        """A plugin is active (loaded) iff installed AND enabled."""
-        return name in (self._installed_set() & self._enabled_set())
+        """Active (loaded) iff installed (on disk) AND enabled."""
+        return name in self._installed_set() and name in self._enabled_set()
 
     def missing_requires(self, name: str) -> list:
-        """Plugins that *name* declares it requires but which are not installed."""
-        if name not in self._specs:
-            self.discover()
-        spec = self._specs.get(name)
+        """Required plugins (declared) that are not currently installed."""
+        spec = self._specs.get(name) or self.store_catalog().get(name)
         if not spec:
             return []
         installed = self._installed_set()
         return [r for r in spec.requires if r not in installed]
 
     def set_installed_state(self, name: str, on: bool, *, enable: bool = True) -> None:
-        """Flip a plugin's installed flag in config WITHOUT loading routes (for
-        CLI/headless use; the GUI server reconciles via load_enabled on its next
-        start). Installing also enables by default; uninstalling also disables.
-        Honours protection on uninstall."""
-        if name not in self._specs:
+        """CLI/headless install/uninstall WITHOUT loading routes: copy store ->
+        installed (or remove the installed dir); the GUI server reconciles via
+        load_enabled on its next start. Installing also enables by default;
+        uninstalling disables. Honours protection on uninstall."""
+        if on:
+            self._provision_from_store(name)         # copy store -> installed (raises if unknown)
             self.discover()
-        if name not in self._specs:
-            raise KeyError(f"no such plugin: {name}")
-        spec = self._specs.get(name)
-        if not on and spec and spec.protected:
-            raise ValueError(f"plugin {name!r} is protected and cannot be uninstalled")
-        self._set_installed(name, on)
-        if on and enable:
-            self._set_enabled(name, True)
-        if not on:
+            if name not in self._specs:              # copied but unparseable -> roll back
+                detail = self._discover_errors.get(name, "bad manifest")
+                self._remove_installed_dir(name)
+                raise ValueError(f"plugin {name!r} could not be installed: {detail}")
+            if enable:
+                self._set_enabled(name, True)
+        else:
+            self.discover()
+            if name not in self._installed_set():
+                raise KeyError(f"no such plugin: {name}")
+            if self._is_protected(name):
+                raise ValueError(f"plugin {name!r} is protected and cannot be uninstalled")
             self._set_enabled(name, False)
+            self._remove_installed_dir(name)
 
     def set_enabled_state(self, name: str, on: bool) -> None:
-        """Flip a plugin's enabled flag in config WITHOUT loading/unloading routes.
-        For CLI/headless use. Requires the plugin to be installed (you cannot
-        enable a catalog-only plugin); honours protection on disable."""
-        if name not in self._specs:
-            self.discover()
-        if name not in self._specs:
+        """CLI/headless enable/disable WITHOUT loading routes. Requires the plugin
+        to be installed (on disk); honours protection on disable."""
+        self.discover()
+        if name not in self._installed_set():
+            from localm.plugins import catalog as _cat
+            if on and (_cat.get(name) or self._store_dir(name)):
+                raise ValueError(f"plugin {name!r} is not installed; install it first")
             raise KeyError(f"no such plugin: {name}")
-        spec = self._specs.get(name)
-        if on and name not in self._installed_set():
-            raise ValueError(f"plugin {name!r} is not installed; install it first")
-        if not on and spec and spec.protected:
+        if not on and self._is_protected(name):
             raise ValueError(f"plugin {name!r} is protected and cannot be disabled")
         self._set_enabled(name, on)
 
     def uninstall(self, name: str, *, delete_data: bool = False) -> bool:
-        """Uninstall a plugin: unload it, clear its installed + enabled flags, and
-        (for third-party plugins) delete its directory. First-party builtins stay
-        in the bundled catalog so they can be reinstalled. User content is kept
-        unless *delete_data* is set; a plugin's on_uninstall hook runs first.
-        Returns True if the plugin was installed. Raises KeyError for a wholly
-        unknown plugin (not in the catalog and not a stale installed entry)."""
-        if name not in self._specs:
-            self.discover()
+        """Uninstall a plugin: unload it, disable it, and DELETE its directory from
+        the installed folder (it reverts to being merely available in the store).
+        User content is kept unless *delete_data*; the on_uninstall hook runs
+        first. Returns True if it was installed; KeyError if wholly unknown."""
+        self.discover()
         spec = self._specs.get(name)
         was_installed = name in self._installed_set()
         if spec is None and not was_installed:
-            raise KeyError(f"no such plugin: {name}")   # truly unknown
-        if spec and spec.protected:
+            raise KeyError(f"no such plugin: {name}")
+        if self._is_protected(name):
             raise ValueError(f"plugin {name!r} is protected and cannot be uninstalled")
-        # (a stale installed entry whose spec is gone still falls through so its
-        # config flags can be cleaned up; a missing plugin cannot be the protected
-        # chat builtin, which is always discoverable)
-        # let the plugin clean up its own scaffolding first
         entry = self._loaded.get(name)
         if entry:
             module = entry[1]
@@ -483,12 +576,9 @@ class PluginManager:
                     pass
         self._unload(name)
         self._set_enabled(name, False)
-        self._set_installed(name, False)
-        if spec and not spec.builtin:
-            from localm.plugins.loader import remove_plugin
-            remove_plugin(name)        # third-party: delete the copied directory
         if delete_data and spec and spec.data_subdir:
             self._delete_plugin_data(spec)
+        self._remove_installed_dir(name)             # delete from the installed folder
         return was_installed
 
     def _delete_plugin_data(self, spec: PluginSpec) -> None:
@@ -503,30 +593,48 @@ class PluginManager:
 
     # ---- state for the API / GUI -------------------------------------------
     def api_state(self) -> dict:
+        """Installed plugins (loaded from the installed folder) plus what is
+        AVAILABLE to install (the bundled store + the static catalog, minus what
+        is installed). Each entry carries installed/enabled/active/available."""
+        from localm.plugins import catalog as _cat
         self.discover()
         installed = self._installed_set()
         enabled = self._enabled_set()
+        store = self.store_catalog()
         plugins = []
-        for name, spec in sorted(self._specs.items()):
-            plugins.append({
-                "name": spec.name,
-                "version": spec.version,
-                "description": spec.description,
-                "scope": spec.scope,
-                "builtin": spec.builtin,
-                "protected": spec.protected,
-                "tab": spec.surface.tab_id if spec.surface else "",
-                "label": spec.surface.label if spec.surface else "",
-                "icon": spec.surface.icon if spec.surface else "",
-                "group": spec.surface.group if spec.surface else "",
-                "requires_extras": spec.requires_extras,
-                "requires": spec.requires,
+
+        def _entry(spec, name, *, available):
+            cat = _cat.get(name)
+            return {
+                "name": name,
+                "version": spec.version if spec else "",
+                "description": (spec.description if spec and spec.description
+                                else (cat.description if cat else "")),
+                "scope": spec.scope if spec else name,
+                "builtin": (name in store) or bool(cat),
+                "protected": self._is_protected(name),
+                "tab": spec.surface.tab_id if spec and spec.surface else "",
+                "label": spec.surface.label if spec and spec.surface else "",
+                "icon": spec.surface.icon if spec and spec.surface else "",
+                "group": spec.surface.group if spec and spec.surface else "",
+                "requires_extras": spec.requires_extras if spec else [],
+                "requires": spec.requires if spec else [],
+                "extra": cat.extra if cat else "",
                 "installed": name in installed,
                 "enabled": name in enabled,
-                "active": name in (installed & enabled),
+                "active": (name in installed) and (name in enabled),
+                "available": available,
                 "loaded": name in self._loaded,
                 "error": self._errors.get(name) or self._discover_errors.get(name),
-            })
+            }
+
+        for name, spec in sorted(self._specs.items()):       # installed
+            plugins.append(_entry(spec, name, available=False))
+        seen = set(self._specs)
+        for name in sorted(set(store) | set(_cat.names())):  # available, not installed
+            if name in seen:
+                continue
+            plugins.append(_entry(store.get(name), name, available=True))
         return {"plugins": plugins,
                 "errors": {**self._discover_errors, **self._errors}}
 
