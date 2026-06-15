@@ -93,6 +93,35 @@ def test_enable_mounts_routes_disable_unmounts(env):
         assert c.get("/api/myplug/ping").status_code == 200
 
 
+def test_enable_after_catchall_mount_is_not_shadowed(env, tmp_path):
+    """Runtime enable must work even after the GUI mounted a catch-all "/" - the
+    host relocates the plugin's routes ahead of it, or Starlette's "/" Mount
+    would swallow every request (this is the whole point of enable-without-
+    restart living alongside the SPA)."""
+    import os as _os
+    from fastapi.staticfiles import StaticFiles
+    from localm.plugins.engine import PluginManager
+    plugins = env / "plugins"
+    _make_plugin(plugins, "late", _ping("late"))
+
+    static = tmp_path / "static"
+    static.mkdir()
+    (static / "index.html").write_text("INDEX", encoding="utf-8")
+
+    app = FastAPI()
+    app.mount("/", StaticFiles(directory=str(static), html=True), name="gui")
+
+    mgr = PluginManager(app, external_root=plugins, builtin_root=None)
+    mgr.enable("late")                       # mounted AFTER the catch-all "/"
+    with TestClient(app) as c:
+        assert c.get("/api/late/ping").status_code == 200
+        assert c.get("/").text == "INDEX"    # SPA still served
+
+    mgr.disable("late")
+    with TestClient(app) as c:
+        assert c.get("/api/late/ping").status_code == 404
+
+
 def test_enabled_state_persists_in_config(env):
     from localm.plugins.engine import PluginManager
     from localm.config import load_config
