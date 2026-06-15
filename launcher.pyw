@@ -66,6 +66,16 @@ def python_exe() -> str:
     return sys.executable.replace("pythonw.exe", "python.exe")
 
 
+def _auth():
+    """The localm.auth module (file-backed API key), or None if unavailable."""
+    try:
+        sys.path.insert(0, str(REPO_DIR))
+        from localm import auth
+        return auth
+    except Exception:
+        return None
+
+
 def load_models() -> list:
     try:
         sys.path.insert(0, str(REPO_DIR))
@@ -120,6 +130,12 @@ class Launcher(tk.Tk):
         self.privacy_global = tk.StringVar(value=saved.get("privacy_global", "privacy"))
         self.privacy_chat = tk.StringVar(value=saved.get("privacy_chat", USE_GLOBAL))
         self.privacy_coder = tk.StringVar(value=saved.get("privacy_coder", USE_GLOBAL))
+
+        _a = _auth()
+        self.api_key = tk.StringVar(value=(_a.get_api_key() if _a else "") or "")
+        self.show_key = tk.BooleanVar(value=False)
+        self.require_auth = tk.BooleanVar(
+            value=bool(_a.require_auth_enabled()) if _a else False)
 
         self._build()
         self._on_mode_change()
@@ -301,6 +317,33 @@ class Launcher(tk.Tk):
                      values=[USE_GLOBAL] + PRIVACY_MODES, state="readonly",
                      width=12).grid(row=3, column=2, sticky="w", padx=(14, 0))
 
+        # ----- authentication -----
+        auth_card = self._card(root)
+        ttk.Label(auth_card, text="Authentication", style="Card.TLabel").grid(
+            row=0, column=0, columnspan=4, sticky="w")
+        ttk.Label(auth_card,
+                  text="API key clients must send (Bearer token). Blank = open "
+                       "(local only); a key is required to expose on the network.",
+                  style="Dim.TLabel").grid(row=1, column=0, columnspan=4,
+                                           sticky="w", pady=(0, 6))
+        self.key_entry = ttk.Entry(auth_card, textvariable=self.api_key,
+                                   width=40, show="•")
+        self.key_entry.grid(row=2, column=0, sticky="we", pady=(2, 0))
+        ttk.Button(auth_card, text="Generate", style="Quiet.TButton",
+                   command=self._gen_key).grid(row=2, column=1, padx=(8, 0),
+                                               pady=(2, 0))
+        ttk.Button(auth_card, text="Clear", style="Quiet.TButton",
+                   command=lambda: self.api_key.set("")).grid(
+            row=2, column=2, padx=(8, 0), pady=(2, 0))
+        ttk.Checkbutton(auth_card, text="Show", variable=self.show_key,
+                        command=self._toggle_key).grid(
+            row=2, column=3, padx=(8, 0), pady=(2, 0))
+        ttk.Checkbutton(auth_card,
+                        text="Require a key (server refuses to run without one)",
+                        variable=self.require_auth).grid(
+            row=3, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        auth_card.columnconfigure(0, weight=1)
+
         # ----- footer -----
         footer = ttk.Frame(root)
         footer.pack(fill="x", pady=(4, 0))
@@ -432,6 +475,19 @@ class Launcher(tk.Tk):
     def status_msg(self, text: str, error: bool = False) -> None:
         self.status.configure(text=text, fg="#e25d5d" if error else GREEN)
 
+    def _gen_key(self) -> None:
+        a = _auth()
+        if not a:
+            self.status_msg("auth module unavailable", error=True)
+            return
+        self.api_key.set(a.generate_key())
+        self.show_key.set(True)
+        self._toggle_key()
+        self.status_msg("New key generated - click Launch to save & apply it")
+
+    def _toggle_key(self) -> None:
+        self.key_entry.configure(show="" if self.show_key.get() else "•")
+
     # ------------------------------------------------------------- #
 
     def _build_command(self) -> list | None:
@@ -528,6 +584,28 @@ class Launcher(tk.Tk):
         env = os.environ.copy()
         if self.debug.get() and "--debug" not in cmd:
             env["LOCALM_DEBUG"] = "1"
+
+        # --- authentication: persist the key + require flag, inject into env ---
+        key = self.api_key.get().strip()
+        exposing = self.mode.get() == "serve" and self.host_lan.get()
+        if exposing and not key:
+            self.status_msg("Set or Generate an API key before exposing on the "
+                            "network", error=True)
+            return
+        a = _auth()
+        if a:
+            try:
+                a.set_api_key(key)            # writes/clears <data dir>/auth.key
+                from localm.config import load_config, save_config
+                cfg = load_config()
+                cfg["require_auth"] = bool(self.require_auth.get())
+                save_config(cfg)
+            except Exception:
+                pass
+        if key:
+            env["LOCALM_API_KEY"] = key
+        if self.require_auth.get():
+            env["LOCALM_REQUIRE_AUTH"] = "1"
 
         save_settings({
             "mode": self.mode.get(),
