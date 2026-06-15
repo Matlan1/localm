@@ -52,6 +52,7 @@ def parse_spec(plugin_dir: Path, *, builtin: bool = False) -> PluginSpec:
         label=str(s.get("label", "")),
         icon=str(s.get("icon", "")),
         assets_dir=str(s.get("assets_dir", "")),
+        client_entry=str(s.get("client_entry", "")),
         settings_group=str(s.get("settings_group", "")),
         group=str(s.get("group", "")),
     )
@@ -155,6 +156,36 @@ class PluginHost:
                    if isinstance(r, Mount) and r.path in ("", "/"))
         for j, r in enumerate(new):
             routes.insert(idx + j, r)
+
+    def mount_static(self, directory: str, *, url_prefix: str = "") -> str:
+        """Serve the plugin's static asset *directory* (relative to the plugin dir)
+        read-only at ``/plugins/<name>/`` - or *url_prefix* if given. Returns the
+        URL prefix. The mount is tracked like a route so ``unmount`` removes it on
+        disable, and relocated before the SPA's "/" catch-all so it matches when
+        the plugin is enabled at runtime. Static assets are public (like the SPA
+        shell itself) so the browser can ``import()`` the client entry module;
+        secrets must live behind scope-gated ``/api`` routes, never here."""
+        import mimetypes
+
+        from starlette.staticfiles import StaticFiles
+        # ES module import() enforces a JS MIME type; some Windows registries map
+        # .js/.mjs to text/plain, which would block a plugin's client module. Pin
+        # them (idempotent) so served plugin scripts always load as modules.
+        mimetypes.add_type("text/javascript", ".js")
+        mimetypes.add_type("text/javascript", ".mjs")
+        base = Path(self._spec.path or ".")
+        d = (base / directory).resolve()
+        if not d.is_dir():
+            raise ValueError(
+                f"plugin {self._spec.name!r}: static dir {directory!r} not found")
+        prefix = "/" + (url_prefix or f"/plugins/{self._spec.name}").strip("/")
+        before = {id(r) for r in self._app.router.routes}
+        self._app.mount(prefix, StaticFiles(directory=str(d)),
+                        name=f"plugin-static-{self._spec.name}")
+        new = [r for r in self._app.router.routes if id(r) not in before]
+        self._relocate_before_catchall(new)
+        self._routes += new
+        return prefix
 
     def unmount(self) -> None:
         for r in self._routes:
@@ -617,6 +648,11 @@ class PluginManager:
                 "label": spec.surface.label if spec and spec.surface else "",
                 "icon": spec.surface.icon if spec and spec.surface else "",
                 "group": spec.surface.group if spec and spec.surface else "",
+                "client_entry": (spec.surface.client_entry
+                                 if spec and spec.surface else ""),
+                "assets_base": (f"/plugins/{name}"
+                                if spec and spec.surface and spec.surface.assets_dir
+                                else ""),
                 "requires_extras": spec.requires_extras if spec else [],
                 "requires": spec.requires if spec else [],
                 "extra": cat.extra if cat else "",

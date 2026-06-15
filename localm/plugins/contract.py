@@ -30,7 +30,12 @@ class Surface:
     tab_id: str = ""            # "" = no tab (settings-only or headless plugin)
     label: str = ""
     icon: str = ""              # emoji or static-asset name
-    assets_dir: str = ""        # static frontend assets, relative to the plugin
+    assets_dir: str = ""        # static frontend assets, relative to the plugin;
+                                # served at /plugins/<name>/ when set
+    client_entry: str = ""      # ES module under assets_dir the SPA import()s on
+                                # boot for an active plugin (e.g. "tts.js"); the
+                                # module exports register(ctx) - a headless plugin
+                                # can ship client-side behaviour with no tab
     settings_group: str = ""    # group label for this plugin's settings section
     group: str = ""             # nav category id (e.g. "studio"); the SPA collapses
                                 # tabs sharing a group under one parent when 2+ are
@@ -74,6 +79,7 @@ class Host(Protocol):
     api_version: int
 
     def mount_router(self, router: Any) -> None: ...
+    def mount_static(self, directory: str, *, url_prefix: str = "") -> str: ...
     def add_settings(self, fields: list) -> None: ...
     def register_tab(self, surface: Surface) -> None: ...
     def plugin_config(self, name: str) -> dict: ...
