@@ -27,6 +27,11 @@ the same contract.
   content (rag collections, generated media) with an opt-in "also delete data",
   plus an optional plugin `on_uninstall` cleanup hook (WordPress deactivate-vs-delete).
 - **Rollout:** phased on a branch.
+- **Platforms:** Windows, Linux, and macOS are all first-class (DONE - PR #32; see
+  docs/linux-setup.md). Native llama.cpp via copy-from-build (llama.dll /
+  libllama.so / libllama.dylib); GPU = ROCm + CUDA + CPU on Linux, ROCm on Windows;
+  install via setup.bat / setup.sh / one-click install.sh. Every plugin (Phase 3+)
+  must stay cross-platform (declare platform-specific extras; no OS-only paths).
 
 ## Two shared foundations (consumed by everything)
 
@@ -87,9 +92,10 @@ what makes runtime load/unload possible.
   validation, reset-to-default, search; per-plugin sections. Plugin settings live
   under `config["plugins"][name]`; `PATCH /v1/config` accepts that namespace.
 - **Phase 6 - First-run + launcher:** plugin selection in the launcher (it can
-  `uv pip install` extras) + setup.bat; per-plugin setup-on-install or
-  prompt-on-first-use; launcher Auth card extends to owner key/scopes; one config
-  source of truth shared by launcher and GUI.
+  `uv pip install` extras) across setup.bat (Windows) AND setup.sh / install.sh
+  (Linux/macOS, already shipped); per-plugin setup-on-install or prompt-on-first-
+  use; launcher Auth card extends to owner key/scopes; one config source of truth
+  shared by launcher and GUI.
 - **Phase 7 - Docs + example plugin + hardening:** plugin authoring guide, an
   example plugin, manifest api_version checks, audit of plugin actions, full tests.
 - **Phase 8 - Chat control surface:** chat can manage the app via explicit,
@@ -110,6 +116,7 @@ what makes runtime load/unload possible.
 
 ## Status
 
-Phase 0 + Phase 1 complete and merged. Phase 1 added the scoped keystore,
-`require_scope` enforcement, the `/v1/keys` management API, route gating, and the
-`/v1/models/{id}` path-leak fix (full suite 1118 pass). Next: Phase 2 (plugin engine).
+Phase 0 + Phase 1 complete and merged (PRs #30, #31). Native Linux/macOS support
+also complete and merged (PR #32): platform-aware native loader, setup.sh +
+one-click install.sh + docs/linux-setup.md, GPU autodetect ROCm/CUDA/CPU. Full
+suite 1134 pass. Next: Phase 2 (plugin engine).
