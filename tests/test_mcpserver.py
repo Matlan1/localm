@@ -208,3 +208,56 @@ class TestClientServerIntegration:
             assert res.output == "pong"
         finally:
             client.stop()
+
+
+class TestMcpCliGate:
+    """The MCP server became an optional plugin (Phase 3): `localm mcp` refuses to
+    serve unless the mcp plugin is enabled, but --print-config always works."""
+
+    @pytest.fixture
+    def cfg_env(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
+        import localm.config as _cfg
+        monkeypatch.setattr(_cfg, "HOME_DIR", tmp_path)
+        monkeypatch.setattr(_cfg, "MODELS_DIR", tmp_path / "models")
+        monkeypatch.setattr(_cfg, "CONFIG_FILE", tmp_path / "config.json")
+        monkeypatch.setattr(_cfg, "REGISTRY_FILE", tmp_path / "registry.json")
+        return _cfg
+
+    def test_refuses_when_disabled(self, cfg_env):
+        from click.testing import CliRunner
+        from localm.plugins.mcpserver.cli import main
+        result = CliRunner().invoke(main, [])
+        assert result.exit_code == 1
+        assert "disabled" in result.output.lower()
+        assert "localm plugin enable mcp" in result.output
+
+    def test_print_config_works_when_disabled(self, cfg_env):
+        from click.testing import CliRunner
+        from localm.plugins.mcpserver.cli import main
+        result = CliRunner().invoke(main, ["--print-config"])
+        assert result.exit_code == 0
+        assert "mcpServers" in result.output
+        assert "localm plugin enable mcp" in result.output
+
+    def test_serves_when_enabled(self, cfg_env, monkeypatch):
+        from click.testing import CliRunner
+        from localm.config import load_config, save_config
+        cfg = load_config()
+        cfg["plugins_enabled"] = ["mcp"]
+        save_config(cfg)
+        called = {}
+        import localm.plugins.mcpserver.server as server
+        monkeypatch.setattr(server, "serve_stdio",
+                            lambda **k: called.setdefault("ok", True))
+        from localm.plugins.mcpserver.cli import main
+        result = CliRunner().invoke(main, [])
+        assert result.exit_code == 0
+        assert called.get("ok") is True
+
+    def test_mcp_plugin_discoverable_and_disabled_by_default(self, cfg_env):
+        from localm.plugins.engine import PluginManager
+        state = {p["name"]: p for p in PluginManager(None).api_state()["plugins"]}
+        assert "mcp" in state
+        assert state["mcp"]["enabled"] is False
+        assert state["mcp"]["scope"] == "mcp"
