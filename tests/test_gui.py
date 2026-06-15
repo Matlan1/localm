@@ -1403,16 +1403,28 @@ class TestAgentHooks:
 
 @pytest.fixture
 def img_app(tmp_path, monkeypatch):
-    """GUI app whose images dir lives under tmp_path."""
+    """GUI app with the builtin image plugin enabled; images dir under tmp.
+    image became a plugin in Phase 3 - its routes are mounted by enabling it
+    (before attach_gui, the production order), not by attach_gui."""
+    home = tmp_path / ".localm"
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    import localm.config as _cfg
+    monkeypatch.setattr(_cfg, "HOME_DIR", home)
+    monkeypatch.setattr(_cfg, "MODELS_DIR", home / "models")
+    monkeypatch.setattr(_cfg, "CONFIG_FILE", home / "config.json")
+    monkeypatch.setattr(_cfg, "REGISTRY_FILE", home / "registry.json")
+    from localm.plugins.engine import PluginManager
     app = FastAPI()
+    PluginManager(app, external_root=tmp_path / "noplugins").enable("image")
 
     async def switch_model(name):
         pass
 
     attach_gui(app, self_url="http://127.0.0.1:9/v1",
                switch_model=switch_model, active_model=lambda: "model-a")
-    images = tmp_path / ".localm" / "gui_images"
+    images = home / "gui_images"
     images.mkdir(parents=True)
     return app, images
 
@@ -1502,6 +1514,102 @@ class TestImageManagement:
                             json={"dest": str(dest)})
         assert r.status_code == 409
         assert (images / "img.png").exists()
+
+
+class TestImageGeneration:
+    """The /api/imagine generation route, with the ComfyUI backend mocked at the
+    shared-plumbing level (localm.image_gen.comfy). Exercises the image plugin's
+    backend wiring + the background job -> result path."""
+
+    @staticmethod
+    def _wait_job(client, job_id, timeout=30):
+        import time as _time
+        end = None
+        deadline = _time.monotonic() + timeout
+        with client.stream("GET", f"/api/jobs/{job_id}/events") as r:
+            for raw in r.iter_lines():
+                if _time.monotonic() > deadline:
+                    break
+                if not raw.startswith("data: "):
+                    continue
+                ev = json.loads(raw[6:])
+                if ev["type"] == "end":
+                    end = ev
+                    break
+        return end
+
+    def test_empty_prompt_is_400(self, img_app):
+        app, _ = img_app
+        with TestClient(app) as client:
+            assert client.post("/api/imagine", json={"prompt": "   "}).status_code == 400
+
+    def test_missing_input_image_is_400(self, img_app):
+        app, _ = img_app
+        with TestClient(app) as client:
+            r = client.post("/api/imagine",
+                            json={"prompt": "x", "input_image": "Z:/nope.png"})
+        assert r.status_code == 400
+
+    def test_imagine_without_gui_jobs_is_503(self, tmp_path, monkeypatch):
+        """Image gen needs the GUI's job manager (app.state.jobs). With the plugin
+        enabled on a bare app (no attach_gui), the route returns a clear 503 rather
+        than a 500."""
+        home = tmp_path / ".localm"
+        monkeypatch.setenv("LOCALM_HOME", str(home))
+        monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+        import localm.config as _cfg
+        monkeypatch.setattr(_cfg, "HOME_DIR", home)
+        monkeypatch.setattr(_cfg, "MODELS_DIR", home / "models")
+        monkeypatch.setattr(_cfg, "CONFIG_FILE", home / "config.json")
+        monkeypatch.setattr(_cfg, "REGISTRY_FILE", home / "registry.json")
+        from localm.plugins.engine import PluginManager
+        app = FastAPI()
+        PluginManager(app, external_root=tmp_path / "noplugins").enable("image")
+        with TestClient(app) as client:
+            r = client.post("/api/imagine", json={"prompt": "a fox"})
+        assert r.status_code == 503
+
+    def test_imagine_job_generates_and_returns_result(self, img_app, monkeypatch):
+        app, images = img_app
+        import localm.image_gen.comfy as comfy
+        monkeypatch.setattr(comfy, "ensure_comfy", lambda *a, **k: (True, "ComfyUI is running."))
+        monkeypatch.setattr(comfy, "free_comfy_vram", lambda *a, **k: False)
+
+        def fake_gen(prompt, out_path, **kw):
+            Path(out_path).write_bytes(b"\x89PNG fake")
+            return True, f"Image saved to {out_path}"
+        monkeypatch.setattr(comfy, "generate_image", fake_gen)
+
+        with TestClient(app) as client:
+            r = client.post("/api/imagine", json={"prompt": "a fox in snow"})
+            assert r.status_code == 200
+            end = self._wait_job(client, r.json()["job_id"])
+        assert end and end["status"] == "done"
+        assert end.get("result", "").endswith(".png")
+        assert list(images.glob("*.png"))      # the image landed in the plugin dir
+
+    def test_backend_uses_per_plugin_api_url(self, img_app, monkeypatch):
+        """A per-plugin comfy.api_url overrides the default and is what the
+        shared plumbing is called with."""
+        app, _ = img_app
+        from localm.config import load_config, save_config
+        cfg = load_config()
+        cfg.setdefault("plugins", {})["image"] = {
+            "backend": "comfy", "comfy": {"api_url": "http://127.0.0.1:9999"}}
+        save_config(cfg)
+
+        import localm.image_gen.comfy as comfy
+        seen = {}
+        monkeypatch.setattr(comfy, "ensure_comfy",
+                            lambda api_url=None, **k: (seen.update(url=api_url), (True, "up"))[1])
+        monkeypatch.setattr(comfy, "free_comfy_vram", lambda *a, **k: False)
+        monkeypatch.setattr(comfy, "generate_image",
+                            lambda prompt, out_path, **kw: (Path(out_path).write_bytes(b"x"),
+                                                            (True, "ok"))[1])
+        with TestClient(app) as client:
+            r = client.post("/api/imagine", json={"prompt": "x"})
+            self._wait_job(client, r.json()["job_id"])
+        assert seen.get("url") == "http://127.0.0.1:9999"
 
 
 # ------------------------------------------------------------------ #

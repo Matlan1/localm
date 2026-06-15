@@ -30,6 +30,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from localm.inference.http_server import _require_auth
+from localm.pathsafe import confined_file as _confined_file
+from localm.pathsafe import confined_name as _confined_name
 from .sessions import CoderSession, SessionManager
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -72,21 +74,8 @@ class AliasRequest(BaseModel):
     alias: str
 
 
-class ImagineRequest(BaseModel):
-    prompt: str
-    negative_prompt: str | None = None
-    seed: int | None = None
-    guidance: float | None = None
-    input_image: str | None = None    # path on this machine (img2img)
-    denoise: float | None = None
-
-
 class MoveImageRequest(BaseModel):
     dest: str                         # destination directory on this machine
-
-
-class RenameFileRequest(BaseModel):
-    new_name: str                     # new basename (extension kept)
 
 
 class MusicRequest(BaseModel):
@@ -565,155 +554,13 @@ def attach_gui(
             job.push({"type": "line", "text":
                       f"Reload deferred to the next message ({e})."})
 
-    # ----------------------- image generation --------------------- #
+    # Image generation (/api/imagine*) moved to the builtin "image" plugin
+    # (localm/plugins/builtin/image) in Phase 3; it ships disabled by default and
+    # reads its own per-plugin backend config. _confined_name/_confined_file now
+    # live in localm.pathsafe (imported at module top) - still used below by the
+    # music/video file ops and by coder_history.
 
     from localm.config import home_dir
-    images_dir = home_dir() / "gui_images"
-
-    @app.post("/api/imagine", dependencies=[Depends(_require_auth)])
-    async def imagine(req: ImagineRequest):
-        if not req.prompt.strip():
-            raise HTTPException(400, "Empty prompt")
-        input_image = None
-        if req.input_image:
-            input_image = Path(req.input_image).expanduser()
-            if not input_image.is_file():
-                raise HTTPException(400, f"Input image not found: {req.input_image}")
-
-        images_dir.mkdir(parents=True, exist_ok=True)
-        import time as _time
-        out_path = images_dir / f"{_time.strftime('%Y%m%d_%H%M%S')}_{os.urandom(3).hex()}.png"
-
-        def _generate(job):
-            from localm.audit import SessionMode, effective_mode
-            from localm.image_gen.comfy import generate_image
-            if not _ensure_comfy(job):
-                return False
-            job.push({"type": "line", "text": "Submitting workflow to ComfyUI…"})
-            ok, message = generate_image(
-                req.prompt,
-                out_path,
-                guidance=req.guidance,
-                negative_prompt=req.negative_prompt,
-                seed=req.seed,
-                input_image=input_image,
-                denoise=req.denoise,
-                localm_url=self_url,
-                # privacy mode: the prompt never touches disk
-                write_sidecar=effective_mode("server") != SessionMode.PRIVACY,
-            )
-            job.push({"type": "line", "text": message})
-            if ok:
-                job.result = out_path.name
-                _reload_llm(job)
-            return ok
-
-        job = jobs.start_fn("imagine", _generate, result_path=out_path.name)
-        return {"job_id": job.id}
-
-    def _confined_name(base: Path, name: str) -> Path:
-        """Resolve *name* and guarantee it stays directly inside *base*,
-        without requiring it to exist (rename targets, new files).
-
-        Blocklisting separators is not enough on Windows: a drive-relative
-        name like ``C:evil`` joins to ``C:evil`` (outside *base*), and an
-        absolute name replaces the join entirely.  We verify the *resolved*
-        path's parent is *base* and the basename is unchanged, which also
-        rejects ``..``, nested subpaths, and ``con``/device names."""
-        if name != Path(name).name or name in ("", ".", ".."):
-            raise HTTPException(400, "Invalid file name")
-        try:
-            resolved = (base / name).resolve()
-        except (OSError, ValueError):
-            raise HTTPException(400, "Invalid file name")
-        if resolved.parent != base.resolve() or resolved.name != name:
-            raise HTTPException(400, "Invalid file name")
-        return resolved
-
-    def _confined_file(base: Path, name: str, kind: str) -> Path:
-        """_confined_name plus an existence check - for files being read."""
-        resolved = _confined_name(base, name)
-        if not resolved.is_file():
-            raise HTTPException(404, f"No such {kind}")
-        return resolved
-
-    def _image_path(name: str) -> Path:
-        return _confined_file(images_dir, name, "image")
-
-    @app.get("/api/imagine/file/{name}", dependencies=[Depends(_require_auth)])
-    async def imagine_file(name: str):
-        from fastapi.responses import FileResponse
-        return FileResponse(str(_image_path(name)), media_type="image/png")
-
-    @app.delete("/api/imagine/file/{name}", dependencies=[Depends(_require_auth)])
-    async def imagine_delete(name: str):
-        path = _image_path(name)
-        sidecar = path.with_suffix(path.suffix + ".json")
-        path.unlink()
-        if sidecar.is_file():
-            sidecar.unlink()
-        return {"status": "deleted", "name": name}
-
-    @app.post("/api/imagine/file/{name}/move",
-              dependencies=[Depends(_require_auth)])
-    async def imagine_move(name: str, req: MoveImageRequest):
-        """Move a generated image (and its metadata sidecar) to a folder on
-        this machine - e.g. into a project or pictures directory."""
-        import shutil
-        path = _image_path(name)
-        dest_dir = Path(req.dest).expanduser()
-        try:
-            dest_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            raise HTTPException(400, f"Cannot create destination: {e}")
-        if not dest_dir.is_dir():
-            raise HTTPException(400, f"Not a directory: {req.dest}")
-        target = dest_dir / path.name
-        if target.exists():
-            raise HTTPException(409, f"Already exists: {target}")
-        shutil.move(str(path), str(target))
-        sidecar = path.with_suffix(path.suffix + ".json")
-        if sidecar.is_file():
-            shutil.move(str(sidecar), str(dest_dir / sidecar.name))
-        return {"status": "moved", "path": str(target)}
-
-    @app.post("/api/imagine/file/{name}/rename",
-              dependencies=[Depends(_require_auth)])
-    async def imagine_rename(name: str, req: RenameFileRequest):
-        """Rename a generated image (and its metadata sidecar) in place."""
-        path = _image_path(name)
-        new_name = req.new_name.strip()
-        if not new_name:
-            raise HTTPException(400, "Empty name")
-        if not new_name.lower().endswith(path.suffix.lower()):
-            new_name += path.suffix          # keep the extension
-        target = _confined_name(images_dir, new_name)
-        if target.exists():
-            raise HTTPException(409, f"Already exists: {new_name}")
-        path.rename(target)
-        sidecar = path.with_suffix(path.suffix + ".json")
-        if sidecar.is_file():
-            sidecar.rename(target.with_suffix(target.suffix + ".json"))
-        return {"status": "renamed", "name": target.name}
-
-    @app.get("/api/imagine/history", dependencies=[Depends(_require_auth)])
-    async def imagine_history():
-        """Generated images, newest first, with their sidecar metadata."""
-        items = []
-        if images_dir.is_dir():
-            for p in sorted(images_dir.glob("*.png"),
-                            key=lambda f: f.stat().st_mtime, reverse=True)[:100]:
-                meta = {}
-                sidecar = p.with_suffix(p.suffix + ".json")
-                if sidecar.is_file():
-                    try:
-                        meta = json.loads(sidecar.read_text(encoding="utf-8"))
-                    except Exception:
-                        pass
-                items.append({"name": p.name, "meta": meta,
-                              "path": str(p),
-                              "mtime": p.stat().st_mtime})
-        return {"images": items}
 
     # ----------------------- music generation --------------------- #
 
