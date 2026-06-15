@@ -59,8 +59,14 @@ USE_GLOBAL = "(use global)"
 
 
 def python_exe() -> str:
-    """Prefer the repo venv; fall back to the interpreter running this script."""
-    for candidate in (REPO_DIR / ".venv" / "Scripts" / "python.exe",):
+    """Prefer the repo venv's interpreter; fall back to the one running us.
+    Handles both the Windows (Scripts/) and POSIX (bin/) venv layouts."""
+    if sys.platform == "win32":
+        candidates = (REPO_DIR / ".venv" / "Scripts" / "python.exe",)
+    else:
+        candidates = (REPO_DIR / ".venv" / "bin" / "python3",
+                      REPO_DIR / ".venv" / "bin" / "python")
+    for candidate in candidates:
         if candidate.is_file():
             return str(candidate)
     return sys.executable.replace("pythonw.exe", "python.exe")
