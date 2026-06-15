@@ -74,11 +74,15 @@ what makes runtime load/unload possible.
   GET/PATCH -> config:read/write; models load/unload -> models:write) plus a
   key-management API (`/v1/keys`, keys:admin). `/v1/models/{id}` path leak fixed
   (basename only).
-- **Phase 2 - Plugin engine (`PluginManager`):** discovery (in-tree + external),
-  manifest validation, load/unload (dynamic import + register/unregister, runtime
-  route mount/unmount), enable/disable (config-persisted), install (admin +
-  consent + capability display) / uninstall (keep + opt-in delete + hook),
-  failure isolation, lazy dep-loading, `GET /api/plugins`. Model untouched.
+- **Phase 2 - Plugin engine (DONE):** `localm/plugins/engine.py` - `PluginManager`
+  + concrete `PluginHost`. Discovery (in-tree `localm/plugins/builtin/` + external
+  `~/.localm/plugins`), `parse_spec` (richer manifest), runtime load/unload via
+  dynamic import + `register(host)`/`unregister()` with route mount/unmount on the
+  live app (each plugin's routes auto-scoped to its capability; model untouched),
+  enable/disable persisted to `config["plugins_enabled"]`, install/uninstall
+  (keep-data default + `on_uninstall` hook), failure isolation, and the
+  `/api/plugins` state + enable/disable API (scope-gated). `attach_engine` wired
+  into `create_app`. 7 tests.
 - **Phase 3 - Convert features to first-party plugins:** coder, image, music,
   video, rag, web, voice, mcp each become a plugin (manifest + `register()`
   mounting existing routes + settings + tab), one at a time, behavior-preserving.
@@ -116,7 +120,8 @@ what makes runtime load/unload possible.
 
 ## Status
 
-Phase 0 + Phase 1 complete and merged (PRs #30, #31). Native Linux/macOS support
-also complete and merged (PR #32): platform-aware native loader, setup.sh +
-one-click install.sh + docs/linux-setup.md, GPU autodetect ROCm/CUDA/CPU. Full
-suite 1134 pass. Next: Phase 2 (plugin engine).
+Phases 0, 1, 2 complete and merged, plus native Linux/macOS support. Phase 2
+added the plugin engine (PluginManager + PluginHost: runtime load/unload with
+route mount/unmount, enable/disable, install/uninstall, `/api/plugins`), wired
+into create_app. Full suite 1141 pass. Next: Phase 3 (convert the bundled
+features into first-party plugins; chat becomes the protected plugin #0).
