@@ -78,16 +78,6 @@ class MoveImageRequest(BaseModel):
     dest: str                         # destination directory on this machine
 
 
-class MusicRequest(BaseModel):
-    tags: str                         # style prompt: genre, mood, instruments…
-    lyrics: str | None = None         # None/empty = instrumental
-    duration_seconds: float = 120.0   # arbitrary track length
-    seed: int | None = None
-    steps: int | None = None
-    cfg: float | None = None
-    lyrics_strength: float | None = None
-
-
 class VideoRequest(BaseModel):
     prompt: str                       # scene description (motion verbs matter)
     negative_prompt: str | None = None
@@ -562,118 +552,9 @@ def attach_gui(
 
     from localm.config import home_dir
 
-    # ----------------------- music generation --------------------- #
-
-    music_dir = home_dir() / "gui_music"
-
-    @app.post("/api/music", dependencies=[Depends(_require_auth)])
-    async def music(req: MusicRequest):
-        if not req.tags.strip():
-            raise HTTPException(400, "Empty style tags")
-        if req.duration_seconds <= 0 or req.duration_seconds > 3600:
-            raise HTTPException(400, "Duration must be between 1 and 3600 seconds")
-
-        music_dir.mkdir(parents=True, exist_ok=True)
-        import time as _time
-        out_path = music_dir / f"{_time.strftime('%Y%m%d_%H%M%S')}_{os.urandom(3).hex()}.flac"
-
-        def _generate(job):
-            from localm.audit import SessionMode, effective_mode
-            from localm.music_gen import generate_music
-            if not _ensure_comfy(job):
-                return False
-            job.push({"type": "line", "text":
-                      f"Submitting ACE-Step workflow to ComfyUI "
-                      f"({req.duration_seconds:.0f}s track)…"})
-            kwargs = {}
-            if req.seed is not None:
-                kwargs["seed"] = req.seed
-            if req.steps is not None:
-                kwargs["steps"] = req.steps
-            if req.cfg is not None:
-                kwargs["cfg"] = req.cfg
-            if req.lyrics_strength is not None:
-                kwargs["lyrics_strength"] = req.lyrics_strength
-            ok, message = generate_music(
-                req.tags,
-                out_path,
-                lyrics=req.lyrics,
-                duration_seconds=req.duration_seconds,
-                localm_url=self_url,
-                on_progress=lambda t: job.push({"type": "line", "text": t}),
-                write_sidecar=effective_mode("server") != SessionMode.PRIVACY,
-                **kwargs,
-            )
-            job.push({"type": "line", "text": message})
-            if ok:
-                job.result = out_path.name
-                _reload_llm(job)
-            return ok
-
-        job = jobs.start_fn("music", _generate, result_path=out_path.name)
-        return {"job_id": job.id}
-
-    def _music_path(name: str) -> Path:
-        return _confined_file(music_dir, name, "track")
-
-    @app.get("/api/music/file/{name}", dependencies=[Depends(_require_auth)])
-    async def music_file(name: str):
-        from fastapi.responses import FileResponse
-        path = _music_path(name)
-        media = "audio/mpeg" if path.suffix.lower() == ".mp3" else "audio/flac"
-        return FileResponse(str(path), media_type=media)
-
-    @app.delete("/api/music/file/{name}", dependencies=[Depends(_require_auth)])
-    async def music_delete(name: str):
-        path = _music_path(name)
-        sidecar = path.with_suffix(path.suffix + ".json")
-        path.unlink()
-        if sidecar.is_file():
-            sidecar.unlink()
-        return {"status": "deleted", "name": name}
-
-    @app.post("/api/music/file/{name}/move",
-              dependencies=[Depends(_require_auth)])
-    async def music_move(name: str, req: MoveImageRequest):
-        import shutil
-        path = _music_path(name)
-        dest_dir = Path(req.dest).expanduser()
-        try:
-            dest_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            raise HTTPException(400, f"Cannot create destination: {e}")
-        if not dest_dir.is_dir():
-            raise HTTPException(400, f"Not a directory: {req.dest}")
-        target = dest_dir / path.name
-        if target.exists():
-            raise HTTPException(409, f"Already exists: {target}")
-        shutil.move(str(path), str(target))
-        sidecar = path.with_suffix(path.suffix + ".json")
-        if sidecar.is_file():
-            shutil.move(str(sidecar), str(dest_dir / sidecar.name))
-        return {"status": "moved", "path": str(target)}
-
-    @app.get("/api/music/history", dependencies=[Depends(_require_auth)])
-    async def music_history():
-        """Generated tracks, newest first, with their sidecar metadata."""
-        items = []
-        if music_dir.is_dir():
-            files = [p for p in music_dir.iterdir()
-                     if p.suffix.lower() in (".flac", ".mp3", ".wav", ".ogg")]
-            for p in sorted(files, key=lambda f: f.stat().st_mtime,
-                            reverse=True)[:100]:
-                meta = {}
-                sidecar = p.with_suffix(p.suffix + ".json")
-                if sidecar.is_file():
-                    try:
-                        meta = json.loads(sidecar.read_text(encoding="utf-8"))
-                    except Exception:
-                        pass
-                items.append({"name": p.name, "meta": meta,
-                              "path": str(p),
-                              "size_bytes": p.stat().st_size,
-                              "mtime": p.stat().st_mtime})
-        return {"tracks": items}
+    # Music generation (/api/music*) moved to the builtin "music" plugin
+    # (localm/plugins/builtin/music) in Phase 3; it ships disabled by default and
+    # reads its own per-plugin backend config.
 
     # ----------------------- video generation --------------------- #
 

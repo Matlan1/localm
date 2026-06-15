@@ -1613,6 +1613,119 @@ class TestImageGeneration:
 
 
 # ------------------------------------------------------------------ #
+#  Music plugin (/api/music*)                                          #
+# ------------------------------------------------------------------ #
+
+@pytest.fixture
+def music_app(tmp_path, monkeypatch):
+    """GUI app with the builtin music plugin enabled; music dir under tmp.
+    music became a plugin in Phase 3 - enabled before attach_gui (production
+    order), reading its own per-plugin backend config."""
+    home = tmp_path / ".localm"
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    import localm.config as _cfg
+    monkeypatch.setattr(_cfg, "HOME_DIR", home)
+    monkeypatch.setattr(_cfg, "MODELS_DIR", home / "models")
+    monkeypatch.setattr(_cfg, "CONFIG_FILE", home / "config.json")
+    monkeypatch.setattr(_cfg, "REGISTRY_FILE", home / "registry.json")
+    from localm.plugins.engine import PluginManager
+    app = FastAPI()
+    PluginManager(app, external_root=tmp_path / "noplugins").enable("music")
+
+    async def switch_model(name):
+        pass
+
+    attach_gui(app, self_url="http://127.0.0.1:9/v1",
+               switch_model=switch_model, active_model=lambda: "model-a")
+    tracks = home / "gui_music"
+    tracks.mkdir(parents=True)
+    return app, tracks
+
+
+class TestMusicPlugin:
+    @staticmethod
+    def _wait_job(client, job_id, timeout=30):
+        import time as _time
+        end = None
+        deadline = _time.monotonic() + timeout
+        with client.stream("GET", f"/api/jobs/{job_id}/events") as r:
+            for raw in r.iter_lines():
+                if _time.monotonic() > deadline:
+                    break
+                if not raw.startswith("data: "):
+                    continue
+                ev = json.loads(raw[6:])
+                if ev["type"] == "end":
+                    end = ev
+                    break
+        return end
+
+    def test_empty_tags_is_400(self, music_app):
+        app, _ = music_app
+        with TestClient(app) as client:
+            assert client.post("/api/music", json={"tags": "  "}).status_code == 400
+
+    def test_bad_duration_is_400(self, music_app):
+        app, _ = music_app
+        with TestClient(app) as client:
+            assert client.post("/api/music",
+                               json={"tags": "lofi", "duration_seconds": 0}).status_code == 400
+            assert client.post("/api/music",
+                               json={"tags": "lofi", "duration_seconds": 99999}).status_code == 400
+
+    def test_music_job_generates_and_returns_result(self, music_app, monkeypatch):
+        app, tracks = music_app
+        import localm.image_gen.comfy as comfy
+        import localm.music_gen as music_gen
+        monkeypatch.setattr(comfy, "ensure_comfy", lambda *a, **k: (True, "up"))
+        monkeypatch.setattr(comfy, "free_comfy_vram", lambda *a, **k: False)
+
+        def fake_gen(tags, out_path, **kw):
+            Path(out_path).write_bytes(b"FLACfake")
+            return True, f"Track saved to {out_path}"
+        monkeypatch.setattr(music_gen, "generate_music", fake_gen)
+
+        with TestClient(app) as client:
+            r = client.post("/api/music", json={"tags": "synthwave", "duration_seconds": 30})
+            assert r.status_code == 200
+            end = self._wait_job(client, r.json()["job_id"])
+        assert end and end["status"] == "done"
+        assert end.get("result", "").endswith(".flac")
+        assert list(tracks.glob("*.flac"))
+
+    def test_history_delete_move(self, music_app, tmp_path):
+        app, tracks = music_app
+        (tracks / "t.flac").write_bytes(b"FLACfake")
+        (tracks / "t.flac.json").write_text(json.dumps({"tags": "lofi"}))
+        with TestClient(app) as client:
+            data = client.get("/api/music/history").json()
+            assert data["tracks"][0]["name"] == "t.flac"
+            dest = tmp_path / "kept"
+            r = client.post("/api/music/file/t.flac/move", json={"dest": str(dest)})
+            assert r.status_code == 200
+            assert (dest / "t.flac").is_file() and (dest / "t.flac.json").is_file()
+            assert client.delete("/api/music/file/nope.flac").status_code == 404
+
+    def test_music_without_gui_jobs_is_503(self, tmp_path, monkeypatch):
+        home = tmp_path / ".localm"
+        monkeypatch.setenv("LOCALM_HOME", str(home))
+        monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+        import localm.config as _cfg
+        monkeypatch.setattr(_cfg, "HOME_DIR", home)
+        monkeypatch.setattr(_cfg, "MODELS_DIR", home / "models")
+        monkeypatch.setattr(_cfg, "CONFIG_FILE", home / "config.json")
+        monkeypatch.setattr(_cfg, "REGISTRY_FILE", home / "registry.json")
+        from localm.plugins.engine import PluginManager
+        app = FastAPI()
+        PluginManager(app, external_root=tmp_path / "noplugins").enable("music")
+        with TestClient(app) as client:
+            r = client.post("/api/music", json={"tags": "lofi"})
+        assert r.status_code == 503
+
+
+# ------------------------------------------------------------------ #
 #  Video generation endpoints                                          #
 # ------------------------------------------------------------------ #
 

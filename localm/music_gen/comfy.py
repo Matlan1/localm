@@ -61,6 +61,8 @@ def generate_music(
     max_poll_seconds: int = 1800,
     on_progress=None,
     write_sidecar: bool = True,
+    launch_cmd: Optional[str] = None,
+    workdir: Optional[str] = None,
 ) -> tuple[bool, str]:
     """
     Generate a music track and save it to *output_path* (FLAC).
@@ -114,7 +116,8 @@ def generate_music(
 
     # Make sure ComfyUI is up (auto-launching when configured) - before
     # costing the user an LLM unload
-    ok, msg = ensure_comfy(api_url, on_progress=_say)
+    ok, msg = ensure_comfy(api_url, on_progress=_say,
+                           launch_cmd=launch_cmd, workdir=workdir)
     if not ok:
         return False, msg
 
