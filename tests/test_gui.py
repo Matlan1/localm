@@ -905,7 +905,7 @@ def web_app(tmp_path, monkeypatch):
     monkeypatch.setattr(_cfg, "REGISTRY_FILE", tmp_path / "registry.json")
     from localm.plugins.engine import PluginManager
     app = FastAPI()
-    PluginManager(app, external_root=tmp_path / "noplugins").enable("web")
+    PluginManager(app, external_root=tmp_path / "noplugins").install("web")
     return app
 
 
@@ -1021,7 +1021,7 @@ def voice_app(tmp_path, monkeypatch):
     monkeypatch.setattr(_cfg, "REGISTRY_FILE", tmp_path / "registry.json")
     from localm.plugins.engine import PluginManager
     app = FastAPI()
-    PluginManager(app, external_root=tmp_path / "noplugins").enable("voice")
+    PluginManager(app, external_root=tmp_path / "noplugins").install("voice")
     return app
 
 
@@ -1186,7 +1186,7 @@ def rag_app(tmp_path, monkeypatch):
 
     from localm.plugins.engine import PluginManager
     app = FastAPI()
-    PluginManager(app, external_root=tmp_path / "noplugins").enable("rag")
+    PluginManager(app, external_root=tmp_path / "noplugins").install("rag")
 
     async def switch_model(name):
         pass
@@ -1417,7 +1417,7 @@ def img_app(tmp_path, monkeypatch):
     monkeypatch.setattr(_cfg, "REGISTRY_FILE", home / "registry.json")
     from localm.plugins.engine import PluginManager
     app = FastAPI()
-    PluginManager(app, external_root=tmp_path / "noplugins").enable("image")
+    PluginManager(app, external_root=tmp_path / "noplugins").install("image")
 
     async def switch_model(name):
         pass
@@ -1564,7 +1564,7 @@ class TestImageGeneration:
         monkeypatch.setattr(_cfg, "REGISTRY_FILE", home / "registry.json")
         from localm.plugins.engine import PluginManager
         app = FastAPI()
-        PluginManager(app, external_root=tmp_path / "noplugins").enable("image")
+        PluginManager(app, external_root=tmp_path / "noplugins").install("image")
         with TestClient(app) as client:
             r = client.post("/api/imagine", json={"prompt": "a fox"})
         assert r.status_code == 503
@@ -1632,7 +1632,7 @@ def music_app(tmp_path, monkeypatch):
     monkeypatch.setattr(_cfg, "REGISTRY_FILE", home / "registry.json")
     from localm.plugins.engine import PluginManager
     app = FastAPI()
-    PluginManager(app, external_root=tmp_path / "noplugins").enable("music")
+    PluginManager(app, external_root=tmp_path / "noplugins").install("music")
 
     async def switch_model(name):
         pass
@@ -1719,7 +1719,7 @@ class TestMusicPlugin:
         monkeypatch.setattr(_cfg, "REGISTRY_FILE", home / "registry.json")
         from localm.plugins.engine import PluginManager
         app = FastAPI()
-        PluginManager(app, external_root=tmp_path / "noplugins").enable("music")
+        PluginManager(app, external_root=tmp_path / "noplugins").install("music")
         with TestClient(app) as client:
             r = client.post("/api/music", json={"tags": "lofi"})
         assert r.status_code == 503
@@ -1745,7 +1745,7 @@ def video_app(tmp_path, monkeypatch):
     monkeypatch.setattr(_cfg, "REGISTRY_FILE", home / "registry.json")
     from localm.plugins.engine import PluginManager
     app = FastAPI()
-    PluginManager(app, external_root=tmp_path / "noplugins").enable("video")
+    PluginManager(app, external_root=tmp_path / "noplugins").install("video")
 
     async def switch_model(name):
         pass
@@ -1891,7 +1891,7 @@ class TestVideoEndpoints:
         monkeypatch.setattr(_cfg, "REGISTRY_FILE", home / "registry.json")
         from localm.plugins.engine import PluginManager
         app = FastAPI()
-        PluginManager(app, external_root=tmp_path / "noplugins").enable("video")
+        PluginManager(app, external_root=tmp_path / "noplugins").install("video")
         with TestClient(app) as client:
             r = client.post("/api/video", json={"prompt": "a fox"})
         assert r.status_code == 503

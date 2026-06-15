@@ -65,7 +65,7 @@ def test_discover_and_parse(env):
     assert specs["alpha"].surface.tab_id == "alpha"
 
 
-def test_enable_mounts_routes_disable_unmounts(env):
+def test_install_mounts_routes_disable_unmounts(env):
     from localm.plugins.engine import PluginManager
     plugins = env / "plugins"
     _make_plugin(plugins, "myplug", _ping("myplug"))
@@ -74,23 +74,72 @@ def test_enable_mounts_routes_disable_unmounts(env):
     mgr.discover()
 
     with TestClient(app) as c:
-        assert c.get("/api/myplug/ping").status_code == 404   # not loaded yet
+        assert c.get("/api/myplug/ping").status_code == 404   # not installed yet
 
-    mgr.enable("myplug")
+    mgr.install("myplug")                                      # install = installed + enabled + loaded
     with TestClient(app) as c:
         r = c.get("/api/myplug/ping")
         assert r.status_code == 200 and r.json()["pong"] is True
 
     state = {p["name"]: p for p in mgr.api_state()["plugins"]}
-    assert state["myplug"]["enabled"] and state["myplug"]["loaded"]
+    assert state["myplug"]["installed"] and state["myplug"]["enabled"]
+    assert state["myplug"]["active"] and state["myplug"]["loaded"]
 
-    mgr.disable("myplug")
+    mgr.disable("myplug")                                      # stays installed, goes inactive
     with TestClient(app) as c:
         assert c.get("/api/myplug/ping").status_code == 404   # unmounted at runtime
+    state = {p["name"]: p for p in mgr.api_state()["plugins"]}
+    assert state["myplug"]["installed"] and not state["myplug"]["enabled"]
 
-    mgr.enable("myplug")                                       # re-enable = fresh import
+    mgr.enable("myplug")                                       # re-enable an installed plugin
     with TestClient(app) as c:
         assert c.get("/api/myplug/ping").status_code == 200
+
+
+def test_enable_requires_install_first(env):
+    from localm.plugins.engine import PluginManager
+    plugins = env / "plugins"
+    _make_plugin(plugins, "p1", _ping("p1"))
+    mgr = PluginManager(FastAPI(), external_root=plugins, builtin_root=None)
+    mgr.discover()
+    with pytest.raises(ValueError):
+        mgr.enable("p1")                                       # not installed
+
+
+def test_uninstall_external_clears_axes_and_removes_dir(env):
+    """Uninstalling a THIRD-PARTY plugin clears both axes AND deletes its copied
+    directory (it leaves the catalog entirely)."""
+    from localm.config import load_config
+    from localm.plugins.engine import PluginManager
+    plugins = env / "plugins"
+    _make_plugin(plugins, "p1", _ping("p1"))
+    mgr = PluginManager(FastAPI(), external_root=plugins, builtin_root=None)
+    mgr.install("p1")
+    assert mgr.uninstall("p1") is True
+    cfg = load_config()
+    assert "p1" not in cfg.get("plugins_installed", [])
+    assert "p1" not in cfg.get("plugins_enabled", [])
+    state = {p["name"]: p for p in mgr.api_state()["plugins"]}
+    assert "p1" not in state                 # external dir deleted -> off the catalog
+    assert not (plugins / "p1").exists()
+
+
+def test_uninstall_builtin_stays_in_catalog(env):
+    """Uninstalling a FIRST-PARTY builtin clears both axes but keeps its code in
+    the bundled catalog (so it can be reinstalled)."""
+    from localm.config import load_config
+    from localm.plugins.engine import PluginManager
+    builtins = env / "builtins"
+    _make_plugin(builtins, "b1", _ping("b1"))
+    mgr = PluginManager(FastAPI(), external_root=env / "none", builtin_root=builtins)
+    mgr.install("b1")
+    assert mgr.uninstall("b1") is True
+    cfg = load_config()
+    assert "b1" not in cfg.get("plugins_installed", [])
+    assert "b1" not in cfg.get("plugins_enabled", [])
+    state = {p["name"]: p for p in mgr.api_state()["plugins"]}
+    assert "b1" in state and not state["b1"]["installed"]   # still in catalog
+    assert (builtins / "b1").exists()
 
 
 def test_enable_after_catchall_mount_is_not_shadowed(env, tmp_path):
@@ -112,7 +161,7 @@ def test_enable_after_catchall_mount_is_not_shadowed(env, tmp_path):
     app.mount("/", StaticFiles(directory=str(static), html=True), name="gui")
 
     mgr = PluginManager(app, external_root=plugins, builtin_root=None)
-    mgr.enable("late")                       # mounted AFTER the catch-all "/"
+    mgr.install("late")                      # mounted AFTER the catch-all "/"
     with TestClient(app) as c:
         assert c.get("/api/late/ping").status_code == 200
         assert c.get("/").text == "INDEX"    # SPA still served
@@ -122,16 +171,20 @@ def test_enable_after_catchall_mount_is_not_shadowed(env, tmp_path):
         assert c.get("/api/late/ping").status_code == 404
 
 
-def test_enabled_state_persists_in_config(env):
+def test_install_enabled_state_persists_in_config(env):
     from localm.plugins.engine import PluginManager
     from localm.config import load_config
     plugins = env / "plugins"
     _make_plugin(plugins, "p1", _ping("p1"))
     mgr = PluginManager(FastAPI(), external_root=plugins, builtin_root=None)
-    mgr.enable("p1")
-    assert "p1" in load_config().get("plugins_enabled", [])
+    mgr.install("p1")
+    cfg = load_config()
+    assert "p1" in cfg.get("plugins_installed", [])
+    assert "p1" in cfg.get("plugins_enabled", [])
     mgr.disable("p1")
-    assert "p1" not in load_config().get("plugins_enabled", [])
+    cfg = load_config()
+    assert "p1" in cfg.get("plugins_installed", [])      # still installed
+    assert "p1" not in cfg.get("plugins_enabled", [])
 
 
 def test_load_enabled_isolates_failures(env):
@@ -141,7 +194,10 @@ def test_load_enabled_isolates_failures(env):
     _make_plugin(plugins, "bad",
                  'def register(host):\n    raise RuntimeError("boom")\ndef unregister():\n    pass\n')
     _make_plugin(plugins, "good", _ping("good"))
-    cfg = load_config(); cfg["plugins_enabled"] = ["bad", "good"]; save_config(cfg)
+    cfg = load_config()
+    cfg["plugins_installed"] = ["bad", "good"]
+    cfg["plugins_enabled"] = ["bad", "good"]
+    save_config(cfg)
     app = FastAPI()
     mgr = PluginManager(app, external_root=plugins, builtin_root=None)
     mgr.load_enabled()                       # must NOT raise despite the bad plugin
@@ -157,7 +213,7 @@ def test_protected_plugin_cannot_be_disabled(env):
     plugins = env / "plugins"
     _make_plugin(plugins, "core", _ping("core"), toml_extra="protected = true\n")
     mgr = PluginManager(FastAPI(), external_root=plugins, builtin_root=None)
-    mgr.enable("core")
+    mgr.install("core")
     with pytest.raises(ValueError):
         mgr.disable("core")
 
@@ -169,35 +225,91 @@ def test_enable_unknown_raises(env):
         mgr.enable("nope")
 
 
-def test_set_enabled_state_without_app(env):
-    """CLI/headless toggle: flips config, never touches an app (app is None)."""
+def test_uninstall_unknown_raises(env):
+    from localm.plugins.engine import PluginManager
+    mgr = PluginManager(FastAPI(), external_root=env / "plugins", builtin_root=None)
+    with pytest.raises(KeyError):
+        mgr.uninstall("ghost")
+
+
+def test_install_rolls_back_on_load_failure(env):
+    """A plugin whose register() raises must NOT leave installed/enabled config
+    behind - install loads first and only persists on success."""
+    from localm.config import load_config
+    from localm.plugins.engine import PluginManager
+    plugins = env / "plugins"
+    _make_plugin(plugins, "broken",
+                 'def register(host):\n    raise RuntimeError("boom")\n'
+                 'def unregister():\n    pass\n')
+    mgr = PluginManager(FastAPI(), external_root=plugins, builtin_root=None)
+    with pytest.raises(RuntimeError):
+        mgr.install("broken")
+    cfg = load_config()
+    assert "broken" not in cfg.get("plugins_installed", [])
+    assert "broken" not in cfg.get("plugins_enabled", [])
+    assert not mgr.is_installed("broken")
+
+
+def test_enable_rolls_back_on_load_failure(env):
+    """enable() on an installed plugin whose load fails must not persist enabled."""
+    from localm.config import load_config
+    from localm.plugins.engine import PluginManager
+    plugins = env / "plugins"
+    _make_plugin(plugins, "broken",
+                 'def register(host):\n    raise RuntimeError("boom")\n'
+                 'def unregister():\n    pass\n')
+    mgr = PluginManager(FastAPI(), external_root=plugins, builtin_root=None)
+    mgr.set_installed_state("broken", True, enable=False)   # installed, not loaded
+    with pytest.raises(RuntimeError):
+        mgr.enable("broken")
+    cfg = load_config()
+    assert "broken" in cfg.get("plugins_installed", [])     # stays installed
+    assert "broken" not in cfg.get("plugins_enabled", [])   # enable rolled back
+
+
+def test_set_installed_state_without_app(env):
+    """CLI/headless toggle: flips config, never touches an app (app is None).
+    Install sets installed + enabled; uninstall clears both."""
     from localm.config import load_config
     from localm.plugins.engine import PluginManager
     plugins = env / "plugins"
     _make_plugin(plugins, "p1", _ping("p1"))
     mgr = PluginManager(None, external_root=plugins, builtin_root=None)
-    mgr.set_enabled_state("p1", True)
-    assert mgr.is_enabled("p1")
-    assert "p1" in load_config().get("plugins_enabled", [])
+    mgr.set_installed_state("p1", True)
+    assert mgr.is_installed("p1") and mgr.is_enabled("p1")
+    assert "p1" in load_config().get("plugins_installed", [])
+    # disable keeps installed
     mgr.set_enabled_state("p1", False)
-    assert not mgr.is_enabled("p1")
+    assert mgr.is_installed("p1") and not mgr.is_enabled("p1")
+    # uninstall clears both
+    mgr.set_installed_state("p1", False)
+    assert not mgr.is_installed("p1") and not mgr.is_enabled("p1")
 
 
-def test_set_enabled_state_unknown_raises(env):
+def test_set_enabled_state_requires_install(env):
+    from localm.plugins.engine import PluginManager
+    plugins = env / "plugins"
+    _make_plugin(plugins, "p1", _ping("p1"))
+    mgr = PluginManager(None, external_root=plugins, builtin_root=None)
+    with pytest.raises(ValueError):
+        mgr.set_enabled_state("p1", True)        # not installed
+
+
+def test_set_installed_state_unknown_raises(env):
     from localm.plugins.engine import PluginManager
     mgr = PluginManager(None, external_root=env / "plugins", builtin_root=None)
     with pytest.raises(KeyError):
-        mgr.set_enabled_state("nope", True)
+        mgr.set_installed_state("nope", True)
 
 
-def test_set_enabled_state_protected_cannot_disable(env):
+def test_set_installed_state_protected_cannot_uninstall(env):
     from localm.plugins.engine import PluginManager
     plugins = env / "plugins"
     _make_plugin(plugins, "core", _ping("core"), toml_extra="protected = true\n")
     mgr = PluginManager(None, external_root=plugins, builtin_root=None)
-    mgr.set_enabled_state("core", True)
+    mgr.set_installed_state("core", True)
     with pytest.raises(ValueError):
-        mgr.set_enabled_state("core", False)
+        mgr.set_installed_state("core", False)
 
 
 def test_missing_requires(env):
@@ -206,9 +318,9 @@ def test_missing_requires(env):
     _make_plugin(plugins, "needy", _ping("needy"), toml_extra='requires = ["dep1"]\n')
     _make_plugin(plugins, "dep1", _ping("dep1"))
     mgr = PluginManager(None, external_root=plugins, builtin_root=None)
-    mgr.set_enabled_state("needy", True)
+    mgr.set_installed_state("needy", True)
     assert mgr.missing_requires("needy") == ["dep1"]
-    mgr.set_enabled_state("dep1", True)
+    mgr.set_installed_state("dep1", True)
     assert mgr.missing_requires("needy") == []
 
 
@@ -218,3 +330,34 @@ def test_parse_spec_rejects_bad_manifest(tmp_path):
     (d / "plugin.toml").write_text("[plugin]\n", encoding="utf-8")   # no name
     with pytest.raises(ValueError):
         parse_spec(d)
+
+
+def test_attach_engine_http_install_lifecycle(env, monkeypatch):
+    """The /api/plugins/* management surface over the real shipped builtins:
+    nothing installed by default; install -> enable/disable -> uninstall."""
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    from localm.plugins.engine import attach_engine
+    app = FastAPI()
+    attach_engine(app)                       # default roots = the real builtins
+    with TestClient(app) as c:
+        st = {p["name"]: p for p in c.get("/api/plugins").json()["plugins"]}
+        assert st["voice"]["installed"] is False        # available, not installed
+        assert st["voice"]["loaded"] is False           # nothing active by default
+
+        assert c.post("/api/plugins/voice/install").status_code == 200
+        st = {p["name"]: p for p in c.get("/api/plugins").json()["plugins"]}
+        assert st["voice"]["installed"] and st["voice"]["active"]
+
+        # enabling a not-installed plugin is a 409 (install first)
+        assert c.post("/api/plugins/web/enable").status_code == 409
+
+        assert c.post("/api/plugins/voice/disable").status_code == 200
+        st = {p["name"]: p for p in c.get("/api/plugins").json()["plugins"]}
+        assert st["voice"]["installed"] and not st["voice"]["enabled"]
+
+        assert c.post("/api/plugins/voice/uninstall").status_code == 200
+        st = {p["name"]: p for p in c.get("/api/plugins").json()["plugins"]}
+        assert st["voice"]["installed"] is False
+
+        assert c.post("/api/plugins/ghost/install").status_code == 404
+        assert c.post("/api/plugins/ghost/uninstall").status_code == 404

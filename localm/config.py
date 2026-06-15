@@ -226,6 +226,24 @@ def save_config(cfg: dict) -> None:
         _atomic_write_json(CONFIG_FILE, cfg)
 
 
+def update_config(mutator: Callable[[dict], None]) -> dict:
+    """Atomically read-modify-write the config under the I/O lock.
+
+    *mutator* receives the loaded config dict (defaults merged) and edits it in
+    place; the result is persisted with a single atomic write. Use this instead of
+    a bare load_config()/save_config() pair wherever a lost update would matter
+    (e.g. two in-process writers toggling different plugins concurrently)."""
+    ensure_dirs()
+    with _io_lock:
+        cfg = DEFAULT_CONFIG.copy()
+        stored = _read_json(CONFIG_FILE, {})
+        if isinstance(stored, dict):
+            cfg.update(stored)
+        mutator(cfg)
+        _atomic_write_json(CONFIG_FILE, cfg)
+        return cfg
+
+
 def load_registry() -> dict:
     ensure_dirs()
     with _io_lock:
