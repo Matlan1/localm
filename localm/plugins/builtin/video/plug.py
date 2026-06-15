@@ -1,0 +1,219 @@
+"""Video plugin: ComfyUI Wan short-video generation + a library for the chat surface.
+
+Routes (mounted by the engine, auto-scoped to the ``video`` capability):
+  POST   /api/video                       - generate a clip (background job)
+  GET    /api/video/history               - generated clips, newest first
+  GET    /api/video/file/{name}           - serve a generated clip
+  DELETE /api/video/file/{name}           - delete a clip (+ sidecar)
+  POST   /api/video/file/{name}/move      - move a clip to a folder
+
+Generation runs as a background job streamed through the kernel's /api/jobs/*
+SSE endpoint. REQUIRES the GUI: ``attach_gui`` must have been called on the app
+(it publishes ``request.app.state.jobs`` / ``.self_url``); when it has not, the
+generate route returns a clear 503. The backend is selected per-plugin (default
+ComfyUI Wan) and reads this plugin's own config (see backend.py). Ships DISABLED
+by default.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import time
+from pathlib import Path
+
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+
+from localm.pathsafe import confined_file
+from . import backend as _backend
+
+_router = APIRouter()
+
+
+class VideoRequest(BaseModel):
+    prompt: str                       # scene description (motion verbs matter)
+    negative_prompt: str | None = None
+    seconds: float = 5.0
+    fps: int = 24
+    width: int | None = None
+    height: int | None = None
+    steps: int | None = None
+    cfg: float | None = None
+    seed: int | None = None
+    input_image: str | None = None    # path on this machine (image-to-video)
+
+
+class MoveFileRequest(BaseModel):
+    dest: str                         # destination directory on this machine
+
+
+def _video_dir() -> Path:
+    from localm.config import home_dir
+    return home_dir() / "gui_video"
+
+
+def _video_path(name: str) -> Path:
+    return confined_file(_video_dir(), name, "clip")
+
+
+def _reload_llm(job, self_url: str, s: dict) -> None:
+    """Hand VRAM back: ask the backend to drop its models, then reload the chat
+    model. Skipped when reload-after-generate is off."""
+    if not s["reload_after"]:
+        job.push({"type": "line", "text":
+                  "Keeping the video backend loaded (reload is off) - the chat "
+                  "model reloads on the next message."})
+        return
+    if not _backend.free_vram(s):
+        job.push({"type": "line", "text":
+                  "The video backend kept its models in VRAM - the chat model "
+                  "will reload on the next message instead."})
+        return
+    job.push({"type": "line", "text": "Reloading the chat model..."})
+    try:
+        import requests as _rq
+        headers = {}
+        key = os.environ.get("LOCALM_API_KEY")
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        _rq.post(f"{self_url}/models/load", headers=headers, timeout=300)
+        job.push({"type": "line", "text": "Chat model ready."})
+    except Exception as e:
+        job.push({"type": "line", "text": f"Reload deferred to the next message ({e})."})
+
+
+@_router.post("/api/video")
+async def video(req: VideoRequest, request: Request):
+    if not req.prompt.strip():
+        raise HTTPException(400, "Empty prompt")
+    if req.seconds <= 0 or req.seconds > 20:
+        raise HTTPException(400, "Duration must be between 1 and 20 seconds")
+    if req.fps <= 0 or req.fps > 60:
+        raise HTTPException(400, "FPS must be between 1 and 60")
+    input_image = None
+    if req.input_image:
+        input_image = Path(req.input_image).expanduser()
+        if not input_image.is_file():
+            raise HTTPException(400, f"Input image not found: {req.input_image}")
+
+    jobs = getattr(request.app.state, "jobs", None)
+    if jobs is None:
+        raise HTTPException(503, "Video generation needs the localm GUI server "
+                                 "(the background job manager is unavailable).")
+    self_url = getattr(request.app.state, "self_url", "")
+
+    video_dir = _video_dir()
+    video_dir.mkdir(parents=True, exist_ok=True)
+    out_path = video_dir / f"{time.strftime('%Y%m%d_%H%M%S')}_{os.urandom(3).hex()}.mp4"
+
+    from localm.config import load_config
+    s = _backend.settings(load_config())
+
+    def _generate(job):
+        from localm.audit import SessionMode, effective_mode
+        if s.get("warning"):
+            job.push({"type": "line", "text": s["warning"]})
+        ok, msg = _backend.ensure_available(
+            s, on_progress=lambda t: job.push({"type": "line", "text": t}))
+        job.push({"type": "line", "text": msg})
+        if not ok:
+            return False
+        job.push({"type": "line", "text":
+                  f"Submitting Wan workflow to the video backend "
+                  f"({req.seconds:.0f}s clip - video is slow, be patient)..."})
+        kwargs = {}
+        for field in ("negative_prompt", "seconds", "fps", "width",
+                      "height", "seed", "steps", "cfg"):
+            value = getattr(req, field)
+            if value is not None:
+                kwargs[field] = value
+        ok, message = _backend.generate(
+            s, req.prompt, out_path,
+            self_url=self_url,
+            write_sidecar=effective_mode("server") != SessionMode.PRIVACY,
+            on_progress=lambda t: job.push({"type": "line", "text": t}),
+            input_image=input_image,
+            **kwargs,
+        )
+        job.push({"type": "line", "text": message})
+        if ok:
+            job.result = out_path.name
+            _reload_llm(job, self_url, s)
+        return ok
+
+    job = jobs.start_fn("video", _generate, result_path=out_path.name)
+    return {"job_id": job.id}
+
+
+@_router.get("/api/video/file/{name}")
+async def video_file(name: str):
+    path = _video_path(name)
+    media = {".mp4": "video/mp4", ".webm": "video/webm",
+             ".gif": "image/gif"}.get(path.suffix.lower(),
+                                      "application/octet-stream")
+    return FileResponse(str(path), media_type=media)
+
+
+@_router.delete("/api/video/file/{name}")
+async def video_delete(name: str):
+    path = _video_path(name)
+    sidecar = path.with_suffix(path.suffix + ".json")
+    path.unlink()
+    if sidecar.is_file():
+        sidecar.unlink()
+    return {"status": "deleted", "name": name}
+
+
+@_router.post("/api/video/file/{name}/move")
+async def video_move(name: str, req: MoveFileRequest):
+    path = _video_path(name)
+    dest_dir = Path(req.dest).expanduser()
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise HTTPException(400, f"Cannot create destination: {e}")
+    if not dest_dir.is_dir():
+        raise HTTPException(400, f"Not a directory: {req.dest}")
+    target = dest_dir / path.name
+    if target.exists():
+        raise HTTPException(409, f"Already exists: {target}")
+    shutil.move(str(path), str(target))
+    sidecar = path.with_suffix(path.suffix + ".json")
+    if sidecar.is_file():
+        shutil.move(str(sidecar), str(dest_dir / sidecar.name))
+    return {"status": "moved", "path": str(target)}
+
+
+@_router.get("/api/video/history")
+async def video_history():
+    """Generated clips, newest first, with their sidecar metadata."""
+    video_dir = _video_dir()
+    items = []
+    if video_dir.is_dir():
+        files = [p for p in video_dir.iterdir()
+                 if p.suffix.lower() in (".mp4", ".webm", ".gif")]
+        for p in sorted(files, key=lambda f: f.stat().st_mtime,
+                        reverse=True)[:100]:
+            meta = {}
+            sidecar = p.with_suffix(p.suffix + ".json")
+            if sidecar.is_file():
+                try:
+                    meta = json.loads(sidecar.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+            items.append({"name": p.name, "meta": meta,
+                          "path": str(p),
+                          "size_bytes": p.stat().st_size,
+                          "mtime": p.stat().st_mtime})
+    return {"videos": items}
+
+
+def register(host) -> None:
+    host.mount_router(_router)
+
+
+def unregister() -> None:
+    pass
