@@ -257,6 +257,15 @@ def update_registry(mutator: Callable[[dict], None]) -> dict:
         return reg
 
 
+def _loadable_lib_names() -> tuple:
+    """Loadable native llama library filename(s) for this platform."""
+    if sys.platform == "win32":
+        return ("llama.dll",)
+    if sys.platform == "darwin":
+        return ("libllama.dylib",)
+    return ("libllama.so",)
+
+
 def find_binary_dir() -> Optional[Path]:
     """Return the directory holding the native llama.cpp binaries (llama.dll,
     plus optional llama-cli/llama-server exes), used by `localm info` and
@@ -277,11 +286,13 @@ def find_binary_dir() -> Optional[Path]:
             candidates.append(Path(d))
     except Exception:
         pass
+    names = _loadable_lib_names()
     for p in candidates:
-        if ((p / "llama.dll").exists()
-                or (p / "llama-server.exe").exists()
-                or (p / "llama-cli.exe").exists()):
-            return p
+        try:
+            if any((p / n).exists() for n in names):
+                return p
+        except OSError:
+            continue
     return None
 
 
