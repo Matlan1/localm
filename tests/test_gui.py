@@ -1731,17 +1731,28 @@ class TestMusicPlugin:
 
 @pytest.fixture
 def video_app(tmp_path, monkeypatch):
-    """GUI app whose video dir lives under tmp_path."""
-    # LOCALM_HOME pinned to tmp by the autouse conftest fixture (see persist_app).
+    """GUI app with the builtin video plugin enabled; video dir under tmp.
+    video became a plugin in Phase 3 - enabled before attach_gui (production
+    order), reading its own per-plugin backend config."""
+    home = tmp_path / ".localm"
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    import localm.config as _cfg
+    monkeypatch.setattr(_cfg, "HOME_DIR", home)
+    monkeypatch.setattr(_cfg, "MODELS_DIR", home / "models")
+    monkeypatch.setattr(_cfg, "CONFIG_FILE", home / "config.json")
+    monkeypatch.setattr(_cfg, "REGISTRY_FILE", home / "registry.json")
+    from localm.plugins.engine import PluginManager
     app = FastAPI()
+    PluginManager(app, external_root=tmp_path / "noplugins").enable("video")
 
     async def switch_model(name):
         pass
 
     attach_gui(app, self_url="http://127.0.0.1:9/v1",
                switch_model=switch_model, active_model=lambda: "model-a")
-    videos = tmp_path / ".localm" / "gui_video"
+    videos = home / "gui_video"
     videos.mkdir(parents=True)
     return app, videos
 
@@ -1752,6 +1763,23 @@ class TestVideoEndpoints:
         (videos / name).write_bytes(b"fake mp4")
         if meta is not None:
             (videos / (name + ".json")).write_text(json.dumps(meta))
+
+    @staticmethod
+    def _wait_job(client, job_id, timeout=30):
+        import time as _time
+        end = None
+        deadline = _time.monotonic() + timeout
+        with client.stream("GET", f"/api/jobs/{job_id}/events") as r:
+            for raw in r.iter_lines():
+                if _time.monotonic() > deadline:
+                    break
+                if not raw.startswith("data: "):
+                    continue
+                ev = json.loads(raw[6:])
+                if ev["type"] == "end":
+                    end = ev
+                    break
+        return end
 
     def test_empty_prompt_rejected(self, video_app):
         app, _ = video_app
@@ -1831,3 +1859,39 @@ class TestVideoEndpoints:
         assert (dest / "clip.mp4").is_file()
         assert (dest / "clip.mp4.json").is_file()
         assert not (videos / "clip.mp4").exists()
+
+    def test_video_job_generates_and_returns_result(self, video_app, monkeypatch):
+        app, videos = video_app
+        import localm.image_gen.comfy as comfy
+        import localm.video_gen as video_gen
+        monkeypatch.setattr(comfy, "ensure_comfy", lambda *a, **k: (True, "up"))
+        monkeypatch.setattr(comfy, "free_comfy_vram", lambda *a, **k: False)
+
+        def fake_gen(prompt, out_path, **kw):
+            Path(out_path).write_bytes(b"fake mp4")
+            return True, f"Clip saved to {out_path}"
+        monkeypatch.setattr(video_gen, "generate_video", fake_gen)
+
+        with TestClient(app) as client:
+            r = client.post("/api/video", json={"prompt": "a fox runs", "seconds": 5})
+            assert r.status_code == 200
+            end = self._wait_job(client, r.json()["job_id"])
+        assert end and end["status"] == "done"
+        assert end.get("result", "").endswith(".mp4")
+        assert list(videos.glob("*.mp4"))
+
+    def test_video_without_gui_jobs_is_503(self, tmp_path, monkeypatch):
+        home = tmp_path / ".localm"
+        monkeypatch.setenv("LOCALM_HOME", str(home))
+        monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+        import localm.config as _cfg
+        monkeypatch.setattr(_cfg, "HOME_DIR", home)
+        monkeypatch.setattr(_cfg, "MODELS_DIR", home / "models")
+        monkeypatch.setattr(_cfg, "CONFIG_FILE", home / "config.json")
+        monkeypatch.setattr(_cfg, "REGISTRY_FILE", home / "registry.json")
+        from localm.plugins.engine import PluginManager
+        app = FastAPI()
+        PluginManager(app, external_root=tmp_path / "noplugins").enable("video")
+        with TestClient(app) as client:
+            r = client.post("/api/video", json={"prompt": "a fox"})
+        assert r.status_code == 503

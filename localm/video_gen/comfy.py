@@ -84,6 +84,8 @@ def generate_video(
     max_poll_seconds: int = 3600,
     on_progress=None,
     write_sidecar: bool = True,
+    launch_cmd: Optional[str] = None,
+    workdir: Optional[str] = None,
 ) -> tuple[bool, str]:
     """
     Generate a short video clip and save it to *output_path* (MP4).
@@ -151,7 +153,8 @@ def generate_video(
 
     # Make sure ComfyUI is up (auto-launching when configured) - before
     # costing the user an LLM unload
-    ok, msg = ensure_comfy(api_url, on_progress=_say)
+    ok, msg = ensure_comfy(api_url, on_progress=_say,
+                           launch_cmd=launch_cmd, workdir=workdir)
     if not ok:
         return False, msg
 

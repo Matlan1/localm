@@ -31,7 +31,6 @@ from pydantic import BaseModel
 
 from localm.inference.http_server import _require_auth
 from localm.pathsafe import confined_file as _confined_file
-from localm.pathsafe import confined_name as _confined_name
 from .sessions import CoderSession, SessionManager
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -72,23 +71,6 @@ class RemoveModelRequest(BaseModel):
 class AliasRequest(BaseModel):
     model: str
     alias: str
-
-
-class MoveImageRequest(BaseModel):
-    dest: str                         # destination directory on this machine
-
-
-class VideoRequest(BaseModel):
-    prompt: str                       # scene description (motion verbs matter)
-    negative_prompt: str | None = None
-    seconds: float = 5.0              # snapped to Wan's 4k+1 frame rule
-    fps: int = 24
-    width: int | None = None          # template default 832 (multiple of 16)
-    height: int | None = None         # template default 480
-    seed: int | None = None
-    steps: int | None = None
-    cfg: float | None = None
-    input_image: str | None = None    # path on this machine (image-to-video)
 
 
 class MessageRequest(BaseModel):
@@ -502,177 +484,14 @@ def attach_gui(
         job.cancel()
         return {"status": "cancelling"}
 
-    # ------------------ ComfyUI generation helpers ---------------- #
-    # Shared by image (/api/imagine) and music (/api/music) generation.
-
-    def _ensure_comfy(job) -> bool:
-        """ComfyUI reachable? If not, launch it when configured, else tell
-        the user exactly what to do. Shared logic lives in image_gen.comfy
-        (ensure_comfy) so the CLI and coder tools auto-launch too."""
-        from localm.image_gen.comfy import ensure_comfy
-        ok, msg = ensure_comfy(
-            on_progress=lambda t: job.push({"type": "line", "text": t}))
-        job.push({"type": "line", "text": msg})
-        return ok
-
-    def _reload_llm(job) -> None:
-        """Hand VRAM back: ask ComfyUI to drop its models, then reload
-        the chat model so the next reply is instant.  Skipped when the
-        reload_llm_after_imagine setting is off (e.g. batch generating)."""
-        from localm.config import load_config
-        if not load_config().get("reload_llm_after_imagine", True):
-            job.push({"type": "line", "text":
-                      "Keeping ComfyUI loaded (reload_llm_after_imagine is "
-                      "off) - the chat model reloads on the next message."})
-            return
-        from localm.image_gen.comfy import free_comfy_vram
-        if not free_comfy_vram():
-            job.push({"type": "line", "text":
-                      "ComfyUI kept its models in VRAM (no /free support) - "
-                      "the chat model will reload on the next message instead."})
-            return
-        job.push({"type": "line", "text": "Reloading the chat model…"})
-        try:
-            import requests as _rq
-            headers = {}
-            key = os.environ.get("LOCALM_API_KEY")
-            if key:
-                headers["Authorization"] = f"Bearer {key}"
-            _rq.post(f"{self_url}/models/load", headers=headers, timeout=300)
-            job.push({"type": "line", "text": "Chat model ready."})
-        except Exception as e:
-            job.push({"type": "line", "text":
-                      f"Reload deferred to the next message ({e})."})
-
-    # Image generation (/api/imagine*) moved to the builtin "image" plugin
-    # (localm/plugins/builtin/image) in Phase 3; it ships disabled by default and
-    # reads its own per-plugin backend config. _confined_name/_confined_file now
-    # live in localm.pathsafe (imported at module top) - still used below by the
-    # music/video file ops and by coder_history.
+    # Media generation (image /api/imagine*, music /api/music*, video /api/video*)
+    # moved to standalone builtin plugins (localm/plugins/builtin/{image,music,
+    # video}) in Phase 3; each ships disabled by default and reads its own
+    # per-plugin backend config (the shared ComfyUI launch/reload helpers moved
+    # into those plugins' backends). _confined_file lives in localm.pathsafe
+    # (imported at module top) - still used below by coder_history.
 
     from localm.config import home_dir
-
-    # Music generation (/api/music*) moved to the builtin "music" plugin
-    # (localm/plugins/builtin/music) in Phase 3; it ships disabled by default and
-    # reads its own per-plugin backend config.
-
-    # ----------------------- video generation --------------------- #
-
-    video_dir = home_dir() / "gui_video"
-
-    @app.post("/api/video", dependencies=[Depends(_require_auth)])
-    async def video(req: VideoRequest):
-        if not req.prompt.strip():
-            raise HTTPException(400, "Empty prompt")
-        if req.seconds <= 0 or req.seconds > 20:
-            raise HTTPException(400, "Duration must be between 1 and 20 seconds")
-        if req.fps <= 0 or req.fps > 60:
-            raise HTTPException(400, "FPS must be between 1 and 60")
-        input_image = None
-        if req.input_image:
-            input_image = Path(req.input_image).expanduser()
-            if not input_image.is_file():
-                raise HTTPException(400, f"Input image not found: {req.input_image}")
-
-        video_dir.mkdir(parents=True, exist_ok=True)
-        import time as _time
-        out_path = video_dir / f"{_time.strftime('%Y%m%d_%H%M%S')}_{os.urandom(3).hex()}.mp4"
-
-        def _generate(job):
-            from localm.audit import SessionMode, effective_mode
-            from localm.video_gen import generate_video
-            if not _ensure_comfy(job):
-                return False
-            job.push({"type": "line", "text":
-                      f"Submitting Wan workflow to ComfyUI "
-                      f"({req.seconds:.0f}s clip - video is slow, be patient)…"})
-            kwargs = {}
-            for field in ("negative_prompt", "seconds", "fps", "width",
-                          "height", "seed", "steps", "cfg"):
-                value = getattr(req, field)
-                if value is not None:
-                    kwargs[field] = value
-            ok, message = generate_video(
-                req.prompt,
-                out_path,
-                input_image=input_image,
-                localm_url=self_url,
-                on_progress=lambda t: job.push({"type": "line", "text": t}),
-                write_sidecar=effective_mode("server") != SessionMode.PRIVACY,
-                **kwargs,
-            )
-            job.push({"type": "line", "text": message})
-            if ok:
-                job.result = out_path.name
-                _reload_llm(job)
-            return ok
-
-        job = jobs.start_fn("video", _generate, result_path=out_path.name)
-        return {"job_id": job.id}
-
-    def _video_path(name: str) -> Path:
-        return _confined_file(video_dir, name, "clip")
-
-    @app.get("/api/video/file/{name}", dependencies=[Depends(_require_auth)])
-    async def video_file(name: str):
-        from fastapi.responses import FileResponse
-        path = _video_path(name)
-        media = {".mp4": "video/mp4", ".webm": "video/webm",
-                 ".gif": "image/gif"}.get(path.suffix.lower(),
-                                          "application/octet-stream")
-        return FileResponse(str(path), media_type=media)
-
-    @app.delete("/api/video/file/{name}", dependencies=[Depends(_require_auth)])
-    async def video_delete(name: str):
-        path = _video_path(name)
-        sidecar = path.with_suffix(path.suffix + ".json")
-        path.unlink()
-        if sidecar.is_file():
-            sidecar.unlink()
-        return {"status": "deleted", "name": name}
-
-    @app.post("/api/video/file/{name}/move",
-              dependencies=[Depends(_require_auth)])
-    async def video_move(name: str, req: MoveImageRequest):
-        import shutil
-        path = _video_path(name)
-        dest_dir = Path(req.dest).expanduser()
-        try:
-            dest_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            raise HTTPException(400, f"Cannot create destination: {e}")
-        if not dest_dir.is_dir():
-            raise HTTPException(400, f"Not a directory: {req.dest}")
-        target = dest_dir / path.name
-        if target.exists():
-            raise HTTPException(409, f"Already exists: {target}")
-        shutil.move(str(path), str(target))
-        sidecar = path.with_suffix(path.suffix + ".json")
-        if sidecar.is_file():
-            shutil.move(str(sidecar), str(dest_dir / sidecar.name))
-        return {"status": "moved", "path": str(target)}
-
-    @app.get("/api/video/history", dependencies=[Depends(_require_auth)])
-    async def video_history():
-        """Generated clips, newest first, with their sidecar metadata."""
-        items = []
-        if video_dir.is_dir():
-            files = [p for p in video_dir.iterdir()
-                     if p.suffix.lower() in (".mp4", ".webm", ".gif")]
-            for p in sorted(files, key=lambda f: f.stat().st_mtime,
-                            reverse=True)[:100]:
-                meta = {}
-                sidecar = p.with_suffix(p.suffix + ".json")
-                if sidecar.is_file():
-                    try:
-                        meta = json.loads(sidecar.read_text(encoding="utf-8"))
-                    except Exception:
-                        pass
-                items.append({"name": p.name, "meta": meta,
-                              "path": str(p),
-                              "size_bytes": p.stat().st_size,
-                              "mtime": p.stat().st_mtime})
-        return {"videos": items}
 
     # ------------------------ model discovery --------------------- #
     # Search HuggingFace for GGUF models and show per-quant "fits your
