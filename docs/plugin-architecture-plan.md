@@ -32,6 +32,10 @@ the same contract.
   libllama.so / libllama.dylib); GPU = ROCm + CUDA + CPU on Linux, ROCm on Windows;
   install via setup.bat / setup.sh / one-click install.sh. Every plugin (Phase 3+)
   must stay cross-platform (declare platform-specific extras; no OS-only paths).
+- **Defaults (plugins, not plug-outs):** ONLY chat is enabled by default (the
+  protected builtin plugin #0); the model manager stays kernel/core (not a plugin).
+  EVERY other plugin ships DISABLED - the user opts in via first-run selection or
+  the Plugins page. (During development a plugin may be enabled only to test it.)
 
 ## Two shared foundations (consumed by everything)
 
@@ -59,6 +63,41 @@ itself - `mount_router`, `add_settings`, `register_tab`, `plugin_config` /
 `browse_dirs`. A plugin never imports the app or global config directly, which is
 what makes runtime load/unload possible.
 
+## Distribution, commands & tools
+
+How plugins reach a user, and how they contribute commands and tools.
+
+- **Distribution model (available, not installed).** There is no "default set"
+  that ships enabled. The kernel knows a **catalog** of first-party plugins
+  (the builtins in `localm/plugins/builtin/`); each is installable but ships
+  DISABLED. Only chat is active out of the box. The user opts in two ways:
+  first-run selection (pick from the catalog during setup) or the Plugins page
+  later. "Disabled by default" therefore means "present in the catalog but not
+  active", not "absent from disk".
+- **Third-party install location (in-app, admin-gated).** Third-party plugins
+  are installed from inside the running app via the Plugins page (admin scope +
+  capability-consent prompt), NOT bundled into the installer. The installer/
+  first-run only offers first-party catalog plugins. This keeps the install
+  surface trusted and the consent decision close to where the user sees what a
+  plugin asks for. (Rationale: matches the Jenkins / Home-Assistant / browser-
+  extension model already locked for install security.)
+- **Commands (plugin-contributed, discoverable when disabled).** Slash commands
+  are declared in the manifest and registered only while the plugin is enabled.
+  The kernel keeps a catalog of known commands across ALL first-party plugins,
+  so a command from a known-but-disabled plugin is RECOGNISED: it replies
+  "`/generate-image` needs the image plugin - enable it?" rather than "unknown
+  command". A truly unknown command still errors normally. **Rename:** the legacy
+  `/imagine` becomes `/generate-image` (and `/generate-music`, `/generate-video`)
+  - a command name must say plainly what it does.
+- **Third-party commands & tools.** Plugins declare `commands` and `tools` in the
+  manifest; both are registered when the plugin is enabled and unregistered on
+  disable. Each is scope-gated to the plugin's capability, so a command/tool can
+  only do what the plugin is already permitted to do. Write/destructive tools go
+  through the Phase-8 human-in-the-loop confirm path. Name collisions (two plugins
+  claiming the same command/tool) are namespaced by plugin name and surfaced as a
+  warning. `PluginSpec` gains `commands` and `tools` fields (added in Phase 3 when
+  the first command-bearing feature lands).
+
 ## Phases
 
 - **Phase 0 - Foundations (DONE):** scope taxonomy, settings-schema format + all
@@ -83,11 +122,12 @@ what makes runtime load/unload possible.
   (keep-data default + `on_uninstall` hook), failure isolation, and the
   `/api/plugins` state + enable/disable API (scope-gated). `attach_engine` wired
   into `create_app`. 7 tests.
-- **Phase 3 - Convert features to first-party plugins:** coder, image, music,
-  video, rag, web, voice, mcp each become a plugin (manifest + `register()`
-  mounting existing routes + settings + tab), one at a time, behavior-preserving.
+- **Phase 3 - Convert features to first-party plugins (incremental, one per PR):**
+  coder, image, music, video, rag, web, voice, mcp each become a builtin plugin
+  (manifest + `register()` mounting its routes + settings + tab), moved out of
+  gui/web.py. They ship **DISABLED by default** - only chat is default-enabled.
   Reconcile the external-plugin loader into the unified model. **Chat becomes the
-  built-in protected plugin.**
+  built-in protected, default-enabled plugin #0.**
 - **Phase 4 - Dynamic GUI:** SPA renders nav/tabs from `GET /api/plugins`
   (not hardcoded); the Plugins page becomes enable/disable/install/uninstall.
 - **Phase 5 - Settings redesign:** schema-driven, grouped page; dropdowns for
