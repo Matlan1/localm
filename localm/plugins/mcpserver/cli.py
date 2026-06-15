@@ -59,10 +59,8 @@ def main(model, no_images, print_config):
     # client that launches `localm mcp` gets a clear refusal until the user opts
     # in - rather than silently exposing the models. --print-config above is
     # exempt so users can set up the client first, then enable.
-    from localm.config import load_config
-    _cfg = load_config()
-    if ("mcp" not in _cfg.get("plugins_installed", [])
-            or "mcp" not in _cfg.get("plugins_enabled", [])):
+    from localm.plugins.engine import PluginManager
+    if not PluginManager(None).is_active("mcp"):     # installed (on disk) AND enabled
         click.echo(
             "The MCP server plugin is not active.\n"
             "Install it with:  localm plugin install mcp\n"

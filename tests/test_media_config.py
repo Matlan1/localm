@@ -5,10 +5,10 @@ only exercises localm.plugins.media_config dict logic."""
 from localm.plugins import media_config as mc
 
 
-def _cfg(plugins, enabled=None, installed=None):
-    inst = installed if installed is not None else list(plugins)
-    en = enabled if enabled is not None else list(inst)
-    return {"plugins": plugins, "plugins_installed": inst, "plugins_enabled": en}
+def _cfg(plugins, enabled=None):
+    # "installed" is physical disk presence in the new model, so tests pass the
+    # active set explicitly to resolve_config(active=...) rather than via config.
+    return {"plugins": plugins, "plugins_enabled": enabled or list(plugins)}
 
 
 def test_own_block_when_no_sharing():
@@ -23,7 +23,7 @@ def test_share_resolves_to_source_block():
         "image": {"comfy": {"api_url": "http://image"}},
         "music": {"use_config_from": "image", "comfy": {"api_url": "http://own-music"}},
     })
-    block, warn = mc.resolve_config("music", cfg)
+    block, warn = mc.resolve_config("music", cfg, active={"image", "music"})
     assert warn is None
     # music now reflects image's backend, not its own
     assert block["comfy"]["api_url"] == "http://image"
@@ -36,7 +36,7 @@ def test_share_never_mutates_sharer_own_block():
         "music": {"use_config_from": "image", "comfy": {"api_url": "http://own-music"}},
     }
     cfg = _cfg(plugins)
-    mc.resolve_config("music", cfg)
+    mc.resolve_config("music", cfg, active={"image", "music"})
     # the stored block is untouched: toggling sharing off restores own values
     assert plugins["music"]["comfy"]["api_url"] == "http://own-music"
 
@@ -60,7 +60,7 @@ def test_resolved_share_block_is_deep_copy_of_source():
         "music": {"use_config_from": "image", "comfy": {"api_url": "http://own-music"}},
     }
     cfg = _cfg(plugins)
-    block, _ = mc.resolve_config("music", cfg)
+    block, _ = mc.resolve_config("music", cfg, active={"image", "music"})
     block["comfy"]["api_url"] = "http://MUTATED"
     assert plugins["image"]["comfy"]["api_url"] == "http://image"
 
@@ -69,8 +69,8 @@ def test_source_not_enabled_falls_back_with_warning():
     cfg = _cfg({
         "image": {"comfy": {"api_url": "http://image"}},
         "music": {"use_config_from": "image", "comfy": {"api_url": "http://own-music"}},
-    }, enabled=["music"])           # image installed but NOT enabled
-    block, warn = mc.resolve_config("music", cfg)
+    })           # active excludes image -> not active (installed-but-disabled)
+    block, warn = mc.resolve_config("music", cfg, active={"music"})
     assert warn and "image" in warn
     assert block["comfy"]["api_url"] == "http://own-music"
 
@@ -81,17 +81,16 @@ def test_source_installed_but_disabled_falls_back():
     cfg = _cfg({
         "image": {"comfy": {"api_url": "http://image"}},
         "music": {"use_config_from": "image", "comfy": {"api_url": "http://own-music"}},
-    }, installed=["image", "music"], enabled=["music"])     # image installed, disabled
-    block, warn = mc.resolve_config("music", cfg)
+    })
+    block, warn = mc.resolve_config("music", cfg, active={"music"})  # image not active
     assert warn and "not active" in warn
     assert block["comfy"]["api_url"] == "http://own-music"
 
 
 def test_source_missing_falls_back_with_warning():
     cfg = _cfg({"music": {"use_config_from": "image",
-                          "comfy": {"api_url": "http://own-music"}}},
-               enabled=["music"])
-    block, warn = mc.resolve_config("music", cfg)
+                          "comfy": {"api_url": "http://own-music"}}})
+    block, warn = mc.resolve_config("music", cfg, active={"music"})
     assert warn is not None
     assert block["comfy"]["api_url"] == "http://own-music"
 
@@ -102,8 +101,8 @@ def test_direct_cycle_is_broken():
         "music": {"use_config_from": "image", "comfy": {"api_url": "http://m"}},
     })
     # neither recurses; each falls back to its own with a warning
-    bi, wi = mc.resolve_config("image", cfg)
-    bm, wm = mc.resolve_config("music", cfg)
+    bi, wi = mc.resolve_config("image", cfg, active={"image", "music"})
+    bm, wm = mc.resolve_config("music", cfg, active={"image", "music"})
     assert wi and wm
     assert bi["comfy"]["api_url"] == "http://i"
     assert bm["comfy"]["api_url"] == "http://m"
@@ -117,8 +116,9 @@ def test_three_way_cycle_is_broken():
         "music": {"use_config_from": "video", "comfy": {"api_url": "http://m"}},
         "video": {"use_config_from": "image", "comfy": {"api_url": "http://v"}},
     })
+    active = {"image", "music", "video"}
     for name, url in (("image", "http://i"), ("music", "http://m"), ("video", "http://v")):
-        block, warn = mc.resolve_config(name, cfg)
+        block, warn = mc.resolve_config(name, cfg, active=active)
         assert warn and "cycle" in warn
         assert block["comfy"]["api_url"] == url
 

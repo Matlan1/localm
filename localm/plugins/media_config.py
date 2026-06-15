@@ -51,6 +51,25 @@ def _source_of(name: str, cfg: dict) -> Optional[str]:
     return None
 
 
+def active_plugins(cfg: dict) -> set:
+    """The set of ACTIVE plugin names = installed (physically present in the
+    installed folder) AND enabled (config). "Installed" is disk presence in the
+    new store->installed model, NOT a config flag, so we scan the installed
+    folder rather than reading a (no-longer-written) config list."""
+    from pathlib import Path
+
+    from localm.plugins.loader import plugins_dir
+    installed = set()
+    try:
+        for child in Path(plugins_dir()).glob("*"):
+            if child.is_dir() and (child / "plugin.toml").is_file():
+                installed.add(child.name)
+    except OSError:
+        pass
+    enabled = set(cfg.get("plugins_enabled", []) or [])
+    return installed & enabled
+
+
 def would_cycle(name: str, source: str, cfg: dict) -> bool:
     """Would setting ``name.use_config_from = source`` create a cycle? Follows the
     source's own ``use_config_from`` chain back; True if it returns to *name*."""
@@ -66,22 +85,25 @@ def would_cycle(name: str, source: str, cfg: dict) -> bool:
     return False
 
 
-def resolve_config(name: str, cfg: dict) -> tuple[dict, Optional[str]]:
+def resolve_config(name: str, cfg: dict,
+                   *, active: "Optional[set]" = None) -> tuple[dict, Optional[str]]:
     """Effective stored block for media plugin *name*.
 
-    Applies ``use_config_from`` (one hop, using the source's OWN block) when set,
-    enabled, and non-cyclic; otherwise returns *name*'s own block. Returns
-    ``(block, warning_or_None)``. The returned block is a deep copy, so the stored
-    config is never mutated even if the caller writes to nested sub-blocks.
+    Applies ``use_config_from`` (one hop, using the source's OWN block) when the
+    source is active and non-cyclic; otherwise returns *name*'s own block.
+    *active* is the set of active plugin names (installed AND enabled); when None
+    it is derived from disk + config via ``active_plugins`` (the source plugin
+    must be installed on disk and enabled, per the store->installed model).
+    Returns ``(block, warning_or_None)``. The returned block is a deep copy, so
+    the stored config is never mutated even if the caller writes to nested blocks.
     """
     own = _own_block(name, cfg)
     src = own.get("use_config_from")
     if not (isinstance(src, str) and src in MEDIA_PLUGINS and src != name):
         return own, None
 
-    installed = set(cfg.get("plugins_installed", []) or [])
-    enabled = set(cfg.get("plugins_enabled", []) or [])
-    active = installed & enabled
+    if active is None:
+        active = active_plugins(cfg)
     if src not in _plugins(cfg) or src not in active:
         return own, (f"'{name}' is set to use '{src}' config, but '{src}' is not "
                      f"active; using its own settings.")
