@@ -32,6 +32,9 @@ class Surface:
     icon: str = ""              # emoji or static-asset name
     assets_dir: str = ""        # static frontend assets, relative to the plugin
     settings_group: str = ""    # group label for this plugin's settings section
+    group: str = ""             # nav category id (e.g. "studio"); the SPA collapses
+                                # tabs sharing a group under one parent when 2+ are
+                                # enabled, and shows a flat tab when exactly one is
 
 
 @dataclass
