@@ -62,6 +62,7 @@ CATALOG: tuple = (
                  commands=("search-web",)),
     CatalogEntry("voice", "Speech-to-text for the chat mic button",
                  extra="voice"),
+    CatalogEntry("tts", "Text-to-speech (neural voices) for reading replies aloud"),
     CatalogEntry("mcp", "Expose your local models to MCP clients",
                  commands=("mcp",)),
 )

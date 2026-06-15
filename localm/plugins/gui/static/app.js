@@ -1175,9 +1175,42 @@ async function toggleMic() {
 
 $("chat-mic").onclick = toggleMic;
 
-/** Read text aloud with the browser's offline voices. With toggle: true
- *  (the 🔊 button) a second call stops instead; auto-speak replaces. */
+/* ---- text-to-speech ----
+ *  A client plugin (the `tts` plugin) may install a neural provider via
+ *  registerTTS(); otherwise we fall back to the browser's built-in offline
+ *  voices. The browser fallback can only reach robotic local voices on Windows
+ *  (the good Win11 voices are Narrator-only or cloud), which is exactly why the
+ *  tts plugin exists. */
+let ttsProvider = null;   // {name, voices(), getVoice(), setVoice(id),
+                          //  speaking(), ready(), speak(text, opts), stop()}
+
+/** Install (or clear, with null) the active TTS provider, then refresh the
+ *  voice picker. Called by a client plugin's register(ctx). */
+function registerTTS(provider) {
+  ttsProvider = provider;
+  populateVoicePicker();
+}
+
+/** The browser SpeechSynthesisVoice the user picked for the fallback, if any. */
+function selectedBrowserVoice() {
+  if (!window.speechSynthesis) return null;
+  const want = localStorage.getItem("localm.ttsVoiceBrowser");
+  if (!want) return null;
+  return speechSynthesis.getVoices().find((v) => v.name === want) || null;
+}
+
+/** Read text aloud. With toggle: true (the 🔊 button) a second call stops
+ *  instead; auto-speak replaces the current utterance. */
 function speak(text, opts = {}) {
+  const clean = stripThink(text).replace(/[*_`#>\[\]()]/g, " ").trim();
+  if (ttsProvider) {
+    if (ttsProvider.speaking()) {
+      ttsProvider.stop();
+      if (opts.toggle) return;
+    }
+    if (clean) ttsProvider.speak(clean, opts);
+    return;
+  }
   if (!window.speechSynthesis) {
     toast("This browser has no speech synthesis", true);
     return;
@@ -1186,8 +1219,84 @@ function speak(text, opts = {}) {
     speechSynthesis.cancel();
     if (opts.toggle) return;
   }
-  const clean = stripThink(text).replace(/[*_`#>\[\]()]/g, " ");
-  if (clean.trim()) speechSynthesis.speak(new SpeechSynthesisUtterance(clean));
+  if (clean) {
+    const u = new SpeechSynthesisUtterance(clean);
+    const v = selectedBrowserVoice();
+    if (v) u.voice = v;
+    speechSynthesis.speak(u);
+  }
+}
+
+/** Fill the voice picker from the active provider (or, with no provider, the
+ *  browser's LOCAL voices) and remember the choice. Hidden when there is
+ *  nothing to choose. */
+function populateVoicePicker() {
+  const sel = $("p-voice");
+  const row = $("voice-row");
+  if (!sel) return;
+  let opts = [];
+  let current = "";
+  if (ttsProvider) {
+    opts = ttsProvider.voices();
+    current = localStorage.getItem("localm.ttsVoice") || ttsProvider.getVoice();
+    if (current) ttsProvider.setVoice(current);
+  } else if (window.speechSynthesis) {
+    // getVoices() is async-populated; filter to localService so we never offer
+    // a cloud voice that would send text off the machine.
+    opts = speechSynthesis
+      .getVoices()
+      .filter((v) => v.localService)
+      .map((v) => ({ id: v.name, label: `${v.name} (${v.lang})` }));
+    current = localStorage.getItem("localm.ttsVoiceBrowser") || "";
+  }
+  sel.replaceChildren();
+  if (!opts.length) {
+    if (row) row.style.display = "none";
+    return;
+  }
+  if (row) row.style.display = "";
+  for (const o of opts) {
+    const el = document.createElement("option");
+    el.value = o.id;
+    el.textContent = o.label;
+    sel.appendChild(el);
+  }
+  if (current) sel.value = current;
+}
+
+/** Persist the picked voice and apply it to the active provider. */
+function onVoicePick() {
+  const id = $("p-voice").value;
+  if (ttsProvider) {
+    ttsProvider.setVoice(id);
+    localStorage.setItem("localm.ttsVoice", id);
+  } else {
+    localStorage.setItem("localm.ttsVoiceBrowser", id);
+  }
+}
+
+/** Load client-side plugin modules: for each ACTIVE plugin that ships a
+ *  client_entry, import it and call register(ctx). Failures are isolated so a
+ *  broken plugin module never breaks chat. */
+async function loadClientPlugins() {
+  let plugins = [];
+  try {
+    const r = await fetch("/api/plugins", { headers: authHeaders() });
+    if (r.ok) plugins = (await r.json()).plugins || [];
+  } catch {
+    return; // server unreachable; the built-in browser voice still works
+  }
+  const ctx = { registerTTS, toast, authHeaders, voicesChanged: populateVoicePicker };
+  for (const p of plugins) {
+    if (!p.active || !p.client_entry) continue;
+    const base = p.assets_base || `/plugins/${p.name}`;
+    try {
+      const mod = await import(`${base}/${p.client_entry}`);
+      if (mod && typeof mod.register === "function") await mod.register(ctx);
+    } catch (e) {
+      console.error(`client plugin ${p.name} failed to load`, e);
+    }
+  }
 }
 
 /* ---- assistant memory ---- */
@@ -2850,6 +2959,11 @@ refreshKbSelect();
 refreshPersonas();
 refreshMemory();
 refreshVoiceStatus();
+// Voice picker + client-side plugins (the tts plugin installs a neural voice).
+if (window.speechSynthesis) speechSynthesis.onvoiceschanged = populateVoicePicker;
+if ($("p-voice")) $("p-voice").onchange = onVoicePick;
+populateVoicePicker();
+loadClientPlugins();
 setInterval(refreshModels, 30000);
 // The resolved ctx ceiling only exists once a model has loaded - keep the
 // compaction threshold in sync as models load or switch.

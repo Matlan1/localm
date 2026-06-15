@@ -1,0 +1,11 @@
+{
+  "_comment": "Shipped TTS defaults (template). User overrides live in the non-tracked config under plugins.tts and win over these values; the chosen voice is remembered client-side. Do not put personal model choices in tracked files - override here.",
+  "engine": "kokoro",
+  "model": "onnx-community/Kokoro-82M-v1.0-ONNX",
+  "device": "auto",
+  "dtype": "auto",
+  "voice": "af_heart",
+  "speed": 1.0,
+  "library": "vendor/kokoro.min.js",
+  "wasm_paths": ""
+}
