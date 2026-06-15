@@ -98,6 +98,52 @@ How plugins reach a user, and how they contribute commands and tools.
   warning. `PluginSpec` gains `commands` and `tools` fields (added in Phase 3 when
   the first command-bearing feature lands).
 
+## Media generation plugins (image, music, video)
+
+Three SEPARATE plugins, each fully standalone (owner decision). No assumption
+that they share a backend or are installed together; any subset works (image
+only, music+video, etc.). ComfyUI is just the owner's current backend, not a
+given.
+
+- **Backend (shared plumbing, per-plugin choice).** The generic ComfyUI HTTP
+  plumbing (launch + reachability + queue/poll/download + free-VRAM) stays one
+  shared module (`localm/image_gen/comfy.py`, parameterised so each caller passes
+  its own api_url / launch_cmd / workdir / output_dir). Each media plugin selects
+  a backend by name (default `"comfy"`) and supplies its OWN workflow template +
+  OWN config; a plugin can later use a completely different program (native
+  ACE-Step server, etc.) without touching the others. The per-media workflow
+  graphs already diverge (Flux vs ACE vs Wan), so only the transport is shared.
+- **Per-plugin config.** `config["plugins"][<name>]` holds the backend type, its
+  typed sub-block (`comfy.api_url/launch_cmd/workdir/output_dir`), and
+  `reload_llm_after_generate`. A one-time shim migrates the legacy global keys
+  (`comfy_launch_cmd`/`comfy_workdir`/`comfy_output_dir`/`reload_llm_after_imagine`)
+  into the image plugin's block.
+- **Share config ("use config from").** Each media plugin's config has an opt-in
+  `use_config_from` selector naming ANOTHER media plugin. While active, this
+  plugin resolves its backend config from the source LIVE (edit the source once,
+  the sharer follows); the sharer's own fields are greyed out in the UI but NEVER
+  cleared (toggle off and they take effect again). Cycle-prevented (no image<-video
+  while video<-image; validated on save, defensively broken on read). Applies only
+  to the three media plugins. If the source is disabled/uninstalled, the sharer
+  falls back to its own preserved block (with a warning), never a silent default.
+- **Tab design: hybrid, grouped under "Studio".** Surface gains an optional
+  `group` field (`group = "studio"`). The SPA (Phase 4) renders: nothing when 0
+  media plugins are enabled, a single flat tab when exactly 1, and one "Studio"
+  parent that expands to the installed children when 2+. Parent rail position is
+  stable so the nav does not reshuffle as plugins toggle.
+- **Increment:** one plugin per PR (image, then music, then video). A formal
+  `MediaBackend` protocol is deferred until a second (non-ComfyUI) backend
+  actually lands; until then the seam is "a backend module selected by config
+  name". `_localm_unload` (LLM-unload handoff, cross-cutting) can move to a host
+  utility when convenient.
+- **Phase-5 hardening (when the backend config becomes GUI-editable):** the
+  backend `launch_cmd` is run through the shell (today it is the user's own local
+  config, so this is trusted) and `api_url` is used unvalidated (it is meant to be
+  loopback, e.g. 127.0.0.1:8188, so the netpolicy SSRF guard must NOT be applied
+  naively or it would block legitimate local backends). Once a settings editor can
+  change these from a request, gate edits behind admin scope and validate/escape
+  there. Same pattern lives in music_gen/video_gen.
+
 ## Phases
 
 - **Phase 0 - Foundations (DONE):** scope taxonomy, settings-schema format + all

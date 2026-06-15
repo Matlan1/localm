@@ -53,6 +53,7 @@ def parse_spec(plugin_dir: Path, *, builtin: bool = False) -> PluginSpec:
         icon=str(s.get("icon", "")),
         assets_dir=str(s.get("assets_dir", "")),
         settings_group=str(s.get("settings_group", "")),
+        group=str(s.get("group", "")),
     )
     return PluginSpec(
         name=name,
@@ -397,6 +398,7 @@ class PluginManager:
                 "tab": spec.surface.tab_id if spec.surface else "",
                 "label": spec.surface.label if spec.surface else "",
                 "icon": spec.surface.icon if spec.surface else "",
+                "group": spec.surface.group if spec.surface else "",
                 "requires_extras": spec.requires_extras,
                 "enabled": name in enabled,
                 "loaded": name in self._loaded,
