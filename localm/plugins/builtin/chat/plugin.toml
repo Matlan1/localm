@@ -1,0 +1,13 @@
+[plugin]
+name = "chat"
+version = "1.0.0"
+description = "Chat with your local model: conversation history, assistant memory, and personas."
+scope = "chat"
+register = "plug"
+protected = true
+default_enabled = true
+
+[surface]
+tab_id = "chat"
+label = "Chat"
+icon = "chat"

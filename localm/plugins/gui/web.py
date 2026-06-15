@@ -58,28 +58,6 @@ class AliasRequest(BaseModel):
     alias: str
 
 
-class ConversationUpsert(BaseModel):
-    title: str = "Untitled"
-    updated_at: float = 0
-    pinned: bool = False
-    folder: str | None = None
-    branches: list = []           # parked message-branch tails (fork points)
-    messages: list = []
-
-
-class PromptUpsert(BaseModel):
-    system: str = ""
-    params: dict = {}             # sampling defaults (temperature, top_p, …)
-
-
-class MemoryUpdate(BaseModel):
-    text: str
-
-
-class MemoryAppend(BaseModel):
-    text: str
-
-
 # ------------------------------------------------------------------ #
 #  Attach                                                             #
 # ------------------------------------------------------------------ #
@@ -277,8 +255,6 @@ def attach_gui(
     # per-plugin backend config (the shared ComfyUI launch/reload helpers moved
     # into those plugins' backends).
 
-    from localm.config import home_dir
-
     # ------------------------ model discovery --------------------- #
     # Search HuggingFace for GGUF models and show per-quant "fits your
     # VRAM" badges. User-initiated prelude to a pull (docs/network.md);
@@ -319,198 +295,10 @@ def attach_gui(
             f["fit"] = fit_label(f["size_bytes"], total)
         return {"repo": repo.strip().strip("/"), "files": files, "vram": vram}
 
-    # ------------------- chat conversation store ------------------ #
-    # Server-side persistence for GUI chat conversations so they survive
-    # browser reloads, profile wipes, and other devices on the LAN.
-    # Strictly gated on the chat surface's session mode: in privacy mode
-    # (the default) nothing is readable or writable here and the GUI keeps
-    # conversations in memory only.
-
-    import re as _re
-
-    chats_dir = home_dir() / "chats"
-    _CONV_ID = _re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-    _CONV_MAX_BYTES = 16 * 1024 * 1024   # data-URI images make these large
-
-    def _chat_persist_enabled() -> bool:
-        from localm.audit import SessionMode, effective_mode
-        return effective_mode("chat") != SessionMode.PRIVACY
-
-    def _conv_path(conv_id: str) -> Path:
-        if not _CONV_ID.match(conv_id):
-            raise HTTPException(400, "Invalid conversation id")
-        return chats_dir / f"{conv_id}.json"
-
-    @app.get("/api/conversations", dependencies=[Depends(_require_auth)])
-    async def conversations_list():
-        if not _chat_persist_enabled():
-            return {"enabled": False, "conversations": []}
-        items = []
-        if chats_dir.is_dir():
-            for p in chats_dir.glob("*.json"):
-                try:
-                    data = json.loads(p.read_text(encoding="utf-8"))
-                    data["id"] = p.stem
-                    items.append(data)
-                except Exception:
-                    continue   # corrupt file - skip, never block the list
-        items.sort(key=lambda c: c.get("updated_at", 0), reverse=True)
-        return {"enabled": True, "conversations": items[:200]}
-
-    @app.put("/api/conversations/{conv_id}",
-             dependencies=[Depends(_require_auth)])
-    async def conversation_upsert(conv_id: str, req: ConversationUpsert):
-        if not _chat_persist_enabled():
-            raise HTTPException(
-                403, "Chat persistence is off (privacy mode). "
-                     "Set mode/chat_mode to 'log' or 'full' to enable it.")
-        path = _conv_path(conv_id)
-        payload = json.dumps(
-            {"id": conv_id, "title": req.title,
-             "updated_at": req.updated_at,
-             "pinned": req.pinned, "folder": req.folder,
-             "branches": req.branches,
-             "messages": req.messages},
-            ensure_ascii=False)
-        if len(payload.encode("utf-8")) > _CONV_MAX_BYTES:
-            raise HTTPException(413, "Conversation too large to persist")
-        chats_dir.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(payload, encoding="utf-8")
-        tmp.replace(path)
-        return {"status": "saved", "id": conv_id}
-
-    @app.delete("/api/conversations/{conv_id}",
-                dependencies=[Depends(_require_auth)])
-    async def conversation_delete(conv_id: str):
-        if not _chat_persist_enabled():
-            raise HTTPException(403, "Chat persistence is off (privacy mode)")
-        path = _conv_path(conv_id)
-        if path.is_file():
-            path.unlink()
-            return {"status": "deleted", "id": conv_id}
-        return {"status": "absent", "id": conv_id}
-
-    # Web search and fetch (/api/web/*) moved to the builtin "web" plugin
-    # (localm/plugins/builtin/web) in Phase 3; it ships disabled by default.
-
-    # ----------------------- assistant memory --------------------- #
-    # ChatGPT-style persistent memory for chat: a plain markdown file the
-    # user can read and edit, injected into the system prompt when the
-    # drawer toggle is on. LOCALCODER.md is the coder-side analogue.
-    #
-    # Privacy semantics: privacy mode means "no new traces", not amnesia -
-    # READING memory written by earlier non-privacy sessions is allowed,
-    # but WRITES (which would persist conversation-derived facts) return
-    # 403 while privacy is active.
-
-    memory_file = home_dir() / "chat-memory.md"
-    _MEMORY_MAX = 64_000   # characters - keep injection bounded
-
-    def _memory_writable() -> bool:
-        from localm.audit import SessionMode, effective_mode
-        return effective_mode("chat") != SessionMode.PRIVACY
-
-    def _read_memory() -> str:
-        if memory_file.is_file():
-            try:
-                return memory_file.read_text(encoding="utf-8")
-            except OSError:
-                return ""
-        return ""
-
-    def _write_memory(text: str) -> None:
-        text = text.strip()
-        if len(text) > _MEMORY_MAX:
-            raise HTTPException(413, "Memory file too large (max 64k chars)")
-        memory_file.parent.mkdir(parents=True, exist_ok=True)
-        if not text:
-            memory_file.unlink(missing_ok=True)
-            return
-        tmp = memory_file.with_name(memory_file.name + ".tmp")
-        tmp.write_text(text + "\n", encoding="utf-8")
-        tmp.replace(memory_file)
-
-    @app.get("/api/memory", dependencies=[Depends(_require_auth)])
-    async def memory_get():
-        return {"text": _read_memory(), "writable": _memory_writable(),
-                "path": str(memory_file)}
-
-    @app.put("/api/memory", dependencies=[Depends(_require_auth)])
-    async def memory_put(req: MemoryUpdate):
-        if not _memory_writable():
-            raise HTTPException(
-                403, "Memory writes are off in privacy mode (no new traces). "
-                     "Set mode/chat_mode to 'log' or 'full' to enable them.")
-        _write_memory(req.text)
-        return {"status": "saved", "chars": len(req.text.strip())}
-
-    @app.post("/api/memory/append", dependencies=[Depends(_require_auth)])
-    async def memory_append(req: MemoryAppend):
-        if not _memory_writable():
-            raise HTTPException(
-                403, "Memory writes are off in privacy mode (no new traces)")
-        fact = req.text.strip()
-        if not fact:
-            raise HTTPException(400, "Nothing to remember")
-        current = _read_memory().strip()
-        line = fact if fact.startswith("-") else f"- {fact}"
-        _write_memory((current + "\n" + line) if current else line)
-        return {"status": "appended"}
-
-    # ------------------------ prompt library ---------------------- #
-    # Named personas: a system prompt plus sampling defaults, applied from
-    # the chat parameters drawer. Explicit user assets (like knowledge
-    # collections), stored in <data dir>/prompts.json in every session mode.
-
-    prompts_file = home_dir() / "prompts.json"
-
-    def _check_prompt_name(name: str) -> str:
-        name = (name or "").strip()
-        if not name or len(name) > 64 or any(c in name for c in "\n\r\t"):
-            raise HTTPException(
-                400, "Persona names must be 1-64 characters on one line")
-        return name
-
-    def _load_prompts() -> dict:
-        if prompts_file.is_file():
-            try:
-                return json.loads(prompts_file.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                return {}
-        return {}
-
-    def _save_prompts(data: dict) -> None:
-        prompts_file.parent.mkdir(parents=True, exist_ok=True)
-        tmp = prompts_file.with_name(prompts_file.name + ".tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2),
-                       encoding="utf-8")
-        tmp.replace(prompts_file)
-
-    @app.get("/api/prompts", dependencies=[Depends(_require_auth)])
-    async def prompts_list():
-        data = _load_prompts()
-        return {"prompts": [
-            {"name": name, **entry} for name, entry in sorted(data.items())
-        ]}
-
-    @app.put("/api/prompts/{name}", dependencies=[Depends(_require_auth)])
-    async def prompt_upsert(name: str, req: PromptUpsert):
-        name = _check_prompt_name(name)
-        data = _load_prompts()
-        data[name] = {"system": req.system, "params": req.params}
-        _save_prompts(data)
-        return {"status": "saved", "name": name}
-
-    @app.delete("/api/prompts/{name}", dependencies=[Depends(_require_auth)])
-    async def prompt_delete(name: str):
-        name = _check_prompt_name(name)
-        data = _load_prompts()
-        if name not in data:
-            raise HTTPException(404, f"No such persona: {name}")
-        del data[name]
-        _save_prompts(data)
-        return {"status": "deleted", "name": name}
+    # Chat persistence (/api/conversations, /api/memory, /api/prompts) moved
+    # to the builtin "chat" plugin (localm/plugins/builtin/chat) - the
+    # preinstalled, protected, default-enabled plugin #0. The chat turn
+    # itself (/v1/chat/completions) stays in the kernel inference server.
 
     # Knowledge / RAG (/api/rag/*) moved to the builtin "rag" plugin
     # (localm/plugins/builtin/rag) in Phase 3; it ships disabled by default and
