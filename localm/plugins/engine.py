@@ -127,8 +127,32 @@ class PluginHost:
         before = {id(r) for r in self._app.router.routes}
         self._app.include_router(
             router, dependencies=[Depends(require_scope(self._spec.scope))])
-        self._routes += [r for r in self._app.router.routes if id(r) not in before]
+        new = [r for r in self._app.router.routes if id(r) not in before]
+        # include_router appends, but the GUI mounts a catch-all StaticFiles at
+        # "/" which would shadow anything added after it (Starlette returns the
+        # first matching route, and a "/" Mount matches every path). When a
+        # plugin is enabled at runtime - after the GUI mounted "/" - relocate
+        # its routes just before that catch-all so they actually match.
+        self._relocate_before_catchall(new)
+        self._routes += new
         self._app.openapi_schema = None      # force /openapi.json to regenerate
+
+    def _relocate_before_catchall(self, new: list) -> None:
+        from starlette.routing import Mount
+        routes = self._app.router.routes
+        idx = next((i for i, r in enumerate(routes)
+                    if isinstance(r, Mount) and r.path in ("", "/")), None)
+        if idx is None:
+            return                            # no catch-all mount; append is fine
+        new_ids = {id(r) for r in new}
+        if any(id(r) in new_ids for r in routes[:idx]):
+            return                            # already before the catch-all
+        for r in new:
+            routes.remove(r)
+        idx = next(i for i, r in enumerate(routes)
+                   if isinstance(r, Mount) and r.path in ("", "/"))
+        for j, r in enumerate(new):
+            routes.insert(idx + j, r)
 
     def unmount(self) -> None:
         for r in self._routes:
