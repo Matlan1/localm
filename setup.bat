@@ -131,8 +131,23 @@ if "%DATAPICK%"=="3" (
 
 rem ---- optional desktop shortcut ----------------------------------------------
 echo.
-choice /c YN /n /m "  Create a desktop shortcut that opens the localm GUI? [Y/N] "
-if not errorlevel 2 (
+echo  Desktop shortcut - what should it open?
+echo    [1] Launcher (pick mode/model, set an API key)   recommended
+echo    [2] Web GUI directly
+echo    [3] No shortcut
+choice /c 123 /n /m "  Pick 1, 2 or 3: "
+set "SCPICK=%errorlevel%"
+if "%SCPICK%"=="1" (
+    powershell -NoProfile -Command ^
+        "$s = (New-Object -ComObject WScript.Shell).CreateShortcut([Environment]::GetFolderPath('Desktop') + '\localm.lnk');" ^
+        "$s.TargetPath = '%CD%\localm-launcher.bat';" ^
+        "$s.WorkingDirectory = '%CD%';" ^
+        "$s.IconLocation = '%CD%\assets\localm.ico';" ^
+        "$s.Description = 'localm - open the launcher';" ^
+        "$s.Save()"
+    if not errorlevel 1 echo  Shortcut created: Desktop\localm.lnk  (opens the launcher)
+)
+if "%SCPICK%"=="2" (
     powershell -NoProfile -Command ^
         "$s = (New-Object -ComObject WScript.Shell).CreateShortcut([Environment]::GetFolderPath('Desktop') + '\localm.lnk');" ^
         "$s.TargetPath = '%CD%\.venv\Scripts\localm.exe';" ^
@@ -141,8 +156,9 @@ if not errorlevel 2 (
         "$s.IconLocation = '%CD%\assets\localm.ico';" ^
         "$s.Description = 'localm - open the web GUI';" ^
         "$s.Save()"
-    if not errorlevel 1 echo  Shortcut created: Desktop\localm.lnk
+    if not errorlevel 1 echo  Shortcut created: Desktop\localm.lnk  (opens the GUI)
 )
+if "%SCPICK%"=="3" echo  No shortcut created.
 
 rem ---- done ------------------------------------------------------------------
 echo.

@@ -55,8 +55,15 @@ def _require_auth(
     If the env var is set, every request to a protected endpoint must supply a
     matching ``Authorization: Bearer <token>`` header.
     """
-    api_key = os.environ.get("LOCALM_API_KEY")
+    from localm.auth import get_api_key, require_auth_enabled
+    api_key = get_api_key()   # env LOCALM_API_KEY (non-empty) > auth.key file > None
     if not api_key:
+        if require_auth_enabled():
+            # Fail closed: auth is required but no key is configured anywhere.
+            raise HTTPException(
+                status_code=503,
+                detail="Auth required but no API key configured "
+                       "(set one via the launcher or LOCALM_API_KEY)")
         return  # no key configured - dev/local mode, skip auth
     # Constant-time compare so a network attacker can't recover the key byte
     # by byte from response-timing differences.

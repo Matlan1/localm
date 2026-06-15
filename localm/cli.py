@@ -31,8 +31,8 @@ def _exposed_bind_warning(host: str) -> Optional[str]:
     that combination serves an unauthenticated LLM API to the whole network.
     Returns None when the configuration is safe.
     """
-    import os
-    if host in _LOOPBACK_HOSTS or os.environ.get("LOCALM_API_KEY"):
+    from localm.auth import get_api_key
+    if host in _LOOPBACK_HOSTS or get_api_key():
         return None
     return (
         f"⚠ Binding to {host} WITHOUT authentication - anyone on the network "
