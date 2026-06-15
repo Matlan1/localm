@@ -1,0 +1,7 @@
+[plugin]
+name = "voice"
+version = "1.0.0"
+description = "Speech-to-text (Whisper) for the chat mic button."
+scope = "voice"
+register = "plug"
+requires_extras = ["voice"]

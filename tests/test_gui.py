@@ -991,10 +991,27 @@ class TestDiscoverEndpoints:
 #  Voice (/api/voice/transcribe)                                       #
 # ------------------------------------------------------------------ #
 
+@pytest.fixture
+def voice_app(tmp_path, monkeypatch):
+    """A bare app with the builtin voice plugin loaded (open mode). voice became
+    a plugin in Phase 3, so its routes are mounted by enabling it - not attach_gui."""
+    monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    import localm.config as _cfg
+    monkeypatch.setattr(_cfg, "HOME_DIR", tmp_path)
+    monkeypatch.setattr(_cfg, "MODELS_DIR", tmp_path / "models")
+    monkeypatch.setattr(_cfg, "CONFIG_FILE", tmp_path / "config.json")
+    monkeypatch.setattr(_cfg, "REGISTRY_FILE", tmp_path / "registry.json")
+    from localm.plugins.engine import PluginManager
+    app = FastAPI()
+    PluginManager(app, external_root=tmp_path / "noplugins").enable("voice")
+    return app
+
+
 class TestVoiceEndpoint:
-    def test_success_path(self, gui_app, monkeypatch):
+    def test_success_path(self, voice_app, monkeypatch):
         import base64
-        app, _ = gui_app
+        app = voice_app
         monkeypatch.setattr("localm.voice.transcribe_bytes",
                             lambda data, language=None: "hello world")
         with TestClient(app) as client:
@@ -1003,7 +1020,7 @@ class TestVoiceEndpoint:
         assert r.status_code == 200
         assert r.json()["text"] == "hello world"
 
-    def test_missing_package_is_501(self, gui_app):
+    def test_missing_package_is_501(self, voice_app):
         """faster-whisper is not installed in the test venv - the real
         VoiceError install-hint path must surface as 501."""
         import base64
@@ -1012,24 +1029,24 @@ class TestVoiceEndpoint:
             pytest.skip("faster-whisper installed - hint path unreachable")
         except ImportError:
             pass
-        app, _ = gui_app
+        app = voice_app
         with TestClient(app) as client:
             r = client.post("/api/voice/transcribe", json={
                 "audio_b64": base64.b64encode(b"fake").decode()})
         assert r.status_code == 501
         assert "localm[voice]" in r.json()["detail"]
 
-    def test_bad_base64_is_400(self, gui_app):
-        app, _ = gui_app
+    def test_bad_base64_is_400(self, voice_app):
+        app = voice_app
         with TestClient(app) as client:
             r = client.post("/api/voice/transcribe",
                             json={"audio_b64": "!!nope!!"})
         assert r.status_code == 400
 
-    def test_transcription_failure_is_422(self, gui_app, monkeypatch):
+    def test_transcription_failure_is_422(self, voice_app, monkeypatch):
         import base64
         from localm.voice import VoiceError
-        app, _ = gui_app
+        app = voice_app
 
         def boom(data, language=None):
             raise VoiceError("No speech detected in the recording")
