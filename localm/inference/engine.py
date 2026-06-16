@@ -10,6 +10,7 @@ from rich.console import Console
 
 from localm.config import load_config
 from localm.inference.backends.base import BaseBackend
+from localm.inference.textnorm import scrub_stream
 
 console = Console()
 
@@ -224,7 +225,11 @@ class Engine:
             self._backend.load()
 
         cfg = load_config()
-        return self._backend.chat_stream(
+        # Normalise model-internal control markers (harmony/Gemma channel tags,
+        # etc.) once here so every backend inherits it - the GGUF backend also
+        # scrubs internally, which is fine because scrub_stream is idempotent,
+        # while the HF backend relies on this pass alone.
+        return scrub_stream(self._backend.chat_stream(
             messages,
             max_tokens=max_tokens if max_tokens is not None else cfg["max_tokens"],
             temperature=temperature if temperature is not None else cfg["temperature"],
@@ -233,7 +238,7 @@ class Engine:
             repeat_penalty=repeat_penalty if repeat_penalty is not None else cfg["repeat_penalty"],
             grammar=grammar,
             seed=seed,
-        )
+        ))
 
     def __enter__(self) -> "Engine":
         self.load()
