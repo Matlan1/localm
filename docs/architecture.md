@@ -2,18 +2,21 @@
 
 ## Overview
 
-localm is structured as a thin CLI shell over a pluggable inference backend
-system, with plugins layered on top. The core design rule: the CLI knows
-nothing about inference; inference knows nothing about CLI. They communicate
-through `Engine`.
+localm core is a model loader plus a plugin engine. The CLI is a thin shell
+over a pluggable inference backend, and everything above bare chat is a
+plugin. The core design rule: the CLI knows nothing about inference;
+inference knows nothing about CLI. They communicate through `Engine`. CHAT
+is the protected, preinstalled plugin (#0); coder, image, music, video, rag,
+web, voice (Whisper STT), tts (Kokoro in-browser TTS), and mcp are all
+plugins layered on top.
 
 ```
-CLI (cli.py)                       Plugins (localm/plugins/)
-  └── Engine (inference/engine.py)   ├── coder/      AI coding agent
-        ├── GgufBackend              ├── gui/        web GUI (FastAPI routes + static)
-        │     └── LlamaCpp (ctypes)  ├── mcpserver/  `localm mcp` stdio server
-        └── HFBackend                └── loader.py   external plugin discovery
-              └── HF Transformers
+CLI (cli.py)                       Plugin engine (localm/plugins/)
+  └── Engine (inference/engine.py)   ├── engine.py    PluginManager
+        ├── GgufBackend              ├── contract.py  Host / Surface / PluginSpec
+        │     └── LlamaCpp (ctypes)  ├── catalog.py   first-party catalog
+        └── HFBackend                ├── builtin/     store (read-only)
+              └── HF Transformers     └── ~/.localm/plugins/  installed
 ```
 
 ## Engine
@@ -59,17 +62,57 @@ semaphore serialises all inference. Endpoints are documented in
 `inference/compact.py` summarises older chat turns through the model when a
 conversation reaches 70% of the context ceiling, keeping the system prompt
 and the last two exchanges verbatim, with a hard-trim fallback that never
-raises. Used by `localm run` interactive chat; the GUI implements the same
-protocol client-side. The coder agent has its own compaction in
-`plugins/coder/agent.py` (GBNF-structured summaries).
+raises. Used by `localm run` interactive chat; the GUI (itself a plugin
+surface now) implements the same protocol client-side. The coder agent has
+its own compaction in `localm/plugins/coder/agent.py` (GBNF-structured
+summaries); coder is the builtin `coder` plugin (store dir
+`localm/plugins/builtin/coder/` wrapping `localm/plugins/coder/`).
 
-## Plugins
+## Plugin engine
 
-Built-in plugins live in `localm/plugins/` (coder, gui, mcpserver).
-External plugins are folders under `~/.localm/plugins/` with a
-`plugin.toml` manifest; `loader.py` discovers them at CLI start, mounts
-their Click command, and registers exported agent tools. A broken plugin
-warns and is skipped, never crashing the CLI.
+Everything above bare chat is a plugin, managed by `PluginManager` in
+`localm/plugins/engine.py`. A plugin ships a `plugin.toml` manifest
+(`[plugin]` + `[surface]` tables) plus a module exporting `register(host)`
+and `unregister()`.
+
+**Two locations.** The *store* is `localm/plugins/builtin/` (the bundled,
+read-only first-party plugins: coder, image, music, video, rag, web, voice,
+tts, mcp). *Installed* plugins live under `~/.localm/plugins/`. Installing
+copies a plugin from the store into the installed location.
+
+**Four states.** A plugin is *installed* (present under `~/.localm/plugins/`),
+*enabled* (listed in `config["plugins_enabled"]`), and *active* only when it
+is both installed AND enabled. The store also tracks what is *available* (in
+the catalog but not yet installed). By default only chat is active.
+
+**Chat is plugin #0.** CHAT is protected and preinstalled; it cannot be
+disabled or uninstalled.
+
+**Contract.** `localm/plugins/contract.py` defines the protocols a plugin
+sees: `Surface` and `PluginSpec` (manifest shape) and `Host` (the API the
+engine hands to `register`). The host exposes `mount_router`, `mount_static`,
+`add_settings`, `register_tab`, `plugin_config`, `save_plugin_config`,
+`engine`, `audit`, and `browse_dirs`. `catalog.py` holds the static
+first-party catalog; `loader.py` is the legacy external/CLI loader;
+`media_config.py` resolves shared media-plugin config.
+
+**Lifecycle.** `PluginManager` discovers installed plugins, then
+`load_enabled` mounts each active plugin at runtime through `PluginHost`
+(`mount_router` for FastAPI routes, `mount_static` for assets). Enable and
+disable toggle the config entry; install copies store -> installed (and
+enables), uninstall removes the installed directory. Mounting and unmounting
+happen at runtime without restarting the server.
+
+**api_version gating.** Each manifest declares the contract version it
+targets; the engine refuses to load a plugin whose `api_version` it does not
+support, surfacing an error rather than crashing.
+
+**Capability scopes.** Every plugin declares a capability scope, and its
+HTTP routes are gated to that scope, so a plugin cannot reach beyond the
+permissions it asked for.
+
+See [plugins.md](plugins.md) for the full authoring guide. A broken plugin
+warns and is skipped, never crashing the host.
 
 ## Debug mode
 

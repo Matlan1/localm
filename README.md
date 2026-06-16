@@ -1,6 +1,8 @@
 # localm
 
-**Run local LLMs offline.** GGUF models via a pure-Python ctypes binding to `llama.dll`, HuggingFace Transformers models, an OpenAI-compatible HTTP server, a browser GUI, an AI coding agent, and MCP support in both directions. One CLI, no cloud required.
+**Run local LLMs offline.** GGUF models via a pure-Python ctypes binding to `llama.dll`, HuggingFace Transformers models, and an OpenAI-compatible HTTP server. localm core is a model loader plus a plugin engine: the only always-present feature is **chat**, which ships as the protected, preinstalled plugin. Everything else - the coder agent, image/music/video generation, Knowledge (RAG), web access, voice (speech-to-text), text-to-speech, and MCP - is a plugin you install when you want it. One CLI, no cloud required.
+
+**Plugin states.** Bundled plugins live read-only in `localm/plugins/builtin/` (the "store"). *Installing* a plugin copies it into `~/.localm/plugins/` (installed = on disk); *enabling* adds it to `config["plugins_enabled"]`; a plugin is *active* only when it is both installed and enabled. **Out of the box only chat is active** (it is protected, so it cannot be disabled or uninstalled, and `default_enabled` makes it active on first run). You turn the rest on with `localm plugin install <name>` (see [Plugins](#plugins) below).
 
 ```
 localm run mymodel --prompt "Explain RDNA2 in one sentence."
@@ -17,39 +19,43 @@ Everything that does not strictly need the internet works fully offline. Online 
 
 - **Local model inference.** GGUF files load through a small ctypes binding to `llama.dll`, so there's no llama-cpp-python to install. HuggingFace models work too, and it works out whether to run on your AMD or NVIDIA GPU (or fall back to CPU) from what actually loads at startup.
 - **Pick how you talk to it.** A browser GUI, a plain terminal chat, and an OpenAI-compatible server for when you want other apps to connect.
-- **A coding agent that does the work.** `localm coder` works through a task with tools for files, the shell, search, and tests, and you can redirect it mid-run or review what it touched with session diffs. It speaks MCP both ways, so localm can expose your models to clients like Claude Desktop, and the coder can pull in external MCP tool servers.
-- **Media generation (drives your ComfyUI).** Point localm at a local [ComfyUI](https://github.com/comfyanonymous/ComfyUI) and it makes images with FLUX, music of any length with ACE-Step, and short video clips from a prompt or a still with Wan 2.2. You install ComfyUI and download the models once (roughly 20 to 25 GB for FLUX; see [docs/flux-setup.md](docs/flux-setup.md)); localm orchestrates the rest, including VRAM handover from the LLM.
-- **Bring your own data.** Attach files or index whole folders and chat against them with citations, talk to it using local Whisper, or hand it an image to look at.
+- **A coding agent that does the work (coder plugin).** `localm coder` works through a task with tools for files, the shell, search, and tests, and you can redirect it mid-run or review what it touched with session diffs. It speaks MCP both ways, so localm can expose your models to clients like Claude Desktop, and the coder can pull in external MCP tool servers.
+- **Media generation (image/music/video plugins, drives your ComfyUI).** Point localm at a local [ComfyUI](https://github.com/comfyanonymous/ComfyUI) and it makes images with FLUX, music of any length with ACE-Step, and short video clips from a prompt or a still with Wan 2.2. You install ComfyUI and download the models once (roughly 20 to 25 GB for FLUX; see [docs/flux-setup.md](docs/flux-setup.md)); localm orchestrates the rest, including VRAM handover from the LLM.
+- **Bring your own data (rag, voice, and tts plugins).** Attach files or index whole folders and chat against them with citations (Knowledge), dictate with local Whisper speech-to-text, have replies read back to you with in-browser Kokoro text-to-speech, or hand the model an image to look at.
 - **Model management that stays out of the way.** Pull from HuggingFace with aliases and SHA256 dedup, browse quants with a note on whether they fit your VRAM, and let it register whatever you drop into the models folder. Abliteration is a single command that passes a model to Heretic and registers what comes back.
 - **Offline first.** Nothing leaves your machine unless you allow it. The optional online parts, meaning cloud providers for the coder and web access for fetching pages, are opt-in and run through one network policy you set.
 
 <details>
 <summary>Full feature list</summary>
 
+localm core (model loader plus plugin engine) provides GGUF/HF inference, the OpenAI-compatible server, the GUI shell, model management, and chat (the protected plugin that is active by default). Everything tagged *(plugin)* below is shipped in the `builtin/` store but is inactive until you run `localm plugin install <name>`; see [Plugins](#plugins).
+
 | Feature | Details |
 |---|---|
-| **GGUF inference** | Pure-Python ctypes wrapper around `llama.dll`, no llama-cpp-python required |
-| **GPU support** | AMD (ROCm / HIP), NVIDIA (CUDA), CPU. Auto-detected from DLL loading order |
-| **HF Transformers** | Full HuggingFace model directories |
-| **OpenAI-compatible server** | `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`, streaming SSE, TTFT and tok/s in usage |
-| **Web GUI** | `localm gui`: chat, coder agent, model manager, image/music/video generation, plugins, and settings in the browser; zero build step, fully offline ([guide](docs/gui.md)) |
-| **Coding agent** | `localm coder` / `localcoder`: agentic loop with file, shell, search, test, and image tools; mid-task steering, cumulative session diffs (`/changes`, `/diff`), circuit breaker on repeated failures, tab-completed REPL |
-| **Web access (opt-in)** | `web_search` + `fetch_url` for coder and chat via one network policy: `off`/`ask`/`allow`, domain allow/deny, private-address SSRF guard ([guide](docs/network.md)) |
-| **Knowledge (RAG)** | Chat with your documents: attach files in chat (in-memory, privacy-clean) or index folders into collections with cited retrieval - BM25 always, embeddings blended in when the backend supports them ([guide](docs/rag.md)) |
-| **Voice** | 🎤 local Whisper speech-to-text into the composer (`localm[voice]` extra, CPU, no torch) and 🔊 read-aloud via the browser's offline voices |
-| **MCP client** | The coder consumes external MCP tool servers from `.localcoder/config.toml` |
-| **MCP server** | `localm mcp` exposes your local models to Claude Desktop and other MCP clients ([guide](docs/mcp.md)) |
-| **Interactive chat** | Multi-turn shell with `/imagine`, `/compact`, `/clear`, `/image`, `/system`, `/save` |
-| **Model registry** | Pull from HuggingFace (split GGUF supported), aliases, SHA256 dedup, tab completion |
-| **Model discovery** | Search HF from the Models page or `localm search`; per-quant sizes with "fits your VRAM" badges (torch-free VRAM detection) |
+| **GGUF inference** (core) | Pure-Python ctypes wrapper around `llama.dll`, no llama-cpp-python required |
+| **GPU support** (core) | AMD (ROCm / HIP), NVIDIA (CUDA), CPU. Auto-detected from DLL loading order |
+| **HF Transformers** (core) | Full HuggingFace model directories |
+| **OpenAI-compatible server** (core) | `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`, streaming SSE, TTFT and tok/s in usage |
+| **Web GUI** (core) | `localm gui`: chat, coder agent, model manager, image/music/video generation, plugins, and settings in the browser; zero build step, fully offline ([guide](docs/gui.md)) |
+| **Chat** (plugin #0, protected) | Conversation history, assistant memory, and personas. The only plugin active out of the box; cannot be disabled or uninstalled |
+| **Coding agent** (coder plugin) | `localm coder` / `localcoder`: agentic loop with file, shell, search, test, and image tools; mid-task steering, cumulative session diffs (`/changes`, `/diff`), circuit breaker on repeated failures, tab-completed REPL |
+| **Web access (opt-in)** (web plugin) | `web_search` + `fetch_url` for coder and chat via one network policy: `off`/`ask`/`allow`, domain allow/deny, private-address SSRF guard ([guide](docs/network.md)) |
+| **Knowledge (RAG)** (rag plugin) | Chat with your documents: attach files in chat (in-memory, privacy-clean) or index folders into collections with cited retrieval - BM25 always, embeddings blended in when the backend supports them ([guide](docs/rag.md)) |
+| **Voice (speech-to-text)** (voice plugin) | Local Whisper speech-to-text into the composer (`localm[voice]` extra, CPU, no torch) |
+| **Text-to-speech** (tts plugin) | Read replies aloud with in-browser Kokoro neural voices. Synthesis runs entirely client-side (vendored kokoro-js), so it ships no Python dependency and writes nothing to disk, keeping privacy mode trace-free; shipped as a client-asset plugin |
+| **MCP client** (mcp plugin) | The coder consumes external MCP tool servers from `.localcoder/config.toml` |
+| **MCP server** (mcp plugin) | `localm mcp` exposes your local models to Claude Desktop and other MCP clients ([guide](docs/mcp.md)) |
+| **Interactive chat** | Multi-turn shell with `/imagine` (image plugin), `/compact`, `/clear`, `/image`, `/system`, `/save` |
+| **Model registry** (core) | Pull from HuggingFace (split GGUF supported), aliases, SHA256 dedup, tab completion |
+| **Model discovery** (core) | Search HF from the Models page or `localm search`; per-quant sizes with "fits your VRAM" badges (torch-free VRAM detection) |
 | **Abliteration** | `localm abliterate`: decensor a model with [Heretic](https://github.com/Matlan1/heretic-win-AMD) (a separate AGPL program, run as a subprocess), then auto-register the result (`localm[abliterate]` extra) |
-| **Folder auto-sync** | `localm list`/`gui`/launcher reconcile the registry with the models folder on start; missing files are flagged, not deleted (opt-in `autoprune_missing_models`) |
-| **Image generation** | `generate_image` tool drives a local ComfyUI FLUX pipeline with VRAM handover (requires ComfyUI + models, see [docs/flux-setup.md](docs/flux-setup.md)) |
-| **Music generation** | ACE-Step via the same ComfyUI server: arbitrary track length, lyrics or instrumental (`localm music`, Music page, `/music`) |
-| **Video generation** | Wan 2.2 short clips (~5 s native, text- or image-to-video) via ComfyUI (`localm video`, Video page, `/video`; [guide](docs/video.md)) |
-| **Plugins** | Drop a folder with `plugin.toml` into `~/.localm/plugins/` to add CLI commands and agent tools |
-| **Multimodal** | Image attachment via `--image` or `/image` with a HuggingFace-format vision model. The built-in GGUF backend is text-only and rejects an attached image with a clear error rather than silently ignoring it. |
-| **Ollama interop** | Register Ollama blobs directly via `localm add <manifest-dir>` |
+| **Folder auto-sync** (core) | `localm list`/`gui`/launcher reconcile the registry with the models folder on start; missing files are flagged, not deleted (opt-in `autoprune_missing_models`) |
+| **Image generation** (image plugin) | `generate_image` tool drives a local ComfyUI FLUX pipeline with VRAM handover (requires ComfyUI + models, see [docs/flux-setup.md](docs/flux-setup.md)) |
+| **Music generation** (music plugin) | ACE-Step via the same ComfyUI server: arbitrary track length, lyrics or instrumental (`localm music`, Music page, `/music`) |
+| **Video generation** (video plugin) | Wan 2.2 short clips (~5 s native, text- or image-to-video) via ComfyUI (`localm video`, Video page, `/video`; [guide](docs/video.md)) |
+| **Plugins** | First-party store plugins (above) plus third-party folders: install/enable/disable/uninstall from the CLI or GUI, export agent tools, add CLI commands and GUI tabs ([authoring guide](docs/plugins.md)) |
+| **Multimodal** (core) | Image attachment via `--image` or `/image` with a HuggingFace-format vision model. The built-in GGUF backend is text-only and rejects an attached image with a clear error rather than silently ignoring it. |
+| **Ollama interop** (core) | Register Ollama blobs directly via `localm add <manifest-dir>` |
 
 </details>
 
@@ -85,6 +91,14 @@ uv venv --python 3.12 .venv
 uv pip install -p .venv -e ".[gpu,coder,audio]"   # AMD ROCm flavour
 uv pip install -p .venv -e ".[coder]"             # base / CPU flavour
 ```
+
+A pip extra and a plugin install are two separate steps. The extra installs a
+plugin's heavy Python dependencies into the venv; `localm plugin install <name>`
+activates the plugin itself. The defined extras are `coder`, `gpu`, `gguf`,
+`audio`, `rag`, `voice`, `cpu`, and `abliterate`. Not every plugin needs one:
+the image/music/video plugins talk to an external ComfyUI (no extra), and tts
+runs in the browser (no extra, no Python dependency). So enabling RAG is, for
+example, `pip install "localm[rag]"` followed by `localm plugin install rag`.
 
 > **Avoid `uv tool install` for this project.** Tool installs are *global per
 > package name*: a second clone installing the `localm` tool silently replaces
@@ -151,8 +165,9 @@ localm gui mymodel        # or name one
 
 Chat, the coder agent, model management, and image generation in one page.
 The model preloads in the background so the first reply is fast, and typing
-`/` in any composer opens a command menu (`/imagine` generates images
-inline). See [docs/gui.md](docs/gui.md).
+`/` in any composer opens a command menu. `/imagine` is provided by the image
+plugin and generates images inline; it is unavailable until that plugin is
+installed (`localm plugin install image`). See [docs/gui.md](docs/gui.md).
 
 ### Start the inference server
 
@@ -193,7 +208,7 @@ localm coder "fix the failing test"       # single task
 localcoder --model mymodel                # same thing, standalone command
 ```
 
-The agent auto-starts `localm serve` when needed, plans with tool calls (read, write, edit, patch, shell, search, tests, image generation), asks before destructive actions, tracks a turn budget so it asks for help instead of guessing forever, and verifies its own code changes before answering. Privacy mode is the default: nothing is persisted unless you opt into `--mode log` or `--mode full`.
+The agent auto-starts `localm serve` when needed, plans with tool calls (read, write, edit, patch, shell, search, tests, image generation, plus tools exported by other installed plugins, which are registered as `plugin_<plugin>_<tool>`), asks before destructive actions, tracks a turn budget so it asks for help instead of guessing forever, and verifies its own code changes before answering. Privacy mode is the default: nothing is persisted unless you opt into `--mode log` or `--mode full`.
 
 ### Session privacy modes (all surfaces)
 
@@ -351,34 +366,48 @@ Model names complete everywhere a model argument is expected.
 
 ### Plugins
 
+localm core is a model loader plus a plugin engine. Chat is the protected,
+preinstalled plugin and is the only feature active out of the box; every other
+feature (coder, image, music, video, rag, web, voice, tts, mcp) is a plugin you
+install when you want it.
+
+**Plugin states.** Bundled plugins live read-only in `localm/plugins/builtin/`
+(the "store"). *Installing* copies one into `~/.localm/plugins/` (installed = on
+disk); *enabling* adds it to `config["plugins_enabled"]`; a plugin is *active*
+only when it is both installed and enabled. Chat is protected (cannot be disabled
+or uninstalled) and `default_enabled`, so it is active on first run; nothing else
+is.
+
+**First-party store plugins** are managed by name:
+
 ```bash
-localm plugin list
-localm plugin install /path/to/plugin-folder
-localm plugin remove NAME
+localm plugin status            # what is installed and which installs are active
+localm plugin install NAME      # copy NAME from the store and enable it
+localm plugin enable NAME       # enable an already-installed plugin
+localm plugin disable NAME      # disable but keep it installed
+localm plugin uninstall NAME    # remove it (add --delete-data to drop its data)
 ```
 
-A plugin is a folder with a `plugin.toml` manifest and Python files. It can add a CLI command (`localm <name>`) and export tools into the coder agent. Installation is a local directory copy, fully offline.
+The store names are `coder`, `image`, `music`, `video`, `rag`, `web`, `voice`,
+`tts`, and `mcp` (plus the protected `chat`). For plugins with heavy Python
+dependencies, also install the matching pip extra (for example
+`pip install "localm[rag]"` alongside `localm plugin install rag`); see
+[Install](#install). A running GUI server picks up new HTTP routes on its next
+start, while stdio plugins like mcp take effect immediately.
 
-To export an agent tool, list it in the manifest and define a matching callable
-in the entry module (same contract as a built-in tool: `fn(cwd, **args)`
-returning a `ToolResult` or a string):
+**Third-party plugins** are folders containing a `plugin.toml` manifest and
+Python files. A plugin can add a CLI command (`localm <name>`), export tools into
+the coder agent, and contribute a GUI tab or client assets. The full authoring
+contract (manifest fields, tool-export signature, surfaces, privacy rules) lives
+in **[docs/plugins.md](docs/plugins.md)**; foreign-ecosystem interop (importing
+plugins from other tools over the MCP spine) is in
+[docs/plugin-interop.md](docs/plugin-interop.md). Folder install of a third-party
+plugin from a local path is supported by the engine; installation is a local
+directory copy, fully offline.
 
-```toml
-[tools]
-exports = ["tool_search_issues"]
-```
-
-```python
-def tool_search_issues(cwd, query=""):
-    """Search the local issue tracker."""           # becomes the tool description
-    return f"... results for {query} ..."
-tool_search_issues.tool_params = {"query": {"type": "string", "required": True}}
-tool_search_issues.tool_destructive = False          # default True (asks before running)
-```
-
-The coder registers it as `plugin_<name>_tool_search_issues` and tells the model
-about it, exactly like an MCP tool. External plugin code defaults to needing
-confirmation before it runs.
+Tools exported by an installed plugin are registered with the coder as
+`plugin_<plugin>_<tool>` and described to the model exactly like an MCP tool, and
+external plugin code defaults to needing confirmation before it runs.
 
 ---
 
@@ -432,10 +461,9 @@ localm/
 ├── config.py                 # ~/.localm/ paths, config, port range
 ├── setup_llama.py            # `localm setup-llama` - provision native binaries
 ├── model_manager.py          # registry, pull, dedup, aliases, Ollama manifests
-├── image_gen/
-│   └── comfy.py              # ComfyUI FLUX pipeline driver
-├── music_gen/                # ComfyUI ACE-Step music pipeline
-├── video_gen/                # ComfyUI Wan 2.2 short-video pipeline
+├── image_gen/                # shared ComfyUI FLUX transport (used by image plugin)
+├── music_gen/                # shared ComfyUI ACE-Step transport (used by music plugin)
+├── video_gen/                # shared ComfyUI Wan 2.2 transport (used by video plugin)
 ├── inference/
 │   ├── engine.py             # unified Engine: GGUF vs HF detection
 │   ├── http_server.py        # FastAPI app: /v1/* endpoints
@@ -444,12 +472,28 @@ localm/
 │       ├── gguf.py           # GgufBackend + VRAM pre-flight
 │       ├── hf.py             # HFBackend (Transformers)
 │       └── llamacpp/         # pure-Python ctypes llama.cpp binding
-└── plugins/
+└── plugins/                  # the plugin engine and every feature plugin
+    ├── engine.py             # PluginManager: install/enable/active state, route mounting
+    ├── contract.py           # the plugin contract (manifest schema, surfaces)
+    ├── catalog.py            # discovers the builtin/ store + external installs
     ├── loader.py             # external plugin discovery (~/.localm/plugins/)
-    ├── coder/                # the coding agent (agent loop, tools, MCP client)
-    ├── gui/                  # web GUI (FastAPI routes + static frontend)
-    └── mcpserver/            # `localm mcp` stdio server
+    ├── media_config.py       # shared ComfyUI config for the media plugins
+    └── builtin/              # the read-only store (only chat is active by default)
+        ├── chat/             # protected plugin #0: history, memory, personas
+        ├── coder/            # the coding agent (agent loop, tools, MCP client)
+        ├── image/            # FLUX image generation (consumes image_gen/)
+        ├── music/            # ACE-Step music generation (consumes music_gen/)
+        ├── video/            # Wan 2.2 video generation (consumes video_gen/)
+        ├── rag/              # Knowledge: collections + cited retrieval
+        ├── web/              # web_search + fetch_url under the network policy
+        ├── voice/            # local Whisper speech-to-text
+        ├── tts/              # in-browser Kokoro text-to-speech (client assets)
+        └── mcp/              # `localm mcp` stdio server + MCP client
 ```
+
+The `image_gen/`, `music_gen/`, and `video_gen/` packages are shared transport
+helpers (the ComfyUI HTTP/websocket drivers); the user-facing image, music, and
+video plugins under `builtin/` consume them.
 
 ### The ctypes llama.cpp binding
 
@@ -471,12 +515,16 @@ Stop strings (`<|im_end|>`, `<end_of_turn>`, etc.) are filtered via a streaming 
 
 | Doc | Contents |
 |---|---|
+| [docs/plugins.md](docs/plugins.md) | Authoring a plugin: manifest, tool exports, surfaces, privacy rules |
+| [docs/plugin-interop.md](docs/plugin-interop.md) | Foreign-ecosystem interop: importing plugins from other tools over the MCP spine |
+| [docs/plugin-architecture-plan.md](docs/plugin-architecture-plan.md) | The plugin-first re-architecture: vision, phases, and contract |
 | [docs/gui.md](docs/gui.md) | The web GUI: chat, coder sessions, approvals, security notes |
 | [docs/mcp.md](docs/mcp.md) | MCP in both directions: serving models, consuming tool servers |
 | [docs/server-api.md](docs/server-api.md) | HTTP API details |
 | [docs/architecture.md](docs/architecture.md) | Design notes |
 | [docs/llamacpp-binding.md](docs/llamacpp-binding.md) | The ctypes binding internals |
 | [docs/gpu-setup.md](docs/gpu-setup.md) | GPU/DLL setup |
+| [docs/linux-setup.md](docs/linux-setup.md) | Running localm on Linux: venv, runtime, GPU notes |
 | [docs/flux-setup.md](docs/flux-setup.md) | ComfyUI FLUX image pipeline |
 | [docs/video.md](docs/video.md) | Wan 2.2 video generation: model setup, timing expectations, workflow override |
 | [docs/rag.md](docs/rag.md) | Knowledge: chat with your documents, collections, retrieval design |

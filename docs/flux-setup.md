@@ -34,13 +34,15 @@ behind that setup are recorded in
 
 ## How localm drives it
 
-Four frontends share the same pipeline (`localm/image_gen/comfy.py`):
+Each frontend is provided by a plugin and shares the same pipeline
+(`localm/image_gen/comfy.py`); a frontend appears only when its plugin is
+installed and enabled:
 
-- `/imagine <prompt>` in chat (GUI and `localm run`)
-- The GUI's Images page (`localm gui`)
-- The coder agent's `generate_image` tool, invoked when you ask the agent
+- The `image` plugin: its Images page in the GUI (`localm gui`) and the
+  image-generation chat slash command
+- The `coder` plugin's `generate_image` tool, invoked when you ask the agent
   for an image
-- The MCP server's `generate_image` tool (`localm mcp`)
+- The `mcp` plugin's `generate_image` tool (`localm mcp`)
 
 Features handled for you:
 
