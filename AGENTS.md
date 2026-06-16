@@ -87,3 +87,21 @@ A non-sensitive bad path can be fixed in a normal commit, but a genuine
 disclosure in history (a secret, a personal email, or a real-user absolute path
 baked into a committed file or binary) requires a history rewrite and a
 force-push, and the maintainer must be told before that happens.
+
+## Running a test instance for verification
+
+Agents may launch a local instance of the full app to verify a change in the
+real product, not only through the test suite. This is pre-approved; you do not
+need to ask first. Examples: `localm gui`, `localm serve`, `localm run <model>`.
+
+Keep it cheap and self-contained:
+
+- Use a SMALL model. A tiny GGUF is enough to smoke-test the UI, model routing,
+  token streaming, and the coder loop; do not download a large model just to
+  verify a change. `localm gui --no-model` covers checks that need no model at
+  all (the GUI opens model-less and you add or switch on the Models page).
+- Prefer an isolated, throwaway data directory so the run never touches the
+  user's real models, config, or chat history: set the `LOCALM_HOME` environment
+  variable to a temporary path for the test instance.
+- Bind to localhost only, and stop the instance once the check is done. Do not
+  leave a server bound across turns.
