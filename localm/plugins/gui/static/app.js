@@ -775,7 +775,7 @@ function buildEmptyHint() {
   div.appendChild(big);
   div.appendChild(document.createTextNode(
     "Chat with your local model. Everything stays on this machine."));
-  const tip = el("div", "", "Type / for commands - /imagine generates images locally.");
+  const tip = el("div", "", "Type / for commands - /generate-image creates images locally.");
   tip.style.marginTop = "10px";
   tip.style.fontSize = "13px";
   div.appendChild(tip);
@@ -1299,6 +1299,40 @@ async function loadClientPlugins() {
   }
 }
 
+/* ---- first-party plugin command catalog ---- */
+// Map of slash-command verb -> { plugin, active } across the first-party
+// catalog, so a command that belongs to a known-but-inactive plugin (e.g.
+// /generate-image with the image plugin off) gets a "needs the X plugin" hint
+// instead of a confusing 404 or "unknown command". Populated from /api/plugins;
+// stays empty (silent, current behaviour) until loaded or if the server is
+// unreachable. `suggest` mirrors the suggest_plugins config toggle.
+const pluginCommands = { map: {}, suggest: true };
+
+async function refreshPluginCommands() {
+  try {
+    const r = await fetch("/api/plugins", { headers: authHeaders() });
+    if (!r.ok) return;
+    const data = await r.json();
+    const map = {};
+    for (const p of data.plugins || []) {
+      for (const c of p.commands || []) {
+        map[c] = { plugin: p.name, active: !!p.active };
+      }
+    }
+    pluginCommands.map = map;
+    pluginCommands.suggest = data.suggest_plugins !== false;
+  } catch { /* server unreachable; fall back to plain unknown-command */ }
+}
+
+/** A "/cmd needs the X plugin" hint when *cmd* belongs to a known first-party
+ *  plugin that is not active, else null (handle it normally). */
+function pluginSuggestion(cmd) {
+  if (!pluginCommands.suggest) return null;
+  const hit = pluginCommands.map[cmd];
+  if (!hit || hit.active) return null;
+  return `/${cmd} needs the ${hit.plugin} plugin - install or enable it on the Plugins page.`;
+}
+
 /* ---- assistant memory ---- */
 
 const memory = { text: "", writable: false };
@@ -1472,8 +1506,8 @@ async function runCompletion(conv, webDepth = 0) {
     sysText = (sysText ? sysText + "\n\n" : "") + WEB_TOOL_PROMPT;
   }
   if (sysText) messages.push({ role: "system", content: sysText });
-  // Server-generated images (/api/ URLs from /imagine) must not be sent to
-  // the model as image parts - replace those messages with a text note.
+  // Server-generated images (/api/ URLs from /generate-image) must not be sent
+  // to the model as image parts - replace those messages with a text note.
   const mapped = conv.messages.map((m) => {
     if (Array.isArray(m.content) &&
         m.content.some((p) => p.type === "image_url" &&
@@ -2597,9 +2631,9 @@ $("setup-history").onclick = openSessionHistory;
 /* ================================================================ */
 
 const CHAT_COMMANDS = [
-  { cmd: "imagine", hint: "generate an image with FLUX", args: "<prompt>" },
-  { cmd: "music", hint: "generate a music track (ACE-Step, 120s instrumental)", args: "<style tags>" },
-  { cmd: "video", hint: "generate a short video clip (Wan, ~5s - slow)", args: "<prompt>" },
+  { cmd: "generate-image", hint: "generate an image with FLUX", args: "<prompt>" },
+  { cmd: "generate-music", hint: "generate a music track (ACE-Step, 120s instrumental)", args: "<style tags>" },
+  { cmd: "generate-video", hint: "generate a short video clip (Wan, ~5s - slow)", args: "<prompt>" },
   { cmd: "web", hint: "search the web, then answer with sources", args: "<query>" },
   { cmd: "clear", hint: "clear this conversation" },
   { cmd: "compact", hint: "summarise older messages to free context" },
@@ -2626,10 +2660,10 @@ const CODER_COMMANDS = [
 ];
 
 async function runImagineInChat(promptText) {
-  if (!promptText) { toast("Usage: /imagine <prompt>", true); return; }
+  if (!promptText) { toast("Usage: /generate-image <prompt>", true); return; }
   if (!currentConv()) newConversation();
   const conv = currentConv();
-  conv.messages.push({ role: "user", content: "/imagine " + promptText });
+  conv.messages.push({ role: "user", content: "/generate-image " + promptText });
   saveConversations(conv);
   renderChat();
   const box = $("chat-messages");
@@ -2700,10 +2734,10 @@ async function runWebInChat(query) {
 /** /music <tags> - generate a default-length instrumental inline; the Music
  *  page has the full form (lyrics, duration, seed…). */
 async function runMusicInChat(tags) {
-  if (!tags) { toast("Usage: /music <style tags>", true); return; }
+  if (!tags) { toast("Usage: /generate-music <style tags>", true); return; }
   if (!currentConv()) newConversation();
   const conv = currentConv();
-  conv.messages.push({ role: "user", content: "/music " + tags });
+  conv.messages.push({ role: "user", content: "/generate-music " + tags });
   saveConversations(conv);
   renderChat();
   const box = $("chat-messages");
@@ -2742,10 +2776,10 @@ async function runMusicInChat(tags) {
 /** /video <prompt> - generate a default-length (~5s) clip inline; the Video
  *  page has the full form (negative, duration, size, start image…). */
 async function runVideoInChat(promptText) {
-  if (!promptText) { toast("Usage: /video <prompt>", true); return; }
+  if (!promptText) { toast("Usage: /generate-video <prompt>", true); return; }
   if (!currentConv()) newConversation();
   const conv = currentConv();
-  conv.messages.push({ role: "user", content: "/video " + promptText });
+  conv.messages.push({ role: "user", content: "/generate-video " + promptText });
   saveConversations(conv);
   renderChat();
   const box = $("chat-messages");
@@ -2783,9 +2817,9 @@ async function runVideoInChat(promptText) {
 
 function execChatCommand(cmd, arg) {
   switch (cmd) {
-    case "imagine": runImagineInChat(arg); return true;
-    case "music": runMusicInChat(arg); return true;
-    case "video": runVideoInChat(arg); return true;
+    case "generate-image": case "imagine": runImagineInChat(arg); return true;
+    case "generate-music": case "music": runMusicInChat(arg); return true;
+    case "generate-video": case "video": runVideoInChat(arg); return true;
     case "web": runWebInChat(arg); return true;
     case "clear": {
       const conv = currentConv();
@@ -2938,6 +2972,8 @@ function handleSlashSubmit(text, execute) {
   const space = text.indexOf(" ");
   const cmd = (space === -1 ? text.slice(1) : text.slice(1, space)).toLowerCase();
   const arg = space === -1 ? "" : text.slice(space + 1).trim();
+  const hint = pluginSuggestion(cmd);   // known plugin, just not active yet
+  if (hint) { toast(hint, true); return true; }
   if (!execute(cmd, arg)) {
     toast(`Unknown command: /${cmd}`, true);
   }
@@ -2964,6 +3000,7 @@ if (window.speechSynthesis) speechSynthesis.onvoiceschanged = populateVoicePicke
 if ($("p-voice")) $("p-voice").onchange = onVoicePick;
 populateVoicePicker();
 loadClientPlugins();
+refreshPluginCommands();
 setInterval(refreshModels, 30000);
 // The resolved ctx ceiling only exists once a model has loaded - keep the
 // compaction threshold in sync as models load or switch.

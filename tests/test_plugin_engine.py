@@ -96,6 +96,24 @@ def test_install_mounts_routes_disable_unmounts(env):
         assert c.get("/api/myplug/ping").status_code == 200
 
 
+def test_api_state_exposes_catalog_commands_and_suggest_flag(env):
+    """api_state carries each first-party plugin's command verbs (for the GUI's
+    'needs the X plugin' hint) and mirrors the suggest_plugins config toggle."""
+    from localm.config import save_config
+    from localm.plugins.engine import PluginManager
+    mgr = PluginManager(FastAPI(), store_root=env / "store",
+                        installed_root=env / "installed")
+    state = mgr.api_state()
+    assert state["suggest_plugins"] is True
+    by_name = {p["name"]: p for p in state["plugins"]}
+    # the (available, not installed) image plugin advertises its renamed verb
+    assert by_name["image"]["commands"] == ["generate-image"]
+    assert by_name["image"]["active"] is False
+
+    save_config({"suggest_plugins": False})
+    assert mgr.api_state()["suggest_plugins"] is False
+
+
 def test_enable_requires_install_first(env):
     from localm.plugins.engine import PluginManager
     store = env / "store"

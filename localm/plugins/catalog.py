@@ -81,6 +81,28 @@ def for_command(command: str) -> "CatalogEntry | None":
     return _BY_COMMAND.get(command)
 
 
+def commands() -> dict:
+    """Map of command verb -> providing plugin name, across the whole catalog.
+    Lets a command surface (CLI REPL, GUI) recognise a command that belongs to a
+    known-but-inactive plugin instead of treating it as unknown."""
+    return {cmd: e.name for cmd, e in _BY_COMMAND.items()}
+
+
+def suggestion(command: str) -> "str | None":
+    """A friendly 'that command needs the X plugin' hint for *command* when it
+    belongs to a known first-party plugin that is not handling it (because the
+    plugin is not installed or not enabled), else None for a truly unknown
+    command. Phrased generically (install) because the catalog alone does not
+    know install/enable state; a surface that knows the state can refine the
+    verb. Callers gate this on the ``suggest_plugins`` config toggle."""
+    entry = for_command(command)
+    if entry is None or entry.preinstalled:
+        return None
+    return (f"/{command} needs the {entry.name} plugin ({entry.description}). "
+            f"Install it from the Plugins page, or run: "
+            f"localm plugin install {entry.name}")
+
+
 def names() -> tuple:
     return tuple(_BY_NAME)
 

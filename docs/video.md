@@ -58,7 +58,7 @@ GUI - the **Video** page has the full form (prompt, negative, duration, fps,
 resolution, seed, steps, CFG, optional start image), a streamed job log, an
 inline player, and a history with play / move-to-folder / delete.
 
-Chat - `/video <prompt>` generates a default ~5 s clip inline and attaches a
+Chat - `/generate-video <prompt>` generates a default ~5 s clip inline and attaches a
 player to the conversation.
 
 CLI:
