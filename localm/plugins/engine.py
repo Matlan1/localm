@@ -539,6 +539,34 @@ class PluginManager:
         self._set_enabled(name, True)
         return spec0
 
+    def set_installed_from_dir(self, source: Path, *, force: bool = False,
+                               enable: bool = True):
+        """CLI/headless install of a THIRD-PARTY plugin from an arbitrary
+        directory WITHOUT mounting routes (the app-free sibling of
+        ``install_external``, mirroring ``set_installed_state``): validate the
+        manifest, copy it into the installed folder, and enable it. Rolls back a
+        copy that does not parse. A running GUI server loads it on its next
+        start. Returns the parsed PluginSpec."""
+        import shutil
+        src = Path(source)
+        spec0 = parse_spec(src)                       # validate manifest + name (raises)
+        name = spec0.name
+        dest = self._installed_dir(name)
+        if dest.exists():
+            if not force:
+                raise ValueError(f"plugin {name!r} is already installed")
+            self._remove_installed_dir(name)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(src, dest)
+        self.discover()
+        if name not in self._specs:
+            detail = self._discover_errors.get(name, "bad manifest")
+            self._remove_installed_dir(name)
+            raise ValueError(f"plugin {name!r} could not be installed: {detail}")
+        if enable:
+            self._set_enabled(name, True)
+        return spec0
+
     def enable(self, name: str) -> None:
         self.discover()
         if name not in self._specs:
