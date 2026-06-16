@@ -146,6 +146,19 @@ class TestDiscover:
         assert len(errs) == 1
         assert "name is required" in errs[0]
 
+    def test_engine_plugin_ignored_not_errored(self, tmp_path):
+        """An engine-contract plugin (register=, no entry=) shares the installed
+        dir but belongs to the plugin engine; the legacy loader skips it silently
+        instead of reporting it as a broken legacy plugin."""
+        eng = tmp_path / "coder"
+        eng.mkdir()
+        (eng / "plugin.toml").write_text(
+            '[plugin]\nname = "coder"\nscope = "coder"\nregister = "plug"\n',
+            encoding="utf-8")
+        _make_plugin(tmp_path, "demo")           # a real legacy plugin alongside
+        assert [m.name for m in discover_plugins(tmp_path)] == ["demo"]
+        assert discover_errors(tmp_path) == []   # engine plugin produced no error
+
 
 # ---------------------------------------------------------------------------
 #  load_entry

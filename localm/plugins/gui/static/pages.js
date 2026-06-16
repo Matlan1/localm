@@ -20,7 +20,7 @@ window.onViewShown = (name) => {
   if (name === "music") refreshMusicHistory();
   if (name === "video") refreshVideoHistory();
   if (name === "knowledge") refreshKnowledgePage();
-  if (name === "plugins") refreshPluginsPage();
+  if (name === "plugins") { renderCatalogPlugins(); refreshPluginsPage(); }
   if (name === "settings") refreshSettingsPage();
 };
 
@@ -719,6 +719,97 @@ $("img-generate").onclick = async () => {
 /* ================================================================ */
 /*  Plugins page                                                     */
 /* ================================================================ */
+
+/* First-party catalog plugins, driven by the engine (/api/plugins). Each row
+   shows install/enable/disable/uninstall depending on its state; chat is the
+   protected #0 and has no actions. After any change the catalog table AND the
+   slash-command hint cache re-derive from one fetch (nav follows in Phase 4). */
+async function renderCatalogPlugins() {
+  const box = $("catalog-table");
+  if (!box) return;
+  box.replaceChildren();
+  let data;
+  try {
+    const r = await fetch("/api/plugins", { headers: authHeaders() });
+    if (!r.ok) throw new Error(r.statusText);
+    data = await r.json();
+  } catch (e) {
+    box.appendChild(el("div", "sub", "Could not load plugins: " + e.message));
+    return;
+  }
+  const plugins = (data.plugins || []).filter((p) => p.builtin);
+  const table = el("table", "data-table");
+  const thead = el("thead");
+  const hr = el("tr");
+  for (const h of ["Name", "Status", "Description", ""]) hr.appendChild(el("th", "", h));
+  thead.appendChild(hr);
+  table.appendChild(thead);
+  const tbody = el("tbody");
+  for (const p of plugins) {
+    const tr = el("tr");
+    const nameTd = el("td");
+    nameTd.appendChild(el("span", "name", p.label || p.name));
+    tr.appendChild(nameTd);
+    const status = p.protected ? "protected"
+      : p.active ? "active"
+      : p.installed ? "installed (off)"
+      : "available";
+    tr.appendChild(el("td", "mono", status));
+    tr.appendChild(el("td", "", p.description));
+    const actions = el("td");
+    actions.style.textAlign = "right";
+    if (!p.protected) {
+      if (!p.installed) {
+        actions.appendChild(_catalogBtn("install", p.name, "btn-primary", "Install"));
+      } else {
+        actions.appendChild(p.enabled
+          ? _catalogBtn("disable", p.name, "", "Disable")
+          : _catalogBtn("enable", p.name, "btn-primary", "Enable"));
+        actions.appendChild(_catalogBtn("uninstall", p.name, "danger", "Uninstall"));
+      }
+    }
+    tr.appendChild(actions);
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  box.appendChild(table);
+  if (data.errors) {
+    for (const [name, err] of Object.entries(data.errors)) {
+      box.appendChild(el("div", "sub", `⚠ ${name}: ${err}`));
+    }
+  }
+}
+
+function _catalogBtn(action, name, cls, label) {
+  const b = el("button", cls, label);
+  b.style.marginLeft = "6px";
+  b.onclick = () => pluginCatalogAction(action, name);
+  return b;
+}
+
+async function pluginCatalogAction(action, name) {
+  if (action === "uninstall" &&
+      !confirm(`Uninstall '${name}'? Its plugin files are removed (your data is kept).`)) return;
+  try {
+    const r = await fetch(`/api/plugins/${encodeURIComponent(name)}/${action}`,
+                          { method: "POST", headers: authHeaders() });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const msg = d.detail || (r.status === 404 ? "no such plugin"
+                 : r.status === 409 ? "not allowed in the current state"
+                 : "failed");
+      toast(`${action} ${name}: ${msg}`, true);
+      return;
+    }
+    toast(`${name}: ${d.status || action}`);
+  } catch (e) {
+    toast(`${action} failed: ${e.message}`, true);
+    return;
+  }
+  // Re-derive from one place: the catalog table and the slash-hint cache.
+  renderCatalogPlugins();
+  refreshPluginCommands();
+}
 
 async function refreshPluginsPage() {
   const box = $("plugins-table");
