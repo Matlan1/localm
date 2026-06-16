@@ -177,11 +177,19 @@ def attach_gui(
 
     @app.post("/api/models/pull", dependencies=[Depends(_require_auth)])
     async def model_pull(req: PullRequest):
-        if not req.spec.strip():
-            raise HTTPException(400, "Empty model spec")
-        args = ["pull", req.spec]
+        spec = req.spec.strip()
+        if not spec or set(spec) <= {"-"}:
+            raise HTTPException(
+                400,
+                "Enter a model spec: owner/repo, owner/repo:file.gguf, "
+                "or an https URL.",
+            )
+        # Pass the spec after "--" so a value like "-h" or "--help" is treated as
+        # the model argument, not parsed by the CLI as an option/help flag.
+        args = ["pull"]
         if req.name:
             args += ["--name", req.name]
+        args += ["--", spec]
         # Stream structured download progress; suppress huggingface_hub's own
         # tqdm bars (their \r output doesn't line-stream cleanly).
         job = jobs.start_cli("pull", args, extra_env={

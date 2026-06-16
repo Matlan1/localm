@@ -657,6 +657,9 @@ pre:hover .copy-btn { opacity: 1; }
   width: 35% !important; transition: none;
   animation: dl-slide 1.1s ease-in-out infinite;
 }
+.dl-fill.failed {
+  width: 100% !important; animation: none; background: var(--red);
+}
 @keyframes dl-slide {
   0%   { margin-left: -35%; }
   100% { margin-left: 100%; }
