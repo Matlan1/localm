@@ -34,16 +34,44 @@ choice /c 12 /n /m "  Pick 1 or 2: "
 if errorlevel 2 (set "FLAVOUR=base") else (set "FLAVOUR=gpu")
 
 rem ---- create the venv in the repo root -------------------------------------
+rem  An existing .venv is reused unless the user opts to replace it, so a
+rem  re-run never ejects with a misleading "could not create" error (uv refuses
+rem  to clobber an existing environment and returns non-zero).
 if "%FLAVOUR%"=="gpu" (set "PYVER=3.12") else (set "PYVER=3.12")
+
+if not exist ".venv" goto venv_create
+
+rem .venv already exists - is it one we created, or a foreign one?
+set "OURS=0"
+if exist ".venv\.localm-venv" set "OURS=1"
+if exist ".venv\Scripts\localm.exe" set "OURS=1"
+echo.
+if "%OURS%"=="1" (
+    echo  An existing localm .venv was found in this folder.
+    choice /c YN /n /m "  Replace it and reinstall from scratch? [y/N]: "
+) else (
+    echo  [!] A .venv exists here but does not look like a localm environment.
+    echo      Replacing it deletes its current contents.
+    choice /c YN /n /m "  Replace this foreign .venv? [y/N]: "
+)
+rem choice sets errorlevel: 1=Y, 2=N. Test the higher index first.
+if errorlevel 2 (
+    echo  Keeping the existing .venv and continuing setup.
+    goto venv_done
+)
+
+:venv_create
 echo.
 echo  Creating .venv (Python %PYVER%) ...
-uv venv --python %PYVER% .venv
+uv venv --python %PYVER% --clear .venv
 if errorlevel 1 (
     echo  [!] Could not create the environment. Is Python %PYVER% available?
     echo      uv can fetch it:  uv python install %PYVER%
     pause
     exit /b 1
 )
+type nul > ".venv\.localm-venv"
+:venv_done
 
 rem ---- install localm (editable) into the venv ------------------------------
 rem  [voice] ships the speech-to-text package preinstalled; the Whisper model
