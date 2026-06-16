@@ -334,18 +334,22 @@
     <section id="view-plugins" class="view">
       <div class="page">
         <h2>Plugins</h2>
-        <div class="sub">External plugins live in <code>~/.localm/plugins/</code>. A plugin is a
-        folder with a <code>plugin.toml</code> manifest; it can add a CLI command and export
-        tools to the coder agent. Installation is a local directory copy.</div>
+        <div class="sub">localm is a model loader plus a plugin engine. Only chat is active out of
+        the box; install the others as you need them. Enabling or disabling a plugin takes effect
+        instantly - no restart, no model reload.</div>
         <div class="card">
-          <h3>Install</h3>
-          <div class="row">
-            <input type="text" id="plugin-source" placeholder="D:\path\to\plugin-folder" spellcheck="false">
-            <button class="btn-primary" id="plugin-install">Install</button>
-          </div>
+          <h3>First-party plugins</h3>
+          <div id="catalog-table"></div>
         </div>
         <div class="card">
-          <h3>Installed</h3>
+          <h3>External plugins</h3>
+          <div class="sub">A third-party plugin is a folder with a <code>plugin.toml</code> manifest
+          under <code>~/.localm/plugins/</code>; it can add a CLI command and export tools to the
+          coder agent. Installation is a local directory copy.</div>
+          <div class="row">
+            <input type="text" id="plugin-source" placeholder="path to a plugin folder" spellcheck="false">
+            <button class="btn-primary" id="plugin-install">Install</button>
+          </div>
           <div id="plugins-table"></div>
         </div>
       </div>
