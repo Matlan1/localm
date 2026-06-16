@@ -239,10 +239,14 @@ $("theme-toggle").onclick = () =>
 const VIEWS = ["chat", "coder", "models", "images", "music", "video", "knowledge", "plugins", "settings"];
 
 function showView(name) {
-  if (!VIEWS.includes(name)) name = "chat";
+  // Fall back to chat for an unknown name OR a view whose section is gone
+  // (e.g. a remembered tab whose plugin was since uninstalled). Tolerating a
+  // missing nav/view element is what lets the nav rail be rebuilt at runtime.
+  if (!$("view-" + name)) name = "chat";
   for (const v of VIEWS) {
-    $("view-" + v).classList.toggle("active", v === name);
-    $("nav-" + v).classList.toggle("active", v === name);
+    const view = $("view-" + v), nav = $("nav-" + v);
+    if (view) view.classList.toggle("active", v === name);
+    if (nav) nav.classList.toggle("active", v === name);
   }
   // Remembered across reloads - but never in privacy mode (no traces).
   if (!chat.privacy) localStorage.setItem("localm.activeView", name);
@@ -3019,6 +3023,10 @@ if ($("p-voice")) $("p-voice").onchange = onVoicePick;
 populateVoicePicker();
 loadClientPlugins();
 refreshPluginCommands();
+// Re-sync plugin command hints when the window regains focus, so a plugin
+// toggled in another terminal/tab while sitting on the chat view is reflected
+// without a reload (the view-switch path in pages.js covers navigation).
+window.addEventListener("focus", refreshPluginCommands);
 setInterval(refreshModels, 30000);
 // The resolved ctx ceiling only exists once a model has loaded - keep the
 // compaction threshold in sync as models load or switch.
