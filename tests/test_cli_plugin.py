@@ -92,3 +92,23 @@ def test_status_shows_installed_and_available(cli_env):
     assert r.exit_code == 0
     assert "Installed" in r.output and "Available" in r.output
     assert "dep1" in r.output and "needy" in r.output
+
+
+def test_install_from_directory(cli_env, tmp_path):
+    """`plugin install <dir>` installs a THIRD-PARTY plugin by path (not a store
+    name); re-installing the same dir without --force errors."""
+    from localm.config import load_config
+    ext = tmp_path / "thirdparty"
+    ext.mkdir()
+    (ext / "plugin.toml").write_text(
+        '[plugin]\nname = "ext1"\nscope = "ext1"\nregister = "plug"\n', encoding="utf-8")
+    (ext / "plug.py").write_text(
+        "def register(host):\n    pass\n\ndef unregister():\n    pass\n", encoding="utf-8")
+
+    r = CliRunner().invoke(cli_env.main, ["plugin", "install", str(ext)])
+    assert r.exit_code == 0 and "Installed" in r.output and "ext1" in r.output
+    assert (cli_env.installed / "ext1").is_dir()                 # copied into installed
+    assert "ext1" in load_config().get("plugins_enabled", [])    # enabled
+
+    r2 = CliRunner().invoke(cli_env.main, ["plugin", "install", str(ext)])
+    assert r2.exit_code == 1 and "already installed" in r2.output.lower()

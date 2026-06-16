@@ -1418,26 +1418,6 @@ def plugin() -> None:
     """Manage external plugins (installed in ~/.localm/plugins/)."""
 
 
-@plugin.command("install")
-@click.argument("source", type=click.Path(exists=True, file_okay=False))
-@click.option("--force", is_flag=True, help="Overwrite an existing install of the same plugin.")
-def plugin_install(source, force):
-    """Install a plugin from a local directory containing plugin.toml."""
-    from .plugins.loader import PluginError, install_plugin
-
-    try:
-        manifest = install_plugin(Path(source), force=force)
-    except PluginError as e:
-        console.print(f"[red]{e}[/red]")
-        sys.exit(1)
-    console.print(
-        f"[green]Installed[/green] [bold]{manifest.name}[/bold] "
-        f"v{manifest.version} → {manifest.path}"
-    )
-    if manifest.tool_exports:
-        console.print(f"  Tool exports: {', '.join(manifest.tool_exports)}")
-
-
 @plugin.command("list")
 def plugin_list():
     """List installed external plugins."""
@@ -1498,21 +1478,39 @@ def _warn_missing_requires(mgr, name):
 
 
 @plugin.command("install")
-@click.argument("name")
-def plugin_install_engine(name):
-    """Install (select) an engine plugin from the available catalog.
+@click.argument("target")
+@click.option("--force", is_flag=True,
+              help="When installing from a directory, overwrite an existing install.")
+def plugin_install_engine(target, force):
+    """Install a plugin and enable it.
 
-    Installs and enables it. For plugins with extra dependencies, also run the
-    matching pip extra, e.g. pip install "localm[coder]".
+    TARGET is either a first-party plugin NAME from the bundled store
+    (e.g. ``localm plugin install coder``) or a path to a DIRECTORY containing a
+    plugin.toml (a third-party plugin). For plugins with extra dependencies, also
+    run the matching pip extra, e.g. pip install "localm[coder]".
     """
     mgr = _engine_manager()
+    src = Path(target)
+    if src.is_dir() and (src / "plugin.toml").is_file():
+        try:
+            spec = mgr.set_installed_from_dir(src, force=force)
+        except ValueError as e:
+            console.print(f"[red]{e}[/red]")
+            sys.exit(1)
+        console.print(f"[green]Installed[/green] plugin [bold]{spec.name}[/bold] "
+                      f"v{spec.version}")
+        _warn_missing_requires(mgr, spec.name)
+        return
     try:
-        mgr.set_installed_state(name, True)
+        mgr.set_installed_state(target, True)
     except KeyError:
-        console.print(f"[red]No such plugin: {name}[/red]")
+        console.print(f"[red]No such plugin: {target}[/red]")
         sys.exit(1)
-    console.print(f"[green]Installed[/green] plugin [bold]{name}[/bold]")
-    _warn_missing_requires(mgr, name)
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        sys.exit(1)
+    console.print(f"[green]Installed[/green] plugin [bold]{target}[/bold]")
+    _warn_missing_requires(mgr, target)
 
 
 @plugin.command("uninstall")
