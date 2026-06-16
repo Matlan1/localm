@@ -131,6 +131,22 @@ def discover_errors(root: Optional[Path] = None) -> List[str]:
     return errors
 
 
+def _is_engine_plugin(plugin_dir: Path) -> bool:
+    """True for a plugin using the engine contract (``register = ...``) rather
+    than the legacy CLI manifest (``entry = "<module>:<attr>"``). Both kinds live
+    in the same installed dir, so the legacy loader must IGNORE engine plugins -
+    otherwise it reports every engine-installed builtin (coder, image, ...) as a
+    broken legacy plugin. Engine plugins are owned by ``engine.PluginManager``."""
+    try:
+        data = tomllib.loads((plugin_dir / "plugin.toml").read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return False
+    plugin = data.get("plugin")
+    if not isinstance(plugin, dict):
+        return False
+    return bool(plugin.get("register")) and not plugin.get("entry")
+
+
 def _scan(root: Optional[Path]) -> tuple[List[PluginManifest], List[str]]:
     root = root or plugins_dir()
     manifests: List[PluginManifest] = []
@@ -140,6 +156,8 @@ def _scan(root: Optional[Path]) -> tuple[List[PluginManifest], List[str]]:
     for child in sorted(root.iterdir()):
         if not child.is_dir() or not (child / "plugin.toml").is_file():
             continue
+        if _is_engine_plugin(child):
+            continue   # owned by the plugin engine, not a legacy CLI plugin
         try:
             manifests.append(parse_manifest(child))
         except PluginError as e:
