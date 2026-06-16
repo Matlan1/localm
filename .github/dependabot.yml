@@ -1,0 +1,19 @@
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    ignore:
+      # GPU/ROCm wheels resolve from a custom AMD index (pyproject [tool.uv.sources]
+      # / [[tool.uv.index]]); blanket bumps break the install. Update these by hand
+      # against the AMD index.
+      - dependency-name: "torch"
+      - dependency-name: "torchvision"
+      - dependency-name: "rocm"
+      - dependency-name: "rocm-sdk-core"
+      - dependency-name: "rocm-sdk-libraries-gfx103x-all"
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

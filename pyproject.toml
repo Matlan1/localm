@@ -84,6 +84,11 @@ cpu = []
 # out to Heretic (a separate AGPL program; not bundled) and uses git + uv, which
 # the user already has. This extra exists as an explicit opt-in marker.
 abliterate = []
+# Development + CI tooling (lint + tests). Install with:  pip install -e ".[dev]"
+dev = [
+    "ruff>=0.6",
+    "pytest>=8.0",
+]
 
 [project.scripts]
 localm    = "localm.cli:main"
@@ -123,3 +128,14 @@ testpaths = ["tests"]
 markers = [
     "integration: marks tests that require external tools (git, network) to be present",
 ]
+
+[tool.ruff]
+target-version = "py310"
+
+[tool.ruff.lint]
+# The codebase deliberately uses a compact style: one-line guards (if x: return),
+# short local names, and a few intentional late module-level imports. Ignore those
+# stylistic rules; keep the pyflakes (F) checks that catch real dead code plus the
+# rest of ruff's default E set. The remaining unused-import backlog (F401) is
+# tracked for a focused cleanup, after which CI's ruff step becomes blocking.
+ignore = ["E741", "E701", "E702", "E402"]

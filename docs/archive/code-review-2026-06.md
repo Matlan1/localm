@@ -1,4 +1,10 @@
-# localm - full code review (2026-06-13)
+# localm - full code review (2026-06-13, historical)
+
+Historical point-in-time snapshot; findings have since been addressed or deferred
+(see TODO.md), and it predates the plugin-first re-architecture. Kept for the
+reasoning and comparisons.
+
+---
 
 Tool-assisted review: `ruff` (lint), `bandit` (security lint), `pip-audit` (dep CVEs),
 plus four parallel deep-dive review agents (security, inference core, model-management,
