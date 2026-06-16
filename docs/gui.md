@@ -1,6 +1,8 @@
 # The localm web GUI
 
-`localm gui` starts the inference server with a browser frontend on top. Chat with your models and run the coder agent from one page. There is no build step, no Node, and no network dependency: the frontend is plain HTML/JS served by the same FastAPI process, with vendored libraries for markdown rendering and syntax highlighting.
+`localm gui` starts the inference server with a browser frontend on top. There is no build step, no Node, and no network dependency: the frontend is plain HTML/JS served by the same FastAPI process, with vendored libraries for markdown rendering and syntax highlighting.
+
+Only two surfaces are always present: **Chat** (the protected plugin #0) and the **model manager** (the Models page). Every other tab is contributed by a plugin and is absent until that plugin is installed **and** enabled - the image, music, and video studios (grouped under a "studio" nav category), coder, Knowledge (the rag plugin), and so on. The **Plugins** page is where you install and enable them; see [plugins.md](plugins.md) for authoring. Throughout this page, sections other than Chat and Models describe surfaces that only appear once their plugin is active.
 
 ```bash
 localm gui              # first registered model, opens your default browser
@@ -24,9 +26,10 @@ same flows (file / folder / URL).
 ## Chat
 
 - Typing `/` opens a command menu: `/imagine <prompt>` (generate an image
-  inline), `/web <query>` (search the web, answer with sources), `/clear`,
-  `/compact`, `/export`, `/rename <title>`, `/system`, `/new`. Slash input is
-  always handled by the UI, never sent to the model.
+  inline - provided by the image plugin, so it is unavailable until that
+  plugin is installed and enabled), `/web <query>` (search the web, answer with
+  sources), `/clear`, `/compact`, `/export`, `/rename <title>`, `/system`,
+  `/new`. Slash input is always handled by the UI, never sent to the model.
 - Web access: `/web` grounds one answer in search results, and the "Web
   access" checkbox in the parameters drawer lets the model search and read
   pages on its own mid-conversation (bounded rounds; every request and result
@@ -54,13 +57,20 @@ same flows (file / folder / URL).
   Privacy semantics: privacy mode blocks memory **writes** (no new traces)
   but still injects what earlier non-privacy sessions saved - privacy means
   no traces, not amnesia.
-- Voice: the 🎤 button records from the microphone and transcribes locally
-  with Whisper into the composer (needs `pip install "localm[voice]"`; the
-  model downloads once on first use, then everything is offline; recordings
-  are processed in memory, never written to disk). Every reply has a 🔊
-  read-aloud button, and the "Speak replies aloud" drawer toggle reads each
-  finished reply automatically - both use the browser's built-in offline
-  voices, no setup at all.
+- Voice input: the 🎤 button records from the microphone and transcribes
+  locally with Whisper into the composer (needs `pip install "localm[voice]"`;
+  the model downloads once on first use, then everything is offline; recordings
+  are processed in memory, never written to disk).
+- Read-aloud: every reply has a 🔊 button, and the "Speak replies aloud" toggle
+  reads each finished reply automatically. By default this uses the browser's
+  built-in `speechSynthesis` voices (no setup at all). Installing and enabling
+  the **tts plugin** upgrades it to neural **Kokoro** voices synthesised
+  entirely in the browser: the ~86 MB model is fetched once and cached
+  client-side, so no text ever leaves the machine and nothing is written to the
+  server (privacy mode stays trace-free). The plugin adds a voice picker in the
+  "Voice" settings group and has no tab of its own; `speechSynthesis` remains
+  the fallback whenever the plugin is not installed or its model has not
+  loaded.
 - Conversation persistence follows the session mode. In `privacy` (the default) conversations live in memory only and vanish on reload. In `log`/`full` they are saved to `chats/` in the localm data directory (with localStorage as a cache), so they survive reloads, browser profile wipes, and server restarts. Deleting one removes it everywhere.
 - The sidebar search filters chats by title **and** message content (content
   matches show a snippet). Hover a chat for 📌 pin-to-top and 📁 move-to-folder;
@@ -77,7 +87,10 @@ same flows (file / folder / URL).
 
 ## Coder
 
-Start a session by pointing the agent at a project directory. The agent gets the same tools as the terminal version: read, write, edit, patch, shell, search, tests, image generation, plus any MCP tools configured for that project.
+Coder is itself a plugin: this tab and its routes only appear once the coder
+plugin is installed and enabled.
+
+Start a session by pointing the agent at a project directory. The agent gets the same tools as the terminal version: read, write, edit, patch, shell, search, tests, image generation, plus any MCP tools configured for that project. It can also call tools exported by other installed plugins, registered under namespaced names like `plugin_<plugin>_<tool>` so they never collide with the built-ins.
 
 What you see in the feed:
 
@@ -135,6 +148,13 @@ Stop asks the agent to halt at the next safe point. End session terminates it.
 
 ## Other pages
 
+Of the pages below, only **Models** and **Plugins** are part of the core shell.
+The **Images**, **Music**, **Video**, and **Knowledge** tabs are each
+contributed by a plugin and are absent until that plugin is installed and
+enabled. Image, music, and video declare the same `"studio"` nav group, so the
+SPA collapses them into a single **studio** category in the sidebar rather than
+three top-level tabs; Knowledge is the rag plugin.
+
 - **Models**: search HuggingFace for GGUF models right on the page (empty
   query shows the most downloaded), expand a repo to see every quantization
   with its size and a "fits your VRAM" badge (compared against total VRAM,
@@ -167,7 +187,12 @@ Stop asks the agent to halt at the next safe point. End session terminates it.
   progress, inspect/remove indexed documents, test-search a collection, and
   delete collections (index only - original files untouched). Collections show
   `hybrid` when embeddings are available, `BM25` otherwise.
-- **Plugins**: list installed plugins, install from a local folder, remove.
+- **Plugins**: browse the bundled store, install a plugin, then enable or
+  disable it - all at runtime, with no server restart. Installing copies the
+  plugin into the installed folder; enabling mounts its routes, static assets,
+  and any tab it contributes onto the live app (disabling removes them again).
+  This is the page that makes every plugin-contributed surface on this list
+  appear or disappear. See [plugins.md](plugins.md) for authoring.
 - **Settings**: edit the server config (`~/.localm/config.json`) and the GUI's
   API key; light/dark theme toggle lives in the sidebar.
 
@@ -206,10 +231,22 @@ behaviour can be analysed.
 browser (static JS)
    │  /v1/chat/completions      streaming chat
    │  /api/models               registry + engine switching
-   │  /api/coder/sessions/*     session lifecycle, SSE events, approvals
+   │  /api/plugins              install / enable / disable; client-asset list
+   │  /api/coder/sessions/*     session lifecycle, SSE events, approvals (coder plugin)
    ▼
 localm FastAPI server ── Engine (GGUF/HF) ── your GPU
-            └── coder Agent (per session, in-process thread)
+            ├── PluginManager (mounts each active plugin's routes + static assets)
+            └── coder Agent (per session, in-process thread; coder plugin)
 ```
 
 The coder agent talks to the model through the server's own OpenAI-compatible endpoint, so chat and agent share one engine and inference is serialised cleanly between them.
+
+The plugin engine ties the rest together. At startup, and again whenever you
+install, enable, or disable a plugin from the Plugins page, the **PluginManager**
+mounts each active plugin's API routes (scope-gated) and static assets onto the
+live FastAPI app, and unmounts them on disable - no server restart. On the
+browser side the SPA fetches `/api/plugins` and, for every active plugin that
+declares a `client_entry`, `import()`s that JS module from `/plugins/<name>/`
+and calls its `register(ctx)`. That is how a client-asset plugin like **tts**
+adds behaviour (its Kokoro voice provider and voice picker) without contributing
+a tab or any server-side code.

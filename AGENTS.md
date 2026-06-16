@@ -45,6 +45,12 @@ this to your install"). When in doubt, make the example generic.
 Keep personal and local files out of git with `.gitignore`: `config.json`,
 `registry.json`, `*_local.json` personal workflows, `.venv/`, the native
 binaries under `runtime/localm_llama_runtime/lib/`, `home/`, and `.claude/`.
+Also keep out the installed-plugins directory (`~/.localm/plugins/`, the
+user's own enabled plugins) and any per-plugin local config that overrides a
+tracked template: `tts.json` (overrides `tts.example.json`) and
+`flux_workflow.json` (overrides `flux_workflow.example.json`). Commit the
+`*.example.json` templates, never the personal workflow, voice, or model
+choices they stand in for.
 
 ### 3. No em-dashes
 
