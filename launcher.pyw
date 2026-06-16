@@ -57,6 +57,10 @@ MODES = [
 PRIVACY_MODES = ["privacy", "log", "full"]
 USE_GLOBAL = "(use global)"
 
+# Dropdown sentinel: open the Web GUI with nothing loaded (pick a model in the
+# GUI). Only valid for the Web GUI mode; chat/serve/coder need a real model.
+NO_MODEL_LABEL = "(no model - choose later in the GUI)"
+
 
 def python_exe() -> str:
     """Prefer the repo venv's interpreter; fall back to the one running us.
@@ -370,13 +374,15 @@ class Launcher(tk.Tk):
 
     def _refresh_models(self) -> None:
         models = load_models()
-        self.model_box["values"] = models
-        if models and self.model.get() not in models:
-            self.model.set(models[0])
+        # The "no model" sentinel always leads the list so the Web GUI can be
+        # launched with nothing loaded even when usable models are registered.
+        values = [NO_MODEL_LABEL] + models
+        self.model_box["values"] = values
+        if self.model.get() not in values:
+            self.model.set(models[0] if models else NO_MODEL_LABEL)
         if not models:
-            self.model.set("")
-            self.status_msg("No models yet - Import one, or launch the Web GUI "
-                            "to add one there", error=True)
+            self.status_msg("No models yet - Import one, or just launch the Web "
+                            "GUI and add one on the Models page", error=False)
 
     # ------------------------- model import ----------------------- #
 
@@ -499,9 +505,10 @@ class Launcher(tk.Tk):
     def _build_command(self) -> list | None:
         mode = self.mode.get()
         model = self.model.get().strip()
-        # The Web GUI can open with no model (you add one on the Models page);
-        # chat / serve / coder need a model to run.
-        if not model and mode != "gui":
+        # The Web GUI can open with no model (you add or switch on the Models
+        # page); chat / serve / coder need a real model to run.
+        no_model = (not model) or (model == NO_MODEL_LABEL)
+        if no_model and mode != "gui":
             self.status_msg("Pick or import a model first", error=True)
             return None
 
@@ -523,7 +530,9 @@ class Launcher(tk.Tk):
 
         if mode == "gui":
             cmd += ["gui"]
-            if model:
+            if no_model:
+                cmd += ["--no-model"]
+            else:
                 cmd += [model]
             if port:
                 cmd += ["-p", port]
