@@ -45,6 +45,9 @@ def _gui_bind_warning(host: str):
 @click.option("-c", "--ctx", default=None, type=int, help="Context window size.")
 @click.option("-g", "--gpu-layers", default=None, type=int)
 @click.option("--no-browser", is_flag=True, help="Don't open the browser automatically.")
+@click.option("--no-model", "no_model", is_flag=True,
+              help="Open with no model loaded even when the registry has usable "
+                   "models. Pick or switch models on the Models page.")
 @click.option("--pull", "pull_spec", default=None, metavar="SPEC",
               help="Open the GUI on the Models page and start downloading SPEC "
                    "(a HuggingFace repo, repo:file.gguf, or https URL). Lets you "
@@ -61,15 +64,17 @@ def _gui_bind_warning(host: str):
               help="Allow binding past loopback WITHOUT LOCALM_API_KEY set. This "
                    "exposes the unauthenticated coder agent (shell + file edits) "
                    "to the network - only on a trusted, isolated network.")
-def main(model, host, port, ctx, gpu_layers, no_browser, pull_spec, debug, mode, insecure):
+def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, debug, mode, insecure):
     """Open the localm web GUI - chat and the coder agent in your browser.
 
     \b
     MODEL is optional; defaults to the first registered model. With no model
-    registered at all, the GUI still opens so you can add one from the Models
-    page (or pass --pull SPEC to start a download immediately):
+    registered at all (or with --no-model), the GUI still opens so you can add
+    or switch models from the Models page (or pass --pull SPEC to start a
+    download immediately):
       localm gui
       localm gui gemma4-4b
+      localm gui --no-model
       localm gui --pull bartowski/Qwen2.5-7B-Instruct-GGUF:Qwen2.5-7B-Instruct-Q4_K_M.gguf
     """
     from rich.console import Console
@@ -119,7 +124,14 @@ def main(model, host, port, ctx, gpu_layers, no_browser, pull_spec, debug, mode,
 
     registry = load_registry()
     model_less = False
-    if not model:
+    if no_model:
+        # Explicit "open with nothing loaded" even when usable models exist; the
+        # user picks or switches on the Models page.
+        model_less = True
+        model = ""
+        console.print("[dim]Opening with no model loaded - "
+                      "pick one on the Models page.[/dim]")
+    elif not model:
         if not registry:
             # Fresh install: open the GUI anyway so the user can add a model
             # from the Models page (or via --pull). No engine until then.
