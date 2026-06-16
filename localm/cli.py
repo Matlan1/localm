@@ -737,7 +737,8 @@ def pull(model_spec, name, sha256, redownload):
 
     Models are stored in ~/.localm/models/ and registered automatically.
     """
-    pull_model(model_spec, name, expected_sha256=sha256, redownload=redownload)
+    if not pull_model(model_spec, name, expected_sha256=sha256, redownload=redownload):
+        sys.exit(1)
 
 
 @main.command("search")

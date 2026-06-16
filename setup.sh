@@ -55,9 +55,37 @@ if [ "$YES" != 1 ] && [ "$GPU" != cpu ]; then
 fi
 
 # ---- create the venv --------------------------------------------------------
-say ""
-say "  Creating .venv (Python 3.12) ..."
-uv venv --python 3.12 .venv
+# An existing .venv is reused unless the user chooses to replace it, so a
+# re-run never aborts mid-setup. uv refuses to clobber an existing environment
+# (exits non-zero, which set -e would treat as fatal), so we branch explicitly.
+is_our_venv() {  # a venv we created carries the marker / the localm console script
+  [ -f .venv/.localm-venv ] || [ -x .venv/bin/localm ]
+}
+create_venv() {
+  say ""
+  say "  Creating .venv (Python 3.12) ..."
+  uv venv --python 3.12 --clear .venv
+  : > .venv/.localm-venv   # marker: this venv was created by localm setup
+}
+
+if [ -d .venv ]; then
+  if is_our_venv; then
+    say ""
+    say "  An existing localm .venv was found in this folder."
+    rep="$(ask "  Replace it and reinstall from scratch? [y/N]: " N)"
+  else
+    say ""
+    say "  [!] A .venv exists here but does not look like a localm environment."
+    say "      Replacing it deletes its current contents."
+    rep="$(ask "  Replace this foreign .venv? [y/N]: " N)"
+  fi
+  case "$rep" in
+    [Yy]*) create_venv ;;
+    *)     say "  Keeping the existing .venv and continuing setup." ;;
+  esac
+else
+  create_venv
+fi
 
 # ---- install localm (editable) ----------------------------------------------
 say "  Installing localm into .venv ..."

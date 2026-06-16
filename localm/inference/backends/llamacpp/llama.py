@@ -260,77 +260,12 @@ def _filtered_stream(pieces: Iterator[str]) -> Iterator[str]:
 #  <think> … </think> so every frontend can handle reasoning one way.
 # ---------------------------------------------------------------------------
 
-import re as _re
-
-# Reasoning-channel openers/closers → canonical think tags.
-# Harmony: <|channel|>analysis<|message|>REASONING …<|channel|>final<|message|>ANSWER
-# Gemma 4: <|channel>thought\nREASONING\n<channel|>ANSWER
-_THINK_OPEN_RE = _re.compile(
-    r"<\|?channel\|?>(thought|analysis|commentary)\n?(<\|message\|>)?"
-)
-_THINK_CLOSE_RE = _re.compile(
-    r"<channel\|>"                                       # gemma4 close
-    r"|<\|?channel\|?>final\n?(<\|message\|>)?"          # harmony final-channel switch
-)
-
-_MARKER_RE = _re.compile(
-    r"<\|?channel\|?>"                                    # leftover channel tag
-    r"|<\|message\|>"                                     # stray harmony separator
-    r"|<\|start\|>(assistant|user|system)?"
-    r"|<\|return\|>"
-    r"|<\|turn>(user|model|assistant|system)?\n?"         # Gemma 4 turn open
-    r"|<turn\|>"                                          # Gemma 4 turn close
-    # NOTE: <|tool_call> / <|tool_response> markers are deliberately NOT
-    # scrubbed - the coder agent parses them out of this same stream.
-    r"|<\|tool>|<tool\|>"                                 # Gemma 4 tool declarations
-    r"|<\|think\|>|<think\|>"                             # Gemma 4 thinking enable token
-    r"|<unused\d+>?"                                      # Gemma reserved tokens
-)
-
-# Longest text a partial marker could span across two stream pieces
-_MARKER_HOLD = 32
-
-
-def _scrub_text(text: str) -> str:
-    """Apply marker normalisation/removal to a complete text chunk."""
-    text = text.replace('<|"|>', '"')          # Gemma 4 quote token
-    text = _THINK_OPEN_RE.sub("<think>\n", text)
-    text = _THINK_CLOSE_RE.sub("\n</think>\n", text)
-    return _MARKER_RE.sub("", text)
-
-
-def _scrub_stream(pieces: Iterator[str]) -> Iterator[str]:
-    """
-    Normalise/remove internal model markers in a text stream.
-
-    The trailing ``_MARKER_HOLD`` characters stay buffered because a marker
-    (or its optional role suffix, e.g. ``<|turn>model``) can straddle two
-    pieces - scrubbing them too early would strip the marker head and leak
-    its tail as text.  Only the committed region is scrubbed and yielded;
-    the cut never lands inside a potential marker (markers start with ``<``).
-    """
-    buf = ""
-    for piece in pieces:
-        buf += piece
-        cut = len(buf) - _MARKER_HOLD
-        if cut <= 0:
-            continue
-        # Back the cut up to the last '<' just before the boundary so a
-        # marker straddling it stays whole in the buffer.  A legit '<' in
-        # prose only delays its emission one round - the window slides past
-        # it as more text arrives.
-        lt = buf.rfind("<", max(0, cut - _MARKER_HOLD), cut)
-        if lt != -1:
-            cut = lt
-        if cut <= 0:
-            continue
-        out = _scrub_text(buf[:cut])
-        buf = buf[cut:]
-        if out:
-            yield out
-    buf = _scrub_text(buf)
-    if buf:
-        yield buf
+# Marker scrubbing now lives in a shared module so every backend normalises the
+# same way and the engine can apply it once for all of them. It is re-imported
+# here (under the original private names) for the GGUF decode pipeline below; a
+# second pass at the engine layer is idempotent.
+from localm.inference.textnorm import scrub_stream as _scrub_stream  # noqa: E402
+from localm.inference.textnorm import scrub_text as _scrub_text      # noqa: E402
 
 
 # ---------------------------------------------------------------------------

@@ -10,14 +10,38 @@ from rich.console import Console
 
 from localm.config import load_config
 from localm.inference.backends.base import BaseBackend
+from localm.inference.textnorm import scrub_stream
 
 console = Console()
+
+
+# A bare config.json is not enough to call a directory a model: localm's own
+# data directory keeps its settings in a config.json too. A real HF model also
+# carries weights or a tokenizer next to the config, so require one of those.
+_HF_WEIGHT_GLOBS = ("*.safetensors", "*.bin", "*.pt", "*.pth")
+_HF_TOKENIZER_FILES = (
+    "tokenizer.json", "tokenizer.model", "tokenizer_config.json",
+    "vocab.json", "sentencepiece.bpe.model",
+)
+
+
+def _has_hf_model_artifacts(p: Path) -> bool:
+    """True when an HF directory holds real model files, not just a config.json."""
+    if (p / "adapter_config.json").exists():   # LoRA / adapter directory
+        return True
+    if any(next(p.glob(pat), None) is not None for pat in _HF_WEIGHT_GLOBS):
+        return True
+    return any((p / t).exists() for t in _HF_TOKENIZER_FILES)
 
 
 def _is_hf_dir(path: str) -> bool:
     """True when path is a directory that looks like a HuggingFace model."""
     p = Path(path)
-    return p.is_dir() and (p / "config.json").exists()
+    return (
+        p.is_dir()
+        and (p / "config.json").exists()
+        and _has_hf_model_artifacts(p)
+    )
 
 
 def _is_gguf(path: str) -> bool:
@@ -201,7 +225,11 @@ class Engine:
             self._backend.load()
 
         cfg = load_config()
-        return self._backend.chat_stream(
+        # Normalise model-internal control markers (harmony/Gemma channel tags,
+        # etc.) once here so every backend inherits it - the GGUF backend also
+        # scrubs internally, which is fine because scrub_stream is idempotent,
+        # while the HF backend relies on this pass alone.
+        return scrub_stream(self._backend.chat_stream(
             messages,
             max_tokens=max_tokens if max_tokens is not None else cfg["max_tokens"],
             temperature=temperature if temperature is not None else cfg["temperature"],
@@ -210,7 +238,7 @@ class Engine:
             repeat_penalty=repeat_penalty if repeat_penalty is not None else cfg["repeat_penalty"],
             grammar=grammar,
             seed=seed,
-        )
+        ))
 
     def __enter__(self) -> "Engine":
         self.load()

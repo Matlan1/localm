@@ -246,6 +246,11 @@ $("disc-query").addEventListener("keydown", (e) => {
 $("pull-start").onclick = async () => {
   const spec = $("pull-spec").value.trim();
   if (!spec) { toast("Enter a model spec", true); return; }
+  if (spec.startsWith("-")) {
+    toast("A model spec can't start with '-'. Use owner/repo, " +
+          "owner/repo:file.gguf, or an https URL.", true);
+    return;
+  }
   const name = $("pull-name").value.trim();
   $("pull-start").disabled = true;
   const log = $("pull-log");
@@ -254,7 +259,13 @@ $("pull-start").onclick = async () => {
   const prog = $("pull-progress");
   const bar = $("pull-bar");
   const pct = $("pull-pct");
-  prog.style.display = "none";
+  // Show a live (indeterminate) bar from the start so a job that fails before
+  // emitting any progress is visibly running rather than a blank panel.
+  prog.style.display = "block";
+  bar.classList.remove("failed");
+  bar.classList.add("indeterminate");
+  bar.style.width = "35%";
+  pct.textContent = "starting…";
   try {
     const r = await fetch("/api/models/pull", {
       method: "POST", headers: authHeaders(),
@@ -266,7 +277,6 @@ $("pull-start").onclick = async () => {
       log.textContent += line + "\n";
       log.scrollTop = log.scrollHeight;
     }, (ev) => {
-      prog.style.display = "block";
       if (ev.pct != null && ev.total) {
         bar.classList.remove("indeterminate");
         bar.style.width = ev.pct + "%";
@@ -282,14 +292,24 @@ $("pull-start").onclick = async () => {
     if (end.status === "done") {
       bar.classList.remove("indeterminate");
       bar.style.width = "100%";
+      pct.textContent = "done";
       toast("Pull finished");
       $("pull-spec").value = "";
       $("pull-name").value = "";
       refreshModelsPage();
     } else {
-      toast("Pull " + end.status, true);
+      // Surface the failure: red bar, exit code, and keep the inputs so the
+      // user can see what they typed and retry.
+      bar.classList.remove("indeterminate");
+      bar.classList.add("failed");
+      const code = end.returncode != null ? `, exit ${end.returncode}` : "";
+      pct.textContent = `failed${code} - see log`;
+      toast(`Pull failed (${end.status}${code}) - see log`, true);
     }
   } catch (e) {
+    bar.classList.remove("indeterminate");
+    bar.classList.add("failed");
+    pct.textContent = "failed - see log";
     toast("Pull failed: " + e.message, true);
   } finally {
     $("pull-start").disabled = false;
