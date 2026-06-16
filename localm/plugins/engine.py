@@ -120,6 +120,7 @@ class PluginHost:
         self._manager = manager
         self._spec = spec
         self._routes: list = []
+        self._chat_phases: list = []        # chat-pipeline phases this plugin hooked
         self.settings: list = []
         self.surface: Optional[Surface] = spec.surface or None
 
@@ -196,6 +197,12 @@ class PluginHost:
                 pass
         self._routes = []
         self._app.openapi_schema = None
+        # Drop any chat-pipeline hooks this plugin registered.
+        if self._chat_phases:
+            pipeline = getattr(self._app.state, "chat_pipeline", None)
+            if pipeline is not None:
+                pipeline.remove_plugin(self._spec.name)
+            self._chat_phases = []
 
     def add_settings(self, fields: list) -> None:
         self.settings.extend(fields)
@@ -245,6 +252,20 @@ class PluginHost:
             pass
         parent = "" if base.parent == base else str(base.parent)
         return {"path": str(base), "parent": parent, "dirs": dirs}
+
+    def register_chat_hook(self, phase: str, fn, *, priority: int = 0) -> None:
+        """Register an inlet/stream/outlet transform on the kernel chat pipeline
+        (see localm.inference.chat_pipeline). Tracked so unmount drops this
+        plugin's hooks when it is disabled or uninstalled."""
+        pipeline = getattr(self._app.state, "chat_pipeline", None)
+        if pipeline is None:
+            # No chat pipeline on this app (e.g. a bare-FastAPI test harness):
+            # stay loadable; the hook is simply inert.
+            self.audit("chat_hook_skipped", {"phase": phase})
+            return
+        pipeline.add_hook(phase, fn, priority=priority, plugin=self._spec.name)
+        if phase not in self._chat_phases:
+            self._chat_phases.append(phase)
 
 
 # --------------------------------------------------------------------------- #
