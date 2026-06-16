@@ -68,6 +68,12 @@ tests/test_flux_generation.py
 chatlogs_errorlogs/
 .commitmsg.txt
 
+# Local-only issue tracker / scratch report (machine-specific notes, never
+# public). DO NOT DELETE this directory or its contents - it is the user's
+# working backlog and is not recoverable from git (it is ignored on purpose).
+# See AGENTS.md "Protected local paths".
+issues/
+
 # Native llama.cpp binaries - provisioned locally by `localm setup-llama`,
 # never committed (large, GPU/platform-specific, license-encumbered).
 runtime/localm_llama_runtime/lib/*

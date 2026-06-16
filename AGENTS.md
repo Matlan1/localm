@@ -69,6 +69,25 @@ into the venv with `localm setup-llama` and resolved from the
 `localm-llama-runtime` wheel or from user config, never from a hardcoded
 external folder.
 
+## Protected local paths (NEVER DELETE)
+
+Some directories are local-only working state that is deliberately gitignored.
+Gitignored does NOT mean disposable: because git does not track them, a deletion
+is NOT recoverable from history. Treat these as read/append-only unless the
+maintainer explicitly tells you, in the current session, to remove something.
+
+- `issues/` - the maintainer's working backlog and issue/bug report. It is
+  gitignored (local, machine-specific notes), so it will never show in git and
+  was already lost once to a "tidy stray files" pass. Never `rm` it, never
+  `git clean -x`/`-X` it away, never flag it as a "stray" or "untracked" file to
+  remove, and never overwrite `issues/issues.txt` wholesale. You may read it and
+  append to it. If you believe anything under a protected path should be removed,
+  STOP and ask the maintainer first.
+
+Other gitignored local state (do not delete without being asked): `home/`,
+`config.json`, `registry.json`, the installed-plugins dir, and the personal
+`*_workflow*.json` / `tts.json` overrides listed under rule 2.
+
 ## How these rules are enforced
 
 Run the hygiene check before you commit:
