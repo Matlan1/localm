@@ -86,7 +86,7 @@ cpu = []
 abliterate = []
 # Development + CI tooling (lint + tests). Install with:  pip install -e ".[dev]"
 dev = [
-    "ruff>=0.6",
+    "ruff>=0.15.17",
     "pytest>=8.0",
 ]
 
