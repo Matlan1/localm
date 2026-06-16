@@ -173,6 +173,40 @@ def test_owner_key_grants_every_scope(auth, monkeypatch):
     assert require_scope(S.KEYS_ADMIN)(cred) is None
 
 
+def test_model_read_routes_require_models_read_scope(auth, monkeypatch):
+    """SECURITY.md promises every /v1 route is auth-gated when a key is set.
+    /v1/models and /v1/models/{id} must require models:read; /health stays open."""
+    from fastapi.testclient import TestClient
+    from localm import scopes as S
+    from localm.inference.http_server import create_app
+
+    fake = {"m1": {"path": "m1.gguf", "source": "local", "sha256": "abc"}}
+    monkeypatch.setattr("localm.config.load_registry", lambda: fake)
+
+    # A key exists -> auth enforced. This key lacks models:read.
+    weak = auth.create_key("weak", [S.CHAT])
+    app = create_app(None)
+    with TestClient(app) as client:
+        # No credentials -> 401 on both model-read routes.
+        assert client.get("/v1/models").status_code == 401
+        assert client.get("/v1/models/m1").status_code == 401
+        # A key without models:read -> 403.
+        weak_hdr = {"Authorization": f"Bearer {weak['key']}"}
+        assert client.get("/v1/models", headers=weak_hdr).status_code == 403
+        assert client.get("/v1/models/m1", headers=weak_hdr).status_code == 403
+        # A key WITH models:read -> 200.
+        reader = auth.create_key("reader", [S.MODELS_READ])
+        rdr_hdr = {"Authorization": f"Bearer {reader['key']}"}
+        assert client.get("/v1/models", headers=rdr_hdr).status_code == 200
+        assert client.get("/v1/models/m1", headers=rdr_hdr).status_code == 200
+        # The owner key (implicit ADMIN) -> 200.
+        monkeypatch.setenv("LOCALM_API_KEY", "ownersecret")
+        own_hdr = {"Authorization": "Bearer ownersecret"}
+        assert client.get("/v1/models", headers=own_hdr).status_code == 200
+        # /health is an unauthenticated liveness probe even with a key set.
+        assert client.get("/health").status_code in (200, 503)
+
+
 def test_model_detail_does_not_leak_absolute_path(auth, monkeypatch):
     from fastapi.testclient import TestClient
     from localm.inference.http_server import create_app

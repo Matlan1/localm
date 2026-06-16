@@ -187,7 +187,8 @@ def create_app(engine: Engine) -> FastAPI:
     #  Models list                                                       #
     # ---------------------------------------------------------------- #
 
-    @app.get("/v1/models")
+    @app.get("/v1/models",
+             dependencies=[Depends(require_scope(scopes.MODELS_READ))])
     async def list_models():
         # The GUI can run with no engine yet (fresh install, empty registry -
         # the user adds a model from the Models page). Report an empty list.
@@ -206,7 +207,8 @@ def create_app(engine: Engine) -> FastAPI:
             ],
         }
 
-    @app.get("/v1/models/{model_id}")
+    @app.get("/v1/models/{model_id}",
+             dependencies=[Depends(require_scope(scopes.MODELS_READ))])
     async def model_detail(model_id: str):
         """Registry metadata for one model: path, source, size, hash, aliases."""
         from localm.config import load_registry
