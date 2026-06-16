@@ -278,6 +278,23 @@ class Agent:
         except Exception as e:
             print_warning(f"Plugin tool setup failed: {e}")
 
+        # Agent skills: discover SKILL.md folders and expose list_skills/use_skill,
+        # the same way as MCP/plugins and before the prompt is built. Read-only
+        # tools; a skill's prescribed actions still go through the usual confirm.
+        self._skill_docs: str = ""
+        try:
+            from .skills import register_skill_tools
+            skill_names, skill_warnings = register_skill_tools(cwd)
+            for w in skill_warnings:
+                print_warning(w)
+            if skill_names:
+                self._skill_docs = (
+                    "AGENT SKILLS: call list_skills to see available skills, then "
+                    "use_skill(name) to load one's instructions and follow it."
+                )
+        except Exception as e:
+            print_warning(f"Skill setup failed: {e}")
+
         self._system_prompt: str = build_system_prompt(
             cwd,
             agent_name=name,
@@ -285,7 +302,7 @@ class Agent:
             memory=self._memory,
             model_name=self._model_name,
             extra_tool_docs="\n\n".join(
-                d for d in (self._mcp_docs, self._plugin_docs) if d
+                d for d in (self._mcp_docs, self._plugin_docs, self._skill_docs) if d
             ),
         )
 
