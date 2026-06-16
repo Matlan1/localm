@@ -90,10 +90,33 @@ Read and update `~/.localm/config.json`. PATCH accepts only known keys and
 persists immediately; engine values (context sizes, GPU layers) apply on the
 next model load.
 
-### `GET /v1/plugins` / `POST /v1/plugins/install` / `DELETE /v1/plugins/{name}`
+## Plugin management endpoints
 
-List installed external plugins (with manifest errors surfaced), install
-from a local directory containing `plugin.toml`, remove by name.
+These are GUI/management routes under `/api`, served by `localm gui`. They
+are scope-gated: `GET` requires `PLUGINS_READ`, the mutations require
+`PLUGINS_ADMIN`.
+
+### `GET /api/plugins`
+
+Returns `{plugins: [...], errors: {...}}`. Each plugin entry carries the
+state flags `installed`, `enabled`, `active`, `available`, and `loaded`,
+plus `name`, `version`, `description`, `scope`, `builtin`, `protected`,
+`tab`, `label`, `icon`, `group`, `client_entry`, `assets_base`, `requires`,
+`requires_extras`, `extra`, and `error`.
+
+### `POST /api/plugins/{name}/install` / `POST /api/plugins/{name}/uninstall`
+
+Move a plugin between the available catalog and the installed set. Install
+copies the plugin from the store into `~/.localm/plugins/` and enables it;
+uninstall removes the installed directory and accepts `?delete_data=` to
+also drop the plugin's stored data. Uninstalling a protected plugin (chat)
+returns 409; an unknown plugin returns 404.
+
+### `POST /api/plugins/{name}/enable` / `POST /api/plugins/{name}/disable`
+
+Toggle an installed plugin active or inactive in config. Disabling a
+protected plugin (chat) returns 409; enabling a plugin that is not installed
+returns 409; an unknown plugin returns 404.
 
 ## Client example
 

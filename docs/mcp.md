@@ -1,5 +1,9 @@
 # MCP support
 
+> The MCP server is the `mcp` plugin. Install it with `localm plugin install
+> mcp`; it is not active by default. The `generate_image` tool below works only
+> when the `image` plugin and ComfyUI are also present.
+
 localm speaks the Model Context Protocol in both directions:
 
 - **Server**: `localm mcp` exposes your local models as tools to any MCP client (Claude Desktop, IDEs, other agents).

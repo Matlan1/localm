@@ -1,5 +1,9 @@
 # Knowledge: chat with your documents
 
+> Knowledge is provided by the `rag` plugin. The GUI Knowledge page and the
+> `/api/rag` routes appear only when it is enabled; the `localm rag` CLI below
+> remains available for indexing. PDF parsing still needs the `[rag]` pip extra.
+
 localm grounds chat replies in your own files - manuals, notes, code, papers -
 fully offline. Two ways in:
 

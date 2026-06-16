@@ -1,5 +1,10 @@
 # Internet access for the coder and chat
 
+> The network policy (`localm/netpolicy.py`) is CORE and always governs every
+> outbound request, plugin or not. The chat "Web access" surface and the coder
+> web tools, however, are provided by the `web` plugin and appear only when it
+> is active. The off/ask/allow modes and SSRF protection below apply regardless.
+
 localm is offline-first: nothing *requires* the internet. But some tasks
 genuinely need it - looking up current documentation, checking a version,
 querying the weather, reading an error's bug tracker. This page describes how
