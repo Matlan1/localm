@@ -885,9 +885,15 @@ $("plugin-install").onclick = async () => {
 /*  Settings page                                                    */
 /* ================================================================ */
 
-// Keys hidden from the form (structured values the GUI shouldn't edit blind,
-// plus read-only extras the server reports)
-const _CONFIG_SKIP = new Set(["cors_origins", "effective_mode",
+// Keys hidden from the form. Structured values (lists/objects) would be
+// corrupted by the blind text inputs - they get stringified on save and never
+// compare equal to the original array, so they are always re-sent as a broken
+// string (or null for an empty list). plugins_enabled is plugin STATE managed
+// by the Plugins page, not a setting. Plus the read-only extras the server
+// reports. (net_allow/net_deny/cors_origins are edited via `localm config` or
+// the network settings until the typed settings UI lands.)
+const _CONFIG_SKIP = new Set(["cors_origins", "net_allow", "net_deny",
+                              "plugins_enabled", "effective_mode",
                               "effective_coder_mode", "effective_ctx_max"]);
 
 let _configSnapshot = {};

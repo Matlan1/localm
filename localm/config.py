@@ -133,6 +133,13 @@ DEFAULT_CONFIG: dict = {
     # instead of "unknown command". False silences the hint; a truly unknown
     # command always errors regardless.
     "suggest_plugins": True,
+    # Names of enabled engine plugins (WordPress-style). Managed by the plugin
+    # engine (localm plugin enable/disable and the GUI Plugins page) via
+    # update_config, NOT the settings form. Declared here so it has a documented
+    # home and a default - without it the settings-save endpoint rejected it as
+    # an unknown key. A plugin is active only when installed (on disk) AND in
+    # this list; see docs/plugins.md.
+    "plugins_enabled": [],
 }
 
 # localm claims 8642-8741 - far from ComfyUI (8188), A1111 (7860),
