@@ -384,11 +384,13 @@ def _handle_command(
     if cmd in ("exit", "quit", "q", "bye"):
         console.print("[dim]Bye.[/dim]")
         return True
-    elif cmd == "imagine":
+    elif cmd in ("generate-image", "imagine"):
+        if cmd == "imagine":
+            console.print("[dim]/imagine was renamed to /generate-image[/dim]")
         if engine is None:
-            console.print("[dim]/imagine not available in this mode[/dim]")
+            console.print("[dim]/generate-image not available in this mode[/dim]")
         elif not arg:
-            console.print("[dim]Usage: /imagine <prompt>[/dim]")
+            console.print("[dim]Usage: /generate-image <prompt>[/dim]")
         else:
             from .image_gen.comfy import (
                 _comfy_alive, default_api_url, free_comfy_vram, generate_image)
@@ -482,13 +484,21 @@ def _handle_command(
             "/system <text>          set system prompt\n"
             "/save [file]            save conversation to JSON\n"
             "/compact                summarise older turns to free context\n"
-            "/imagine <prompt>       generate an image via ComfyUI FLUX\n"
+            "/generate-image <prompt> generate an image via ComfyUI FLUX\n"
             "/temp <float>           sampling temperature\n"
             "/tokens <int>           max response tokens"
             "[/dim]"
         )
     else:
-        console.print(f"[dim]Unknown: /{cmd} -- try /help[/dim]")
+        hint = None
+        from .config import load_config
+        if load_config().get("suggest_plugins", True):
+            from .plugins import catalog
+            hint = catalog.suggestion(cmd)
+        if hint:
+            console.print(f"[yellow]{hint}[/yellow]")
+        else:
+            console.print(f"[dim]Unknown: /{cmd} -- try /help[/dim]")
     return False
 
 
