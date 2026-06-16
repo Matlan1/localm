@@ -1,4 +1,10 @@
-# localm feature delivery audit (2026-06)
+# localm feature delivery audit (2026-06, historical)
+
+Historical point-in-time snapshot; grades reflect the codebase before the
+plugin-first re-architecture and several findings are now resolved (see TODO.md).
+Kept for the reasoning and comparisons.
+
+---
 
 Method: six parallel code-grounded audits (inference core + server, coding agent,
 GUI, generators, model-management + RAG, peripheral systems). Every grade is from
