@@ -84,6 +84,18 @@ nav button {
 nav button:hover { background: var(--bg-input); color: var(--text); }
 nav button.active { background: var(--accent-soft); color: var(--accent); }
 
+/* Studio group: a parent button with a disclosure chevron, and its child tabs
+   indented beneath it (the media plugins when 2+ are active). */
+.nav-group-parent::after {
+  content: "\25B8";              /* right-pointing triangle */
+  margin-left: auto;
+  font-size: 11px;
+  opacity: 0.7;
+  transition: transform 0.12s ease;
+}
+.nav-group-parent.open::after { transform: rotate(90deg); }
+.nav-child { padding-left: 30px; font-size: 13px; }
+
 #conversations {
   flex: 1;
   overflow-y: auto;
