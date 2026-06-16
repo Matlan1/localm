@@ -186,15 +186,18 @@ overriding the tracked `tts.example.json`), never committed.
 
 ## Third-party plugins
 
-Any directory with a valid `plugin.toml` can be installed as a plugin (it is
-copied into `~/.localm/plugins/` and loaded with the same contract as a
-first-party plugin). Third-party plugins run unsandboxed in-process; install only
-code you trust. Installing a folder is supported by the engine
-(`PluginManager.install_external`); note the name-based `plugin install <name>`
-(store) and a path-based folder install currently share the `install` command
-name in the CLI - prefer the store form, and see
-[plugin-interop.md](plugin-interop.md) for the adapter approach to foreign
-ecosystems.
+Any directory with a valid `plugin.toml` can be installed as a plugin:
+
+```
+localm plugin install /path/to/my-plugin     # --force overwrites an existing install
+```
+
+`plugin install` takes either a first-party plugin NAME (from the bundled store)
+or a path to a DIRECTORY containing a `plugin.toml`; a directory is validated,
+copied into `~/.localm/plugins/`, and enabled, then loaded with the same contract
+as a first-party plugin. Third-party plugins run unsandboxed in-process, so
+install only code you trust. See [plugin-interop.md](plugin-interop.md) for the
+adapter approach to wrapping extensions from other ecosystems.
 
 ## API version compatibility
 
