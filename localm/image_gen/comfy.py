@@ -269,6 +269,114 @@ def _upload_image(image_path: Path, api_url: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+#  Output containment
+# ---------------------------------------------------------------------------
+#
+#  localm's rule: NOTHING a generation produces may remain visible inside
+#  ComfyUI - the only copy is the one localm saved. Left alone, ComfyUI
+#  (a) records every job in /history, which the Queue/History panel and gallery
+#  extensions read, and (b) keeps the rendered file in its own output/ dir, plus
+#  any img2img source we uploaded into input/. After the artifact has been
+#  fetched into localm's own location we therefore clear the history entry AND
+#  delete ComfyUI's on-disk copies. Deleting files needs ComfyUI's output/ dir;
+#  when it cannot be resolved we still clear history and return a loud warning
+#  rather than leaking silently. Shared by image, music, and video generation.
+
+def _comfy_output_root(comfy_output_dir: Optional[str] = None) -> Optional[Path]:
+    """ComfyUI's output/ directory, or None when it cannot be resolved.
+
+    Order: explicit arg, COMFY_OUTPUT_DIR env, the ``comfy_output_dir`` config
+    key, then a derived ``<comfy_workdir>/output`` when that exists."""
+    cand = comfy_output_dir or os.environ.get("COMFY_OUTPUT_DIR")
+    if not cand:
+        try:
+            from localm.config import load_config
+            cfg = load_config()
+            cand = cfg.get("comfy_output_dir")
+            if not cand:
+                wd = cfg.get("comfy_workdir")
+                if wd:
+                    derived = Path(wd) / "output"
+                    if derived.is_dir():
+                        return derived
+        except Exception:
+            return None
+    return Path(cand) if cand else None
+
+
+def clear_comfy_history(api_url: str, prompt_id: str) -> bool:
+    """Remove this job from ComfyUI's /history (the Queue/History panel and
+    gallery views read it). POST /history {"delete": [prompt_id]}. Best-effort;
+    returns True when ComfyUI accepted the request."""
+    if not prompt_id:
+        return False
+    try:
+        body = json.dumps({"delete": [prompt_id]}).encode()
+        req = urllib.request.Request(
+            f"{api_url}/history", data=body,
+            headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=10):
+            return True
+    except Exception:
+        return False
+
+
+def contain_comfy_artifacts(
+    api_url: str,
+    prompt_id: str,
+    info: dict,
+    *,
+    comfy_output_dir: Optional[str] = None,
+    uploaded_input: Optional[str] = None,
+) -> str:
+    """Enforce output containment after an artifact has been fetched locally.
+
+    Clears the ComfyUI /history entry, deletes ComfyUI's own copy of the output
+    (when its output dir is known), and removes any img2img source we uploaded
+    into ComfyUI's input/ dir. Returns a warning string to surface to the user
+    when full containment could NOT be guaranteed (the on-disk copy could not be
+    deleted), or "" when fully contained."""
+    clear_comfy_history(api_url, prompt_id)
+
+    root = _comfy_output_root(comfy_output_dir)
+
+    # Remove the uploaded img2img source from ComfyUI's input/ dir (sibling of
+    # output/). Best-effort: the source image is not in the output browser, but
+    # it is still a stray copy of the user's input.
+    if uploaded_input and root is not None:
+        try:
+            inp = root.parent / "input" / uploaded_input
+            if inp.exists():
+                inp.unlink()
+        except Exception:
+            pass
+
+    # Delete ComfyUI's on-disk copy of the output. type "temp" is auto-purged
+    # by ComfyUI, so only a real "output" artifact needs removing.
+    if (info.get("type") or "output") != "output":
+        return ""
+    if root is None:
+        return (
+            "WARNING: a copy of this file remains in ComfyUI's output folder. "
+            "localm cleared the ComfyUI history entry, but cannot delete the "
+            "file until you set the ComfyUI output dir (Settings -> ComfyUI "
+            "output dir, or: localm config comfy_output_dir <path>)."
+        )
+    try:
+        copy = root / info.get("subfolder", "") / info.get("filename", "")
+        if copy.exists():
+            copy.unlink()
+        return ""
+    except Exception as e:
+        return f"WARNING: could not delete ComfyUI's copy of the output ({e})."
+
+
+def _with_warning(message: str, warning: str) -> str:
+    """Append a containment warning to a success message when present."""
+    return f"{message}\n{warning}" if warning else message
+
+
+# ---------------------------------------------------------------------------
 #  Image generation
 # ---------------------------------------------------------------------------
 
@@ -413,6 +521,7 @@ def generate_image(
                     loader_node["class_type"] = "DualCLIPLoader"
 
     # 4. img2img: upload input image, add LoadImage + VAEEncode, redirect latent
+    uploaded_name: Optional[str] = None
     if input_image is not None:
         if not input_image.is_file():
             return False, f"Input image not found: {input_image}"
@@ -659,31 +768,24 @@ def generate_image(
         except Exception:
             pass
 
-        # Delete the original from ComfyUI's output directory so no second
-        # copy lingers there. Only possible when the user tells us where it
-        # is (COMFY_OUTPUT_DIR env var or "comfy_output_dir" config key) -
-        # there is no portable default.
-        comfy_out = comfy_output_dir or os.environ.get("COMFY_OUTPUT_DIR")
-        if not comfy_out:
-            try:
-                from localm.config import load_config
-                comfy_out = load_config().get("comfy_output_dir")
-            except Exception:
-                comfy_out = None
-        if comfy_out:
-            try:
-                orig = Path(comfy_out) / subfolder / filename
-                if orig.exists():
-                    orig.unlink()
-            except Exception:
-                pass
+        # Enforce output containment: clear ComfyUI's history entry (the
+        # Queue/History + gallery view) and delete ComfyUI's own on-disk copy
+        # of the image plus any uploaded img2img source. Returns a warning when
+        # the file copy could not be removed (e.g. comfy_output_dir unset).
+        contain_warning = contain_comfy_artifacts(
+            api_url, prompt_id,
+            {"filename": filename, "subfolder": subfolder, "type": img_type},
+            comfy_output_dir=comfy_output_dir,
+            uploaded_input=uploaded_name,
+        )
 
         # Sidecar JSON: everything needed to reproduce or tweak this image.
         # Saved as <output>.json next to the image; failure is non-fatal.
         # Skipped entirely in privacy mode (write_sidecar=False).
         if not write_sidecar:
-            return True, (f"Image saved to {output_path} "
-                          f"(seed {seed} - reuse it to reproduce)")
+            return True, _with_warning(
+                f"Image saved to {output_path} "
+                f"(seed {seed} - reuse it to reproduce)", contain_warning)
         try:
             sidecar = {
                 "prompt": prompt,
@@ -710,7 +812,9 @@ def generate_image(
         except Exception:
             pass
 
-        return True, f"Image saved to {output_path} (seed {seed} - reuse it to reproduce)"
+        return True, _with_warning(
+            f"Image saved to {output_path} (seed {seed} - reuse it to reproduce)",
+            contain_warning)
 
     except Exception as e:
         return False, f"Failed to download generated image from ComfyUI: {e}"

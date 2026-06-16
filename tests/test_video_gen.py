@@ -1,6 +1,7 @@
 """Tests for the Wan video generation module (video_gen/comfy.py)."""
 
 import json
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -104,7 +105,7 @@ class TestGenerateVideo:
              patch.object(comfy, "_localm_unload"), \
              patch.object(comfy.urllib.request, "urlopen", fake), \
              patch.object(comfy.time, "sleep"), \
-             patch.dict(comfy.os.environ,
+             patch.dict(os.environ,
                         {"COMFY_OUTPUT_DIR": str(comfy_out)}):
             ok, msg = comfy.generate_video(
                 "a red fox running", tmp_path / "out.mp4", **kwargs)
