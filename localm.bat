@@ -13,8 +13,13 @@ if not "%LOCALM_MODEL%"=="" (
     goto run
 )
 
-rem Default: first model name from the registry
-for /f "usebackq delims=" %%m in (`"%PY%" -c "from localm.config import load_registry; r=load_registry(); print(sorted(r)[0] if r else '')"`) do set "MODEL=%%m"
+rem Default: first model name from the registry.
+rem NB: do not quote %PY% inside this for /f - "usebackq" strips the leading
+rem quote of the backtick command, which mangled the path into
+rem '.venv\Scripts\python.exe" -c "from' ... not recognized. %PY% is always a
+rem space-free value here ("python" or the relative .venv path), so it is safe
+rem unquoted; the -c argument keeps its own quotes.
+for /f "usebackq delims=" %%m in (`%PY% -c "from localm.config import load_registry; r=load_registry(); print(sorted(r)[0] if r else '')"`) do set "MODEL=%%m"
 
 if "%MODEL%"=="" (
     echo No models registered yet.
