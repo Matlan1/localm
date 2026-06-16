@@ -1,6 +1,10 @@
 # Plugin interop: compatibility with third-party plugin ecosystems
 
-Status: design / assessment (not yet implemented). Author-assisted survey, 2026-06.
+Status: design / assessment. Author-assisted survey, 2026-06. Implemented so
+far: the **Skills importer** (see `docs/skills.md`) and the kernel
+**chat-pipeline hook** (primitive B below, see the "Chat pipeline hooks" section
+of `docs/plugins.md`). The ecosystem adapters that ride those primitives (Open
+WebUI / oobabooga) are still to come.
 
 ## Why this exists
 
@@ -56,12 +60,16 @@ The three ecosystems collapse onto a very small amount of new kernel surface:
 
 - **(A) Foreign-tool adapter into the tool registry.** About 80% exists already
   (MCP + plugin-export adapters). Unlocks Open WebUI **Tools**.
-- **(B) A chat-pipeline hook (`inlet` / `outlet` / `stream`).** The convergence
-  point: it serves Open WebUI **Filters** *and* oobabooga's input/output
-  **modifiers** - the single most common extension type in both ecosystems.
-  localm already injects RAG context, assistant memory, and web results into the
-  chat ad hoc, so formalizing that as an ordered hook chain is good architecture
-  independent of interop.
+- **(B) A chat-pipeline hook (`inlet` / `stream` / `outlet`).** IMPLEMENTED (the
+  kernel piece; see `localm/inference/chat_pipeline.py` and the "Chat pipeline
+  hooks" section of `docs/plugins.md`). The convergence point: it serves Open
+  WebUI **Filters** *and* oobabooga's input/output **modifiers** - the single
+  most common extension type in both ecosystems - and a plugin registers
+  transforms via `host.register_chat_hook(phase, fn)`. It is a server-side seam
+  that runs for every `/v1/chat/completions` client. Note: localm's existing
+  RAG / assistant-memory / web injection is done client-side in the SPA (before
+  the request is sent), so the hook chain does not replace it; it is the
+  universal server-side place those, and foreign filters, can live.
 - **(C) A Skills importer.** Needs neither A nor B: an Agent Skill is instructions
   plus resources, and localm's coder agent is exactly the consumer it expects.
 
@@ -204,11 +212,12 @@ non-agentic chat its value drops to a structured persona + context.)
 
 Leverage-weighted:
 
-1. **Skills importer** - quick win, a coder-surface plugin, zero kernel change,
-   lowest risk.
-2. **Chat-pipeline hook (B)** plus the Open WebUI **Tools** adapter (reusing the
-   tool-registry machinery) and the oobabooga / OWUI **text-hook** adapters on
-   top. One kernel piece, two ecosystems.
+1. **Skills importer** - DONE (a coder-surface plugin, zero kernel change; see
+   `docs/skills.md`).
+2. **Chat-pipeline hook (B)** - the kernel hook is DONE. Next on top of it: the
+   Open WebUI **Tools** adapter (reusing the tool-registry machinery) and the
+   oobabooga / OWUI **text-hook** adapters (each translates a foreign filter's
+   signature to `register_chat_hook`). One kernel piece, two ecosystems.
 3. **Open WebUI Pipes** - a virtual-model backend; bigger, later.
 
 ## Security posture
@@ -238,8 +247,12 @@ an installable - the distro model applied to interop itself.
 - Which real-world extensions in each ecosystem actually stay within the
   "reachable" set, to size the payoff (a sample audit of the top community
   tools/extensions).
-- The chat-pipeline hook's placement in `/v1/chat/completions` and how it composes
-  with the existing RAG/memory/web injection.
+- ~~The chat-pipeline hook's placement in `/v1/chat/completions` and how it
+  composes with the existing RAG/memory/web injection.~~ RESOLVED: the hook
+  runs server-side in the kernel `/v1/chat/completions` path (inlet before
+  inference, stream per piece, outlet on the reply), downstream of the engine's
+  marker scrubbing. The existing RAG/memory/web injection is client-side in the
+  SPA and is left in place; the hook is the new server-side seam alongside it.
 
 ## Sources
 
