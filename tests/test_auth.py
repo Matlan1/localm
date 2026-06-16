@@ -173,6 +173,54 @@ def test_owner_key_grants_every_scope(auth, monkeypatch):
     assert require_scope(S.KEYS_ADMIN)(cred) is None
 
 
+# --------------------------------------------------------------------------- #
+#  Privilege self-escalation: a keys:admin key must not mint privileged keys  #
+# --------------------------------------------------------------------------- #
+
+def test_create_key_blocks_privileged_scopes_by_default(auth):
+    from localm import scopes as S
+    for priv in (S.ADMIN, S.KEYS_ADMIN, S.PLUGINS_ADMIN, S.CONFIG_WRITE):
+        with pytest.raises(PermissionError):
+            auth.create_key("evil", [S.CHAT, priv])
+    assert auth.list_keys() == []          # nothing was persisted
+
+
+def test_create_key_allows_privileged_for_owner(auth):
+    from localm import scopes as S
+    made = auth.create_key("admin-key", [S.ADMIN], allow_privileged=True)
+    assert S.ADMIN in made["scopes"]
+    assert auth.verify(made["key"]) == {S.ADMIN}
+
+
+def test_keys_endpoint_blocks_privilege_self_escalation(auth, monkeypatch):
+    """POST /v1/keys: a non-owner key holding only keys:admin can mint ordinary
+    keys but is refused (403) when it tries to grant itself privileged scopes;
+    the owner key can."""
+    from fastapi.testclient import TestClient
+    from localm import scopes as S
+    from localm.inference.http_server import create_app
+
+    # The owner mints a keys:admin-only key (the attacker principal).
+    attacker = auth.create_key("ka", [S.KEYS_ADMIN], allow_privileged=True)
+    app = create_app(None)
+    with TestClient(app) as client:
+        hdr = {"Authorization": f"Bearer {attacker['key']}"}
+        # keys:admin -> mint an ADMIN key: refused.
+        esc = client.post("/v1/keys", json={"name": "pwn", "scopes": [S.ADMIN]},
+                          headers=hdr)
+        assert esc.status_code == 403
+        # keys:admin -> mint an ordinary (non-privileged) key: allowed.
+        ok = client.post("/v1/keys", json={"name": "reader", "scopes": [S.CHAT]},
+                         headers=hdr)
+        assert ok.status_code == 200
+        # the owner key CAN mint an ADMIN key.
+        monkeypatch.setenv("LOCALM_API_KEY", "ownersecret")
+        owner = client.post("/v1/keys", json={"name": "adm", "scopes": [S.ADMIN]},
+                            headers={"Authorization": "Bearer ownersecret"})
+        assert owner.status_code == 200
+        assert S.ADMIN in owner.json()["scopes"]
+
+
 def test_model_detail_does_not_leak_absolute_path(auth, monkeypatch):
     from fastapi.testclient import TestClient
     from localm.inference.http_server import create_app
