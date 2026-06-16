@@ -21,6 +21,7 @@ from rich.progress import (
 from rich.table import Table
 
 from .config import (
+    HOME_DIR,
     MODELS_DIR,
     REGISTRY_FILE,
     ensure_dirs,
@@ -240,8 +241,10 @@ def get_model_info(name: str):
     if not direct.exists():
         return None
 
-    # HF model directory
-    if direct.is_dir() and (direct / "config.json").exists():
+    # HF model directory (config.json plus real weights/tokenizer, so the data
+    # dir's own config.json is not mistaken for a model)
+    from localm.inference.engine import _is_hf_dir
+    if _is_hf_dir(str(direct)):
         return direct, None
     # GGUF file - for split GGUFs, normalise to the first part (llama.cpp
     # needs the *-00001-of-N part to load the whole set)
@@ -1211,15 +1214,28 @@ def add_local(
         )
         return
 
-    is_gguf = p.suffix == ".gguf"
-    is_hf   = p.is_dir() and (p / "config.json").exists()
+    # Refuse the localm data directory (and its models root): its config.json is
+    # the app's settings file, not a model config, so registering it would poison
+    # the registry and make the loader choke on a non-model directory.
+    if p in {HOME_DIR.resolve(), MODELS_DIR.resolve()}:
+        console.print(
+            f"[red]That is the localm data folder, not a model:[/red] {p}\n"
+            "Point at a .gguf file or a specific model directory."
+        )
+        return
+
+    from localm.inference.engine import _is_hf_dir
+    is_gguf = p.is_file() and p.suffix == ".gguf"
+    is_hf   = _is_hf_dir(str(p))  # config.json AND real weights/tokenizer
     is_blob = p.is_file() and p.name.startswith("sha256-")  # raw Ollama blob by path
 
     if not (is_gguf or is_hf or is_blob):
         console.print(
-            "[yellow]Warning:[/yellow] path doesn't look like a GGUF file, "
-            "HuggingFace model directory, or Ollama blob."
+            f"[red]Not a model:[/red] {p}\n"
+            "Expected a .gguf file or a HuggingFace model directory "
+            "(config.json plus weights or a tokenizer)."
         )
+        return
 
     model_name = name or p.stem
     kind = "hf" if is_hf else "local"
