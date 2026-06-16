@@ -69,8 +69,21 @@ function formatToolCalls(text) {
     });
 }
 
+/** Last-resort client scrub of model-internal control markers. The backend
+ *  (localm/inference/textnorm.py) normalises these, but a third-party or
+ *  plugged-in backend might not, so the GUI never renders raw channel tokens.
+ *  Mirrors the server regexes; runs on the full accumulated text so there is no
+ *  streaming-boundary concern here. */
+function scrubMarkers(text) {
+  return (text || "")
+    .replace(/<\|"\|>/g, '"')
+    .replace(/<\|?\s*channel\s*\|?>(thought|thinking|analysis|reasoning|commentary|reflection)\n?(<\|?\s*message\s*\|?>)?/g, "<think>\n")
+    .replace(/<\s*channel\s*\|>|<\|?\s*channel\s*\|?>final\n?(<\|?\s*message\s*\|?>)?/g, "\n</think>\n")
+    .replace(/<\|?\s*channel\s*\|?>|<\s*channel\s*\|>|<\|?\s*message\s*\|?>|<\|start\|>(assistant|user|system)?|<\|return\|>|<\|turn>(user|model|assistant|system)?\n?|<turn\|>|<\|tool>|<tool\|>|<\|think\|>|<think\|>|<unused\d+>?/g, "");
+}
+
 function renderMarkdown(target, text) {
-  const { think, open, rest: rawRest } = splitThink(text);
+  const { think, open, rest: rawRest } = splitThink(scrubMarkers(text));
   const rest = formatToolCalls(rawRest);
   target.innerHTML = "";
   if (think) {
@@ -1643,7 +1656,12 @@ async function sendChat() {
   const input = $("chat-input");
   const text = input.value.trim();
   if (!text && chat.attachments.length === 0 && chat.docs.length === 0) return;
-  if (chat.abort) return;
+  if (chat.abort) {
+    // A reply is still streaming. Tell the user how to act instead of silently
+    // swallowing the send (the send button is a Stop control while streaming).
+    toast("Reply still streaming - press the stop button to interrupt", true);
+    return;
+  }
 
   if (text.startsWith("/")) {
     input.value = "";
