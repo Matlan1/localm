@@ -99,3 +99,48 @@ class TestUrlPull:
         monkeypatch.setattr("requests.head", MagicMock())
         mm._pull_url("http://example.com/model.gguf", "mymodel")
         get_spy.assert_not_called()
+
+
+class TestUrlPullResult:
+    """The bool return drives the CLI exit code and the GUI job status."""
+
+    def test_success_returns_true(self, url_env, monkeypatch):
+        _wire_http(monkeypatch, 10, _resp(200, b"0123456789"))
+        assert mm._pull_url("http://example.com/model.gguf", "m") is True
+
+    def test_already_downloaded_returns_true(self, url_env):
+        models, _ = url_env
+        (models / "model.gguf").write_bytes(b"already here")
+        assert mm._pull_url("http://example.com/model.gguf", "m") is True
+
+    def test_empty_stem_url_returns_false(self, url_env, monkeypatch):
+        """A URL whose path has no file name is rejected before any network I/O."""
+        get_spy = MagicMock()
+        monkeypatch.setattr("requests.get", get_spy)
+        monkeypatch.setattr("requests.head", MagicMock())
+        assert mm._pull_url("https://huggingface.co/asdasd/", "m") is False
+        get_spy.assert_not_called()
+
+    def test_http_error_returns_false(self, url_env, monkeypatch, capsys):
+        """A 404/bad URL yields a clear message and False, not a traceback."""
+        import requests
+
+        def boom_get(url, headers=None, stream=None, timeout=None):
+            resp = MagicMock()
+            resp.status_code = 404
+            err = requests.HTTPError("404 Not Found")
+            err.response = resp
+            raise err
+
+        monkeypatch.setattr("requests.head", MagicMock(
+            return_value=MagicMock(headers={"content-length": "0"})))
+        monkeypatch.setattr("requests.get", boom_get)
+        assert mm._pull_url("http://example.com/model.gguf", "m") is False
+        assert "download failed" in capsys.readouterr().out.lower()
+
+
+class TestPullModelDispatch:
+    def test_unknown_spec_returns_false(self, monkeypatch, capsys):
+        monkeypatch.setattr(mm, "resolve_spec", lambda s: s)
+        assert mm.pull_model("garbage-no-slash") is False
+        assert "unknown spec" in capsys.readouterr().out.lower()

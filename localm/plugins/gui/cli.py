@@ -128,7 +128,16 @@ def main(model, host, port, ctx, gpu_layers, no_browser, pull_spec, debug, mode,
                           "Opening the GUI - add one on the Models page"
                           + (" (download starting)…" if pull_spec else "."))
         else:
-            model = sorted(registry)[0]
+            # Pick the first entry that still resolves to a real model file or
+            # directory, skipping rows whose file is missing or is not a model,
+            # so one bad registry entry never blocks startup.
+            model = next((n for n in sorted(registry) if get_model_info(n)), None)
+            if model is None:
+                model_less = True
+                console.print(
+                    "[yellow]No loadable models in the registry "
+                    "(files missing or not a model).[/yellow] "
+                    "Opening the GUI - fix or add one on the Models page.")
 
     model_path = None
     display_name = ""
@@ -160,7 +169,17 @@ def main(model, host, port, ctx, gpu_layers, no_browser, pull_spec, debug, mode,
             display_name=name if name in load_registry() else m_hint,
         )
 
-    engine = None if model_less else _make_engine(model)
+    engine = None
+    if not model_less:
+        try:
+            engine = _make_engine(model)
+        except Exception as e:
+            # A single bad registry entry must not stop the server from starting;
+            # degrade to the model-less path and let the user pick on the Models page.
+            console.print(f"[yellow]Could not load model '{model}': {e}[/yellow]")
+            console.print("[yellow]Opening the GUI model-less - pick a model on "
+                          "the Models page.[/yellow]")
+            model_less = True
     app = hs.create_app(engine)
 
     state = {"model": "" if model_less else model}

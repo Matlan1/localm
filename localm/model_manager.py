@@ -21,6 +21,7 @@ from rich.progress import (
 from rich.table import Table
 
 from .config import (
+    HOME_DIR,
     MODELS_DIR,
     REGISTRY_FILE,
     ensure_dirs,
@@ -240,8 +241,10 @@ def get_model_info(name: str):
     if not direct.exists():
         return None
 
-    # HF model directory
-    if direct.is_dir() and (direct / "config.json").exists():
+    # HF model directory (config.json plus real weights/tokenizer, so the data
+    # dir's own config.json is not mistaken for a model)
+    from localm.inference.engine import _is_hf_dir
+    if _is_hf_dir(str(direct)):
         return direct, None
     # GGUF file - for split GGUFs, normalise to the first part (llama.cpp
     # needs the *-00001-of-N part to load the whole set)
@@ -314,18 +317,24 @@ def pull_model(
     name: Optional[str] = None,
     expected_sha256: Optional[str] = None,
     redownload: bool = False,
-) -> None:
+) -> bool:
+    """Download a model from HuggingFace or a URL.
+
+    Returns True on success or a benign no-op (already present / aliased /
+    user-skipped), False on a real error, so callers can set a non-zero exit
+    code and the GUI can mark the job failed instead of reporting "finished".
+    """
     spec = resolve_spec(model_spec)
     if spec.startswith("http://") or spec.startswith("https://"):
-        _pull_url(spec, name or _stem_from_url(spec),
-                  expected_sha256=expected_sha256, redownload=redownload)
+        return _pull_url(spec, name or _stem_from_url(spec),
+                         expected_sha256=expected_sha256, redownload=redownload)
     elif "/" in spec:
         if ":" in spec or spec.rsplit("/", 1)[-1].endswith(".gguf"):
             # owner/repo:file.gguf  or  owner/repo/file.gguf  -> single GGUF file
-            _pull_gguf_file(spec, name, redownload=redownload)
+            return _pull_gguf_file(spec, name, redownload=redownload)
         else:
             # owner/repo  (no filename) -> full HuggingFace snapshot
-            _pull_hf_snapshot(spec, name, redownload=redownload)
+            return _pull_hf_snapshot(spec, name, redownload=redownload)
     else:
         console.print(f"[red]Unknown spec:[/red] {model_spec}")
         console.print("Formats:")
@@ -333,6 +342,7 @@ def pull_model(
         console.print("  [bold]owner/repo:file.gguf[/bold]   single GGUF file")
         console.print("  [bold]https://...[/bold]             direct URL")
         console.print("Run [bold]localm models[/bold] for GGUF shortcuts.")
+        return False
 
 
 def _stem_from_url(url: str) -> str:
@@ -405,13 +415,13 @@ def _prompt_predownload_dup(dup_names: List[str], model_name: str) -> str:
     return {"a": "alias", "d": "download", "s": "skip"}[choice.lower()]
 
 
-def _pull_gguf_file(spec: str, name: Optional[str], redownload: bool = False) -> None:
+def _pull_gguf_file(spec: str, name: Optional[str], redownload: bool = False) -> bool:
     """Download a single .gguf file from a HuggingFace repo."""
     try:
         from huggingface_hub import hf_hub_download, hf_hub_url
     except ImportError:
         console.print("[red]Missing:[/red] huggingface-hub  (run: uv pip install huggingface-hub)")
-        return
+        return False
 
     if ":" in spec:
         repo_id, filename = spec.rsplit(":", 1)
@@ -435,7 +445,7 @@ def _pull_gguf_file(spec: str, name: Optional[str], redownload: bool = False) ->
     if not missing:
         console.print(f"[yellow]Already downloaded:[/yellow] {filename}")
         _register_with_dedup(model_name, dest, f"hf:{repo_id}", digest=expected)
-        return
+        return True
 
     # Pre-download duplicate check: same bytes already on disk elsewhere?
     if expected and not redownload:
@@ -443,10 +453,10 @@ def _pull_gguf_file(spec: str, name: Optional[str], redownload: bool = False) ->
         if dups:
             action = _prompt_predownload_dup(dups, model_name)
             if action == "skip":
-                return
+                return True
             if action == "alias":
                 alias_model(dups[0], model_name)
-                return
+                return True
             # "download" falls through
 
     ensure_dirs()
@@ -463,7 +473,7 @@ def _pull_gguf_file(spec: str, name: Optional[str], redownload: bool = False) ->
         total_size = 0
 
     if not _check_disk_space(MODELS_DIR, total_size):
-        return
+        return False
 
     if len(all_parts) > 1:
         console.print(
@@ -487,19 +497,20 @@ def _pull_gguf_file(spec: str, name: Optional[str], redownload: bool = False) ->
                     shutil.move(local, final)
             except Exception as e:
                 console.print(f"[red]Download failed[/red] ({part}): {e}")
-                return
+                return False
 
     _register(model_name, MODELS_DIR / filename, f"hf:{repo_id}", sha256=expected)
     console.print(f"[green]✓[/green] [bold]{model_name}[/bold] is ready")
+    return True
 
 
-def _pull_hf_snapshot(repo_id: str, name: Optional[str], redownload: bool = False) -> None:
+def _pull_hf_snapshot(repo_id: str, name: Optional[str], redownload: bool = False) -> bool:
     """Download a complete HuggingFace model repo (for transformers/HF format models)."""
     try:
         from huggingface_hub import snapshot_download
     except ImportError:
         console.print("[red]Missing:[/red] huggingface-hub  (run: uv pip install huggingface-hub)")
-        return
+        return False
 
     model_name = name or repo_id.split("/")[-1]
     dest = MODELS_DIR / model_name
@@ -507,7 +518,7 @@ def _pull_hf_snapshot(repo_id: str, name: Optional[str], redownload: bool = Fals
     if dest.exists() and (dest / "config.json").exists():
         console.print(f"[yellow]Already downloaded:[/yellow] {model_name}")
         _register_with_dedup(model_name, dest, f"hf:{repo_id}")
-        return
+        return True
 
     # Same repo already pulled under a different name?
     if not redownload:
@@ -524,7 +535,7 @@ def _pull_hf_snapshot(repo_id: str, name: Optional[str], redownload: bool = Fals
             if not sys.stdin.isatty():
                 console.print("[dim]Non-interactive session - skipping. "
                               "Use --redownload to force.[/dim]")
-                return
+                return True
             import click
             choice = click.prompt(
                 f"  [a]lias as '{model_name}'  [d]ownload anyway  [s]kip",
@@ -532,10 +543,10 @@ def _pull_hf_snapshot(repo_id: str, name: Optional[str], redownload: bool = Fals
                 default="a", show_choices=False,
             )
             if choice.lower() == "s":
-                return
+                return True
             if choice.lower() == "a":
                 alias_model(same_source[0], model_name)
-                return
+                return True
 
     ensure_dirs()
     console.print(
@@ -568,10 +579,11 @@ def _pull_hf_snapshot(repo_id: str, name: Optional[str], redownload: bool = Fals
             )
     except Exception as e:
         console.print(f"[red]Download failed:[/red] {e}")
-        return
+        return False
 
     _register(model_name, dest, f"hf:{repo_id}")
     console.print(f"[green]✓[/green] [bold]{model_name}[/bold] downloaded to {dest}")
+    return True
 
 
 def _sha256_file(path: Path) -> str:
@@ -684,18 +696,26 @@ def _pull_url(
     name: str,
     expected_sha256: Optional[str] = None,
     redownload: bool = False,
-) -> None:
+) -> bool:
     """Download a model from a direct URL with resumable .part file support."""
     import requests
 
-    filename = _stem_from_url(url) + ".gguf"
+    stem = _stem_from_url(url)
+    if not stem:
+        console.print(
+            f"[red]Invalid URL - no file name in the path:[/red] {url}\n"
+            "A direct URL must point at a file, e.g. https://host/model.gguf"
+        )
+        return False
+
+    filename = stem + ".gguf"
     dest      = MODELS_DIR / filename
     part_file = MODELS_DIR / (filename + ".part")
 
     if dest.exists():
         console.print(f"[yellow]Already downloaded:[/yellow] {filename}")
         _register_with_dedup(name, dest, url)
-        return
+        return True
 
     # Pre-download check by user-supplied hash (URL servers can't tell us one)
     if expected_sha256 and not redownload:
@@ -703,10 +723,10 @@ def _pull_url(
         if dups:
             action = _prompt_predownload_dup(dups, name)
             if action == "skip":
-                return
+                return True
             if action == "alias":
                 alias_model(dups[0], name)
-                return
+                return True
 
     ensure_dirs()
 
@@ -722,7 +742,7 @@ def _pull_url(
 
     remaining = max(0, total - already_have)
     if not _check_disk_space(MODELS_DIR, remaining):
-        return
+        return False
 
     # Build request - try to resume from where we left off
     headers: dict = {}
@@ -735,8 +755,16 @@ def _pull_url(
     else:
         console.print(f"Downloading [bold cyan]{url}[/bold cyan]")
 
-    r = requests.get(url, headers=headers, stream=True, timeout=30)
-    r.raise_for_status()
+    try:
+        r = requests.get(url, headers=headers, stream=True, timeout=30)
+        r.raise_for_status()
+    except requests.HTTPError as e:
+        code = getattr(e.response, "status_code", "?")
+        console.print(f"[red]Download failed[/red] (HTTP {code}): {url}")
+        return False
+    except requests.RequestException as e:
+        console.print(f"[red]Could not reach[/red] {url}: {e}")
+        return False
 
     # Server may ignore the Range header - detect and reset if needed
     if already_have and r.status_code == 200:
@@ -775,7 +803,7 @@ def _pull_url(
                 f"got {actual[:16]}… - deleting corrupted file"
             )
             dest.unlink()
-            return
+            return False
     else:
         console.print(f"[dim]SHA256: {actual}[/dim]")
 
@@ -801,10 +829,11 @@ def _pull_url(
                 if dest.resolve() != existing_path.resolve():
                     dest.unlink()
                 alias_model(dups[0], name)
-                return
+                return True
 
     _register(name, dest, url, sha256=actual)
     console.print(f"[green]✓[/green] [bold]{name}[/bold] is ready")
+    return True
 
 
 def _register(
@@ -1211,15 +1240,28 @@ def add_local(
         )
         return
 
-    is_gguf = p.suffix == ".gguf"
-    is_hf   = p.is_dir() and (p / "config.json").exists()
+    # Refuse the localm data directory (and its models root): its config.json is
+    # the app's settings file, not a model config, so registering it would poison
+    # the registry and make the loader choke on a non-model directory.
+    if p in {HOME_DIR.resolve(), MODELS_DIR.resolve()}:
+        console.print(
+            f"[red]That is the localm data folder, not a model:[/red] {p}\n"
+            "Point at a .gguf file or a specific model directory."
+        )
+        return
+
+    from localm.inference.engine import _is_hf_dir
+    is_gguf = p.is_file() and p.suffix == ".gguf"
+    is_hf   = _is_hf_dir(str(p))  # config.json AND real weights/tokenizer
     is_blob = p.is_file() and p.name.startswith("sha256-")  # raw Ollama blob by path
 
     if not (is_gguf or is_hf or is_blob):
         console.print(
-            "[yellow]Warning:[/yellow] path doesn't look like a GGUF file, "
-            "HuggingFace model directory, or Ollama blob."
+            f"[red]Not a model:[/red] {p}\n"
+            "Expected a .gguf file or a HuggingFace model directory "
+            "(config.json plus weights or a tokenizer)."
         )
+        return
 
     model_name = name or p.stem
     kind = "hf" if is_hf else "local"

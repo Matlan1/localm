@@ -398,6 +398,49 @@ class TestModelEndpoints:
         assert r.json()["status"] == "loaded"
         assert switched == ["model-b"]
 
+    def _capture_pull_args(self, monkeypatch):
+        """Patch JobManager.start_cli to capture the argv it would run."""
+        captured = {}
+
+        class _FakeJob:
+            id = "job-test"
+
+        def fake_start_cli(self, kind, cli_args, **kw):
+            captured["kind"] = kind
+            captured["args"] = list(cli_args)
+            return _FakeJob()
+
+        monkeypatch.setattr(
+            "localm.plugins.gui.jobs.JobManager.start_cli", fake_start_cli)
+        return captured
+
+    def test_pull_passes_spec_after_double_dash(self, gui_app, monkeypatch):
+        """A flag-like spec (e.g. -h) must reach the CLI as the argument, not an
+        option, so Click never dumps help text or a usage error."""
+        app, _ = gui_app
+        captured = self._capture_pull_args(monkeypatch)
+        with TestClient(app) as client:
+            r = client.post("/api/models/pull", json={"spec": "-h"})
+        assert r.status_code == 200
+        assert captured["args"] == ["pull", "--", "-h"]
+
+    def test_pull_name_option_precedes_separator(self, gui_app, monkeypatch):
+        app, _ = gui_app
+        captured = self._capture_pull_args(monkeypatch)
+        with TestClient(app) as client:
+            r = client.post(
+                "/api/models/pull", json={"spec": "owner/repo", "name": "alias1"})
+        assert r.status_code == 200
+        assert captured["args"] == ["pull", "--name", "alias1", "--", "owner/repo"]
+
+    def test_pull_rejects_all_dash_spec(self, gui_app, monkeypatch):
+        app, _ = gui_app
+        self._capture_pull_args(monkeypatch)
+        with TestClient(app) as client:
+            for bad in ("--", "-", "   "):
+                r = client.post("/api/models/pull", json={"spec": bad})
+                assert r.status_code == 400
+
 
 @pytest.fixture
 def coder_app(tmp_path, monkeypatch):
@@ -729,6 +772,30 @@ class TestJobs:
         assert events[-1]["type"] == "end"
         assert events[-1]["status"] == "done"
         assert any("localm" in e.get("text", "") for e in events if e["type"] == "line")
+
+    def test_pull_flaglike_spec_fails_not_help(self):
+        """End-to-end: `pull -- -h` treats -h as the spec (unknown) and exits
+        non-zero, so the job is 'failed' and no Click help text is dumped."""
+        from localm.plugins.gui.jobs import JobManager
+        mgr = JobManager()
+        # cli_args is the full argv after "-m localm" (the endpoint passes the
+        # "pull" subcommand itself), so this runs: localm pull -- -h
+        job = mgr.start_cli("pull", ["pull", "--", "-h"])
+        events = []
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            try:
+                ev = job.events.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            events.append(ev)
+            if ev["type"] == "end":
+                break
+        assert events[-1]["type"] == "end"
+        assert events[-1]["status"] == "failed"
+        text = " ".join(e.get("text", "") for e in events if e["type"] == "line")
+        assert "Usage:" not in text          # help was NOT dumped
+        assert "Unknown spec" in text        # treated as a (bad) model spec
 
     def test_fn_job_success_and_failure(self):
         from localm.plugins.gui.jobs import JobManager
