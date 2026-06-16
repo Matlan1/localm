@@ -10,6 +10,10 @@
 /* ================================================================ */
 
 window.onViewShown = (name) => {
+  // Re-sync the plugin command catalog on entering a composer so a plugin
+  // toggled elsewhere (CLI, another tab) updates the slash hints without a
+  // full reload (refreshPluginCommands lives in app.js, shared global scope).
+  if (name === "chat" || name === "coder") refreshPluginCommands();
   if (name === "coder") { populateSetupModels(); presetCoderMode(); }
   if (name === "models") refreshModelsPage();
   if (name === "images") refreshImageHistory();
