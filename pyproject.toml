@@ -47,7 +47,7 @@ coder = [
 # AMD RDNA2 (RX 6xxx) GPU stack - ROCm 7.13.0, Python 3.12, Windows
 # Install with:  uv pip install -e ".[gpu]"  (requires Python 3.12 venv)
 gpu = [
-    "transformers[kernels]~=5.10",
+    "transformers[kernels]~=5.12",
     "accelerate>=1.0",
     "pillow>=10.0",
     "torch==2.9.1+rocm7.13.0; sys_platform == 'win32'",
