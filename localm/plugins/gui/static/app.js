@@ -3077,7 +3077,13 @@ function attachSlashMenu(textarea, commands, execute) {
   function render() {
     const value = textarea.value;
     if (!value.startsWith("/") || value.includes("\n")) { close(); return; }
-    const typed = value.slice(1).split(" ")[0].toLowerCase();
+    // Once a space is typed the command token is complete and the user is
+    // entering arguments - close the menu so Enter SENDS the whole line
+    // ("/remember some note") instead of the menu's Enter handler calling
+    // pick(), which overwrites the input with "/cmd " and discards the args.
+    const rest = value.slice(1);
+    if (rest.includes(" ")) { close(); return; }
+    const typed = rest.toLowerCase();
     visible = commands.filter((c) => c.cmd.startsWith(typed));
     if (!visible.length) { close(); return; }
     selected = Math.min(selected, visible.length - 1);
