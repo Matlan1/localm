@@ -401,9 +401,9 @@ the coder agent, and contribute a GUI tab or client assets. The full authoring
 contract (manifest fields, tool-export signature, surfaces, privacy rules) lives
 in **[docs/plugins.md](docs/plugins.md)**; foreign-ecosystem interop (importing
 plugins from other tools over the MCP spine) is in
-[docs/plugin-interop.md](docs/plugin-interop.md). Folder install of a third-party
-plugin from a local path is supported by the engine; installation is a local
-directory copy, fully offline.
+[docs/plugin-interop.md](docs/plugin-interop.md). Install a third-party plugin
+from a local path with `localm plugin install <path>` (the same command takes a
+store name or a directory); installation is a local directory copy, fully offline.
 
 Tools exported by an installed plugin are registered with the coder as
 `plugin_<plugin>_<tool>` and described to the model exactly like an MCP tool, and
