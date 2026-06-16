@@ -236,7 +236,10 @@ $("theme-toggle").onclick = () =>
 /*  Tabs                                                             */
 /* ================================================================ */
 
-const VIEWS = ["chat", "coder", "models", "images", "music", "video", "knowledge", "plugins", "settings"];
+// Kernel pages are always present; plugin views (coder, images, music, video,
+// knowledge) are added to VIEWS by renderNav() while their plugin is active.
+const CORE_VIEWS = ["chat", "models", "plugins", "settings"];
+let VIEWS = [...CORE_VIEWS];
 
 function showView(name) {
   // Fall back to chat for an unknown name OR a view whose section is gone
@@ -253,7 +256,9 @@ function showView(name) {
   // Lazy page refreshes live in pages.js
   if (window.onViewShown) window.onViewShown(name);
 }
-for (const v of VIEWS) $("nav-" + v).onclick = () => showView(v);
+// Kernel nav buttons are static; plugin nav buttons get their handler in
+// renderNav() as they are (re)created from the active-plugin set.
+for (const v of CORE_VIEWS) $("nav-" + v).onclick = () => showView(v);
 
 /* ================================================================ */
 /*  Models (sidebar selector)                                        */
@@ -1338,6 +1343,8 @@ async function refreshPluginCommands() {
     }
     pluginCommands.map = map;
     pluginCommands.suggest = data.suggest_plugins !== false;
+    pluginState = data.plugins || [];
+    renderNav();
   } catch { /* server unreachable; fall back to plain unknown-command */ }
 }
 
@@ -1348,6 +1355,111 @@ function pluginSuggestion(cmd) {
   const hit = pluginCommands.map[cmd];
   if (!hit || hit.active) return null;
   return `/${cmd} needs the ${hit.plugin} plugin - install or enable it on the Plugins page.`;
+}
+
+/* ---- dynamic nav rail (tabs follow the active plugins) ---- */
+// The most recent /api/plugins entries, refreshed alongside the command cache.
+let pluginState = [];
+
+// Each plugin's manifest icon name -> the nav emoji. Kernel buttons keep their
+// own emoji in index.html; "studio" is the media parent.
+const NAV_ICON = { chat: "💬", code: "⚙️", image: "🖼️", music: "🎵", video: "🎬", book: "📚" };
+// Canonical rail order of first-party plugin tabs (stable so the rail does not
+// reshuffle as plugins toggle); "studio" is the media slot (image/music/video).
+const NAV_TAB_ORDER = ["coder", "studio", "knowledge"];
+
+function _navButton(id, icon, label, onClick, cls) {
+  const b = el("button", cls || "", `${icon} ${label}`);
+  b.id = id;
+  b.onclick = onClick;
+  return b;
+}
+
+/** Rebuild the plugin portion of the nav rail from the active-with-a-tab
+ *  plugins, then re-derive VIEWS and re-assert the active tab. */
+function renderNav() {
+  const slot = $("nav-plugin-slot");
+  if (!slot) return;
+  slot.replaceChildren();
+  // chat owns a tab but is the static kernel anchor; never render it (or any
+  // plugin claiming a kernel view) as a dynamic tab.
+  const active = pluginState.filter(
+    (p) => p.active && p.tab && !CORE_VIEWS.includes(p.tab));
+  const studio = active.filter((p) => p.group === "studio");
+  const flat = active.filter((p) => p.group !== "studio");
+  const byTab = {};
+  for (const p of flat) byTab[p.tab] = p;
+
+  const renderFlat = (p) => slot.appendChild(_navButton(
+    "nav-" + p.tab, NAV_ICON[p.icon] || "•", p.label || p.name, () => showView(p.tab)));
+
+  const done = new Set();
+  for (const key of NAV_TAB_ORDER) {
+    if (key === "studio") { renderStudioGroup(slot, studio); continue; }
+    if (byTab[key]) { renderFlat(byTab[key]); done.add(key); }
+  }
+  // any other active plugin tab not in the canonical order, in catalog order
+  for (const p of flat) if (!done.has(p.tab)) renderFlat(p);
+
+  rebuildViews();
+  reconcileActiveView();
+}
+
+/** Studio hybrid grouping: nothing for 0 media plugins, a single flat tab for
+ *  exactly 1, and one stable-position "Studio" parent expanding to the active
+ *  children for 2+. */
+function renderStudioGroup(slot, studio) {
+  if (studio.length === 0) return;
+  if (studio.length === 1) {
+    const p = studio[0];
+    slot.appendChild(_navButton(
+      "nav-" + p.tab, NAV_ICON[p.icon] || "•", p.label || p.name, () => showView(p.tab)));
+    return;
+  }
+  const order = ["images", "music", "video"];
+  const kids = order.map((t) => studio.find((p) => p.tab === t)).filter(Boolean);
+  const activeView = (document.querySelector(".view.active") || { id: "view-chat" })
+    .id.replace("view-", "");
+  const hasActiveKid = kids.some((p) => p.tab === activeView);
+  const open = hasActiveKid ||
+    (chat.privacy ? true : localStorage.getItem("localm.studioOpen") !== "0");
+
+  const wrap = el("div", "nav-group");
+  const parent = el("button", "nav-group-parent" + (open ? " open" : ""), "🎨 Studio");
+  const children = el("div", "nav-children");
+  children.style.display = open ? "block" : "none";
+  parent.onclick = () => {
+    const nowOpen = children.style.display === "none";
+    children.style.display = nowOpen ? "block" : "none";
+    parent.classList.toggle("open", nowOpen);
+    if (!chat.privacy) localStorage.setItem("localm.studioOpen", nowOpen ? "1" : "0");
+  };
+  for (const p of kids) {
+    children.appendChild(_navButton(
+      "nav-" + p.tab, NAV_ICON[p.icon] || "•", p.label || p.name,
+      () => showView(p.tab), "nav-child"));
+  }
+  wrap.appendChild(parent);
+  wrap.appendChild(children);
+  slot.appendChild(wrap);
+}
+
+function rebuildViews() {
+  const tabs = pluginState
+    .filter((p) => p.active && p.tab && !CORE_VIEWS.includes(p.tab))
+    .map((p) => p.tab);
+  VIEWS = ["chat", ...tabs, "models", "plugins", "settings"];
+}
+
+// After the rail is rebuilt, keep the shown view reachable: if its plugin was
+// just disabled/uninstalled, fall back to chat; otherwise re-assert the active
+// highlight on the (possibly freshly created) nav button.
+function reconcileActiveView() {
+  const cur = document.querySelector(".view.active");
+  const name = cur ? cur.id.replace("view-", "") : "chat";
+  const ok = CORE_VIEWS.includes(name) ||
+             pluginState.some((p) => p.active && p.tab === name);
+  showView(ok ? name : "chat");
 }
 
 /* ---- assistant memory ---- */

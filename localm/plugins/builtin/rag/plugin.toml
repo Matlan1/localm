@@ -5,3 +5,8 @@ description = "Document collections for retrieval-augmented chat (knowledge base
 scope = "rag"
 register = "plug"
 data_subdir = "rag"
+
+[surface]
+tab_id = "knowledge"
+label = "Knowledge"
+icon = "book"

@@ -14,13 +14,12 @@
   <aside id="sidebar">
     <div id="logo">local<span>m</span></div>
     <nav>
+      <!-- chat (protected #0), models/plugins/settings are kernel pages and
+           stay static; the plugin tabs (coder, studio media, knowledge, ...)
+           are rendered into nav-plugin-slot by renderNav() from /api/plugins. -->
       <button id="nav-chat" class="active">&#128172; Chat</button>
-      <button id="nav-coder">&#9881;&#65039; Coder</button>
+      <div id="nav-plugin-slot"></div>
       <button id="nav-models">&#128230; Models</button>
-      <button id="nav-images">&#127912; Images</button>
-      <button id="nav-music">&#127925; Music</button>
-      <button id="nav-video">&#127916; Video</button>
-      <button id="nav-knowledge">&#128218; Knowledge</button>
       <button id="nav-plugins">&#129513; Plugins</button>
       <button id="nav-settings">&#9965; Settings</button>
     </nav>
