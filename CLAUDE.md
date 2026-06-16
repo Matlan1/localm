@@ -17,3 +17,9 @@ The four rules, in short (see `AGENTS.md` for the full text and rationale):
    folder on disk.
 
 Enforce with `python scripts/check_hygiene.py` before committing.
+
+Verifying changes: you are pre-approved to launch a local test instance of the
+full app (`localm gui`, `localm serve`, `localm run`) to check a change in the
+real product, no need to ask. Use a small model (a tiny GGUF, or
+`localm gui --no-model`), prefer a throwaway `LOCALM_HOME` so it does not touch
+the user's real data, and stop it when done. See `AGENTS.md` for the full text.
