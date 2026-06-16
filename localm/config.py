@@ -127,6 +127,12 @@ DEFAULT_CONFIG: dict = {
     # entry as "missing" (kept, shown in the list); True deletes the entry.
     # Only files under the models folder are ever auto-deleted.
     "autoprune_missing_models": False,
+    # When the user invokes a command that belongs to a known first-party plugin
+    # that is not installed/enabled (e.g. /generate-image with the image plugin
+    # off), suggest installing it ("that needs the image plugin - install it?")
+    # instead of "unknown command". False silences the hint; a truly unknown
+    # command always errors regardless.
+    "suggest_plugins": True,
 }
 
 # localm claims 8642-8741 - far from ComfyUI (8188), A1111 (7860),

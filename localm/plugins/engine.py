@@ -710,6 +710,7 @@ class PluginManager:
                 "requires_extras": spec.requires_extras if spec else [],
                 "requires": spec.requires if spec else [],
                 "extra": cat.extra if cat else "",
+                "commands": list(cat.commands) if cat else [],
                 "installed": name in installed,
                 "enabled": name in enabled,
                 "active": (name in installed) and (name in enabled),
@@ -725,8 +726,10 @@ class PluginManager:
             if name in seen:
                 continue
             plugins.append(_entry(store.get(name), name, available=True))
+        from localm.config import load_config
         return {"plugins": plugins,
-                "errors": {**self._discover_errors, **self._errors}}
+                "errors": {**self._discover_errors, **self._errors},
+                "suggest_plugins": bool(load_config().get("suggest_plugins", True))}
 
 
 # --------------------------------------------------------------------------- #

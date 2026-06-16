@@ -129,6 +129,12 @@ CORE_FIELDS: list = [
                  "Confirm before deleting models", group="Models"),
     SettingField("autoprune_missing_models", Widget.TOGGLE,
                  "Auto-remove registry entries for missing files", group="Models"),
+    # ---- Plugins ----
+    SettingField("suggest_plugins", Widget.TOGGLE,
+                 "Suggest installing a plugin for its command",
+                 "When a command belongs to a known but inactive plugin, suggest "
+                 "installing it instead of reporting an unknown command.",
+                 group="Plugins"),
     # ---- Coder (plugin) ----
     SettingField("coder_confirm_timeout", Widget.NUMBER,
                  "Coder approval timeout (s)", group="Coder", owner="coder",

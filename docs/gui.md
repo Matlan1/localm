@@ -25,7 +25,7 @@ same flows (file / folder / URL).
 
 ## Chat
 
-- Typing `/` opens a command menu: `/imagine <prompt>` (generate an image
+- Typing `/` opens a command menu: `/generate-image <prompt>` (generate an image
   inline - provided by the image plugin, so it is unavailable until that
   plugin is installed and enabled), `/web <query>` (search the web, answer with
   sources), `/clear`, `/compact`, `/export`, `/rename <title>`, `/system`,
@@ -173,13 +173,13 @@ three top-level tabs; Knowledge is the rag plugin.
   tags, optional lyrics ([verse]/[chorus] markers), and an **arbitrary track
   length in seconds**; seed/steps/CFG for control. Same VRAM handover as image
   generation. History with inline playback, move-to-folder, and delete.
-  `/music <tags>` in chat generates a default-length instrumental inline, and
+  `/generate-music <tags>` in chat generates a default-length instrumental inline, and
   `localm music "tags" --lyrics song.txt -d 180` does it from the terminal.
 - **Video**: generate short clips with the local ComfyUI Wan 2.2 workflow -
   prompt + negative, duration (snapped to the model's frame rule; ~5 s is the
   native length), fps, resolution, seed/steps/CFG, and an optional start image
   (image-to-video). Same VRAM handover; history with inline playback,
-  move-to-folder, and delete. `/video <prompt>` in chat generates a default
+  move-to-folder, and delete. `/generate-video <prompt>` in chat generates a default
   ~5 s clip inline, and `localm video "prompt"` does it from the terminal.
   Video is the slowest generator - see [docs/video.md](video.md) for model
   setup and honest timing expectations.

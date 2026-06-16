@@ -45,14 +45,14 @@ localm core (model loader plus plugin engine) provides GGUF/HF inference, the Op
 | **Text-to-speech** (tts plugin) | Read replies aloud with in-browser Kokoro neural voices. Synthesis runs entirely client-side (vendored kokoro-js), so it ships no Python dependency and writes nothing to disk, keeping privacy mode trace-free; shipped as a client-asset plugin |
 | **MCP client** (mcp plugin) | The coder consumes external MCP tool servers from `.localcoder/config.toml` |
 | **MCP server** (mcp plugin) | `localm mcp` exposes your local models to Claude Desktop and other MCP clients ([guide](docs/mcp.md)) |
-| **Interactive chat** | Multi-turn shell with `/imagine` (image plugin), `/compact`, `/clear`, `/image`, `/system`, `/save` |
+| **Interactive chat** | Multi-turn shell with `/generate-image` (image plugin), `/compact`, `/clear`, `/image`, `/system`, `/save` |
 | **Model registry** (core) | Pull from HuggingFace (split GGUF supported), aliases, SHA256 dedup, tab completion |
 | **Model discovery** (core) | Search HF from the Models page or `localm search`; per-quant sizes with "fits your VRAM" badges (torch-free VRAM detection) |
 | **Abliteration** | `localm abliterate`: decensor a model with [Heretic](https://github.com/Matlan1/heretic-win-AMD) (a separate AGPL program, run as a subprocess), then auto-register the result (`localm[abliterate]` extra) |
 | **Folder auto-sync** (core) | `localm list`/`gui`/launcher reconcile the registry with the models folder on start; missing files are flagged, not deleted (opt-in `autoprune_missing_models`) |
 | **Image generation** (image plugin) | `generate_image` tool drives a local ComfyUI FLUX pipeline with VRAM handover (requires ComfyUI + models, see [docs/flux-setup.md](docs/flux-setup.md)) |
-| **Music generation** (music plugin) | ACE-Step via the same ComfyUI server: arbitrary track length, lyrics or instrumental (`localm music`, Music page, `/music`) |
-| **Video generation** (video plugin) | Wan 2.2 short clips (~5 s native, text- or image-to-video) via ComfyUI (`localm video`, Video page, `/video`; [guide](docs/video.md)) |
+| **Music generation** (music plugin) | ACE-Step via the same ComfyUI server: arbitrary track length, lyrics or instrumental (`localm music`, Music page, `/generate-music`) |
+| **Video generation** (video plugin) | Wan 2.2 short clips (~5 s native, text- or image-to-video) via ComfyUI (`localm video`, Video page, `/generate-video`; [guide](docs/video.md)) |
 | **Plugins** | First-party store plugins (above) plus third-party folders: install/enable/disable/uninstall from the CLI or GUI, export agent tools, add CLI commands and GUI tabs ([authoring guide](docs/plugins.md)) |
 | **Multimodal** (core) | Image attachment via `--image` or `/image` with a HuggingFace-format vision model. The built-in GGUF backend is text-only and rejects an attached image with a clear error rather than silently ignoring it. |
 | **Ollama interop** (core) | Register Ollama blobs directly via `localm add <manifest-dir>` |
@@ -165,8 +165,8 @@ localm gui mymodel        # or name one
 
 Chat, the coder agent, model management, and image generation in one page.
 The model preloads in the background so the first reply is fast, and typing
-`/` in any composer opens a command menu. `/imagine` is provided by the image
-plugin and generates images inline; it is unavailable until that plugin is
+`/` in any composer opens a command menu. `/generate-image` is provided by the
+image plugin and generates images inline; it is unavailable until that plugin is
 installed (`localm plugin install image`). See [docs/gui.md](docs/gui.md).
 
 ### Start the inference server
