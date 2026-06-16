@@ -897,41 +897,54 @@ const _CONFIG_SKIP = new Set(["cors_origins", "net_allow", "net_deny",
                               "effective_coder_mode", "effective_ctx_max"]);
 
 let _configSnapshot = {};
+// Monotonic token so overlapping refreshes don't both render. The old code
+// cleared the form BEFORE its `await fetch`, then appended after - two
+// concurrent runs each cleared then appended, doubling every field (60 inputs
+// instead of 30). Now each run clears+appends only if it is still the latest,
+// AND clears right before appending (no clear-before-await gap).
+let _settingsRenderToken = 0;
 
 async function refreshSettingsPage() {
+  const myToken = ++_settingsRenderToken;
   $("gui-api-key").value = localStorage.getItem("localm.apiKey") || "";
   const form = $("config-form");
-  form.replaceChildren();
+  let cfg;
   try {
     const r = await fetch("/v1/config", { headers: authHeaders() });
     if (!r.ok) throw new Error(r.statusText);
-    _configSnapshot = await r.json();
-    for (const [key, value] of Object.entries(_configSnapshot)) {
-      if (_CONFIG_SKIP.has(key)) continue;
-      const wrap = el("div");
-      wrap.appendChild(el("label", "", key));
-      let input;
-      if (typeof value === "boolean") {
-        input = document.createElement("input");
-        input.type = "checkbox";
-        input.checked = value;
-        input.style.width = "auto";
-      } else if (typeof value === "number") {
-        input = document.createElement("input");
-        input.type = "number";
-        input.step = Number.isInteger(value) ? "1" : "0.05";
-        input.value = value;
-      } else {
-        input = document.createElement("input");
-        input.type = "text";
-        input.value = value ?? "";
-      }
-      input.dataset.key = key;
-      wrap.appendChild(input);
-      form.appendChild(wrap);
-    }
+    cfg = await r.json();
   } catch (e) {
-    form.appendChild(el("div", "sub", "Could not load config: " + e.message));
+    if (myToken === _settingsRenderToken) {
+      form.replaceChildren(el("div", "sub", "Could not load config: " + e.message));
+    }
+    return;
+  }
+  if (myToken !== _settingsRenderToken) return;  // a newer refresh superseded us
+  _configSnapshot = cfg;
+  form.replaceChildren();
+  for (const [key, value] of Object.entries(_configSnapshot)) {
+    if (_CONFIG_SKIP.has(key)) continue;
+    const wrap = el("div");
+    wrap.appendChild(el("label", "", key));
+    let input;
+    if (typeof value === "boolean") {
+      input = document.createElement("input");
+      input.type = "checkbox";
+      input.checked = value;
+      input.style.width = "auto";
+    } else if (typeof value === "number") {
+      input = document.createElement("input");
+      input.type = "number";
+      input.step = Number.isInteger(value) ? "1" : "0.05";
+      input.value = value;
+    } else {
+      input = document.createElement("input");
+      input.type = "text";
+      input.value = value ?? "";
+    }
+    input.dataset.key = key;
+    wrap.appendChild(input);
+    form.appendChild(wrap);
   }
 }
 
