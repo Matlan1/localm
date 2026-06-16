@@ -31,6 +31,8 @@ class Widget:
     FOLDER   = "folder"     # a directory (free text + folder picker)
     SECRET   = "secret"     # masked; never returned in plaintext
     LIST     = "list"       # list of strings (e.g. domains)
+    HIDDEN   = "hidden"     # a config value managed elsewhere (e.g. the Plugins
+                            # page), NOT rendered as a settings control
 
 
 class Applies:
@@ -134,6 +136,10 @@ CORE_FIELDS: list = [
                  "Suggest installing a plugin for its command",
                  "When a command belongs to a known but inactive plugin, suggest "
                  "installing it instead of reporting an unknown command.",
+                 group="Plugins"),
+    SettingField("plugins_enabled", Widget.HIDDEN, "Enabled plugins",
+                 "Names of enabled engine plugins. Managed by the Plugins page "
+                 "and `localm plugin enable/disable`, not edited here.",
                  group="Plugins"),
     # ---- Coder (plugin) ----
     SettingField("coder_confirm_timeout", Widget.NUMBER,
