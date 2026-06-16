@@ -1,6 +1,12 @@
-# localm GUI: Plan and status
+# localm GUI: web-first vs Tauri (historical ADR)
 
-**Implemented:** web-first GUI as a built-in plugin (`localm/plugins/gui/`), served by the existing FastAPI server. `localm gui` starts the server and opens the browser. See `docs/gui.md`.
+Historical architecture-decision record for why the web-first GUI shipped instead
+of the originally planned Tauri shell. Kept for the rationale; for current GUI
+behaviour see `docs/gui.md` and `docs/architecture.md`.
+
+---
+
+**Implemented:** web-first GUI served by the FastAPI server (`localm/plugins/gui/`). `localm gui` starts the server and opens the browser. See `docs/gui.md`.
 
 **Original plan:** Tauri 2 + Svelte 5 native shell. Deliberately deferred, not abandoned.
 
