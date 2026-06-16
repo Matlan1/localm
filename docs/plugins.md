@@ -126,6 +126,7 @@ instant and clean.
 | `engine()` | Handle to the inference engine. |
 | `audit(event, data)` | Log a plugin event. |
 | `browse_dirs(path)` | Server-side folder picker helper. |
+| `register_chat_hook(phase, fn, *, priority=0)` | Register an inlet/stream/outlet transform that runs on every chat turn (see [Chat pipeline hooks](#chat-pipeline-hooks)). |
 
 A routes-only plugin (`voice`) is just:
 
@@ -163,6 +164,63 @@ Kokoro neural TTS entirely in the browser and registers a speech provider via
 `ctx.registerTTS(...)`. It writes nothing to the server, so it stays trace-free
 in privacy mode with no gating. The client context (`ctx`) exposes
 `registerTTS`, `toast`, `authHeaders`, and `voicesChanged`.
+
+## Chat pipeline hooks
+
+A plugin can intercept and transform a chat turn server-side by registering
+hooks on the kernel chat pipeline. This is the seam that wraps Open WebUI
+*Filter* functions and oobabooga input/output text modifiers (see
+[plugin-interop.md](plugin-interop.md)); it is also a clean way to inject
+context, redact, translate, or annotate every turn.
+
+`host.register_chat_hook(phase, fn, *, priority=0)` takes one of three phases:
+
+| Phase | Signature | When |
+|-------|-----------|------|
+| `inlet` | `fn(messages, ctx) -> messages` (sync or async) | before token counting and inference; transform the message list |
+| `stream` | `fn(token, ctx) -> token` (**sync only**) | per streamed text piece on the hot path; an async fn is skipped |
+| `outlet` | `fn(text, messages, ctx) -> text` (sync or async) | on the final reply text |
+
+Returning `None` keeps the prior value (so a hook may mutate in place and return
+nothing). Lower `priority` runs first; ties keep registration order. A hook that
+raises is logged and skipped, never breaking the turn. The engine drops a
+plugin's hooks automatically when it is disabled or uninstalled.
+
+`ctx` (`ChatHookContext`) carries `model_id`, `stream`, `request_id`, and a
+mutable `state` dict shared across the inlet/stream/outlet of one request (so an
+inlet can stash data its outlet reads). `principal` / `scopes` are reserved for
+future per-user gating and are unset in open mode.
+
+```python
+def _inlet(messages, ctx):
+    messages.insert(0, {"role": "system", "content": "Answer concisely."})
+    return messages
+
+def _outlet(text, messages, ctx):
+    return text.replace("secret", "[redacted]")
+
+def register(host):
+    host.register_chat_hook("inlet", _inlet)
+    host.register_chat_hook("outlet", _outlet)
+
+def unregister():
+    pass
+```
+
+Scope and limits:
+
+- The chain runs for **every** `/v1/chat/completions` client (the GUI, raw API
+  callers, and the coder agent pointed at localm). It does **not** run for the
+  in-process `localm run` REPL, which calls the engine directly.
+- Hooks see scrubbed content text, not model-internal control markers (the
+  pipeline sits downstream of the engine's marker scrubbing).
+- This is a server-side seam. It is independent of localm's existing
+  client-side RAG / memory / web injection (assembled in the SPA before the
+  request is sent), which it does not replace.
+- In a streaming turn, `inlet` and `stream` affect what the client receives, but
+  `outlet` runs after all chunks have been sent, so it only shapes the recorded
+  reply (audit / transcript / side-effects). Use a `stream` hook to rewrite
+  streamed output live.
 
 ## Dependencies
 

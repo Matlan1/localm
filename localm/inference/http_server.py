@@ -21,7 +21,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator, List, Optional
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -30,6 +30,7 @@ from localm import scopes
 from localm.inference.backends.base import (
     IMAGE_UNSUPPORTED_MESSAGE, messages_contain_image,
 )
+from localm.inference.chat_pipeline import ChatHookContext, ChatPipeline
 from localm.inference.engine import Engine
 from localm.inference.protocol import (
     ChatChunk, ChatRequest, ChatResponse, CompletionRequest, EmbeddingRequest,
@@ -124,6 +125,12 @@ def create_app(engine: Engine) -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
     )
+
+    # Chat-pipeline hooks: plugins register inlet/stream/outlet transforms that
+    # run on every /v1/chat/completions turn. Created here so it exists before
+    # plugins load (attach_engine, below) and stays reachable as
+    # request.app.state.chat_pipeline. A pipeline with no hooks is a no-op.
+    app.state.chat_pipeline = ChatPipeline()
 
     # Debug mode: log every request with timing to the debug log file
     from localm.debuglog import debug_enabled, logger as _dbg
@@ -391,12 +398,26 @@ def create_app(engine: Engine) -> FastAPI:
     # ---------------------------------------------------------------- #
 
     @app.post("/v1/chat/completions", dependencies=[Depends(_require_auth)])
-    async def chat_completions(req: ChatRequest):
+    async def chat_completions(req: ChatRequest, request: Request):
         if _engine is None:
             raise HTTPException(503, "No model loaded")
 
         # Convert pydantic Messages to plain dicts for the backend
         messages = _protocol_messages_to_dicts(req.messages)
+
+        # Chat-pipeline hooks. The inlet runs here (so token counting and
+        # inference see the transformed messages); the per-request context is
+        # built whenever a pipeline is present so the inlet, stream, and outlet
+        # of this turn share one ctx. A pipeline with no hooks costs nothing.
+        pipeline = getattr(request.app.state, "chat_pipeline", None)
+        ctx = None
+        if pipeline is not None:
+            ctx = ChatHookContext(
+                model_id=req.model, stream=req.stream,
+                request_id=make_chunk_id(),
+            )
+            if pipeline.has("inlet"):
+                messages = await pipeline.run_inlet(messages, ctx)
 
         # Reject image input on a text-only model with a clear 400 instead of
         # silently dropping the picture. For GGUF (always text-only) this is
@@ -425,7 +446,8 @@ def create_app(engine: Engine) -> FastAPI:
         if req.stream:
             return StreamingResponse(
                 _stream_sse(_engine, messages, req.model, _inference_sem,
-                            audit=_audit, transcript=_transcript, **gen_kwargs),
+                            audit=_audit, transcript=_transcript,
+                            pipeline=pipeline, ctx=ctx, **gen_kwargs),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
@@ -435,7 +457,7 @@ def create_app(engine: Engine) -> FastAPI:
         else:
             return await _complete(_engine, messages, req.model, _inference_sem,
                                    audit=_audit, transcript=_transcript,
-                                   **gen_kwargs)
+                                   pipeline=pipeline, ctx=ctx, **gen_kwargs)
 
     # ---------------------------------------------------------------- #
     #  Embeddings  (/v1/embeddings)                                     #
@@ -595,6 +617,8 @@ async def _stream_sse(
     sem: asyncio.Semaphore,
     audit=None,
     transcript=None,
+    pipeline=None,
+    ctx=None,
     **gen_kwargs,
 ) -> AsyncIterator[str]:
     from localm.inference.protocol import ChoiceDelta, StreamChoice
@@ -661,6 +685,10 @@ async def _stream_sse(
                 continue
             if first_token_at is None:
                 first_token_at = time.perf_counter()
+            # Stream hook transforms the piece before it is recorded and sent,
+            # so usage reflects exactly what the client receives.
+            if pipeline is not None and ctx is not None and pipeline.has("stream"):
+                token = pipeline.run_stream(token, ctx)
             completion_parts.append(token)
             chunk = ChatChunk.token(token, model_id, chunk_id, ts)
             yield f"data: {chunk.model_dump_json()}\n\n"
@@ -673,10 +701,18 @@ async def _stream_sse(
             f"\n[inference error: {gen_error}]", model_id, chunk_id, ts)
         yield f"data: {err_chunk.model_dump_json()}\n\n"
 
-    _audit_exchange(audit, transcript, messages, "".join(completion_parts))
+    streamed = "".join(completion_parts)
+    # Outlet runs after every chunk has been sent, so it cannot alter the live
+    # stream (a stream hook does that). Here it only shapes the recorded reply
+    # (audit / transcript / side-effects); usage stays tied to what was streamed.
+    reply = streamed
+    if pipeline is not None and ctx is not None and pipeline.has("outlet"):
+        reply = await pipeline.run_outlet(streamed, messages, ctx)
 
-    # Count tokens on the full completion text - more accurate and efficient
-    completion_tokens = engine.count_tokens("".join(completion_parts))
+    _audit_exchange(audit, transcript, messages, reply)
+
+    # Count tokens on the streamed text - what the client actually received
+    completion_tokens = engine.count_tokens(streamed)
 
     usage = UsageInfo(
         prompt_tokens=prompt_tokens,
@@ -771,6 +807,8 @@ async def _complete(
     sem: asyncio.Semaphore,
     audit=None,
     transcript=None,
+    pipeline=None,
+    ctx=None,
     **gen_kwargs,
 ):
     loop = asyncio.get_running_loop()
@@ -792,6 +830,10 @@ async def _complete(
         gen_start = time.perf_counter()
         text = await loop.run_in_executor(None, _run)
         gen_elapsed = time.perf_counter() - gen_start
+
+    # Outlet fully controls the returned content in the non-streaming path.
+    if pipeline is not None and ctx is not None and pipeline.has("outlet"):
+        text = await pipeline.run_outlet(text, messages, ctx)
 
     _audit_exchange(audit, transcript, messages, text)
 

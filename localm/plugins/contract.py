@@ -91,6 +91,29 @@ class Host(Protocol):
     def audit(self, event: str, data: dict) -> None: ...
     def browse_dirs(self, path: str) -> dict: ...         # server-side folder picker
 
+    def register_chat_hook(self, phase: str, fn: Any, *,
+                           priority: int = 0) -> None:
+        """Register a transform run on every ``/v1/chat/completions`` turn.
+
+        *phase* is one of:
+          - ``"inlet"``  - ``fn(messages, ctx) -> messages`` (sync or async),
+            run before token counting and inference.
+          - ``"stream"`` - ``fn(token, ctx) -> token`` (SYNC; per streamed text
+            piece on the hot path - an async fn is skipped).
+          - ``"outlet"`` - ``fn(text, messages, ctx) -> text`` (sync or async),
+            run on the final reply.
+
+        Returning None from a hook keeps the prior value (mutate-in-place is
+        fine). Lower *priority* runs first; ties keep registration order. A hook
+        that raises is logged and skipped, never breaking the turn. The engine
+        removes this plugin's hooks automatically on disable/uninstall.
+
+        Hooks see scrubbed content text, not model control markers. In a
+        streaming turn the outlet runs after all chunks have been sent (for
+        record/side-effects only); use a stream hook to rewrite streamed output.
+        """
+        ...
+
 
 @runtime_checkable
 class Plugin(Protocol):
