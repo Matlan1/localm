@@ -18,13 +18,14 @@ jobs:
         with:
           python-version: "3.12"
 
-      # Light deps only. The [gpu]/[gguf] extras pull torch / ROCm / llama-cpp
-      # wheels from a custom AMD index and are GPU-bound, so they are never
-      # installed in CI; optional-dependency tests skip themselves (importorskip).
+      # Light extras only ([rag] = pypdf, pure-Python). The [gpu]/[gguf] extras
+      # pull torch / ROCm / llama-cpp wheels from a custom AMD index and are
+      # GPU-bound, so they are never installed in CI; tests needing those extras
+      # skip themselves (importorskip).
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install -e ".[dev,rag]"
 
       # The mandated repo-hygiene gate (AGENTS.md): no em/en dashes, no personal
       # disclosure, no machine-absolute paths in code.
