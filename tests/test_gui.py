@@ -753,6 +753,32 @@ class TestPlatformEndpoints:
         assert r.status_code == 400
 
 
+class TestGuiNoModel:
+    """`localm gui --no-model` opens model-less even when usable models exist."""
+
+    def test_no_model_flag_skips_auto_selection(self, monkeypatch):
+        from click.testing import CliRunner
+
+        from localm.plugins.gui import cli as guicli
+
+        # A populated registry that would normally auto-select a default model.
+        monkeypatch.setattr(
+            "localm.config.load_registry",
+            lambda: {"some-model": {"path": "x.gguf", "source": "local"}})
+        # get_model_info must NOT be consulted when --no-model is set.
+        monkeypatch.setattr(
+            "localm.model_manager.get_model_info",
+            lambda name: (_ for _ in ()).throw(AssertionError("auto-selected a model")))
+        monkeypatch.setattr("localm.winconsole.disable_quickedit", lambda: None)
+        ran = {}
+        monkeypatch.setattr("uvicorn.run", lambda app, **kw: ran.setdefault("ok", True))
+
+        result = CliRunner().invoke(guicli.main, ["--no-model", "--no-browser"])
+        assert result.exit_code == 0, result.output
+        assert "no model loaded" in result.output.lower()
+        assert ran.get("ok")
+
+
 class TestJobs:
     def test_cli_job_streams_lines_and_ends(self):
         from localm.plugins.gui.jobs import JobManager
