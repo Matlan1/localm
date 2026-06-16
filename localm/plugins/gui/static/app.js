@@ -241,16 +241,26 @@ $("theme-toggle").onclick = () =>
 const CORE_VIEWS = ["chat", "models", "plugins", "settings"];
 let VIEWS = [...CORE_VIEWS];
 
-function showView(name) {
-  // Fall back to chat for an unknown name OR a view whose section is gone
-  // (e.g. a remembered tab whose plugin was since uninstalled). Tolerating a
-  // missing nav/view element is what lets the nav rail be rebuilt at runtime.
-  if (!$("view-" + name)) name = "chat";
+// Toggle the .active class on the view sections + nav buttons. Split out of
+// showView so the nav rebuild (reconcileActiveView) can re-assert the highlight
+// on freshly-created buttons WITHOUT re-running onViewShown - re-firing
+// onViewShown for chat/coder calls refreshPluginCommands, which calls renderNav
+// -> reconcileActiveView -> showView -> onViewShown, an infinite /api/plugins
+// loop.
+function _applyActiveClasses(name) {
   for (const v of VIEWS) {
     const view = $("view-" + v), nav = $("nav-" + v);
     if (view) view.classList.toggle("active", v === name);
     if (nav) nav.classList.toggle("active", v === name);
   }
+}
+
+function showView(name) {
+  // Fall back to chat for an unknown name OR a view whose section is gone
+  // (e.g. a remembered tab whose plugin was since uninstalled). Tolerating a
+  // missing nav/view element is what lets the nav rail be rebuilt at runtime.
+  if (!$("view-" + name)) name = "chat";
+  _applyActiveClasses(name);
   // Remembered across reloads - but never in privacy mode (no traces).
   if (!chat.privacy) localStorage.setItem("localm.activeView", name);
   // Lazy page refreshes live in pages.js
@@ -1459,7 +1469,18 @@ function reconcileActiveView() {
   const name = cur ? cur.id.replace("view-", "") : "chat";
   const ok = CORE_VIEWS.includes(name) ||
              pluginState.some((p) => p.active && p.tab === name);
-  showView(ok ? name : "chat");
+  if (ok) {
+    // The shown view is still valid: just re-assert the highlight on the
+    // (possibly freshly-created) nav button. Do NOT call showView(name) here -
+    // it re-fires onViewShown, and for chat/coder onViewShown re-enters
+    // refreshPluginCommands -> renderNav -> reconcileActiveView, a runaway
+    // /api/plugins loop (and it double-renders whatever page is open).
+    _applyActiveClasses(name);
+  } else {
+    // The shown view's plugin was uninstalled - fall back to chat (a real
+    // view switch, page refresh included).
+    showView("chat");
+  }
 }
 
 /* ---- assistant memory ---- */
