@@ -12,6 +12,33 @@ from localm.rag import (
 from localm.rag.bm25 import BM25, tokenize
 
 
+def _tiny_pdf(text: str) -> bytes:
+    """A minimal valid single-page PDF that renders *text*, built by hand so the
+    test needs no PDF-writer dependency (only pypdf, to read it back)."""
+    content = b"BT /F1 18 Tf 20 100 Td (" + text.encode("latin-1") + b") Tj ET"
+    objs = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 144] /Contents 4 0 R "
+        b"/Resources << /Font << /F1 5 0 R >> >> >>",
+        b"<< /Length " + str(len(content)).encode() + b" >>\nstream\n"
+        + content + b"\nendstream",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    pdf = b"%PDF-1.4\n"
+    offsets = []
+    for i, body in enumerate(objs, 1):
+        offsets.append(len(pdf))
+        pdf += str(i).encode() + b" 0 obj\n" + body + b"\nendobj\n"
+    startxref = len(pdf)
+    pdf += b"xref\n0 " + str(len(objs) + 1).encode() + b"\n0000000000 65535 f \n"
+    for off in offsets:
+        pdf += ("%010d 00000 n \n" % off).encode()
+    pdf += (b"trailer\n<< /Root 1 0 R /Size " + str(len(objs) + 1).encode()
+            + b" >>\nstartxref\n" + str(startxref).encode() + b"\n%%EOF\n")
+    return pdf
+
+
 # ------------------------------------------------------------------ #
 #  Extraction                                                          #
 # ------------------------------------------------------------------ #
@@ -91,6 +118,16 @@ class TestExtract:
         f.write_bytes(b"%PDF-1.4 fake")
         with pytest.raises(ExtractError, match="localm\\[rag\\]"):
             extract_text(f)
+
+    def test_pdf_extracted_with_pypdf(self, tmp_path):
+        """Present-pypdf counterpart of the install-hint test: a real PDF
+        round-trips through extract_text(). Runs in CI (which installs the [rag]
+        extra); skips locally when pypdf is absent. This is the regression guard
+        that future pypdf bumps cannot silently break PDF extraction."""
+        pytest.importorskip("pypdf")
+        f = tmp_path / "doc.pdf"
+        f.write_bytes(_tiny_pdf("hello localm rag pdf"))
+        assert "hello localm rag pdf" in extract_text(f)
 
 
 # ------------------------------------------------------------------ #
