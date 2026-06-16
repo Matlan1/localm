@@ -727,6 +727,37 @@ class TestPlatformEndpoints:
         r = v1_client.patch("/v1/config", json={"hax": 1})
         assert r.status_code == 400
 
+    def test_config_accepts_plugins_enabled(self, v1_client, tmp_path):
+        """plugins_enabled is a real config key (managed by the engine); it must
+        not be rejected as unknown - that was B3 ('Unknown config keys:
+        plugins_enabled' on every settings save)."""
+        cfg_file = tmp_path / "config.json"
+        with patch("localm.config.CONFIG_FILE", cfg_file), \
+             patch("localm.config.HOME_DIR", tmp_path), \
+             patch("localm.config.MODELS_DIR", tmp_path / "models"):
+            data = v1_client.get("/v1/config").json()
+            assert data["plugins_enabled"] == []          # default present now
+            r = v1_client.patch("/v1/config", json={"plugins_enabled": ["chat"]})
+            assert r.status_code == 200, r.text
+            assert r.json()["plugins_enabled"] == ["chat"]
+            assert json.loads(cfg_file.read_text())["plugins_enabled"] == ["chat"]
+
+    def test_config_ignores_readonly_extras(self, v1_client, tmp_path):
+        """The GET handler injects effective_* extras; echoing them back on a
+        PATCH must not 400 and must not be persisted."""
+        cfg_file = tmp_path / "config.json"
+        with patch("localm.config.CONFIG_FILE", cfg_file), \
+             patch("localm.config.HOME_DIR", tmp_path), \
+             patch("localm.config.MODELS_DIR", tmp_path / "models"):
+            r = v1_client.patch("/v1/config", json={
+                "n_ctx": 8192, "effective_mode": "privacy",
+                "effective_coder_mode": "log", "effective_ctx_max": 99999})
+            assert r.status_code == 200, r.text
+            stored = json.loads(cfg_file.read_text())
+            assert stored["n_ctx"] == 8192
+            assert "effective_mode" not in stored
+            assert "effective_ctx_max" not in stored
+
     def test_plugins_list_empty(self, v1_client, tmp_path):
         with patch("localm.plugins.loader.plugins_dir", return_value=tmp_path):
             data = v1_client.get("/v1/plugins").json()

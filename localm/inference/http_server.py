@@ -311,8 +311,14 @@ def create_app(engine: Engine) -> FastAPI:
 
     @app.patch("/v1/config", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def patch_config(body: dict):
-        """Update known config keys and persist. Unknown keys are rejected."""
+        """Update known config keys and persist. Unknown keys are rejected.
+
+        The read-only extras the GET handler injects (effective_mode etc.) are
+        dropped first, so a client that round-trips the whole config object is
+        not rejected for echoing back values it never edited."""
         from localm.config import DEFAULT_CONFIG, load_config, save_config
+        readonly = {"effective_mode", "effective_coder_mode", "effective_ctx_max"}
+        body = {k: v for k, v in body.items() if k not in readonly}
         unknown = [k for k in body if k not in DEFAULT_CONFIG]
         if unknown:
             raise HTTPException(400, f"Unknown config keys: {', '.join(unknown)}")
