@@ -25,6 +25,10 @@ terminal.) So the only real questions are *how the phone reaches your server* an
 2. **Open the printed address on the phone.** On startup the console now prints
    the address to use, e.g. `http://192.168.1.50:8642/`. Type that into the phone
    browser.
+   - *Tip (experimental PoC):* `localm gui -H 0.0.0.0 --qr` prints a scannable QR
+     of that address so you can point the phone camera at the terminal instead of
+     typing it. Needs `pip install "localm[qr]"` and a terminal that renders block
+     glyphs (Windows Terminal is fine). This is a proof-of-concept and may change.
 3. **Install it.** In the phone browser menu choose *Install app* / *Add to Home
    screen*. localm now has its own icon.
 
