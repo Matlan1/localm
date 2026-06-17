@@ -45,6 +45,27 @@ def _make_client_plugin(root, name):
     return pdir
 
 
+def _make_autoclient_plugin(root, name):
+    """A client_entry plugin that declares assets_dir but whose register() does
+    NOT call mount_static - the engine must auto-mount the assets so the client
+    module is still served (otherwise a future plugin like this silently 404s)."""
+    pdir = root / name
+    (pdir / "static").mkdir(parents=True, exist_ok=True)
+    (pdir / "plugin.toml").write_text(
+        f'[plugin]\nname = "{name}"\nscope = "{name}"\nregister = "plug"\n'
+        f'[surface]\nassets_dir = "static"\nclient_entry = "{name}.js"\n',
+        encoding="utf-8")
+    (pdir / "static" / f"{name}.js").write_text(
+        "export function register(ctx) { ctx.toast('auto'); }\n", encoding="utf-8")
+    (pdir / "plug.py").write_text(textwrap.dedent('''
+        def register(host):
+            pass                 # deliberately does NOT mount_static
+        def unregister():
+            pass
+    '''), encoding="utf-8")
+    return pdir
+
+
 # --------------------------- the generic hook ----------------------------- #
 
 def test_parse_spec_reads_client_entry(env):
@@ -91,6 +112,52 @@ def test_mount_static_serves_module_then_unmounts(env, tmp_path):
     mgr.disable("widget")
     with TestClient(app) as c:
         assert c.get("/plugins/widget/widget.js").status_code == 404
+
+
+def test_engine_auto_mounts_surface_assets(env, tmp_path):
+    """A client_entry plugin that declares assets_dir but never calls
+    mount_static is still served: the engine auto-mounts the surface's assets
+    after register(), so the SPA's import() of the client module never 404s.
+    The auto-mount unmounts cleanly on disable, like an explicit mount."""
+    from localm.plugins.engine import PluginManager
+    plugins = env / "plugins"
+    _make_autoclient_plugin(plugins, "autowidget")
+
+    static = tmp_path / "spa"
+    static.mkdir()
+    (static / "index.html").write_text("INDEX", encoding="utf-8")
+    app = FastAPI()
+    app.mount("/", StaticFiles(directory=str(static), html=True), name="gui")
+
+    mgr = PluginManager(app, external_root=plugins, builtin_root=None)
+    mgr.install("autowidget")
+    with TestClient(app) as c:
+        r = c.get("/plugins/autowidget/autowidget.js")
+        assert r.status_code == 200
+        assert "export function register" in r.text
+        assert r.headers["content-type"].startswith("text/javascript")
+        assert c.get("/").text == "INDEX"      # SPA catch-all still served
+
+    mgr.disable("autowidget")
+    with TestClient(app) as c:
+        assert c.get("/plugins/autowidget/autowidget.js").status_code == 404
+
+
+def test_explicit_mount_static_does_not_double_mount(env):
+    """mount_static is idempotent on its prefix: a plugin that mounts its assets
+    explicitly AND gets the engine's auto-mount ends up with exactly one mount
+    for /plugins/<name> (the explicit call wins; auto-mount short-circuits)."""
+    from starlette.routing import Mount
+
+    from localm.plugins.engine import PluginManager
+    plugins = env / "plugins"
+    _make_client_plugin(plugins, "widget")     # register() DOES call mount_static
+    app = FastAPI()
+    mgr = PluginManager(app, external_root=plugins, builtin_root=None)
+    mgr.install("widget")
+    mounts = [r for r in app.router.routes
+              if isinstance(r, Mount) and r.path == "/plugins/widget"]
+    assert len(mounts) == 1                     # not two
 
 
 def test_mount_static_missing_dir_raises(env):
