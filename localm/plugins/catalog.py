@@ -65,6 +65,8 @@ CATALOG: tuple = (
     CatalogEntry("tts", "Text-to-speech (neural voices) for reading replies aloud"),
     CatalogEntry("mcp", "Expose your local models to MCP clients",
                  commands=("mcp",)),
+    CatalogEntry("jobs", "Scheduled recurring tasks",
+                 commands=("job",)),
 )
 
 _BY_NAME = {e.name: e for e in CATALOG}

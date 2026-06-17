@@ -1,0 +1,16 @@
+[plugin]
+name = "jobs"
+version = "1.0.0"
+description = "Scheduled recurring tasks: run a chat or coder prompt on an interval or cron schedule."
+scope = "jobs"
+register = "plug"
+cli = "cli:main"
+data_subdir = "jobs"
+
+[surface]
+tab_id = "jobs"
+label = "Jobs"
+icon = "clock"
+group = "studio"
+assets_dir = "static"
+client_entry = "jobs.js"
