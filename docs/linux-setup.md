@@ -3,6 +3,10 @@
 localm runs natively on Linux. The app code is platform-agnostic; only the
 native llama.cpp library and a few setup scripts differ from Windows.
 
+> **macOS is experimental and unverified.** `setup.sh` runs and will try to fetch
+> the Apple-Silicon (Metal) llama.cpp build, but this path has not been tested -
+> treat it as best-effort and expect rough edges.
+
 ## One-click install (the lazy path)
 
 ```sh
@@ -10,11 +14,9 @@ curl -fsSL https://raw.githubusercontent.com/Matlan1/localm/master/install.sh | 
 ```
 
 This clones localm to `~/localm`, installs `uv` if needed, creates a private
-`.venv`, auto-detects your GPU (ROCm / CUDA / CPU), and runs a non-interactive
-setup. Override the location with `LOCALM_DIR=...`.
-
-You still need the native llama.cpp library for GGUF inference (see below) - the
-one-click install skips it and tells you how to add it.
+`.venv`, auto-detects your GPU, and runs a non-interactive setup that also
+provisions the matching llama.cpp backend (Vulkan for any GPU, CPU otherwise).
+Override the location with `LOCALM_DIR=...`.
 
 ## Manual install
 
@@ -36,11 +38,18 @@ Prerequisites:
 
 ## The native llama.cpp library (GGUF backend)
 
-There is no hosted prebuilt for Linux, so you build llama.cpp once for your GPU
-and point localm at it. localm loads `libllama.so` (plus its `libggml*.so`) from
-the build.
+`setup.sh` provisions this for you from the official llama.cpp releases - pick a
+backend (or let auto-detect choose) and it downloads the matching Linux build:
 
-Build examples:
+```sh
+.venv/bin/localm setup-llama --backend vulkan   # any GPU, no vendor toolkit
+.venv/bin/localm setup-llama --backend cuda      # NVIDIA (needs CUDA runtime)
+.venv/bin/localm setup-llama --backend hip       # AMD ROCm (needs ROCm runtime)
+.venv/bin/localm setup-llama --backend cpu       # no GPU
+```
+
+If you would rather build llama.cpp yourself (e.g. a specific gfx target), build
+it once and point localm at the output with `--from`:
 
 ```sh
 git clone https://github.com/ggml-org/llama.cpp
