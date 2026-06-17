@@ -1335,7 +1335,7 @@ ws     ::= [ \t\n\r]*
         args = dict(call.args)
         if call.name == "spawn_agent":
             args["_parent_agent"] = self
-        if call.name in ("run_shell", "fetch_url", "web_search") \
+        if call.name in ("run_shell", "fetch_url", "web_search", "generate_image") \
                 and self.mode == SessionMode.PRIVACY:
             args["_privacy"] = True
 

@@ -409,7 +409,12 @@ def _handle_command(
                 console.print("[dim]Freeing VRAM (chat model unloads, "
                               "reloads on your next message)…[/dim]")
                 engine.unload()
-                ok, message = generate_image(arg, out)
+                from .audit import SessionMode, effective_mode
+                ok, message = generate_image(
+                    arg, out,
+                    api_url=api,
+                    write_sidecar=effective_mode("chat") != SessionMode.PRIVACY,
+                )
                 console.print(message)
                 if ok:
                     free_comfy_vram(api)
