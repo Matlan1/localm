@@ -118,8 +118,10 @@ class Host(Protocol):
 @runtime_checkable
 class Plugin(Protocol):
     """What a plugin module/object exposes. ``register`` / ``unregister`` are
-    required; the lifecycle hooks (on_install / on_first_use / on_uninstall) are
-    optional - the engine calls them only if present."""
+    required. Optional lifecycle hooks: ``on_install`` (called once at install)
+    and ``on_uninstall(delete_data)`` (called at uninstall) are invoked if
+    present. ``on_first_use`` is RESERVED and not yet invoked by the engine (no
+    stable "first use" point is defined yet) - do not rely on it."""
 
     def register(self, host: Host) -> None: ...
     def unregister(self) -> None: ...

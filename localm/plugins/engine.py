@@ -500,6 +500,19 @@ class PluginManager:
         host.unmount()
         sys.modules.pop(uniq, None)     # drop so a re-enable re-imports fresh
 
+    def _invoke_hook(self, name: str, hook_name: str, **kwargs) -> None:
+        """Call an optional plugin lifecycle hook if the loaded module defines it.
+        Best-effort (mirrors on_uninstall): a hook error never blocks the action."""
+        entry = self._loaded.get(name)
+        if not entry:
+            return
+        hook = getattr(entry[1], hook_name, None)
+        if callable(hook):
+            try:
+                hook(**kwargs)
+            except Exception:
+                pass
+
     # ---- provisioning helpers ----------------------------------------------
     def _installed_dir(self, name: str) -> Path:
         return Path(self._installed_root) / name
@@ -557,6 +570,7 @@ class PluginManager:
         except Exception:
             self._remove_installed_dir(name)         # roll back the copy
             raise
+        self._invoke_hook(name, "on_install")        # optional lifecycle hook
         self._set_enabled(name, True)
 
     def install_external(self, source: Path, *, force: bool = False):
@@ -583,6 +597,7 @@ class PluginManager:
         except Exception:
             self._remove_installed_dir(name)
             raise
+        self._invoke_hook(name, "on_install")        # optional lifecycle hook
         self._set_enabled(name, True)
         return spec0
 
