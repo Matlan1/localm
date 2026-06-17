@@ -65,6 +65,39 @@ def test_discover_and_parse(env):
     assert specs["alpha"].surface.tab_id == "alpha"
 
 
+def test_on_install_hook_fires(env):
+    """The optional on_install lifecycle hook is invoked when a plugin is
+    installed (symmetric with on_uninstall). Negative-testable: without the
+    engine's _invoke_hook(name, "on_install") call, the marker is never written."""
+    from localm.plugins.engine import PluginManager
+    plugins = env / "plugins"
+    body = '''
+        from pathlib import Path
+        from fastapi import APIRouter
+        _r = APIRouter()
+
+        @_r.get("/api/hooked/ping")
+        def ping():
+            return {"pong": True}
+
+        def register(host):
+            host.mount_router(_r)
+
+        def unregister():
+            pass
+
+        def on_install():
+            (Path(__file__).parent / "on_install_called").write_text("yes")
+    '''
+    _make_plugin(plugins, "hooked", body)
+    mgr = PluginManager(FastAPI(), external_root=plugins, builtin_root=None)
+    mgr.discover()
+    marker = plugins / "hooked" / "on_install_called"
+    assert not marker.exists()          # hook has not fired before install
+    mgr.install("hooked")
+    assert marker.exists()              # on_install fired during install
+
+
 def test_install_mounts_routes_disable_unmounts(env):
     from localm.plugins.engine import PluginManager
     plugins = env / "plugins"
