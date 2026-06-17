@@ -151,6 +151,11 @@ def wired(tmp_path, monkeypatch):
     monkeypatch.setattr(setup_llama, "_runtime_pkg_dir", lambda: tmp_path / "pkg")
     monkeypatch.setattr(setup_llama, "_verify", lambda: None)
     monkeypatch.setattr(setup_llama, "_ensure_importable", lambda: None)
+    # Provisioning now load-tests the native library in a subprocess; against a
+    # stub llama.dll that would always fail (and trigger a fallback re-download),
+    # so we treat the load as successful here. The fallback path itself is
+    # covered explicitly in test_cuda_setup.py.
+    monkeypatch.setattr(setup_llama, "_native_loads_ok", lambda: (True, ""))
     # Pretend we are on Windows so the default-URL download path is taken even
     # when the test host is not win32.
     monkeypatch.setattr(setup_llama.sys, "platform", "win32")
@@ -241,3 +246,37 @@ def test_main_accepts_matching_sha256(wired, monkeypatch):
     assert result.exit_code == 0, result.output
     assert trace.extracted
     assert trace.installed
+
+
+# --------------------------------------------------------------------------- #
+# --from / --url: a user-pinned build that provisions but does NOT load must    #
+# exit non-zero (never report success on a broken runtime), not warn + exit 0.  #
+# --------------------------------------------------------------------------- #
+
+
+def test_from_load_failure_exits_nonzero(wired, monkeypatch, tmp_path):
+    target, trace = wired
+    monkeypatch.setattr(setup_llama, "_native_loads_ok", lambda: (False, "wrong arch"))
+    src = tmp_path / "src"
+    src.mkdir()
+    result = _run(["--from", str(src)])
+    assert result.exit_code != 0
+    assert "did not load" in result.output
+
+
+def test_from_load_success_reports_ok(wired, monkeypatch, tmp_path):
+    target, trace = wired   # fixture stubs _native_loads_ok -> (True, "")
+    src = tmp_path / "src"
+    src.mkdir()
+    result = _run(["--from", str(src)])
+    assert result.exit_code == 0, result.output
+    assert "loads on this machine" in result.output
+
+
+def test_url_load_failure_exits_nonzero(wired, monkeypatch):
+    target, trace = wired
+    _stub_download(monkeypatch, _make_zip())
+    monkeypatch.setattr(setup_llama, "_native_loads_ok", lambda: (False, "missing dep"))
+    result = _run(["--url", "https://example.test/llama.zip"])
+    assert result.exit_code != 0
+    assert "did not load" in result.output
