@@ -560,6 +560,25 @@ def test_jobs_in_catalog():
     assert catalog.commands().get("job") == "jobs"
 
 
+def test_jobs_client_entry_is_served(home, monkeypatch):
+    """The GUI imports the Jobs view from /plugins/jobs/jobs.js; the plugin must
+    mount its static assets or the view 404s and silently never loads."""
+    from pathlib import Path
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    store_root = Path(__file__).resolve().parents[1] / "localm" / "plugins" / "builtin"
+    app = FastAPI()
+    from localm.plugins.engine import PluginManager
+    mgr = PluginManager(app, store_root=store_root, installed_root=home / "plugins")
+    mgr.install("jobs")
+    with TestClient(app) as c:
+        r = c.get("/plugins/jobs/jobs.js")
+        assert r.status_code == 200, "client_entry must be served, not 404"
+        assert "register" in r.text          # the ES-module export the GUI calls
+
+
 def test_jobs_available_in_api_state(home, monkeypatch):
     """The bundled jobs plugin shows up as an available plugin (store catalog)."""
     from pathlib import Path

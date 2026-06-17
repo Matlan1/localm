@@ -178,6 +178,10 @@ def register(host) -> None:
     global _scheduler, _host
     _host = host
     host.mount_router(_router)
+    # Serve the client_entry (static/jobs.js) at /plugins/jobs/ so the GUI's
+    # loadClientPlugins() can import() it; without this the Jobs view 404s and
+    # silently never loads (same pattern as the tts plugin).
+    host.mount_static("static")
 
     scheduler = JobScheduler(JobStore(),
                              run_job=_run_job,
