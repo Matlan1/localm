@@ -22,8 +22,8 @@ from __future__ import annotations
 
 import datetime
 import difflib
-import fnmatch
 import json
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -66,11 +66,29 @@ _UNDOABLE_TOOLS: frozenset[str] = frozenset({
     "write_file", "edit_file", "patch_file", "edit_notebook_cell",
 })
 
-# File-access tools whose `path` argument must match the active scope glob
+# File-access tools whose target path must match the active scope glob.
+# The check keys on the `path` arg; for tools whose primary target is a
+# `glob` or `output_path` arg instead (or as well), that arg is checked too
+# (see _SCOPE_PATH_ARGS). run_shell is intentionally NOT scoped: it runs
+# arbitrary commands, so a path-arg check cannot meaningfully confine it.
 _SCOPED_TOOLS: frozenset[str] = frozenset({
     "read_file", "write_file", "edit_file", "patch_file",
     "list_dir", "tree",
+    # FAC-8: the rest of the file-reading/writing tools.
+    "grep", "search_files", "search_replace", "read_env",
+    "edit_notebook_cell", "generate_image",
 })
+
+# For each scoped tool, the argument names that name a path/glob to enforce the
+# scope against. Order matters only for which value is reported first; any
+# present arg that falls outside the scope rejects the call. Tools default to
+# checking "path"; entries here add (or replace with) the tool's real target.
+_SCOPE_PATH_ARGS: dict[str, tuple[str, ...]] = {
+    "grep":           ("path", "glob"),
+    "search_files":   ("path", "pattern"),
+    "search_replace": ("glob",),
+    "generate_image": ("output_path",),
+}
 
 # Model-initiated network tools, governed by the net_mode policy
 # (localm.netpolicy): off = fail fast, ask = approval flow, allow = run.
@@ -89,6 +107,67 @@ _CODE_EXTS: frozenset[str] = frozenset({
 
 # run_shell commands containing one of these substrings count as verification
 _TEST_COMMAND_MARKERS: tuple[str, ...] = ("pytest", "unittest", "npm test", "cargo test", "go test")
+
+
+# ---------------------------------------------------------------------------
+#  Scope matching (path-aware glob)
+# ---------------------------------------------------------------------------
+
+# Cache compiled scope patterns - the same scope is matched many times per run.
+_SCOPE_RE_CACHE: dict[str, "re.Pattern[str]"] = {}
+
+
+def _glob_to_regex(pattern: str) -> "re.Pattern[str]":
+    """
+    Compile a path-aware glob into a regex anchored to a full relative path.
+
+    Semantics (gitignore / pathspec style), unlike plain ``fnmatch``:
+      - ``*``  matches any run of characters WITHIN one path segment - it does
+        NOT cross ``/``. So ``src/*.py`` matches ``src/a.py`` but not
+        ``src/a/b.py``.
+      - ``**`` matches across segments. ``**/`` matches any number of leading
+        directories (including none); a trailing ``**`` matches the rest.
+      - ``?``  matches a single non-``/`` character.
+      - all other characters are matched literally.
+    """
+    i, n = 0, len(pattern)
+    out = ["(?s:"]
+    while i < n:
+        c = pattern[i]
+        if c == "*":
+            if pattern[i:i + 2] == "**":
+                j = i
+                while j < n and pattern[j] == "*":
+                    j += 1
+                if pattern[j:j + 1] == "/":
+                    # '**/' -> zero or more leading directory segments
+                    out.append("(?:[^/]+/)*")
+                    i = j + 1
+                else:
+                    out.append(".*")
+                    i = j
+            else:
+                out.append("[^/]*")
+                i += 1
+        elif c == "?":
+            out.append("[^/]")
+            i += 1
+        elif c == "/":
+            out.append("/")
+            i += 1
+        else:
+            out.append(re.escape(c))
+            i += 1
+    out.append(r")\Z")
+    return re.compile("".join(out))
+
+
+def _scope_pattern(scope: str) -> "re.Pattern[str]":
+    rx = _SCOPE_RE_CACHE.get(scope)
+    if rx is None:
+        rx = _glob_to_regex(scope)
+        _SCOPE_RE_CACHE[scope] = rx
+    return rx
 
 
 # ---------------------------------------------------------------------------
@@ -1209,6 +1288,68 @@ ws     ::= [ \t\n\r]*
             self._last_turn_tokens += n
 
     # ------------------------------------------------------------------ #
+    #  Scope enforcement
+    # ------------------------------------------------------------------ #
+
+    def _scope_rel(self, value: str) -> Optional[str]:
+        """
+        Resolve a path/glob arg to a cwd-relative POSIX string for scope
+        matching, or return None if it escapes cwd.
+
+        Relative paths are joined onto cwd; absolute paths are accepted only
+        when they live inside cwd (an in-cwd absolute path that matches the
+        scope must pass - BUG-6). Glob metacharacters in *value* (e.g.
+        ``**/*.py`` for grep/search_replace) survive resolution: they are kept
+        verbatim in the relative string and matched against the scope as-is.
+        """
+        raw = str(value).replace("\\", "/")
+        p = Path(raw)
+        cwd = self.cwd.resolve()
+        if p.is_absolute():
+            try:
+                # No resolve(): the path may contain glob chars or not exist.
+                rel = Path(raw).relative_to(cwd)
+            except ValueError:
+                # Try once more against the resolved abs form for symlinks etc.
+                try:
+                    rel = Path(raw).resolve().relative_to(cwd)
+                except ValueError:
+                    return None   # outside cwd
+            return rel.as_posix()
+        # Relative: collapse any leading ./ and reject cwd escapes (../).
+        rel_posix = (Path(".") / raw).as_posix()
+        if rel_posix.startswith("./"):
+            rel_posix = rel_posix[2:]
+        parts = [seg for seg in rel_posix.split("/") if seg not in ("", ".")]
+        if ".." in parts:
+            return None   # escapes cwd
+        return "/".join(parts)
+
+    def _scope_allows(self, value: str) -> bool:
+        """True if *value* (a path or glob arg) is within the active scope."""
+        rel = self._scope_rel(value)
+        if rel is None:
+            return False
+        return _scope_pattern(self.scope).match(rel) is not None
+
+    def _scope_violation(self, call: ToolCall) -> Optional[str]:
+        """
+        Return the first in-scope-checked arg value that falls outside the
+        active scope, or None if the call is allowed.
+
+        Defaults to checking the ``path`` arg; ``_SCOPE_PATH_ARGS`` overrides
+        this for tools whose primary target is a ``glob`` or ``output_path``
+        arg (and may add ``path`` alongside it).
+        """
+        arg_names = _SCOPE_PATH_ARGS.get(call.name, ("path",))
+        for name in arg_names:
+            value = call.args.get(name)
+            if value:
+                if not self._scope_allows(str(value)):
+                    return str(value)
+        return None
+
+    # ------------------------------------------------------------------ #
     #  Tool execution
     # ------------------------------------------------------------------ #
 
@@ -1254,18 +1395,15 @@ ws     ::= [ \t\n\r]*
 
         # Scope check - reject file operations that fall outside the active glob
         if self.scope and call.name in _SCOPED_TOOLS:
-            path_arg = call.args.get("path", "")
-            if path_arg:
-                # Normalise to forward slashes for cross-platform glob matching
-                normalised = str(Path(path_arg)).replace("\\", "/")
-                if not fnmatch.fnmatch(normalised, self.scope):
-                    result = ToolResult.error(
-                        f"'{path_arg}' is outside the active scope '{self.scope}'. "
-                        "Only files matching this glob pattern can be accessed."
-                    )
-                    if interactive:
-                        print_tool_error(call.name, result.output)
-                    return result
+            offending = self._scope_violation(call)
+            if offending is not None:
+                result = ToolResult.error(
+                    f"'{offending}' is outside the active scope '{self.scope}'. "
+                    "Only files matching this glob pattern can be accessed."
+                )
+                if interactive:
+                    print_tool_error(call.name, result.output)
+                return result
 
         # Dry-run: show destructive calls but don't execute them
         if self.dry_run and tool_def.destructive:

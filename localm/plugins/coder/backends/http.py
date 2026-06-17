@@ -68,6 +68,10 @@ class HTTPBackend(BaseLLMBackend):
         Additional fields merged into every request body (e.g. ``top_k``).
     """
 
+    # Anthropic requires max_tokens on every request; OpenAI-compat does not.
+    _ANTHROPIC_DEFAULT_MAX_TOKENS = 4096
+    _ANTHROPIC_VERSION = "2023-06-01"
+
     def __init__(
         self,
         base_url: str,
@@ -75,6 +79,7 @@ class HTTPBackend(BaseLLMBackend):
         api_key: str = "localm",
         timeout: int = 300,
         native_tools: bool = False,
+        anthropic: bool = False,
         **extra_params,
     ) -> None:
         self._base_url     = base_url.rstrip("/")
@@ -84,14 +89,19 @@ class HTTPBackend(BaseLLMBackend):
         self._extra        = extra_params
         self._last_usage: dict = {}
         self.native_tools  = native_tools
+        # Anthropic speaks the Messages API (/v1/messages, x-api-key,
+        # anthropic-version, content-block responses) - NOT the OpenAI
+        # /chat/completions + Bearer shape. When True, chat()/chat_stream()
+        # use the Messages translation below.
+        self.anthropic     = anthropic
         self._tool_defs: list = []   # OpenAI-format tool definitions
 
         # GBNF grammar sampling is only supported by our own local server.
         # Passing grammar= to external APIs (OpenAI, Anthropic) causes errors.
         _external_prefixes = ("https://api.openai.com", "https://api.anthropic.com")
-        self.supports_grammar = not any(
+        self.supports_grammar = not (anthropic or any(
             base_url.startswith(p) for p in _external_prefixes
-        )
+        ))
 
     @property
     def model_id(self) -> str:
@@ -139,12 +149,28 @@ class HTTPBackend(BaseLLMBackend):
     # ------------------------------------------------------------------ #
 
     def _headers(self) -> dict:
+        if self.anthropic:
+            # Anthropic Messages API auth: x-api-key + anthropic-version,
+            # never a Bearer Authorization header.
+            return {
+                "x-api-key": self._api_key,
+                "anthropic-version": self._ANTHROPIC_VERSION,
+                "Content-Type": "application/json",
+            }
         return {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
         }
 
+    def _chat_url(self) -> str:
+        """The completion endpoint for this backend's protocol."""
+        if self.anthropic:
+            return f"{self._base_url}/messages"
+        return f"{self._base_url}/chat/completions"
+
     def _body(self, messages: list[dict], stream: bool, **kwargs) -> dict:
+        if self.anthropic:
+            return self._anthropic_body(messages, stream, **kwargs)
         body = {
             "model":    self._model,
             "messages": messages,
@@ -157,18 +183,100 @@ class HTTPBackend(BaseLLMBackend):
             body["tool_choice"] = "auto"
         return {k: v for k, v in body.items() if v is not None}
 
+    def _anthropic_body(self, messages: list[dict], stream: bool, **kwargs) -> dict:
+        """
+        Translate an OpenAI-style message list into the Anthropic Messages
+        API request shape:
+
+          - system-role messages are concatenated into a top-level ``system``
+            field (Anthropic does not accept a ``system`` role in ``messages``).
+          - ``max_tokens`` is required, so a default is supplied when absent.
+        """
+        system_parts: list[str] = []
+        convo: list[dict] = []
+        for m in messages:
+            if m.get("role") == "system":
+                content = m.get("content", "")
+                if isinstance(content, list):
+                    content = " ".join(
+                        p.get("text", "") for p in content if isinstance(p, dict)
+                    )
+                if content:
+                    system_parts.append(str(content))
+            else:
+                convo.append(m)
+
+        body: dict = {
+            "model":      self._model,
+            "messages":   convo,
+            "stream":     stream,
+            **self._extra,
+            **kwargs,
+        }
+        if system_parts:
+            body["system"] = "\n\n".join(system_parts)
+        if not body.get("max_tokens"):
+            body["max_tokens"] = self._ANTHROPIC_DEFAULT_MAX_TOKENS
+        if self.native_tools and self._tool_defs:
+            # Anthropic's tool schema differs from OpenAI's nested form;
+            # flatten {"function": {...}} entries to top-level name/schema.
+            body["tools"] = [self._anthropic_tool(t) for t in self._tool_defs]
+        return {k: v for k, v in body.items() if v is not None}
+
+    @staticmethod
+    def _anthropic_tool(tool_def: dict) -> dict:
+        fn = tool_def.get("function", tool_def)
+        return {
+            "name":         fn.get("name", ""),
+            "description":  fn.get("description", ""),
+            "input_schema": fn.get("parameters", {"type": "object", "properties": {}}),
+        }
+
+    def _parse_anthropic_response(self, data: dict) -> str:
+        """Extract assistant text (and any tool_use blocks) from a Messages response."""
+        usage = data.get("usage") or {}
+        if usage:
+            in_tok  = usage.get("input_tokens", 0)
+            out_tok = usage.get("output_tokens", 0)
+            self._last_usage = {
+                "prompt_tokens":     in_tok,
+                "completion_tokens": out_tok,
+                "total_tokens":      in_tok + out_tok,
+            }
+        text_parts: list[str] = []
+        tool_calls: list[dict] = []
+        for block in data.get("content") or []:
+            btype = block.get("type")
+            if btype == "text":
+                text_parts.append(block.get("text", ""))
+            elif btype == "tool_use":
+                import json as _json
+                tool_calls.append({
+                    "function": {
+                        "name":      block.get("name", ""),
+                        "arguments": _json.dumps(block.get("input", {})),
+                    }
+                })
+        text = "".join(text_parts)
+        if tool_calls:
+            xml = self._tool_calls_to_xml(tool_calls)
+            text = (text + "\n" + xml).strip() if text else xml
+        return text
+
     # ------------------------------------------------------------------ #
 
     def chat(self, messages: list[dict], **kwargs) -> str:
         self._last_usage = {}
         resp = _post_with_retry(
-            f"{self._base_url}/chat/completions",
+            self._chat_url(),
             headers=self._headers(),
             json_body=self._body(messages, stream=False, **kwargs),
             timeout=self._timeout,
         )
         resp.raise_for_status()
         data = resp.json()
+        if self.anthropic:
+            return self._parse_anthropic_response(data)
         if data.get("usage"):
             self._last_usage = data["usage"]
         message = data["choices"][0]["message"]
@@ -181,13 +289,16 @@ class HTTPBackend(BaseLLMBackend):
         return text
 
     def chat_stream(self, messages: list[dict], **kwargs) -> Iterator[str]:
+        if self.anthropic:
+            yield from self._anthropic_stream(messages, **kwargs)
+            return
         import json as _json
         self._last_usage = {}
         # Accumulate streaming native tool_calls: index → {name, arguments_buf}
         _tc_buf: dict[int, dict] = {}
 
         with _post_with_retry(
-            f"{self._base_url}/chat/completions",
+            self._chat_url(),
             headers=self._headers(),
             json_body=self._body(messages, stream=True, **kwargs),
             timeout=self._timeout,
@@ -234,6 +345,81 @@ class HTTPBackend(BaseLLMBackend):
             ])
             yield "\n" + xml
 
+    def _anthropic_stream(self, messages: list[dict], **kwargs) -> Iterator[str]:
+        """
+        Stream from the Anthropic Messages API (SSE).
+
+        Anthropic emits typed events (message_start, content_block_delta with
+        ``text_delta``/``input_json_delta``, message_delta with usage). We yield
+        text deltas and accumulate tool_use blocks, emitting them as our XML
+        format after the stream ends - mirroring the OpenAI path.
+        """
+        import json as _json
+        self._last_usage = {}
+        in_tok = 0
+        # index -> {"name": str, "arguments": str}
+        _tc_buf: dict[int, dict] = {}
+
+        with _post_with_retry(
+            self._chat_url(),
+            headers=self._headers(),
+            json_body=self._body(messages, stream=True, **kwargs),
+            timeout=self._timeout,
+            stream=True,
+        ) as resp:
+            resp.raise_for_status()
+            for line in resp.iter_lines():
+                if not line:
+                    continue
+                text = line.decode() if isinstance(line, bytes) else line
+                if not text.startswith("data:"):
+                    continue   # skip "event:" lines and blank separators
+                text = text[len("data:"):].strip()
+                if not text or text == "[DONE]":
+                    continue
+                try:
+                    evt = _json.loads(text)
+                except Exception:
+                    continue
+                etype = evt.get("type")
+                if etype == "message_start":
+                    usage = (evt.get("message") or {}).get("usage") or {}
+                    in_tok = usage.get("input_tokens", 0)
+                elif etype == "content_block_start":
+                    block = evt.get("content_block") or {}
+                    if block.get("type") == "tool_use":
+                        _tc_buf[evt.get("index", 0)] = {
+                            "name": block.get("name", ""), "arguments": ""
+                        }
+                elif etype == "content_block_delta":
+                    delta = evt.get("delta") or {}
+                    if delta.get("type") == "text_delta":
+                        piece = delta.get("text") or ""
+                        if piece:
+                            yield piece
+                    elif delta.get("type") == "input_json_delta":
+                        idx = evt.get("index", 0)
+                        _tc_buf.setdefault(idx, {"name": "", "arguments": ""})
+                        _tc_buf[idx]["arguments"] += delta.get("partial_json", "")
+                elif etype == "message_delta":
+                    usage = evt.get("usage") or {}
+                    out_tok = usage.get("output_tokens", 0)
+                    self._last_usage = {
+                        "prompt_tokens":     in_tok,
+                        "completion_tokens": out_tok,
+                        "total_tokens":      in_tok + out_tok,
+                    }
+                elif etype == "message_stop":
+                    break
+
+        if _tc_buf:
+            ordered = [_tc_buf[i] for i in sorted(_tc_buf)]
+            xml = self._tool_calls_to_xml([
+                {"function": {"name": t["name"], "arguments": t["arguments"]}}
+                for t in ordered
+            ])
+            yield "\n" + xml
+
 
 # ------------------------------------------------------------------ #
 #  Convenience constructors
@@ -249,12 +435,20 @@ def make_openai_backend(model: str = "gpt-4o", **kw) -> HTTPBackend:
 
 
 def make_anthropic_backend(model: str = "claude-opus-4-5", **kw) -> HTTPBackend:
-    """Uses the OpenAI-compat shim included in the ``anthropic`` SDK."""
+    """
+    Anthropic Messages API backend.
+
+    Posts to ``https://api.anthropic.com/v1/messages`` with an ``x-api-key``
+    header and an ``anthropic-version`` header (NOT a Bearer ``Authorization``
+    header against ``/chat/completions``). The OpenAI-style message list is
+    translated to the Messages request/response shape in HTTPBackend.
+    """
     key = os.environ.get("ANTHROPIC_API_KEY", "")
-    # anthropic provides an openai-compat base URL
     return HTTPBackend(
         "https://api.anthropic.com/v1",
         model,
         api_key=key,
+        anthropic=True,
+        native_tools=True,
         **kw,
     )

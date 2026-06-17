@@ -331,10 +331,12 @@ def pull_model(
     elif "/" in spec:
         if ":" in spec or spec.rsplit("/", 1)[-1].endswith(".gguf"):
             # owner/repo:file.gguf  or  owner/repo/file.gguf  -> single GGUF file
-            return _pull_gguf_file(spec, name, redownload=redownload)
+            return _pull_gguf_file(spec, name, expected_sha256=expected_sha256,
+                                   redownload=redownload)
         else:
             # owner/repo  (no filename) -> full HuggingFace snapshot
-            return _pull_hf_snapshot(spec, name, redownload=redownload)
+            return _pull_hf_snapshot(spec, name, expected_sha256=expected_sha256,
+                                     redownload=redownload)
     else:
         console.print(f"[red]Unknown spec:[/red] {model_spec}")
         console.print("Formats:")
@@ -415,8 +417,19 @@ def _prompt_predownload_dup(dup_names: List[str], model_name: str) -> str:
     return {"a": "alias", "d": "download", "s": "skip"}[choice.lower()]
 
 
-def _pull_gguf_file(spec: str, name: Optional[str], redownload: bool = False) -> bool:
-    """Download a single .gguf file from a HuggingFace repo."""
+def _pull_gguf_file(
+    spec: str,
+    name: Optional[str],
+    expected_sha256: Optional[str] = None,
+    redownload: bool = False,
+) -> bool:
+    """Download a single .gguf file from a HuggingFace repo.
+
+    ``expected_sha256`` is the user-supplied ``--sha256`` digest. It is NOT a
+    facade here (FAC-5): when given it is reconciled with HuggingFace's own LFS
+    metadata up front, and the downloaded first part is verified against it
+    before the model is registered.
+    """
     try:
         from huggingface_hub import hf_hub_download, hf_hub_url
     except ImportError:
@@ -434,6 +447,18 @@ def _pull_gguf_file(spec: str, name: Optional[str], redownload: bool = False) ->
     all_parts = split_gguf_parts(filename) or [filename]
     filename  = all_parts[0]
 
+    # Traversal guard (GAP-CLI-2): the filename comes from an untrusted spec
+    # (owner/repo:../../evil.gguf), so confine every part to MODELS_DIR before
+    # it is used as a destination. Reject the whole pull on any unsafe part.
+    for part in all_parts:
+        if _safe_models_filename(part) is None:
+            console.print(
+                f"[red]Unsafe model filename:[/red] {part}\n"
+                "A GGUF filename must be a single name inside the models folder "
+                "(no '/', '\\', or '..')."
+            )
+            return False
+
     model_name = name or filename.removesuffix(".gguf")
     dest = MODELS_DIR / filename
 
@@ -441,15 +466,41 @@ def _pull_gguf_file(spec: str, name: Optional[str], redownload: bool = False) ->
     # (Only identifies the first part of a split GGUF, which is enough.)
     expected = _hf_file_sha256(repo_id, filename)
 
+    # FAC-5: honour a user-supplied --sha256. If HF's own metadata digest is
+    # known and disagrees with it, the bytes can never match - refuse up front
+    # rather than spending a download to discover the mismatch.
+    want = expected_sha256.lower() if expected_sha256 else None
+    if want and expected and want != expected.lower():
+        console.print(
+            f"[red]SHA256 mismatch (before download):[/red] --sha256 "
+            f"{want[:16]}… does not match HuggingFace's metadata for "
+            f"{filename} ({expected[:16]}…). Refusing to download."
+        )
+        return False
+    # The digest we will verify against / store: prefer HF metadata, else the
+    # user-supplied value.
+    verify_digest = expected or want
+
     missing = [p for p in all_parts if not (MODELS_DIR / p).exists()]
     if not missing:
         console.print(f"[yellow]Already downloaded:[/yellow] {filename}")
-        _register_with_dedup(model_name, dest, f"hf:{repo_id}", digest=expected)
+        # If the user asserted a hash, verify the file actually on disk before
+        # treating it as the requested model.
+        if want:
+            on_disk = _sha256_file(dest)
+            if on_disk.lower() != want:
+                console.print(
+                    f"[red]SHA256 mismatch![/red] The file already at {filename} "
+                    f"({on_disk[:16]}…) does not match --sha256 ({want[:16]}…)."
+                )
+                return False
+        _register_with_dedup(model_name, dest, f"hf:{repo_id}",
+                             digest=verify_digest)
         return True
 
     # Pre-download duplicate check: same bytes already on disk elsewhere?
-    if expected and not redownload:
-        dups = find_by_sha256(expected)
+    if verify_digest and not redownload:
+        dups = find_by_sha256(verify_digest)
         if dups:
             action = _prompt_predownload_dup(dups, model_name)
             if action == "skip":
@@ -499,13 +550,48 @@ def _pull_gguf_file(spec: str, name: Optional[str], redownload: bool = False) ->
                 console.print(f"[red]Download failed[/red] ({part}): {e}")
                 return False
 
-    _register(model_name, MODELS_DIR / filename, f"hf:{repo_id}", sha256=expected)
+    # FAC-5: verify the downloaded first part against the user's --sha256.
+    # (HF metadata is already trusted; we only need to confirm a user assertion
+    # against the real bytes.) On mismatch, delete the part(s) and fail.
+    if want:
+        actual = _sha256_file(dest).lower()
+        if actual != want:
+            console.print(
+                f"[red]SHA256 mismatch![/red] Expected {want[:16]}…, got "
+                f"{actual[:16]}… - deleting downloaded file(s)"
+            )
+            for part in all_parts:
+                p = MODELS_DIR / part
+                if p.exists():
+                    p.unlink()
+            return False
+        console.print(f"[green]✓[/green] SHA256 verified: {actual[:16]}…")
+
+    _register(model_name, MODELS_DIR / filename, f"hf:{repo_id}",
+              sha256=verify_digest)
     console.print(f"[green]✓[/green] [bold]{model_name}[/bold] is ready")
     return True
 
 
-def _pull_hf_snapshot(repo_id: str, name: Optional[str], redownload: bool = False) -> bool:
+def _pull_hf_snapshot(
+    repo_id: str,
+    name: Optional[str],
+    expected_sha256: Optional[str] = None,
+    redownload: bool = False,
+) -> bool:
     """Download a complete HuggingFace model repo (for transformers/HF format models)."""
+    # FAC-5: a full-repo snapshot is many files; there is no single digest to
+    # check --sha256 against. Refuse the flag with a clear message rather than
+    # silently ignoring it (which would give a false sense of verification).
+    if expected_sha256:
+        console.print(
+            "[red]--sha256 is not supported for a full HuggingFace repo[/red] "
+            f"({repo_id}): a snapshot has many files and no single digest to "
+            "verify. Drop --sha256, or pull a single file with "
+            "[bold]owner/repo:file.gguf --sha256 <hash>[/bold]."
+        )
+        return False
+
     try:
         from huggingface_hub import snapshot_download
     except ImportError:
@@ -594,6 +680,39 @@ def _sha256_file(path: Path) -> str:
         for block in iter(lambda: f.read(65536), b""):
             h.update(block)
     return h.hexdigest()
+
+
+def _sha256_file_bytes(data: bytes) -> str:
+    """Return the hex SHA256 digest of an in-memory byte string."""
+    import hashlib
+    return hashlib.sha256(data).hexdigest()
+
+
+def _safe_models_filename(filename: str) -> Optional[str]:
+    """Return a single-component filename confined to ``MODELS_DIR``.
+
+    A model download must never write outside the models folder. ``filename`` is
+    derived from untrusted input (a URL path or an ``owner/repo:file`` spec), so
+    a value like ``../../evil.gguf`` or ``sub/dir/evil.gguf`` must be rejected
+    rather than used as a destination. Returns the bare filename when it is a
+    single, non-traversing path component, else ``None`` (GAP-CLI-2).
+    """
+    if not filename:
+        return None
+    # Reject anything that is not a single path component (no separators, no
+    # drive/absolute prefixes, no '.'/'..').
+    name = Path(filename).name
+    if name != filename or name in ("", ".", ".."):
+        return None
+    if "/" in filename or "\\" in filename or os.sep in filename:
+        return None
+    dest = (MODELS_DIR / name).resolve()
+    try:
+        if dest.parent != MODELS_DIR.resolve():
+            return None
+    except OSError:
+        return None
+    return name
 
 
 # ------------------------------------------------------------------ #
@@ -709,11 +828,44 @@ def _pull_url(
         return False
 
     filename = stem + ".gguf"
+
+    # Traversal guard (GAP-CLI-2): the filename is derived from an untrusted URL
+    # path segment, so confine it to MODELS_DIR before using it as a dest.
+    safe = _safe_models_filename(filename)
+    if safe is None:
+        console.print(
+            f"[red]Unsafe model filename derived from URL:[/red] {filename}\n"
+            "The download destination must be a single name inside the models "
+            "folder (no '/', '\\', or '..')."
+        )
+        return False
+    filename = safe
+
     dest      = MODELS_DIR / filename
     part_file = MODELS_DIR / (filename + ".part")
 
     if dest.exists():
-        console.print(f"[yellow]Already downloaded:[/yellow] {filename}")
+        # A file with this derived name is already here. Only treat it as the
+        # requested model if the caller's --sha256 (when given) matches its
+        # bytes - never alias a new name onto unrelated existing bytes
+        # (GAP-CLI-2).
+        if expected_sha256:
+            on_disk = _sha256_file(dest)
+            if on_disk.lower() != expected_sha256.lower():
+                console.print(
+                    f"[red]SHA256 mismatch![/red] A different file already "
+                    f"occupies {filename} ({on_disk[:16]}…); it does not match "
+                    f"--sha256 ({expected_sha256.lower()[:16]}…). Refusing to "
+                    "alias onto unrelated bytes - use --redownload or a "
+                    "different -n name."
+                )
+                return False
+            console.print(
+                f"[yellow]Already downloaded:[/yellow] {filename} "
+                f"[dim](sha256 verified)[/dim]"
+            )
+        else:
+            console.print(f"[yellow]Already downloaded:[/yellow] {filename}")
         _register_with_dedup(name, dest, url)
         return True
 
@@ -850,9 +1002,27 @@ def _register(
     update_registry(lambda reg: reg.__setitem__(name, entry))
 
 
+def _sanitize_name(base: str) -> str:
+    """Reduce ``base`` to a registry-safe key.
+
+    Strips anything that could turn a registry name into a filesystem path or a
+    traversal sequence: only ``A-Za-z0-9._-`` survive, and any run of other
+    characters (path separators, ``..`` sequences, spaces) collapses to a single
+    hyphen. Leading/trailing hyphens are trimmed; an empty result falls back to
+    ``"model"``. Consecutive dots (``..`` traversal) collapse to one and
+    leading/trailing dots are trimmed, so the result is never ``.``/``..`` and
+    cannot act as a relative path. This is the single sanitizer used for both
+    auto-discovered names (sync_models_dir) and user-supplied ``-n`` names
+    (add_local).
+    """
+    base = re.sub(r"[^A-Za-z0-9._-]+", "-", base)
+    base = re.sub(r"\.{2,}", ".", base)          # ..  ->  .  (no traversal)
+    return base.strip("-.") or "model"
+
+
 def _unique_registry_name(reg: dict, base: str) -> str:
     """Return a registry-safe name derived from ``base``, avoiding collisions."""
-    base = re.sub(r"[^A-Za-z0-9._-]+", "-", base).strip("-") or "model"
+    base = _sanitize_name(base)
     if base not in reg:
         return base
     i = 2
@@ -1230,7 +1400,10 @@ def add_local(
     ollama = _resolve_ollama_manifest(p)
     if ollama is not None:
         blob_path, suggested = ollama
-        model_name = name or suggested
+        # Sanitize the user-supplied -n name through the same filter
+        # sync_models_dir uses, so a '../evil' or 'a/b' name can never become a
+        # raw registry key (GAP-CLI-1).
+        model_name = _sanitize_name(name) if name else suggested
         # Ollama blob filenames already ARE the sha256 digest - store it free
         digest = blob_path.name.removeprefix("sha256-") \
             if blob_path.name.startswith("sha256-") else None
@@ -1263,7 +1436,9 @@ def add_local(
         )
         return
 
-    model_name = name or p.stem
+    # Sanitize the user-supplied -n name (GAP-CLI-1): never let '../evil' or
+    # 'a/b' become a raw registry key. p.stem is already path-component-safe.
+    model_name = _sanitize_name(name) if name else p.stem
     kind = "hf" if is_hf else "local"
 
     if is_blob:

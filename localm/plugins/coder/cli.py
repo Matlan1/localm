@@ -21,7 +21,12 @@ from typing import Optional
 import click
 from rich.console import Console
 
-from .backends.http import HTTPBackend, make_localm_backend, make_openai_backend
+from .backends.http import (
+    HTTPBackend,
+    make_anthropic_backend,
+    make_localm_backend,
+    make_openai_backend,
+)
 from .agent import Agent
 from .audit import SessionMode, parse_mode
 from .privacy import (
@@ -245,11 +250,8 @@ def main(
     elif provider == "anthropic":
         if not model:
             model = "claude-opus-4-5"
-        import os
-        key = os.environ.get("ANTHROPIC_API_KEY", "")
-        backend = HTTPBackend(
-            "https://api.anthropic.com/v1", model, api_key=key, native_tools=True
-        )
+        # Anthropic Messages API (x-api-key + anthropic-version + /v1/messages).
+        backend = make_anthropic_backend(model=model)
 
     elif url:
         # Explicit URL - no server management
