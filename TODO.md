@@ -5,6 +5,32 @@ GUI gaps identified by comparing against LM Studio, Jan, Open WebUI.
 
 ---
 
+## Status note: the `[x]` marks below are a dev log, NOT verified status
+
+The checkboxes in this file are a running development log of what was *built*. They
+are NOT a verified statement that each item works end to end - a 2026-06-16
+ground-truth audit found that a number of `[x]` items were facades (a description over
+a stub, a silent `except: pass`, or a test that asserted nothing). Treat this file as
+historical/aspirational.
+
+The verifiable source of truth for what actually works is, in order:
+
+1. `issues/audit-ground-truth-2026-06-16.md` + `issues/test-plans/` - the per-subsystem
+   audit and adversarial test plans (claimed-vs-actual, with file:line evidence).
+2. The test suite + CI: `pytest` (~1556 tests) and `npm test` (the GUI jsdom harness),
+   run by GitHub Actions on every PR. A feature is "done" here only when a test fails
+   without the fix and passes with it.
+
+Several `[x]` items the audit proved were facades have since been genuinely fixed and
+test-guarded (settings page / `--scope` confinement / MCP `--print-config` / B4 media
+containment / privilege checks). The **genuinely open** roadmap items remain the `[ ]`
+boxes below (the notable ones: real-ComfyUI verification of music gen, the suite-parity
+"Medium" + "Polish/later" lists, the Tauri shell, and the VS Code/Neovim extension).
+"Done end to end" still requires exercising the real-model / real-ComfyUI / real-browser
+paths, which the mock-based suite does not cover.
+
+---
+
 ## Context & Memory
 
 - [x] Project map / codebase index: build a semantic map of the repo upfront; don't re-read files on demand every turn
