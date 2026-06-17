@@ -204,3 +204,66 @@ class TestSearchReplace:
         utils_c = (project / "src" / "utils.py").read_text()
         assert "def replaced():" in main_c
         assert "def replaced():" in utils_c
+
+
+# ---------------------------------------------------------------------------
+#  glob traversal confinement (security boundary)
+#
+#  _confine() guards the `path` argument, but the `glob` argument fed to
+#  Path.glob() is a separate escape vector: Path.glob("../*") traverses
+#  upward. grep (read) and search_replace (write) must filter their glob
+#  results back to cwd, the same way tool_search_files already does, or the
+#  coder agent can read/rewrite files outside the project root entirely.
+# ---------------------------------------------------------------------------
+
+class TestGlobTraversalConfinement:
+    @pytest.fixture()
+    def sandbox(self, tmp_path):
+        """A project dir with a SECRET file in the parent (outside cwd)."""
+        proj = tmp_path / "project"
+        proj.mkdir()
+        (proj / "inside.py").write_text("inside_marker = 1\n", encoding="utf-8")
+        secret = tmp_path / "secret.txt"
+        secret.write_text("TOPSECRET_VALUE\n", encoding="utf-8")
+        return proj, secret
+
+    def test_grep_cannot_read_outside_cwd_via_parent_glob(self, sandbox):
+        proj, _secret = sandbox
+        r = tool_grep(proj, "TOPSECRET", glob="../*")
+        assert "TOPSECRET_VALUE" not in r.output
+        assert "0 match" in r.summary
+
+    def test_grep_cannot_read_outside_cwd_via_recursive_parent_glob(self, sandbox):
+        proj, _secret = sandbox
+        r = tool_grep(proj, "TOPSECRET", glob="../**/*")
+        assert "TOPSECRET_VALUE" not in r.output
+
+    def test_grep_still_searches_inside_cwd(self, sandbox):
+        proj, _secret = sandbox
+        r = tool_grep(proj, "inside_marker", glob="**/*")
+        assert r.ok
+        assert "inside.py" in r.output
+
+    def test_search_replace_cannot_write_outside_cwd_via_parent_glob(self, sandbox):
+        proj, secret = sandbox
+        tool_search_replace(
+            proj, pattern="TOPSECRET_VALUE", replacement="PWNED", glob="../*"
+        )
+        # The sibling secret must be untouched.
+        assert secret.read_text(encoding="utf-8") == "TOPSECRET_VALUE\n"
+
+    def test_search_replace_dry_run_excludes_outside_cwd(self, sandbox):
+        proj, _secret = sandbox
+        r = tool_search_replace(
+            proj, pattern="TOPSECRET_VALUE", replacement="PWNED",
+            glob="../*", dry_run=True,
+        )
+        assert "secret.txt" not in r.output
+
+    def test_search_replace_still_replaces_inside_cwd(self, sandbox):
+        proj, _secret = sandbox
+        r = tool_search_replace(
+            proj, pattern="inside_marker", replacement="renamed_marker", glob="**/*"
+        )
+        assert r.ok
+        assert "renamed_marker" in (proj / "inside.py").read_text(encoding="utf-8")
