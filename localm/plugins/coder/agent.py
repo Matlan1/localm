@@ -87,7 +87,7 @@ _SCOPE_PATH_ARGS: dict[str, tuple[str, ...]] = {
     "grep":           ("path", "glob"),
     "search_files":   ("path", "pattern"),
     "search_replace": ("glob",),
-    "generate_image": ("output_path",),
+    "generate_image": ("output_path", "input_image"),
 }
 
 # Model-initiated network tools, governed by the net_mode policy

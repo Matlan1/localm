@@ -206,6 +206,8 @@ def _field_map() -> dict:
 def _to_bool(key: str, val):
     if isinstance(val, bool):
         return val
+    if isinstance(val, int) and val in (0, 1):   # JSON clients that send 1/0
+        return bool(val)
     if isinstance(val, str):
         low = val.strip().lower()
         if low in _TRUE:

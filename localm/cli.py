@@ -758,7 +758,8 @@ def benchmark(model, gen_tokens, prompts, ctx, gpu_layers):
 @click.argument("model_spec")
 @click.option("-n", "--name", default=None, help="Alias for the downloaded model.")
 @click.option("--sha256", default=None, metavar="HASH",
-              help="Expected SHA256 hex digest (URL downloads only). Download is deleted on mismatch.")
+              help="Expected SHA256 hex digest (direct-URL and HF single-GGUF pulls; "
+                   "refused for full-repo snapshots). Download is deleted on mismatch.")
 @click.option("--redownload", is_flag=True,
               help="Download even when an identical model is already registered.")
 def pull(model_spec, name, sha256, redownload):
