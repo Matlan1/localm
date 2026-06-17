@@ -165,22 +165,47 @@ def build_tools(engines: EngineCache, enable_images: bool = True) -> Dict[str, d
         prompt = args.get("prompt", "")
         if not prompt:
             return _text_result("'prompt' is required", is_error=True)
-        from localm.config import HOME_DIR
+        import contextlib
+        from localm.audit import SessionMode, effective_mode
+        from localm.config import home_dir
         from localm.image_gen.comfy import generate_image as gen_img
-        out_arg = args.get("output_path")
-        if out_arg:
-            out = Path(out_arg)
-        else:
-            out_dir = HOME_DIR / "mcp-images"
-            out = out_dir / f"mcp-{int(time.time())}.png"
-        ok, message = gen_img(
-            prompt, out,
-            guidance=args.get("guidance"),
-            negative_prompt=args.get("negative_prompt"),
-            seed=args.get("seed"),
-            input_image=Path(args["input_image"]) if args.get("input_image") else None,
-            denoise=args.get("denoise"),
-        )
+
+        home = home_dir().resolve()
+
+        def _confine(raw: str, label: str):
+            """Keep MCP file paths inside the localm data dir - this tool is
+            driven by an LLM client, so an arbitrary output_path/input_image
+            could read or overwrite anything on disk (SEC-7)."""
+            p = Path(raw).expanduser()
+            p = p if p.is_absolute() else home / p
+            p = p.resolve()
+            if not p.is_relative_to(home):
+                raise ValueError(
+                    f"{label} must stay within the localm data dir ({home})")
+            return p
+
+        try:
+            out_arg = args.get("output_path")
+            out = (_confine(out_arg, "output_path") if out_arg
+                   else home / "mcp-images" / f"mcp-{int(time.time())}.png")
+            input_p = _confine(args["input_image"], "input_image") if args.get("input_image") else None
+        except ValueError as e:
+            return _text_result(str(e), is_error=True)
+
+        write_sidecar = effective_mode("mcp") != SessionMode.PRIVACY
+        # comfy.generate_image builds its own rich Console / Progress on stdout;
+        # the JSON-RPC frame stream lives on stdout too, so route any stray
+        # output to stderr or it corrupts the protocol (BUG-11).
+        with contextlib.redirect_stdout(sys.stderr):
+            ok, message = gen_img(
+                prompt, out,
+                guidance=args.get("guidance"),
+                negative_prompt=args.get("negative_prompt"),
+                seed=args.get("seed"),
+                input_image=input_p,
+                denoise=args.get("denoise"),
+                write_sidecar=write_sidecar,
+            )
         return _text_result(message, is_error=not ok)
 
     _model_param = {"type": "string",
@@ -259,6 +284,11 @@ class MCPStdioServer:
     def handle(self, msg: dict) -> Optional[dict]:
         """Process one message. Returns the response dict, or None for
         notifications (which get no reply)."""
+        if not isinstance(msg, dict):
+            # A JSON-RPC batch array, a bare scalar, or null all parse fine but
+            # are not a request object - reply Invalid Request instead of
+            # crashing on msg.get(...).
+            return self._error(None, -32600, "Invalid Request: expected a JSON object")
         method = msg.get("method", "")
         mid = msg.get("id")
 
@@ -324,10 +354,18 @@ class MCPStdioServer:
             except json.JSONDecodeError:
                 _log(f"skipping non-JSON input line")
                 continue
-            response = self.handle(msg)
-            if response is not None:
-                stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
-                stdout.flush()
+            # A JSON-RPC payload may be a single request object or a batch
+            # array; a bare scalar / null is invalid. handle() replies -32600
+            # for any non-dict element rather than crashing the loop.
+            if isinstance(msg, list):
+                batch = msg or [None]      # empty batch -> one Invalid Request
+            else:
+                batch = [msg]
+            for one in batch:
+                response = self.handle(one)
+                if response is not None:
+                    stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
+                    stdout.flush()
         _log("stdin closed - shutting down")
 
 

@@ -272,3 +272,108 @@ class TestMcpCliGate:
         assert state["mcp"]["installed"] is False
         assert state["mcp"]["available"] is True
         assert state["mcp"]["scope"] == "mcp"
+
+    def test_print_config_uses_os_correct_path(self, cfg_env):
+        """FAC-14: the Claude Desktop path must match the OS, not hardcode %APPDATA%."""
+        import sys
+        from click.testing import CliRunner
+        from localm.plugins.mcpserver.cli import main
+        out = CliRunner().invoke(main, ["--print-config"]).output
+        if sys.platform == "win32":
+            assert "%APPDATA%" in out
+        elif sys.platform == "darwin":
+            assert "Library/Application Support/Claude" in out
+        else:
+            assert "/.config/Claude" in out
+
+
+# --------------------------------------------------------------------------- #
+#  Robustness: a malformed JSON-RPC payload must not crash the stdio loop      #
+# --------------------------------------------------------------------------- #
+
+class TestStdioRobustness:
+    def test_batch_array_is_handled_not_crashed(self):
+        """BUG-12: a JSON-RPC batch array must be processed element by element."""
+        server, _ = _server()
+        batch = json.dumps([
+            {"jsonrpc": "2.0", "id": 1, "method": "ping"},
+            {"jsonrpc": "2.0", "id": 2, "method": "ping"},
+        ])
+        stdout = io.StringIO()
+        server.run_stdio(stdin=io.StringIO(batch + "\n"), stdout=stdout)
+        ids = {json.loads(l)["id"] for l in stdout.getvalue().splitlines()}
+        assert ids == {1, 2}
+
+    def test_scalar_and_null_lines_do_not_crash(self):
+        """BUG-12: a bare scalar / null parses but is not a request object."""
+        server, _ = _server()
+        stdout = io.StringIO()
+        server.run_stdio(stdin=io.StringIO('123\n"hi"\ntrue\nnull\n'), stdout=stdout)
+        responses = [json.loads(l) for l in stdout.getvalue().splitlines()]
+        assert len(responses) == 4
+        assert all(r["error"]["code"] == -32600 for r in responses)
+
+    def test_handle_rejects_non_dict_directly(self):
+        server, _ = _server()
+        assert server.handle(123)["error"]["code"] == -32600
+        assert server.handle([{"x": 1}])["error"]["code"] == -32600
+
+
+# --------------------------------------------------------------------------- #
+#  generate_image safety: stdout purity, privacy sidecar, path confinement     #
+# --------------------------------------------------------------------------- #
+
+class TestGenerateImageSafety:
+    def _call(self, server, args):
+        return server.handle({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "generate_image", "arguments": args}})
+
+    def test_output_path_confined_to_home(self, tmp_path):
+        """SEC-7: an output_path outside the localm data dir is refused."""
+        server, _ = _server()
+        outside = str(tmp_path / "evil.png")        # sibling of LOCALM_HOME (.localm)
+        with patch("localm.image_gen.comfy.generate_image") as mock_gen:
+            r = self._call(server, {"prompt": "x", "output_path": outside})
+        assert r["result"]["isError"] is True
+        assert "data dir" in r["result"]["content"][0]["text"]
+        mock_gen.assert_not_called()
+
+    def test_input_image_confined_to_home(self, tmp_path):
+        server, _ = _server()
+        outside = str(tmp_path / "secret.png")
+        with patch("localm.image_gen.comfy.generate_image") as mock_gen:
+            r = self._call(server, {"prompt": "x", "input_image": outside})
+        assert r["result"]["isError"] is True
+        mock_gen.assert_not_called()
+
+    def test_privacy_mode_suppresses_sidecar(self, monkeypatch):
+        """BUG-14: privacy mode must pass write_sidecar=False to generate_image."""
+        monkeypatch.setenv("LOCALM_MODE", "privacy")
+        server, _ = _server()
+        with patch("localm.image_gen.comfy.generate_image",
+                   return_value=(True, "ok")) as mock_gen:
+            self._call(server, {"prompt": "x"})
+        assert mock_gen.call_args.kwargs.get("write_sidecar") is False
+
+    def test_logmode_keeps_sidecar(self, monkeypatch):
+        monkeypatch.setenv("LOCALM_MODE", "log")
+        server, _ = _server()
+        with patch("localm.image_gen.comfy.generate_image",
+                   return_value=(True, "ok")) as mock_gen:
+            self._call(server, {"prompt": "x"})
+        assert mock_gen.call_args.kwargs.get("write_sidecar") is True
+
+    def test_generate_image_keeps_stdout_clean(self, capsys):
+        """BUG-11: comfy progress output must go to stderr, not the JSON-RPC stdout."""
+        server, _ = _server()
+
+        def noisy(*a, **k):
+            print("PROGRESS_NOISE_ON_STDOUT")
+            return (True, "ok")
+
+        with patch("localm.image_gen.comfy.generate_image", noisy):
+            self._call(server, {"prompt": "x"})
+        captured = capsys.readouterr()
+        assert "PROGRESS_NOISE_ON_STDOUT" not in captured.out
+        assert "PROGRESS_NOISE_ON_STDOUT" in captured.err
