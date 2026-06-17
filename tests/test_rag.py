@@ -277,6 +277,52 @@ class TestCollection:
         assert c.stats()["n_docs"] == 1
         assert not c.query("sourdough flour water", k=3)
 
+    def test_reserved_device_names_rejected(self, tmp_path):
+        # BUG-8: names that match the regex but break mkdir on Windows
+        for bad in ("con", "CON", "nul", "com1", "LPT9", "aux"):
+            with pytest.raises(ValueError):
+                Collection(bad, base=tmp_path)
+
+    def test_corrupt_meta_does_not_crash_listing(self, tmp_path, docs_dir):
+        # BUG-7: a single corrupt meta.json must not 500 the whole list
+        base = tmp_path / "rag"
+        Collection("good", base=base).create().add_paths([docs_dir])
+        bad = base / "bad"
+        bad.mkdir(parents=True)
+        (bad / "meta.json").write_text("{ this is not json", encoding="utf-8")
+        # listing still works and includes the broken collection's dir
+        assert "good" in collection_names(base)
+        # constructing the broken one does not raise; it is flagged corrupt
+        c = Collection("bad", base=base)
+        assert c.corrupt is True
+        assert c.stats()["corrupt"] is True
+        assert c.stats()["n_chunks"] == 0
+
+    def test_vectors_json_records_dim(self, tmp_path, docs_dir):
+        # BUG-5 / FAC: the documented vectors.json "dim" field is now written
+        base = tmp_path / "rag"
+        c = Collection("kb", base=base).create()
+        c.add_paths([docs_dir], embed_fn=lambda ts: [[1.0, 0.0, 0.0] for _ in ts])
+        data = json.loads((base / "kb" / "vectors.json").read_text(encoding="utf-8"))
+        assert data["dim"] == 3
+
+    def test_switched_embed_model_does_not_crash(self, tmp_path, docs_dir):
+        # BUG-5: query vectors of a different dim than stored must degrade to
+        # lexical, never crash (numpy) or silently truncate (no-numpy).
+        base = tmp_path / "rag"
+        c = Collection("kb", base=base).create()
+        c.add_paths([docs_dir], embed_fn=lambda ts: [[1.0, 0.0] for _ in ts])  # dim 2
+
+        def bigger_model(texts):
+            return [[1.0, 0.0, 0.0, 0.0] for _ in texts]                       # dim 4
+
+        hits = c.query("ROCm DLLs", k=1, embed_fn=bigger_model)   # must not raise
+        assert hits and "gpu.md" in hits[0]["source"]             # lexical fallback
+
+    def test_cosine_dim_mismatch_is_zero(self):
+        from localm.rag.store import _cosine
+        assert _cosine([1.0, 2.0], [1.0, 2.0, 3.0]) == 0.0
+
     def test_failed_files_reported(self, tmp_path):
         base = tmp_path / "rag"
         c = Collection("kb", base=base).create()
