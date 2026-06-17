@@ -14,12 +14,52 @@ from collections import Counter
 _K1 = 1.5
 _B = 0.75
 
-_TOKEN_RE = re.compile(r"[a-z0-9]+")
+# Unicode-aware word runs: keeps accented latin, Cyrillic, Greek, Arabic,
+# CJK, etc. (Python 3's \w is unicode by default; re.UNICODE is explicit).
+_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
+
+# Scripts that are written without spaces between words (CJK ideographs,
+# Hiragana, Katakana, Hangul). For these we have no reliable word boundary,
+# so we fall back to per-character tokens: that lets a query character match
+# a corpus character, which is the standard cheap approach for space-free
+# scripts. Latin / Cyrillic / Arabic / etc. word runs are kept whole.
+_CJK_RANGES = (
+    (0x3040, 0x30FF),    # Hiragana + Katakana
+    (0x3400, 0x4DBF),    # CJK Unified Ideographs Extension A
+    (0x4E00, 0x9FFF),    # CJK Unified Ideographs
+    (0xF900, 0xFAFF),    # CJK Compatibility Ideographs
+    (0xAC00, 0xD7AF),    # Hangul syllables
+    (0x20000, 0x2A6DF),  # CJK Unified Ideographs Extension B
+)
+
+
+def _is_cjk(ch: str) -> bool:
+    cp = ord(ch)
+    return any(lo <= cp <= hi for lo, hi in _CJK_RANGES)
 
 
 def tokenize(text: str) -> list[str]:
-    """Lowercase alphanumeric tokens. Deliberately simple and deterministic."""
-    return _TOKEN_RE.findall(text.lower())
+    """Lowercase unicode word tokens.
+
+    Word runs are split on unicode word boundaries (so accented latin,
+    Cyrillic, Arabic, etc. survive instead of collapsing to nothing under
+    the old ASCII-only rule). Characters from space-free scripts (CJK,
+    Hangul) are emitted one token per character so a query can still match.
+    """
+    tokens: list[str] = []
+    for run in _TOKEN_RE.findall(text.lower()):
+        buf: list[str] = []
+        for ch in run:
+            if _is_cjk(ch):
+                if buf:
+                    tokens.append("".join(buf))
+                    buf = []
+                tokens.append(ch)
+            else:
+                buf.append(ch)
+        if buf:
+            tokens.append("".join(buf))
+    return tokens
 
 
 class BM25:

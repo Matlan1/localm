@@ -62,6 +62,28 @@ USE_GLOBAL = "(use global)"
 NO_MODEL_LABEL = "(no model - choose later in the GUI)"
 
 
+def _spawn_detached(cmd: list, *, cwd: str, env: dict | None = None):
+    """Start a child mode process detached from the launcher, cross-platform.
+
+    On Windows we open the child in its own console window via
+    ``creationflags=CREATE_NEW_CONSOLE`` so the user sees its output. That flag
+    (and the ``CREATE_NEW_CONSOLE`` attribute itself) is Windows-only:
+    referencing it on Linux/macOS raises ``AttributeError``, which the callers'
+    bare ``except`` would swallow into a silent "Launch failed" - making the
+    setup.sh ``.desktop`` entry a dead button (BUG-15). On POSIX we instead use
+    ``start_new_session=True`` so the child survives the launcher closing,
+    without touching the Windows-only flag.
+    """
+    kwargs: dict = {"cwd": cwd}
+    if env is not None:
+        kwargs["env"] = env
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
+    else:
+        kwargs["start_new_session"] = True
+    return subprocess.Popen(cmd, **kwargs)
+
+
 def python_exe() -> str:
     """Prefer the repo venv's interpreter; fall back to the one running us.
     Handles both the Windows (Scripts/) and POSIX (bin/) venv layouts."""
@@ -456,8 +478,7 @@ class Launcher(tk.Tk):
             cmd += ["-p", port]
         cmd += ["--mode", self.privacy_global.get() or "privacy"]
         try:
-            subprocess.Popen(cmd, cwd=str(REPO_DIR),
-                             creationflags=subprocess.CREATE_NEW_CONSOLE)
+            _spawn_detached(cmd, cwd=str(REPO_DIR))
         except Exception as e:
             self.status_msg(f"Launch failed: {e}", error=True)
             return
@@ -640,12 +661,7 @@ class Launcher(tk.Tk):
         self._save_privacy_config()
 
         try:
-            subprocess.Popen(
-                cmd,
-                cwd=str(REPO_DIR),
-                env=env,
-                creationflags=subprocess.CREATE_NEW_CONSOLE,
-            )
+            _spawn_detached(cmd, cwd=str(REPO_DIR), env=env)
         except Exception as e:
             self.status_msg(f"Launch failed: {e}", error=True)
             return

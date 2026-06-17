@@ -199,7 +199,17 @@ def _scrub_history_file(path: Path, pattern: re.Pattern) -> bool:
 
 def clear_shell_history_traces(binary_name: str = "localcoder") -> int:
     """
-    Scrub lines referencing *binary_name* from shell history files on exit.
+    Scrub lines referencing the coder invocation from shell history on exit.
+
+    Matches BOTH spellings of the coder command:
+      * the standalone ``binary_name`` console-script (default ``localcoder``);
+      * the documented ``localm coder`` subcommand form (the real, primary
+        invocation), allowing any inter-word whitespace.
+
+    A bare ``localm`` line for some *other* subcommand (``localm gui``,
+    ``localm serve``, the chat REPL, ...) is intentionally left untouched: only
+    the coder pollutes its own history, and wiping every ``localm`` line would
+    delete unrelated history.
 
     Cleans:
       Windows  - PSReadLine ConsoleHost_history.txt
@@ -209,10 +219,17 @@ def clear_shell_history_traces(binary_name: str = "localcoder") -> int:
 
     Returns the number of files that were modified.
     """
-    # Match the binary name as a word at the start of the command or after
-    # common prefixes like 'sudo ', 'env VAR=x ', etc.
+    # Match either the standalone binary name or the "localm coder" subcommand,
+    # as a word at the start of the command or after common prefixes like
+    # 'sudo ', a pipe, '&&', etc.  ``\b`` after each alternative keeps the match
+    # word-bounded so substrings ("localcoderlib", "localm coderfoo") are kept.
+    invocation = (
+        r"(?:" + re.escape(binary_name) + r"\b"
+        + r"|localm\s+coder\b"
+        + r")"
+    )
     pattern = re.compile(
-        r"(^|[|&;`]\s*|sudo\s+)" + re.escape(binary_name) + r"\b",
+        r"(^|[|&;`]\s*|sudo\s+)" + invocation,
         re.IGNORECASE,
     )
 
