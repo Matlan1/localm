@@ -113,16 +113,37 @@ esac
 # ---- native llama.cpp runtime wheel (loader imports it) ---------------------
 uv pip install -p .venv -e ./runtime >/dev/null 2>&1 || true
 
-# ---- provision the native library -------------------------------------------
+# ---- provision the native library (official llama.cpp prebuilt) -------------
+# Recommend the broadest WORKING backend for the detected hardware: any GPU ->
+# vulkan (runs on AMD/NVIDIA/Intel via the display driver, no vendor toolkit);
+# no GPU -> cpu. CUDA/ROCm are offered for peak vendor performance (they need
+# that vendor's runtime present). setup-llama fetches the matching upstream
+# build, so a Linux/macOS tester no longer has to compile llama.cpp by hand.
+case "$GPU" in cpu) REC=cpu ;; *) REC=vulkan ;; esac
 say ""
-say "  Native llama.cpp library (libllama.so): no prebuilt is hosted for Linux."
-say "  Build llama.cpp for your GPU (see docs/linux-setup.md), then copy it in."
-buildpath="$(ask "  Path to a llama.cpp build dir to copy now (blank = skip): " "")"
-if [ -n "$buildpath" ]; then
-  .venv/bin/localm setup-llama --from "$buildpath" \
-    || say "  [!] setup-llama failed - run it later:  .venv/bin/localm setup-llama --from <dir>"
+say "  Native inference runtime (llama.cpp). Recommended for your hardware: $REC"
+say "    [1] $REC  (recommended)"
+say "    [2] vulkan   - any GPU, no vendor toolkit"
+say "    [3] cuda     - NVIDIA, peak performance (needs the CUDA runtime)"
+say "    [4] hip      - AMD ROCm, peak performance (needs the ROCm runtime)"
+say "    [5] cpu      - no GPU"
+say "    [6] I will build / provide my own (skip the download)"
+bpick="$(ask "  Pick 1-6 [1]: " 1)"
+case "$bpick" in
+  2) BACKEND=vulkan ;; 3) BACKEND=cuda ;; 4) BACKEND=hip ;; 5) BACKEND=cpu ;;
+  6) BACKEND=own ;;   *) BACKEND="$REC" ;;
+esac
+if [ "$BACKEND" = own ]; then
+  buildpath="$(ask "  Path to a llama.cpp build dir to copy now (blank = skip): " "")"
+  if [ -n "$buildpath" ]; then
+    .venv/bin/localm setup-llama --from "$buildpath" \
+      || say "  [!] setup-llama failed - run later:  .venv/bin/localm setup-llama --from <dir>"
+  else
+    say "  Skipped. Provision later:  .venv/bin/localm setup-llama --backend <vulkan|cuda|hip|cpu>"
+  fi
 else
-  say "  Skipped. Provision later:  .venv/bin/localm setup-llama --from <build dir>"
+  .venv/bin/localm setup-llama --backend "$BACKEND" \
+    || say "  [!] setup-llama failed - run later:  .venv/bin/localm setup-llama --backend $BACKEND"
 fi
 
 # ---- data directory ---------------------------------------------------------
