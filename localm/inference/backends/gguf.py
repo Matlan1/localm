@@ -320,34 +320,70 @@ class GgufBackend(BaseBackend):
         if messages_contain_image(messages):
             raise UnsupportedInputError(IMAGE_UNSUPPORTED_MESSAGE)
 
-        kwargs: dict = dict(
-            messages=messages,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            top_k=top_k,
-            repeat_penalty=repeat_penalty,
-            grammar=grammar,
-            stream=True,
-        )
-        if seed is not None:
-            kwargs["seed"] = seed
+        # Some native llama.dll builds ship a grammar sampler that faults at
+        # sample time (a C++ exception across the C ABI) without harming the
+        # loaded model. Once we have seen that on this build, skip grammar
+        # up-front and generate unconstrained - the same soft-degrade contract
+        # the HF backend offers - so a grammar request never breaks chat.
+        if grammar and getattr(self, "_grammar_unsupported", False):
+            console.print(
+                "[yellow]grammar is not supported by this native llama build; "
+                "generating without constraint.[/yellow]"
+            )
+            grammar = None
 
-        # native ctypes path (LlamaCpp)
-        self.last_finish_reason = "stop"
-        try:
-            for chunk in self._llm.create_chat_completion(**kwargs):
+        def _make_kwargs(g: Optional[str]) -> dict:
+            kw: dict = dict(
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                top_k=top_k,
+                repeat_penalty=repeat_penalty,
+                grammar=g,
+                stream=True,
+            )
+            if seed is not None:
+                kw["seed"] = seed
+            return kw
+
+        def _stream(g: Optional[str]) -> Iterator[str]:
+            for chunk in self._llm.create_chat_completion(**_make_kwargs(g)):
                 choice = chunk["choices"][0]
-                token = choice.get("delta", {}).get("content", "")
                 if choice.get("finish_reason"):
                     # "length" = the max_tokens budget ran out mid-reply
                     self.last_finish_reason = choice["finish_reason"]
+                token = choice.get("delta", {}).get("content", "")
                 if token:
                     yield token
+
+        # native ctypes path (LlamaCpp)
+        self.last_finish_reason = "stop"
+        yielded = False
+        try:
+            for token in _stream(grammar):
+                yielded = True
+                yield token
         except OSError as e:
-            # A native fault (access violation etc.) leaves the loaded model
-            # in an unknown state. Without this, every later request returns
-            # an instant empty stream - a zombie server. Drop the broken
+            # A grammar sampler fault on a build that does not implement it: the
+            # model decode context is unharmed (only the sampler threw), so if
+            # nothing was emitted yet, remember it and retry once WITHOUT the
+            # grammar instead of failing the request.
+            if grammar and not yielded:
+                self._grammar_unsupported = True
+                from localm.debuglog import logger as _dbg
+                _dbg.warning("native grammar sampler faulted (%s); "
+                             "degrading to unconstrained generation", e)
+                console.print(
+                    "[yellow]grammar is not supported by this native llama "
+                    "build; generating without constraint.[/yellow]"
+                )
+                self.last_finish_reason = "stop"
+                yield from _stream(None)
+                return
+            # Any other native fault (access violation etc.) leaves the loaded
+            # model in an unknown state. Without this, every later request
+            # returns an instant empty stream - a zombie server. Drop the broken
             # instance so the next request triggers a clean reload.
             # Mark the reason so the response doesn't report a clean "stop".
             self.last_finish_reason = "error"
