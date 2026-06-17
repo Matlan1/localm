@@ -32,6 +32,19 @@ from .extract import EXTRACTABLE_SUFFIXES, ExtractError, extract_text
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
+# Windows reserved device names: they match _NAME_RE but mkdir raises on them.
+_RESERVED_NAMES = {"con", "prn", "aux", "nul",
+                   *(f"com{i}" for i in range(1, 10)),
+                   *(f"lpt{i}" for i in range(1, 10))}
+
+
+def _first_dim(vectors: list) -> Optional[int]:
+    """Dimensionality of the first non-empty vector, or None."""
+    for v in vectors:
+        if v:
+            return len(v)
+    return None
+
 # Directories never worth indexing when a folder is added
 _SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__",
               ".pytest_cache", ".mypy_cache", "dist", "build", ".idea",
@@ -50,6 +63,8 @@ def _check_name(name: str) -> str:
     if not _NAME_RE.match(name or ""):
         raise ValueError(
             "Collection names must be 1-64 letters, digits, '-' or '_'")
+    if name.lower() in _RESERVED_NAMES:
+        raise ValueError(f"'{name}' is a reserved device name and cannot be used")
     return name
 
 
@@ -78,7 +93,9 @@ class Collection:
         self._meta: dict = {}
         self._chunks: list[dict] = []
         self._vectors: Optional[list] = None     # aligned with _chunks, or None
+        self._vec_dim: Optional[int] = None       # dimensionality of stored vectors
         self._bm25: Optional[BM25] = None
+        self.corrupt: bool = False
         if self.exists():
             self._load()
 
@@ -98,7 +115,21 @@ class Collection:
         return self
 
     def _load(self) -> None:
-        self._meta = json.loads((self.dir / "meta.json").read_text(encoding="utf-8"))
+        # A corrupt meta.json must not crash construction (and thus the whole
+        # collections listing) - flag it and present an empty collection.
+        try:
+            meta = json.loads((self.dir / "meta.json").read_text(encoding="utf-8"))
+            if not isinstance(meta, dict):
+                raise ValueError("meta.json is not an object")
+            self._meta = meta
+        except (json.JSONDecodeError, ValueError, OSError):
+            self.corrupt = True
+            self._meta = {"name": self.name, "docs": {}}
+            self._chunks = []
+            self._vectors = None
+            self._vec_dim = None
+            self._bm25 = None
+            return
         self._chunks = []
         chunks_file = self.dir / "chunks.jsonl"
         if chunks_file.is_file():
@@ -108,6 +139,7 @@ class Collection:
                 except json.JSONDecodeError:
                     continue
         self._vectors = None
+        self._vec_dim = None
         vec_file = self.dir / "vectors.json"
         if vec_file.is_file():
             try:
@@ -115,6 +147,7 @@ class Collection:
                 vectors = data.get("vectors", [])
                 if len(vectors) == len(self._chunks):
                     self._vectors = vectors
+                    self._vec_dim = data.get("dim") or _first_dim(vectors)
             except (json.JSONDecodeError, OSError):
                 pass
         self._bm25 = None
@@ -125,10 +158,12 @@ class Collection:
         self._atomic_write("chunks.jsonl", "\n".join(
             json.dumps(c, ensure_ascii=False) for c in self._chunks))
         if self._vectors is not None and any(v for v in self._vectors):
+            self._vec_dim = _first_dim(self._vectors)
             self._atomic_write("vectors.json", json.dumps(
-                {"vectors": self._vectors}))
+                {"dim": self._vec_dim, "vectors": self._vectors}))
         else:
             (self.dir / "vectors.json").unlink(missing_ok=True)
+            self._vec_dim = None
         self._bm25 = None
 
     def _atomic_write(self, filename: str, content: str) -> None:
@@ -284,6 +319,13 @@ class Collection:
             qvec = embed_fn([text])[0]
         except Exception:
             return None
+        # A switched embedding model yields query vectors of a different
+        # dimensionality than the stored ones: numpy (va @ vb) would raise and
+        # the no-numpy path would silently truncate. Skip vector scoring and
+        # fall back to lexical-only rather than crash or return wrong scores.
+        dim = self._vec_dim or _first_dim(self._vectors)
+        if dim is not None and len(qvec) != dim:
+            return None
         out = []
         for v in self._vectors:
             out.append(_cosine(qvec, v) if v else 0.0)
@@ -303,6 +345,7 @@ class Collection:
             "n_docs": len(self._meta.get("docs", {})),
             "n_chunks": len(self._chunks),
             "has_vectors": bool(vectors) and all(v for v in vectors),
+            "corrupt": self.corrupt,
         }
 
     def docs(self) -> list[dict]:
@@ -313,6 +356,8 @@ class Collection:
 
 
 def _cosine(a: list, b: list) -> float:
+    if len(a) != len(b):       # mismatched dims (switched embed model) -> no signal
+        return 0.0
     try:
         import numpy as np
         va, vb = np.asarray(a, dtype="float32"), np.asarray(b, dtype="float32")
