@@ -82,10 +82,13 @@ class BaseBackend(ABC):
         Parameters
         ----------
         grammar:
-            Optional GBNF grammar string.  When provided (GGUF backend only),
-            the sampler masks tokens that would violate the grammar at the
-            current parse position.  Use ``localm.inference.gbnf`` for
-            pre-built grammars.  Ignored by backends that do not support it.
+            Optional GBNF/EBNF grammar string.  When provided, the sampler masks
+            tokens that would violate the grammar at the current parse position,
+            so output is structurally valid by construction.  The GGUF backend
+            uses llama.cpp's native grammar sampler; the HF backend uses xgrammar
+            (the optional ``[grammar]`` extra) and falls back to unconstrained
+            generation if it is not installed.  Use ``localm.inference.gbnf`` for
+            pre-built grammars.
         seed:
             RNG seed for reproducible generation.  GGUF: passed to the sampler.
             HF: sets ``torch.manual_seed`` before generating.
