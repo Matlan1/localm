@@ -186,6 +186,17 @@ class TestScopedToolCoverage:
         )
         assert _rejected(result)
 
+    def test_generate_image_input_image_outside_scope_rejected(self, tmp_path):
+        """img2img input_image is also scope-checked (re-audit residual: it was
+        not, so a scoped agent could read any file as an img2img source)."""
+        agent = _make_agent(tmp_path, scope="art/*.png")
+        result = agent._execute_tool(
+            _call("generate_image", prompt="a cat",
+                  output_path="art/ok.png", input_image="secret/private.png"),
+            interactive=False,
+        )
+        assert _rejected(result)
+
     def test_edit_notebook_cell_outside_scope_rejected(self, tmp_path):
         agent = _make_agent(tmp_path, scope="src/*.py")
         result = agent._execute_tool(
