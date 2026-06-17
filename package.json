@@ -1,0 +1,12 @@
+{
+  "name": "localm-gui-tests",
+  "version": "0.0.0",
+  "private": true,
+  "description": "jsdom test harness for the localm GUI (localm/plugins/gui/static). Python is the product; this only tests the vanilla-JS frontend.",
+  "scripts": {
+    "test": "node --test --test-force-exit tests-js/*.test.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "^25.0.1"
+  }
+}

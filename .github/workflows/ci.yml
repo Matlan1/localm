@@ -35,6 +35,18 @@ jobs:
       - name: Tests
         run: pytest -m "not integration"
 
+      # GUI is vanilla JS (localm/plugins/gui/static); the jsdom harness under
+      # tests-js/ loads app.js and exercises it. node:test, no build step.
+      - name: Setup Node (GUI JS tests)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: GUI tests (jsdom)
+        run: |
+          npm ci
+          npm test
+
       # ruff is configured (pyproject [tool.ruff]) but not yet blocking while an
       # unused-import backlog remains. Flip continue-on-error to false once it is
       # cleared.
