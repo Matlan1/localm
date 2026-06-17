@@ -178,6 +178,8 @@ say "    [3] cuda     - NVIDIA, peak performance (needs the CUDA runtime)"
 say "    [4] hip      - AMD ROCm, peak performance (needs the ROCm runtime)"
 say "    [5] cpu      - no GPU"
 say "    [6] I will build / provide my own (skip the download)"
+say "    (the chosen backend is verified after install; if it cannot load here,"
+say "     setup falls back to vulkan, then cpu, so you are never left broken)"
 bpick="$(ask "  Pick 1-6 [1]: " 1)"
 case "$bpick" in
   2) BACKEND=vulkan ;; 3) BACKEND=cuda ;; 4) BACKEND=hip ;; 5) BACKEND=cpu ;;

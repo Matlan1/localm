@@ -8,7 +8,7 @@ can also do it (or change it) directly:
 ```bash
 localm setup-llama                      # auto-detect and pick the right backend
 localm setup-llama --backend vulkan     # any GPU (AMD/NVIDIA/Intel), no toolkit
-localm setup-llama --backend cuda       # NVIDIA, peak perf (needs CUDA runtime)
+localm setup-llama --backend cuda       # NVIDIA, peak perf (Windows: fetches the runtime for you)
 localm setup-llama --backend amd-rocm   # AMD RX 6000 (gfx103X), self-contained
 localm setup-llama --backend cpu        # no GPU
 localm setup-llama --from <build dir>   # your own llama.cpp build (any backend)
@@ -17,7 +17,7 @@ localm setup-llama --from <build dir>   # your own llama.cpp build (any backend)
 | Backend | Runs on | Notes |
 |---|---|---|
 | `vulkan` | any AMD / NVIDIA / Intel GPU | universal default - only the normal display driver, no CUDA/ROCm/oneAPI toolkit |
-| `cuda` | NVIDIA | peak performance; needs the CUDA runtime present |
+| `cuda` | NVIDIA | peak performance; on Windows setup fetches the CUDA runtime for you (no Toolkit), then load-tests and falls back to vulkan/cpu if it cannot load |
 | `amd-rocm` | AMD RX 6000 (gfx103X) | self-contained ROCm build (bundles its runtime) |
 | `hip` | AMD (any gfx) | upstream ROCm build; needs the ROCm/HIP runtime |
 | `sycl` | Intel Arc | needs the oneAPI runtime |
@@ -85,10 +85,32 @@ localm run mymodel --gpu-layers 20 --prompt "hello"
 ## NVIDIA (CUDA)
 
 The simplest path is `localm setup-llama --backend vulkan` (runs on the NVIDIA
-GPU through the normal driver, no CUDA toolkit). For peak performance use
-`localm setup-llama --backend cuda`, which fetches the upstream CUDA build (it
-needs the CUDA runtime present). Either way the loader auto-detects the GPU at
-startup; nothing else differs from the AMD path.
+GPU through the normal driver, no CUDA toolkit) - this is what the installer
+recommends.
+
+For peak performance pick `--backend cuda`. On **Windows** this is a guided,
+self-contained path: setup checks your driver, then fetches BOTH the CUDA
+`llama` build and the matching `cudart` runtime bundle from the same llama.cpp
+release, so **you do not need to install the CUDA Toolkit**. The dialogue covers:
+
+- **Driver new enough** (supports CUDA >= 12.4): it offers to download the build
+  + runtime (a few hundred MB) and sets it up.
+- **Driver too old**: the GPU driver is the one piece setup cannot fetch for you
+  (it needs admin + a reboot). Setup points you at NVIDIA's driver download and
+  uses Vulkan for now so you are not stuck; re-run
+  `localm setup-llama --backend cuda --force` after updating.
+- **No NVIDIA detected** but you chose CUDA anyway: it proceeds at your request
+  (a one-time heads-up), or you can take Vulkan.
+
+After provisioning, setup **load-tests** the library exactly as `localm run`
+will. If the CUDA build cannot load on your machine it automatically falls back
+to Vulkan, then CPU, so setup never leaves you with a broken runtime. (On Linux,
+`--backend cuda` uses the upstream CUDA build and expects the CUDA runtime
+present; the same load-test + fallback applies.)
+
+> `--sha256 <hex>` pins the **CUDA build** archive only. The separate cudart
+> runtime bundle has no per-release published hash, so it is validated by size +
+> archive shape rather than the pin; both come from the same upstream release.
 
 ## Intel (Arc)
 
@@ -128,3 +150,19 @@ uv pip install -p .venv torch torchvision --index-url https://download.pytorch.o
 The `[gpu]` extra is AMD-ROCm-specific (Windows, Python 3.12) - do **not** install
 it on an NVIDIA box; use the CUDA wheels above. GPU is selected automatically;
 override with `--device cuda` / `--device cpu`.
+
+## When something goes wrong
+
+localm tries to fail like a good citizen: it tells you *what* broke and *why*,
+and (for an unexpected error) offers to save a prefilled, editable bug report you
+can read before anything is sent. You can also create one any time:
+
+```bash
+localm bug-report -m "short description of the problem"
+```
+
+It collects a safe snapshot - OS, GPU vendor, driver / CUDA capability, the
+chosen backend, and the names of the provisioned libraries - and never your API
+key, config, or chat data. The report is saved under your data dir
+(`bug-reports/`); you can edit it, then email it to the maintainer, open a GitHub
+issue (once you have repo access), or send the file however you like.
