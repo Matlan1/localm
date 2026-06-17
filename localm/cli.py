@@ -466,19 +466,57 @@ def _handle_command(
         else:
             console.print("[dim]Usage: /system <text>[/dim]")
     elif cmd == "save":
-        _save_chat(messages, arg or "chat.json")
+        target = arg or "chat.json"
+        # Confine writes to the current working directory: a path like
+        # "../x.json" or an absolute path elsewhere must not let the REPL
+        # write outside cwd.
+        cwd = Path.cwd().resolve()
+        try:
+            resolved = (cwd / target).resolve()
+        except (OSError, ValueError) as e:
+            console.print(f"[red]Invalid save path: {e}[/red]")
+        else:
+            if resolved == cwd or cwd not in resolved.parents:
+                console.print(
+                    f"[red]Refusing to save outside the current directory:[/red] "
+                    f"{target}\n[dim]Use a path inside {cwd}[/dim]"
+                )
+            else:
+                _save_chat(messages, str(resolved))
     elif cmd == "temp":
         try:
-            gen_opts["temperature"] = float(arg)
-            console.print(f"[dim]temperature = {gen_opts['temperature']}[/dim]")
+            requested = float(arg)
         except ValueError:
             console.print("[dim]Usage: /temp 0.7[/dim]")
+        else:
+            # Clamp to a sane sampling range; negative or huge temps are not
+            # meaningful and would otherwise be stored verbatim.
+            clamped = max(0.0, min(2.0, requested))
+            gen_opts["temperature"] = clamped
+            if clamped != requested:
+                console.print(
+                    f"[dim]temperature clamped to {clamped} (valid range 0..2)[/dim]"
+                )
+            else:
+                console.print(f"[dim]temperature = {clamped}[/dim]")
     elif cmd == "tokens":
         try:
-            gen_opts["max_tokens"] = int(arg)
-            console.print(f"[dim]max_tokens = {gen_opts['max_tokens']}[/dim]")
+            requested = int(arg)
         except ValueError:
             console.print("[dim]Usage: /tokens 2048[/dim]")
+        else:
+            # max_tokens must be at least 1; cap absurd values so a typo cannot
+            # request an effectively unbounded generation.
+            MAX_TOKENS_CAP = 1_000_000
+            clamped = max(1, min(MAX_TOKENS_CAP, requested))
+            gen_opts["max_tokens"] = clamped
+            if clamped != requested:
+                console.print(
+                    f"[dim]max_tokens clamped to {clamped} "
+                    f"(valid range 1..{MAX_TOKENS_CAP})[/dim]"
+                )
+            else:
+                console.print(f"[dim]max_tokens = {clamped}[/dim]")
     elif cmd == "help":
         console.print(
             "[dim]"
@@ -1288,7 +1326,34 @@ def doctor():
             None,
         )
         if found_dll:
-            console.print(f"  {ok_sym}  {found_dll.name} found in {binary_dir}")
+            # Existence alone is not health: a zeroed or truncated llama.dll
+            # exists but cannot load. Check the file size, and flag a lib that
+            # is present but implausibly small to be a real native library.
+            try:
+                size = found_dll.stat().st_size
+            except OSError as e:
+                size = -1
+                console.print(
+                    f"  {fail_sym}  {found_dll.name} in {binary_dir} cannot be "
+                    f"read (corrupt?): {e}"
+                )
+            else:
+                # A genuine llama.dll/.so is multiple MB. 64 KiB is a generous
+                # floor that still rejects 0/1-byte stubs and tiny placeholders.
+                TINY_LIB_BYTES = 64 * 1024
+                if size == 0:
+                    console.print(
+                        f"  {fail_sym}  {found_dll.name} in {binary_dir} is empty "
+                        f"(0 bytes) - corrupt; re-run 'localm setup-llama'"
+                    )
+                elif size < TINY_LIB_BYTES:
+                    console.print(
+                        f"  {warn_sym}  {found_dll.name} found in {binary_dir} but "
+                        f"is suspiciously small ({size} bytes, expected multiple MB) "
+                        f"- it may be truncated/corrupt"
+                    )
+                else:
+                    console.print(f"  {ok_sym}  {found_dll.name} found in {binary_dir}")
         else:
             files = [f.name for f in binary_dir.iterdir() if f.is_file()][:8]
             console.print(
@@ -1318,10 +1383,13 @@ def doctor():
         except Exception:
             continue
 
-    if not gpu_found:
-        console.print(f"  {warn_sym}  No GPU driver found (nvidia-smi / rocm-smi) - CPU mode only")
-
     # ----- VRAM via torch -----
+    # Run the torch GPU probe BEFORE deciding the "CPU mode only" verdict:
+    # the smi tools can be absent while torch still sees a usable GPU (common
+    # on ROCm installs without rocm-smi on PATH). Printing both "CPU mode only"
+    # and a torch GPU/VRAM line in the same run contradicts itself, so let
+    # torch's view veto the CPU-only warning.
+    torch_gpu_found = False
     try:
         import torch
         if torch.cuda.is_available():
@@ -1334,10 +1402,14 @@ def doctor():
                     f"  {ok_sym}  GPU {i}: {props.name}  "
                     f"{free_b / 1024**3:.1f} GB free / {total_b / 1024**3:.1f} GB total"
                 )
+                torch_gpu_found = True
         else:
             console.print(f"  {warn_sym}  torch available but torch.cuda.is_available() = False")
     except ImportError:
         console.print(f"  {warn_sym}  torch not installed - GPU VRAM check skipped")
+
+    if not gpu_found and not torch_gpu_found:
+        console.print(f"  {warn_sym}  No GPU driver found (nvidia-smi / rocm-smi) - CPU mode only")
 
     # ----- Required Python packages -----
     packages = [
@@ -1352,10 +1424,20 @@ def doctor():
         ("torch",             "torch (HF backend / GPU info)"),
         ("transformers",      "transformers (HF backend)"),
     ]
+    import importlib.metadata as _ilm
+    # Import name -> distribution name where they differ (for version lookup).
+    _dist_names = {"huggingface_hub": "huggingface-hub"}
     for mod, label in packages + optional_pkgs:
         try:
             m = importlib.import_module(mod)
             ver = getattr(m, "__version__", "")
+            if not ver:
+                # Some packages (e.g. 'rich') expose no __version__ attribute;
+                # read the installed distribution metadata instead of blanking.
+                try:
+                    ver = _ilm.version(_dist_names.get(mod, mod))
+                except _ilm.PackageNotFoundError:
+                    ver = ""
             sym = ok_sym
             ver_str = f" {ver}" if ver else ""
         except ImportError:
