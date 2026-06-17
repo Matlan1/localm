@@ -141,6 +141,10 @@ CORE_FIELDS: list = [
                  "Names of enabled engine plugins. Managed by the Plugins page "
                  "and `localm plugin enable/disable`, not edited here.",
                  group="Plugins"),
+    SettingField("plugins", Widget.HIDDEN, "Per-plugin config",
+                 "Per-plugin settings (e.g. media output dirs). Managed by the "
+                 "Plugins/Settings pages and plugin backends, not edited here.",
+                 group="Plugins"),
     # ---- Coder (plugin) ----
     SettingField("coder_confirm_timeout", Widget.NUMBER,
                  "Coder approval timeout (s)", group="Coder", owner="coder",
@@ -181,6 +185,136 @@ CORE_FIELDS: list = [
     SettingField("heretic_path", Widget.FOLDER, "Heretic checkout path",
                  group="Advanced", owner="abliterate"),
 ]
+
+
+# --------------------------------------------------------------------------- #
+#  Validation: coerce + check a dict of config updates against the schema.    #
+#  Single source of truth for PATCH /v1/config and `localm config`, so        #
+#  neither can persist an unknown key, a wrong-typed value, a SELECT value    #
+#  outside its options, or an out-of-range number. The GUI form submits       #
+#  strings; raw API clients submit native JSON types - both are coerced here. #
+# --------------------------------------------------------------------------- #
+
+_TRUE = {"1", "true", "yes", "on"}
+_FALSE = {"0", "false", "no", "off"}
+
+
+def _field_map() -> dict:
+    return {f.key: f for f in CORE_FIELDS}
+
+
+def _to_bool(key: str, val):
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        low = val.strip().lower()
+        if low in _TRUE:
+            return True
+        if low in _FALSE:
+            return False
+    raise ValueError(f"{key}: expected a boolean, got {val!r}")
+
+
+def _to_number(key: str, val, *, want_int: bool, lo, hi):
+    if isinstance(val, bool):       # bool is an int subclass - reject as a number
+        raise ValueError(f"{key}: expected a number, not a boolean")
+    try:
+        num = int(val) if want_int else float(val)
+    except (TypeError, ValueError):
+        kind = "an integer" if want_int else "a number"
+        raise ValueError(f"{key}: expected {kind}, got {val!r}")
+    if lo is not None and num < lo:
+        raise ValueError(f"{key}: {num} is below the minimum {lo}")
+    if hi is not None and num > hi:
+        raise ValueError(f"{key}: {num} is above the maximum {hi}")
+    return num
+
+
+def _to_str_list(key: str, val):
+    if isinstance(val, str):
+        return [s.strip() for s in val.split(",") if s.strip()]
+    if isinstance(val, (list, tuple)):
+        return [str(s).strip() for s in val if str(s).strip()]
+    raise ValueError(f"{key}: expected a list of strings, got {val!r}")
+
+
+def _validate_one(key: str, val, field: "SettingField", default):
+    nullable = default is None
+    widget = field.widget
+
+    if val is None:
+        if nullable or widget in (Widget.TEXT, Widget.FOLDER, Widget.PATH, Widget.SECRET):
+            return None
+        raise ValueError(f"{key}: a value is required (got null)")
+
+    if widget == Widget.TOGGLE:
+        return _to_bool(key, val)
+
+    if widget == Widget.NUMBER:
+        want_int = isinstance(default, int) and not isinstance(default, bool)
+        return _to_number(key, val, want_int=want_int, lo=field.min, hi=field.max)
+
+    if widget == Widget.SELECT:
+        s = "" if val == "" else str(val)
+        if s == "" and nullable:
+            return None
+        if field.options and s in field.options:
+            return s
+        raise ValueError(f"{key}: {val!r} is not one of {field.options}")
+
+    if widget == Widget.LIST:
+        return _to_str_list(key, val)
+
+    if widget == Widget.HIDDEN:
+        # plugins_enabled (list) / plugins (dict): managed by the engine, not the
+        # settings form, but accepted with the right container type for the
+        # GET->PATCH round-trip the GUI does.
+        if isinstance(default, list):
+            if not isinstance(val, list):
+                raise ValueError(f"{key}: expected a list")
+            return [str(s) for s in val]
+        if isinstance(default, dict):
+            if not isinstance(val, dict):
+                raise ValueError(f"{key}: expected an object")
+            return val
+        return val
+
+    # TEXT / FOLDER / PATH / SECRET
+    if key == "cors_origins":
+        # None | "*" | list of origins; a comma string becomes a list so the
+        # server's CORS handling (which only honours "*"/list) actually applies.
+        if isinstance(val, (list, tuple)):
+            return _to_str_list(key, val)
+        s = str(val).strip()
+        if not s:
+            return None
+        if s == "*":
+            return "*"
+        return _to_str_list(key, s)
+    if isinstance(val, str):
+        s = val.strip()
+        return s or (None if nullable else "")
+    raise ValueError(f"{key}: expected a string, got {val!r}")
+
+
+def validate_update(updates: dict) -> dict:
+    """Coerce + validate a dict of config updates against CORE_FIELDS.
+
+    Returns a new dict of normalized, correctly-typed values. Raises ValueError
+    on an unknown key, a value that cannot be coerced to the field's type, a
+    SELECT value outside its options, or a number outside its min/max."""
+    from localm.config import DEFAULT_CONFIG
+    fields = _field_map()
+    out: dict = {}
+    for key, val in updates.items():
+        if key not in DEFAULT_CONFIG:
+            raise ValueError(f"unknown config key: {key!r}")
+        field = fields.get(key)
+        if field is None:                  # schema/config drift (a test guards this)
+            out[key] = val
+            continue
+        out[key] = _validate_one(key, val, field, DEFAULT_CONFIG[key])
+    return out
 
 
 def all_widgets() -> set:

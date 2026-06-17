@@ -1232,20 +1232,15 @@ def config_cmd(key, value):
       localm config n_ctx 8192
       localm config temperature 0.7
     """
+    from localm.settings_schema import validate_update
+    try:
+        validated = validate_update({key: value})
+    except ValueError as e:
+        raise click.ClickException(str(e))
     cfg = load_config()
-    coerced: object = value
-    if value.lower() in ("true", "false"):
-        coerced = value.lower() == "true"
-    else:
-        for cast in (int, float):
-            try:
-                coerced = cast(value)
-                break
-            except ValueError:
-                pass
-    cfg[key] = coerced
+    cfg.update(validated)
     save_config(cfg)
-    console.print(f"[green]✓[/green] {key} = {coerced}")
+    console.print(f"[green]✓[/green] {key} = {validated[key]}")
 
 
 # ------------------------------------------------------------------ #
