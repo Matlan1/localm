@@ -121,6 +121,7 @@ class PluginHost:
         self._spec = spec
         self._routes: list = []
         self._chat_phases: list = []        # chat-pipeline phases this plugin hooked
+        self._static_prefixes: set = set()  # URL prefixes this plugin already serves
         self.settings: list = []
         self.surface: Optional[Surface] = spec.surface or None
 
@@ -175,19 +176,40 @@ class PluginHost:
         # them (idempotent) so served plugin scripts always load as modules.
         mimetypes.add_type("text/javascript", ".js")
         mimetypes.add_type("text/javascript", ".mjs")
+        prefix = "/" + (url_prefix or f"/plugins/{self._spec.name}").strip("/")
+        if prefix in self._static_prefixes:
+            return prefix                    # already serving this prefix (idempotent)
         base = Path(self._spec.path or ".")
         d = (base / directory).resolve()
         if not d.is_dir():
             raise ValueError(
                 f"plugin {self._spec.name!r}: static dir {directory!r} not found")
-        prefix = "/" + (url_prefix or f"/plugins/{self._spec.name}").strip("/")
         before = {id(r) for r in self._app.router.routes}
         self._app.mount(prefix, StaticFiles(directory=str(d)),
                         name=f"plugin-static-{self._spec.name}")
         new = [r for r in self._app.router.routes if id(r) not in before]
         self._relocate_before_catchall(new)
         self._routes += new
+        self._static_prefixes.add(prefix)
         return prefix
+
+    def mount_surface_assets(self) -> Optional[str]:
+        """Auto-mount the surface's declared ``assets_dir`` at the default
+        ``/plugins/<name>`` prefix. The engine calls this right after
+        ``register(host)`` so any plugin that declares ``assets_dir`` /
+        ``client_entry`` serves its assets without having to call
+        ``mount_static`` itself - otherwise the SPA's ``import()`` of the client
+        entry 404s silently (api_state already advertises ``assets_base`` for
+        such a plugin, so serving it keeps the two in sync). Idempotent: a plugin
+        that DID mount the prefix in register() short-circuits here. Best-effort:
+        an absent assets_dir is ignored, never fatal."""
+        surface = self._spec.surface
+        if not surface or not surface.assets_dir:
+            return None
+        try:
+            return self.mount_static(surface.assets_dir)
+        except ValueError:
+            return None                      # declared but missing on disk
 
     def unmount(self) -> None:
         for r in self._routes:
@@ -196,6 +218,7 @@ class PluginHost:
             except ValueError:
                 pass
         self._routes = []
+        self._static_prefixes = set()
         self._app.openapi_schema = None
         # Drop any chat-pipeline hooks this plugin registered.
         if self._chat_phases:
@@ -457,6 +480,9 @@ class PluginManager:
             raise ValueError(f"plugin {spec.name!r}: no callable {attr!r}")
         host = PluginHost(self.app, self, spec)
         register(host)
+        # Serve a declared surface assets_dir even if register() did not mount it
+        # itself, so a client_entry plugin's module never silently 404s.
+        host.mount_surface_assets()
         self._loaded[spec.name] = (spec, module, host, uniq)
         self._errors.pop(spec.name, None)       # a successful load clears prior error
 
