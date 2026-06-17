@@ -52,6 +52,45 @@ def _lan_ip() -> str:
         return ""
 
 
+def _print_qr(url: str) -> None:
+    """[PoC] Print a scannable QR of *url* to the console so a phone can open
+    localm without typing the address. Experimental; needs the optional 'qrcode'
+    dependency (pip install "localm[qr]"). Best-effort and fully guarded: a
+    missing dep or a console that cannot render block glyphs degrades to a hint
+    and NEVER breaks GUI startup. If it does not scan, your terminal's colours
+    may be inverted - try a light-background terminal."""
+    import io
+    import sys
+
+    from rich.console import Console
+    con = Console()
+    try:
+        import qrcode
+    except ImportError:
+        con.print('  [yellow][PoC][/yellow] QR needs an optional dep: '
+                  r'[cyan]pip install "localm\[qr]"[/cyan]')
+        return
+    try:
+        q = qrcode.QRCode(border=2)
+        q.add_data(url)
+        q.make(fit=True)
+        buf = io.StringIO()
+        q.print_ascii(out=buf, invert=True)   # invert scans better on dark terminals
+        con.print("  [yellow][PoC - experimental][/yellow] scan to open localm on your phone:")
+        # Write the block glyphs as UTF-8 bytes so a legacy console code page
+        # (e.g. Windows cp1252) cannot raise UnicodeEncodeError at startup.
+        data = buf.getvalue().encode("utf-8", "replace")
+        out = getattr(sys.stdout, "buffer", None)
+        if out is not None:
+            out.write(data)
+            out.flush()
+        else:
+            sys.stdout.write(buf.getvalue())
+    except Exception:
+        con.print("  [yellow][PoC][/yellow] [dim](could not render the QR in this "
+                  "terminal; just open the URL above on your phone)[/dim]")
+
+
 @click.command("gui")
 @click.argument("model", default="", required=False, shell_complete=_complete_model)
 @click.option("-H", "--host", default="127.0.0.1", show_default=True,
@@ -80,7 +119,12 @@ def _lan_ip() -> str:
               help="Allow binding past loopback WITHOUT LOCALM_API_KEY set. This "
                    "exposes the unauthenticated coder agent (shell + file edits) "
                    "to the network - only on a trusted, isolated network.")
-def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, debug, mode, insecure):
+@click.option("--qr", "show_qr", is_flag=True,
+              help="[PoC] Print a scannable QR of the LAN URL at startup so a "
+                   "phone can open localm without typing the address. Needs a "
+                   "network bind (-H 0.0.0.0) and the optional 'qrcode' dep "
+                   "(pip install \"localm[qr]\"). Experimental.")
+def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, debug, mode, insecure, show_qr):
     """Open the localm web GUI - chat and the coder agent in your browser.
 
     \b
@@ -271,13 +315,20 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
             "  [dim]use from your phone: bind to your network with "
             "[/dim][cyan]localm gui -H 0.0.0.0[/cyan][dim] (set LOCALM_API_KEY "
             "first); then see docs/phone.md[/dim]")
+        if show_qr:
+            console.print(
+                "  [yellow][PoC][/yellow] [dim]--qr needs a network bind to be "
+                "scannable: [/dim][cyan]localm gui -H 0.0.0.0 --qr[/cyan]")
     else:
         _ip = _lan_ip()
         if _ip:
+            phone_url = f"http://{_ip}:{chosen_port}/"
             console.print(
                 f"  [dim]from a phone on this network:[/dim] "
-                f"[cyan]http://{_ip}:{chosen_port}/[/cyan] "
+                f"[cyan]{phone_url}[/cyan] "
                 "[dim](open it, then Install as app)[/dim]")
+            if show_qr:
+                _print_qr(phone_url)
 
     # Preload the model in the background so the first chat reply is fast.
     # Engine.load is lock-protected; a request arriving mid-load waits on it.
