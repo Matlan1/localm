@@ -125,10 +125,12 @@ echo.
 echo  Native inference runtime (llama.cpp) - press Enter to accept the recommendation:
 echo    [1] %REC%   (recommended for your hardware)
 echo    [2] vulkan     - any GPU (AMD/NVIDIA/Intel), no vendor toolkit
-echo    [3] cuda       - NVIDIA, peak performance (needs the CUDA runtime)
+echo    [3] cuda       - NVIDIA, peak performance (fetches the CUDA runtime for you)
 echo    [4] amd-rocm   - AMD RX 6000 (gfx103X), self-contained
 echo    [5] cpu        - no GPU
 echo    [6] I will build / provide my own (skip the download)
+echo    (the chosen backend is verified after install; if it cannot load here,
+echo     setup falls back to vulkan, then cpu, so you are never left broken)
 set "BSEL="
 set /p "BSEL=  Pick 1-6 [1]: "
 if not defined BSEL set "BSEL=1"
