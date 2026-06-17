@@ -60,7 +60,10 @@ do_uninstall() {
   case "$ok" in [Yy]*) ;; *) say "  Aborted - nothing changed."; return 0 ;; esac
 
   if [ -n "$py" ]; then
-    "$py" -m localm.install_manifest uninstall --root . $pflag || true
+    # --force: the dry-run above already showed any unrecorded items and the
+    # at-your-own-risk warning; the user chose to continue. The catastrophic-path
+    # guard inside the module still refuses root/$HOME/repo regardless.
+    "$py" -m localm.install_manifest uninstall --root . $pflag --force || true
   fi
   # The manifest never deletes the running venv; remove it here, marker-checked.
   if [ -f .venv/.localm-venv ]; then

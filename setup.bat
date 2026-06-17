@@ -312,7 +312,10 @@ if errorlevel 2 (
     pause
     exit /b 0
 )
-if exist "%PYBIN%" "%PYBIN%" -m localm.install_manifest uninstall --root . %PFLAG%
+rem --force: the dry-run above showed any unrecorded items + the at-your-own-risk
+rem warning and the user chose to continue; the module still refuses catastrophic
+rem paths (root/%USERPROFILE%/repo) regardless.
+if exist "%PYBIN%" "%PYBIN%" -m localm.install_manifest uninstall --root . %PFLAG% --force
 rem The manifest never deletes the running venv; remove it here, marker-checked.
 if exist ".venv\.localm-venv" (
     rmdir /s /q .venv

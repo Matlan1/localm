@@ -112,86 +112,100 @@ def _unsafe_data_dir(path: str, repo: Path) -> Optional[str]:
     return None
 
 
-def uninstall(root, *, purge_data=False, dry_run=False, log=print) -> dict:
-    """Remove what the manifest recorded - and nothing else. Returns a report
-    dict with 'removed' / 'skipped' / 'refused' / 'venv'. With *dry_run*, reports
-    the plan without touching disk. The venv is reported, not removed."""
+def uninstall(root, *, purge_data=False, dry_run=False, force=False, log=print) -> dict:
+    """Plan/execute the uninstall. Each item is classified:
+
+      * recorded - we have a record we created it; removed.
+      * warn     - we do NOT remember creating it; removed only with *force*
+                   (the caller shows a clear at-your-own-risk warning first and
+                   the user chooses to continue). Always reported.
+      * refuse   - a categorically dangerous target (filesystem/drive root,
+                   $HOME, the repo, an ancestor of it, or a symlink); NEVER
+                   removed, even with force. This is the rm -rf / guard.
+
+    With *dry_run* nothing is touched. The venv is reported, not removed."""
     root = Path(root).resolve()
-    report = {"removed": [], "skipped": [], "refused": [], "venv": "", "ok": True}
+    report = {"removed": [], "skipped": [], "warned": [], "refused": [],
+              "venv": "", "ok": True, "no_manifest": False}
+    actions = []                              # (path, kind, status, reason)
 
     m = load(root)
     if m is None:
-        log("[uninstall] No install manifest (.localm-install.json) found - "
-            "refusing to guess. Nothing removed.")
-        report["ok"] = False
-        return report
-    if m.get("schema") != SCHEMA_VERSION:
+        # No record. We can still offer the provisioned binaries (a fixed,
+        # repo-relative location) as WARNED guesses - never the data dir.
+        report["no_manifest"] = True
+        default_lib = root / "runtime" / "localm_llama_runtime" / "lib"
+        for name in _bin_files(default_lib):
+            actions.append((str(default_lib / name), "binary", "warn",
+                            "no install record - not certain we created this"))
+        report["venv"] = str(root / ".venv")
+    elif m.get("schema") != SCHEMA_VERSION:
         log(f"[uninstall] Unrecognised manifest schema {m.get('schema')!r} - "
             "aborting for safety. Nothing removed.")
         report["ok"] = False
         return report
+    else:
+        lib_dir = m.get("lib_dir", "")
+        for name in m.get("binaries", []):
+            if not name or "/" in name or "\\" in name or name in (".", ".."):
+                report["refused"].append((name, "suspicious binary name in manifest"))
+                continue
+            if not lib_dir:
+                report["refused"].append((name, "no lib_dir recorded"))
+                continue
+            actions.append((str(Path(lib_dir) / name), "binary", "recorded", ""))
+        if m.get("home_cfg"):
+            actions.append((m["home_cfg"], "home_cfg", "recorded", ""))
+        if m.get("shortcut"):
+            actions.append((m["shortcut"], "shortcut", "recorded", ""))
+        data_dir = m.get("data_dir", "")
+        if purge_data and data_dir:
+            reason = _unsafe_data_dir(data_dir, root)
+            if reason:
+                actions.append((data_dir, "data", "refuse", reason))
+            elif not m.get("data_created"):
+                actions.append((data_dir, "data", "warn",
+                                "not recorded as created by the installer"))
+            else:
+                actions.append((data_dir, "data", "recorded", ""))
+        elif data_dir:
+            report["skipped"].append(
+                (data_dir, "data kept (pass --purge-data to remove)"))
+        report["venv"] = m.get("venv", "")
 
-    def _rm_file(path: str, label: str) -> None:
-        if not path:
-            return
-        f = Path(path)
-        if not f.exists():
+    def _remove(path: str, kind: str) -> None:
+        p = Path(path)
+        if not p.exists():
             report["skipped"].append((path, "already gone"))
-            return
-        if f.is_dir():                        # a recorded file is now a dir: refuse
-            report["refused"].append((path, f"{label} is unexpectedly a directory"))
             return
         if dry_run:
             report["removed"].append(path)
             return
         try:
-            f.unlink()
+            if p.is_dir() and kind == "data":
+                shutil.rmtree(path)
+            elif p.is_dir():
+                report["refused"].append((path, f"{kind} is unexpectedly a directory"))
+                return
+            else:
+                p.unlink()
             report["removed"].append(path)
         except OSError as e:
             report["refused"].append((path, f"could not remove: {e}"))
 
-    # 1) provisioned binaries: only recorded bare names, only inside recorded lib_dir
-    lib_dir = m.get("lib_dir", "")
-    for name in m.get("binaries", []):
-        if not name or "/" in name or "\\" in name or name in (".", ".."):
-            report["refused"].append((name, "suspicious binary name in manifest"))
+    for path, kind, status, reason in actions:
+        if status == "refuse":
+            report["refused"].append((path, reason))
             continue
-        if not lib_dir:
-            report["refused"].append((name, "no lib_dir recorded"))
-            continue
-        _rm_file(str(Path(lib_dir) / name), "binary")
+        if status == "warn":
+            report["warned"].append((path, reason))
+            if not force:
+                continue                      # shown, but not removed without force
+            if dry_run:
+                continue                      # listed under 'warned', don't double-list
+        _remove(path, kind)
 
-    # 2) home.cfg and shortcut: only the exact recorded file paths
-    _rm_file(m.get("home_cfg", ""), "home.cfg")
-    _rm_file(m.get("shortcut", ""), "shortcut")
-
-    # 3) data dir: ONLY if WE created it, --purge-data is set, and it is safe
-    data_dir = m.get("data_dir", "")
-    if purge_data and data_dir:
-        if not m.get("data_created"):
-            report["skipped"].append(
-                (data_dir, "not created by the installer; left untouched"))
-        else:
-            reason = _unsafe_data_dir(data_dir, root)
-            if reason:
-                report["refused"].append((data_dir, reason))
-            elif dry_run:
-                report["removed"].append(data_dir)
-            else:
-                try:
-                    shutil.rmtree(data_dir)
-                    report["removed"].append(data_dir)
-                except OSError as e:
-                    report["refused"].append((data_dir, f"could not remove: {e}"))
-    elif data_dir:
-        report["skipped"].append(
-            (data_dir, "data kept (pass --purge-data to remove)"))
-
-    # 4) venv: recorded for the shell to remove (marker-checked) after we return.
-    report["venv"] = m.get("venv", "")
-
-    # 5) drop the manifest itself last
-    if not dry_run:
+    if not dry_run and m is not None:
         try:
             manifest_path(root).unlink()
         except OSError:
@@ -205,11 +219,20 @@ def uninstall(root, *, purge_data=False, dry_run=False, log=print) -> dict:
 
 def _print_report(rep: dict) -> None:
     for x in rep["removed"]:
-        print(f"  removed: {x}")
+        print(f"  remove: {x}")
+    for x, why in rep.get("warned", []):
+        print(f"  WARN  : {x}  (unverified - {why}; removed only if you continue)")
     for x, why in rep["skipped"]:
-        print(f"  skipped: {x}  ({why})")
+        print(f"  keep  : {x}  ({why})")
     for x, why in rep["refused"]:
-        print(f"  REFUSED: {x}  ({why})")
+        print(f"  REFUSE: {x}  (unsafe - {why}; never removed)")
+    if rep.get("warned") or rep.get("no_manifest"):
+        print("")
+        if rep.get("no_manifest"):
+            print("  [!] No install record (.localm-install.json) was found.")
+        print("  *** Some items above are NOT in our install record - we do not")
+        print("      remember creating them. Continuing removes them anyway:")
+        print("      here be dragons (possible data loss). Your call. ***")
 
 
 def main(argv=None) -> int:
@@ -227,10 +250,14 @@ def main(argv=None) -> int:
     r.add_argument("--shortcut", default="")
     r.add_argument("--stamp", default="")
 
-    u = sub.add_parser("uninstall", help="remove only what the manifest recorded")
+    u = sub.add_parser("uninstall", help="remove what the manifest recorded")
     u.add_argument("--root", default=".")
     u.add_argument("--purge-data", action="store_true")
     u.add_argument("--dry-run", action="store_true")
+    u.add_argument("--force", action="store_true",
+                   help="also remove items with no install record (after the "
+                        "caller has warned the user); never overrides the "
+                        "catastrophic-path guard")
 
     args = ap.parse_args(argv)
     if args.cmd == "record":
@@ -240,7 +267,8 @@ def main(argv=None) -> int:
                    stamp=args.stamp)
         print(f"[install] recorded manifest at {p}")
         return 0
-    rep = uninstall(args.root, purge_data=args.purge_data, dry_run=args.dry_run)
+    rep = uninstall(args.root, purge_data=args.purge_data,
+                    dry_run=args.dry_run, force=args.force)
     _print_report(rep)
     return 0 if rep["ok"] else 1
 

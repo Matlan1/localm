@@ -72,16 +72,32 @@ def test_uninstall_purge_data_removes_data_when_we_created_it(tmp_path):
     assert str(p["data"].resolve()) in rep["removed"]
 
 
-def test_uninstall_purge_data_keeps_data_we_did_not_create(tmp_path):
+def test_purge_data_not_ours_is_warned_not_removed_without_force(tmp_path):
     p = _fake_install(tmp_path, data_created=False)
-    im.uninstall(tmp_path, purge_data=True)
-    assert p["data"].exists()                     # we never owned it -> never delete it
+    rep = im.uninstall(tmp_path, purge_data=True)     # no force
+    assert p["data"].exists()                         # kept - not removed by default
+    assert any("not recorded as created" in why for _, why in rep["warned"])
 
 
-def test_no_manifest_refuses(tmp_path):
-    rep = im.uninstall(tmp_path, purge_data=True)
-    assert rep["ok"] is False
+def test_purge_data_not_ours_removed_with_force(tmp_path):
+    p = _fake_install(tmp_path, data_created=False)
+    im.uninstall(tmp_path, purge_data=True, force=True)   # user accepted the risk
+    assert not p["data"].exists()                     # safe nested path -> removed
+
+
+def test_no_manifest_warns_then_force_removes_known_binaries(tmp_path):
+    lib = tmp_path / "runtime" / "localm_llama_runtime" / "lib"
+    lib.mkdir(parents=True)
+    (lib / "llama.dll").write_text("x", encoding="utf-8")
+    # No record: warned, but nothing removed without force.
+    rep = im.uninstall(tmp_path)
+    assert rep["no_manifest"] is True
     assert rep["removed"] == []
+    assert any("no install record" in why for _, why in rep["warned"])
+    assert (lib / "llama.dll").exists()
+    # With force (the dragons warning was shown and accepted): removed.
+    im.uninstall(tmp_path, force=True)
+    assert not (lib / "llama.dll").exists()
 
 
 def test_bad_schema_aborts(tmp_path):
@@ -131,6 +147,6 @@ def test_uninstall_refuses_when_data_dir_is_unsafe(tmp_path):
               lib_dir=str(tmp_path / "runtime" / "lib"),
               data_dir=str(tmp_path), data_created=True)
     (tmp_path / "keepme.txt").write_text("important", encoding="utf-8")
-    rep = im.uninstall(tmp_path, purge_data=True)
-    assert (tmp_path / "keepme.txt").exists()                 # repo not nuked
+    rep = im.uninstall(tmp_path, purge_data=True, force=True)  # NOT overridable
+    assert (tmp_path / "keepme.txt").exists()                 # repo not nuked even forced
     assert any("repository root" in why for _, why in rep["refused"])
