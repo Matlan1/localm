@@ -1408,8 +1408,10 @@ function renderNav() {
     if (key === "studio") { renderStudioGroup(slot, studio); continue; }
     if (byTab[key]) { renderFlat(byTab[key]); done.add(key); }
   }
-  // any other active plugin tab not in the canonical order, in catalog order
-  for (const p of flat) if (!done.has(p.tab)) renderFlat(p);
+  // any other active plugin tab not in the canonical order, in catalog order.
+  // Iterate the tab-deduped map (not raw `flat`) so two plugins claiming the
+  // same tab cannot emit duplicate id="nav-<tab>" nodes (LBUG-1).
+  for (const p of Object.values(byTab)) if (!done.has(p.tab)) renderFlat(p);
 
   rebuildViews();
   reconcileActiveView();
@@ -1427,7 +1429,11 @@ function renderStudioGroup(slot, studio) {
     return;
   }
   const order = ["images", "music", "video"];
-  const kids = order.map((t) => studio.find((p) => p.tab === t)).filter(Boolean);
+  const known = order.map((t) => studio.find((p) => p.tab === t)).filter(Boolean);
+  // include any studio plugin with a non-canonical tab so a third-party media
+  // plugin is not counted toward the group yet silently never rendered (LGAP-1)
+  const extra = studio.filter((p) => !order.includes(p.tab));
+  const kids = [...known, ...extra];
   const activeView = (document.querySelector(".view.active") || { id: "view-chat" })
     .id.replace("view-", "");
   const hasActiveKid = kids.some((p) => p.tab === activeView);
@@ -1703,6 +1709,7 @@ async function runCompletion(conv, webDepth = 0) {
   let full = "";
   let usage = null;
   let finishReason = null;
+  let aborted = false;
   try {
     const r = await fetch("/v1/chat/completions", {
       method: "POST",
@@ -1729,7 +1736,9 @@ async function runCompletion(conv, webDepth = 0) {
       }
     });
   } catch (e) {
-    if (e.name !== "AbortError") {
+    if (e.name === "AbortError") {
+      aborted = true;
+    } else {
       renderMarkdown(liveBody, full + "\n\n*[error: " + e.message + "]*");
       toast("Chat request failed: " + e.message, true);
     }
@@ -1738,6 +1747,10 @@ async function runCompletion(conv, webDepth = 0) {
     sendBtn.classList.remove("stop");
     sendBtn.textContent = "➤";
   }
+
+  // User pressed Stop: leave the partial text on screen but do NOT persist it,
+  // read it aloud, or fire the web loop / recurse on a partial reply (BUG-13).
+  if (aborted) return;
 
   const reply = { role: "assistant", content: full };
   if (finishReason === "length") {
@@ -3099,6 +3112,7 @@ function attachSlashMenu(textarea, commands, execute) {
   }
 
   function pick(c) {
+    if (!c) { close(); return; }   // empty list in a render/keydown race (LATENT-1)
     if (c.args) {
       textarea.value = "/" + c.cmd + " ";
       textarea.focus();

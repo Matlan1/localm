@@ -1,0 +1,50 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { loadApp, runScript } from "./harness.mjs";
+
+// renderNav() builds the dynamic nav from the top-level `pluginState` (a `let`,
+// so it lives in the realm's global lexical env, not on window). We seed it and
+// invoke renderNav from an injected script, stubbing the tail calls
+// (rebuildViews / reconcileActiveView) that touch unrelated view machinery.
+function renderWith(plugins) {
+  const { window } = loadApp();
+  runScript(window, `
+    rebuildViews = function () {};
+    reconcileActiveView = function () {};
+    pluginState = ${JSON.stringify(plugins)};
+    renderNav();
+  `);
+  return window;
+}
+
+test("LBUG-1: two active plugins sharing a tab do not produce duplicate nav ids", () => {
+  const win = renderWith([
+    { name: "a", active: true, tab: "extras", group: "", icon: "code", label: "A" },
+    { name: "b", active: true, tab: "extras", group: "", icon: "code", label: "B" },
+  ]);
+  const slot = win.document.getElementById("nav-plugin-slot");
+  const matches = slot.querySelectorAll('[id="nav-extras"]');
+  assert.equal(matches.length, 1, "exactly one nav node for the shared tab");
+});
+
+test("LGAP-1: a studio plugin with an unknown tab is still rendered as a child", () => {
+  const win = renderWith([
+    { name: "img", active: true, tab: "images", group: "studio", icon: "image", label: "Images" },
+    { name: "threed", active: true, tab: "threed", group: "studio", icon: "image", label: "3D" },
+  ]);
+  const slot = win.document.getElementById("nav-plugin-slot");
+  assert.ok(slot.querySelector('[id="nav-threed"]'),
+    "an unknown-tab studio plugin must still be rendered, not silently dropped");
+});
+
+test("renderNav still renders ordinary flat + studio tabs", () => {
+  const win = renderWith([
+    { name: "coder", active: true, tab: "coder", group: "", icon: "code", label: "Coder" },
+    { name: "img", active: true, tab: "images", group: "studio", icon: "image", label: "Images" },
+    { name: "music", active: true, tab: "music", group: "studio", icon: "music", label: "Music" },
+  ]);
+  const slot = win.document.getElementById("nav-plugin-slot");
+  assert.ok(slot.querySelector('[id="nav-coder"]'), "flat coder tab rendered");
+  assert.ok(slot.querySelector('[id="nav-images"]'), "studio child images rendered");
+  assert.ok(slot.querySelector('[id="nav-music"]'), "studio child music rendered");
+});
