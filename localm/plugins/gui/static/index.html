@@ -4,6 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>localm</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#0f1115">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icon.svg">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="localm">
 <link rel="stylesheet" href="/style.css">
 <link rel="stylesheet" href="/vendor/github-dark.min.css">
 <link rel="stylesheet" href="/vendor/katex.min.css">
@@ -376,6 +383,17 @@
             <button class="btn-quiet" id="gui-clear-convs">Delete all conversations</button>
           </div>
         </div>
+        <div class="card">
+          <h3>Companion app</h3>
+          <div class="sub">Connected to <code id="conn-origin">this server</code>. This app talks
+          only to the server that served it - to use it from your phone, open that address on the
+          phone (over your LAN, or a private network like Tailscale) and install it from there.</div>
+          <div class="actions">
+            <button class="btn-primary" id="install-app" style="display:none">Install as app</button>
+            <span id="install-hint" class="sub">Use your browser's <em>Install app</em> /
+            <em>Add to Home screen</em> to pin localm as an app.</span>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -398,5 +416,41 @@
 <script src="/vendor/auto-render.min.js"></script>
 <script src="/app.js"></script>
 <script src="/pages.js"></script>
+<script>
+/* PWA: register the service worker, show which server we are connected to, and
+   wire an "Install as app" button when the browser offers the install prompt. */
+(function () {
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", function () {
+      navigator.serviceWorker.register("/sw.js").catch(function () {});
+    });
+  }
+  var originEl = document.getElementById("conn-origin");
+  if (originEl) originEl.textContent = location.origin;
+
+  var deferred = null;
+  var btn = document.getElementById("install-app");
+  var hint = document.getElementById("install-hint");
+  window.addEventListener("beforeinstallprompt", function (e) {
+    e.preventDefault();
+    deferred = e;
+    if (btn) btn.style.display = "";
+    if (hint) hint.style.display = "none";
+  });
+  if (btn) btn.addEventListener("click", function () {
+    if (!deferred) return;
+    deferred.prompt();
+    deferred.userChoice.finally(function () {
+      deferred = null;
+      btn.style.display = "none";
+      if (hint) hint.style.display = "";
+    });
+  });
+  window.addEventListener("appinstalled", function () {
+    if (btn) btn.style.display = "none";
+    if (hint) hint.textContent = "Installed. Find localm with your other apps.";
+  });
+})();
+</script>
 </body>
 </html>
