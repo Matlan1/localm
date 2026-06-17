@@ -169,6 +169,7 @@ if /i "%BACKEND%"=="own" (
     set /p "LLAMABUILD=  Path to your llama.cpp build dir with llama.dll (blank = skip): "
     if not "!LLAMABUILD!"=="" (
         .venv\Scripts\localm setup-llama --from "!LLAMABUILD!"
+        if errorlevel 1 echo  [!] Provisioning failed - run later: .venv\Scripts\localm setup-llama --from "!LLAMABUILD!"
     ) else (
         echo  Skipped - provision later: .venv\Scripts\localm setup-llama --backend ^<vulkan^|cuda^|amd-rocm^|cpu^>
     )
@@ -312,6 +313,11 @@ if "%PURGE%"=="1" (
     if "%DATA%"=="" set "SAFE=0"
     if /i "%DATA%"=="%CD%" set "SAFE=0"
     if /i "%DATA%"=="%USERPROFILE%" set "SAFE=0"
+    rem reject drive roots (C:, C:\) and parent-traversal (..)
+    set "DCHK=%DATA%"
+    if "!DCHK:~-1!"=="\" set "DCHK=!DCHK:~0,-1!"
+    if "!DCHK:~-1!"==":" set "SAFE=0"
+    if not "!DATA!"=="!DATA:..=!" set "SAFE=0"
     if "!SAFE!"=="0" (
         echo  [!] Unsafe or empty data path - kept: %DATA%
     ) else (

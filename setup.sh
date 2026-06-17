@@ -72,14 +72,26 @@ do_uninstall() {
   rm -f "$HOME/.local/share/applications/localm.desktop" 2>/dev/null || true
 
   if [ "$PURGE" = 1 ]; then
-    local repo; repo="$(pwd)"
-    if [ -z "$data" ] || [ "$data" = "/" ] || [ "$data" = "$HOME" ] || [ "$data" = "$repo" ]; then
-      say "  [!] Refusing to delete data dir '$data' (unsafe path) - kept."
+    local repo home_abs data_abs unsafe=0
+    repo="$(pwd -P)"
+    home_abs="$(cd "$HOME" 2>/dev/null && pwd -P || echo "$HOME")"
+    # Reject shell glob / parent-traversal metacharacters and a symlinked data
+    # dir outright, then CANONICALISE with `pwd -P` (resolves symlinks and ./)
+    # so the guards compare REAL locations, not strings - a relative or
+    # symlinked path cannot aim the delete at the repo root, $HOME, or elsewhere.
+    case "$data" in *'*'*|*'?'*|*'['*|*..*) unsafe=1 ;; esac
+    if [ -L "$data" ]; then unsafe=1; fi
+    data_abs="$(cd "$data" 2>/dev/null && pwd -P || echo "$data")"
+    if [ "$unsafe" = 1 ] || [ -z "$data" ] || [ -z "$data_abs" ] \
+        || [ "$data_abs" = "/" ] || [ "$data_abs" = "$home_abs" ] || [ "$data_abs" = "$repo" ]; then
+      say "  [!] Refusing to delete data path '$data' (unsafe path) - kept."
     else
-      local ok2; ok2="$(ask "  Permanently delete ALL data in $data ? [y/N]: " N)"
+      local ok2; ok2="$(ask "  Permanently delete ALL data in $data_abs ? [y/N]: " N)"
       case "$ok2" in
-        [Yy]*) rm -rf "$data" 2>/dev/null || true; say "  Removed $data" ;;
-        *)     say "  Data kept." ;;
+        [Yy]*)
+          if rm -rf "$data_abs" 2>/dev/null; then say "  Removed $data_abs"
+          else say "  [!] Could not fully remove $data_abs (check permissions)."; fi ;;
+        *) say "  Data kept." ;;
       esac
     fi
   fi
@@ -160,13 +172,13 @@ case "$GPU" in
     say "  Installing PyTorch (ROCm) + transformers ..."
     uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/rocm6.2 \
       || say "  [!] ROCm torch install failed - install a matching torch+rocm manually (see docs/linux-setup.md)."
-    uv pip install -p .venv "transformers[kernels]~=5.10" "accelerate>=1.0" "pillow>=10.0" || true
+    uv pip install -p .venv "transformers[kernels]~=5.12" "accelerate>=1.0" "pillow>=10.0" || true
     ;;
   cuda)
     say "  Installing PyTorch (CUDA) + transformers ..."
     uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu124 \
       || say "  [!] CUDA torch install failed - install a matching torch+cuda manually (see docs/linux-setup.md)."
-    uv pip install -p .venv "transformers[kernels]~=5.10" "accelerate>=1.0" "pillow>=10.0" || true
+    uv pip install -p .venv "transformers[kernels]~=5.12" "accelerate>=1.0" "pillow>=10.0" || true
     ;;
   cpu)
     say "  CPU mode - skipping the GPU/torch stack (GGUF inference needs no torch)."

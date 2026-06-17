@@ -70,6 +70,30 @@ def test_resolve_unsupported_backend_raises():
         sl._resolve_backend_url(bad)
 
 
+def test_extract_archive_rejects_path_traversal(tmp_path):
+    """A zip member that escapes the destination (absolute, drive, or ..) is
+    refused before extraction, not written outside the target."""
+    import zipfile
+    z = tmp_path / "evil.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("ok/llama.dll", b"x")
+        zf.writestr("../escape.dll", b"x")          # path traversal
+    with pytest.raises(sl.ArtifactError):
+        sl._extract_archive(z, tmp_path / "out")
+    assert not (tmp_path / "escape.dll").exists()   # nothing escaped
+
+
+def test_extract_archive_accepts_clean_zip(tmp_path):
+    import zipfile
+    z = tmp_path / "good.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("bin/llama.dll", b"x")
+        zf.writestr("bin/ggml.dll", b"y")
+    out = tmp_path / "out"
+    sl._extract_archive(z, out)
+    assert (out / "bin" / "llama.dll").is_file()
+
+
 def test_resolve_offline_falls_back_to_pinned_tag(monkeypatch):
     """With the release API unreachable, resolution must still produce a sane
     upstream URL built from the pinned fallback tag and the right backend."""

@@ -7,9 +7,10 @@ depending on a folder elsewhere on disk.
 
 Backends (``--backend``), so any machine has a working out-of-the-box path:
   * ``auto`` (default) - detect the GPU and pick the broadest WORKING backend:
-    AMD -> the self-contained ROCm build; any other GPU -> ``vulkan`` (runs on
-    NVIDIA/Intel/AMD through the normal display driver, no vendor toolkit);
-    Apple Silicon -> ``metal``; no GPU -> ``cpu``.
+    AMD on Windows -> the self-contained ROCm build (AMD on Linux -> ``vulkan``);
+    any other GPU -> ``vulkan`` (runs on NVIDIA/Intel/AMD through the normal
+    display driver, no vendor toolkit); Apple Silicon -> ``metal``; no GPU ->
+    ``cpu``.
   * ``vulkan`` - universal GPU build from upstream llama.cpp (recommended for
     NVIDIA/Intel, and a no-toolkit option for AMD).
   * ``cuda`` / ``sycl`` / ``cpu`` - upstream llama.cpp prebuilts. ``cuda`` and
@@ -226,8 +227,8 @@ def _resolve_backend_url(backend: str) -> str:
     # Fallback: construct the canonical URL from the first matcher token.
     stem = matchers[0]
     ext = "zip" if plat == "win32" else "tar.gz"
-    fname = f"llama-{tag}-{stem.replace('bin-', 'bin-')}.{ext}"
-    return (f"https://github.com/{_UPSTREAM_REPO}/releases/download/{tag}/{fname}")
+    fname = f"llama-{tag}-{stem}.{ext}"
+    return f"https://github.com/{_UPSTREAM_REPO}/releases/download/{tag}/{fname}"
 
 
 # --------------------------------------------------------------------------- #
@@ -311,10 +312,15 @@ def _validate_archive(
 
 
 def _extract_archive(path: Path, dest: Path) -> None:
-    """Extract a validated zip or tar.gz into *dest*. Tar extraction uses the
-    'data' filter (Python 3.12+) so a malicious member cannot escape *dest*."""
+    """Extract a validated zip or tar.gz into *dest*, refusing any member that
+    would escape *dest* (an absolute path, a drive letter, or a ``..`` segment).
+    Tar uses the 'data' filter (Python 3.12+) for the same guarantee."""
     if zipfile.is_zipfile(path):
         with zipfile.ZipFile(path) as zf:
+            for n in zf.namelist():
+                if n.startswith(("/", "\\")) or ".." in Path(n).parts \
+                        or (len(n) > 1 and n[1] == ":"):
+                    raise ArtifactError(f"unsafe path in archive: {n!r}")
             zf.extractall(dest)
         return
     with tarfile.open(path) as tf:
@@ -356,8 +362,9 @@ def _install_runtime_wheel(pkg_dir: Path) -> bool:
               type=click.Choice(["auto", "vulkan", "cuda", "sycl", "hip", "cpu",
                                  "metal", "amd-rocm"], case_sensitive=False),
               help="Which prebuilt to fetch. 'auto' detects your GPU and picks "
-                   "the broadest working backend (vulkan for NVIDIA/Intel, the "
-                   "self-contained ROCm build for AMD, cpu if no GPU).")
+                   "the broadest working backend: vulkan for NVIDIA/Intel; the "
+                   "self-contained ROCm build for AMD on Windows (vulkan for AMD "
+                   "on Linux); cpu if no GPU.")
 @click.option("--url", default=None, help="Override with an explicit prebuilt archive URL.")
 @click.option("--sha256", "sha256", default=None,
               help="Expected sha256 of the downloaded archive. When given, the "
@@ -448,6 +455,9 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
                 _extract_archive(arc_path, extract_dir)
             except (zipfile.BadZipFile, tarfile.TarError):
                 console.print("[red]The downloaded file is not a valid archive.[/red]")
+                sys.exit(1)
+            except ArtifactError as e:
+                console.print(f"[red]Refusing to extract:[/red] {e}")
                 sys.exit(1)
             n = _copy_binaries(extract_dir, target)
             if not (target / lib_name).exists():

@@ -25,7 +25,9 @@ localm setup-llama --from <build dir>   # your own llama.cpp build (any backend)
 
 Binaries come from official [llama.cpp](https://github.com/ggml-org/llama.cpp)
 releases (AMD uses a self-contained build); the loader auto-detects the GPU at
-runtime. **macOS/Metal is experimental and unverified - treat it as best-effort.**
+runtime. **macOS/Metal is experimental and unverified - treat it as best-effort.
+If inference fails or hangs on macOS, fall back to CPU:
+`localm setup-llama --backend cpu --force`.**
 
 ## AMD (ROCm / HIP)
 
