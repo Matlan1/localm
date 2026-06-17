@@ -187,9 +187,15 @@ echo        models and settings
 echo    [3] Custom path
 choice /c 123 /n /m "  Pick 1, 2 or 3: "
 set "DATAPICK=%errorlevel%"
+rem DATADIR + DATACREATED feed the install manifest (DATACREATED=1 only when WE
+rem made the dir, so uninstall --purge-data never removes a pre-existing folder).
+set "DATADIR=%USERPROFILE%\.localm"
+set "DATACREATED=0"
 if "%DATAPICK%"=="1" (
     if not exist "home" mkdir "home"
     if exist "localm-home.cfg" del "localm-home.cfg"
+    set "DATADIR=%CD%\home"
+    set "DATACREATED=1"
     echo  Data directory: %CD%\home
 )
 if "%DATAPICK%"=="2" (
@@ -207,6 +213,8 @@ if "%DATAPICK%"=="3" (
     ) else (
         > "localm-home.cfg" echo !CUSTOMHOME!
         if not exist "!CUSTOMHOME!" mkdir "!CUSTOMHOME!"
+        set "DATADIR=!CUSTOMHOME!"
+        set "DATACREATED=1"
         echo  Data directory: !CUSTOMHOME!  (recorded in localm-home.cfg)
     )
 )
@@ -219,6 +227,9 @@ echo    [2] Web GUI directly
 echo    [3] No shortcut
 choice /c 123 /n /m "  Pick 1, 2 or 3: "
 set "SCPICK=%errorlevel%"
+set "SCPATH="
+if "%SCPICK%"=="1" set "SCPATH=%USERPROFILE%\Desktop\localm.lnk"
+if "%SCPICK%"=="2" set "SCPATH=%USERPROFILE%\Desktop\localm.lnk"
 if "%SCPICK%"=="1" (
     powershell -NoProfile -Command ^
         "$s = (New-Object -ComObject WScript.Shell).CreateShortcut([Environment]::GetFolderPath('Desktop') + '\localm.lnk');" ^
@@ -247,6 +258,12 @@ echo.
 echo  Which optional features (plugins) do you want? chat is always on.
 .venv\Scripts\localm plugin setup
 
+rem ---- record what we installed (uninstall removes ONLY what we created) -----
+set "CRD="
+if "%DATACREATED%"=="1" set "CRD=--data-created"
+.venv\Scripts\python -m localm.install_manifest record --root . --venv "%CD%\.venv" --lib-dir "%CD%\runtime\localm_llama_runtime\lib" --data-dir "%DATADIR%" %CRD% --shortcut "%SCPATH%" >nul 2>nul
+if errorlevel 1 echo  [!] Could not record the install manifest (uninstall will be conservative).
+
 rem ---- done ------------------------------------------------------------------
 echo.
 echo  Done. This clone is self-contained:
@@ -268,28 +285,25 @@ pause
 exit /b 0
 
 rem ===========================================================================
-rem  Uninstall / rollback. Removes ONLY what setup created: our .venv
-rem  (marker-checked), the provisioned native binaries, localm-home.cfg, and the
-rem  desktop shortcut. Data is KEPT unless --purge-data, and unsafe target paths
-rem  are refused even then.
+rem  Uninstall / rollback. The actual removal is delegated to the tested
+rem  localm.install_manifest module, which removes ONLY what install recorded
+rem  (never a derived/globbed/empty path) and hard-guards the one rm. The shell
+rem  only removes the marker-checked .venv afterwards (a running interpreter
+rem  cannot delete its own venv).
 rem ===========================================================================
 :uninstall
 echo.
 echo  localm uninstall / rollback for this clone:
 echo    %CD%
 echo.
-set "DATA=%USERPROFILE%\.localm"
-if exist "home" set "DATA=%CD%\home"
-if exist "localm-home.cfg" set /p DATA=<localm-home.cfg
-echo  Will remove:
-if exist ".venv\.localm-venv" (echo    - .\.venv ^(the localm virtual environment^)) else (echo    - .\.venv   [skipped: not a localm-created venv])
-echo    - provisioned native binaries in runtime\localm_llama_runtime\lib
-if exist "localm-home.cfg" echo    - .\localm-home.cfg
-if "%PURGE%"=="1" (
-    echo    - YOUR DATA ^(models, config, chats^): %DATA%   [--purge-data]
+set "PYBIN=.venv\Scripts\python.exe"
+set "PFLAG="
+if "%PURGE%"=="1" set "PFLAG=--purge-data"
+if exist "%PYBIN%" (
+    echo  Planned removals (from the install manifest .localm-install.json):
+    "%PYBIN%" -m localm.install_manifest uninstall --root . %PFLAG% --dry-run
 ) else (
-    echo.
-    echo  Your data is KEPT: %DATA%   ^(pass --purge-data to remove it too^)
+    echo  [!] No venv Python found - only the marked .venv will be removed.
 )
 echo.
 choice /c YN /n /m "  Proceed? [y/N]: "
@@ -298,35 +312,14 @@ if errorlevel 2 (
     pause
     exit /b 0
 )
+rem --force: the dry-run above showed any unrecorded items + the at-your-own-risk
+rem warning and the user chose to continue; the module still refuses catastrophic
+rem paths (root/%USERPROFILE%/repo) regardless.
+if exist "%PYBIN%" "%PYBIN%" -m localm.install_manifest uninstall --root . %PFLAG% --force
+rem The manifest never deletes the running venv; remove it here, marker-checked.
 if exist ".venv\.localm-venv" (
     rmdir /s /q .venv
     echo  Removed .\.venv
-)
-del /q "runtime\localm_llama_runtime\lib\*.dll" 2>nul
-del /q "runtime\localm_llama_runtime\lib\*.exe" 2>nul
-del /q "runtime\localm_llama_runtime\lib\*.pyd" 2>nul
-echo  Cleared provisioned native binaries
-del /q "localm-home.cfg" 2>nul
-del /q "%USERPROFILE%\Desktop\localm.lnk" 2>nul
-if "%PURGE%"=="1" (
-    set "SAFE=1"
-    if "%DATA%"=="" set "SAFE=0"
-    if /i "%DATA%"=="%CD%" set "SAFE=0"
-    if /i "%DATA%"=="%USERPROFILE%" set "SAFE=0"
-    rem reject drive roots (C:, C:\) and parent-traversal (..)
-    set "DCHK=%DATA%"
-    if "!DCHK:~-1!"=="\" set "DCHK=!DCHK:~0,-1!"
-    if "!DCHK:~-1!"==":" set "SAFE=0"
-    if not "!DATA!"=="!DATA:..=!" set "SAFE=0"
-    if "!SAFE!"=="0" (
-        echo  [!] Unsafe or empty data path - kept: %DATA%
-    ) else (
-        choice /c YN /n /m "  Permanently delete ALL data in %DATA%? [y/N]: "
-        if not errorlevel 2 (
-            rmdir /s /q "%DATA%"
-            echo  Removed %DATA%
-        )
-    )
 )
 echo.
 echo  Done. To reinstall: setup.bat
