@@ -36,6 +36,22 @@ def _gui_bind_warning(host: str):
     )
 
 
+def _lan_ip() -> str:
+    """Best-effort primary LAN IPv4 of this machine, or "" if undetermined.
+    Opens a UDP socket toward a TEST-NET address to learn the outbound interface;
+    no packets are actually sent. Used only to PRINT a reachable phone/LAN URL."""
+    import socket
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("192.0.2.1", 80))      # TEST-NET-1 (RFC 5737); no traffic
+            return s.getsockname()[0]
+        finally:
+            s.close()
+    except OSError:
+        return ""
+
+
 @click.command("gui")
 @click.argument("model", default="", required=False, shell_complete=_complete_model)
 @click.option("-H", "--host", default="127.0.0.1", show_default=True,
@@ -245,6 +261,23 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     else:
         console.print(f"  model: [cyan]{display_name or Path(str(model_path)).stem}[/cyan]")
     console.print("  Ctrl+C to stop")
+
+    # Phone / LAN access. The GUI is an installable PWA, so a phone just opens
+    # this URL and adds it to the home screen. Bound to loopback, it is only
+    # reachable on this machine; bound to the network, print the address a phone
+    # on the same Wi-Fi can open. See docs/phone.md (Tailscale for off-LAN use).
+    if host in ("127.0.0.1", "localhost", "::1"):
+        console.print(
+            "  [dim]use from your phone: bind to your network with "
+            "[/dim][cyan]localm gui -H 0.0.0.0[/cyan][dim] (set LOCALM_API_KEY "
+            "first); then see docs/phone.md[/dim]")
+    else:
+        _ip = _lan_ip()
+        if _ip:
+            console.print(
+                f"  [dim]from a phone on this network:[/dim] "
+                f"[cyan]http://{_ip}:{chosen_port}/[/cyan] "
+                "[dim](open it, then Install as app)[/dim]")
 
     # Preload the model in the background so the first chat reply is fast.
     # Engine.load is lock-protected; a request arriving mid-load waits on it.

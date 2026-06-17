@@ -15,6 +15,10 @@ localm gui --pull bartowski/Qwen2.5-7B-Instruct-GGUF:Qwen2.5-7B-Instruct-Q4_K_M.
 The selected model preloads in a background thread at startup, so the first
 reply does not pay the load cost.
 
+**On your phone.** The GUI is an installable PWA: open your server's address on a
+phone and "Add to Home screen" to use localm as an app. See
+[phone.md](phone.md) for the same-Wi-Fi and remote (Tailscale) paths.
+
 **Starting with no models.** On a fresh install `localm gui` (no model
 argument, empty registry) still opens - it lands on the Models page so you can
 pull or import a first model from the browser; the engine starts once you load
