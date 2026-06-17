@@ -180,15 +180,28 @@ def list_keys() -> list:
     ]
 
 
-def create_key(name: str, scope_list) -> dict:
+def create_key(name: str, scope_list, *, allow_privileged: bool = False) -> dict:
     """Mint a named key with *scope_list*, persist its hash, and return a record
     INCLUDING the plaintext key once - the caller must surface it now, it cannot
-    be recovered. Raises ValueError on an unknown scope."""
+    be recovered. Raises ValueError on an unknown scope.
+
+    PRIVILEGED_SCOPES (admin / keys:admin / plugins:admin / config:write) are
+    refused with PermissionError unless *allow_privileged* is True. Callers must
+    only set that for an owner/ADMIN principal, so a merely keys:admin-scoped key
+    cannot mint itself owner-equivalent access (privilege self-escalation)."""
     from localm import scopes as S
     clean = S.normalize(scope_list)
     bad = [s for s in clean if not S.is_valid_scope(s)]
     if bad:
         raise ValueError(f"Unknown scope(s): {', '.join(bad)}")
+    if not allow_privileged:
+        privileged = [s for s in clean if s in S.PRIVILEGED_SCOPES]
+        if privileged:
+            raise PermissionError(
+                "Refusing to grant privileged scope(s): "
+                f"{', '.join(privileged)}. Only the owner key may mint keys "
+                "with these capabilities."
+            )
     key = generate_key()
     record = {
         "id": secrets.token_hex(6),
