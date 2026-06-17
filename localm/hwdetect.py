@@ -33,6 +33,7 @@ class Detection:
     vendors: list = field(default_factory=list)   # subset of VENDORS, in priority order
     recommended: str = "cpu"                       # "vulkan" | "cpu"
     source: str = ""                               # how we decided (for messaging)
+    gpu_names: str = ""                            # raw adapter name(s), lowercased
 
     @property
     def has_gpu(self) -> bool:
@@ -107,9 +108,55 @@ def detect() -> Detection:
     # Priority order, de-duplicated.
     ordered = [v for v in VENDORS if v in found]
     recommended = "vulkan" if ordered else "cpu"
-    return Detection(vendors=ordered, recommended=recommended, source=src)
+    return Detection(vendors=ordered, recommended=recommended, source=src,
+                     gpu_names=names)
 
 
 def recommended_backend(det: "Detection | None" = None) -> str:
     """Convenience: the default backend for the current machine."""
     return (det or detect()).recommended
+
+
+def _amd_known_non_gfx103x(names: str) -> bool:
+    """True when the AMD adapter name CLEARLY indicates a family the self-contained
+    gfx103X (RDNA2 / RX 6000) ROCm build does NOT cover: RDNA1 (RX 5000), RDNA3
+    (RX 7000), RDNA4 (RX 9000), Radeon VII, Instinct. Conservative - an unknown or
+    RX 6000 name returns False so the self-contained build stays the default (the
+    setup-llama load-test + vulkan fallback is the net if this guess is ever wrong)."""
+    return any(tag in names for tag in
+               ("rx 5", "rx 7", "rx 9", "radeon vii", "instinct"))
+
+
+def recommended_install_backend(det: "Detection | None" = None) -> str:
+    """The backend the INSTALLER should provision by default - the ONE policy both
+    setup.bat and setup.sh call, so the two detectors can never drift:
+      * Apple Silicon                         -> metal
+      * no GPU                                -> cpu
+      * AMD on Windows, RX 6000 / unknown     -> amd-rocm  (self-contained gfx103X build)
+      * AMD on Windows, clearly not RX 6000    -> vulkan    (gfx103X build won't fit)
+      * any other GPU (NVIDIA, Intel, Linux    -> vulkan    (no vendor toolkit needed)
+        AMD, mixed)
+    The self-contained ROCm bundle is gfx103X + Windows only, hence the narrow amd-rocm case."""
+    d = det or detect()
+    if "apple" in d.vendors:
+        return "metal"
+    if not d.has_gpu:
+        return "cpu"
+    if (sys.platform == "win32" and d.vendors == ["amd"]
+            and not _amd_known_non_gfx103x(d.gpu_names)):
+        return "amd-rocm"
+    return "vulkan"
+
+
+def main(argv=None) -> int:
+    """``python -m localm.hwdetect`` -> prints '<primary-vendor-or-none> <install-backend>'
+    on one line, so the shell installers (setup.bat / setup.sh) share this single
+    tested detector + policy instead of each rolling their own."""
+    d = detect()
+    vendor = d.vendors[0] if d.vendors else "none"
+    print(f"{vendor} {recommended_install_backend(d)}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

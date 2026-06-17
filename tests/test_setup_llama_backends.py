@@ -21,6 +21,36 @@ def test_detect_returns_valid_shape():
     assert det.has_gpu == bool(det.vendors)
 
 
+def test_recommended_install_backend_policy(monkeypatch):
+    """The ONE installer-backend policy both setup.bat and setup.sh share."""
+    def rec(vendors, names, platform="win32"):
+        monkeypatch.setattr(hwdetect.sys, "platform", platform)
+        return hwdetect.recommended_install_backend(
+            hwdetect.Detection(vendors=vendors, gpu_names=names))
+    # AMD on Windows: RX 6000 / unknown keep the self-contained gfx103X ROCm build...
+    assert rec(["amd"], "amd radeon rx 6900 xt") == "amd-rocm"
+    assert rec(["amd"], "amd radeon graphics") == "amd-rocm"
+    # ...but a CLEARLY non-gfx103X AMD downgrades to the universal Vulkan build.
+    assert rec(["amd"], "amd radeon rx 7800 xt") == "vulkan"
+    assert rec(["amd"], "amd radeon rx 9070") == "vulkan"
+    assert rec(["amd"], "amd radeon rx 5700") == "vulkan"
+    # AMD on Linux is always vulkan (the self-contained bundle is Windows-only).
+    assert rec(["amd"], "amd radeon rx 6900 xt", platform="linux") == "vulkan"
+    # Any other GPU -> vulkan; no GPU -> cpu; Apple Silicon -> metal.
+    assert rec(["nvidia"], "nvidia geforce rtx 4090") == "vulkan"
+    assert rec(["intel"], "intel arc a770") == "vulkan"
+    assert rec([], "") == "cpu"
+    assert rec(["apple"], "", platform="darwin") == "metal"
+
+
+def test_hwdetect_cli_prints_vendor_and_backend(capsys):
+    """`python -m localm.hwdetect` emits '<vendor> <install-backend>' for the shells."""
+    assert hwdetect.main() == 0
+    out = capsys.readouterr().out.strip().split()
+    assert len(out) == 2
+    assert out[1] in ("vulkan", "cpu", "metal", "amd-rocm")
+
+
 # --------------------------- auto backend policy -------------------------- #
 
 def _fake_detect(vendors, recommended):

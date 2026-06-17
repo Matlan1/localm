@@ -93,6 +93,8 @@ detect_gpu() {
     echo rocm
   elif command -v nvidia-smi >/dev/null 2>&1; then
     echo cuda
+  elif command -v lspci >/dev/null 2>&1 && lspci 2>/dev/null | grep -Eiq 'intel.*(arc|dg2|xe)'; then
+    echo intel
   else
     echo cpu
   fi
@@ -155,6 +157,10 @@ case "$GPU" in
       || say "  [!] CUDA torch install failed - install a matching torch+cuda manually (see docs/linux-setup.md)."
     uv pip install -p .venv "transformers[kernels]~=5.12" "accelerate>=1.0" "pillow>=10.0" || true
     ;;
+  intel)
+    say "  Intel Arc detected - skipping the PyTorch/transformers stack (no standard"
+    say "  pip GPU wheel for Arc); GGUF chat runs on the Vulkan backend without torch."
+    ;;
   cpu)
     say "  CPU mode - skipping the GPU/torch stack (GGUF inference needs no torch)."
     ;;
@@ -164,12 +170,17 @@ esac
 uv pip install -p .venv -e ./runtime >/dev/null 2>&1 || true
 
 # ---- provision the native library (official llama.cpp prebuilt) -------------
-# Recommend the broadest WORKING backend for the detected hardware: any GPU ->
-# vulkan (runs on AMD/NVIDIA/Intel via the display driver, no vendor toolkit);
-# no GPU -> cpu. CUDA/ROCm are offered for peak vendor performance (they need
-# that vendor's runtime present). setup-llama fetches the matching upstream
-# build, so a Linux/macOS tester no longer has to compile llama.cpp by hand.
-case "$GPU" in cpu) REC=cpu ;; *) REC=vulkan ;; esac
+# The RECOMMENDED backend comes from the SAME tested policy the Windows installer
+# uses (`python -m localm.hwdetect` -> "<vendor> <backend>"), so the two installers
+# can never drift: any GPU -> vulkan (runs on AMD/NVIDIA/Intel via the display
+# driver, no vendor toolkit), Apple Silicon -> metal, no GPU -> cpu. CUDA/ROCm are
+# offered below for peak vendor performance (they need that vendor's runtime).
+# setup-llama fetches the matching upstream build, so a tester never compiles by hand.
+REC="$(.venv/bin/python -m localm.hwdetect 2>/dev/null | awk '{print $2}')"
+case "$REC" in
+  vulkan|cuda|hip|cpu|metal|amd-rocm) ;;                      # a known backend from the policy
+  *) case "$GPU" in cpu) REC=cpu ;; *) REC=vulkan ;; esac ;;  # fallback if the probe failed
+esac
 say ""
 say "  Native inference runtime (llama.cpp). Recommended for your hardware: $REC"
 say "    [1] $REC  (recommended)"
