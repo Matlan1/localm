@@ -182,6 +182,41 @@ def create_app(engine: Engine) -> FastAPI:
         **cors_kwargs,
     )
 
+    # CSRF / drive-by guard for the MANAGEMENT endpoints. The default CORS policy
+    # admits ANY localhost:PORT origin, so without this a malicious local web page
+    # (a dev server, an npm postinstall server) could drive these from the user's
+    # browser - mint a key, flip require_auth, install a plugin, load/unload the
+    # model, browse the filesystem - even on a keyless install (open-mode scope
+    # collapse). We require such requests to be same-origin (or an explicitly
+    # configured CORS origin). The inference API (chat/completions, completions,
+    # embeddings) is deliberately left cross-origin callable so a local app can
+    # use it; non-browser clients (CLI / SDK) send no Origin; "cors_origins": "*"
+    # opts out entirely.
+    _UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+    _GUARDED_PREFIXES = (
+        "/v1/keys", "/v1/config", "/v1/plugins", "/api/plugins",
+        "/v1/models/load", "/v1/models/unload", "/api/fs",
+    )
+    _cors_allowlist = cors_cfg if isinstance(cors_cfg, list) else []
+    _cors_wildcard = cors_cfg == "*"
+
+    @app.middleware("http")
+    async def _origin_guard(request, call_next):
+        if (request.method in _UNSAFE_METHODS and not _cors_wildcard
+                and request.url.path.startswith(_GUARDED_PREFIXES)):
+            origin = request.headers.get("origin")
+            if origin:
+                host = request.headers.get("host", "")
+                same_origin = origin.split("://", 1)[-1] == host
+                if not (same_origin or origin in _cors_allowlist):
+                    return JSONResponse(
+                        status_code=403,
+                        content={"detail": "Cross-origin request refused for a "
+                                 "management endpoint (set 'cors_origins' to "
+                                 "allow this origin)."},
+                    )
+        return await call_next(request)
+
     # ---------------------------------------------------------------- #
     #  Health                                                            #
     # ---------------------------------------------------------------- #

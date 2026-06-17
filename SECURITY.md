@@ -25,6 +25,28 @@ Because the default is fail-open, **do not bind localm to a non-localhost interf
 without setting an API key** (and ideally TLS - see `docs/tls.md`). Exposing the GUI
 also exposes the coder agent, which can run shell commands.
 
+State-changing endpoints (`POST`/`PUT`/`PATCH`/`DELETE`) additionally require the
+request to be same-origin (or an explicitly configured `cors_origins`), so a web page
+on another `localhost` port cannot drive them from your browser. Non-browser clients
+(the CLI and SDKs) send no `Origin` and are unaffected.
+
+## Capability scopes grant host access - only issue keys to trusted clients
+
+Some capabilities reach the host filesystem and process by design, bounded by the
+localm process's own permissions rather than a sandbox:
+
+- **`coder`** runs shell commands and reads/writes files (the `--scope` glob narrows
+  *which* files; `run_shell` is intentionally unscoped).
+- **`rag`** indexing reads any file the localm process can read (you point it at your
+  documents); a `rag`-scoped key can therefore read server-readable files back through
+  a query.
+- **`config:write` / `plugins:admin` / `keys:admin`** are privileged and are never
+  granted implicitly - only the owner key may mint keys carrying them.
+
+localm is single-owner and local-first: these are deliberate grants to *you*. Treat a
+scoped key (or an exposed GUI) as granting the holder that capability on your machine,
+and only issue keys to - or expose the GUI to - clients you trust.
+
 ## Supported versions
 
 localm is pre-1.0; security fixes land on the latest `master`.
