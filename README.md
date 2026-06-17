@@ -61,14 +61,14 @@ SSRF guard ([guide](docs/network.md)).
   MCP both ways, so localm can expose your models to clients like Claude
   Desktop, and the coder can pull in external MCP tool servers.
 - **Media generation (image / music / video plugins).** localm drives a local
-  media-generation server that *you* already run - it integrates with
-  [ComfyUI](https://github.com/comfyanonymous/ComfyUI) today (that is just what
-  the maintainer happens to run), and the media plugins are backend-pluggable (a
-  `backend` setting per plugin) so other media servers can be added. You bring
-  the server and models; localm orchestrates generation and VRAM handover from
-  the LLM, and surfaces it as the Images/Music/Video pages and `/generate-*` chat
-  commands. [docs/flux-setup.md](docs/flux-setup.md) and
-  [docs/video.md](docs/video.md) walk through the ComfyUI setup as one example.
+  media-generation server that *you* already run. **[ComfyUI](https://github.com/comfyanonymous/ComfyUI)
+  is the backend supported today** - it is what the maintainer happens to run, not
+  a recommendation. You bring the server and models; localm orchestrates
+  generation and VRAM handover from the LLM, and surfaces it as the
+  Images/Music/Video pages and `/generate-*` chat commands. The plugins keep a
+  backend seam (a per-plugin `backend` setting) so other media servers can be
+  added later. [docs/flux-setup.md](docs/flux-setup.md) and
+  [docs/video.md](docs/video.md) cover the ComfyUI setup.
 - **Bring your own data (rag, voice, and tts plugins).** Attach files or index
   whole folders and chat against them with citations (Knowledge), dictate with
   local Whisper speech-to-text, or have replies read back to you with in-browser
@@ -113,9 +113,9 @@ ships in the `builtin/` store but is inactive until you run
 | **Model discovery** (core) | Search HF from the Models page or `localm search`; per-quant sizes with "fits your VRAM" badges (torch-free VRAM detection) |
 | **Abliteration** | `localm abliterate` / `localabliterate`: decensor a model with [Heretic](https://github.com/Matlan1/heretic-win-AMD) (a separate AGPL program, run as a subprocess), then auto-register the result (`localm[abliterate]` extra) |
 | **Folder auto-sync** (core) | `localm list`/`gui`/launcher reconcile the registry with the models folder on start; missing files are flagged, not deleted (opt-in `autoprune_missing_models`) |
-| **Image generation** (image plugin) | drives a local media-generation backend (ComfyUI today; backend-pluggable) with VRAM handover; Images GUI page and the `/generate-image` chat command (see [docs/flux-setup.md](docs/flux-setup.md)) |
-| **Music generation** (music plugin) | full-length music, lyrics or instrumental, via the media backend (`localm music` CLI, Music page, `/generate-music` in GUI chat) |
-| **Video generation** (video plugin) | short text- or image-to-video clips via the media backend (`localm video` CLI, Video page, `/generate-video` in GUI chat; [guide](docs/video.md)) |
+| **Image generation** (image plugin) | drives a local media-generation backend (ComfyUI, the backend supported today) with VRAM handover; Images GUI page and the `/generate-image` chat command (see [docs/flux-setup.md](docs/flux-setup.md)) |
+| **Music generation** (music plugin) | full-length music, lyrics or instrumental, via ComfyUI (the supported backend today) (`localm music` CLI, Music page, `/generate-music` in GUI chat) |
+| **Video generation** (video plugin) | short text- or image-to-video clips via ComfyUI (the supported backend today) (`localm video` CLI, Video page, `/generate-video` in GUI chat; [guide](docs/video.md)) |
 | **Plugins** | First-party store plugins (above) plus third-party folders: install/enable/disable/uninstall from the CLI or GUI, export agent tools, add CLI commands and GUI tabs ([authoring guide](docs/plugins.md)) |
 | **Multimodal** (core) | Image attachment via `--image` or `/image` with a HuggingFace-format vision model. The built-in GGUF backend is text-only and rejects an attached image with a clear error rather than silently ignoring it |
 | **Ollama interop** (core) | Register Ollama blobs directly via `localm add <manifest-dir>` |
