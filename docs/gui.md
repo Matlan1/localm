@@ -149,11 +149,11 @@ Stop asks the agent to halt at the next safe point. End session terminates it.
 ## Other pages
 
 Of the pages below, only **Models** and **Plugins** are part of the core shell.
-The **Images**, **Music**, **Video**, and **Knowledge** tabs are each
+The **Images**, **Music**, **Video**, **Knowledge**, and **Jobs** tabs are each
 contributed by a plugin and are absent until that plugin is installed and
 enabled. Image, music, and video declare the same `"studio"` nav group, so the
 SPA collapses them into a single **studio** category in the sidebar rather than
-three top-level tabs; Knowledge is the rag plugin.
+three top-level tabs; Knowledge is the rag plugin and Jobs is the jobs plugin.
 
 - **Models**: search HuggingFace for GGUF models right on the page (empty
   query shows the most downloaded), expand a repo to see every quantization
@@ -187,6 +187,12 @@ three top-level tabs; Knowledge is the rag plugin.
   progress, inspect/remove indexed documents, test-search a collection, and
   delete collections (index only - original files untouched). Collections show
   `hybrid` when embeddings are available, `BM25` otherwise.
+- **Jobs**: schedule a chat or coder prompt to run on a repeating schedule
+  (every N seconds, or a 5-field cron expression). Create, enable/disable, edit,
+  run-now, and delete jobs; each run records a result you can browse. An in-app
+  scheduler runs due jobs while the GUI or server is up. See
+  [jobs.md](jobs.md); the same jobs are managed from the terminal with
+  `localm job`.
 - **Plugins**: browse the bundled store, install a plugin, then enable or
   disable it - all at runtime, with no server restart. Installing copies the
   plugin into the installed folder; enabling mounts its routes, static assets,

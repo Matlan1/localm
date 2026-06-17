@@ -47,9 +47,14 @@ tokenizer plus performance numbers:
 }
 ```
 
+`ttft_ms` (time to first token) is reported on streaming responses only; a
+non-streaming response carries the token counts and `tokens_per_sec` but no
+`ttft_ms`.
+
 Multimodal input uses the standard multipart content format with base64
 data-URIs (`{"type": "image_url", "image_url": {"url": "data:image/..."}}`)
-and requires a model loaded with `--mmproj`.
+and requires a HuggingFace-format vision model (the built-in GGUF backend is
+text-only and rejects an attached image with a clear error).
 
 ### `POST /v1/completions`
 

@@ -147,7 +147,7 @@ def main(model, gguf_file, export_gguf, name, print_command):
         console.print(
             "[yellow]Re-run the abliteration, or if you did save a model, "
             f"register it manually:[/yellow]\n"
-            f"  [bold]localm add-local <path> --name {reg_name}[/bold]"
+            f"  [bold]localm add <path> --name {reg_name}[/bold]"
         )
         return
 
@@ -220,7 +220,7 @@ def _register_result(target: Path, reg_name: str) -> None:
     where = where.strip().strip('"')
     if not where:
         console.print(
-            f"Skipped. Register later with:  [bold]localm add-local <path> --name {reg_name}[/bold]"
+            f"Skipped. Register later with:  [bold]localm add <path> --name {reg_name}[/bold]"
         )
         return
 
@@ -236,5 +236,5 @@ def _register_result(target: Path, reg_name: str) -> None:
     else:
         console.print(
             f"[red]{saved} is not a model directory or .gguf.[/red] "
-            "Register it manually with `localm add-local`."
+            "Register it manually with `localm add`."
         )
