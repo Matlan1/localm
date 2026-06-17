@@ -50,6 +50,45 @@ class MoveFileRequest(BaseModel):
     dest: str                         # destination directory on this machine
 
 
+def _allowed_input_roots() -> list[Path]:
+    """Roots an ``input_image`` (image-to-video source) may live under.
+
+    image-to-video uploads the file into ComfyUI's input/ dir, so an unconfined
+    path is an arbitrary-local-file read primitive (any readable file gets copied
+    into ComfyUI). Confine it to localm's own data dir plus the project checkout
+    when running from source - the only locations a user legitimately drops a
+    source image into for this local tool."""
+    from localm.config import home_dir
+    roots: list[Path] = []
+    try:
+        roots.append(home_dir().resolve())
+    except OSError:
+        pass
+    repo_root = Path(__file__).resolve().parents[4]
+    if (repo_root / "pyproject.toml").is_file():
+        roots.append(repo_root)
+    return roots
+
+
+def _confined_input_image(raw: str) -> Path:
+    """Resolve and confine an ``input_image`` to an allowed root.
+
+    Raises HTTPException(400) when the path escapes every allowed root or does
+    not point at an existing file. Symlinks are resolved first, so a link inside
+    an allowed root that targets outside it is still rejected."""
+    try:
+        resolved = Path(raw).expanduser().resolve()
+    except (OSError, ValueError, RuntimeError):
+        raise HTTPException(400, "Invalid input image path")
+    roots = _allowed_input_roots()
+    if not any(resolved == r or r in resolved.parents for r in roots):
+        raise HTTPException(
+            400, "Input image must be inside the localm data directory")
+    if not resolved.is_file():
+        raise HTTPException(400, f"Input image not found: {raw}")
+    return resolved
+
+
 def _video_dir() -> Path:
     from localm.config import home_dir
     return home_dir() / "gui_video"
@@ -95,9 +134,7 @@ async def video(req: VideoRequest, request: Request):
         raise HTTPException(400, "FPS must be between 1 and 60")
     input_image = None
     if req.input_image:
-        input_image = Path(req.input_image).expanduser()
-        if not input_image.is_file():
-            raise HTTPException(400, f"Input image not found: {req.input_image}")
+        input_image = _confined_input_image(req.input_image)
 
     jobs = getattr(request.app.state, "jobs", None)
     if jobs is None:
