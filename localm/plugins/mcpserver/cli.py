@@ -45,10 +45,17 @@ def main(model, no_images, print_config):
                 }
             }
         }
+        import sys as _sys
+        if _sys.platform == "win32":
+            cfg_path = "%APPDATA%\\Claude\\claude_desktop_config.json"
+        elif _sys.platform == "darwin":
+            cfg_path = "~/Library/Application Support/Claude/claude_desktop_config.json"
+        else:
+            cfg_path = "~/.config/Claude/claude_desktop_config.json"
         click.echo(json.dumps(block, indent=2))
         click.echo(
             "\n# Paste the mcpServers entry into your MCP client's config.\n"
-            "# Claude Desktop: %APPDATA%\\Claude\\claude_desktop_config.json\n"
+            f"# Claude Desktop: {cfg_path}\n"
             "# The client launches/stops the server automatically.\n"
             "# First install the plugin:  localm plugin install mcp",
             err=False,
