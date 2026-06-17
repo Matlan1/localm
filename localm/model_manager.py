@@ -326,7 +326,7 @@ def pull_model(
     """
     spec = resolve_spec(model_spec)
     if spec.startswith("http://") or spec.startswith("https://"):
-        return _pull_url(spec, name or _stem_from_url(spec),
+        return _pull_url(spec, _sanitize_name(name or _stem_from_url(spec)),
                          expected_sha256=expected_sha256, redownload=redownload)
     elif "/" in spec:
         if ":" in spec or spec.rsplit("/", 1)[-1].endswith(".gguf"):
@@ -459,7 +459,7 @@ def _pull_gguf_file(
             )
             return False
 
-    model_name = name or filename.removesuffix(".gguf")
+    model_name = _sanitize_name(name or filename.removesuffix(".gguf"))
     dest = MODELS_DIR / filename
 
     # Expected digest from HF metadata - free, no download needed.
@@ -598,7 +598,7 @@ def _pull_hf_snapshot(
         console.print("[red]Missing:[/red] huggingface-hub  (run: uv pip install huggingface-hub)")
         return False
 
-    model_name = name or repo_id.split("/")[-1]
+    model_name = _sanitize_name(name or repo_id.split("/")[-1])
     dest = MODELS_DIR / model_name
 
     if dest.exists() and (dest / "config.json").exists():

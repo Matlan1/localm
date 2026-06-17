@@ -876,7 +876,10 @@ def tool_read_env(cwd: Path, path: str = "") -> ToolResult:
     """
     lines: list[str] = []
 
-    env_file = _confine(cwd, path) if path else (cwd / ".env")
+    try:
+        env_file = _confine(cwd, path) if path else (cwd / ".env")
+    except PermissionError as e:
+        return ToolResult.error(str(e))
     if env_file.is_file():
         lines.append(f"# {env_file.name}")
         for raw in env_file.read_text(encoding="utf-8", errors="replace").splitlines():

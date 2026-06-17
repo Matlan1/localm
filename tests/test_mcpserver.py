@@ -273,18 +273,28 @@ class TestMcpCliGate:
         assert state["mcp"]["available"] is True
         assert state["mcp"]["scope"] == "mcp"
 
-    def test_print_config_uses_os_correct_path(self, cfg_env):
-        """FAC-14: the Claude Desktop path must match the OS, not hardcode %APPDATA%."""
+    def test_print_config_uses_os_correct_path(self, cfg_env, monkeypatch):
+        """FAC-14: the Claude Desktop path must match the OS, not hardcode %APPDATA%.
+
+        Drives all three OS branches by patching sys.platform (cli.py reads it at
+        call time), so the test proves the fix regardless of the host platform -
+        the previous version only asserted the host's own branch, which on
+        Windows matched the pre-fix hardcoded %APPDATA% too (a weak guard)."""
         import sys
         from click.testing import CliRunner
         from localm.plugins.mcpserver.cli import main
-        out = CliRunner().invoke(main, ["--print-config"]).output
-        if sys.platform == "win32":
-            assert "%APPDATA%" in out
-        elif sys.platform == "darwin":
-            assert "Library/Application Support/Claude" in out
-        else:
-            assert "/.config/Claude" in out
+        cases = {
+            "win32": "%APPDATA%\\Claude\\claude_desktop_config.json",
+            "darwin": "Library/Application Support/Claude/claude_desktop_config.json",
+            "linux": "/.config/Claude/claude_desktop_config.json",
+        }
+        for plat, expected in cases.items():
+            monkeypatch.setattr(sys, "platform", plat)
+            out = CliRunner().invoke(main, ["--print-config"]).output
+            assert expected in out, f"{plat}: expected {expected!r} in output"
+        # the macOS path must NOT be the windows one (catches a hardcode regression)
+        monkeypatch.setattr(sys, "platform", "darwin")
+        assert "%APPDATA%" not in CliRunner().invoke(main, ["--print-config"]).output
 
 
 # --------------------------------------------------------------------------- #

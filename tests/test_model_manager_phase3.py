@@ -226,6 +226,44 @@ class TestUserNameSanitized:
         key = next(iter(store))
         assert "/" not in key and "\\" not in key
 
+    def test_gguf_pull_name_is_sanitized(self, fake_registry, tmp_path, monkeypatch):
+        # the #83 fix sanitized add's -n but NOT pull's -n (re-audit residual)
+        store, models_dir = fake_registry
+        monkeypatch.setattr(mm, "_hf_file_sha256", lambda r, fn: None)
+        monkeypatch.setattr(mm, "find_by_sha256", lambda *a, **k: [])
+
+        def _fake_download(repo_id, filename, local_dir, **kw):
+            p = Path(local_dir) / filename
+            p.write_bytes(b"data")
+            return str(p)
+
+        import huggingface_hub
+        monkeypatch.setattr(huggingface_hub, "hf_hub_download", _fake_download)
+        ok = mm._pull_gguf_file("o/r:good.gguf", "../../evil")
+        assert ok is True
+        assert "../../evil" not in store
+        assert not any((".." in k or "/" in k or "\\" in k) for k in store)
+
+    def test_hf_snapshot_pull_name_is_sanitized(self, fake_registry, tmp_path, monkeypatch):
+        # model_name is both the registry key AND the dest dir (MODELS_DIR/name),
+        # so an unsanitized -n escaped the models folder too.
+        store, models_dir = fake_registry
+
+        def _fake_snap(repo_id, local_dir, **kw):
+            d = Path(local_dir)
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "config.json").write_text("{}", encoding="utf-8")
+            return str(d)
+
+        import huggingface_hub
+        monkeypatch.setattr(huggingface_hub, "snapshot_download", _fake_snap)
+        ok = mm._pull_hf_snapshot("owner/repo", "../../evil")
+        assert ok is True
+        assert "../../evil" not in store
+        assert not any((".." in k or "/" in k or "\\" in k) for k in store)
+        # the dest dir stayed inside MODELS_DIR (no traversal escape)
+        assert not list(models_dir.parent.glob("evil"))
+
 
 # ---------------------------------------------------------------------------
 # GAP-CLI-2: dest filename confined to MODELS_DIR; collision is hash-checked
