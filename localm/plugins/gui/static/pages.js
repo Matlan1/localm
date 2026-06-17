@@ -893,7 +893,7 @@ $("plugin-install").onclick = async () => {
 // reports. (net_allow/net_deny/cors_origins are edited via `localm config` or
 // the network settings until the typed settings UI lands.)
 const _CONFIG_SKIP = new Set(["cors_origins", "net_allow", "net_deny",
-                              "plugins_enabled", "effective_mode",
+                              "plugins_enabled", "plugins", "effective_mode",
                               "effective_coder_mode", "effective_ctx_max"]);
 
 let _configSnapshot = {};

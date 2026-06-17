@@ -331,14 +331,16 @@ def create_app(engine: Engine) -> FastAPI:
         The read-only extras the GET handler injects (effective_mode etc.) are
         dropped first, so a client that round-trips the whole config object is
         not rejected for echoing back values it never edited."""
-        from localm.config import DEFAULT_CONFIG, load_config, save_config
+        from localm.config import load_config, save_config
+        from localm.settings_schema import validate_update
         readonly = {"effective_mode", "effective_coder_mode", "effective_ctx_max"}
         body = {k: v for k, v in body.items() if k not in readonly}
-        unknown = [k for k in body if k not in DEFAULT_CONFIG]
-        if unknown:
-            raise HTTPException(400, f"Unknown config keys: {', '.join(unknown)}")
+        try:
+            validated = validate_update(body)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
         cfg = load_config()
-        cfg.update(body)
+        cfg.update(validated)
         save_config(cfg)
         return cfg
 
