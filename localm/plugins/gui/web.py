@@ -314,6 +314,13 @@ def attach_gui(
 
     # ------------------------- static ----------------------------- #
     # Mounted last: API routes above take precedence over the SPA files.
+    # Pin the MIME types the PWA relies on (some Windows registries map .js to
+    # text/plain, and .webmanifest is unknown to mimetypes) so the service
+    # worker, app scripts, manifest, and icon are served correctly.
+    import mimetypes
+    mimetypes.add_type("text/javascript", ".js")
+    mimetypes.add_type("application/manifest+json", ".webmanifest")
+    mimetypes.add_type("image/svg+xml", ".svg")
     app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="gui")
 
     return manager

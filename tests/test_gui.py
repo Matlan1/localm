@@ -602,6 +602,34 @@ class TestStaticFiles:
             assert client.get("/style.css").status_code == 200
             assert client.get("/vendor/marked.min.js").status_code == 200
 
+    def test_pwa_shell_served(self, gui_app):
+        """The PWA shell is served with the right MIME types, and index.html
+        links the manifest + registers the service worker - so the GUI installs
+        as a companion app (and is reachable from a phone over the network)."""
+        app, _ = gui_app
+        with TestClient(app) as client:
+            m = client.get("/manifest.webmanifest")
+            assert m.status_code == 200
+            assert m.headers["content-type"].startswith("application/manifest+json")
+            body = m.json()
+            assert body["start_url"] == "/" and body["display"] == "standalone"
+            assert body["icons"][0]["src"] == "/icon.svg"
+
+            sw = client.get("/sw.js")
+            assert sw.status_code == 200
+            assert sw.headers["content-type"].startswith("text/javascript")
+            assert "localm-shell" in sw.text
+            # the worker must never cache live API/model traffic
+            assert "api|v1|plugins" in sw.text
+
+            icon = client.get("/icon.svg")
+            assert icon.status_code == 200
+            assert icon.headers["content-type"].startswith("image/svg+xml")
+
+            html = client.get("/").text
+            assert 'rel="manifest"' in html
+            assert "/sw.js" in html                     # registration present
+
 
 class TestSessionExtras:
     def test_session_list_and_info(self, coder_app, tmp_path, monkeypatch):
