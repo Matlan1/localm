@@ -28,6 +28,7 @@ import hashlib
 import json
 import os
 import secrets
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -142,6 +143,14 @@ def _restrict_perms(path: Path) -> None:
 # the plaintext is shown once at creation and is never recoverable.
 
 
+# Serializes the read-modify-write of the keystore. create_key/revoke_key both
+# load the full record list, mutate it, and write it back; without this lock two
+# concurrent calls can read the same list and the last writer clobbers the
+# other's change (a lost write / dropped key). Module-level so it is shared by
+# every caller in the process.
+_KEYSTORE_LOCK = threading.Lock()
+
+
 def keystore_file() -> Path:
     """Path to the scoped-key store (inside the localm data dir)."""
     from localm.config import home_dir
@@ -210,20 +219,22 @@ def create_key(name: str, scope_list, *, allow_privileged: bool = False) -> dict
         "scopes": clean,
         "created": time.time(),
     }
-    records = _load_keystore()
-    records.append(record)
-    _save_keystore(records)
+    with _KEYSTORE_LOCK:
+        records = _load_keystore()
+        records.append(record)
+        _save_keystore(records)
     return {"id": record["id"], "name": record["name"],
             "scopes": record["scopes"], "key": key}
 
 
 def revoke_key(key_id: str) -> bool:
     """Delete a named key by id. Returns True if it existed."""
-    records = _load_keystore()
-    remaining = [r for r in records if r.get("id") != key_id]
-    if len(remaining) == len(records):
-        return False
-    _save_keystore(remaining)
+    with _KEYSTORE_LOCK:
+        records = _load_keystore()
+        remaining = [r for r in records if r.get("id") != key_id]
+        if len(remaining) == len(records):
+            return False
+        _save_keystore(remaining)
     return True
 
 

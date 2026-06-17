@@ -137,11 +137,52 @@ def check_url(url: str) -> None:
         _check_public_address(host)
 
 
+def _is_blocked_ip(ip: ipaddress._BaseAddress) -> bool:
+    """True for addresses the SSRF guard refuses (loopback, RFC1918 private,
+    link-local incl. 169.254.169.254 cloud metadata, reserved, multicast,
+    unspecified)."""
+    return bool(ip.is_loopback or ip.is_private or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified)
+
+
+def _literal_ipv4(host: str) -> Optional[ipaddress.IPv4Address]:
+    """If ``host`` is a numeric / short-form IPv4 literal (dotless decimal
+    '2130706433', hex '0x7f000001', octal '0177.0.0.1', short '127.1', or the
+    plain dotted form), return its canonical IPv4Address. Otherwise None.
+
+    ipaddress.ip_address() refuses the dotless / hex / octal / short forms, and
+    socket.getaddrinfo may raise for them, so without this an attacker can hand
+    '2130706433' (== 127.0.0.1) to the policy and slip past the public-address
+    check (SEC-5). socket.inet_aton parses the historical IPv4 forms; we then
+    classify the canonical address it yields. Normal hostnames contain letters
+    or dots-with-letters and make inet_aton raise, so they fall through."""
+    try:
+        packed = socket.inet_aton(host)
+    except OSError:
+        return None
+    try:
+        return ipaddress.IPv4Address(packed)
+    except ValueError:
+        return None
+
+
 def _check_public_address(host: str) -> None:
     """SSRF guard: refuse hosts that resolve to loopback / private /
     link-local / reserved addresses (cloud metadata, router admin pages,
     the localm API itself…). Unresolvable hosts pass - the fetch will fail
-    with a normal DNS error anyway."""
+    with a normal DNS error anyway.
+
+    Numeric / short-form IPv4 literals are normalized and classified directly
+    (see _literal_ipv4) so they cannot evade the check by being unresolvable or
+    unparseable by the ipaddress module."""
+    literal = _literal_ipv4(host)
+    if literal is not None:
+        if _is_blocked_ip(literal):
+            raise NetworkPolicyError(
+                f"'{host}' is the non-public address {literal}. "
+                "Requests to local/private networks are blocked "
+                "(set net_allow_private true to permit them).")
+        return
     try:
         infos = socket.getaddrinfo(host, None)
     except (socket.gaierror, ValueError):
@@ -151,8 +192,7 @@ def _check_public_address(host: str) -> None:
             ip = ipaddress.ip_address(info[4][0])
         except ValueError:
             continue
-        if (ip.is_loopback or ip.is_private or ip.is_link_local
-                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+        if _is_blocked_ip(ip):
             raise NetworkPolicyError(
                 f"'{host}' resolves to the non-public address {ip}. "
                 "Requests to local/private networks are blocked "

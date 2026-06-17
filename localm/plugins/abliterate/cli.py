@@ -123,7 +123,7 @@ def main(model, gguf_file, export_gguf, name, print_command):
     console.print(f"[dim](in {location.repo_dir or 'PATH'})[/dim]\n")
 
     try:
-        subprocess.run(
+        completed = subprocess.run(
             command,
             cwd=str(location.repo_dir) if location.repo_dir else None,
         )
@@ -134,6 +134,21 @@ def main(model, gguf_file, export_gguf, name, print_command):
         return
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted.[/yellow]")
+        return
+
+    # Only register when Heretic exited cleanly. A non-zero exit means it
+    # crashed, errored, or the user quit without saving, so the target dir is
+    # empty or half-written - registering it would surface a broken model.
+    if completed.returncode != 0:
+        console.print(
+            f"\n[red]Heretic exited with code {completed.returncode}; "
+            "nothing was registered.[/red]"
+        )
+        console.print(
+            "[yellow]Re-run the abliteration, or if you did save a model, "
+            f"register it manually:[/yellow]\n"
+            f"  [bold]localm add-local <path> --name {reg_name}[/bold]"
+        )
         return
 
     _register_result(target, reg_name)

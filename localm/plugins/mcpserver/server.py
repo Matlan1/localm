@@ -111,6 +111,23 @@ def _text_result(text: str, is_error: bool = False) -> dict:
     return {"content": [{"type": "text", "text": text}], "isError": is_error}
 
 
+def _backend_can_embed(engines: "EngineCache") -> bool:
+    """True unless the active/default backend explicitly cannot embed.
+
+    The common GGUF backend has no embedding support and would make the 'embed'
+    tool error on every call (FAC-6), so we hide it. We resolve the default
+    engine WITHOUT loading the model (constructing the backend is cheap) and
+    read its ``can_embed`` flag; a backend that does not set the flag is treated
+    as embed-capable (e.g. the HuggingFace backend), and any failure to resolve
+    a model leaves the tool advertised rather than silently dropping it."""
+    try:
+        engine = engines.get(None)
+    except Exception:
+        return True  # cannot determine - do not hide a possibly-working tool
+    backend = getattr(engine, "_backend", None)
+    return getattr(backend, "can_embed", True) is not False
+
+
 def build_tools(engines: EngineCache, enable_images: bool = True) -> Dict[str, dict]:
     """Return {tool_name: {schema, handler}} for everything this server offers."""
 
@@ -233,7 +250,13 @@ def build_tools(engines: EngineCache, enable_images: bool = True) -> Dict[str, d
             "inputSchema": {"type": "object", "properties": {}},
             "handler": list_models,
         },
-        "embed": {
+    }
+
+    # Only advertise embed when the active backend can actually produce vectors
+    # (FAC-6). The handler still degrades gracefully if invoked anyway, but a
+    # tool that always errors should not appear in tools/list.
+    if _backend_can_embed(engines):
+        tools["embed"] = {
             "description": "Compute embedding vectors for one or more texts with a local model.",
             "inputSchema": {
                 "type": "object",
@@ -245,8 +268,7 @@ def build_tools(engines: EngineCache, enable_images: bool = True) -> Dict[str, d
                 "required": ["texts"],
             },
             "handler": embed,
-        },
-    }
+        }
 
     if enable_images:
         tools["generate_image"] = {

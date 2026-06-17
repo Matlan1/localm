@@ -339,6 +339,19 @@ def create_app(engine: Engine) -> FastAPI:
             validated = validate_update(body)
         except ValueError as e:
             raise HTTPException(400, str(e))
+        # SEC-3: refuse to enable require_auth while no API key exists. Doing so
+        # is a one-way self-lockout: the very next keyless request 503s and the
+        # GUI sends no Bearer, so the toggle could never be undone from the GUI.
+        # Only block ENABLING it (turning it off or unrelated edits are fine);
+        # the auth-state check belongs here, not in the static schema validator.
+        if validated.get("require_auth") is True:
+            from localm.auth import any_key_configured
+            if not any_key_configured():
+                raise HTTPException(
+                    400,
+                    "Cannot enable require_auth while no API key is configured: "
+                    "this would lock you out. Set an owner key (the launcher or "
+                    "LOCALM_API_KEY) or create a named key first, then enable it.")
         cfg = load_config()
         cfg.update(validated)
         save_config(cfg)
@@ -498,6 +511,17 @@ def create_app(engine: Engine) -> FastAPI:
         if _engine is None:
             raise HTTPException(503, "No model loaded")
 
+        # Honor the OpenAI encoding_format contract. "float" returns plain JSON
+        # arrays; "base64" returns each vector as a base64-encoded little-endian
+        # float32 buffer (FAC-9). Anything else is rejected up front rather than
+        # silently downgraded to float, which would mislead the client.
+        fmt = (req.encoding_format or "float").lower()
+        if fmt not in ("float", "base64"):
+            raise HTTPException(
+                400,
+                f"Unsupported encoding_format {req.encoding_format!r}: "
+                "expected 'float' or 'base64'.")
+
         texts = [req.input] if isinstance(req.input, str) else req.input
 
         loop = asyncio.get_running_loop()
@@ -507,11 +531,19 @@ def create_app(engine: Engine) -> FastAPI:
         except NotImplementedError as e:
             raise HTTPException(422, str(e))
 
+        def _encode(vec):
+            if fmt == "base64":
+                import base64
+                import struct
+                buf = struct.pack("<%df" % len(vec), *(float(x) for x in vec))
+                return base64.b64encode(buf).decode("ascii")
+            return vec
+
         total_tokens = sum(_engine.count_tokens(t) for t in texts)
         return {
             "object": "list",
             "data": [
-                {"object": "embedding", "index": i, "embedding": vec}
+                {"object": "embedding", "index": i, "embedding": _encode(vec)}
                 for i, vec in enumerate(vecs)
             ],
             "model": req.model,
