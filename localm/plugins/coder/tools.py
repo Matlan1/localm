@@ -710,6 +710,13 @@ def tool_grep(cwd: Path, pattern: str, path: str = ".", glob: str = "", context:
     file_glob = glob or "**/*"
     files = sorted(base.glob(file_glob)) if base.is_dir() else [base]
 
+    # Confine glob results to cwd: a traversal glob like '../*' makes
+    # base.glob() climb above the project root, so filter the matches back
+    # inside cwd (the same guard tool_search_files applies). _confine() only
+    # protects the `path` arg, not the `glob` arg.
+    cwd_resolved = cwd.resolve()
+    files = [f for f in files if f.resolve().is_relative_to(cwd_resolved)]
+
     try:
         rx = re.compile(pattern, re.IGNORECASE | re.MULTILINE)
     except re.error as e:
@@ -1270,7 +1277,14 @@ def tool_search_replace(
     except re.error as e:
         return ToolResult.error(f"Invalid regex: {e}")
 
-    candidates = sorted(p for p in cwd.glob(glob) if p.is_file())
+    # Confine glob results to cwd: a traversal glob like '../*' makes
+    # cwd.glob() climb above the project root and would rewrite files outside
+    # it. Filter matches back inside cwd before touching anything on disk.
+    cwd_resolved = cwd.resolve()
+    candidates = sorted(
+        p for p in cwd.glob(glob)
+        if p.is_file() and p.resolve().is_relative_to(cwd_resolved)
+    )
     changes: list[tuple[Path, Path, str, int]] = []  # (abs, rel, new_text, count)
 
     for fp in candidates:
