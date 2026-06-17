@@ -99,24 +99,25 @@ rem  project never depends on a folder elsewhere on disk. Installed empty here;
 rem  `localm setup-llama` downloads/copies the actual binaries into it below.
 uv pip install -p .venv -e ".\runtime"
 
-rem ---- detect the GPU (via the tested localm.hwdetect helper) ----------------
+rem ---- detect the GPU + recommended backend (the ONE tested policy) ----------
+rem  `python -m localm.hwdetect` prints "<vendor> <install-backend>" - the same
+rem  arch-aware policy setup.sh uses, so the two installers can never drift. It
+rem  knows the self-contained gfx103X ROCm build only fits AMD RX 6000 / unknown
+rem  on Windows; a clearly newer/older AMD card is steered to vulkan instead.
 echo.
 echo  Detecting graphics hardware ...
-.venv\Scripts\python -c "import localm.hwdetect as h; d=h.detect(); print((d.vendors or ['none'])[0])" > "%TEMP%\localm_vendor.txt" 2>nul
 set "VENDOR=none"
-if exist "%TEMP%\localm_vendor.txt" set /p VENDOR=<"%TEMP%\localm_vendor.txt"
-del "%TEMP%\localm_vendor.txt" 2>nul
-if "%VENDOR%"=="" set "VENDOR=none"
-
-if /i "%VENDOR%"=="amd" (
-    set "REC=amd-rocm"
-) else if /i "%VENDOR%"=="nvidia" (
-    set "REC=vulkan"
-) else if /i "%VENDOR%"=="intel" (
-    set "REC=vulkan"
-) else (
-    set "REC=cpu"
+set "REC=cpu"
+.venv\Scripts\python -m localm.hwdetect > "%TEMP%\localm_hw.txt" 2>nul
+if exist "%TEMP%\localm_hw.txt" (
+    for /f "usebackq tokens=1,2" %%a in ("%TEMP%\localm_hw.txt") do (
+        set "VENDOR=%%a"
+        set "REC=%%b"
+    )
 )
+del "%TEMP%\localm_hw.txt" 2>nul
+if "%VENDOR%"=="" set "VENDOR=none"
+if "%REC%"=="" set "REC=cpu"
 echo  Detected graphics vendor: %VENDOR%
 echo  Recommended inference backend: %REC%
 
