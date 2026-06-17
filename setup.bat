@@ -20,6 +20,13 @@ echo.
 echo  localm setup - self-contained install in: %CD%
 echo.
 
+rem ---- uninstall / rollback (report first, then remove) ---------------------
+set "PURGE=0"
+if /i "%~2"=="--purge-data" set "PURGE=1"
+if /i "%~1"=="uninstall"   goto uninstall
+if /i "%~1"=="--uninstall" goto uninstall
+if /i "%~1"=="--rollback"  goto uninstall
+
 rem ---- uv is required (fast, reliable resolver; handles the GPU wheels) ------
 where uv >nul 2>nul
 if errorlevel 1 (
@@ -257,3 +264,65 @@ echo  Tip: avoid "uv tool install" for this project - tool installs are
 echo  global per package name and clones would overwrite each other.
 echo.
 pause
+exit /b 0
+
+rem ===========================================================================
+rem  Uninstall / rollback. Removes ONLY what setup created: our .venv
+rem  (marker-checked), the provisioned native binaries, localm-home.cfg, and the
+rem  desktop shortcut. Data is KEPT unless --purge-data, and unsafe target paths
+rem  are refused even then.
+rem ===========================================================================
+:uninstall
+echo.
+echo  localm uninstall / rollback for this clone:
+echo    %CD%
+echo.
+set "DATA=%USERPROFILE%\.localm"
+if exist "home" set "DATA=%CD%\home"
+if exist "localm-home.cfg" set /p DATA=<localm-home.cfg
+echo  Will remove:
+if exist ".venv\.localm-venv" (echo    - .\.venv ^(the localm virtual environment^)) else (echo    - .\.venv   [skipped: not a localm-created venv])
+echo    - provisioned native binaries in runtime\localm_llama_runtime\lib
+if exist "localm-home.cfg" echo    - .\localm-home.cfg
+if "%PURGE%"=="1" (
+    echo    - YOUR DATA ^(models, config, chats^): %DATA%   [--purge-data]
+) else (
+    echo.
+    echo  Your data is KEPT: %DATA%   ^(pass --purge-data to remove it too^)
+)
+echo.
+choice /c YN /n /m "  Proceed? [y/N]: "
+if errorlevel 2 (
+    echo  Aborted - nothing changed.
+    pause
+    exit /b 0
+)
+if exist ".venv\.localm-venv" (
+    rmdir /s /q .venv
+    echo  Removed .\.venv
+)
+del /q "runtime\localm_llama_runtime\lib\*.dll" 2>nul
+del /q "runtime\localm_llama_runtime\lib\*.exe" 2>nul
+del /q "runtime\localm_llama_runtime\lib\*.pyd" 2>nul
+echo  Cleared provisioned native binaries
+del /q "localm-home.cfg" 2>nul
+del /q "%USERPROFILE%\Desktop\localm.lnk" 2>nul
+if "%PURGE%"=="1" (
+    set "SAFE=1"
+    if "%DATA%"=="" set "SAFE=0"
+    if /i "%DATA%"=="%CD%" set "SAFE=0"
+    if /i "%DATA%"=="%USERPROFILE%" set "SAFE=0"
+    if "!SAFE!"=="0" (
+        echo  [!] Unsafe or empty data path - kept: %DATA%
+    ) else (
+        choice /c YN /n /m "  Permanently delete ALL data in %DATA%? [y/N]: "
+        if not errorlevel 2 (
+            rmdir /s /q "%DATA%"
+            echo  Removed %DATA%
+        )
+    )
+)
+echo.
+echo  Done. To reinstall: setup.bat
+pause
+exit /b 0
