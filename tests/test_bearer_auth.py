@@ -4,7 +4,7 @@ Tests for bearer-token authentication in localm.inference.http_server.
 Covers:
   - Open mode (no LOCALM_API_KEY set) - all requests allowed
   - Protected mode (LOCALM_API_KEY set) - wrong/missing token → 401, correct → 200
-  - Unprotected endpoints (/health, /v1/models) stay open in both modes
+  - /health stays open in both modes; /v1/models requires models:read once a key is set
 
 Key invariant: _require_auth reads os.environ at REQUEST time, so env vars
 must be active when the request is processed (not just at app-creation time).
@@ -161,19 +161,25 @@ class TestProtectedMode:
 
 
 # ---------------------------------------------------------------------------
-#  Unprotected endpoints stay open even with API key set
+#  /health stays open with a key set; /v1/models is gated by models:read
 # ---------------------------------------------------------------------------
 
 class TestUnprotectedEndpoints:
     def test_health_accessible_without_key(self, protected_client):
+        """/health is an intentionally open liveness probe."""
         with patch.dict(os.environ, {"LOCALM_API_KEY": SECRET}):
             r = protected_client.get("/health")
         assert r.status_code == 200
 
-    def test_models_list_accessible_without_key(self, protected_client):
+    def test_models_list_requires_key_when_configured(self, protected_client):
+        """With a key set, /v1/models requires it (models:read); the owner key
+        (implicit ADMIN) is accepted. It is no longer open like /health."""
         with patch.dict(os.environ, {"LOCALM_API_KEY": SECRET}):
-            r = protected_client.get("/v1/models")
-        assert r.status_code == 200
+            denied = protected_client.get("/v1/models")
+            assert denied.status_code == 401
+            ok = protected_client.get(
+                "/v1/models", headers={"Authorization": f"Bearer {SECRET}"})
+            assert ok.status_code == 200
 
 
 # ---------------------------------------------------------------------------

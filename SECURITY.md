@@ -15,8 +15,11 @@ localm is a local-first, single-owner application. API access is gated by a
 - When **no key is configured**, the server is **fail-open by design** - it binds
   to localhost and serves requests without auth, for frictionless local use.
 - When a key **is** configured (`LOCALM_API_KEY`), every `/v1` and `/api` route
-  requires `Authorization: Bearer <key>`, and plugin routes are additionally gated
-  by per-plugin capability scopes.
+  requires `Authorization: Bearer <key>`, gated by capability scopes: model-read
+  routes (`GET /v1/models`, `GET /v1/models/{id}`) need `models:read`, plugin
+  routes their per-plugin scope, key/config/plugin administration their privileged
+  scopes (the owner key implies every scope). The sole exception is `GET /health`,
+  an unauthenticated liveness probe that returns only the model name and load state.
 
 Because the default is fail-open, **do not bind localm to a non-localhost interface
 without setting an API key** (and ideally TLS - see `docs/tls.md`). Exposing the GUI
