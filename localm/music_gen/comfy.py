@@ -26,7 +26,9 @@ from typing import Optional
 # Shared ComfyUI plumbing lives in image_gen - one server, one set of helpers
 from localm.image_gen.comfy import (
     _localm_unload,
+    _with_warning,
     comfy_http_error_detail,
+    contain_comfy_artifacts,
     default_api_url,
     ensure_comfy,
 )
@@ -218,12 +220,24 @@ def generate_music(
     except Exception as e:
         return False, f"Failed to download generated track from ComfyUI: {e}"
 
+    # Enforce output containment: clear ComfyUI's history entry and delete its
+    # own copy of the track. ACE-Step's SaveAudio node writes into ComfyUI's
+    # output dir and records the job in /history, both of which its output
+    # browser surfaces - so the only copy left must be the one localm saved.
+    contain_warning = contain_comfy_artifacts(
+        api_url, prompt_id,
+        {"filename": audio_info.get("filename"),
+         "subfolder": audio_info.get("subfolder", ""),
+         "type": audio_info.get("type", "output")},
+    )
+
     # Sidecar JSON - everything needed to reproduce or tweak the track.
     # Skipped entirely in privacy mode (write_sidecar=False) so the prompt
     # and lyrics never touch disk.
     if not write_sidecar:
-        return True, (f"Track saved to {output_path} "
-                      f"(seed {seed} - reuse it to reproduce)")
+        return True, _with_warning(
+            f"Track saved to {output_path} "
+            f"(seed {seed} - reuse it to reproduce)", contain_warning)
     try:
         sidecar = {
             "tags": tags,
@@ -244,7 +258,6 @@ def generate_music(
     except Exception:
         pass
 
-    return True, (
+    return True, _with_warning(
         f"Track saved to {output_path} "
-        f"(seed {seed} - reuse it to reproduce)"
-    )
+        f"(seed {seed} - reuse it to reproduce)", contain_warning)

@@ -689,10 +689,24 @@ class PluginManager:
 
     def _delete_plugin_data(self, spec: PluginSpec) -> None:
         import shutil
+        import sys
         from localm.config import home_dir
-        d = home_dir() / spec.data_subdir
+        if not spec.data_subdir:
+            return
+        # data_subdir comes verbatim from a (possibly third-party) manifest.
+        # Resolve it and confine to home_dir: reject traversal ('../models'),
+        # absolute escapes, and the home root itself ('.') before any rmtree.
+        home = home_dir().resolve()
+        d = (home / spec.data_subdir).resolve()
+        if d == home or not d.is_relative_to(home):
+            print(
+                "[localm] refusing to delete plugin data outside the data dir: "
+                f"data_subdir={spec.data_subdir!r} -> {d}",
+                file=sys.stderr, flush=True,
+            )
+            return
         try:
-            if d.is_dir() and spec.data_subdir:    # never delete the data root itself
+            if d.is_dir():
                 shutil.rmtree(d)
         except OSError:
             pass

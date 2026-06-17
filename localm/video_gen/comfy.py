@@ -22,7 +22,6 @@ existing picture (image-to-video) instead.
 from __future__ import annotations
 
 import json
-import os
 import random
 import time
 import urllib.error
@@ -35,7 +34,9 @@ from typing import Optional
 from localm.image_gen.comfy import (
     _localm_unload,
     _upload_image,
+    _with_warning,
     comfy_http_error_detail,
+    contain_comfy_artifacts,
     default_api_url,
     ensure_comfy,
 )
@@ -185,6 +186,7 @@ def generate_video(
         workflow["10"]["inputs"]["fps"] = fps
 
     # Image-to-video: upload the picture and feed it as the start frame
+    uploaded_name: Optional[str] = None
     if input_image is not None:
         if not input_image.is_file():
             return False, f"Input image not found: {input_image}"
@@ -280,32 +282,25 @@ def generate_video(
     except Exception as e:
         return False, f"Failed to download generated clip from ComfyUI: {e}"
 
-    # Delete the original from ComfyUI's output directory so no second copy
-    # lingers there. Only possible when the user tells us where it is
-    # (COMFY_OUTPUT_DIR env var or "comfy_output_dir" config key) - there is
-    # no portable default. Same behaviour as image generation.
-    comfy_out = os.environ.get("COMFY_OUTPUT_DIR")
-    if not comfy_out:
-        try:
-            from localm.config import load_config
-            comfy_out = load_config().get("comfy_output_dir")
-        except Exception:
-            comfy_out = None
-    if comfy_out:
-        try:
-            orig = (Path(comfy_out) / video_info.get("subfolder", "")
-                    / video_info.get("filename"))
-            if orig.exists():
-                orig.unlink()
-        except Exception:
-            pass
+    # Enforce output containment: clear ComfyUI's history entry (the
+    # Queue/History + gallery view) and delete ComfyUI's own on-disk copy of
+    # the clip plus any uploaded img2video source. Returns a warning when the
+    # file copy could not be removed (e.g. comfy_output_dir unset).
+    contain_warning = contain_comfy_artifacts(
+        api_url, prompt_id,
+        {"filename": video_info.get("filename"),
+         "subfolder": video_info.get("subfolder", ""),
+         "type": video_info.get("type", "output")},
+        uploaded_input=uploaded_name,
+    )
 
     # Sidecar JSON - everything needed to reproduce or tweak the clip.
     # Skipped entirely in privacy mode (write_sidecar=False) so the prompt
     # never touches disk.
     if not write_sidecar:
-        return True, (f"Clip saved to {output_path} "
-                      f"(seed {seed} - reuse it to reproduce)")
+        return True, _with_warning(
+            f"Clip saved to {output_path} "
+            f"(seed {seed} - reuse it to reproduce)", contain_warning)
     try:
         sidecar = {
             "prompt": prompt,
@@ -330,7 +325,6 @@ def generate_video(
     except Exception:
         pass
 
-    return True, (
+    return True, _with_warning(
         f"Clip saved to {output_path} "
-        f"(seed {seed} - reuse it to reproduce)"
-    )
+        f"(seed {seed} - reuse it to reproduce)", contain_warning)
