@@ -36,64 +36,39 @@ say ""
 # provisioned native binaries, the home.cfg, and the menu entry. Your data is
 # kept unless --purge-data, and even then unsafe target paths are refused.
 do_uninstall() {
-  local data
-  if [ -f localm-home.cfg ]; then data="$(cat localm-home.cfg 2>/dev/null || true)"
-  elif [ -d home ]; then data="$(pwd)/home"
-  else data="$HOME/.localm"; fi
-
   say "  Uninstall / rollback for this clone:"
   say "    $(pwd)"
   say ""
-  say "  Will remove:"
-  if [ -f .venv/.localm-venv ]; then say "    - ./.venv (the localm virtual environment)"
-  else say "    - ./.venv   [skipped: not a localm-created venv]"; fi
-  say "    - provisioned native binaries (llama/ggml libs)"
-  if [ -f localm-home.cfg ]; then say "    - ./localm-home.cfg"; fi
-  if [ -f "$HOME/.local/share/applications/localm.desktop" ]; then say "    - the application menu entry"; fi
-  if [ "$PURGE" = 1 ]; then
-    say "    - YOUR DATA (models, config, chats):  $data   [--purge-data]"
+  local py=".venv/bin/python"
+  [ -x "$py" ] || py="$(command -v python3 || command -v python || echo "")"
+  local pflag=""
+  if [ "$PURGE" = 1 ]; then pflag="--purge-data"; fi
+
+  # The manifest module removes ONLY what install recorded (binaries, home.cfg,
+  # shortcut, and the data dir only when WE created it and --purge-data is set,
+  # with hard guards on the single rm -rf). It never derives or globs a path -
+  # so an empty/relative/symlinked value cannot point a delete somewhere else.
+  if [ -n "$py" ]; then
+    say "  Planned removals (from the install manifest .localm-install.json):"
+    "$py" -m localm.install_manifest uninstall --root . $pflag --dry-run \
+      || say "  [!] No usable install manifest - only the marked ./.venv will be removed."
   else
-    say ""
-    say "  Your data is KEPT:  $data   (pass --purge-data to remove it too)"
+    say "  [!] No Python found - only the marked ./.venv will be removed."
   fi
   say ""
   local ok; ok="$(ask "  Proceed? [y/N]: " N)"
   case "$ok" in [Yy]*) ;; *) say "  Aborted - nothing changed."; return 0 ;; esac
 
-  if [ -f .venv/.localm-venv ]; then rm -rf .venv 2>/dev/null || true; say "  Removed ./.venv"; fi
-  local lib="runtime/localm_llama_runtime/lib"
-  if [ -d "$lib" ]; then
-    find "$lib" -maxdepth 1 -type f \
-      \( -name '*.dll' -o -name '*.so*' -o -name '*.dylib' -o -name '*.exe' -o -name '*.pyd' \) \
-      -delete 2>/dev/null || true
-    say "  Cleared provisioned native binaries"
+  if [ -n "$py" ]; then
+    # --force: the dry-run above already showed any unrecorded items and the
+    # at-your-own-risk warning; the user chose to continue. The catastrophic-path
+    # guard inside the module still refuses root/$HOME/repo regardless.
+    "$py" -m localm.install_manifest uninstall --root . $pflag --force || true
   fi
-  rm -f localm-home.cfg 2>/dev/null || true
-  rm -f "$HOME/.local/share/applications/localm.desktop" 2>/dev/null || true
-
-  if [ "$PURGE" = 1 ]; then
-    local repo home_abs data_abs unsafe=0
-    repo="$(pwd -P)"
-    home_abs="$(cd "$HOME" 2>/dev/null && pwd -P || echo "$HOME")"
-    # Reject shell glob / parent-traversal metacharacters and a symlinked data
-    # dir outright, then CANONICALISE with `pwd -P` (resolves symlinks and ./)
-    # so the guards compare REAL locations, not strings - a relative or
-    # symlinked path cannot aim the delete at the repo root, $HOME, or elsewhere.
-    case "$data" in *'*'*|*'?'*|*'['*|*..*) unsafe=1 ;; esac
-    if [ -L "$data" ]; then unsafe=1; fi
-    data_abs="$(cd "$data" 2>/dev/null && pwd -P || echo "$data")"
-    if [ "$unsafe" = 1 ] || [ -z "$data" ] || [ -z "$data_abs" ] \
-        || [ "$data_abs" = "/" ] || [ "$data_abs" = "$home_abs" ] || [ "$data_abs" = "$repo" ]; then
-      say "  [!] Refusing to delete data path '$data' (unsafe path) - kept."
-    else
-      local ok2; ok2="$(ask "  Permanently delete ALL data in $data_abs ? [y/N]: " N)"
-      case "$ok2" in
-        [Yy]*)
-          if rm -rf "$data_abs" 2>/dev/null; then say "  Removed $data_abs"
-          else say "  [!] Could not fully remove $data_abs (check permissions)."; fi ;;
-        *) say "  Data kept." ;;
-      esac
-    fi
+  # The manifest never deletes the running venv; remove it here, marker-checked.
+  if [ -f .venv/.localm-venv ]; then
+    if rm -rf .venv 2>/dev/null; then say "  Removed ./.venv"
+    else say "  [!] Could not remove ./.venv (check permissions)."; fi
   fi
   say ""
   say "  Done. To reinstall:  bash setup.sh"
@@ -229,20 +204,24 @@ say "    [2] Shared per-user (~/.localm) - clones share models and settings"
 dpick="$(ask "  Pick 1 or 2 [2]: " 2)"
 if [ "$dpick" = 1 ]; then
   mkdir -p home; rm -f localm-home.cfg
-  say "  Data directory: $(pwd)/home"
+  DATA_DIR="$(pwd)/home"; DATA_CREATED=1        # we created ./home
+  say "  Data directory: $DATA_DIR"
 else
   rm -f localm-home.cfg
   [ -d home ] && rmdir home 2>/dev/null || true
-  say "  Data directory: $HOME/.localm (shared)"
+  DATA_DIR="$HOME/.localm"; DATA_CREATED=0       # localm creates it on first run, not us
+  say "  Data directory: $DATA_DIR (shared)"
 fi
 
 # ---- application menu entry --------------------------------------------------
+SHORTCUT=""
 mk="$(ask "  Create an application menu entry? [Y/n]: " Y)"
 case "$mk" in
   [Nn]*) say "  No desktop entry created." ;;
   *)
     apps="$HOME/.local/share/applications"
     mkdir -p "$apps"
+    SHORTCUT="$apps/localm.desktop"
     icon="$(pwd)/assets/localm.png"; [ -f "$icon" ] || icon="$(pwd)/assets/localm.ico"
     cat > "$apps/localm.desktop" <<EOF
 [Desktop Entry]
@@ -262,6 +241,16 @@ say ""
 say "  Which optional features (plugins) do you want? chat is always on."
 .venv/bin/localm plugin setup \
   || say "  [!] Skipped - choose later with:  .venv/bin/localm plugin setup"
+
+# ---- record what we installed (so uninstall removes ONLY what we created) ----
+crd=""; if [ "${DATA_CREATED:-0}" = 1 ]; then crd="--data-created"; fi
+.venv/bin/python -m localm.install_manifest record --root . \
+  --venv "$(pwd)/.venv" \
+  --lib-dir "$(pwd)/runtime/localm_llama_runtime/lib" \
+  --data-dir "${DATA_DIR:-}" $crd \
+  --shortcut "${SHORTCUT:-}" \
+  --stamp "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")" \
+  >/dev/null 2>&1 || say "  [!] Could not record the install manifest (uninstall will be conservative)."
 
 say ""
 say "  Done. This clone is self-contained:"
