@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="localm">
+  <rect width="512" height="512" rx="72" fill="#0f1115"/>
+  <text x="50%" y="50%" dy="0.34em" text-anchor="middle"
+        font-family="Segoe UI, Roboto, Helvetica, Arial, sans-serif"
+        font-size="232" font-weight="700" letter-spacing="-6">
+    <tspan fill="#d7dde7">l</tspan><tspan fill="#4f9cf9">m</tspan>
+  </text>
+</svg>
