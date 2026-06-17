@@ -37,7 +37,7 @@ SSRF guard ([guide](docs/network.md)).
 - [Quick start](#quick-start)
 - [CLI reference](#cli-reference)
 - [Plugins](#plugins)
-- [GPU setup (AMD)](#gpu-setup-amd)
+- [GPU setup](#gpu-setup)
 - [Architecture](#architecture)
 - [Documentation](#documentation)
 - [License](#license)
@@ -60,12 +60,15 @@ SSRF guard ([guide](docs/network.md)).
   redirect it mid-run or review what it touched with session diffs. It speaks
   MCP both ways, so localm can expose your models to clients like Claude
   Desktop, and the coder can pull in external MCP tool servers.
-- **Media generation (image / music / video plugins, drives your ComfyUI).**
-  Point localm at a local [ComfyUI](https://github.com/comfyanonymous/ComfyUI)
-  and it makes images with FLUX, music of any length with ACE-Step, and short
-  video clips from a prompt or a still with Wan 2.2. You install ComfyUI and the
-  models once; localm orchestrates the rest, including VRAM handover from the
-  LLM ([FLUX setup](docs/flux-setup.md), [video setup](docs/video.md)).
+- **Media generation (image / music / video plugins).** localm drives a local
+  media-generation server that *you* already run - it integrates with
+  [ComfyUI](https://github.com/comfyanonymous/ComfyUI) today (that is just what
+  the maintainer happens to run), and the media plugins are backend-pluggable (a
+  `backend` setting per plugin) so other media servers can be added. You bring
+  the server and models; localm orchestrates generation and VRAM handover from
+  the LLM, and surfaces it as the Images/Music/Video pages and `/generate-*` chat
+  commands. [docs/flux-setup.md](docs/flux-setup.md) and
+  [docs/video.md](docs/video.md) walk through the ComfyUI setup as one example.
 - **Bring your own data (rag, voice, and tts plugins).** Attach files or index
   whole folders and chat against them with citations (Knowledge), dictate with
   local Whisper speech-to-text, or have replies read back to you with in-browser
@@ -110,9 +113,9 @@ ships in the `builtin/` store but is inactive until you run
 | **Model discovery** (core) | Search HF from the Models page or `localm search`; per-quant sizes with "fits your VRAM" badges (torch-free VRAM detection) |
 | **Abliteration** | `localm abliterate` / `localabliterate`: decensor a model with [Heretic](https://github.com/Matlan1/heretic-win-AMD) (a separate AGPL program, run as a subprocess), then auto-register the result (`localm[abliterate]` extra) |
 | **Folder auto-sync** (core) | `localm list`/`gui`/launcher reconcile the registry with the models folder on start; missing files are flagged, not deleted (opt-in `autoprune_missing_models`) |
-| **Image generation** (image plugin) | `localm` drives a local ComfyUI FLUX pipeline with VRAM handover; Images GUI page and the `/generate-image` chat command (requires ComfyUI + models, see [docs/flux-setup.md](docs/flux-setup.md)) |
-| **Music generation** (music plugin) | ACE-Step via the same ComfyUI server: arbitrary track length, lyrics or instrumental (`localm music` CLI, Music page, `/generate-music` in GUI chat) |
-| **Video generation** (video plugin) | Wan 2.2 short clips (~5 s native, text- or image-to-video) via ComfyUI (`localm video` CLI, Video page, `/generate-video` in GUI chat; [guide](docs/video.md)) |
+| **Image generation** (image plugin) | drives a local media-generation backend (ComfyUI today; backend-pluggable) with VRAM handover; Images GUI page and the `/generate-image` chat command (see [docs/flux-setup.md](docs/flux-setup.md)) |
+| **Music generation** (music plugin) | full-length music, lyrics or instrumental, via the media backend (`localm music` CLI, Music page, `/generate-music` in GUI chat) |
+| **Video generation** (video plugin) | short text- or image-to-video clips via the media backend (`localm video` CLI, Video page, `/generate-video` in GUI chat; [guide](docs/video.md)) |
 | **Plugins** | First-party store plugins (above) plus third-party folders: install/enable/disable/uninstall from the CLI or GUI, export agent tools, add CLI commands and GUI tabs ([authoring guide](docs/plugins.md)) |
 | **Multimodal** (core) | Image attachment via `--image` or `/image` with a HuggingFace-format vision model. The built-in GGUF backend is text-only and rejects an attached image with a clear error rather than silently ignoring it |
 | **Ollama interop** (core) | Register Ollama blobs directly via `localm add <manifest-dir>` |
@@ -140,8 +143,9 @@ driver, VRAM, and optional packages in one shot.
 
 **Recommended (Windows): self-contained setup.** Clone anywhere and double-click
 `setup.bat`. It creates a private `.venv` inside the clone (always Python 3.12),
-installs localm into it (you pick the full AMD-GPU flavour or base), provisions
-the native llama.cpp binaries, and asks where data should live:
+installs localm into it, detects your GPU and provisions the matching llama.cpp
+backend (Vulkan for any GPU, CUDA/ROCm for peak performance, or CPU), and asks
+where data should live:
 
 - **inside the clone** (`.\home`) - fully portable; multiple clones on one
   machine are completely independent,
@@ -181,9 +185,9 @@ activates the plugin itself. The defined extras are:
 | `dev` | Contributor / CI tooling: `ruff` + `pytest` |
 
 Not every plugin needs an extra: the image/music/video plugins talk to an
-external ComfyUI, jobs and web have no extra, and tts runs in the browser. So
-enabling RAG is, for example, `pip install "localm[rag]"` followed by
-`localm plugin install rag`.
+external media-generation server you run (ComfyUI today), jobs and web have no
+extra, and tts runs in the browser. So enabling RAG is, for example,
+`pip install "localm[rag]"` followed by `localm plugin install rag`.
 
 > **Avoid `uv tool install` for this project.** Tool installs are *global per
 > package name*: a second clone installing the `localm` tool silently replaces
@@ -591,23 +595,25 @@ external plugin code defaults to needing confirmation before it runs.
 
 ---
 
-## GPU setup (AMD)
+## GPU setup
 
 The native llama.cpp binaries live **inside this install**, packaged as the
 `localm-llama-runtime` wheel in the venv, so the project never depends on a
-folder elsewhere on disk. Provision them once:
+folder elsewhere on disk. `setup-llama` provisions the backend matching your
+hardware (full list in [docs/gpu-setup.md](docs/gpu-setup.md)):
 
 ```bash
-localm setup-llama                      # download the default gfx1030 prebuilt
-localm setup-llama --from <build-dir>   # or copy your own llama.cpp build
-localm setup-llama --url <url> --sha256 <hex>   # custom prebuilt with integrity pin
+localm setup-llama                       # auto-detect the GPU, fetch the right backend
+localm setup-llama --backend vulkan      # any GPU (AMD/NVIDIA/Intel), no vendor toolkit
+localm setup-llama --backend cuda        # NVIDIA  /  --backend amd-rocm (AMD)  /  --backend cpu
+localm setup-llama --from <build-dir>    # or copy your own llama.cpp build
 ```
 
-This places `llama.dll` + `ggml-*.dll` (and, for the prebuilt, the matched ROCm
-runtime + `llama-cli`/`llama-server`) into `runtime/localm_llama_runtime/lib/`
-and installs the wheel. The ROCm runtime they need at load time (`amdhip64`,
-`rocblas`, ...) comes from the `rocm-sdk` wheels the `[gpu]` extra already
-installed into the same venv.
+Vulkan runs on any GPU with just the vendor's normal driver; CUDA/ROCm give peak
+performance when their runtime is present; CPU always works. The AMD ROCm build
+is self-contained (it bundles its ROCm runtime via the `[gpu]` extra's
+`rocm-sdk` wheels). macOS/Metal is experimental. See
+[docs/phone.md](docs/phone.md) to reach the GUI from a phone.
 
 localm resolves the binary directory in order: `LLAMA_CPP_LIB` env >
 `binary_dir` config > the bundled runtime wheel. No absolute path is ever assumed
