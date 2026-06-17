@@ -188,6 +188,11 @@ if "%SCPICK%"=="2" (
 )
 if "%SCPICK%"=="3" echo  No shortcut created.
 
+rem ---- choose which plugins to enable (chat is always on) -------------------
+echo.
+echo  Which optional features (plugins) do you want? chat is always on.
+.venv\Scripts\localm plugin setup
+
 rem ---- done ------------------------------------------------------------------
 echo.
 echo  Done. This clone is self-contained:
