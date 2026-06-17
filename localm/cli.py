@@ -1468,6 +1468,13 @@ try:
 except ImportError:
     pass
 
+# Jobs plugin - scheduled recurring tasks (localm job add/list/run/...)
+try:
+    from .plugins.builtin.jobs.cli import main as _jobs_main
+    main.add_command(_jobs_main, name="job")
+except ImportError:
+    pass
+
 try:
     from .plugins.coder.cli import main as _coder_main
     main.add_command(_coder_main, name="coder")
