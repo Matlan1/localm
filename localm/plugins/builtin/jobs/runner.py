@@ -1,0 +1,165 @@
+"""Execute a single job and return a result record.
+
+``run_job(job, *, engine=None)`` runs the job's prompt and returns a dict:
+    {status: "ok"|"error", output: str, error: str|None,
+     started: float, finished: float}
+
+It NEVER raises - any failure is caught and reported as an ``error`` result, so
+a scheduler tick can safely run many jobs in a row.
+
+task_kind "chat":  the prompt is run against the inference engine. A passed-in
+    ``engine`` is reused; otherwise one is loaded via the model manager from the
+    job's ``model`` (or the active/first registered model).
+task_kind "coder": a coder Agent runs the prompt in the job's ``cwd`` with the
+    job's ``scope`` and the current privacy mode. The coder path is best-effort:
+    a full agentic run needs the coder extra installed and a working backend; it
+    is unit-tested with the agent/backend mocked.
+
+Results are explicit user data (the store saves them in every privacy mode), but
+any session TRACE a run would leave (audit JSONL, transcripts) still honours
+``effective_mode`` - the coder Agent is constructed with the resolved mode, and
+the chat path writes no trace of its own.
+"""
+
+from __future__ import annotations
+
+import time
+from pathlib import Path
+from typing import Optional
+
+from localm.plugins.builtin.jobs.store import Job
+
+
+def run_job(job: Job, *, engine=None) -> dict:
+    """Run *job* and return a result record. Dispatches on task_kind and never
+    raises."""
+    started = time.time()
+    try:
+        if job.task_kind == "chat":
+            output = _run_chat(job, engine=engine)
+        elif job.task_kind == "coder":
+            output = _run_coder(job, engine=engine)
+        else:
+            raise ValueError(f"unknown task_kind: {job.task_kind!r}")
+        return {
+            "status": "ok",
+            "output": output,
+            "error": None,
+            "prompt": job.prompt,
+            "task_kind": job.task_kind,
+            "model": job.model,
+            "started": started,
+            "finished": time.time(),
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "output": "",
+            "error": f"{type(e).__name__}: {e}",
+            "prompt": job.prompt,
+            "task_kind": job.task_kind,
+            "model": job.model,
+            "started": started,
+            "finished": time.time(),
+        }
+
+
+# --------------------------------------------------------------------------- #
+#  chat                                                                        #
+# --------------------------------------------------------------------------- #
+
+def _run_chat(job: Job, *, engine=None) -> str:
+    """Run the prompt through the inference engine and return the reply text.
+
+    The chat path leaves no session trace of its own (no audit/transcript
+    writes here), so it is privacy-safe regardless of mode; the explicit result
+    is saved by the store like any other generated artifact."""
+    eng = engine if engine is not None else _load_engine(job.model)
+    if eng is None:
+        raise RuntimeError(
+            "no inference engine available (pass one, or register a model)")
+    messages = [{"role": "user", "content": job.prompt}]
+    pieces = []
+    for tok in eng.chat_stream(messages):
+        pieces.append(tok)
+    return "".join(pieces).strip()
+
+
+def _load_engine(model: Optional[str]):
+    """Load an inference Engine for *model* (or the active/first registered
+    model) via the model manager. Returns a loaded Engine, or None when no model
+    can be resolved."""
+    from localm.config import load_config, load_registry
+    from localm.inference.engine import Engine
+    from localm.model_manager import get_model_info
+
+    name = model
+    if not name:
+        cfg = load_config()
+        name = cfg.get("default_model") or cfg.get("model")
+    if not name:
+        reg = load_registry()
+        if reg:
+            name = sorted(reg)[0]
+    if not name:
+        return None
+    info = get_model_info(name)
+    if info is None:
+        raise RuntimeError(f"model not found: {name}")
+    model_path, display_hint = info
+    eng = Engine(str(model_path), display_name=(name if model else display_hint))
+    eng.load()
+    return eng
+
+
+# --------------------------------------------------------------------------- #
+#  coder (best-effort)                                                         #
+# --------------------------------------------------------------------------- #
+
+def _run_coder(job: Job, *, engine=None) -> str:
+    """Run a coder Agent for the prompt in the job's cwd. Best-effort: requires
+    the coder plugin and a reachable backend. Honours the current privacy mode
+    for any session trace the agent would write.
+
+    The agent always talks to an OpenAI-compatible HTTP endpoint, so a job run
+    needs a localm server (``self_url``) reachable; without one this raises and
+    the run is recorded as an error (never crashing the tick)."""
+    from localm.audit import effective_mode
+
+    cwd = Path(job.cwd or ".").expanduser()
+    if not cwd.is_dir():
+        raise RuntimeError(f"coder cwd is not a directory: {job.cwd}")
+
+    backend = _coder_backend(job)
+    mode = effective_mode("coder")
+
+    from localm.plugins.coder.agent import Agent
+    agent = Agent(
+        backend,
+        cwd.resolve(),
+        auto_approve=True,        # unattended scheduled run: no interactive prompts
+        mode=mode,
+        scope=job.scope,
+    )
+    try:
+        return (agent.run_task(job.prompt) or "").strip()
+    finally:
+        close = getattr(agent, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+
+
+def _coder_backend(job: Job):
+    """Build the HTTP backend the coder Agent talks to. Points at this machine's
+    localm server (LOCALM_SELF_URL or the default local address)."""
+    import os
+
+    from localm.plugins.coder.backends.http import HTTPBackend
+
+    self_url = (os.environ.get("LOCALM_SELF_URL")
+                or "http://127.0.0.1:8080/v1")
+    api_key = os.environ.get("LOCALM_API_KEY") or "localm"
+    return HTTPBackend(self_url, model=job.model or "localm", api_key=api_key)
