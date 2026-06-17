@@ -1606,6 +1606,98 @@ def plugin_install_engine(target, force):
     _warn_missing_requires(mgr, target)
 
 
+# Recommended everyday set for a non-interactive install: the surfaces that work
+# without a separate external service. image/music/video need a ComfyUI server,
+# voice needs the [voice] extra + a model, mcp is for external clients - all opt-in.
+_SETUP_DEFAULTS = ("coder", "rag", "web", "tts")
+
+
+def _installed_plugin_names(mgr) -> set:
+    return {p["name"] for p in mgr.api_state()["plugins"] if p.get("installed")}
+
+
+def _parse_plugin_selection(raw, available):
+    """Parse an interactive selection (comma list of 1-based numbers or names,
+    or 'all') into a list of plugin names."""
+    if not raw.strip():
+        return []
+    if raw.strip().lower() == "all":
+        return [e.name for e in available]
+    by_idx = {str(i): e.name for i, e in enumerate(available, 1)}
+    names = {e.name for e in available}
+    out = []
+    for tok in raw.split(","):
+        t = tok.strip()
+        if not t:
+            continue
+        if t in by_idx:
+            out.append(by_idx[t])
+        elif t in names:
+            out.append(t)
+        else:
+            console.print(f"[yellow]Ignoring unknown selection: {t}[/yellow]")
+    return out
+
+
+@plugin.command("setup")
+@click.option("--plugins", "plugins_csv", default=None,
+              help="Comma-list to install non-interactively (skips the prompt).")
+@click.option("--all", "install_all", is_flag=True,
+              help="Install every first-party plugin.")
+@click.option("--defaults", "install_defaults", is_flag=True,
+              help="Install the recommended set non-interactively (coder, rag, web, tts).")
+def plugin_setup(plugins_csv, install_all, install_defaults):
+    """Choose which first-party plugins to install.
+
+    Out of the box only chat is active; this turns on the features you want
+    (coder, image/music/video, rag, web, voice, tts, mcp). Run by the installer
+    after dependencies are in place, and any time afterwards. Some plugins also
+    need a pip extra (e.g. pip install "localm[coder]").
+    """
+    from .plugins import catalog
+    mgr = _engine_manager()
+    installed = _installed_plugin_names(mgr)
+    available = [e for e in catalog.CATALOG if not e.preinstalled]
+
+    if install_all:
+        chosen = [e.name for e in available]
+    elif plugins_csv is not None:
+        chosen = _parse_plugin_selection(plugins_csv, available)
+    elif install_defaults:
+        chosen = list(_SETUP_DEFAULTS)
+    elif not sys.stdin.isatty():
+        console.print(
+            "[dim]Non-interactive shell - skipping plugin selection. Run "
+            "[bold]localm plugin setup[/bold] to choose, or pass "
+            "--plugins/--all/--defaults.[/dim]")
+        return
+    else:
+        console.print("Choose first-party plugins to install (chat is always on):\n")
+        for i, e in enumerate(available, 1):
+            mark = " [green](installed)[/green]" if e.name in installed else ""
+            extra = f" [dim](pip extra: localm[{e.extra}])[/dim]" if e.extra else ""
+            console.print(f"  [bold]{i:>2}.[/bold] {e.name:<7} {e.description}{mark}{extra}")
+        console.print(
+            "\nEnter numbers or names (comma-separated), 'all', or blank to skip.")
+        raw = click.prompt("Install", default="", show_default=False)
+        chosen = _parse_plugin_selection(raw, available)
+
+    if not chosen:
+        console.print("[dim]No plugins selected.[/dim]")
+        return
+    for name in chosen:
+        if name in installed:
+            console.print(f"[dim]{name} already installed[/dim]")
+            continue
+        try:
+            mgr.set_installed_state(name, True)
+        except (KeyError, ValueError) as e:
+            console.print(f"[yellow]Skipped {name}: {e}[/yellow]")
+            continue
+        console.print(f"[green]Installed[/green] [bold]{name}[/bold]")
+        _warn_missing_requires(mgr, name)
+
+
 @plugin.command("uninstall")
 @click.argument("name")
 @click.option("--delete-data", is_flag=True,

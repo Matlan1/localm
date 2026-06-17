@@ -163,6 +163,11 @@ EOF
 esac
 
 say ""
+say "  Which optional features (plugins) do you want? chat is always on."
+.venv/bin/localm plugin setup \
+  || say "  [!] Skipped - choose later with:  .venv/bin/localm plugin setup"
+
+say ""
 say "  Done. This clone is self-contained:"
 say "    ./localm-launcher.sh    graphical launcher (GUI / chat / server / coder)"
 say "    ./localm.sh <args>      the localm CLI, e.g.:  ./localm.sh gui"
