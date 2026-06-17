@@ -6,6 +6,11 @@ rem  Creates a private .venv in THIS folder and (optionally) keeps all data
 rem  (models, config, logs, generated images) in THIS folder too.  Multiple
 rem  clones on one machine never see or affect each other.  Nothing is
 rem  installed globally and PATH is not modified.
+rem
+rem  Detects your GPU and provisions the matching llama.cpp backend, so an
+rem  NVIDIA, Intel, AMD, or CPU-only machine all get a working install. Vulkan
+rem  is the universal default (any GPU, no vendor toolkit); CUDA/ROCm are
+rem  offered for peak performance; CPU for machines with no GPU.
 rem ===========================================================================
 setlocal EnableDelayedExpansion
 cd /d "%~dp0"
@@ -15,7 +20,14 @@ echo.
 echo  localm setup - self-contained install in: %CD%
 echo.
 
-rem ---- uv is required (fast, reliable resolver; handles the ROCm wheels) ----
+rem ---- uninstall / rollback (report first, then remove) ---------------------
+set "PURGE=0"
+if /i "%~2"=="--purge-data" set "PURGE=1"
+if /i "%~1"=="uninstall"   goto uninstall
+if /i "%~1"=="--uninstall" goto uninstall
+if /i "%~1"=="--rollback"  goto uninstall
+
+rem ---- uv is required (fast, reliable resolver; handles the GPU wheels) ------
 where uv >nul 2>nul
 if errorlevel 1 (
     echo  [!] uv is not installed. Install it first:
@@ -26,18 +38,12 @@ if errorlevel 1 (
     exit /b 1
 )
 
-rem ---- choose the install flavour -------------------------------------------
-echo  Install flavour:
-echo    [1] Full - AMD GPU stack (ROCm torch, transformers; needs Python 3.12)
-echo    [2] Base - CPU / GGUF-via-llama.dll only (any Python 3.10+)
-choice /c 12 /n /m "  Pick 1 or 2: "
-if errorlevel 2 (set "FLAVOUR=base") else (set "FLAVOUR=gpu")
-
 rem ---- create the venv in the repo root -------------------------------------
 rem  An existing .venv is reused unless the user opts to replace it, so a
 rem  re-run never ejects with a misleading "could not create" error (uv refuses
-rem  to clobber an existing environment and returns non-zero).
-if "%FLAVOUR%"=="gpu" (set "PYVER=3.12") else (set "PYVER=3.12")
+rem  to clobber an existing environment and returns non-zero). Python 3.12 is
+rem  required by the AMD ROCm torch wheels; we standardise on it for all flavours.
+set "PYVER=3.12"
 
 if not exist ".venv" goto venv_create
 
@@ -74,16 +80,13 @@ type nul > ".venv\.localm-venv"
 :venv_done
 
 rem ---- install localm (editable) into the venv ------------------------------
-rem  [voice] ships the speech-to-text package preinstalled; the Whisper model
-rem  itself is only downloaded after the user consents in the GUI (privacy:
-rem  that one fetch is the only network access, transcription is local).
+rem  Base install first: GGUF chat needs no PyTorch, so this alone is a working
+rem  install. The GPU/torch stack for HuggingFace models is added below to match
+rem  the detected vendor. [voice] ships speech-to-text; its Whisper model is only
+rem  downloaded after the user consents in the GUI.
 echo.
 echo  Installing localm into .venv ...
-if "%FLAVOUR%"=="gpu" (
-    uv pip install -p .venv -e ".[gpu,coder,audio,voice]"
-) else (
-    uv pip install -p .venv -e ".[coder,voice]"
-)
+uv pip install -p .venv -e ".[coder,voice]"
 if errorlevel 1 (
     echo  [!] Install failed - see the error above.
     pause
@@ -93,36 +96,87 @@ if errorlevel 1 (
 rem ---- install the native-runtime wheel (self-contained inference) ----------
 rem  localm-llama-runtime carries llama.dll + ggml inside this venv so the
 rem  project never depends on a folder elsewhere on disk. Installed empty here;
-rem  `localm setup-llama` downloads/copies the actual binaries into it.
+rem  `localm setup-llama` downloads/copies the actual binaries into it below.
 uv pip install -p .venv -e ".\runtime"
 
-rem ---- provision the native llama.cpp binaries ------------------------------
-rem  The DLLs (llama.dll + ggml + ROCm runtime) are large and license- and
-rem  provenance-sensitive, so they are never committed to git - a clone does
-rem  not carry them. Place them in this venv now so the install is runnable.
-if "%FLAVOUR%"=="gpu" goto provision_gpu
+rem ---- detect the GPU (via the tested localm.hwdetect helper) ----------------
 echo.
-echo  CPU GGUF inference needs a CPU-built llama.dll (the default prebuilt is a
-echo  GPU build). Provision it yourself with:
-echo     .venv\Scripts\localm setup-llama --from ^<your cpu llama.cpp build dir^>
-echo.
-goto provision_done
-:provision_gpu
-echo.
-echo  Native llama.cpp binaries are not in the repo and must be placed in this
-echo  venv once. How do you want to provide them?
-echo    [1] Download the default gfx1030 prebuilt   one network fetch, lemonade-sdk
-echo    [2] Copy from your OWN llama.cpp build dir   no download
-echo    [3] Skip for now
-choice /c 123 /n /m "  Pick 1, 2 or 3: "
-set "LLAMAPICK=%errorlevel%"
-if "%LLAMAPICK%"=="1" .venv\Scripts\localm setup-llama
-if "%LLAMAPICK%"=="2" (
-    set /p "LLAMABUILD=  Path to your build dir with llama.dll: "
-    .venv\Scripts\localm setup-llama --from "!LLAMABUILD!"
+echo  Detecting graphics hardware ...
+.venv\Scripts\python -c "import localm.hwdetect as h; d=h.detect(); print((d.vendors or ['none'])[0])" > "%TEMP%\localm_vendor.txt" 2>nul
+set "VENDOR=none"
+if exist "%TEMP%\localm_vendor.txt" set /p VENDOR=<"%TEMP%\localm_vendor.txt"
+del "%TEMP%\localm_vendor.txt" 2>nul
+if "%VENDOR%"=="" set "VENDOR=none"
+
+if /i "%VENDOR%"=="amd" (
+    set "REC=amd-rocm"
+) else if /i "%VENDOR%"=="nvidia" (
+    set "REC=vulkan"
+) else if /i "%VENDOR%"=="intel" (
+    set "REC=vulkan"
+) else (
+    set "REC=cpu"
 )
-if "%LLAMAPICK%"=="3" echo  Skipped - provision later: .venv\Scripts\localm setup-llama
-:provision_done
+echo  Detected graphics vendor: %VENDOR%
+echo  Recommended inference backend: %REC%
+
+rem ---- choose the llama.cpp backend (recommended pre-selected) ---------------
+echo.
+echo  Native inference runtime (llama.cpp) - press Enter to accept the recommendation:
+echo    [1] %REC%   (recommended for your hardware)
+echo    [2] vulkan     - any GPU (AMD/NVIDIA/Intel), no vendor toolkit
+echo    [3] cuda       - NVIDIA, peak performance (needs the CUDA runtime)
+echo    [4] amd-rocm   - AMD RX 6000 (gfx103X), self-contained
+echo    [5] cpu        - no GPU
+echo    [6] I will build / provide my own (skip the download)
+set "BSEL="
+set /p "BSEL=  Pick 1-6 [1]: "
+if not defined BSEL set "BSEL=1"
+set "BACKEND=%REC%"
+if "%BSEL%"=="2" set "BACKEND=vulkan"
+if "%BSEL%"=="3" set "BACKEND=cuda"
+if "%BSEL%"=="4" set "BACKEND=amd-rocm"
+if "%BSEL%"=="5" set "BACKEND=cpu"
+if "%BSEL%"=="6" set "BACKEND=own"
+
+rem ---- PyTorch + transformers for HuggingFace models (matches the GPU) -------
+rem  Independent of the llama backend above (that path is GGUF and needs no
+rem  torch). Installed to match the DETECTED vendor so torch never mismatches
+rem  the hardware. Skipped on Intel/CPU - GGUF chat works without it.
+if /i "%VENDOR%"=="amd" (
+    echo.
+    echo  Installing PyTorch (AMD ROCm) + transformers for HuggingFace models ...
+    uv pip install -p .venv -e ".[gpu,audio]" || echo  [!] ROCm torch stack failed - GGUF chat still works without it.
+) else if /i "%VENDOR%"=="nvidia" (
+    echo.
+    echo  Installing PyTorch (NVIDIA CUDA) + transformers for HuggingFace models ...
+    uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu124 || echo  [!] CUDA torch failed - GGUF chat still works without it.
+    uv pip install -p .venv "transformers[kernels]~=5.12" "accelerate>=1.0" "pillow>=10.0" "soundfile>=0.12" || echo  [!] transformers stack failed - GGUF chat still works.
+) else (
+    echo.
+    echo  Skipping the PyTorch/transformers stack ^(not needed for GGUF chat^).
+    echo  Add it later if you want HuggingFace transformers models.
+)
+
+rem ---- provision the native llama.cpp binaries ------------------------------
+rem  The binaries are large and license/provenance-sensitive, so they are never
+rem  committed to git. setup-llama fetches the prebuilt matching the chosen
+rem  backend from upstream llama.cpp releases (AMD uses a self-contained ROCm
+rem  build), and places them in this venv so the install is runnable.
+echo.
+if /i "%BACKEND%"=="own" (
+    set "LLAMABUILD="
+    set /p "LLAMABUILD=  Path to your llama.cpp build dir with llama.dll (blank = skip): "
+    if not "!LLAMABUILD!"=="" (
+        .venv\Scripts\localm setup-llama --from "!LLAMABUILD!"
+        if errorlevel 1 echo  [!] Provisioning failed - run later: .venv\Scripts\localm setup-llama --from "!LLAMABUILD!"
+    ) else (
+        echo  Skipped - provision later: .venv\Scripts\localm setup-llama --backend ^<vulkan^|cuda^|amd-rocm^|cpu^>
+    )
+) else (
+    .venv\Scripts\localm setup-llama --backend %BACKEND%
+    if errorlevel 1 echo  [!] Provisioning failed - run later: .venv\Scripts\localm setup-llama --backend %BACKEND%
+)
 
 rem ---- choose where data lives ----------------------------------------------
 echo.
@@ -204,12 +258,77 @@ echo    .venv\Scripts\localm  CLI directly, e.g.:
 echo        .venv\Scripts\localm pull ^<model^>
 echo        .venv\Scripts\localm gui
 echo.
-if "%FLAVOUR%"=="gpu" (
-    echo  Re-provision or update the native binaries any time with:
-    echo        .venv\Scripts\localm setup-llama --force
-    echo.
-)
+echo  Re-provision or change the inference backend any time with:
+echo        .venv\Scripts\localm setup-llama --backend ^<auto^|vulkan^|cuda^|amd-rocm^|cpu^> --force
+echo.
 echo  Tip: avoid "uv tool install" for this project - tool installs are
 echo  global per package name and clones would overwrite each other.
 echo.
 pause
+exit /b 0
+
+rem ===========================================================================
+rem  Uninstall / rollback. Removes ONLY what setup created: our .venv
+rem  (marker-checked), the provisioned native binaries, localm-home.cfg, and the
+rem  desktop shortcut. Data is KEPT unless --purge-data, and unsafe target paths
+rem  are refused even then.
+rem ===========================================================================
+:uninstall
+echo.
+echo  localm uninstall / rollback for this clone:
+echo    %CD%
+echo.
+set "DATA=%USERPROFILE%\.localm"
+if exist "home" set "DATA=%CD%\home"
+if exist "localm-home.cfg" set /p DATA=<localm-home.cfg
+echo  Will remove:
+if exist ".venv\.localm-venv" (echo    - .\.venv ^(the localm virtual environment^)) else (echo    - .\.venv   [skipped: not a localm-created venv])
+echo    - provisioned native binaries in runtime\localm_llama_runtime\lib
+if exist "localm-home.cfg" echo    - .\localm-home.cfg
+if "%PURGE%"=="1" (
+    echo    - YOUR DATA ^(models, config, chats^): %DATA%   [--purge-data]
+) else (
+    echo.
+    echo  Your data is KEPT: %DATA%   ^(pass --purge-data to remove it too^)
+)
+echo.
+choice /c YN /n /m "  Proceed? [y/N]: "
+if errorlevel 2 (
+    echo  Aborted - nothing changed.
+    pause
+    exit /b 0
+)
+if exist ".venv\.localm-venv" (
+    rmdir /s /q .venv
+    echo  Removed .\.venv
+)
+del /q "runtime\localm_llama_runtime\lib\*.dll" 2>nul
+del /q "runtime\localm_llama_runtime\lib\*.exe" 2>nul
+del /q "runtime\localm_llama_runtime\lib\*.pyd" 2>nul
+echo  Cleared provisioned native binaries
+del /q "localm-home.cfg" 2>nul
+del /q "%USERPROFILE%\Desktop\localm.lnk" 2>nul
+if "%PURGE%"=="1" (
+    set "SAFE=1"
+    if "%DATA%"=="" set "SAFE=0"
+    if /i "%DATA%"=="%CD%" set "SAFE=0"
+    if /i "%DATA%"=="%USERPROFILE%" set "SAFE=0"
+    rem reject drive roots (C:, C:\) and parent-traversal (..)
+    set "DCHK=%DATA%"
+    if "!DCHK:~-1!"=="\" set "DCHK=!DCHK:~0,-1!"
+    if "!DCHK:~-1!"==":" set "SAFE=0"
+    if not "!DATA!"=="!DATA:..=!" set "SAFE=0"
+    if "!SAFE!"=="0" (
+        echo  [!] Unsafe or empty data path - kept: %DATA%
+    ) else (
+        choice /c YN /n /m "  Permanently delete ALL data in %DATA%? [y/N]: "
+        if not errorlevel 2 (
+            rmdir /s /q "%DATA%"
+            echo  Removed %DATA%
+        )
+    )
+)
+echo.
+echo  Done. To reinstall: setup.bat
+pause
+exit /b 0

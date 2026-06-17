@@ -10,10 +10,12 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-YES=0
+YES=0; UNINSTALL=0; PURGE=0
 for arg in "$@"; do
   case "$arg" in
     --yes|-y) YES=1 ;;
+    --uninstall|--rollback) UNINSTALL=1 ;;
+    --purge-data) PURGE=1 ;;
   esac
 done
 
@@ -28,6 +30,79 @@ ask() {  # ask "prompt" "default"  ->  echoes the answer (the default in --yes m
 say ""
 say "  localm setup - self-contained install in: $(pwd)"
 say ""
+
+# ---- uninstall / rollback (report first, then remove) -----------------------
+# Removes ONLY what this installer created: our .venv (marker-checked), the
+# provisioned native binaries, the home.cfg, and the menu entry. Your data is
+# kept unless --purge-data, and even then unsafe target paths are refused.
+do_uninstall() {
+  local data
+  if [ -f localm-home.cfg ]; then data="$(cat localm-home.cfg 2>/dev/null || true)"
+  elif [ -d home ]; then data="$(pwd)/home"
+  else data="$HOME/.localm"; fi
+
+  say "  Uninstall / rollback for this clone:"
+  say "    $(pwd)"
+  say ""
+  say "  Will remove:"
+  if [ -f .venv/.localm-venv ]; then say "    - ./.venv (the localm virtual environment)"
+  else say "    - ./.venv   [skipped: not a localm-created venv]"; fi
+  say "    - provisioned native binaries (llama/ggml libs)"
+  if [ -f localm-home.cfg ]; then say "    - ./localm-home.cfg"; fi
+  if [ -f "$HOME/.local/share/applications/localm.desktop" ]; then say "    - the application menu entry"; fi
+  if [ "$PURGE" = 1 ]; then
+    say "    - YOUR DATA (models, config, chats):  $data   [--purge-data]"
+  else
+    say ""
+    say "  Your data is KEPT:  $data   (pass --purge-data to remove it too)"
+  fi
+  say ""
+  local ok; ok="$(ask "  Proceed? [y/N]: " N)"
+  case "$ok" in [Yy]*) ;; *) say "  Aborted - nothing changed."; return 0 ;; esac
+
+  if [ -f .venv/.localm-venv ]; then rm -rf .venv 2>/dev/null || true; say "  Removed ./.venv"; fi
+  local lib="runtime/localm_llama_runtime/lib"
+  if [ -d "$lib" ]; then
+    find "$lib" -maxdepth 1 -type f \
+      \( -name '*.dll' -o -name '*.so*' -o -name '*.dylib' -o -name '*.exe' -o -name '*.pyd' \) \
+      -delete 2>/dev/null || true
+    say "  Cleared provisioned native binaries"
+  fi
+  rm -f localm-home.cfg 2>/dev/null || true
+  rm -f "$HOME/.local/share/applications/localm.desktop" 2>/dev/null || true
+
+  if [ "$PURGE" = 1 ]; then
+    local repo home_abs data_abs unsafe=0
+    repo="$(pwd -P)"
+    home_abs="$(cd "$HOME" 2>/dev/null && pwd -P || echo "$HOME")"
+    # Reject shell glob / parent-traversal metacharacters and a symlinked data
+    # dir outright, then CANONICALISE with `pwd -P` (resolves symlinks and ./)
+    # so the guards compare REAL locations, not strings - a relative or
+    # symlinked path cannot aim the delete at the repo root, $HOME, or elsewhere.
+    case "$data" in *'*'*|*'?'*|*'['*|*..*) unsafe=1 ;; esac
+    if [ -L "$data" ]; then unsafe=1; fi
+    data_abs="$(cd "$data" 2>/dev/null && pwd -P || echo "$data")"
+    if [ "$unsafe" = 1 ] || [ -z "$data" ] || [ -z "$data_abs" ] \
+        || [ "$data_abs" = "/" ] || [ "$data_abs" = "$home_abs" ] || [ "$data_abs" = "$repo" ]; then
+      say "  [!] Refusing to delete data path '$data' (unsafe path) - kept."
+    else
+      local ok2; ok2="$(ask "  Permanently delete ALL data in $data_abs ? [y/N]: " N)"
+      case "$ok2" in
+        [Yy]*)
+          if rm -rf "$data_abs" 2>/dev/null; then say "  Removed $data_abs"
+          else say "  [!] Could not fully remove $data_abs (check permissions)."; fi ;;
+        *) say "  Data kept." ;;
+      esac
+    fi
+  fi
+  say ""
+  say "  Done. To reinstall:  bash setup.sh"
+}
+
+if [ "$UNINSTALL" = 1 ]; then
+  do_uninstall
+  exit 0
+fi
 
 # ---- uv is required ---------------------------------------------------------
 if ! command -v uv >/dev/null 2>&1; then
@@ -97,13 +172,13 @@ case "$GPU" in
     say "  Installing PyTorch (ROCm) + transformers ..."
     uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/rocm6.2 \
       || say "  [!] ROCm torch install failed - install a matching torch+rocm manually (see docs/linux-setup.md)."
-    uv pip install -p .venv "transformers[kernels]~=5.10" "accelerate>=1.0" "pillow>=10.0" || true
+    uv pip install -p .venv "transformers[kernels]~=5.12" "accelerate>=1.0" "pillow>=10.0" || true
     ;;
   cuda)
     say "  Installing PyTorch (CUDA) + transformers ..."
     uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu124 \
       || say "  [!] CUDA torch install failed - install a matching torch+cuda manually (see docs/linux-setup.md)."
-    uv pip install -p .venv "transformers[kernels]~=5.10" "accelerate>=1.0" "pillow>=10.0" || true
+    uv pip install -p .venv "transformers[kernels]~=5.12" "accelerate>=1.0" "pillow>=10.0" || true
     ;;
   cpu)
     say "  CPU mode - skipping the GPU/torch stack (GGUF inference needs no torch)."
@@ -113,16 +188,37 @@ esac
 # ---- native llama.cpp runtime wheel (loader imports it) ---------------------
 uv pip install -p .venv -e ./runtime >/dev/null 2>&1 || true
 
-# ---- provision the native library -------------------------------------------
+# ---- provision the native library (official llama.cpp prebuilt) -------------
+# Recommend the broadest WORKING backend for the detected hardware: any GPU ->
+# vulkan (runs on AMD/NVIDIA/Intel via the display driver, no vendor toolkit);
+# no GPU -> cpu. CUDA/ROCm are offered for peak vendor performance (they need
+# that vendor's runtime present). setup-llama fetches the matching upstream
+# build, so a Linux/macOS tester no longer has to compile llama.cpp by hand.
+case "$GPU" in cpu) REC=cpu ;; *) REC=vulkan ;; esac
 say ""
-say "  Native llama.cpp library (libllama.so): no prebuilt is hosted for Linux."
-say "  Build llama.cpp for your GPU (see docs/linux-setup.md), then copy it in."
-buildpath="$(ask "  Path to a llama.cpp build dir to copy now (blank = skip): " "")"
-if [ -n "$buildpath" ]; then
-  .venv/bin/localm setup-llama --from "$buildpath" \
-    || say "  [!] setup-llama failed - run it later:  .venv/bin/localm setup-llama --from <dir>"
+say "  Native inference runtime (llama.cpp). Recommended for your hardware: $REC"
+say "    [1] $REC  (recommended)"
+say "    [2] vulkan   - any GPU, no vendor toolkit"
+say "    [3] cuda     - NVIDIA, peak performance (needs the CUDA runtime)"
+say "    [4] hip      - AMD ROCm, peak performance (needs the ROCm runtime)"
+say "    [5] cpu      - no GPU"
+say "    [6] I will build / provide my own (skip the download)"
+bpick="$(ask "  Pick 1-6 [1]: " 1)"
+case "$bpick" in
+  2) BACKEND=vulkan ;; 3) BACKEND=cuda ;; 4) BACKEND=hip ;; 5) BACKEND=cpu ;;
+  6) BACKEND=own ;;   *) BACKEND="$REC" ;;
+esac
+if [ "$BACKEND" = own ]; then
+  buildpath="$(ask "  Path to a llama.cpp build dir to copy now (blank = skip): " "")"
+  if [ -n "$buildpath" ]; then
+    .venv/bin/localm setup-llama --from "$buildpath" \
+      || say "  [!] setup-llama failed - run later:  .venv/bin/localm setup-llama --from <dir>"
+  else
+    say "  Skipped. Provision later:  .venv/bin/localm setup-llama --backend <vulkan|cuda|hip|cpu>"
+  fi
 else
-  say "  Skipped. Provision later:  .venv/bin/localm setup-llama --from <build dir>"
+  .venv/bin/localm setup-llama --backend "$BACKEND" \
+    || say "  [!] setup-llama failed - run later:  .venv/bin/localm setup-llama --backend $BACKEND"
 fi
 
 # ---- data directory ---------------------------------------------------------

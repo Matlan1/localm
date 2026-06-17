@@ -208,6 +208,15 @@ def load_lib() -> ctypes.CDLL:
         else:
             _loaded_lib = ctypes.CDLL(str(lib_path), mode=ctypes.RTLD_GLOBAL)
     except OSError as e:
-        raise RuntimeError(f"Failed to load {name} from {lib_path}: {e}") from e
+        raise RuntimeError(
+            f"Failed to load {name} from {lib_path}: {e}\n"
+            "This usually means the provisioned build does not match this "
+            "machine - e.g. an AMD ROCm or NVIDIA CUDA build on a box without "
+            "that GPU or its runtime. Re-provision a backend that fits:\n"
+            "  localm setup-llama --backend vulkan --force   (any GPU, no vendor toolkit)\n"
+            "  localm setup-llama --backend cpu --force       (no GPU)\n"
+            "  localm setup-llama --backend cuda --force      (NVIDIA)\n"
+            "  localm setup-llama --backend amd-rocm --force  (AMD RX 6000)"
+        ) from e
 
     return _loaded_lib

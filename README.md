@@ -48,8 +48,11 @@ SSRF guard ([guide](docs/network.md)).
 
 - **Local model inference.** GGUF files load through a small ctypes binding to
   `llama.dll`, so there is no `llama-cpp-python` to build. HuggingFace models
-  work too, and localm works out whether to run on your AMD or NVIDIA GPU (or
-  fall back to CPU) from what actually loads at startup.
+  work too. The installer detects your GPU and provisions the matching llama.cpp
+  backend - **Vulkan** runs on any AMD/NVIDIA/Intel GPU with no vendor toolkit,
+  with CUDA/ROCm offered for peak performance and CPU when there is no GPU - and
+  localm auto-detects the GPU at load. (macOS/Metal is experimental and
+  unverified.)
 - **Pick how you talk to it.** A browser GUI, a plain terminal chat, and an
   OpenAI-compatible server for when you want other apps to connect.
 - **A coding agent that does the work (coder plugin).** `localm coder` works
@@ -89,7 +92,7 @@ ships in the `builtin/` store but is inactive until you run
 | Feature | Details |
 |---|---|
 | **GGUF inference** (core) | Pure-Python ctypes wrapper around `llama.dll`, no `llama-cpp-python` required |
-| **GPU support** (core) | AMD (ROCm / HIP), NVIDIA (CUDA), CPU. Auto-detected from DLL loading order |
+| **GPU support** (core) | Any GPU via **Vulkan** (no vendor toolkit), plus vendor-optimized AMD (ROCm/HIP) and NVIDIA (CUDA), or CPU. The installer detects your hardware and provisions the matching llama.cpp backend (`setup-llama --backend`); the loader auto-detects the GPU at runtime. macOS/Metal is experimental |
 | **HF Transformers** (core) | Full HuggingFace model directories |
 | **OpenAI-compatible server** (core) | `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`, streaming SSE, plus scope-gated management routes (config, keys, plugins, model load/unload). TTFT and tok/s in usage ([guide](docs/server-api.md)) |
 | **Web GUI** (core) | `localm gui`: chat, coder agent, model manager, plus any plugin tabs (image/music/video studios, Knowledge, Jobs); zero build step, fully offline ([guide](docs/gui.md)) |
