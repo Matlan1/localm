@@ -103,10 +103,11 @@ def register(host) -> None:
 def unregister() -> None:
     """Optional: clean up when the plugin is disabled/unloaded."""
 
-# Optional lifecycle hooks, called only if present:
-def on_install() -> None: ...
-def on_first_use() -> None: ...
-def on_uninstall(delete_data: bool = False) -> None: ...
+# Optional lifecycle hooks, called if present:
+def on_install() -> None: ...                # called once when installed
+def on_uninstall(delete_data: bool = False) -> None: ...  # called at uninstall
+# on_first_use() is RESERVED - not yet invoked by the engine (no stable
+# "first use" point is defined); do not rely on it.
 ```
 
 The engine hands `register` a `PluginHost`; everything the plugin attaches

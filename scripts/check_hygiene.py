@@ -4,7 +4,9 @@
 Scans tracked files and fails on:
   1. The em-dash (U+2014) or en-dash (U+2013) in any text file.
   2. Personal or machine-specific disclosure: a local username used as a path
-     component, a personal email, or a known private external path.
+     component, a leaked secret (token / key / private key), or a known private
+     external path. NOTE: the maintainer's contact email is intentionally
+     published for bug reports (see localm/bugreport.py) and is NOT flagged.
   3. An absolute or machine-specific path used in code/config (not docs), which
      a default must never assume.
 
@@ -35,13 +37,14 @@ _EN_DASH = chr(0x2013)
 _DASHES = (_EM_DASH, _EN_DASH)
 
 # ---- check 2: disclosure (no escape) ---------------------------------------
-# The maintainer identifiers to scan for are assembled from fragments so this
-# file does not itself contain the plaintext email or username it forbids
-# (rule 2). Extend the (user, email-local, email-domain) below per maintainer.
+# The maintainer username is assembled from fragments so this file does not
+# itself contain the plaintext identifier it forbids in path components (rule 2).
+# The maintainer's CONTACT EMAIL is deliberately NOT scanned for: the maintainer
+# opted to publish it for bug reports (localm/bugreport.py). What stays forbidden
+# is a local username used as a filesystem path (a machine-specific bug) and any
+# real secret (API token, access key, private key).
 _MAINT_USER = "Mat" + "lan"
-_MAINT_EMAIL = "thei" + "lige" + "@" + "gmail" + "." + "com"
 _DISCLOSURE = [
-    re.compile(re.escape(_MAINT_EMAIL), re.I),
     re.compile(r"[A-Za-z]:[\\/]Users[\\/]" + _MAINT_USER + r"\b", re.I),  # user dir
     re.compile(r"[\\/]Users[\\/]" + _MAINT_USER + r"\b"),                 # unix-style
     # actual secrets

@@ -51,10 +51,57 @@ def _complete_model_name(ctx, param, incomplete):
         return []
 
 
-@click.group(context_settings={"help_option_names": ["-h", "--help"]})
+class _GracefulGroup(click.Group):
+    """Single, cross-cutting failure handler for the whole CLI.
+
+    Every subcommand (run, gui, serve, coder, setup-llama, ...) is invoked
+    through this group, so an unexpected crash anywhere is caught in ONE place:
+    we say "sorry, X went wrong because Y" and offer a prefilled, editable bug
+    report. A command that hits a known problem just raises bugreport.LocalmError
+    with a good summary/reason; it does not know about reporting itself.
+
+    User errors (ClickException / bad usage), Ctrl+C, and clean exits pass
+    through untouched - those are not bugs."""
+
+    def invoke(self, ctx):
+        try:
+            return super().invoke(ctx)
+        except (SystemExit, KeyboardInterrupt, click.exceptions.Abort,
+                click.exceptions.Exit, click.ClickException):
+            raise
+        except Exception as e:  # an actual, unexpected failure
+            # Reporting must never itself crash the handler (that would turn a
+            # caught bug into the hard crash we are trying to avoid), so guard it.
+            try:
+                from localm import bugreport
+                interactive = bool(getattr(sys.stdin, "isatty", lambda: False)())
+                if isinstance(e, bugreport.LocalmError):
+                    bugreport.report_failure(
+                        summary=e.summary, reason=e.reason,
+                        error=e.__cause__ or e, context=e.context,
+                        interactive=interactive)
+                else:
+                    bugreport.report_failure(
+                        summary="localm hit an unexpected error",
+                        reason=str(e), error=e,
+                        context={"command": getattr(ctx, "invoked_subcommand", None)},
+                        interactive=interactive)
+            except Exception:
+                console.print(f"[red]localm failed:[/red] {e}")
+            raise SystemExit(1)
+
+
+@click.group(cls=_GracefulGroup, context_settings={"help_option_names": ["-h", "--help"]})
 @click.version_option("0.1.0", prog_name="localm")
 def main() -> None:
     """Run local LLMs offline - HuggingFace and GGUF models, AMD/NVIDIA/CPU."""
+    # Install the process-wide graceful-failure net so a crash anywhere - a
+    # background thread (preload, jobs, coder), or any uncaught main-thread
+    # error - becomes a "sorry X for Y" + bug-report offer, not a hard crash.
+    # The _GracefulGroup above still handles per-command errors with nicer
+    # context; this covers everything the group does not wrap.
+    from localm import bugreport
+    bugreport.install_global_handlers()
 
 
 # ------------------------------------------------------------------ #
@@ -75,8 +122,6 @@ def main() -> None:
 @click.option("--device",             default=None,  help="HF device override (cuda / cpu).")
 @click.option("--image", "images",   multiple=True, type=click.Path(exists=True),
               help="Local image file to include (repeat for multiple). Use with -p.")
-@click.option("--output-dir",         default=None,  type=click.Path(),
-              help="Directory to save any images the model produces.")
 @click.option("--debug", is_flag=True,
               help="Write a debug log (~/.localm/logs/), capture native llama.cpp "
                    "stderr, and record raw model output (with markers) in the log.")
@@ -87,7 +132,7 @@ def main() -> None:
                    "log = JSONL audit trail to ~/.localm/sessions/; "
                    "full = log + markdown transcript.")
 def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
-        mmproj, device, images, output_dir, debug, mode):
+        mmproj, device, images, debug, mode):
     """Run a model - interactive chat or single prompt.
 
     \b
@@ -169,9 +214,6 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
         "repeat_penalty": cfg["repeat_penalty"],
     }
 
-    # Resolve output directory for any image output
-    out_dir = Path(output_dir) if output_dir else Path.cwd()
-
     # Accept piped stdin as the prompt
     if not sys.stdin.isatty() and prompt is None:
         prompt = sys.stdin.read().strip()
@@ -192,9 +234,8 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
                 audit.llm(response)
                 if transcript:
                     transcript.exchange(prompt, response)
-                _handle_image_output(response, out_dir)
             else:
-                _interactive(engine, system, gen_opts, out_dir,
+                _interactive(engine, system, gen_opts,
                              audit=audit, transcript=transcript)
     finally:
         audit.close()
@@ -251,28 +292,7 @@ def _stream_once(engine, messages: list, **kwargs) -> str:
     return full
 
 
-def _handle_image_output(response: str, out_dir: Path) -> None:
-    """Extract any base64-encoded images from the model's response and save them."""
-    import base64
-    import re
-    pattern = re.compile(
-        r"!\[.*?\]\(data:(image/\w+);base64,([A-Za-z0-9+/=]+)\)"
-        r"|data:(image/\w+);base64,([A-Za-z0-9+/=]{100,})"
-    )
-    saved = 0
-    for match in pattern.finditer(response):
-        mime = match.group(1) or match.group(3)
-        b64  = match.group(2) or match.group(4)
-        ext  = mime.split("/")[-1].replace("jpeg", "jpg")
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / f"output_{saved + 1}.{ext}"
-        out_path.write_bytes(base64.b64decode(b64))
-        console.print(f"[green]Image saved:[/green] {out_path}")
-        saved += 1
-
-
 def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
-                 out_dir: Optional[Path] = None,
                  audit=None, transcript=None) -> None:  # noqa: C901
     console.print(Panel(
         f"[bold cyan]localm[/bold cyan] - {engine.display_name}\n"
@@ -365,8 +385,6 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
                 audit.llm(response)
             if transcript:
                 transcript.exchange(user_input, response)
-            if out_dir:
-                _handle_image_output(response, out_dir)
 
 
 def _handle_command(
@@ -1508,6 +1526,22 @@ except ImportError:
 # Provision the native llama.cpp binaries into localm's own venv (self-contained).
 from .setup_llama import main as _setup_llama_main
 main.add_command(_setup_llama_main, name="setup-llama")
+
+
+@main.command("bug-report")
+@click.option("-m", "--message", default="", help="One-line summary of the problem.")
+def bug_report_cmd(message: str) -> None:
+    """Generate an editable bug report and offer to send it to the maintainer.
+
+    Collects a safe environment snapshot (OS, GPU, driver, backend - never your
+    API key, config, or chat data), saves an editable markdown file, and offers
+    to email it, open a GitHub issue, or hand it off yourself."""
+    from localm import bugreport
+    bugreport.report_failure(
+        summary=message or "user-reported issue",
+        context={"operation": "bug-report"},
+        as_failure=False,
+        interactive=bool(getattr(sys.stdin, "isatty", lambda: False)()))
 
 
 # ------------------------------------------------------------------ #
