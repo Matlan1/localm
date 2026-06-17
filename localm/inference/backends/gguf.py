@@ -277,6 +277,13 @@ class GgufBackend(BaseBackend):
     #  Embeddings                                                          #
     # ------------------------------------------------------------------ #
 
+    # The native ctypes binding (localm.inference.backends.llamacpp) does not
+    # expose create_embedding, so this backend cannot produce embeddings. This
+    # flag lets callers (the MCP tools/list and /v1/embeddings) decide NOT to
+    # advertise an embed capability that would always raise (FAC-6), without
+    # having to load a model first.
+    can_embed: bool = False
+
     def embed(self, texts: List[str]) -> List[List[float]]:
         if not self._llm:
             raise RuntimeError("Model not loaded - call load() first")

@@ -87,7 +87,8 @@ class EmbeddingRequest(BaseModel):
     """OpenAI /v1/embeddings request."""
     model: str = "localm"
     input: Union[str, List[str]]      # single text or batch
-    encoding_format: str = "float"    # "float" or "base64" (only float supported)
+    encoding_format: str = "float"    # "float" (JSON array) or "base64"
+                                      # (base64 little-endian float32 buffer)
 
 
 class CompletionRequest(BaseModel):
