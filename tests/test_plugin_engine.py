@@ -159,6 +159,54 @@ def test_uninstall_builtin_stays_in_catalog(env):
     assert (builtins / "b1").exists()
 
 
+# ---------------------------------------------------------------------------
+#  _delete_plugin_data: data_subdir is taken verbatim from a (possibly
+#  third-party) manifest. It must NEVER let rmtree escape the data dir via
+#  traversal ('../models'), an absolute path, or '.' (the home root itself).
+# ---------------------------------------------------------------------------
+
+def _mgr_with_data_subdir(tmp_path, monkeypatch, data_subdir):
+    """Build a discovered manager whose plugin 'evil' declares *data_subdir*,
+    with LOCALM_HOME pinned to a subdir of tmp_path so siblings can be
+    created safely outside the data dir."""
+    from localm.plugins.engine import PluginManager
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    plugins = home / "plugins"
+    _make_plugin(plugins, "evil", _ping("evil"),
+                 toml_extra=f'data_subdir = "{data_subdir}"\n')
+    mgr = PluginManager(FastAPI(), external_root=plugins, builtin_root=None)
+    mgr.discover()
+    return mgr, home
+
+
+def test_delete_data_rejects_parent_traversal(tmp_path, monkeypatch):
+    mgr, home = _mgr_with_data_subdir(tmp_path, monkeypatch, "../victim")
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "keep.txt").write_text("important", encoding="utf-8")
+    mgr._delete_plugin_data(mgr._specs["evil"])
+    assert victim.exists() and (victim / "keep.txt").exists()
+
+
+def test_delete_data_rejects_dot_root(tmp_path, monkeypatch):
+    mgr, home = _mgr_with_data_subdir(tmp_path, monkeypatch, ".")
+    (home / "models").mkdir()
+    (home / "models" / "big.gguf").write_text("data", encoding="utf-8")
+    mgr._delete_plugin_data(mgr._specs["evil"])
+    assert home.exists() and (home / "models" / "big.gguf").exists()
+
+
+def test_delete_data_deletes_legit_subdir(tmp_path, monkeypatch):
+    mgr, home = _mgr_with_data_subdir(tmp_path, monkeypatch, "evil_data")
+    target = home / "evil_data"
+    target.mkdir()
+    (target / "cache.bin").write_text("x", encoding="utf-8")
+    mgr._delete_plugin_data(mgr._specs["evil"])
+    assert not target.exists()
+
+
 def test_enable_after_catchall_mount_is_not_shadowed(env, tmp_path):
     """Runtime enable must work even after the GUI mounted a catch-all "/" - the
     host relocates the plugin's routes ahead of it, or Starlette's "/" Mount
