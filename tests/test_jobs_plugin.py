@@ -600,3 +600,58 @@ def test_jobs_json_is_valid_after_writes(home):
     data = json.loads((store.root / "jobs.json").read_text(encoding="utf-8"))
     assert data["version"] == 1
     assert len(data["jobs"]) == 2
+
+
+# --------------------------------------------------------------------------- #
+#  Regression: bugs caught by the adversarial verifier (fix-then-ship)         #
+# --------------------------------------------------------------------------- #
+
+def test_cron_bare_value_step_expands():
+    """'0/15' must mean 0,15,30,45 (Vixie 'a/n' = a..max step n), not just {0}."""
+    from localm.plugins.builtin.jobs.scheduler import parse_cron
+    assert parse_cron("0/15 * * * *")[0] == {0, 15, 30, 45}
+    assert parse_cron("5/20 * * * *")[0] == {5, 25, 45}
+    assert parse_cron("5 * * * *")[0] == {5}          # bare value (no step) unchanged
+    assert parse_cron("*/15 * * * *")[0] == {0, 15, 30, 45}
+
+
+def test_cron_step_fires_at_interval():
+    import time
+    from localm.plugins.builtin.jobs.scheduler import cron_match
+    at15 = time.mktime((2026, 6, 17, 10, 15, 0, 0, 0, -1))
+    at07 = time.mktime((2026, 6, 17, 10, 7, 0, 0, 0, -1))
+    assert cron_match("0/15 * * * *", at15) is True
+    assert cron_match("0/15 * * * *", at07) is False
+
+
+def test_cron_dow_7_is_sunday():
+    """Standard cron accepts 7 as Sunday; it must parse and normalise to 0."""
+    from localm.plugins.builtin.jobs.scheduler import parse_cron
+    assert parse_cron("0 0 * * 7")[4] == {0}          # was: raised out-of-range
+    assert parse_cron("0 0 * * 0")[4] == {0}
+    assert parse_cron("0 0 * * 1-5")[4] == {1, 2, 3, 4, 5}
+
+
+def test_store_concurrent_adds_lose_nothing(home):
+    """Concurrent writers (scheduler tick + route handlers) must not lose jobs
+    or collide on the temp file."""
+    import threading
+    from localm.plugins.builtin.jobs.store import JobStore
+    store = JobStore()
+    n = 40
+    errors = []
+
+    def worker(i):
+        try:
+            store.add(_make_job(name=f"job{i}"))
+        except Exception as e:                       # noqa: BLE001 - want to see any
+            errors.append(repr(e))
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, errors[:3]
+    assert len(JobStore().list()) == n               # every job survived

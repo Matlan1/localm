@@ -51,7 +51,8 @@ def _parse_field(field: str, lo: int, hi: int) -> set:
         if not part:
             raise ValueError("empty cron list element")
         step = 1
-        if "/" in part:
+        had_step = "/" in part
+        if had_step:
             base, _, step_s = part.partition("/")
             if not step_s.isdigit() or int(step_s) < 1:
                 raise ValueError(f"invalid step in cron field: {part!r}")
@@ -67,7 +68,11 @@ def _parse_field(field: str, lo: int, hi: int) -> set:
         else:
             if not part.lstrip("-").isdigit():
                 raise ValueError(f"invalid value in cron field: {part!r}")
-            start = end = int(part)
+            # A bare value with a step means "from this value to the field max,
+            # every n" (Vixie cron: 0/15 == 0,15,30,45). Without a step it is a
+            # single value.
+            start = int(part)
+            end = hi if had_step else start
         if start > end:
             raise ValueError(f"range start > end in cron field: {part!r}")
         for v in range(start, end + 1, step):
@@ -89,8 +94,14 @@ def parse_cron(expr: str) -> list:
             f"cron expression must have 5 fields (minute hour dom month dow), "
             f"got {len(fields)}: {expr!r}")
     sets = []
-    for raw, (lo, hi) in zip(fields, _FIELD_BOUNDS):
-        sets.append(_parse_field(raw, lo, hi))
+    for idx, (raw, (lo, hi)) in enumerate(zip(fields, _FIELD_BOUNDS)):
+        if idx == 4:
+            # day-of-week: accept 7 as an alias for Sunday (Vixie cron), then
+            # normalise to 0 so cron_match (which computes dow 0..6) still works.
+            dow = _parse_field(raw, 0, 7)
+            sets.append({0 if v == 7 else v for v in dow})
+        else:
+            sets.append(_parse_field(raw, lo, hi))
     return sets
 
 

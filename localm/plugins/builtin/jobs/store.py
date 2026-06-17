@@ -19,11 +19,19 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
+
+# Process-wide lock serialising the read-modify-write of jobs.json. The scheduler
+# records results from a worker thread (run_in_executor) while route handlers
+# create/edit jobs on the event-loop thread, and several JobStore instances may
+# point at the same file - so an instance lock is not enough. Home-scale data,
+# so one coarse lock is fine.
+_STORE_LOCK = threading.RLock()
 
 
 # --------------------------------------------------------------------------- #
@@ -188,7 +196,11 @@ class JobStore:
         self._ensure_root()
         payload = {"version": 1,
                    "jobs": [j.to_dict() for j in jobs.values()]}
-        tmp = self._defs_file.with_name(self._defs_file.name + f".tmp{os.getpid()}")
+        # Unique temp name (pid + thread + uuid) so concurrent writers never
+        # share a temp path; os.replace is atomic, so the last writer wins
+        # cleanly rather than corrupting or clobbering the file.
+        tmp = self._defs_file.with_name(
+            f"{self._defs_file.name}.tmp.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}")
         tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False),
                        encoding="utf-8")
         os.replace(tmp, self._defs_file)
@@ -204,33 +216,36 @@ class JobStore:
 
     def add(self, job: Job) -> Job:
         job.validate()
-        jobs = self._read_all()
-        jobs[job.id] = job
-        self._write_all(jobs)
+        with _STORE_LOCK:
+            jobs = self._read_all()
+            jobs[job.id] = job
+            self._write_all(jobs)
         return job
 
     def update(self, job_id: str, **changes) -> Job:
         """Apply *changes* to an existing job and persist. Re-validates the
         result. Raises KeyError if the job does not exist."""
-        jobs = self._read_all()
-        job = jobs.get(job_id)
-        if job is None:
-            raise KeyError(job_id)
-        for key, value in changes.items():
-            if key in Job.__dataclass_fields__ and key != "id":   # never remap id
-                setattr(job, key, value)
-        job.validate()
-        jobs[job.id] = job
-        self._write_all(jobs)
+        with _STORE_LOCK:
+            jobs = self._read_all()
+            job = jobs.get(job_id)
+            if job is None:
+                raise KeyError(job_id)
+            for key, value in changes.items():
+                if key in Job.__dataclass_fields__ and key != "id":   # never remap id
+                    setattr(job, key, value)
+            job.validate()
+            jobs[job.id] = job
+            self._write_all(jobs)
         return job
 
     def remove(self, job_id: str) -> bool:
         """Delete a job def and its results dir. Returns True if it existed."""
-        jobs = self._read_all()
-        if job_id not in jobs:
-            return False
-        del jobs[job_id]
-        self._write_all(jobs)
+        with _STORE_LOCK:
+            jobs = self._read_all()
+            if job_id not in jobs:
+                return False
+            del jobs[job_id]
+            self._write_all(jobs)
         # Best-effort: drop the job's results too (confined to the jobs dir).
         try:
             import shutil
@@ -262,14 +277,15 @@ class JobStore:
         path.write_text(json.dumps(record, indent=2, ensure_ascii=False),
                         encoding="utf-8")
         # Stamp the job def (best-effort: a run for a now-deleted job is fine).
-        jobs = self._read_all()
-        job = jobs.get(job_id)
-        if job is not None:
-            job.last_run = result.get("finished") or time.time()
-            job.last_status = result.get("status")
-            job.last_result_id = result_id
-            jobs[job.id] = job
-            self._write_all(jobs)
+        with _STORE_LOCK:
+            jobs = self._read_all()
+            job = jobs.get(job_id)
+            if job is not None:
+                job.last_run = result.get("finished") or time.time()
+                job.last_status = result.get("status")
+                job.last_result_id = result_id
+                jobs[job.id] = job
+                self._write_all(jobs)
         return result_id
 
     def list_results(self, job_id: str) -> list:
