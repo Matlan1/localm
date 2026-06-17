@@ -1038,8 +1038,12 @@ def tool_generate_image(
     lora_strength_clip: float = 0.5,
     input_image: Optional[str] = None,
     denoise: Optional[float] = None,
+    _privacy: bool = False,
 ) -> ToolResult:
-    """Thin wrapper - delegates to localm.image_gen.comfy.generate_image."""
+    """Thin wrapper - delegates to localm.image_gen.comfy.generate_image.
+
+    In privacy mode (``_privacy=True``, injected by the agent) the prompt
+    sidecar is suppressed so no prompt trace is written to disk."""
     import os
     from localm.image_gen.comfy import generate_image
 
@@ -1060,6 +1064,7 @@ def tool_generate_image(
         lora_strength_clip=lora_strength_clip,
         input_image=input_p,
         denoise=denoise,
+        write_sidecar=not _privacy,
     )
     if ok:
         rel = out_p.relative_to(cwd) if out_p.is_relative_to(cwd) else out_p
