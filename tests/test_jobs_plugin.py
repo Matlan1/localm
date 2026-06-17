@@ -655,3 +655,13 @@ def test_store_concurrent_adds_lose_nothing(home):
 
     assert not errors, errors[:3]
     assert len(JobStore().list()) == n               # every job survived
+
+
+def test_localm_job_wired_into_top_level_cli(home):
+    """`localm job ...` must be reachable from the top-level CLI (the manifest
+    cli_entry alone does not mount it; cli.py wires it like coder/mcp/gui)."""
+    from click.testing import CliRunner
+    from localm.cli import main
+    assert "job" in main.commands
+    r = CliRunner().invoke(main, ["job", "list"])
+    assert r.exit_code == 0, r.output
