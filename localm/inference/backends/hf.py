@@ -45,6 +45,46 @@ def _require_transformers():
         raise
 
 
+def _grammar_processor(grammar: Optional[str], tokenizer, model):
+    """Build an xgrammar LogitsProcessor that masks any token which would violate
+    *grammar* at the current parse position (so output is structurally valid by
+    construction, not by post-hoc repair).
+
+    *grammar* is a GBNF/EBNF string with a ``root`` rule - see
+    ``localm.inference.gbnf`` for ready-made JSON / tool-call grammars.
+
+    Returns a one-element ``LogitsProcessorList`` or ``None``. ``None`` means
+    "generate unconstrained": either no grammar was requested, or xgrammar is
+    not installed / could not compile the grammar - in which case we warn and
+    proceed rather than fail the request (soft-degrade). A FRESH processor is
+    built per call because the underlying grammar matcher is stateful.
+    """
+    if not grammar:
+        return None
+    try:
+        import xgrammar as xgr
+        from xgrammar.contrib.hf import LogitsProcessor
+        from transformers import LogitsProcessorList
+    except ImportError:
+        console.print(
+            "[yellow]A grammar was requested but the [grammar] extra is not "
+            "installed (pip install 'localm[gpu,grammar]'); generating without "
+            "constraint.[/yellow]"
+        )
+        return None
+    try:
+        vocab = getattr(getattr(model, "config", None), "vocab_size", None)
+        info = xgr.TokenizerInfo.from_huggingface(tokenizer, vocab_size=vocab)
+        compiled = xgr.GrammarCompiler(info).compile_grammar(grammar)
+        return LogitsProcessorList([LogitsProcessor(compiled)])
+    except Exception as e:   # malformed grammar, tokenizer mismatch, etc.
+        console.print(
+            f"[yellow]grammar ignored ({type(e).__name__}: {e}); generating "
+            f"without constraint.[/yellow]"
+        )
+        return None
+
+
 class HFBackend(BaseBackend):
     """
     Loads any HuggingFace-format model directory.
@@ -117,19 +157,24 @@ class HFBackend(BaseBackend):
             "trust_remote_code": True,
         }
 
-        # Try classes in order: conditional generation (multimodal/seq2seq),
-        # then causal LM (text-only), then generic fallback.
+        # Try Auto classes in order: multimodal (vision/audio + text), then
+        # encoder-decoder, then causal LM (text-only), then generic fallback.
+        # getattr-with-default skips a class that this transformers version does
+        # not expose (the names drift between major releases) instead of raising.
         for cls_name in (
-            "AutoModelForConditionalGeneration",
-            "AutoModelForCausalLM",
-            "AutoModel",
+            "AutoModelForImageTextToText",   # modern multimodal, transformers 5+
+            "AutoModelForSeq2SeqLM",         # encoder-decoder
+            "AutoModelForCausalLM",          # text-only decoder
+            "AutoModel",                     # generic fallback
         ):
+            cls = getattr(tr, cls_name, None)
+            if cls is None:
+                continue
             try:
-                cls = getattr(tr, cls_name)
                 self._model = cls.from_pretrained(self.model_path, **load_kwargs)
                 console.print(f"[dim]  class    : {cls_name}[/dim]")
                 break
-            except (ValueError, OSError, RuntimeError):
+            except (ValueError, OSError, RuntimeError, KeyError):
                 continue
 
         if self._model is None:
@@ -239,7 +284,7 @@ class HFBackend(BaseBackend):
         top_p: float = 0.95,
         top_k: int = 40,
         repeat_penalty: float = 1.1,
-        grammar: Optional[str] = None,   # accepted but ignored - HF has no GBNF sampler
+        grammar: Optional[str] = None,   # GBNF/EBNF; masks output via xgrammar ([grammar] extra)
         seed: Optional[int] = None,
     ) -> Iterator[str]:
         # Refuse images on a text-only checkpoint instead of silently dropping
@@ -335,6 +380,14 @@ class HFBackend(BaseBackend):
             )
         else:
             gen_kwargs["do_sample"] = False
+
+        # Grammar-constrained decoding (optional [grammar] extra). When a grammar
+        # is supplied, xgrammar masks tokens that would break it; sampling/greedy
+        # then picks only from the still-legal tokens. Soft-degrades to
+        # unconstrained generation if xgrammar is absent or the grammar is bad.
+        lp = _grammar_processor(grammar, tokenizer, model)
+        if lp is not None:
+            gen_kwargs["logits_processor"] = lp
 
         thread = threading.Thread(
             target=model.generate, kwargs=gen_kwargs, daemon=True
