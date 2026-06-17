@@ -19,6 +19,7 @@ import it.
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 import subprocess
 import sys
@@ -39,6 +40,19 @@ DEFAULT_URL = (
     "https://github.com/lemonade-sdk/llamacpp-rocm/releases/download/"
     "b1288/llama-b1288-windows-rocm-gfx103X-x64.zip"
 )
+
+# SEC-8: a prebuilt llama runtime zip is many megabytes. Anything below this
+# floor is almost certainly an error page, a redirect stub, or a truncated
+# transfer, never the real artifact. This is the always-on lower bound; the
+# valid-zip structural check below is the second always-on guard. A pinned
+# sha256 is the opt-in third guard (we do not hardcode a brittle hash for the
+# live URL, which moves with every upstream release).
+_MIN_ARTIFACT_BYTES = 256 * 1024   # 256 KiB
+
+
+class ArtifactError(Exception):
+    """A downloaded artifact failed integrity validation (size, zip shape, or
+    a provided sha256 pin) and must NOT be extracted or installed."""
 
 
 def _lib_name() -> str:
@@ -93,6 +107,61 @@ def _download(url: str, dest: Path) -> None:
     console.print()
 
 
+def _sha256_file(path: Path) -> str:
+    """Stream the file through sha256 so a multi-hundred-MB artifact is not
+    read into memory at once."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _validate_archive(
+    path: Path,
+    expected_sha256: Optional[str] = None,
+    min_size: int = _MIN_ARTIFACT_BYTES,
+) -> None:
+    """SEC-8: validate a downloaded artifact BEFORE it is extracted or
+    installed. Raises :class:`ArtifactError` on any failure.
+
+    Three checks, in cheapest-first order:
+      1. size: a real prebuilt runtime zip is many MB; a tiny/empty body is an
+         error page, a redirect stub, or a truncated transfer (always on).
+      2. shape: it must be a structurally valid zip (``zipfile.is_zipfile``),
+         so a 200-with-HTML or a half-transferred file is rejected before we
+         hand it to ``extractall`` (always on).
+      3. provenance: when *expected_sha256* is given, the file's digest must
+         match it (opt-in; refuses on mismatch). Comparison is whitespace- and
+         case-insensitive so a pasted hash from any source works.
+    """
+    try:
+        size = path.stat().st_size
+    except OSError as e:
+        raise ArtifactError(f"could not stat downloaded file: {e}") from e
+    if size < min_size:
+        raise ArtifactError(
+            f"download is too small ({size} bytes < {min_size} minimum) - "
+            "this is almost certainly an error page or a truncated transfer, "
+            "not the prebuilt runtime."
+        )
+    if not zipfile.is_zipfile(path):
+        raise ArtifactError(
+            "download is not a valid zip archive - it may be a truncated "
+            "transfer, an HTML error page served with a 200, or a tampered "
+            "payload."
+        )
+    if expected_sha256:
+        want = expected_sha256.strip().lower()
+        got = _sha256_file(path)
+        if got != want:
+            raise ArtifactError(
+                "download sha256 does not match the expected pin "
+                f"(expected {want}, got {got}). Refusing to install a "
+                "possibly tampered or wrong artifact."
+            )
+
+
 def _copy_binaries(src_dir: Path, target: Path) -> int:
     """Copy the llama/ggml/runtime libraries from *src_dir* (recursively) into
     *target*. Returns the number of files copied."""
@@ -122,14 +191,20 @@ def _install_runtime_wheel(pkg_dir: Path) -> bool:
 @click.option("--from", "from_dir", default=None, type=click.Path(exists=True, file_okay=False),
               help="Copy binaries from a local llama.cpp build directory instead of downloading.")
 @click.option("--url", default=None, help="Override the prebuilt download URL.")
+@click.option("--sha256", "sha256", default=None,
+              help="Expected sha256 of the downloaded zip. When given, the "
+                   "download is refused unless its digest matches (opt-in "
+                   "integrity pin).")
 @click.option("--force", is_flag=True, help="Re-provision even if binaries are already present.")
-def main(from_dir: Optional[str], url: Optional[str], force: bool) -> None:
+def main(from_dir: Optional[str], url: Optional[str], sha256: Optional[str],
+         force: bool) -> None:
     """Download or copy the native llama.cpp binaries into localm's own venv.
 
     \b
       localm setup-llama                       # Windows: download the default prebuilt
       localm setup-llama --from /path/to/llama.cpp/build/bin
       localm setup-llama --url https://.../llama-rocm-gfxXXXX.zip
+      localm setup-llama --sha256 <hex>        # pin the expected archive digest
     """
     lib_name = _lib_name()
     target = _repo_runtime_lib()
@@ -168,6 +243,15 @@ def main(from_dir: Optional[str], url: Optional[str], force: bool) -> None:
                 console.print(f"[red]Download failed:[/red] {e}")
                 console.print("Provide a local build with --from instead, or a "
                               "different --url.")
+                sys.exit(1)
+            # SEC-8: validate the artifact (size, valid-zip, optional sha256 pin)
+            # BEFORE extracting or installing anything from it.
+            try:
+                _validate_archive(zip_path, expected_sha256=sha256)
+            except ArtifactError as e:
+                console.print(f"[red]Refusing to install:[/red] {e}")
+                console.print("Provide a local build with --from instead, or a "
+                              "different --url (and --sha256 if you pin one).")
                 sys.exit(1)
             extract_dir = Path(tmp) / "x"
             try:
