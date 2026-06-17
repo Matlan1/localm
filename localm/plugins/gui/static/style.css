@@ -655,6 +655,20 @@ pre:hover .copy-btn { opacity: 1; }
 .card .actions { margin-top: 14px; display: flex; gap: 10px; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 14px; }
 
+/* schema-driven settings: a vertical stack of per-group sections, each a
+   2-column field grid with a full-width heading. */
+#config-form { display: block; }
+.settings-group {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 4px 14px;
+  margin-bottom: 22px;
+}
+.settings-group-head {
+  grid-column: 1 / -1; margin: 8px 0 4px;
+  font-size: 14px; color: var(--text-dim);
+  border-bottom: 1px solid var(--border); padding-bottom: 6px;
+}
+.settings-group .sub { margin: 0 0 10px; font-size: 12px; }
+
 /* download progress bar (model pull) */
 .dl-progress { margin-top: 12px; }
 .dl-bar {

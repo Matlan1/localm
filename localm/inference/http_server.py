@@ -359,6 +359,17 @@ def create_app(engine: Engine) -> FastAPI:
         cfg["effective_ctx_max"] = eff_ctx if isinstance(eff_ctx, int) else None
         return cfg
 
+    @app.get("/v1/config/schema",
+             dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
+    async def get_config_schema():
+        """The typed settings schema (widget/label/help/group/owner/options/
+        min/max) with each non-secret field's CURRENT value injected as its
+        `default`, so the GUI can render the right control pre-filled. Secret
+        fields never carry a value (schema_json omits secret defaults)."""
+        from localm.config import load_config
+        from localm.settings_schema import schema_json
+        return {"fields": schema_json(values=load_config())}
+
     @app.patch("/v1/config", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def patch_config(body: dict):
         """Update known config keys and persist. Unknown keys are rejected.

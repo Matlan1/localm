@@ -81,3 +81,16 @@ export function runScript(win, code) {
   s.textContent = code;
   win.document.body.appendChild(s);
 }
+
+/**
+ * Load app.js (via loadApp) and then pages.js in the same realm. pages.js holds
+ * the Models / Images / Plugins / Settings page logic (refreshSettingsPage, the
+ * config-save click handler, ...) and relies on helpers from app.js ($, el,
+ * authHeaders, toast, ...), so it must run AFTER app.js. Its top-level
+ * `$("...").onclick = ...` wiring runs against the real index.html elements.
+ */
+export function loadAppWithPages({ fetchImpl } = {}) {
+  const { dom, window } = loadApp({ fetchImpl });
+  runScript(window, read("pages.js"));
+  return { dom, window };
+}

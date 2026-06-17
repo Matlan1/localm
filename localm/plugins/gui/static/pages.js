@@ -885,84 +885,148 @@ $("plugin-install").onclick = async () => {
 /*  Settings page                                                    */
 /* ================================================================ */
 
-// Keys hidden from the form. Structured values (lists/objects) would be
-// corrupted by the blind text inputs - they get stringified on save and never
-// compare equal to the original array, so they are always re-sent as a broken
-// string (or null for an empty list). plugins_enabled is plugin STATE managed
-// by the Plugins page, not a setting. Plus the read-only extras the server
-// reports. (net_allow/net_deny/cors_origins are edited via `localm config` or
-// the network settings until the typed settings UI lands.)
-const _CONFIG_SKIP = new Set(["cors_origins", "net_allow", "net_deny",
-                              "plugins_enabled", "plugins", "effective_mode",
-                              "effective_coder_mode", "effective_ctx_max"]);
+// The settings form is now schema-driven: it fetches /v1/config/schema (the
+// typed CORE_FIELDS metadata with each non-secret field's current value as its
+// `default`) and renders the right control per field - a <select> for a fixed
+// choice set, a checkbox for a bool, a number input with min/max, a masked
+// input for a secret, a comma-edited LIST sent back as a JSON array. This kills
+// the old blind text-dumper (and its _CONFIG_SKIP hack for list keys: lists are
+// now real LIST inputs that round-trip as arrays). plugins_enabled / plugins
+// stay HIDDEN (the schema marks them widget=hidden) - they are plugin STATE
+// managed by the Plugins page, not settings. On save we PATCH native types
+// (numbers/bools/arrays), which validate_update accepts.
 
-let _configSnapshot = {};
-// Monotonic token so overlapping refreshes don't both render. The old code
-// cleared the form BEFORE its `await fetch`, then appended after - two
-// concurrent runs each cleared then appended, doubling every field (60 inputs
-// instead of 30). Now each run clears+appends only if it is still the latest,
-// AND clears right before appending (no clear-before-await gap).
+// The schema field list from the last successful fetch, keyed by field for the
+// save pass. Each entry mirrors a control: { field, read() }.
+let _settingsControls = [];
+// Monotonic token so overlapping refreshes don't both render (the old text
+// dumper doubled every field when two refreshes raced; we keep the guard).
 let _settingsRenderToken = 0;
+
+/** Build one labelled control for a schema field. Returns { field, read } or
+ *  null for HIDDEN fields (never rendered). */
+function buildSettingControl(field) {
+  if (field.widget === "hidden") return null;
+  const value = field.default;     // current value (omitted for secrets)
+
+  const wrap = el("div");
+  const label = el("label", "", field.label || field.key);
+  label.title = field.key;
+  wrap.appendChild(label);
+
+  let input;
+  let read;
+  switch (field.widget) {
+    case "select": {
+      input = document.createElement("select");
+      for (const opt of field.options || []) {
+        const o = document.createElement("option");
+        o.value = opt;
+        o.textContent = opt === "" ? "(inherit)" : opt;
+        input.appendChild(o);
+      }
+      input.value = value == null ? "" : String(value);
+      read = () => (input.value === "" ? null : input.value);
+      break;
+    }
+    case "toggle": {
+      input = document.createElement("input");
+      input.type = "checkbox";
+      input.checked = !!value;
+      input.style.width = "auto";
+      read = () => input.checked;
+      break;
+    }
+    case "number": {
+      input = document.createElement("input");
+      input.type = "number";
+      if (field.min != null) input.min = field.min;
+      if (field.max != null) input.max = field.max;
+      input.step = field.step != null
+        ? field.step
+        : (Number.isInteger(value) ? "1" : "0.05");
+      if (value != null) input.value = value;
+      read = () => (input.value.trim() === "" ? undefined : Number(input.value));
+      break;
+    }
+    case "secret": {
+      input = document.createElement("input");
+      input.type = "password";
+      input.value = "";                 // never prefill a real secret
+      input.placeholder = "unchanged";
+      // Only send a secret when the user actually typed one.
+      read = () => (input.value === "" ? undefined : input.value);
+      break;
+    }
+    case "list": {
+      input = document.createElement("input");
+      input.type = "text";
+      input.value = Array.isArray(value) ? value.join(", ") : (value ?? "");
+      input.placeholder = "comma-separated";
+      read = () => input.value.split(",").map((s) => s.trim()).filter(Boolean);
+      break;
+    }
+    default: {   // text / folder / path
+      input = document.createElement("input");
+      input.type = "text";
+      input.value = value ?? "";
+      read = () => (input.value.trim() === "" ? null : input.value.trim());
+      break;
+    }
+  }
+  input.dataset.key = field.key;
+  wrap.appendChild(input);
+  if (field.help) wrap.appendChild(el("div", "sub", field.help));
+  return { field, node: wrap, read };
+}
 
 async function refreshSettingsPage() {
   const myToken = ++_settingsRenderToken;
   $("gui-api-key").value = localStorage.getItem("localm.apiKey") || "";
   const form = $("config-form");
-  let cfg;
+  let fields;
   try {
-    const r = await fetch("/v1/config", { headers: authHeaders() });
+    const r = await fetch("/v1/config/schema", { headers: authHeaders() });
     if (!r.ok) throw new Error(r.statusText);
-    cfg = await r.json();
+    fields = (await r.json()).fields || [];
   } catch (e) {
     if (myToken === _settingsRenderToken) {
-      form.replaceChildren(el("div", "sub", "Could not load config: " + e.message));
+      form.replaceChildren(el("div", "sub", "Could not load settings: " + e.message));
     }
     return;
   }
   if (myToken !== _settingsRenderToken) return;  // a newer refresh superseded us
-  _configSnapshot = cfg;
-  form.replaceChildren();
-  for (const [key, value] of Object.entries(_configSnapshot)) {
-    if (_CONFIG_SKIP.has(key)) continue;
-    const wrap = el("div");
-    wrap.appendChild(el("label", "", key));
-    let input;
-    if (typeof value === "boolean") {
-      input = document.createElement("input");
-      input.type = "checkbox";
-      input.checked = value;
-      input.style.width = "auto";
-    } else if (typeof value === "number") {
-      input = document.createElement("input");
-      input.type = "number";
-      input.step = Number.isInteger(value) ? "1" : "0.05";
-      input.value = value;
-    } else {
-      input = document.createElement("input");
-      input.type = "text";
-      input.value = value ?? "";
-    }
-    input.dataset.key = key;
-    wrap.appendChild(input);
-    form.appendChild(wrap);
+
+  // Group by `group`; render plugin-owned (owner != "core") fields under a
+  // per-plugin section heading so each plugin's settings are clearly separated.
+  const controls = [];
+  const groups = new Map();          // group label -> [control...]
+  for (const field of fields) {
+    const ctrl = buildSettingControl(field);
+    if (!ctrl) continue;             // HIDDEN
+    controls.push(ctrl);
+    const owner = field.owner && field.owner !== "core" ? field.owner : null;
+    const heading = owner ? `${field.group} (${owner} plugin)` : field.group;
+    if (!groups.has(heading)) groups.set(heading, []);
+    groups.get(heading).push(ctrl);
   }
+
+  form.replaceChildren();
+  for (const [heading, ctrls] of groups) {
+    const section = el("div", "settings-group");
+    section.appendChild(el("h3", "settings-group-head", heading));
+    for (const c of ctrls) section.appendChild(c.node);
+    form.appendChild(section);
+  }
+  _settingsControls = controls;
 }
 
 $("config-save").onclick = async () => {
   const updates = {};
-  for (const input of $("config-form").querySelectorAll("input")) {
-    const key = input.dataset.key;
-    const old = _configSnapshot[key];
-    let value;
-    if (input.type === "checkbox") value = input.checked;
-    else if (input.type === "number") {
-      if (input.value.trim() === "") continue;
-      value = Number(input.value);
-      if (Number.isInteger(old) && Number.isInteger(value)) value = Math.trunc(value);
-    } else {
-      value = input.value.trim() === "" ? null : input.value.trim();
-    }
-    if (value !== old) updates[key] = value;
+  for (const { field, read } of _settingsControls) {
+    const value = read();
+    if (value === undefined) continue;   // untouched secret / blank number
+    updates[field.key] = value;
   }
   if (!Object.keys(updates).length) { toast("Nothing changed"); return; }
   const r = await fetch("/v1/config", {
@@ -972,7 +1036,9 @@ $("config-save").onclick = async () => {
   const data = await r.json();
   if (r.ok) {
     toast("Saved - engine values apply on the next model load");
-    _configSnapshot = data;
+    // Re-render from the freshly persisted config so the form reflects what
+    // the server normalized (e.g. a comma list collapsed to an array).
+    refreshSettingsPage();
   } else {
     toast(data.detail || "Save failed", true);
   }
