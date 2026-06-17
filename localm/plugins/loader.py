@@ -274,13 +274,48 @@ def install_plugin(source: Path, *, force: bool = False) -> PluginManifest:
     return parse_manifest(dest)
 
 
+def _is_protected(name: str, plugin_dir: Optional[Path] = None) -> bool:
+    """True when *name* is a protected plugin that must never be removed.
+
+    Mirrors the engine's determination (engine.PluginManager._is_protected): a
+    plugin is protected if it is listed as protected in the catalog OR its own
+    installed manifest sets ``[plugin] protected = true``. The legacy loader has
+    no live engine state, so it consults both sources directly. Checking the
+    on-disk manifest matters because a malicious/legacy removal path must not be
+    able to delete a protected plugin (e.g. chat) just because the catalog list
+    happens not to know its name."""
+    try:
+        from localm.plugins import catalog as _cat
+        if name in _cat.protected():
+            return True
+    except Exception:
+        pass
+    if plugin_dir is None:
+        plugin_dir = plugins_dir() / name
+    try:
+        data = tomllib.loads((plugin_dir / "plugin.toml").read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return False
+    plugin = data.get("plugin")
+    if not isinstance(plugin, dict):
+        return False
+    return bool(plugin.get("protected", False))
+
+
 def remove_plugin(name: str) -> bool:
-    """Remove an installed plugin by name. Returns True if it existed."""
+    """Remove an installed plugin by name. Returns True if it existed.
+
+    Refuses to remove a protected plugin (e.g. the built-in ``chat`` plugin):
+    the legacy removal path must honour the same protected-plugin guard the
+    engine enforces, so a protected plugin's directory cannot be deleted via
+    this path (or the DELETE /v1/plugins/{name} endpoint that calls it)."""
     target = plugins_dir() / name
     if not target.is_dir():
         return False
     # Refuse to delete anything outside the plugins root
     if target.resolve().parent != plugins_dir().resolve():
         raise PluginError(f"Refusing to remove path outside plugins dir: {target}")
+    if _is_protected(name, target):
+        raise PluginError(f"Plugin {name!r} is protected and cannot be removed")
     shutil.rmtree(target)
     return True
