@@ -140,6 +140,12 @@ DEFAULT_CONFIG: dict = {
     # an unknown key. A plugin is active only when installed (on disk) AND in
     # this list; see docs/plugins.md.
     "plugins_enabled": [],
+    # Per-plugin config namespace (e.g. plugins["image"]["comfy"]["output_dir"]).
+    # Written by the plugin engine and media backends via update_config, NOT the
+    # flat settings form. Declared here so the settings-save endpoint does not
+    # reject it as an unknown key, and so the per-plugin media-containment knob
+    # is reachable through a full-config round-trip (mirrors plugins_enabled).
+    "plugins": {},
 }
 
 # localm claims 8642-8741 - far from ComfyUI (8188), A1111 (7860),
