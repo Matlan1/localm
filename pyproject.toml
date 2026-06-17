@@ -76,6 +76,15 @@ rag = [
 voice = [
     "faster-whisper>=1.0",
 ]
+# Grammar-constrained decoding (GBNF/EBNF) for the HuggingFace backend. The GGUF
+# backend already has this natively via llama.cpp's grammar sampler; this extra
+# brings the same capability to transformers models through xgrammar. Optional:
+# chat works without it, and the HF backend falls back to unconstrained output
+# if a grammar is requested while this is not installed. Layers on top of [gpu].
+# Install with:  pip install "localm[gpu,grammar]"
+grammar = [
+    "xgrammar>=0.2.2",
+]
 # CPU-only install - the base package already runs GGUF models on CPU via the
 # ctypes binding (only llama.dll + ggml*.dll needed). This extra exists so
 # `pip install "localm[cpu]"` is an explicit, documented choice.
