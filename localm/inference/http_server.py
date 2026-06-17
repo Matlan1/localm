@@ -89,6 +89,19 @@ def require_scope(scope: str):
     return dep
 
 
+def caller_scopes(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
+) -> Optional[set]:
+    """The scope set the presented key grants (the owner key -> {ADMIN}), or
+    None in open mode / when no valid key is presented. Routes use this to make
+    authorisation decisions that depend on *who* the caller is (e.g. only an
+    owner/ADMIN principal may mint keys carrying privileged scopes)."""
+    from localm.auth import any_key_configured, verify
+    if not any_key_configured():
+        return None
+    return verify(credentials.credentials) if credentials else None
+
+
 # ------------------------------------------------------------------ #
 #  App factory                                                         #
 # ------------------------------------------------------------------ #
@@ -337,13 +350,20 @@ def create_app(engine: Engine) -> FastAPI:
         return {"keys": list_keys()}
 
     @app.post("/v1/keys", dependencies=[Depends(require_scope(scopes.KEYS_ADMIN))])
-    async def create_key_ep(body: dict):
+    async def create_key_ep(body: dict, caller: Optional[set] = Depends(caller_scopes)):
         from localm.auth import create_key
         scope_list = body.get("scopes", [])
         if not isinstance(scope_list, list):
             raise HTTPException(400, "'scopes' must be a list of scope strings")
+        # Only an owner/ADMIN caller may grant privileged scopes; a key holding
+        # merely keys:admin must not be able to mint itself owner-equivalent
+        # access. In open mode (caller is None) privileged grants are refused.
+        is_owner = caller is not None and scopes.ADMIN in caller
         try:
-            created = create_key(body.get("name", ""), scope_list)
+            created = create_key(body.get("name", ""), scope_list,
+                                 allow_privileged=is_owner)
+        except PermissionError as e:
+            raise HTTPException(403, str(e))
         except ValueError as e:
             raise HTTPException(400, str(e))
         # The plaintext key is returned exactly once - it is never recoverable.
