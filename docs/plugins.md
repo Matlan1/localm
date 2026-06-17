@@ -262,3 +262,38 @@ adapter approach to wrapping extensions from other ecosystems.
 `api_version` in the manifest must match the engine's `API_VERSION` (currently
 `1`). The engine refuses to load a plugin built against an incompatible contract,
 so bumping the contract is a deliberate, visible break.
+
+## Before you ship a plugin (checklist)
+
+The cross-cutting invariants the engine and reviewers assume but that no single
+file makes obvious. The first group is enforced automatically; the rest are
+reviewer judgment, mirrored in the PR template.
+
+**Enforced by the guard suite**
+([tests/test_builtin_plugins_contract.py](../tests/test_builtin_plugins_contract.py),
+which enumerates every builtin so a new one is covered the moment it ships):
+
+- **Manifest conforms**: `plugin.toml` parses, targets `api_version = 1`, and
+  declares a `scope` and a `register` entry.
+- **`client_entry` is served**: if `[surface]` declares `client_entry`, the file
+  exists under `assets_dir` and is served at `/plugins/<name>/<entry>`. The
+  engine auto-mounts a surface's `assets_dir` after `register()`, so a
+  client_entry plugin never has to call `mount_static` itself and can never
+  silently 404.
+
+**Reviewer judgment** (not machine-checkable):
+
+- **Routes are scope-gated**: mount every route via `host.mount_router` (which
+  applies the plugin's scope), never on the bare app. Secrets live behind `/api`
+  routes, never under the public static assets. See
+  [Capability scopes](#capability-scopes).
+- **Runtime enable/disable**: the plugin loads and unloads with no server restart
+  - `register` mounts, `unregister` tears down, and a disable removes the routes.
+- **Privacy mode**: gate any session-derived disk write on `effective_mode()`.
+  See [Per-plugin config and privacy](#per-plugin-config-and-privacy). A
+  browser-only or read-only plugin needs no gating.
+- **No published personal choices**: model ids, encoders, and workflows live in a
+  tracked `*.example.json` template or user config, never hardcoded or committed
+  (see `AGENTS.md`).
+- **Tested**: behaviour changes are covered by a test that fails before the fix;
+  `python scripts/check_hygiene.py` and `pytest -m "not integration"` pass.
