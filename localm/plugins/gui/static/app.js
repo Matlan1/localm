@@ -1071,9 +1071,11 @@ async function attachDocument(file) {
   renderAttachChips();
 }
 
-$("chat-attach").onclick = () => $("chat-file").click();
-$("chat-file").addEventListener("change", (e) => {
-  for (const file of e.target.files) {
+/** Ingest files as chat attachments: images inline (data URI), every other
+ *  type extracted to text server-side. Shared by the file picker and the
+ *  drag-and-drop zone so both behave identically. */
+function addAttachedFiles(files) {
+  for (const file of files) {
     if (file.type.startsWith("image/")) {
       const reader = new FileReader();
       reader.onload = () => {
@@ -1086,8 +1088,39 @@ $("chat-file").addEventListener("change", (e) => {
         toast(`${file.name}: ${err.message}`, true));
     }
   }
+}
+
+$("chat-attach").onclick = () => $("chat-file").click();
+$("chat-file").addEventListener("change", (e) => {
+  addAttachedFiles(e.target.files);
   e.target.value = "";
 });
+
+/** Drag-and-drop files anywhere on the chat view to attach them, with a
+ *  highlight while a file is hovering. Only reacts to file drags (not text
+ *  selections), and preventDefault stops the browser opening the dropped file. */
+function setupChatDropZone() {
+  const zone = $("view-chat");
+  if (!zone) return;
+  const isFileDrag = (e) =>
+    e.dataTransfer && Array.from(e.dataTransfer.types || []).includes("Files");
+  zone.addEventListener("dragover", (e) => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+    zone.classList.add("drag-over");
+  });
+  zone.addEventListener("dragleave", (e) => {
+    if (!zone.contains(e.relatedTarget)) zone.classList.remove("drag-over");
+  });
+  zone.addEventListener("drop", (e) => {
+    if (!e.dataTransfer || !e.dataTransfer.files || !e.dataTransfer.files.length) return;
+    e.preventDefault();
+    zone.classList.remove("drag-over");
+    addAttachedFiles(e.dataTransfer.files);
+  });
+}
+setupChatDropZone();
 
 /* ---- web access (model-initiated, via the params-drawer toggle) ---- */
 
