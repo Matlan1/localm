@@ -80,8 +80,13 @@ class ManagedServer:
 
         print_server_starting(self.model, self.port)
 
+        # Launch the SAME localm/venv that is running the coder, not a bare
+        # "localm" resolved via PATH. In the self-contained-clone model the
+        # venv's Scripts dir is deliberately not on PATH, so a bare name finds a
+        # different (or broken) global localm, or nothing at all. Using
+        # sys.executable + "-m localm" guarantees this interpreter's localm.
         cmd = [
-            "localm", "serve", self.model,
+            sys.executable, "-m", "localm", "serve", self.model,
             "--host", self.host,
             "--port", str(self.port),
             *self._extra,
@@ -93,10 +98,10 @@ class ManagedServer:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-        except FileNotFoundError:
+        except (FileNotFoundError, OSError):
             print_warning(
-                "localm not found. Install it first:  uv tool install -e ../localm\n"
-                "Or point --url at an existing OpenAI-compatible server."
+                "Could not launch the local model server with this interpreter.\n"
+                "Point --url at an existing OpenAI-compatible server instead."
             )
             return False
 
