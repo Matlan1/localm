@@ -84,3 +84,37 @@ def system_stats() -> dict:
     out.update(_vram())
     out.update(_gpu_util())
     return out
+
+
+# VRAM footprint estimate -------------------------------------------------- #
+# Deliberately mirrors the GGUF backend's own heuristic (gguf.GgufBackend:
+# _VRAM_OVERHEAD_BYTES and the bytes-per-token rule in _auto_ctx_max) so the
+# number the GUI shows matches how the loader actually reasons about fit. It is
+# approximate by nature - callers should label it as an estimate.
+_VRAM_OVERHEAD_BYTES = int(1.5e9)
+
+
+def estimate_vram(model_bytes: int, n_ctx: int,
+                  n_gpu_layers: int = 99, n_layers: int | None = None) -> dict:
+    """Rough VRAM footprint (bytes) to load a GGUF model at *n_ctx* with
+    *n_gpu_layers* offloaded. Returns a breakdown {weights, kv_cache, overhead,
+    needed} so the UI can show where the memory goes. A model/ctx of 0 yields 0
+    needed (nothing to load)."""
+    model_bytes = max(0, int(model_bytes or 0))
+    n_ctx = max(0, int(n_ctx or 0))
+    # Fraction of the weights placed on the GPU. Without the model's true layer
+    # count, treat >= 99 (the "all" sentinel) as full; otherwise scale linearly.
+    if n_gpu_layers is None or n_gpu_layers < 0:
+        frac = 1.0
+    elif n_layers and n_layers > 0:
+        frac = min(1.0, n_gpu_layers / n_layers)
+    else:
+        frac = 1.0 if n_gpu_layers >= 99 else min(1.0, n_gpu_layers / 99)
+    weights = int(model_bytes * frac)
+    # KV cache grows with context; bytes-per-token scales with model size,
+    # clamped to a plausible band (matches _auto_ctx_max).
+    bytes_per_token = min(max(model_bytes // 100_000, 16_000), 512_000)
+    kv_cache = int(n_ctx * bytes_per_token)
+    overhead = _VRAM_OVERHEAD_BYTES if (weights or kv_cache) else 0
+    return {"weights": weights, "kv_cache": kv_cache, "overhead": overhead,
+            "needed": weights + kv_cache + overhead}
