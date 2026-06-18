@@ -375,6 +375,21 @@
             <button class="btn-primary" id="config-save">Save</button>
           </div>
         </div>
+        <div class="card" id="perf-card">
+          <h3>Performance</h3>
+          <div class="sub">How much of the model runs on the GPU, and how large its context window
+          is. Applies on the next model load. The VRAM figure is an estimate.</div>
+          <label>GPU layers - how much of the model to offload to the GPU
+            (<span id="perf-gl-val">all</span>)</label>
+          <input type="range" id="perf-gpu-layers" min="0" max="99" step="1" value="99">
+          <label>Context window - the most tokens the model can attend to
+            (<span id="perf-ctx-val">4096</span>)</label>
+          <input type="range" id="perf-ctx" min="512" max="32768" step="512" value="4096">
+          <div id="perf-estimate" class="sub perf-estimate">estimate unavailable</div>
+          <div class="actions">
+            <button class="btn-primary" id="perf-apply">Apply</button>
+          </div>
+        </div>
         <div class="card">
           <h3>GUI</h3>
           <label>API key (sent as Bearer token; stored in this browser only)</label>

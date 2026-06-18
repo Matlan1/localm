@@ -398,6 +398,48 @@ class TestStatsEndpoint:
         assert r.json() == {}
 
 
+class TestVramEstimate:
+    """The VRAM-estimate behind the Settings performance sliders."""
+
+    def test_estimate_grows_with_context_and_offload(self):
+        from localm.sysstats import estimate_vram
+        gb = 1024 ** 3
+        base = estimate_vram(4 * gb, n_ctx=4096, n_gpu_layers=99)
+        more_ctx = estimate_vram(4 * gb, n_ctx=16384, n_gpu_layers=99)
+        assert more_ctx["kv_cache"] > base["kv_cache"]
+        assert more_ctx["needed"] > base["needed"]
+        # Offloading fewer layers puts less weight on the GPU.
+        half = estimate_vram(4 * gb, n_ctx=4096, n_gpu_layers=16, n_layers=32)
+        assert half["weights"] < base["weights"]
+        # Nothing to load -> nothing needed (no phantom overhead).
+        assert estimate_vram(0, 0)["needed"] == 0
+
+    def test_estimate_endpoint_shape_and_fit(self, gui_app):
+        app, _ = gui_app
+        reg = {"m": {"path": "C:/nonexistent/m.gguf", "source": "local"}}
+        with patch("localm.config.load_registry", return_value=reg), \
+             patch("localm.discover.vram_info",
+                   return_value={"free": 20 * 1024 ** 3, "total": 24 * 1024 ** 3}):
+            with TestClient(app) as client:
+                r = client.get("/api/vram-estimate",
+                               params={"model": "m", "n_ctx": 4096, "n_gpu_layers": 99})
+        assert r.status_code == 200
+        data = r.json()
+        assert data["approximate"] is True
+        assert {"weights", "kv_cache", "overhead", "needed", "free", "total", "fits"} <= data.keys()
+        # 20 GB free, a (missing -> 0-byte) model: trivially fits.
+        assert data["fits"] is True
+
+    def test_estimate_fit_unknown_when_no_vram_reading(self, gui_app):
+        app, _ = gui_app
+        with patch("localm.config.load_registry", return_value={}), \
+             patch("localm.discover.vram_info", return_value={}):
+            with TestClient(app) as client:
+                r = client.get("/api/vram-estimate")
+        assert r.status_code == 200
+        assert r.json()["fits"] is None        # can't claim fit without a reading
+
+
 class TestModelEndpoints:
     def test_models_lists_registry(self, gui_app):
         app, _ = gui_app
