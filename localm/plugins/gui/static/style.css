@@ -213,6 +213,24 @@ nav button.active { background: var(--accent-soft); color: var(--accent); }
   font-size: 15px; color: var(--accent);
   background: var(--accent-soft); pointer-events: none;
 }
+
+/* Command palette (Ctrl/Cmd+K) */
+.cmdk-backdrop { align-items: flex-start; }
+.cmdk-panel {
+  margin-top: 12vh; width: min(560px, 92vw);
+  background: var(--bg-raised); border: 1px solid var(--border);
+  border-radius: 12px; overflow: hidden; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+}
+#cmdk-input {
+  width: 100%; box-sizing: border-box; border: none; outline: none;
+  background: transparent; color: var(--text);
+  padding: 14px 16px; font-size: 15px;
+  border-bottom: 1px solid var(--border);
+}
+.cmdk-list { max-height: 50vh; overflow-y: auto; }
+.cmdk-item { padding: 10px 16px; cursor: pointer; font-size: 14px; color: var(--text); }
+.cmdk-item:hover { background: var(--accent-soft); }
+.cmdk-item.sel { background: var(--accent-soft); color: var(--accent); }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); }
 .dot.ok { background: var(--green); }
 .dot.busy { background: var(--yellow); }
