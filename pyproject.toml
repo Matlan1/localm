@@ -88,9 +88,15 @@ monitor = [
 # brings the same capability to transformers models through xgrammar. Optional:
 # chat works without it, and the HF backend falls back to unconstrained output
 # if a grammar is requested while this is not installed. Layers on top of [gpu].
+# xgrammar masks logits with a Triton kernel. Upstream Triton ships no Windows
+# wheels, so on Windows we pull the triton-windows port - verified working with
+# the pinned AMD ROCm torch on win32 (real GBNF-constrained decoding on gfx1030).
+# On Linux, xgrammar's normal triton dependency applies. If Triton is somehow
+# absent the HF backend soft-degrades to unconstrained instead of hanging.
 # Install with:  pip install "localm[gpu,grammar]"
 grammar = [
     "xgrammar>=0.2.2",
+    "triton-windows>=3.7; sys_platform == 'win32'",
 ]
 # CPU-only install - the base package already runs GGUF models on CPU via the
 # ctypes binding (only llama.dll + ggml*.dll needed). This extra exists so
