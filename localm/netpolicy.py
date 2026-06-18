@@ -259,6 +259,13 @@ class _HTMLStripper(html.parser.HTMLParser):
 
     _SKIP = {"script", "style", "head", "meta", "link", "noscript", "svg",
              "template"}
+    # Void elements have no end tag. They must NOT move the skip counter:
+    # a <meta>/<link> in <head> would otherwise increment it with no matching
+    # decrement, leaving _skip > 0 forever so the whole <body> is dropped and
+    # html_to_text returns "" for every normal page.
+    _VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input",
+             "link", "meta", "param", "source", "track", "wbr"}
+    _BLOCK = {"p", "br", "div", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6"}
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
@@ -266,14 +273,21 @@ class _HTMLStripper(html.parser.HTMLParser):
         self._skip = 0
 
     def handle_starttag(self, tag, attrs):
-        if tag.lower() in self._SKIP:
+        t = tag.lower()
+        if t in self._VOID:
+            if t in self._BLOCK:          # <br> -> line break
+                self._buf.append("\n")
+            return                        # never touch the skip counter
+        if t in self._SKIP:
             self._skip += 1
-        elif tag.lower() in ("p", "br", "div", "li", "tr", "h1", "h2", "h3",
-                             "h4", "h5", "h6"):
+        elif t in self._BLOCK:
             self._buf.append("\n")
 
     def handle_endtag(self, tag):
-        if tag.lower() in self._SKIP and self._skip:
+        t = tag.lower()
+        if t in self._VOID:
+            return
+        if t in self._SKIP and self._skip:
             self._skip -= 1
 
     def handle_data(self, data):

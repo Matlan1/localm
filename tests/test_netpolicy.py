@@ -257,6 +257,21 @@ class TestHtmlToText:
     def test_survives_malformed_html(self):
         assert isinstance(html_to_text("<div><p>ok<"), str)
 
+    def test_void_meta_link_in_head_do_not_swallow_body(self):
+        # Regression: <meta> and <link> are void (no end tag). They must not
+        # leave the skip counter stuck > 0, which previously dropped the entire
+        # <body> so html_to_text returned "" for every real HTML page.
+        text = html_to_text(
+            "<html><head>"
+            "<meta charset='utf-8'>"
+            "<link rel='icon' href='x'>"
+            "<meta name='viewport' content='w'>"
+            "<title>PageTitle</title><style>.a{}</style>"
+            "</head><body><h1>Heading</h1><p>Hello world</p></body></html>")
+        assert "Heading" in text
+        assert "Hello world" in text
+        assert "PageTitle" not in text   # head content is still skipped
+
 
 # ------------------------------------------------------------------ #
 #  Web search                                                         #
