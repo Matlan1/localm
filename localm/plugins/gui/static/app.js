@@ -281,6 +281,54 @@ function setStatus(state, text) {
   $("status-text").textContent = text;
 }
 
+// ---- live hardware monitor in the status bar (CPU/RAM/VRAM/GPU) ----------
+// Renders whatever /api/stats reports; any section the box can't measure is
+// simply absent (e.g. no psutil -> no CPU/RAM; AMD -> no GPU%). VRAM shows
+// used/total when free is known, otherwise just total.
+function renderHwStats(data) {
+  const el = $("hw-stats");
+  if (!el) return;
+  const gib = (b) => (b / GIB).toFixed(1);
+  const parts = [];
+  if (data && data.cpu && typeof data.cpu.percent === "number")
+    parts.push(`CPU ${Math.round(data.cpu.percent)}%`);
+  if (data && data.ram && typeof data.ram.percent === "number")
+    parts.push(`RAM ${Math.round(data.ram.percent)}%`);
+  if (data && data.vram && data.vram.total) {
+    const v = data.vram;
+    parts.push(v.used != null
+      ? `VRAM ${gib(v.used)}/${gib(v.total)} GB`
+      : `VRAM ${gib(v.total)} GB`);
+  }
+  if (data && data.gpu && typeof data.gpu.percent === "number")
+    parts.push(`GPU ${Math.round(data.gpu.percent)}%`);
+  if (parts.length) {
+    el.textContent = parts.join(" · ");
+    el.hidden = false;
+  } else {
+    el.hidden = true;
+  }
+}
+
+async function pollHwStats() {
+  if (typeof document !== "undefined" && document.hidden) return;
+  try {
+    const r = await fetch("/api/stats", { headers: authHeaders() });
+    if (!r.ok) return;
+    renderHwStats(await r.json());
+  } catch (e) { /* transient - keep the last reading */ }
+}
+
+let _hwStatsTimer = null;
+function startHwStats(intervalMs = 2500) {
+  pollHwStats();
+  if (_hwStatsTimer) clearInterval(_hwStatsTimer);
+  _hwStatsTimer = setInterval(pollHwStats, intervalMs);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) pollHwStats();   // refresh promptly on tab focus
+  });
+}
+
 let modelCache = { models: [], active: "" };
 
 async function refreshModels() {
@@ -3181,6 +3229,7 @@ refreshPluginCommands();
 // without a reload (the view-switch path in pages.js covers navigation).
 window.addEventListener("focus", refreshPluginCommands);
 setInterval(refreshModels, 30000);
+startHwStats();   // live CPU/RAM/VRAM/GPU readout in the status bar
 // The resolved ctx ceiling only exists once a model has loaded - keep the
 // compaction threshold in sync as models load or switch.
 setInterval(refreshCtxLimit, 30000);

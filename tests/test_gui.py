@@ -363,6 +363,41 @@ _FAKE_REGISTRY = {
 }
 
 
+class TestStatsEndpoint:
+    """The hardware-monitor stats feed."""
+
+    def test_system_stats_never_raises_and_is_a_dict(self):
+        from localm.sysstats import system_stats
+        stats = system_stats()                 # must not raise on any box
+        assert isinstance(stats, dict)
+        # Whatever sections are present must have a sane shape.
+        if "vram" in stats:
+            assert isinstance(stats["vram"].get("total"), int)
+        if "ram" in stats:
+            assert isinstance(stats["ram"].get("total"), int)
+        if "cpu" in stats:
+            assert isinstance(stats["cpu"].get("percent"), (int, float))
+
+    def test_stats_endpoint_returns_collected_stats(self, gui_app):
+        app, _ = gui_app
+        fake = {"cpu": {"percent": 12.5},
+                "ram": {"used": 4, "total": 8, "percent": 50.0},
+                "vram": {"used": 2, "total": 16, "percent": 12.5}}
+        with patch("localm.sysstats.system_stats", return_value=fake):
+            with TestClient(app) as client:
+                r = client.get("/api/stats")
+        assert r.status_code == 200
+        assert r.json() == fake
+
+    def test_stats_endpoint_ok_when_nothing_measurable(self, gui_app):
+        app, _ = gui_app
+        with patch("localm.sysstats.system_stats", return_value={}):
+            with TestClient(app) as client:
+                r = client.get("/api/stats")
+        assert r.status_code == 200
+        assert r.json() == {}
+
+
 class TestModelEndpoints:
     def test_models_lists_registry(self, gui_app):
         app, _ = gui_app
