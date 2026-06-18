@@ -148,11 +148,11 @@ rem  torch). Installed to match the DETECTED vendor so torch never mismatches
 rem  the hardware. Skipped on Intel/CPU - GGUF chat works without it.
 if /i "%VENDOR%"=="amd" (
     echo.
-    echo  Installing PyTorch (AMD ROCm) + transformers for HuggingFace models ...
+    echo  Installing PyTorch ^(AMD ROCm^) + transformers for HuggingFace models ...
     uv pip install -p .venv -e ".[gpu,audio]" || echo  [!] ROCm torch stack failed - GGUF chat still works without it.
 ) else if /i "%VENDOR%"=="nvidia" (
     echo.
-    echo  Installing PyTorch (NVIDIA CUDA) + transformers for HuggingFace models ...
+    echo  Installing PyTorch ^(NVIDIA CUDA^) + transformers for HuggingFace models ...
     uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu124 || echo  [!] CUDA torch failed - GGUF chat still works without it.
     uv pip install -p .venv "transformers[kernels]~=5.12" "accelerate>=1.0" "pillow>=10.0" "soundfile>=0.12" || echo  [!] transformers stack failed - GGUF chat still works.
 ) else (
@@ -206,7 +206,7 @@ if "%DATAPICK%"=="2" (
     rem an empty/no marker + no home\ dir = shared default; remove a stale
     rem portable dir only if it is empty
     if exist "home" rd "home" 2>nul
-    echo  Data directory: %USERPROFILE%\.localm  (shared)
+    echo  Data directory: %USERPROFILE%\.localm  ^(shared^)
 )
 if "%DATAPICK%"=="3" (
     set /p CUSTOMHOME="  Enter data directory path: "
@@ -218,7 +218,7 @@ if "%DATAPICK%"=="3" (
         if not exist "!CUSTOMHOME!" mkdir "!CUSTOMHOME!"
         set "DATADIR=!CUSTOMHOME!"
         set "DATACREATED=1"
-        echo  Data directory: !CUSTOMHOME!  (recorded in localm-home.cfg)
+        echo  Data directory: !CUSTOMHOME!  ^(recorded in localm-home.cfg^)
     )
 )
 
@@ -241,7 +241,7 @@ if "%SCPICK%"=="1" (
         "$s.IconLocation = '%CD%\assets\localm.ico';" ^
         "$s.Description = 'localm - open the launcher';" ^
         "$s.Save()"
-    if not errorlevel 1 echo  Shortcut created: Desktop\localm.lnk  (opens the launcher)
+    if not errorlevel 1 echo  Shortcut created: Desktop\localm.lnk  ^(opens the launcher^)
 )
 if "%SCPICK%"=="2" (
     powershell -NoProfile -Command ^
@@ -252,7 +252,7 @@ if "%SCPICK%"=="2" (
         "$s.IconLocation = '%CD%\assets\localm.ico';" ^
         "$s.Description = 'localm - open the web GUI';" ^
         "$s.Save()"
-    if not errorlevel 1 echo  Shortcut created: Desktop\localm.lnk  (opens the GUI)
+    if not errorlevel 1 echo  Shortcut created: Desktop\localm.lnk  ^(opens the GUI^)
 )
 if "%SCPICK%"=="3" echo  No shortcut created.
 
@@ -303,7 +303,7 @@ set "PYBIN=.venv\Scripts\python.exe"
 set "PFLAG="
 if "%PURGE%"=="1" set "PFLAG=--purge-data"
 if exist "%PYBIN%" (
-    echo  Planned removals (from the install manifest .localm-install.json):
+    echo  Planned removals ^(from the install manifest .localm-install.json^):
     "%PYBIN%" -m localm.install_manifest uninstall --root . %PFLAG% --dry-run
 ) else (
     echo  [!] No venv Python found - only the marked .venv will be removed.
