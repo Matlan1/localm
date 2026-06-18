@@ -410,6 +410,15 @@
   </div>
 </div>
 
+<!-- Command palette (Ctrl/Cmd+K): fuzzy-jump to any view or action. -->
+<div id="cmdk" class="modal-backdrop cmdk-backdrop" style="display:none">
+  <div class="cmdk-panel" role="dialog" aria-label="Command palette">
+    <input id="cmdk-input" type="text" autocomplete="off" spellcheck="false"
+           placeholder="Type a command…  (↑↓ to move · Enter to run · Esc to close)">
+    <div id="cmdk-list" class="cmdk-list"></div>
+  </div>
+</div>
+
 <script src="/vendor/marked.min.js"></script>
 <script src="/vendor/purify.min.js"></script>
 <script src="/vendor/highlight.min.js"></script>
