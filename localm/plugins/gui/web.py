@@ -133,6 +133,31 @@ def attach_gui(
         stats = await loop.run_in_executor(None, system_stats)
         return stats
 
+    @app.get("/api/vram-estimate", dependencies=[Depends(_require_auth)])
+    async def vram_estimate(model: str = "", n_ctx: int = 4096, n_gpu_layers: int = 99):
+        """Approximate VRAM needed to load *model* (defaults to the active one)
+        at the given context + GPU-offload, vs free/total VRAM. Powers the live
+        readout under the Settings performance sliders. Always 'approximate'."""
+        from localm.config import load_registry
+        from localm.discover import vram_info
+        from localm.sysstats import estimate_vram
+        name = model or active_model()
+        model_bytes = 0
+        entry = load_registry().get(name)
+        if entry:
+            try:
+                p = Path(entry.get("path", ""))
+                if p.is_file():
+                    model_bytes = p.stat().st_size
+            except OSError:
+                pass
+        est = estimate_vram(model_bytes, n_ctx, n_gpu_layers)
+        info = vram_info()
+        free, total = info.get("free"), info.get("total")
+        fits = (est["needed"] <= free) if isinstance(free, int) else None
+        return {"model": name, "model_bytes": model_bytes, **est,
+                "free": free, "total": total, "fits": fits, "approximate": True}
+
     @app.get("/api/fs/dirs", dependencies=[Depends(_require_auth)])
     async def fs_dirs(path: str = ""):
         """Subdirectories of *path*, for the coder setup directory picker.

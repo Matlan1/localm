@@ -1206,6 +1206,75 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
+/* ================================================================ */
+/*  Settings: performance sliders (GPU layers + context) + VRAM est  */
+/* ================================================================ */
+
+function _perfGiB(b) { return (Number(b) / GIB).toFixed(1); }
+function perfGlLabel(v) { return Number(v) >= 99 ? "all" : String(v); }
+
+let _perfEstTimer = null;
+async function refreshPerfEstimate() {
+  const gl = $("perf-gpu-layers"), ctx = $("perf-ctx"), out = $("perf-estimate");
+  if (!gl || !ctx || !out) return;
+  try {
+    const q = new URLSearchParams({ n_ctx: ctx.value, n_gpu_layers: gl.value });
+    const r = await fetch("/api/vram-estimate?" + q.toString(), { headers: authHeaders() });
+    if (!r.ok) { out.textContent = "estimate unavailable"; return; }
+    const d = await r.json();
+    let text = `~${_perfGiB(d.needed)} GB needed `
+      + `(weights ${_perfGiB(d.weights)} · context ${_perfGiB(d.kv_cache)} `
+      + `· overhead ${_perfGiB(d.overhead)})`;
+    if (typeof d.free === "number")
+      text += ` · ${_perfGiB(d.free)} GB free - ` + (d.fits ? "fits ✓" : "may not fit ⚠");
+    else
+      text += " · free VRAM unknown";
+    out.textContent = text;
+    out.classList.toggle("perf-warn", d.fits === false);
+  } catch (e) {
+    out.textContent = "estimate unavailable";
+  }
+}
+
+function setupPerfCard() {
+  const gl = $("perf-gpu-layers"), ctx = $("perf-ctx");
+  if (!gl || !ctx) return;
+  const sync = () => {
+    $("perf-gl-val").textContent = perfGlLabel(gl.value);
+    $("perf-ctx-val").textContent = ctx.value;
+  };
+  const onInput = () => {
+    sync();
+    clearTimeout(_perfEstTimer);
+    _perfEstTimer = setTimeout(refreshPerfEstimate, 150);   // debounce while dragging
+  };
+  gl.addEventListener("input", onInput);
+  ctx.addEventListener("input", onInput);
+  const apply = $("perf-apply");
+  if (apply) apply.onclick = async () => {
+    try {
+      const r = await fetch("/v1/config", {
+        method: "PATCH", headers: authHeaders(),
+        body: JSON.stringify({ n_gpu_layers: Number(gl.value), n_ctx: Number(ctx.value) }),
+      });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+      toast("Saved - applies on the next model load");
+    } catch (e) { toast("Could not save: " + e.message, true); }
+  };
+  // Seed slider positions from the current config, then estimate.
+  fetch("/v1/config", { headers: authHeaders() })
+    .then((r) => (r.ok ? r.json() : {}))
+    .then((cfg) => {
+      if (typeof cfg.n_gpu_layers === "number")
+        gl.value = cfg.n_gpu_layers < 0 ? 99 : Math.min(99, cfg.n_gpu_layers);
+      if (typeof cfg.n_ctx === "number")
+        ctx.value = Math.min(Number(ctx.max), Math.max(Number(ctx.min), cfg.n_ctx));
+      sync();
+      refreshPerfEstimate();
+    })
+    .catch(() => { sync(); refreshPerfEstimate(); });
+}
+
 /* ---- web access (model-initiated, via the params-drawer toggle) ---- */
 
 const WEB_MAX_ROUNDS = 3;
@@ -3347,6 +3416,7 @@ refreshPluginCommands();
 window.addEventListener("focus", refreshPluginCommands);
 setInterval(refreshModels, 30000);
 startHwStats();   // live CPU/RAM/VRAM/GPU readout in the status bar
+setupPerfCard();  // Settings: GPU-layers/context sliders + live VRAM estimate
 // The resolved ctx ceiling only exists once a model has loaded - keep the
 // compaction threshold in sync as models load or switch.
 setInterval(refreshCtxLimit, 30000);

@@ -231,6 +231,11 @@ nav button.active { background: var(--accent-soft); color: var(--accent); }
 .cmdk-item { padding: 10px 16px; cursor: pointer; font-size: 14px; color: var(--text); }
 .cmdk-item:hover { background: var(--accent-soft); }
 .cmdk-item.sel { background: var(--accent-soft); color: var(--accent); }
+
+/* Settings: performance sliders + VRAM estimate */
+#perf-card input[type="range"] { width: 100%; margin: 4px 0 12px; accent-color: var(--accent); }
+.perf-estimate { font-variant-numeric: tabular-nums; margin: 4px 0 2px; }
+.perf-estimate.perf-warn { color: var(--yellow); }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); }
 .dot.ok { background: var(--green); }
 .dot.busy { background: var(--yellow); }
