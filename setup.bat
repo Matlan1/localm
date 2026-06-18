@@ -86,7 +86,7 @@ rem  the detected vendor. [voice] ships speech-to-text; its Whisper model is onl
 rem  downloaded after the user consents in the GUI.
 echo.
 echo  Installing localm into .venv ...
-uv pip install -p .venv -e ".[coder,voice]"
+uv pip install -p .venv -e ".[coder,voice,monitor]"
 if errorlevel 1 (
     echo  [!] Install failed - see the error above.
     pause

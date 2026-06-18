@@ -121,6 +121,18 @@ def attach_gui(
             raise HTTPException(500, f"Failed to load {req.model}: {e}")
         return {"status": "loaded", "model": req.model}
 
+    @app.get("/api/stats", dependencies=[Depends(_require_auth)])
+    async def gui_stats():
+        """Live system load for the status-bar hardware monitor: CPU %, RAM,
+        VRAM, and (NVIDIA only) GPU utilisation. Any section that cannot be
+        measured on this box is simply absent - the frontend renders what it
+        gets. Runs off-thread so a slow probe (e.g. nvidia-smi) never blocks
+        the event loop."""
+        from localm.sysstats import system_stats
+        loop = asyncio.get_running_loop()
+        stats = await loop.run_in_executor(None, system_stats)
+        return stats
+
     @app.get("/api/fs/dirs", dependencies=[Depends(_require_auth)])
     async def fs_dirs(path: str = ""):
         """Subdirectories of *path*, for the coder setup directory picker.

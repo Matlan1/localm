@@ -141,7 +141,7 @@ fi
 
 # ---- install localm (editable) ----------------------------------------------
 say "  Installing localm into .venv ..."
-uv pip install -p .venv -e ".[coder,voice]"
+uv pip install -p .venv -e ".[coder,voice,monitor]"
 
 # ---- GPU stack (PyTorch + transformers for the HF backend) ------------------
 case "$GPU" in

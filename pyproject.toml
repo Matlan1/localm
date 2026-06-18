@@ -76,6 +76,13 @@ rag = [
 voice = [
     "faster-whisper>=1.0",
 ]
+# Live hardware monitor in the GUI status bar (CPU % + RAM). VRAM and NVIDIA
+# GPU % need no package. Optional: the monitor just omits CPU/RAM without it.
+# The installers include this so the readout works out of the box.
+# Install with:  pip install "localm[monitor]"
+monitor = [
+    "psutil>=5.9",
+]
 # Grammar-constrained decoding (GBNF/EBNF) for the HuggingFace backend. The GGUF
 # backend already has this natively via llama.cpp's grammar sampler; this extra
 # brings the same capability to transformers models through xgrammar. Optional:
