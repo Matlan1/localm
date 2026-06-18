@@ -192,6 +192,17 @@ nav button.active { background: var(--accent-soft); color: var(--accent); }
   align-items: center;
   gap: 6px;
 }
+.hw-stats {
+  margin-top: 5px;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hw-stats[hidden] { display: none; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); }
 .dot.ok { background: var(--green); }
 .dot.busy { background: var(--yellow); }
