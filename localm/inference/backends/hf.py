@@ -45,6 +45,35 @@ def _require_transformers():
         raise
 
 
+class _SafeGrammarProcessor:
+    """Wrap an xgrammar HF LogitsProcessor so a RUNTIME failure during generation
+    (for example xgrammar needing Triton, which is not available on Windows)
+    degrades to unconstrained decoding instead of raising inside the generate()
+    thread - which crashes the thread and hangs the HTTP request indefinitely.
+
+    The grammar compiles fine, so the build-time soft-degrade cannot catch this;
+    the failure only surfaces on the first token's logits call. We catch it there,
+    warn once, and pass logits through unchanged for the rest of the generation.
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+        self._failed = False
+
+    def __call__(self, input_ids, scores):
+        if self._failed:
+            return scores
+        try:
+            return self._inner(input_ids, scores)
+        except Exception as e:
+            console.print(
+                f"[yellow]grammar constraint disabled mid-generation "
+                f"({type(e).__name__}: {e}); continuing without constraint.[/yellow]"
+            )
+            self._failed = True
+            return scores
+
+
 def _grammar_processor(grammar: Optional[str], tokenizer, model):
     """Build an xgrammar LogitsProcessor that masks any token which would violate
     *grammar* at the current parse position (so output is structurally valid by
@@ -76,7 +105,7 @@ def _grammar_processor(grammar: Optional[str], tokenizer, model):
         vocab = getattr(getattr(model, "config", None), "vocab_size", None)
         info = xgr.TokenizerInfo.from_huggingface(tokenizer, vocab_size=vocab)
         compiled = xgr.GrammarCompiler(info).compile_grammar(grammar)
-        return LogitsProcessorList([LogitsProcessor(compiled)])
+        return LogitsProcessorList([_SafeGrammarProcessor(LogitsProcessor(compiled))])
     except Exception as e:   # malformed grammar, tokenizer mismatch, etc.
         console.print(
             f"[yellow]grammar ignored ({type(e).__name__}: {e}); generating "
