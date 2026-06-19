@@ -402,6 +402,7 @@ def generate_image(
     launch_cmd: Optional[str] = None,
     workdir: Optional[str] = None,
     comfy_output_dir: Optional[str] = None,
+    swap: bool = True,
 ) -> tuple[bool, str]:
     """
     Generate an image from *prompt* and save it to *output_path*.
@@ -489,8 +490,11 @@ def generate_image(
     if not ok:
         return False, msg
 
-    # 1. Unload LLM to free VRAM before FLUX loads
-    _localm_unload(localm_url)
+    # 1. Unload LLM to free VRAM before FLUX loads. Skipped when the caller
+    # decided the media model fits alongside the chat model (swap=False), so the
+    # chat model stays hot.
+    if swap:
+        _localm_unload(localm_url)
 
     # 2. Load workflow template (personal flux_workflow.json if present,
     # else the committed example)
