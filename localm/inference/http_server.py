@@ -202,20 +202,22 @@ def create_app(engine: Engine) -> FastAPI:
         **cors_kwargs,
     )
 
-    # CSRF / drive-by guard for the MANAGEMENT endpoints. The default CORS policy
-    # admits ANY localhost:PORT origin, so without this a malicious local web page
-    # (a dev server, an npm postinstall server) could drive these from the user's
+    # CSRF / drive-by guard. The default CORS policy admits ANY localhost:PORT
+    # origin, so without this a malicious local web page (a dev server, an npm
+    # postinstall server) could drive state-changing endpoints from the user's
     # browser - mint a key, flip require_auth, install a plugin, load/unload the
-    # model, browse the filesystem - even on a keyless install (open-mode scope
-    # collapse). We require such requests to be same-origin (or an explicitly
-    # configured CORS origin). The inference API (chat/completions, completions,
-    # embeddings) is deliberately left cross-origin callable so a local app can
-    # use it; non-browser clients (CLI / SDK) send no Origin; "cors_origins": "*"
-    # opts out entirely.
+    # model, browse the filesystem, OR index-and-read arbitrary files through a
+    # plugin data route like /api/rag, or drive the coder agent via /api/coder -
+    # even on a keyless install (open-mode scope collapse). We require every
+    # unsafe-method request to be same-origin (or an explicitly configured CORS
+    # origin), EXCEPT the OpenAI-compatible inference API, which is deliberately
+    # left cross-origin callable so a local app can use it. Guarding by default
+    # (allowlist, not denylist) means a new plugin route is protected the moment
+    # it is added, without anyone remembering to register it here. Non-browser
+    # clients (CLI / SDK) send no Origin; "cors_origins": "*" opts out entirely.
     _UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
-    _GUARDED_PREFIXES = (
-        "/v1/keys", "/v1/config", "/v1/plugins", "/api/plugins",
-        "/v1/models/load", "/v1/models/unload", "/api/fs",
+    _CROSS_ORIGIN_OK = (
+        "/v1/chat/completions", "/v1/completions", "/v1/embeddings",
     )
     _cors_allowlist = cors_cfg if isinstance(cors_cfg, list) else []
     _cors_wildcard = cors_cfg == "*"
@@ -223,7 +225,7 @@ def create_app(engine: Engine) -> FastAPI:
     @app.middleware("http")
     async def _origin_guard(request, call_next):
         if (request.method in _UNSAFE_METHODS and not _cors_wildcard
-                and request.url.path.startswith(_GUARDED_PREFIXES)):
+                and not request.url.path.startswith(_CROSS_ORIGIN_OK)):
             origin = request.headers.get("origin")
             allowlisted = bool(origin) and origin in _cors_allowlist
             if origin:
@@ -232,9 +234,9 @@ def create_app(engine: Engine) -> FastAPI:
                 if not (same_origin or allowlisted):
                     return JSONResponse(
                         status_code=403,
-                        content={"detail": "Cross-origin request refused for a "
-                                 "management endpoint (set 'cors_origins' to "
-                                 "allow this origin)."},
+                        content={"detail": "Cross-origin request refused "
+                                 "(only same-origin requests or a configured "
+                                 "'cors_origins' may use this endpoint)."},
                     )
             # H5: open-mode management gate. With no key configured, management
             # routes still require the per-process shell token (injected into the
