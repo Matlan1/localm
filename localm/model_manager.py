@@ -1398,6 +1398,65 @@ def _resolve_ollama_manifest(p: Path):
     return None
 
 
+def _gguf_first_parts(d: Path) -> List[Path]:
+    """First-part GGUF files directly inside *d* (non-recursive).
+
+    Split GGUFs (``model-00001-of-00003.gguf``) contribute only their first
+    part - llama.cpp finds the siblings on its own; loose single-file GGUFs
+    contribute themselves. Mirrors the first-part filter in sync_models_dir.
+    """
+    out: List[Path] = []
+    for f in sorted(d.glob("*.gguf")):
+        try:
+            if not f.is_file():
+                continue
+        except OSError:
+            continue
+        parts = split_gguf_parts(f.name)
+        if parts and f.name != parts[0]:
+            continue   # non-first split part -> registered via its first part
+        out.append(f)
+    return out
+
+
+def _add_local_gguf_dir(
+    first_parts: List[Path],
+    name: Optional[str],
+    on_duplicate: str,
+    no_hash: bool,
+) -> bool:
+    """Register every loose .gguf model in a folder (the *first_parts* list).
+
+    Names each model after its filename stem (split GGUFs strip the
+    ``-NNNNN-of-NNNNN`` suffix), de-duplicating collisions via
+    ``_unique_registry_name``. A user-supplied ``-n`` name is only honoured for
+    a single-model folder, since it cannot apply to many. Returns True - the
+    caller has already checked *first_parts* is non-empty.
+    """
+    use_given_name = bool(name) and len(first_parts) == 1
+    for gguf in first_parts:
+        split = _SPLIT_GGUF_RE.match(gguf.name)
+        base = split.group("stem") if (split and split_gguf_parts(gguf.name)) else gguf.stem
+        reg = load_registry()
+        wanted = _sanitize_name(name) if use_given_name else base
+        model_name = _unique_registry_name(reg, wanted)
+
+        if no_hash:
+            digest = None
+        else:
+            # Hash only when it can change the outcome (unknown path / missing
+            # digest), exactly like the single-file branch below.
+            already_known = find_aliases_by_path(gguf, reg)
+            needs_backfill = any(not reg[n].get("sha256") for n in already_known)
+            digest = _hash_with_notice(gguf) \
+                if (not already_known or needs_backfill) else None
+
+        _register_with_dedup(
+            model_name, gguf, "local", on_duplicate=on_duplicate, digest=digest,
+        )
+    return True
+
+
 def add_local(
     path_str: str,
     name: Optional[str] = None,
@@ -1443,6 +1502,16 @@ def add_local(
     is_gguf = p.is_file() and p.suffix == ".gguf"
     is_hf   = _is_hf_dir(str(p))  # config.json AND real weights/tokenizer
     is_blob = p.is_file() and p.name.startswith("sha256-")  # raw Ollama blob by path
+
+    # A directory of loose .gguf files (not a single model, not an HF model dir,
+    # not an Ollama manifest) - register each one, the way sync_models_dir does
+    # for the models folder (H2). An HF dir (is_hf) falls through to the
+    # dir-as-one-model path below; an empty / non-gguf dir falls through to the
+    # "Not a model" message so existing rejection tests stay green.
+    if p.is_dir() and not is_hf:
+        first_parts = _gguf_first_parts(p)
+        if first_parts:
+            return _add_local_gguf_dir(first_parts, name, on_duplicate, no_hash)
 
     if not (is_gguf or is_hf or is_blob):
         console.print(
