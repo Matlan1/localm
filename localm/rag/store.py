@@ -66,6 +66,10 @@ def rag_dir() -> Path:
 _SENSITIVE_HOME_SUBDIRS = (
     ".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure", ".localm",
 )
+# Lower-cased for matching a path component ANYWHERE in a resolved path, so a
+# nested ~/proj/.ssh is caught too, and case-insensitively so a ".SSH"
+# component cannot slip past on a case-insensitive filesystem.
+_SENSITIVE_NAMES = frozenset(s.lower() for s in _SENSITIVE_HOME_SUBDIRS)
 
 
 def _path_within(child: Path, parent: Path) -> bool:
@@ -133,10 +137,15 @@ def confine_index_path(p, allowed_roots: Optional[list] = None) -> Path:
         raise ValueError(
             f"Refusing to index the localm data directory "
             f"(it holds the API key and registry): {p}")
-    home = Path.home()
-    for sub in _SENSITIVE_HOME_SUBDIRS:
-        if _path_within(rp, home / sub):
-            raise ValueError(f"Refusing to index a credential directory: {p}")
+    # Credential folders are denied wherever they appear in the resolved path,
+    # not only at the home root: ~/proj/.ssh and <cwd>/sub/.aws are as sensitive
+    # as ~/.ssh. rp is already resolved, so this also catches a symlink that
+    # points into a credential dir. Tradeoff: a folder literally named one of
+    # these (a real ./.docker you wanted to index) is refused too - acceptable
+    # for a credential denylist. The real confinement is allowed_roots (plus the
+    # same-origin guard on the route); this is defense in depth.
+    if any(part.lower() in _SENSITIVE_NAMES for part in rp.parts):
+        raise ValueError(f"Refusing to index a credential directory: {p}")
 
     if allowed_roots is not None and not any(
             _path_within(rp, r) for r in allowed_roots):
