@@ -319,9 +319,39 @@ class TestCollection:
         hits = c.query("ROCm DLLs", k=1, embed_fn=bigger_model)   # must not raise
         assert hits and "gpu.md" in hits[0]["source"]             # lexical fallback
 
-    def test_cosine_dim_mismatch_is_zero(self):
+    def test_cosine_dim_mismatch_raises(self):
+        # C3: a dim mismatch is corruption, not a real zero-similarity. _cosine
+        # must fail loud; _vector_scores guarantees equal lengths before calling.
         from localm.rag.store import _cosine
-        assert _cosine([1.0, 2.0], [1.0, 2.0, 3.0]) == 0.0
+        assert _cosine([1.0, 2.0], [3.0, 4.0]) == pytest.approx(0.98, abs=0.02)
+        with pytest.raises(ValueError):
+            _cosine([1.0, 2.0], [1.0, 2.0, 3.0])
+
+    def test_add_with_changed_embed_dim_raises(self, tmp_path, docs_dir):
+        # C3: re-indexing a collection with an embedding model of a different
+        # dimensionality must raise, not silently store mixed-dim vectors.
+        base = tmp_path / "rag"
+        c = Collection("kb", base=base).create()
+        c.add_paths([docs_dir], embed_fn=lambda ts: [[1.0, 0.0] for _ in ts])  # dim 2
+        more = docs_dir / "extra.md"
+        more.write_text("A new document about vector databases.", encoding="utf-8")
+        with pytest.raises(ValueError, match="dimension"):
+            c.add_paths([docs_dir],
+                        embed_fn=lambda ts: [[1.0, 0.0, 0.0, 0.0] for _ in ts])  # dim 4
+
+    def test_embed_dim_persisted_across_reload(self, tmp_path, docs_dir):
+        # The collection's dimensionality survives a reload, so a later add with
+        # a mismatched model is caught even in a fresh process.
+        base = tmp_path / "rag"
+        Collection("kb", base=base).create().add_paths(
+            [docs_dir], embed_fn=lambda ts: [[1.0, 0.0] for _ in ts])  # dim 2
+        c2 = Collection("kb", base=base)            # fresh load from disk
+        more = docs_dir / "extra2.md"
+        more.write_text("Another document, different topic entirely.",
+                        encoding="utf-8")
+        with pytest.raises(ValueError, match="dimension"):
+            c2.add_paths([docs_dir],
+                         embed_fn=lambda ts: [[1.0, 0.0, 0.0] for _ in ts])  # dim 3
 
     def test_failed_files_reported(self, tmp_path):
         base = tmp_path / "rag"
