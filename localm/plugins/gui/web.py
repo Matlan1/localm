@@ -22,8 +22,8 @@ import os
 import queue
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -34,6 +34,45 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 # SSE keepalive interval - must beat proxy/browser idle timeouts
 _KEEPALIVE_S = 15
+
+
+def _is_loopback_host(host: str) -> bool:
+    """True for a loopback bind/client host (127.0.0.0/8, ::1, localhost)."""
+    if not host:
+        return False
+    if host == "localhost":
+        return True
+    import ipaddress
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _index_html_with_key(key: str) -> str:
+    """The SPA shell, optionally seeding *key* into localStorage so a fresh
+    loopback launch is not locked out when require_auth is on (the C1 keystone).
+
+    The key is embedded only in same-origin HTML served to a trusted loopback
+    client: a cross-origin page cannot read another origin's document or its
+    localStorage, so this is not a new exposure beyond local filesystem access to
+    auth.key. An empty *key* injects nothing (open mode, or a non-loopback LAN
+    client)."""
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    if not key:
+        return html
+    # json.dumps escapes quotes/backslashes; also escape "<" so the value can
+    # never break out of the <script> element (defence in depth - keys are
+    # operator-set and URL-safe, but the value still lands inside a script tag).
+    snippet = ("<script>try{localStorage.setItem('localm.apiKey',"
+               + json.dumps(key).replace("<", "\\u003c")
+               + ")}catch(e){}</script>")
+    lower = html.lower()
+    i = lower.find("<head>")
+    if i != -1:
+        cut = i + len("<head>")
+        return html[:cut] + snippet + html[cut:]
+    return snippet + html
 
 
 # ------------------------------------------------------------------ #
@@ -358,6 +397,25 @@ def attach_gui(
     mimetypes.add_type("text/javascript", ".js")
     mimetypes.add_type("application/manifest+json", ".webmanifest")
     mimetypes.add_type("image/svg+xml", ".svg")
+
+    # Serve the SPA shell. On a loopback bind (or for a loopback client on a LAN
+    # bind) seed the configured API key into the page so a fresh launch is not
+    # locked out when require_auth is on (C1). Registered before the "/" static
+    # mount so it wins for the shell document; every other asset hits the mount.
+    @app.get("/", include_in_schema=False)
+    @app.get("/index.html", include_in_schema=False)
+    async def _gui_index(request: Request):
+        from localm import auth
+        key = auth.get_api_key() or ""
+        # Only a loopback BIND (the default `localm gui`, reachable solely from
+        # this machine) auto-seeds the key. We deliberately do NOT trust
+        # request.client.host: behind a same-host reverse proxy it reads as
+        # loopback for REMOTE users, which would leak the key. A non-loopback
+        # bind (e.g. -H 0.0.0.0) never seeds - enter the key in the page instead.
+        if key and not _is_loopback_host(getattr(request.app.state, "bind_host", "127.0.0.1")):
+            key = ""
+        return HTMLResponse(_index_html_with_key(key))
+
     app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="gui")
 
     return manager
