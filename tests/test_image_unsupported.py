@@ -6,6 +6,7 @@ received. The contract now: raise UnsupportedInputError at the backend, and
 return a clean 400 at the HTTP route.
 """
 
+import json
 import unittest
 from unittest.mock import MagicMock
 
@@ -149,6 +150,53 @@ class TestRouteRejectsImage(unittest.TestCase):
         # The user-facing string names the cause and the remedy.
         self.assertIn("vision", IMAGE_UNSUPPORTED_MESSAGE.lower())
         self.assertIn("GGUF", IMAGE_UNSUPPORTED_MESSAGE)
+
+
+# --------------------------------------------------------------------------- #
+#  Capability-aware vision guidance (no dead-end: route or guide per install)  #
+# --------------------------------------------------------------------------- #
+
+class TestVisionGuidance:
+    def test_no_vision_model_gives_actionable_guidance(self, monkeypatch):
+        import localm.model_manager as mm
+        monkeypatch.setattr(mm, "load_registry", lambda: {})
+        assert mm.vision_capable_models() == []
+        msg = mm.vision_input_guidance()
+        assert "cannot accept image" in msg               # legacy phrase preserved
+        assert ("localm pull" in msg) or ("pip install" in msg)  # install-specific remedy
+
+    def test_registered_vlm_is_named_and_routed(self, tmp_path, monkeypatch):
+        import localm.model_manager as mm
+        d = tmp_path / "qwen-vl"
+        d.mkdir()
+        (d / "config.json").write_text(json.dumps(
+            {"architectures": ["Qwen2VLForConditionalGeneration"], "vision_config": {}}),
+            encoding="utf-8")
+        monkeypatch.setattr(mm, "load_registry",
+                            lambda: {"qwen-vl": {"path": str(d), "source": "local"}})
+        assert "qwen-vl" in mm.vision_capable_models()
+        msg = mm.vision_input_guidance()
+        assert "qwen-vl" in msg and "localm run" in msg
+
+    def test_gguf_entry_is_not_vision(self, tmp_path, monkeypatch):
+        import localm.model_manager as mm
+        f = tmp_path / "m.gguf"
+        f.write_bytes(b"GGUF")
+        monkeypatch.setattr(mm, "load_registry",
+                            lambda: {"m": {"path": str(f), "source": "local"}})
+        assert mm.vision_capable_models() == []           # a .gguf file is text-only
+
+    def test_hf_vision_detected_via_preprocessor(self, tmp_path, monkeypatch):
+        import localm.model_manager as mm
+        d = tmp_path / "vlm2"
+        d.mkdir()
+        (d / "config.json").write_text('{"architectures": ["LlamaForCausalLM"]}',
+                                       encoding="utf-8")
+        (d / "preprocessor_config.json").write_text(
+            '{"image_processor_type": "CLIPImageProcessor"}', encoding="utf-8")
+        monkeypatch.setattr(mm, "load_registry",
+                            lambda: {"vlm2": {"path": str(d), "source": "local"}})
+        assert "vlm2" in mm.vision_capable_models()
 
 
 if __name__ == "__main__":

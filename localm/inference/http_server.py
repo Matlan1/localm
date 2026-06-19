@@ -28,7 +28,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from localm import scopes
 from localm.inference.backends.base import (
-    IMAGE_UNSUPPORTED_MESSAGE, messages_contain_image,
+    messages_contain_image,
 )
 from localm.inference.chat_pipeline import ChatHookContext, ChatPipeline
 from localm.inference.engine import Engine
@@ -536,7 +536,10 @@ def create_app(engine: Engine) -> FastAPI:
                 async with _inference_sem:
                     await loop.run_in_executor(None, _engine.load)
             if not _engine.supports_images:
-                raise HTTPException(400, IMAGE_UNSUPPORTED_MESSAGE)
+                # Capability-aware, install-specific guidance: route to a vision
+                # model this install actually has, instead of a flat dead-end.
+                from localm.model_manager import vision_input_guidance
+                raise HTTPException(400, vision_input_guidance())
 
         gen_kwargs = dict(
             max_tokens=req.max_tokens,

@@ -267,6 +267,77 @@ def get_model_info(name: str):
     return None
 
 
+# ------------------------------------------------------------------ #
+#  Vision-input capability (kernel-level, setup-agnostic)              #
+# ------------------------------------------------------------------ #
+
+def _hf_is_vision(model_dir: Path) -> bool:
+    """True if a HuggingFace model directory looks vision-capable, judged from
+    its on-disk metadata (offline, no model load, no hardware assumption). The
+    HF backend can then accept image input for it."""
+    try:
+        pre = model_dir / "preprocessor_config.json"
+        if pre.is_file() and "image" in pre.read_text(
+                encoding="utf-8", errors="replace").lower():
+            return True
+        cfg = model_dir / "config.json"
+        if cfg.is_file():
+            data = json.loads(cfg.read_text(encoding="utf-8", errors="replace"))
+            if any(k in data for k in
+                   ("vision_config", "image_token_index", "image_token_id")):
+                return True
+            arch = " ".join(data.get("architectures") or []).lower()
+            if any(k in arch for k in ("vision", "imagetext", "-vl",
+                                       "qwen2vl", "qwen2_5_vl")):
+                return True
+    except (OSError, ValueError):
+        pass
+    return False
+
+
+def vision_capable_models() -> List[str]:
+    """Registered model names that can accept image INPUT on THIS install.
+
+    Only HuggingFace-format directories with vision metadata qualify: the
+    built-in GGUF backend is text-only today (no mmproj/vision path wired), so
+    GGUF entries never count. Used to ROUTE an image to a capable model instead
+    of dead-ending on a text-only one."""
+    out: List[str] = []
+    for name, info in load_registry().items():
+        try:
+            p = Path(info.get("path", ""))
+        except (TypeError, ValueError):
+            continue
+        if p.is_dir() and _hf_is_vision(p):
+            out.append(name)
+    return sorted(out)
+
+
+def vision_input_guidance() -> str:
+    """Capability-aware, install-specific message for when an image is attached
+    to a model that cannot see it. Instead of a flat dead-end, point the user at
+    a path that EXISTS on THIS install: a vision model already in their library,
+    or how to obtain one. Setup-agnostic - it inspects the registry and the
+    installed stack, never assuming a particular GPU or runtime. Begins with the
+    legacy 'cannot accept image input' phrase so existing callers stay valid."""
+    import importlib.util
+    head = ("This model cannot accept image input (it is text-only), so the "
+            "attached image would be ignored.")
+    vlms = vision_capable_models()
+    if vlms:
+        return (f"{head} A vision-capable model is already in your library: "
+                f"{', '.join(vlms[:3])}. Switch to it (e.g. "
+                f"`localm run {vlms[0]}`, or pick it in the GUI) and attach the "
+                f"image again.")
+    if importlib.util.find_spec("transformers") is not None:
+        return (f"{head} No vision model is registered yet - pull a vision-capable "
+                f"HuggingFace model such as a Gemma 3 vision or Qwen2.5-VL "
+                f"checkpoint (`localm pull <repo>`), then run it with --image.")
+    return (f"{head} To read images, install the HuggingFace stack "
+            f"(`pip install \"localm[gpu]\"`) and load a vision-capable model "
+            f"(Gemma 3 vision / Qwen2.5-VL). The built-in GGUF backend is text-only.")
+
+
 def list_models() -> None:
     reg = load_registry()
     if not reg:
