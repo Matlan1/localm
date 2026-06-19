@@ -50,6 +50,11 @@ MessageContent = Union[str, List[ContentPart]]
 class Message(BaseModel):
     role: Literal["system", "user", "assistant", "tool"]
     content: MessageContent = ""
+    # The model's reasoning, separated from the visible answer (H4). Present only
+    # on assistant responses when the model emitted a <think> block; ignored on
+    # input. OpenAI reasoning-model convention (clients that don't know it ignore
+    # the extra field).
+    reasoning_content: Optional[str] = None
 
     def text_only(self) -> str:
         """Flatten content to plain text (discards media)."""
@@ -126,6 +131,9 @@ class ChatRequest(BaseModel):
 class ChoiceDelta(BaseModel):
     role: Optional[str] = None
     content: Optional[str] = None
+    # Streamed reasoning tokens (H4), routed out of `content`. A delta carries
+    # one or the other; clients that don't know the field ignore it.
+    reasoning_content: Optional[str] = None
 
 
 class StreamChoice(BaseModel):
