@@ -433,6 +433,55 @@ async function startQrScan() {
   }, 300);
 }
 
+// --- PWA install affordance (P2c) -----------------------------------------
+// The browser "Install app" path differs per platform, so the Settings card
+// shows the right thing: Android/desktop Chrome fire `beforeinstallprompt` and
+// get a real Install button; iOS Safari fires nothing (the only path is the
+// Share sheet -> Add to Home Screen), so it gets written steps; an already
+// installed launch (standalone display) just confirms it. applyInstallUI() is
+// the single decision point and is unit-tested by branch.
+
+function pwaDisplayMode() {
+  try {
+    if (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) {
+      return "standalone";
+    }
+  } catch (e) { /* matchMedia absent (older/headless) */ }
+  // iOS records an installed PWA on navigator.standalone, not display-mode.
+  if (window.navigator && window.navigator.standalone === true) return "standalone";
+  return "browser";
+}
+
+function isIOSSafari() {
+  const nav = window.navigator || {};
+  const ua = nav.userAgent || "";
+  // iPadOS 13+ reports itself as a Mac, so add the touch check for that case.
+  return /iPad|iPhone|iPod/.test(ua)
+    || (nav.platform === "MacIntel" && (nav.maxTouchPoints || 0) > 1);
+}
+
+// Show exactly one of: installed confirmation, the native Install button, the
+// iOS Add-to-Home-Screen steps, or the generic hint. env = {standalone, ios,
+// canPrompt}; missing fields are treated as false.
+function applyInstallUI(env) {
+  env = env || {};
+  const btn = document.getElementById("install-app");
+  const hint = document.getElementById("install-hint");
+  const ios = document.getElementById("install-ios");
+  if (btn) btn.style.display = "none";
+  if (ios) ios.style.display = "none";
+  if (!hint) return;
+  hint.style.display = "none";
+  if (env.standalone) {
+    hint.textContent = "Running as an installed app.";
+    hint.style.display = "";
+    return;
+  }
+  if (env.canPrompt && btn) { btn.style.display = ""; return; }
+  if (env.ios && ios) { ios.style.display = ""; return; }
+  hint.style.display = "";   // generic browser-menu hint (default)
+}
+
 let modelCache = { models: [], active: "" };
 
 async function refreshModels() {
