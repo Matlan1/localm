@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Shared pytest fixtures.
 
 Hermetic data dir: every test gets its own ``LOCALM_HOME`` under the test's

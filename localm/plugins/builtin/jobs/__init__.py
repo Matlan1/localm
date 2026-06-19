@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Jobs plugin: scheduled recurring tasks (in-app agent jobs).
 
 Backend only (the GUI lands separately). A job runs a chat or coder prompt on

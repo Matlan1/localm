@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """``localm setup-llama`` - provision the native llama.cpp binaries locally.
 
 Makes localm self-contained: the native inference runtime (the llama shared

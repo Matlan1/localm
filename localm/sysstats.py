@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Best-effort live system stats for the GUI hardware monitor.
 
 Pure and NEVER raises: a probe that fails just omits its field, so the status

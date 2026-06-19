@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """H2: `localm add <dir>` / `localm pull <dir>` over a folder of loose GGUFs must
 register each model instead of rejecting the directory as "Not a model".
 

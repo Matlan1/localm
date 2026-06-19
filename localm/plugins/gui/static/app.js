@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 /* localm GUI - vanilla JS, no build step.
    Talks to the localm FastAPI server: /v1 (OpenAI-compatible) + /api (GUI).
    All model/agent-originating strings go through textContent or DOMPurify -

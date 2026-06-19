@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """SEC-5 regression: numeric / short-form IPv4 SSRF bypass.
 
 '2130706433', '0x7f000001', '0177.0.0.1' and '127.1' all resolve to the

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """
 The plugin engine: discovers, loads, enables/disables, and installs plugins at
 runtime - without restarting the server or reloading the model.

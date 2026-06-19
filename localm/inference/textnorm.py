@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Shared scrubbing of model-internal control markers in chat output.
 
 Some finetunes emit their training-format control markers as plain text:

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Static guard against the cmd.exe parenthesis crash class in .bat installers.
 
 Why this exists

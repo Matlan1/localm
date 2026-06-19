@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Minimal BM25 ranking - pure stdlib, fast enough for home-scale corpora.
 
 A few thousand chunks score in single-digit milliseconds; this is the

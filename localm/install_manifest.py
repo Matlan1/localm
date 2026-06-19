@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Install provenance ledger - so uninstall removes ONLY what install recorded.
 
 The lesson of the famous data-loss incidents (Valve's Steam ``rm -rf

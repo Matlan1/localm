@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Job persistence: the Job dataclass and the JobStore.
 
 Job definitions live in ``<data dir>/jobs/jobs.json`` (a single JSON file,

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """VRAM-aware model-swap policy for media generation.
 
 Before a media gen (image/music/video via ComfyUI), the chat LLM is unloaded to

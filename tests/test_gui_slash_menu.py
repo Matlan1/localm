@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Static tripwire for the slash-command menu (B2).
 
 Bug (from the field report): typing "/remember some note" then Enter discarded

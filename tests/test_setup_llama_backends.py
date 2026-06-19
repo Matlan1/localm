@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Backend selection + asset resolution for `localm setup-llama`, and the
 `hwdetect` helper. Pure/offline: network calls are monkeypatched to fail so the
 URL-resolution FALLBACK path is exercised deterministically.

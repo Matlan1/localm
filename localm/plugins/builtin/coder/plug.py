@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Coder plugin: the offline AI coding agent on the GUI surface.
 
 Routes (mounted by the engine, auto-scoped to the ``coder`` capability):

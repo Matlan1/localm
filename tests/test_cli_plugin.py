@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """CLI tests for the engine plugin toggles: `localm plugin enable/disable/status`.
 
 These exercise the new-engine commands wired in localm/cli.py (set_enabled_state +

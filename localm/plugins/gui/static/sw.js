@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 /* localm PWA service worker.
  *
  * Makes the GUI installable and lets the app shell open instantly (and offline),

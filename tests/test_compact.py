@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for conversation compaction (localm.inference.compact)."""
 
 from localm.inference.compact import (

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Text-to-speech plugin: Kokoro neural voices, rendered entirely in the browser.
 
 The actual synthesis happens client-side (``static/tts.js`` loads Kokoro through

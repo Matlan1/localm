@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """
 Tests for duplicate model detection, aliasing, and alias-aware removal.
 

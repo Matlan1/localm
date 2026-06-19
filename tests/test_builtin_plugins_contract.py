@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Contract & client-asset guards over EVERY shipped builtin plugin.
 
 These are invariant guards, not feature tests. They enumerate the builtins from

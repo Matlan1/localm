@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for localm.plugins.coder.prompts - family detection and per-family prompt content."""
 
 import pytest

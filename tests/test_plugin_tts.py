@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """The client-asset hook (Surface.client_entry + Host.mount_static) and the
 real `tts` plugin: static serving, /api/tts/config resolution, and the
 no-server-traces property.

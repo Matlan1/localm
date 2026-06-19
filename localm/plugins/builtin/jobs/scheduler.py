@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """The job scheduler and a self-contained 5-field cron matcher.
 
 The matcher and the due/tick logic are deliberately PURE and clock-injectable so

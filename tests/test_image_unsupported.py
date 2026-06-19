@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """A model that cannot see images must REJECT image input, not silently drop it.
 
 Regression guard for the audit finding that GGUF (and text-only HF) accepted an

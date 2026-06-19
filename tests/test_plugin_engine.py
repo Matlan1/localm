@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Plugin engine: discovery, runtime load/unload (route mount/unmount),
 enable/disable persistence, protected plugins, and failure isolation.
 

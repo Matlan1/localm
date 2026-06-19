@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Cross-platform native-binary detection / loader logic.
 
 These run on any host by monkeypatching sys.platform, so the Linux and macOS

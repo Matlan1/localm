@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for the VRAM pre-flight warning in GgufBackend.load()."""
 
 from unittest.mock import patch

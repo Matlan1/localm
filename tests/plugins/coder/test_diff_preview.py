@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """
 Tests for display.print_diff_preview and agent._confirm_tool diff path.
 """

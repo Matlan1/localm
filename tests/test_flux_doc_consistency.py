@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Guards for the FLUX generator docs matching the code.
 
 Two audit findings motivated these:

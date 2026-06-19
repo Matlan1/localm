@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for sync_models_dir - registry/folder reconciliation and autoprune.
 
 This runs on every launch and can delete registry entries, yet had no coverage.

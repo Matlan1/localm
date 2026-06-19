@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Validate every bundled (store) plugin manifest so a broken plugin.toml, a
 missing register module, or a client-asset plugin shipping a missing entry module
 fails CI rather than the user at install time.

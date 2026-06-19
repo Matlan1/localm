@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Phase 1: VRAM-aware media swap policy + the C4 driver-hang guard.
 
 The decision: before a media generation, do we unload the chat LLM to free VRAM,

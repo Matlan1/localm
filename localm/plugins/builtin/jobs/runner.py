@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Execute a single job and return a result record.
 
 ``run_job(job, *, engine=None)`` runs the job's prompt and returns a dict:

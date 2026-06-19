@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """The install provenance ledger: uninstall removes ONLY what record() wrote,
 never an unrecorded path, and the data-dir rm -rf is guarded against the
 Steam/Pop!_OS class of disaster (root, $HOME, repo, ancestors, symlinks).

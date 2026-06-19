@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Plain-text extraction from document files. Stdlib wherever possible."""
 
 from __future__ import annotations

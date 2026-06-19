@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """CSRF / drive-by origin guard for state-changing endpoints (SEC-1).
 
 The default CORS policy admits any localhost:PORT origin, so without this guard a

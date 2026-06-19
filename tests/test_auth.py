@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for the shared API-key auth (localm/auth.py) and its enforcement in
 the HTTP server's _require_auth dependency."""
 

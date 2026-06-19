@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Filesystem path-confinement helpers shared by the kernel GUI and plugins.
 
 These guarantee a user-supplied name stays directly inside a known base

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """BUG-15 (M2 Phase 3): the launcher's Launch action must be cross-platform.
 
 The launcher spawned child processes with

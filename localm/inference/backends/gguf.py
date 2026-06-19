@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """GGUF backend - uses our native ctypes wrapper around llama.dll.
 
 The native wrapper (localm.inference.backends.llamacpp) handles GPU DLL

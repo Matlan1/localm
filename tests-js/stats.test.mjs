@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 // jsdom tests for the status-bar hardware monitor (renderHwStats / pollHwStats
 // in localm/plugins/gui/static/app.js). renderHwStats renders whatever
 // /api/stats reports; absent sections must simply not appear, and an all-empty

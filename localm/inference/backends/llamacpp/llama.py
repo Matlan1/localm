@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """
 High-level LlamaCpp class - a pure-Python / ctypes replacement for the
 llama-cpp-python ``Llama`` class.

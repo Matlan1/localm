@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """C1 / H13: the coder's local backend must present the real API key
 (LOCALM_API_KEY or --api-key), not the hardcoded "localm" that 401s against a
 require_auth server."""
