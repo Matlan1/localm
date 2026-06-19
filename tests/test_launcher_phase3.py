@@ -24,7 +24,6 @@ plain ``import``, so we load it from its file path.
 from __future__ import annotations
 
 import importlib.util
-import sys
 from pathlib import Path
 
 import pytest

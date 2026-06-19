@@ -13,14 +13,12 @@ Commands
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 from pathlib import Path
 from typing import Optional
 
 import click
-from rich.console import Console
 
 from .backends.http import (
     HTTPBackend,
@@ -601,7 +599,7 @@ def _handle_command(raw: str, agent: Agent) -> bool:
 
     elif cmd == "cd":
         if not arg:
-            print_info(f"Usage: /cd <path>")
+            print_info("Usage: /cd <path>")
         else:
             new_dir = (agent.cwd / arg).resolve()
             if new_dir.is_dir():
