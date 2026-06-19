@@ -299,11 +299,18 @@ class Launcher(tk.Tk):
         self.gui_opts = ttk.Frame(opt_card, style="Card.TFrame")
         ttk.Checkbutton(self.gui_opts, text="Don't open the browser",
                         variable=self.no_browser).pack(side="left")
+        # The Web GUI is the phone/LAN surface, so it gets the same expose toggle
+        # as the API server. A network bind serves HTTPS automatically (built-in
+        # local-CA TLS), so no extra option is needed for encryption.
+        ttk.Checkbutton(self.gui_opts,
+                        text="Expose on the network (0.0.0.0, HTTPS - set "
+                             "LOCALM_API_KEY first!)",
+                        variable=self.host_lan).pack(side="left", padx=(16, 0))
         self.gui_opts.grid(row=3, column=0, columnspan=4, sticky="w", pady=(10, 0))
 
         self.serve_opts = ttk.Frame(opt_card, style="Card.TFrame")
         ttk.Checkbutton(self.serve_opts,
-                        text="Expose on the network (0.0.0.0 - set "
+                        text="Expose on the network (0.0.0.0, HTTPS - set "
                              "LOCALM_API_KEY first!)",
                         variable=self.host_lan).pack(side="left")
         self.serve_opts.grid(row=4, column=0, columnspan=4, sticky="w", pady=(10, 0))
@@ -555,6 +562,10 @@ class Launcher(tk.Tk):
                 cmd += ["--no-model"]
             else:
                 cmd += [model]
+            # Expose the GUI on the LAN (phone access). A network bind turns on
+            # built-in HTTPS automatically in the CLI - no TLS flag needed here.
+            if self.host_lan.get():
+                cmd += ["-H", "0.0.0.0"]
             if port:
                 cmd += ["-p", port]
             if ctx:
@@ -623,7 +634,7 @@ class Launcher(tk.Tk):
 
         # --- authentication: persist the key + require flag, inject into env ---
         key = self.api_key.get().strip()
-        exposing = self.mode.get() == "serve" and self.host_lan.get()
+        exposing = self.mode.get() in ("gui", "serve") and self.host_lan.get()
         if exposing and not key:
             self.status_msg("Set or Generate an API key before exposing on the "
                             "network", error=True)
