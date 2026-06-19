@@ -80,7 +80,7 @@ def _complete_model(ctx, param, incomplete):
 @click.option("-k", "--api-key",    default="localm", envvar="LOCALM_API_KEY",
               help="API key for the localm/custom server (also $LOCALM_API_KEY). "
                    "A require_auth server needs the real key.")
-@click.option("-p", "--port",       default=None,  type=int,
+@click.option("-p", "--port",       default=None,  type=click.IntRange(1, 65535),
               help="Port for the auto-started localm serve [default: first free in 8642-8741].")
 @click.option("-c", "--cwd",        default=None,  type=click.Path(exists=True, file_okay=False),
               help="Working directory [default: current directory].")
