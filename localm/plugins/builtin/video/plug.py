@@ -158,6 +158,12 @@ async def video(req: VideoRequest, request: Request):
         job.push({"type": "line", "text": msg})
         if not ok:
             return False
+        from localm.vram import decide_media_swap
+        swap = decide_media_swap(s)
+        if not swap:
+            job.push({"type": "line", "text":
+                      "Both models fit in VRAM - keeping the chat model loaded "
+                      "(no swap)."})
         job.push({"type": "line", "text":
                   f"Submitting Wan workflow to the video backend "
                   f"({req.seconds:.0f}s clip - video is slow, be patient)..."})
@@ -173,12 +179,14 @@ async def video(req: VideoRequest, request: Request):
             write_sidecar=effective_mode("server") != SessionMode.PRIVACY,
             on_progress=lambda t: job.push({"type": "line", "text": t}),
             input_image=input_image,
+            swap=swap,
             **kwargs,
         )
         job.push({"type": "line", "text": message})
         if ok:
             job.result = out_path.name
-            _reload_llm(job, self_url, s)
+            if swap:
+                _reload_llm(job, self_url, s)
         return ok
 
     job = jobs.start_fn("video", _generate, result_path=out_path.name)

@@ -157,6 +157,12 @@ async def imagine(req: ImagineRequest, request: Request):
         job.push({"type": "line", "text": msg})
         if not ok:
             return False
+        from localm.vram import decide_media_swap
+        swap = decide_media_swap(s)
+        if not swap:
+            job.push({"type": "line", "text":
+                      "Both models fit in VRAM - keeping the chat model loaded "
+                      "(no swap)."})
         job.push({"type": "line", "text": "Submitting workflow to the image backend..."})
         ok, message = _backend.generate(
             s, req.prompt, out_path,
@@ -168,11 +174,13 @@ async def imagine(req: ImagineRequest, request: Request):
             seed=req.seed,
             input_image=input_image,
             denoise=req.denoise,
+            swap=swap,
         )
         job.push({"type": "line", "text": message})
         if ok:
             job.result = out_path.name
-            _reload_llm(job, self_url, s)
+            if swap:
+                _reload_llm(job, self_url, s)
         return ok
 
     job = jobs.start_fn("imagine", _generate, result_path=out_path.name)

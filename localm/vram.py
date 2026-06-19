@@ -50,27 +50,59 @@ def should_swap_for_media(
 
 
 def resolve_swap_policy(plugin_block: dict, full_config: dict) -> str:
-    """Resolve the effective swap policy for a media plugin, honouring the legacy
-    reload toggles for back-compat.
+    """Resolve the effective media swap policy: a per-plugin ``model_swap_policy``
+    wins, then a global one, else the default ``auto``. An unknown policy string
+    falls back to ``auto``.
 
-    Precedence: an explicit global ``model_swap_policy`` wins; otherwise the
-    legacy reload flag (per-plugin ``reload_llm_after_generate`` or global
-    ``reload_llm_after_imagine``) is mapped - ``False`` means "keep the media
-    model loaded", i.e. do not swap the chat model back, i.e. ``never``;
-    anything else defaults to ``auto``. An unknown policy string falls back to
-    ``auto``.
+    The legacy ``reload_llm_after_imagine`` / per-plugin ``reload_llm_after_generate``
+    boolean is a SEPARATE axis: it controls whether the chat model is *reloaded
+    after* a generation (eager vs lazy), surfaced as the backend ``reload_after``
+    setting, and deliberately does NOT influence the swap (unload-before)
+    decision. Keeping the two axes independent means an existing ``false`` config
+    keeps its lazy-reload behaviour while still getting the safe, VRAM-aware
+    ``auto`` swap default - instead of silently never freeing VRAM (an OOM risk on
+    a small card) the way mapping ``false -> never`` would.
     """
-    explicit = (full_config or {}).get("model_swap_policy")
+    block = plugin_block or {}
+    explicit = block.get("model_swap_policy",
+                         (full_config or {}).get("model_swap_policy"))
     if isinstance(explicit, str) and explicit.lower() in _VALID_POLICIES:
         return explicit.lower()
-    block = plugin_block or {}
-    legacy = block.get(
-        "reload_llm_after_generate",
-        (full_config or {}).get("reload_llm_after_imagine", True),
-    )
-    if legacy is False:
-        return "never"
     return "auto"
+
+
+# Conservative per-backend VRAM estimates (GB) for the media model, used by the
+# 'auto' swap decision when the user has not set plugins.<name>.vram_estimate_gb.
+# Deliberately generous so 'auto' errs toward swapping on a small card; a large
+# card still keeps chat hot when free VRAM clearly exceeds the estimate + headroom.
+# Self-calibrating measurement from the real ComfyUI model files is a Phase 1.5
+# follow-up; a fixed estimate keeps the Phase-1 decision deterministic + testable.
+DEFAULT_MEDIA_VRAM_GB = {"image": 14.0, "music": 12.0, "video": 16.0}
+
+
+def media_estimate_bytes(name: str, plugin_block: Optional[dict] = None) -> int:
+    """Estimated peak VRAM (bytes) for media plugin *name*'s model. Honours a
+    per-plugin override ``vram_estimate_gb``; otherwise a conservative per-backend
+    default (see DEFAULT_MEDIA_VRAM_GB)."""
+    gb = (plugin_block or {}).get("vram_estimate_gb")
+    if not isinstance(gb, (int, float)) or gb <= 0:
+        gb = DEFAULT_MEDIA_VRAM_GB.get(name, 14.0)
+    return int(gb * 1024 ** 3)
+
+
+def decide_media_swap(settings: dict, *,
+                      read_free: Optional[Callable[[], Optional[int]]] = None) -> bool:
+    """Decide whether to unload the chat LLM before a media gen, reading live free
+    VRAM. *settings* is a resolved media-plugin settings dict carrying
+    ``swap_policy`` and ``vram_estimate_bytes`` (filled by the media backends).
+    Pass *read_free* to inject the free-VRAM reading in tests."""
+    if read_free is None:
+        def read_free() -> Optional[int]:
+            from localm.discover import vram_info
+            return vram_info().get("free")
+    return should_swap_for_media(
+        read_free(), settings.get("vram_estimate_bytes"),
+        policy=settings.get("swap_policy", "auto"))
 
 
 def wait_for_vram_release(

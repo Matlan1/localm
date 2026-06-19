@@ -18,6 +18,7 @@ from typing import Optional
 
 from localm.image_gen import comfy as _comfy
 from localm.plugins import media_config
+from localm.vram import media_estimate_bytes, resolve_swap_policy
 
 
 def settings(full_config: dict) -> dict:
@@ -36,6 +37,8 @@ def settings(full_config: dict) -> dict:
         "reload_after": bool(block.get(
             "reload_llm_after_generate",
             full_config.get("reload_llm_after_imagine", True))),
+        "swap_policy": resolve_swap_policy(block, full_config),
+        "vram_estimate_bytes": media_estimate_bytes("image", block),
         "warning": warning,
     }
 
@@ -56,7 +59,8 @@ def generate(s: dict, prompt: str, out_path: Path, *,
              negative_prompt: Optional[str] = None,
              seed: Optional[int] = None,
              input_image: Optional[Path] = None,
-             denoise: Optional[float] = None) -> tuple[bool, str]:
+             denoise: Optional[float] = None,
+             swap: bool = True) -> tuple[bool, str]:
     return _comfy.generate_image(
         prompt, out_path,
         api_url=s["api_url"],
@@ -70,4 +74,5 @@ def generate(s: dict, prompt: str, out_path: Path, *,
         launch_cmd=s["launch_cmd"] or None,
         workdir=s["workdir"] or None,
         comfy_output_dir=s["output_dir"] or None,
+        swap=swap,
     )

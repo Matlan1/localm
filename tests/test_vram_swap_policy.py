@@ -3,12 +3,17 @@
 The decision: before a media generation, do we unload the chat LLM to free VRAM,
 or does the media model fit alongside it (big card) so we keep chat hot?
 """
+import importlib
+from pathlib import Path
+
 import pytest
 
 from localm.vram import (
     should_swap_for_media,
     resolve_swap_policy,
     wait_for_vram_release,
+    decide_media_swap,
+    media_estimate_bytes,
 )
 
 GB = 1024 ** 3
@@ -70,16 +75,19 @@ class TestResolveSwapPolicy:
     def test_explicit_model_swap_policy_wins(self):
         assert resolve_swap_policy(plugin_block={}, full_config={"model_swap_policy": "never"}) == "never"
 
-    def test_legacy_reload_false_means_never(self):
-        # back-compat: the old reload_llm_after_imagine=false (keep media loaded) -> never swap chat
+    def test_per_plugin_policy_overrides_global(self):
+        assert resolve_swap_policy(plugin_block={"model_swap_policy": "never"},
+                                   full_config={"model_swap_policy": "always"}) == "never"
+
+    def test_legacy_reload_flag_does_not_affect_policy(self):
+        # the legacy reload bool is a SEPARATE axis (reload-after, not swap-before);
+        # it must NOT drag the policy to never - it stays the safe default auto.
         assert resolve_swap_policy(plugin_block={},
-                                   full_config={"reload_llm_after_imagine": False}) == "never"
-
-    def test_legacy_per_plugin_reload_false_means_never(self):
+                                   full_config={"reload_llm_after_imagine": False}) == "auto"
         assert resolve_swap_policy(plugin_block={"reload_llm_after_generate": False},
-                                   full_config={}) == "never"
+                                   full_config={}) == "auto"
 
-    def test_explicit_policy_overrides_legacy(self):
+    def test_explicit_policy_still_wins_over_legacy(self):
         assert resolve_swap_policy(plugin_block={},
                                    full_config={"model_swap_policy": "always",
                                                 "reload_llm_after_imagine": False}) == "always"
@@ -129,3 +137,113 @@ class TestWaitForVramRelease:
             lambda: 10 * GB + int(100e6), before_bytes=10 * GB,
             timeout_s=0.3, poll_s=0.1, sleep=clk.sleep, monotonic=clk.monotonic)
         assert released is False
+
+
+class TestMediaEstimateBytes:
+    def test_default_per_backend(self):
+        assert media_estimate_bytes("image", {}) == int(14 * GB)
+        assert media_estimate_bytes("music", {}) == int(12 * GB)
+        assert media_estimate_bytes("video", {}) == int(16 * GB)
+
+    def test_unknown_backend_falls_back(self):
+        assert media_estimate_bytes("weird", {}) == int(14 * GB)
+
+    def test_per_plugin_override_wins(self):
+        assert media_estimate_bytes("image", {"vram_estimate_gb": 8}) == 8 * GB
+
+    def test_bogus_override_ignored(self):
+        assert media_estimate_bytes("image", {"vram_estimate_gb": 0}) == int(14 * GB)
+        assert media_estimate_bytes("image", {"vram_estimate_gb": "huge"}) == int(14 * GB)
+        assert media_estimate_bytes("image", None) == int(14 * GB)
+
+
+class TestDecideMediaSwap:
+    """The live decision: read free VRAM, apply the policy."""
+
+    def _settings(self, policy="auto", est_gb=12):
+        return {"swap_policy": policy, "vram_estimate_bytes": est_gb * GB}
+
+    def test_auto_keeps_chat_when_media_fits(self):
+        assert decide_media_swap(self._settings(), read_free=lambda: 100 * GB) is False
+
+    def test_auto_swaps_when_tight(self):
+        assert decide_media_swap(self._settings(), read_free=lambda: 4 * GB) is True
+
+    def test_never_keeps_even_when_tight(self):
+        assert decide_media_swap(self._settings("never"), read_free=lambda: 1 * GB) is False
+
+    def test_always_swaps_even_when_roomy(self):
+        assert decide_media_swap(self._settings("always"), read_free=lambda: 100 * GB) is True
+
+    def test_unmeasurable_free_swaps(self):
+        assert decide_media_swap(self._settings(), read_free=lambda: None) is True
+
+    def test_missing_policy_defaults_to_auto(self):
+        assert decide_media_swap({"vram_estimate_bytes": 12 * GB},
+                                 read_free=lambda: 4 * GB) is True
+
+
+class TestBackendSwapSettings:
+    """The media backends surface swap_policy + vram_estimate_bytes (consumed by
+    decide_media_swap) and keep the legacy reload toggle working."""
+
+    def _settings(self, name, full_config):
+        mod = importlib.import_module(f"localm.plugins.builtin.{name}.backend")
+        return mod.settings(full_config)
+
+    @pytest.mark.parametrize("name,gb", [("image", 14), ("music", 12), ("video", 16)])
+    def test_defaults(self, name, gb):
+        s = self._settings(name, {})
+        assert s["swap_policy"] == "auto"
+        assert s["vram_estimate_bytes"] == int(gb * GB)
+
+    def test_legacy_reload_false_decouples_from_swap(self):
+        # the legacy reload bool drives reload-after (lazy), NOT the swap policy:
+        # swap_policy stays the safe auto and reload_after is preserved False.
+        s = self._settings("image", {"reload_llm_after_imagine": False})
+        assert s["swap_policy"] == "auto"
+        assert s["reload_after"] is False
+        # auto still swaps when VRAM is tight (no OOM) and keeps chat when it fits
+        assert decide_media_swap(s, read_free=lambda: 1 * GB) is True
+        assert decide_media_swap(s, read_free=lambda: 100 * GB) is False
+
+    def test_explicit_policy_overrides_legacy(self):
+        s = self._settings("video",
+                            {"model_swap_policy": "always",
+                             "reload_llm_after_imagine": False})
+        assert s["swap_policy"] == "always"
+
+
+@pytest.mark.parametrize("modpath, func, first_arg", [
+    ("localm.image_gen.comfy", "generate_image", "a prompt"),
+    ("localm.music_gen.comfy", "generate_music", "tags, mood"),
+    ("localm.video_gen.comfy", "generate_video", "a prompt"),
+])
+class TestMediaTransportSwapGate:
+    """The shared transports honour the swap flag: unload the chat LLM only when
+    swap=True. (Mirrors the media flow: plug.py decides, the transport obeys.)"""
+
+    def _arm(self, monkeypatch, mod, unload_calls):
+        monkeypatch.setattr(mod, "ensure_comfy", lambda *a, **k: (True, "ok"))
+        monkeypatch.setattr(mod, "_localm_unload",
+                            lambda *a, **k: unload_calls.append(1))
+        # Make the step right after the unload (workflow load) fail fast so the
+        # transport returns without needing a live ComfyUI.
+        monkeypatch.setattr(mod, "_workflow_path",
+                            lambda: Path("____no_such_workflow____.json"))
+
+    def test_swap_true_unloads(self, monkeypatch, modpath, func, first_arg):
+        mod = importlib.import_module(modpath)
+        calls = []
+        self._arm(monkeypatch, mod, calls)
+        ok, _msg = getattr(mod, func)(first_arg, Path("out.bin"), swap=True)
+        assert ok is False        # bailed at the (missing) workflow load
+        assert calls == [1]       # but the unload DID run first
+
+    def test_swap_false_skips_unload(self, monkeypatch, modpath, func, first_arg):
+        mod = importlib.import_module(modpath)
+        calls = []
+        self._arm(monkeypatch, mod, calls)
+        ok, _msg = getattr(mod, func)(first_arg, Path("out.bin"), swap=False)
+        assert ok is False
+        assert calls == []        # the unload was skipped (media fits)
