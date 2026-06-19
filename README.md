@@ -2,7 +2,7 @@
 
 **Run local LLMs offline, then build on them.**
 
-![License: MIT](https://img.shields.io/badge/license-MIT-green)
+![License: AGPL v3](https://img.shields.io/badge/license-AGPL%20v3-blue)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Platform: Windows | Linux](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey)
 
@@ -742,4 +742,15 @@ boundaries.
 
 ## License
 
-MIT
+Copyright (C) 2025-2026 Matlan1
+
+localm is free software, licensed under the **GNU Affero General Public License,
+version 3 or later** (AGPL-3.0-or-later). See [LICENSE](LICENSE) for the full text.
+
+In short: you may use, study, modify, and redistribute localm freely, including
+commercially. But if you redistribute it, or run a modified version as a network
+service, you must make the complete corresponding source available to your users
+under the same license. This keeps localm, and anything built on top of it, open.
+
+A separate commercial license (for terms other than the AGPL, such as embedding
+localm in a closed-source product) is available on request.
