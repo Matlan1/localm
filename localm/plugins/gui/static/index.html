@@ -425,6 +425,25 @@
   </div>
 </div>
 
+<!-- API-key gate: shown when the server returns 401 and this browser has no
+     working key (e.g. a network bind, where the loopback key is never
+     auto-seeded). An in-page form, NOT window.prompt() - mobile/PWA browsers
+     suppress prompt(), which left a phone/LAN client on a blank page (NET-1). -->
+<div id="key-gate" class="modal-backdrop" style="display:none">
+  <div class="modal">
+    <div class="modal-head"><span>API key required</span></div>
+    <div class="modal-body">
+      <p id="key-gate-msg">This localm server requires an API key.</p>
+      <label for="key-gate-input">API key (sent as a Bearer token; stored in this browser only)</label>
+      <input type="password" id="key-gate-input" autocomplete="off" spellcheck="false"
+             placeholder="LOCALM_API_KEY">
+      <div class="actions">
+        <button class="btn-quiet" id="key-gate-submit">Connect</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Command palette (Ctrl/Cmd+K): fuzzy-jump to any view or action. -->
 <div id="cmdk" class="modal-backdrop cmdk-backdrop" style="display:none">
   <div class="cmdk-panel" role="dialog" aria-label="Command palette">
