@@ -239,10 +239,37 @@ def revoke_key(key_id: str) -> bool:
     return True
 
 
+def _keystore_configured() -> bool:
+    """True when the scoped keystore should count as 'auth in effect'.
+
+    A present-but-UNPARSEABLE or unreadable auth.json counts as configured, so a
+    transient corruption fails CLOSED (every request still needs a key, and the
+    damaged store verifies none, so access is locked) instead of silently
+    dropping to open mode and exposing a scoped-keys-only install. A genuinely
+    absent or empty (``[]``) keystore is NOT configured (a fresh or cleared
+    install runs open by design, matching _load_keystore()'s empty result).
+    """
+    path = keystore_file()
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return False                       # absent -> no scoped keys
+    except OSError:
+        return True                        # exists but unreadable -> fail closed
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return True                        # exists but corrupt -> fail closed
+    return bool(data) if isinstance(data, list) else True
+
+
 def any_key_configured() -> bool:
-    """True when auth is in effect: an owner key (env/auth.key) OR any named key.
-    When this is False the server runs open (unless require_auth_enabled())."""
-    return get_api_key() is not None or bool(_load_keystore())
+    """True when auth is in effect: an owner key (env/auth.key) OR a configured
+    scoped keystore. When this is False the server runs open (unless
+    require_auth_enabled()). A corrupt or unreadable keystore counts as
+    configured so it fails CLOSED rather than silently open: a scoped-keys-only
+    install must not lose its auth to a damaged auth.json."""
+    return get_api_key() is not None or _keystore_configured()
 
 
 def verify(presented: Optional[str]) -> Optional[set]:
