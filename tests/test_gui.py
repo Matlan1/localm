@@ -2304,3 +2304,36 @@ class TestVideoEndpoints:
         with TestClient(app) as client:
             r = client.post("/api/video", json={"prompt": "a fox"})
         assert r.status_code == 503
+
+
+class TestPairingQR:
+    """GET /api/pairing/qr - the server-rendered key QR (owner scope only)."""
+
+    def test_404_in_open_mode(self, gui_app, monkeypatch):
+        # No key configured -> nothing to pair (and no key leaked).
+        monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+        app, _ = gui_app
+        with TestClient(app) as client:
+            assert client.get("/api/pairing/qr").status_code == 404
+
+    def test_serves_svg_to_owner(self, gui_app, monkeypatch):
+        from localm import auth
+        monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+        auth.set_api_key("ownerkey123")
+        app, _ = gui_app
+        with TestClient(app) as client:
+            r = client.get("/api/pairing/qr",
+                           headers={"Authorization": "Bearer ownerkey123"})
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("image/svg+xml")
+        assert b"<svg" in r.content
+        # The key must NOT appear as plaintext in the SVG (it is QR-encoded).
+        assert b"ownerkey123" not in r.content
+
+    def test_401_when_key_required_and_none_presented(self, gui_app, monkeypatch):
+        from localm import auth
+        monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+        auth.set_api_key("ownerkey123")
+        app, _ = gui_app
+        with TestClient(app) as client:
+            assert client.get("/api/pairing/qr").status_code == 401

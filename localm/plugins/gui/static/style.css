@@ -947,6 +947,14 @@ pre:hover .copy-btn { opacity: 1; }
 .onboard-help summary { cursor: pointer; color: var(--accent); font-size: 12px; }
 .onboard-help ul { margin: 8px 0 0; padding-left: 18px; line-height: 1.5; }
 .onboard-help li { margin-bottom: 4px; }
+
+/* Companion pairing QR (Settings) */
+.pairing { margin-top: 10px; }
+.pairing-qr { margin-top: 8px; width: 216px; }
+.pairing-qr svg {
+  width: 200px; height: 200px; background: #fff; padding: 8px;
+  border-radius: 8px; display: block;
+}
 .modal-body .log-entry {
   font-family: var(--mono); font-size: 12px; padding: 4px 0;
   border-bottom: 1px solid var(--border); word-break: break-word;
