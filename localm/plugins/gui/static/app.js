@@ -330,14 +330,43 @@ function startHwStats(intervalMs = 2500) {
   });
 }
 
+// In-page API-key gate. Shown when an authed boot request returns 401 and this
+// browser has no working key - the network/phone case, where the loopback key
+// is never auto-seeded. Replaces window.prompt() (suppressed by mobile/PWA
+// browsers, the NET-1 white-page cause). Idempotent: safe to call repeatedly.
+function showKeyGate(message) {
+  const gate = $("key-gate");
+  if (!gate) return;
+  if (message) { const m = $("key-gate-msg"); if (m) m.textContent = message; }
+  gate.style.display = "flex";
+  const input = $("key-gate-input");
+  if (input) {
+    input.value = localStorage.getItem("localm.apiKey") || "";
+    input.focus();
+  }
+}
+
+// Store the entered key (trimmed; empty clears it) and reload so the whole boot
+// re-runs authenticated. Mirrors the Settings "Save key" wiring (same storage).
+function submitKeyGate() {
+  const input = $("key-gate-input");
+  const key = (input ? input.value : "").trim();
+  if (key) localStorage.setItem("localm.apiKey", key);
+  else localStorage.removeItem("localm.apiKey");
+  location.reload();
+}
+
 let modelCache = { models: [], active: "" };
 
 async function refreshModels() {
   try {
     const r = await fetch("/api/models", { headers: authHeaders() });
     if (r.status === 401) {
-      const key = prompt("This server requires an API key (LOCALM_API_KEY):");
-      if (key) { localStorage.setItem("localm.apiKey", key); location.reload(); }
+      // No working key (e.g. a network bind, where the loopback key is never
+      // auto-seeded). Show the in-page key gate instead of window.prompt() -
+      // mobile/PWA browsers suppress prompt(), which left a phone/LAN client on
+      // a blank page (NET-1). The gate stores the key and reloads on submit.
+      showKeyGate("This localm server requires an API key.");
       return;
     }
     const data = await r.json();
@@ -3412,6 +3441,13 @@ attachSlashMenu($("coder-input"), CODER_COMMANDS, (c) => execCoderCommand(c));
 /* ================================================================ */
 
 $("setup-cwd").value = localStorage.getItem("localm.coderCwd") || "";
+// API-key gate wiring (shown by showKeyGate on a 401 boot, e.g. a network bind).
+if ($("key-gate-submit")) $("key-gate-submit").onclick = submitKeyGate;
+if ($("key-gate-input")) {
+  $("key-gate-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); submitKeyGate(); }
+  });
+}
 refreshModels().then(() => populateSetupModels());
 // Server persistence depends on knowing the privacy state first.
 refreshCtxLimit().then(initServerConversations);
