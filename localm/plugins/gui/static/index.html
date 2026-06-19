@@ -418,6 +418,11 @@
           <div class="sub">Connected to <code id="conn-origin">this server</code>. This app talks
           only to the server that served it - to use it from your phone, open that address on the
           phone (over your LAN, or a private network like Tailscale) and install it from there.</div>
+          <div id="pairing" class="pairing" style="display:none">
+            <div class="sub">Pair a phone: open localm on the phone, tap <b>Scan QR code</b> on the
+            onboarding screen, and point it at this code to copy the API key over - no typing.</div>
+            <div id="pairing-qr" class="pairing-qr"></div>
+          </div>
           <div class="actions">
             <button class="btn-primary" id="install-app" style="display:none">Install as app</button>
             <span id="install-hint" class="sub">Use your browser's <em>Install app</em> /
