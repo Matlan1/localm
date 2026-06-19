@@ -346,6 +346,10 @@ function showKeyGate(message) {
   const cert = $("key-gate-cert");
   if (cert) cert.style.display =
     (location.protocol === "https:") ? "block" : "none";
+  // Offer "Scan QR code" only where it can work: a touch device with the native
+  // BarcodeDetector + a camera (Android Chrome). iOS / unsupported -> manual entry.
+  const scan = $("key-gate-scan");
+  if (scan) scan.style.display = scanSupported() ? "inline-block" : "none";
   const input = $("key-gate-input");
   if (input) {
     input.value = localStorage.getItem("localm.apiKey") || "";
@@ -361,6 +365,72 @@ function submitKeyGate() {
   if (key) localStorage.setItem("localm.apiKey", key);
   else localStorage.removeItem("localm.apiKey");
   location.reload();
+}
+
+// --- Pairing QR scanner (phone) -------------------------------------------
+// Reads the key QR shown in the computer's Settings (Companion app) with the
+// browser-native BarcodeDetector + camera, and saves the key without typing.
+// Capability = Android Chrome / Chromium; iOS Safari has no BarcodeDetector, so
+// the button stays hidden there and manual entry is the path.
+function scanSupported() {
+  const cap = ("BarcodeDetector" in window)
+    && !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+  const touchLike = (navigator.maxTouchPoints || 0) > 0
+    || !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
+  return cap && touchLike;
+}
+
+// Decode a scanned payload -> save the key + reload. Returns true when it was a
+// localm pairing QR (so the scanner can stop). Factored out for unit testing.
+function handleScannedKey(text) {
+  const prefix = "localm-key:";
+  if (typeof text !== "string" || !text.startsWith(prefix)) return false;
+  const key = text.slice(prefix.length).trim();
+  if (!key) return false;
+  localStorage.setItem("localm.apiKey", key);
+  location.reload();
+  return true;
+}
+
+let _qrStream = null;
+let _qrTimer = null;
+function stopQrScan() {
+  if (_qrTimer) { clearInterval(_qrTimer); _qrTimer = null; }
+  if (_qrStream) { _qrStream.getTracks().forEach((t) => t.stop()); _qrStream = null; }
+  const v = $("qr-video"); if (v) v.srcObject = null;
+  const s = $("qr-scanner"); if (s) s.style.display = "none";
+}
+
+async function startQrScan() {
+  const overlay = $("qr-scanner"), video = $("qr-video"), status = $("qr-scan-status");
+  if (!overlay || !video) return;
+  overlay.style.display = "flex";
+  if (status) status.textContent = "Starting camera…";
+  let detector;
+  try { detector = new window.BarcodeDetector({ formats: ["qr_code"] }); }
+  catch (e) { if (status) status.textContent = "QR scanning is not available here."; return; }
+  try {
+    _qrStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "environment" }, audio: false });
+  } catch (e) {
+    if (status) status.textContent = "Could not open the camera (permission denied?).";
+    return;
+  }
+  video.srcObject = _qrStream;
+  try { await video.play(); } catch (e) { /* autoplay guard */ }
+  if (status) status.textContent = "Point at the QR in the computer's Settings.";
+  let busy = false;
+  _qrTimer = setInterval(async () => {
+    if (busy || !_qrStream) return;
+    busy = true;
+    try {
+      const codes = await detector.detect(video);
+      for (const c of codes) {
+        if (handleScannedKey(c.rawValue)) { stopQrScan(); return; }
+      }
+    } catch (e) { /* transient detect error - keep scanning */ }
+    finally { busy = false; }
+  }, 300);
 }
 
 let modelCache = { models: [], active: "" };
@@ -3450,6 +3520,8 @@ attachSlashMenu($("coder-input"), CODER_COMMANDS, (c) => execCoderCommand(c));
 $("setup-cwd").value = localStorage.getItem("localm.coderCwd") || "";
 // API-key gate wiring (shown by showKeyGate on a 401 boot, e.g. a network bind).
 if ($("key-gate-submit")) $("key-gate-submit").onclick = submitKeyGate;
+if ($("key-gate-scan")) $("key-gate-scan").onclick = startQrScan;
+if ($("qr-scan-cancel")) $("qr-scan-cancel").onclick = stopQrScan;
 if ($("key-gate-input")) {
   $("key-gate-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter") { e.preventDefault(); submitKeyGate(); }
