@@ -376,9 +376,16 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     # loopback (a 127.0.0.1 bind) and can safely seed the API key into the page.
     app.state.bind_host = host
 
+    # Advertise this server in the instance registry (H6 phase 3) as a "full"
+    # surface (API + GUI) so a future launch in the same dir can discover it.
+    from localm import instances
+    from localm.config import home_dir
+
     import uvicorn
     try:
-        uvicorn.run(app, host=host, port=chosen_port, log_level="warning",
-                    ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
+        with instances.advertise(app, home_dir(), host=host, port=chosen_port,
+                                 mode="full"):
+            uvicorn.run(app, host=host, port=chosen_port, log_level="warning",
+                        ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
     finally:
         manager.close_all()

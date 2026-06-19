@@ -277,6 +277,25 @@ def create_app(engine: Engine) -> FastAPI:
         }
 
     # ---------------------------------------------------------------- #
+    #  Instance identity (H6 server-rework, phase 3)                    #
+    # ---------------------------------------------------------------- #
+
+    @app.get("/whoami", include_in_schema=False)
+    async def whoami(request: Request):
+        """Identity handshake for instance discovery: confirms this really is a
+        localm server and which instance/project it serves. Unauthenticated like
+        /health; never returns the attach token or pid. Fields are set on
+        app.state by the surface's advertise() wrapper (None before startup
+        wiring, e.g. an app mounted standalone in tests)."""
+        from localm import instances
+        st = request.app.state
+        return instances.whoami_payload(
+            instance_id=getattr(st, "instance_id", None),
+            root_dir=getattr(st, "root_dir", None),
+            mode=getattr(st, "instance_mode", None),
+        )
+
+    # ---------------------------------------------------------------- #
     #  Built-in TLS: CA download (NET-1)                                 #
     # ---------------------------------------------------------------- #
 
@@ -1125,19 +1144,28 @@ def _protocol_messages_to_dicts(messages: List[Message]) -> list:
 
 def serve(engine: Engine, host: str = "127.0.0.1", port: int = 8642,
           ssl_certfile: Optional[str] = None,
-          ssl_keyfile: Optional[str] = None) -> None:
+          ssl_keyfile: Optional[str] = None,
+          project: Optional[str] = None) -> None:
     """Start the server - blocks until Ctrl+C.
 
     When ``ssl_certfile`` / ``ssl_keyfile`` are given (built-in TLS, NET-1), the
     server speaks HTTPS on this port; a plain-HTTP request to it then fails the
     TLS handshake (effectively refused) rather than crossing the network in
     cleartext.
+
+    Advertises itself in the instance registry (H6 phase 3) as an ``api`` surface
+    for the duration of the run, so a future launch can discover it.
     """
     import uvicorn
+
+    from localm import instances
+    from localm.config import home_dir
 
     app = create_app(engine)
     # Record the bind host so routes that depend on it (open-mode seeding,
     # CA download) can reason about loopback vs network binds.
     app.state.bind_host = host
-    uvicorn.run(app, host=host, port=port, log_level="warning",
-                ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
+    with instances.advertise(app, home_dir(), host=host, port=port,
+                             mode="api", project=project):
+        uvicorn.run(app, host=host, port=port, log_level="warning",
+                    ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
