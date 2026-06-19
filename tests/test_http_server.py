@@ -75,7 +75,11 @@ GB = 1024 ** 3
 class TestUnloadEndpoint(unittest.TestCase):
     def setUp(self):
         self.engine = _make_mock_engine(loaded=True)
-        self.client = TestClient(create_app(self.engine))
+        # H5: model unload is a MODELS_WRITE management route; open mode needs the
+        # loopback shell token (the GUI carries it).
+        _app = create_app(self.engine)
+        self.client = TestClient(
+            _app, headers={"Authorization": f"Bearer {_app.state.shell_token}"})
         # VRAM unmeasurable by default so the C4 release-guard returns at once,
         # rather than polling its full timeout for VRAM a mock engine never frees.
         p = patch("localm.discover.vram_info", return_value={})
@@ -112,7 +116,11 @@ class TestUnloadEndpoint(unittest.TestCase):
 class TestLoadEndpoint(unittest.TestCase):
     def setUp(self):
         self.engine = _make_mock_engine(loaded=False)
-        self.client = TestClient(create_app(self.engine))
+        # H5: model load is a MODELS_WRITE management route; open mode needs the
+        # loopback shell token (the GUI carries it).
+        _app = create_app(self.engine)
+        self.client = TestClient(
+            _app, headers={"Authorization": f"Bearer {_app.state.shell_token}"})
 
     def test_load_when_unloaded(self):
         r = self.client.post("/v1/models/load")

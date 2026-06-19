@@ -32,7 +32,12 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "HOME_DIR", home)
     monkeypatch.setattr(cfg, "CONFIG_FILE", home / "config.json")
     monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
-    with TestClient(create_app(None)) as c:
+    # H5: the one PATCH /v1/config test below is a management write that needs the
+    # loopback shell token in open mode; seed it by default (GET schema reads are
+    # unaffected, and the protected-mode test overrides the header with its key).
+    app = create_app(None)
+    with TestClient(
+        app, headers={"Authorization": f"Bearer {app.state.shell_token}"}) as c:
         yield c
 
 
