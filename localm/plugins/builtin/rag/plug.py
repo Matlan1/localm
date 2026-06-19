@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """RAG plugin: document collections for retrieval-augmented chat.
 
 Routes (mounted by the engine, auto-scoped to the ``rag`` capability):

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """ComfyUI backend for the image plugin.
 
 Thin wrapper over the shared Comfy HTTP plumbing (``localm.image_gen.comfy``)

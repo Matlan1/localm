@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """localm abliterate plugin - decensor a model with Heretic, then register it.
 
 Install with:  pip install "localm[abliterate]"

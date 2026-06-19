@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for the localm MCP server plugin (plugins/mcpserver)."""
 
 import io

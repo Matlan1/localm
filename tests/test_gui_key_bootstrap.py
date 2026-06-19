@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """C1 (GUI half): a fresh loopback `localm gui` launch must not be locked out
 when require_auth is on. The SPA shell seeds the configured API key into
 localStorage on a loopback bind, but never hands it to a non-loopback LAN client.

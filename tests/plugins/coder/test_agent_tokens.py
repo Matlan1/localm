@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for agent token accumulation (Phase 1.2) and memory integration (Phase 1.3)."""
 
 import unittest

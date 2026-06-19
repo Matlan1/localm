@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for read_env, tool-result compression, and HTTP 429 retry."""
 
 from unittest.mock import MagicMock, patch

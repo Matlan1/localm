@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Config update validation (localm.settings_schema.validate_update) and its two
 consumers: the `localm config` CLI command and PATCH /v1/config.
 

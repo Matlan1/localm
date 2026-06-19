@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 // jsdom tests for the Settings "Performance" card (setupPerfCard /
 // refreshPerfEstimate in app.js): the GPU-layers + context sliders seed from
 // /v1/config, the live VRAM readout reflects /api/vram-estimate, and Apply

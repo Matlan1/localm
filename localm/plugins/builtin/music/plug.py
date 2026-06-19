@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Music plugin: ComfyUI ACE-Step music generation + a library for the chat surface.
 
 Routes (mounted by the engine, auto-scoped to the ``music`` capability):

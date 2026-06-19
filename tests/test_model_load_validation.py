@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """
 Tests for "load from folder" validation: add_local must refuse the localm data
 directory and non-model paths instead of polluting the registry, and the HF-dir

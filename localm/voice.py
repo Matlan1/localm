@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """
 Speech-to-text for the GUI chat: Whisper via faster-whisper (CPU int8).
 

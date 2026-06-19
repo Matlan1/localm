@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """
 Low-level ctypes bindings for the llama.cpp C API.
 

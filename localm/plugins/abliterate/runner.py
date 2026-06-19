@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Locate and invoke Heretic as an external program.
 
 Heretic (https://github.com/Matlan1/heretic-win-AMD) is licensed under

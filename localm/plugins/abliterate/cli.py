@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """``localm abliterate`` - decensor a model with Heretic, then register it.
 
 NOTICE: This command invokes Heretic

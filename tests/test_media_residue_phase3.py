@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Media-containment residue regression tests (M2 Phase 3).
 
 Two leaks are covered here, both about a generation leaving a trace that the

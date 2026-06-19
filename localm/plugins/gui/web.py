@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """
 GUI web layer - API routes and static file serving, attached to the
 existing localm FastAPI inference app.

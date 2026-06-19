@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """OpenAI-compatible request / response types (multimodal-aware)."""
 
 from __future__ import annotations

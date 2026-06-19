@@ -17,6 +17,10 @@ build-backend = "hatchling.build"
 name = "localm-llama-runtime"
 version = "0.1.0"
 description = "Native llama.cpp inference binaries for localm (provisioned locally, not committed)"
+# The Python packaging shim here is part of localm and shares its license. The
+# native binaries downloaded into lib/ at runtime keep their own upstream
+# licenses (llama.cpp and ggml are MIT) and are not redistributed via this repo.
+license = { text = "AGPL-3.0-or-later" }
 requires-python = ">=3.10"
 
 [tool.hatch.build.targets.wheel]

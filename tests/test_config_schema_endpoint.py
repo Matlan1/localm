@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for GET /v1/config/schema (F2 / FAC-12).
 
 The schema-driven settings page fetches this endpoint to learn each field's

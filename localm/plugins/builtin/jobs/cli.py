@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """``localm job`` CLI: manage scheduled recurring jobs from the terminal.
 
 Subcommands:

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """SEC-8 regression: the native-binary download had no integrity check.
 
 ``localm setup-llama`` downloaded a prebuilt release zip and extracted +

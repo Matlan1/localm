@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """
 Tests for the coder QoL round: changed-files tracker + session diff,
 mid-task message queue, circuit breaker, parallel execution (ordering +

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for the ACE-Step music generation module (music_gen/comfy.py).
 
 The generator had zero coverage; these mirror tests/test_video_gen.py and pin

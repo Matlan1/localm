@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for the dynamic context window: growth steps, ceiling, auto sizing."""
 
 from unittest.mock import MagicMock, patch

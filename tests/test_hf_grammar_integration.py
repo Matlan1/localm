@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """REAL grammar-constrained-decoding test for the HuggingFace backend.
 
 No mocks: a tiny ungated causal LM (sshleifer/tiny-gpt2, full GPT-2 tokenizer)

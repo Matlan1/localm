@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 // jsdom tests for the command palette (Ctrl/Cmd+K) in app.js. We assert
 // observable effects: the palette shows/hides, typing filters the list, and
 // running a "Go to <view>" command actually activates that view (showView).

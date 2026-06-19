@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for localm.discover - HF search, quant parsing, VRAM fit badges.
 All HuggingFace calls are mocked; no real network."""
 

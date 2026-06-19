@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Chat plugin: the built-in, protected, default-enabled plugin #0.
 
 This is the reference implementation of the plugin contract - the cleanest,

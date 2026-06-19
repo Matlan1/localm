@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """ComfyUI (Wan) backend for the video plugin.
 
 Mirrors the image/music plugin backends: a thin wrapper over the shared Comfy

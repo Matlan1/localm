@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Phase 3 (GAP-RAG-1): the BM25 tokenizer must be unicode-aware.
 
 The original tokenizer used an ASCII-only regex ([a-z0-9]+), so any

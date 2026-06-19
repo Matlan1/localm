@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for the capability/scope taxonomy (localm/scopes.py)."""
 
 from localm import scopes

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """
 ComfyUI Wan 2.2 short-video generation.
 

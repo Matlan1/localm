@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Repository hygiene check (see AGENTS.md).
 
 Scans tracked files and fails on:

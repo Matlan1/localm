@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """ComfyUI (ACE-Step) backend for the music plugin.
 
 Mirrors the image plugin's backend: a thin wrapper over the shared Comfy HTTP

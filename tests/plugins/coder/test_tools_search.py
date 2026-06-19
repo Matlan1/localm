@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """
 Tests for search tools in localm.plugins.coder.tools:
   tool_search_files, tool_grep, tool_search_replace

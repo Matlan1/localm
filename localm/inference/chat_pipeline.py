@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """
 Chat-pipeline hooks: an ordered inlet / stream / outlet chain that loaded
 plugins use to intercept and transform a chat turn server-side, in the kernel

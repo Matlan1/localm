@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """
 In-app model discovery: search HuggingFace for GGUF models and judge,
 per quantization, whether a file fits this machine's VRAM.

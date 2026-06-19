@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """CUDA preflight, self-assembly, and the load-test + graceful fallback for
 ``localm setup-llama``.
 

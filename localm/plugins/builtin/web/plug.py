@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Web plugin: search and page fetch for the chat surface.
 
 Routes (mounted by the engine, auto-scoped to the ``web`` capability):

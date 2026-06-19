@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Register tools exported by external plugins into the coder's TOOL_REGISTRY.
 
 A plugin opts in through its manifest:
