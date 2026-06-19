@@ -36,12 +36,13 @@ def _retry_delay(response, attempt: int) -> float:
 
 
 def _post_with_retry(url: str, *, headers: dict, json_body: dict,
-                     timeout: int, stream: bool = False) -> requests.Response:
+                     timeout: int, stream: bool = False,
+                     verify=True) -> requests.Response:
     """POST with retry on 429/5xx. Returns the first non-retryable response."""
     last = None
     for attempt in range(_MAX_RETRIES + 1):
         resp = requests.post(url, headers=headers, json=json_body,
-                             timeout=timeout, stream=stream)
+                             timeout=timeout, stream=stream, verify=verify)
         if resp.status_code not in _RETRY_STATUSES or attempt == _MAX_RETRIES:
             return resp
         delay = _retry_delay(resp, attempt)
@@ -81,6 +82,7 @@ class HTTPBackend(BaseLLMBackend):
         timeout: int = 300,
         native_tools: bool = False,
         anthropic: bool = False,
+        verify=None,
         **extra_params,
     ) -> None:
         self._base_url     = base_url.rstrip("/")
@@ -88,6 +90,14 @@ class HTTPBackend(BaseLLMBackend):
         self._api_key      = api_key
         self._timeout      = timeout
         self._extra        = extra_params
+        # TLS verification for the POST. A localm network bind serves HTTPS via
+        # its own local CA, so a loopback self-call must trust that CA; external
+        # HTTPS (OpenAI/Anthropic) keeps normal public verification. verify=None
+        # derives this from base_url; an explicit value overrides (tests).
+        if verify is None:
+            from localm import tls
+            verify = tls.requests_verify(base_url)
+        self._verify = verify
         self._last_usage: dict = {}
         self.native_tools  = native_tools
         # Anthropic speaks the Messages API (/v1/messages, x-api-key,
@@ -273,6 +283,7 @@ class HTTPBackend(BaseLLMBackend):
             headers=self._headers(),
             json_body=self._body(messages, stream=False, **kwargs),
             timeout=self._timeout,
+            verify=self._verify,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -304,6 +315,7 @@ class HTTPBackend(BaseLLMBackend):
             json_body=self._body(messages, stream=True, **kwargs),
             timeout=self._timeout,
             stream=True,
+            verify=self._verify,
         ) as resp:
             resp.raise_for_status()
             for line in resp.iter_lines():
@@ -367,6 +379,7 @@ class HTTPBackend(BaseLLMBackend):
             json_body=self._body(messages, stream=True, **kwargs),
             timeout=self._timeout,
             stream=True,
+            verify=self._verify,
         ) as resp:
             resp.raise_for_status()
             for line in resp.iter_lines():

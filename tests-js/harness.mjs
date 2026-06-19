@@ -49,10 +49,12 @@ function installStubs(win, { fetchImpl } = {}) {
  * Build a jsdom window with app.js loaded but its DOMContentLoaded init NOT run.
  * Returns { dom, window }. Pass fetchImpl to control network.
  */
-export function loadApp({ fetchImpl } = {}) {
+export function loadApp({ fetchImpl, url } = {}) {
   const html = read("index.html");
   const dom = new JSDOM(html, {
-    url: "http://localhost:8642/",
+    // Pass url: "https://..." to exercise the HTTPS-only paths (e.g. the
+    // built-in-TLS "Install certificate" link on the key gate).
+    url: url || "http://localhost:8642/",
     runScripts: "dangerously",   // execute scripts we inject (vendor src tags are not loaded)
     pretendToBeVisual: true,
   });

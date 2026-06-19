@@ -49,3 +49,21 @@ test("NET-1: submitting the gate stores the key (trimmed) for the next boot", as
   assert.equal(window.localStorage.getItem("localm.apiKey"), "my-secret-key",
     "submitting stores the trimmed key so the reloaded boot is authenticated");
 });
+
+test("NET-1: over HTTPS the gate offers a one-tap Install-certificate link", async () => {
+  const { window } = loadApp({ fetchImpl: keyless401, url: "https://192.168.0.5:8651/" });
+  await tick();
+  const cert = window.document.getElementById("key-gate-cert");
+  const link = window.document.getElementById("key-gate-cert-link");
+  assert.ok(cert, "#key-gate-cert exists in the shell");
+  assert.notEqual(cert.style.display, "none", "cert link is shown over HTTPS (built-in TLS)");
+  assert.equal(link.getAttribute("href"), "/localm-ca.crt", "links to the CA download");
+});
+
+test("NET-1: over plain HTTP the cert link stays hidden (loopback dev gate)", async () => {
+  const { window } = loadApp({ fetchImpl: keyless401, url: "http://localhost:8642/" });
+  await tick();
+  const cert = window.document.getElementById("key-gate-cert");
+  assert.ok(cert, "#key-gate-cert exists");
+  assert.equal(cert.style.display, "none", "no CA to install over plain HTTP, so hidden");
+});

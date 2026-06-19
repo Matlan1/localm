@@ -26,7 +26,7 @@ from typing import AsyncIterator, List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from localm import scopes
@@ -275,6 +275,29 @@ def create_app(engine: Engine) -> FastAPI:
             "model":  _engine.display_name,
             "loaded": _engine.loaded,
         }
+
+    # ---------------------------------------------------------------- #
+    #  Built-in TLS: CA download (NET-1)                                 #
+    # ---------------------------------------------------------------- #
+
+    @app.get("/localm-ca.crt", include_in_schema=False)
+    async def localm_ca_cert():
+        """Serve localm's local CA certificate so a browser or phone can trust
+        the built-in TLS once - removing the warning and enabling PWA install.
+        Deliberately public and unauthenticated: a CA *certificate* carries no
+        secret (the CA private key never leaves ``<home>/tls``), and the client
+        needs it before it can present a key. 404 when this install has no CA
+        (e.g. a loopback / plain-HTTP run that never generated one)."""
+        from localm import tls
+        from localm.config import home_dir
+        ca = tls.ca_cert_path(home_dir())
+        if not ca.is_file():
+            raise HTTPException(404, "No localm CA on this server (TLS not enabled).")
+        return Response(
+            content=ca.read_bytes(),
+            media_type="application/x-x509-ca-cert",
+            headers={"Content-Disposition": 'attachment; filename="localm-ca.crt"'},
+        )
 
     # ---------------------------------------------------------------- #
     #  Models list                                                       #
@@ -1100,9 +1123,21 @@ def _protocol_messages_to_dicts(messages: List[Message]) -> list:
 #  Entry point                                                         #
 # ------------------------------------------------------------------ #
 
-def serve(engine: Engine, host: str = "127.0.0.1", port: int = 8642) -> None:
-    """Start the server - blocks until Ctrl+C."""
+def serve(engine: Engine, host: str = "127.0.0.1", port: int = 8642,
+          ssl_certfile: Optional[str] = None,
+          ssl_keyfile: Optional[str] = None) -> None:
+    """Start the server - blocks until Ctrl+C.
+
+    When ``ssl_certfile`` / ``ssl_keyfile`` are given (built-in TLS, NET-1), the
+    server speaks HTTPS on this port; a plain-HTTP request to it then fails the
+    TLS handshake (effectively refused) rather than crossing the network in
+    cleartext.
+    """
     import uvicorn
 
     app = create_app(engine)
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+    # Record the bind host so routes that depend on it (open-mode seeding,
+    # CA download) can reason about loopback vs network binds.
+    app.state.bind_host = host
+    uvicorn.run(app, host=host, port=port, log_level="warning",
+                ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)

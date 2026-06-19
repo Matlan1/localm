@@ -69,9 +69,11 @@ def _make_self_embed(self_url: str, active_model):
         key = os.environ.get("LOCALM_API_KEY")
         if key:
             headers["Authorization"] = f"Bearer {key}"
+        from localm import tls as _tls
         r = _rq.post(f"{self_url}/embeddings",
                      json={"input": texts, "model": active_model() or "localm"},
-                     headers=headers, timeout=600)
+                     headers=headers, timeout=600,
+                     verify=_tls.requests_verify(self_url))
         r.raise_for_status()
         return [d["embedding"] for d in r.json()["data"]]
     return _self_embed

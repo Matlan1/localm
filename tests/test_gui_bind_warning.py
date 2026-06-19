@@ -15,16 +15,19 @@ class TestGuiBindWarning:
         assert _gui_bind_warning("127.0.0.1") is None
         assert _gui_bind_warning("localhost") is None
 
-    def test_lan_bind_warns_about_coder_and_tls(self):
+    def test_lan_bind_warns_about_coder_agent(self):
         with patch.dict("os.environ", {}, clear=False) as _env:
             import os
             os.environ.pop("LOCALM_API_KEY", None)
             msg = _gui_bind_warning("0.0.0.0")
         assert msg is not None
         assert "0.0.0.0" in msg
+        # The coder-agent reach is the GUI-specific hazard the warning exists for.
         assert "coder agent" in msg
         assert "shell" in msg
-        assert "reverse proxy" in msg
+        # Built-in TLS now encrypts a network bind, so the warning must NOT push a
+        # reverse proxy as the way to get encryption (NET-1).
+        assert "reverse proxy" not in msg
 
     def test_api_key_silences_warning(self):
         # Setting an API key is the documented precaution; stay quiet then,

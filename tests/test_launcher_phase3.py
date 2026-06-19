@@ -136,6 +136,59 @@ def test_spawn_forwards_cwd_and_env(launcher_mod, monkeypatch):
     assert kwargs.get("env") == env
 
 
+def _build_fake(launcher_mod, **overrides):
+    """A headless stand-in carrying just the StringVar/BooleanVar-like fields
+    _build_command reads. Avoids constructing a Tk root."""
+    class _Var:
+        def __init__(self, v):
+            self._v = v
+
+        def get(self):
+            return self._v
+
+    base = dict(
+        mode="gui", model=launcher_mod.NO_MODEL_LABEL, ctx="", gpu_layers="",
+        port="", privacy_global="privacy", privacy_chat=launcher_mod.USE_GLOBAL,
+        privacy_coder=launcher_mod.USE_GLOBAL, no_browser=False, host_lan=False,
+        debug=False, coder_dir="", coder_yes=False,
+    )
+    base.update(overrides)
+
+    class _Fake:
+        pass
+
+    fake = _Fake()
+    fake.messages = []
+    fake.status_msg = lambda text, error=False: fake.messages.append((text, error))
+    for key, val in base.items():
+        setattr(fake, key, _Var(val))
+    return fake
+
+
+def test_gui_expose_drives_network_bind_with_auto_tls(launcher_mod):
+    """NET-1: ticking "Expose on the network" in Web GUI mode must launch
+    `localm gui -H 0.0.0.0` (which turns on built-in HTTPS) - the maintainer's
+    phone flow. No --no-tls: encryption stays on by default."""
+    fake = _build_fake(launcher_mod, mode="gui", host_lan=True)
+    cmd = launcher_mod.Launcher._build_command(fake)
+    assert "gui" in cmd
+    assert "-H" in cmd and cmd[cmd.index("-H") + 1] == "0.0.0.0"
+    assert "--no-tls" not in cmd
+
+
+def test_gui_without_expose_stays_loopback(launcher_mod):
+    fake = _build_fake(launcher_mod, mode="gui", host_lan=False)
+    cmd = launcher_mod.Launcher._build_command(fake)
+    assert "-H" not in cmd
+
+
+def test_serve_expose_still_binds_network(launcher_mod):
+    """Regression: the serve-mode expose path is unchanged."""
+    fake = _build_fake(launcher_mod, mode="serve", model="m", host_lan=True)
+    cmd = launcher_mod.Launcher._build_command(fake)
+    assert "serve" in cmd and "-H" in cmd and "0.0.0.0" in cmd
+
+
 def test_launch_handler_uses_helper_on_posix(launcher_mod, monkeypatch):
     """End-to-end-ish: the buried Launch handler routes through the helper, so a
     POSIX user clicking Launch spawns a real child instead of getting the
