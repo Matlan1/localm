@@ -955,6 +955,10 @@ pre:hover .copy-btn { opacity: 1; }
   width: 200px; height: 200px; background: #fff; padding: 8px;
   border-radius: 8px; display: block;
 }
+.qr-video {
+  width: 100%; max-width: 320px; border-radius: 8px; background: #000;
+  display: block; margin: 4px 0;
+}
 .modal-body .log-entry {
   font-family: var(--mono); font-size: 12px; padding: 4px 0;
   border-bottom: 1px solid var(--border); word-break: break-word;
