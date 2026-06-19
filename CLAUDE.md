@@ -30,3 +30,9 @@ full app (`localm gui`, `localm serve`, `localm run`) to check a change in the
 real product, no need to ask. Use a small model (a tiny GGUF, or
 `localm gui --no-model`), prefer a throwaway `LOCALM_HOME` so it does not touch
 the user's real data, and stop it when done. See `AGENTS.md` for the full text.
+
+Merging PRs: this is a solo-maintained repo and you are pre-approved to MERGE
+your own PRs once ready (verified + CI green + mergeable), squash-merging and
+deleting the branch. Do not wait for the maintainer to merge. Never merge
+failing, conflicted, or unverified work; do not stack PRs. See `AGENTS.md`
+"Git and PR workflow".
