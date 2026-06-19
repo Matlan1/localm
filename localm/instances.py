@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Instance discovery registry (H6 server-rework, phase 3 - advertise only).
+"""Instance discovery registry (H6 server-rework, phases 3-4).
 
-Each running localm server advertises itself so a future launch can DISCOVER and
-attach to it (phase 4) instead of spinning a second server that double-loads the
-model - the "why is the coder an extra CLI / why a second server" smell. This
-phase only writes/reaps the registry and serves ``GET /whoami``; it changes no
-behavior.
+Each running localm server advertises itself (phase 3) so a future launch can
+DISCOVER and attach to it (phase 4) instead of spinning a second server that
+double-loads the model - the "why is the coder an extra CLI / why a second
+server" smell. ``find_attachable`` returns the live, identity-verified instance
+serving a project dir (or None to spawn); ``advertise`` writes/reaps the registry
+and serves ``GET /whoami``.
 
 Registry: one JSON file per instance under ``<LOCALM_HOME>/run/<instance_id>.json``::
 
@@ -125,9 +126,12 @@ def _lock_down_dir(path: Path) -> None:
 
 def register_instance(home: Path, *, instance_id: str, port: int, host: str,
                       root_dir: str, mode: str, token: str,
+                      scheme: str = "http",
                       started: Optional[str] = None) -> Path:
     """Write this process's registry entry atomically; return its path. The file
-    is owner-only where the OS supports it (it carries the attach token)."""
+    is owner-only where the OS supports it (it carries the attach token).
+    ``scheme`` (http|https) records whether this instance serves TLS, so a
+    discovering client probes /whoami on the right protocol."""
     d = run_dir(home)
     _lock_down_dir(d)
     entry = {
@@ -135,6 +139,7 @@ def register_instance(home: Path, *, instance_id: str, port: int, host: str,
         "pid": os.getpid(),
         "port": port,
         "host": host,
+        "scheme": scheme,
         "root_dir": root_dir,
         "mode": mode,
         "version": _version(),
@@ -249,18 +254,112 @@ def reap_stale(home: Path, *, self_id: Optional[str] = None,
 
 
 # ------------------------------------------------------------------ #
+#  Discovery: attach-or-spawn (H6 phase 4)                           #
+# ------------------------------------------------------------------ #
+
+def _canon(p: str) -> str:
+    """Normalize a path for comparison (resolve + OS-case-fold). Windows paths are
+    case-insensitive, so root_dir matching must be too."""
+    try:
+        return os.path.normcase(str(Path(p).resolve()))
+    except (OSError, ValueError):
+        return os.path.normcase(str(p or ""))
+
+
+def _try_whoami(scheme: str, port: int, instance_id: Optional[str],
+                timeout: float) -> bool:
+    """One handshake: GET <scheme>://127.0.0.1:<port>/whoami and confirm it is
+    THIS localm instance (app==localm AND the advertised instance_id matches the
+    registry file - the impostor guard). Always probes loopback: discovery is
+    same-machine, even for a network-bound instance."""
+    import requests
+    url = f"{scheme}://127.0.0.1:{port}/whoami"
+    try:
+        from localm.tls import requests_verify
+        verify = requests_verify(url)
+    except Exception:
+        verify = False
+    try:
+        r = requests.get(url, timeout=timeout, verify=verify)
+    except requests.RequestException:
+        return False
+    if r.status_code != 200:
+        return False
+    try:
+        data = r.json()
+    except ValueError:
+        return False
+    return (data.get("app") == APP_NAME
+            and data.get("instance_id") == instance_id)
+
+
+def default_probe(entry: dict, *, timeout: float = 0.7) -> bool:
+    """Liveness + identity for a registry entry. Uses the recorded scheme; an
+    entry written before scheme existed is probed http-then-https."""
+    port = entry.get("port")
+    if not port:
+        return False
+    iid = entry.get("instance_id")
+    scheme = entry.get("scheme")
+    order = [scheme] if scheme in ("http", "https") else ["http", "https"]
+    return any(_try_whoami(s, int(port), iid, timeout) for s in order)
+
+
+def find_attachable(home: Path, root_dir: str,
+                    probe: Optional[Callable[[dict], bool]] = None) -> Optional[dict]:
+    """The live, identity-verified instance serving *root_dir*, or None.
+
+    Attaches ONLY on a verified /whoami handshake (app==localm + matching
+    instance_id), so an impostor on a reused port is never attached to. A same-dir
+    entry is reaped here only when it is *confident-dead* - the handshake fails AND
+    the process is gone - so a transient probe miss (a slow /whoami) can never
+    remove a live instance's entry and trigger a duplicate server. Other dirs'
+    entries are left to their own launch / the PID reaper.
+    """
+    probe = probe or default_probe
+    target = _canon(root_dir)
+    for entry in list_entries(home):
+        if _canon(entry.get("root_dir", "")) != target:
+            continue
+        try:
+            alive = probe(entry)
+        except Exception:
+            alive = False
+        if alive:
+            return entry
+        # Not verified live. Reap only if the process is also gone; never delete a
+        # live entry on a transient/identity probe miss (an impostor on a live PID
+        # simply lingers, harmless - it is never attached to).
+        try:
+            pid_gone = not pid_alive(int(entry.get("pid", -1) or -1))
+        except (TypeError, ValueError):
+            pid_gone = True
+        if pid_gone:
+            unregister_instance(entry.get("_path"))
+    return None
+
+
+def attach_url(entry: dict) -> str:
+    """The browser URL for an attachable instance (loopback - same machine)."""
+    scheme = entry.get("scheme") or "http"
+    return f"{scheme}://127.0.0.1:{entry.get('port')}/"
+
+
+# ------------------------------------------------------------------ #
 #  Advertise: the surface-startup context manager                    #
 # ------------------------------------------------------------------ #
 
 @contextmanager
 def advertise(app, home: Path, *, host: str, port: int, mode: str,
-              project: Optional[str] = None):
+              scheme: str = "http", project: Optional[str] = None,
+              isolated: bool = False):
     """Advertise *app* as a running instance for the duration of the server.
 
-    Resolves the instance id + root dir + token, sets them on ``app.state`` (so
-    ``GET /whoami`` can report them), reaps stale entries, writes this instance's
-    registry file on enter, and removes ONLY that file on exit. Phase 3:
-    advertise only - no attach/spawn decision is made here.
+    Resolves the instance id + root dir + token and sets them on ``app.state``
+    (so ``GET /whoami`` reports them). Unless *isolated*, it reaps stale entries,
+    writes this instance's registry file on enter, and removes ONLY that file on
+    exit. ``--isolated`` (test safety) sets *isolated* so the server is invisible
+    to discovery: nothing attaches to it and it is never attached to.
     """
     instance_id = new_instance_id()
     root_dir = resolve_root_dir(override=project)
@@ -271,13 +370,16 @@ def advertise(app, home: Path, *, host: str, port: int, mode: str,
     app.state.instance_mode = mode
     app.state.instance_token = token
 
-    reap_stale(home, self_id=instance_id)
-    path = register_instance(
-        home, instance_id=instance_id, port=port, host=host,
-        root_dir=root_dir, mode=mode, token=token,
-    )
+    path = None
+    if not isolated:
+        reap_stale(home, self_id=instance_id)
+        path = register_instance(
+            home, instance_id=instance_id, port=port, host=host,
+            root_dir=root_dir, mode=mode, token=token, scheme=scheme,
+        )
     try:
-        yield {"instance_id": instance_id, "root_dir": root_dir,
-               "port": port, "token": token, "path": str(path)}
+        yield {"instance_id": instance_id, "root_dir": root_dir, "port": port,
+               "token": token, "path": str(path) if path else None}
     finally:
-        unregister_instance(path)
+        if path is not None:
+            unregister_instance(path)

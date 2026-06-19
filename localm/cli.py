@@ -670,6 +670,15 @@ def _save_chat(messages: list, filepath: str) -> None:
                    "local-CA cert. Requires --tls-key.")
 @click.option("--tls-key", type=click.Path(exists=True, dir_okay=False), default=None,
               help="Private key (PEM) for --tls-cert.")
+@click.option("--project", default=None, type=click.Path(file_okay=False),
+              help="Project root that keys this instance [default: nearest "
+                   ".git/.localcoder above the current directory].")
+@click.option("--new", "force_new", is_flag=True,
+              help="Start a fresh server even if one is already serving this "
+                   "project (by default 'serve' reports the running one).")
+@click.option("--isolated", is_flag=True,
+              help="Start a private server invisible to discovery (test safety). "
+                   "Implies --new.")
 @click.option("--debug", is_flag=True,
               help="Write a debug log (~/.localm/logs/), capture native llama.cpp "
                    "stderr, and log requests.")
@@ -679,7 +688,7 @@ def _save_chat(messages: list, filepath: str) -> None:
                    "privacy = nothing saved; log = JSONL audit of chat traffic; "
                    "full = log + markdown transcript.")
 def serve(model, host, port, ctx, gpu_layers, mmproj, device, no_tls, tls_cert,
-          tls_key, debug, mode):
+          tls_key, project, force_new, isolated, debug, mode):
     """Start an OpenAI-compatible inference server.
 
     \b
@@ -717,6 +726,24 @@ def serve(model, host, port, ctx, gpu_layers, mmproj, device, no_tls, tls_cert,
         sys.exit(1)
 
     model_path, _display_hint = info
+
+    # Attach-or-spawn (H6 phase 4): if a localm is already serving this project,
+    # do not spin a second server that double-loads the model - report it.
+    from . import instances
+    from .config import home_dir
+    _root_dir = instances.resolve_root_dir(override=project)
+    if not (force_new or isolated):
+        _existing = instances.find_attachable(home_dir(), _root_dir)
+        if _existing:
+            _url = instances.attach_url(_existing)
+            console.print(
+                f"[bold]localm is already serving[/bold] [cyan]{_root_dir}[/cyan] "
+                f"at [bold]{_url}v1[/bold] (pid {_existing.get('pid')}, "
+                f"mode {_existing.get('mode')}).")
+            console.print(
+                "  [dim]Use that endpoint, or pass [/dim][cyan]--new[/cyan]"
+                "[dim] to start a separate server.[/dim]")
+            return
 
     from .inference.engine import Engine
     from .inference.http_server import serve as http_serve
@@ -764,7 +791,8 @@ def serve(model, host, port, ctx, gpu_layers, mmproj, device, no_tls, tls_cert,
 
     try:
         http_serve(engine, host=host, port=port,
-                   ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
+                   ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile,
+                   project=project, isolated=isolated)
     except KeyboardInterrupt:
         pass
     finally:

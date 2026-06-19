@@ -1145,7 +1145,8 @@ def _protocol_messages_to_dicts(messages: List[Message]) -> list:
 def serve(engine: Engine, host: str = "127.0.0.1", port: int = 8642,
           ssl_certfile: Optional[str] = None,
           ssl_keyfile: Optional[str] = None,
-          project: Optional[str] = None) -> None:
+          project: Optional[str] = None,
+          isolated: bool = False) -> None:
     """Start the server - blocks until Ctrl+C.
 
     When ``ssl_certfile`` / ``ssl_keyfile`` are given (built-in TLS, NET-1), the
@@ -1153,8 +1154,9 @@ def serve(engine: Engine, host: str = "127.0.0.1", port: int = 8642,
     TLS handshake (effectively refused) rather than crossing the network in
     cleartext.
 
-    Advertises itself in the instance registry (H6 phase 3) as an ``api`` surface
-    for the duration of the run, so a future launch can discover it.
+    Advertises itself in the instance registry (H6 phase 3/4) as an ``api``
+    surface so a future launch can discover and attach to it; ``isolated`` keeps
+    it invisible to discovery.
     """
     import uvicorn
 
@@ -1165,7 +1167,8 @@ def serve(engine: Engine, host: str = "127.0.0.1", port: int = 8642,
     # Record the bind host so routes that depend on it (open-mode seeding,
     # CA download) can reason about loopback vs network binds.
     app.state.bind_host = host
-    with instances.advertise(app, home_dir(), host=host, port=port,
-                             mode="api", project=project):
+    scheme = "https" if ssl_certfile else "http"
+    with instances.advertise(app, home_dir(), host=host, port=port, mode="api",
+                             scheme=scheme, project=project, isolated=isolated):
         uvicorn.run(app, host=host, port=port, log_level="warning",
                     ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
