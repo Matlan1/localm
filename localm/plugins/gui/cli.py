@@ -345,6 +345,10 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         # Delay slightly so the server is listening when the tab opens
         threading.Timer(1.0, lambda: webbrowser.open(open_url)).start()
 
+    # Record the bind host so the SPA-shell route knows whether every client is
+    # loopback (a 127.0.0.1 bind) and can safely seed the API key into the page.
+    app.state.bind_host = host
+
     import uvicorn
     try:
         uvicorn.run(app, host=host, port=chosen_port, log_level="warning")
