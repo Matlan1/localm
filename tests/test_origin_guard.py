@@ -34,15 +34,23 @@ def test_cross_origin_patch_refused(client):
 
 
 def test_same_origin_patch_allowed(client):
-    # same-origin (Origin host:port matches Host) is allowed through the guard
+    # same-origin (Origin host:port matches Host) passes the cross-origin guard;
+    # in open mode it must also carry the shell token (H5).
+    token = client.app.state.shell_token
     r = client.patch("/v1/config", json={"n_ctx": 8192},
-                     headers={"Origin": "http://testserver", "Host": "testserver"})
+                     headers={"Origin": "http://testserver", "Host": "testserver",
+                              "Authorization": f"Bearer {token}"})
     assert r.status_code == 200
 
 
-def test_no_origin_header_allowed(client):
-    # non-browser clients (CLI/SDK) send no Origin and are unaffected
-    r = client.patch("/v1/config", json={"n_ctx": 8192})
+def test_no_origin_open_mode_needs_shell_token(client):
+    # H5: a no-Origin client (CLI/SDK/curl) can no longer drive open-mode
+    # management - the gap this gate closes. Without the shell token -> 403;
+    # with it -> 200.
+    assert client.patch("/v1/config", json={"n_ctx": 8192}).status_code == 403
+    token = client.app.state.shell_token
+    r = client.patch("/v1/config", json={"n_ctx": 8192},
+                     headers={"Authorization": f"Bearer {token}"})
     assert r.status_code == 200
 
 

@@ -407,11 +407,18 @@ def attach_gui(
     async def _gui_index(request: Request):
         from localm import auth
         key = auth.get_api_key() or ""
+        if not key:
+            # Open mode: seed the per-process shell token so the loopback SPA can
+            # still perform management (H5). app.js sends it as the bearer; the
+            # server accepts it only for management routes in open mode. A real
+            # key, once set, takes precedence and is seeded instead.
+            key = getattr(request.app.state, "shell_token", "") or ""
         # Only a loopback BIND (the default `localm gui`, reachable solely from
-        # this machine) auto-seeds the key. We deliberately do NOT trust
+        # this machine) auto-seeds the key/token. We deliberately do NOT trust
         # request.client.host: behind a same-host reverse proxy it reads as
-        # loopback for REMOTE users, which would leak the key. A non-loopback
-        # bind (e.g. -H 0.0.0.0) never seeds - enter the key in the page instead.
+        # loopback for REMOTE users, which would leak it. A non-loopback bind
+        # (e.g. -H 0.0.0.0) never seeds - enter the key in the page instead, and
+        # open-mode management is unavailable there (set a key).
         if key and not _is_loopback_host(getattr(request.app.state, "bind_host", "127.0.0.1")):
             key = ""
         return HTMLResponse(_index_html_with_key(key))

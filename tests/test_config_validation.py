@@ -156,7 +156,11 @@ class TestPatchConfig:
         monkeypatch.setattr(cfg, "HOME_DIR", home)
         monkeypatch.setattr(cfg, "CONFIG_FILE", home / "config.json")
         monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
-        return TestClient(create_app(None))
+        # H5: management routes need the loopback shell token in open mode; the
+        # GUI carries it, so do these config-validation tests.
+        app = create_app(None)
+        return TestClient(
+            app, headers={"Authorization": f"Bearer {app.state.shell_token}"})
 
     def test_unknown_key_400(self, client):
         r = client.patch("/v1/config", json={"hax": 1})

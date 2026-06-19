@@ -79,15 +79,25 @@ class TestOpenMode:
         r = client.post("/v1/chat/completions", json=CHAT_PAYLOAD)
         assert r.status_code == 200
 
-    def test_model_unload_allowed_without_auth(self, client):
+    def test_model_unload_with_shell_token(self, client):
+        # H5: model load/unload are MODELS_WRITE management routes; in open mode
+        # they now require the loopback shell token (the GUI shell injects it).
         os.environ.pop("LOCALM_API_KEY", None)
-        r = client.post("/v1/models/unload")
+        token = client.app.state.shell_token
+        r = client.post("/v1/models/unload",
+                        headers={"Authorization": f"Bearer {token}"})
         assert r.status_code == 200
 
-    def test_model_load_allowed_without_auth(self, client):
+    def test_model_unload_without_token_refused(self, client):
         os.environ.pop("LOCALM_API_KEY", None)
-        client.post("/v1/models/unload")  # unload first
-        r = client.post("/v1/models/load")
+        assert client.post("/v1/models/unload").status_code == 403
+
+    def test_model_load_with_shell_token(self, client):
+        os.environ.pop("LOCALM_API_KEY", None)
+        token = client.app.state.shell_token
+        hdr = {"Authorization": f"Bearer {token}"}
+        client.post("/v1/models/unload", headers=hdr)  # unload first
+        r = client.post("/v1/models/load", headers=hdr)
         assert r.status_code == 200
 
 
