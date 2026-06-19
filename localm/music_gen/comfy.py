@@ -65,6 +65,7 @@ def generate_music(
     write_sidecar: bool = True,
     launch_cmd: Optional[str] = None,
     workdir: Optional[str] = None,
+    swap: bool = True,
 ) -> tuple[bool, str]:
     """
     Generate a music track and save it to *output_path* (FLAC).
@@ -123,7 +124,10 @@ def generate_music(
     if not ok:
         return False, msg
 
-    _localm_unload(localm_url)
+    # Unload the chat LLM to free VRAM, unless the caller decided the media model
+    # fits alongside it (swap=False) so the chat model stays hot.
+    if swap:
+        _localm_unload(localm_url)
 
     try:
         workflow = json.loads(_workflow_path().read_text(encoding="utf-8"))

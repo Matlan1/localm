@@ -460,9 +460,27 @@ def create_app(engine: Engine) -> FastAPI:
         # Under the inference semaphore: freeing the native context while a
         # generation is mid-decode crashes the GPU driver (access violation
         # in the HIP runtime). Unload must wait its turn.
+        from localm.discover import vram_info
+        from localm.vram import wait_for_vram_release
+
+        def _free():
+            return vram_info().get("free")
+
         async with _inference_sem:
+            before = _free()
             await loop.run_in_executor(None, _engine.unload)
-        return {"status": "unloaded", "model": _engine.display_name}
+            # The native context free is deferred: do NOT return until VRAM has
+            # actually dropped, or a caller (e.g. ComfyUI media gen) loads its
+            # model on top of the not-yet-freed weights, exceeds total VRAM and
+            # hangs the GPU driver (TDR). Best-effort: a no-op when VRAM is
+            # unmeasurable (before is None) or already freed.
+            released, after = await loop.run_in_executor(
+                None, lambda: wait_for_vram_release(_free, before_bytes=before))
+        result = {"status": "unloaded", "model": _engine.display_name}
+        if before is not None:
+            result.update(vram_freed=released,
+                          vram_before_bytes=before, vram_after_bytes=after)
+        return result
 
     @app.post("/v1/models/load", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def load_model():

@@ -159,6 +159,12 @@ CORE_FIELDS: list = [
     SettingField("reload_llm_after_imagine", Widget.TOGGLE,
                  "Reload chat model after generating",
                  group="ComfyUI", owner="image"),
+    SettingField("model_swap_policy", Widget.SELECT, "Media VRAM swap",
+                 "auto = keep chat loaded when the media model fits alongside it; "
+                 "always = always unload chat for media; never = keep chat hot "
+                 "(media may run out of VRAM on a small card).",
+                 group="ComfyUI", owner="image",
+                 options=["auto", "always", "never"]),
     # ---- Network (web plugin) ----
     SettingField("net_mode", Widget.SELECT, "Network access",
                  "off = blocked; ask = per-request approval; allow = no prompt.",

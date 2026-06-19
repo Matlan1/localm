@@ -29,6 +29,7 @@ from typing import Optional
 from localm import video_gen as _video_gen
 from localm.image_gen import comfy as _comfy
 from localm.plugins import media_config
+from localm.vram import media_estimate_bytes, resolve_swap_policy
 
 
 @contextlib.contextmanager
@@ -68,6 +69,8 @@ def settings(full_config: dict) -> dict:
         "reload_after": bool(block.get(
             "reload_llm_after_generate",
             full_config.get("reload_llm_after_imagine", True))),
+        "swap_policy": resolve_swap_policy(block, full_config),
+        "vram_estimate_bytes": media_estimate_bytes("video", block),
         "warning": warning,
     }
 
@@ -85,6 +88,7 @@ def free_vram(s: dict) -> bool:
 def generate(s: dict, prompt: str, out_path: Path, *,
              self_url: str, write_sidecar: bool, on_progress=None,
              input_image: Optional[Path] = None,
+             swap: bool = True,
              **kwargs) -> tuple[bool, str]:
     # generate_video has no comfy_output_dir param; feed the per-plugin value
     # through the env var its containment step resolves from (FAC-3). This is
@@ -100,5 +104,6 @@ def generate(s: dict, prompt: str, out_path: Path, *,
             write_sidecar=write_sidecar,
             launch_cmd=s["launch_cmd"] or None,
             workdir=s["workdir"] or None,
+            swap=swap,
             **kwargs,
         )

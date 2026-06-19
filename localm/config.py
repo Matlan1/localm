@@ -106,6 +106,17 @@ DEFAULT_CONFIG: dict = {
     # many images in a row - the chat model then reloads lazily on the next
     # chat message instead.
     "reload_llm_after_imagine": True,
+    # VRAM-aware media model swap. Before an image/music/video generation the chat
+    # LLM is unloaded so the media model gets the GPU; on a big card both fit, so
+    # the swap is pure latency.
+    #   auto   = keep chat loaded when the media model demonstrably fits alongside
+    #            it (free VRAM >= estimate + headroom), else swap (default)
+    #   always = always unload the chat model (the historical behaviour)
+    #   never  = never unload; keep chat hot (media may run out of VRAM on a small
+    #            card - an explicit choice for a big workstation card)
+    # The legacy reload_llm_after_imagine flag is a SEPARATE axis: it controls
+    # eager-vs-lazy reload AFTER a gen, not this unload-before decision.
+    "model_swap_policy": "auto",
     # Network policy for model-initiated requests (coder fetch_url/web_search,
     # chat web access). See localm/netpolicy.py and docs/network.md.
     #   off   = all policy-routed network access fails fast

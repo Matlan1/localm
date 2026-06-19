@@ -69,10 +69,18 @@ class TestModelsEndpoint(unittest.TestCase):
         self.assertFalse(r.json()["data"][0]["loaded"])
 
 
+GB = 1024 ** 3
+
+
 class TestUnloadEndpoint(unittest.TestCase):
     def setUp(self):
         self.engine = _make_mock_engine(loaded=True)
         self.client = TestClient(create_app(self.engine))
+        # VRAM unmeasurable by default so the C4 release-guard returns at once,
+        # rather than polling its full timeout for VRAM a mock engine never frees.
+        p = patch("localm.discover.vram_info", return_value={})
+        p.start()
+        self.addCleanup(p.stop)
 
     def test_unload_when_loaded(self):
         r = self.client.post("/v1/models/unload")
@@ -85,6 +93,20 @@ class TestUnloadEndpoint(unittest.TestCase):
         r = self.client.post("/v1/models/unload")
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["status"], "already_unloaded")
+
+    def test_unload_reports_vram_freed_once_released(self):
+        # The C4 guard: free VRAM is low before the unload, then rises after the
+        # native free completes. The endpoint must wait for the rise and report it.
+        reads = iter([{"free": 10 * GB}, {"free": 20 * GB}])
+        with patch("localm.discover.vram_info",
+                   side_effect=lambda: next(reads, {"free": 20 * GB})):
+            r = self.client.post("/v1/models/unload")
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual(body["status"], "unloaded")
+        self.assertTrue(body["vram_freed"])
+        self.assertEqual(body["vram_before_bytes"], 10 * GB)
+        self.assertEqual(body["vram_after_bytes"], 20 * GB)
 
 
 class TestLoadEndpoint(unittest.TestCase):
