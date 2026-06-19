@@ -1,50 +1,108 @@
-# Serving localm over a LAN: TLS and reverse proxies
+# Serving localm over a LAN: built-in TLS and reverse proxies
 
 localm binds to 127.0.0.1 by default and that is the right setting for almost
-everyone. If you want other machines on your network to use your models, do
-not just bind 0.0.0.0 and move on. This guide covers the safe way.
+everyone. When you bind past loopback so other machines (or your phone) can
+reach it, localm serves **HTTPS out of the box** - it generates its own
+certificate and encrypts every connection. You do not need a reverse proxy or
+any external tool for that anymore; the proxy section below is for advanced
+setups (a real domain, a public CA).
 
 ## Threat model in one paragraph
 
 The HTTP API can run inference (costs your GPU time), unload and switch
 models, and, when the GUI is enabled, start coder sessions that write files
 and run shell commands on the host. Anyone who can reach the port can do all
-of that. Bearer auth (`LOCALM_API_KEY`) is the minimum; TLS stops the key
-from crossing the network in cleartext.
+of that. Bearer auth (`LOCALM_API_KEY`) is the minimum; TLS stops the key and
+your prompts from crossing the network in cleartext. localm now does the TLS
+itself on a network bind, so both protections are on by default.
 
-## Step 1: always set an API key
+## Always set an API key
 
 ```powershell
 $env:LOCALM_API_KEY = Read-Host -MaskInput "localm API key"
 localm serve mymodel -H 0.0.0.0
 ```
 
-Without the key, localm prints a warning when binding beyond localhost.
-Clients send `Authorization: Bearer <key>`.
-
-Do not put the key on the command line (it lands in shell history); use
+localm refuses to bind past loopback without a key (pass `--insecure` to
+override on a trusted, isolated network). Clients send `Authorization: Bearer
+<key>`. Do not put the key on the command line (it lands in shell history); use
 `Read-Host -MaskInput` as above or set it in your environment manager.
 
-## Step 2: terminate TLS in front of localm
+## Built-in TLS (the default past loopback)
 
-localm itself speaks plain HTTP. Put a reverse proxy in front for TLS.
+Run either of:
 
-### Caddy (simplest, automatic self-signed or ACME certificates)
+```powershell
+localm gui   -H 0.0.0.0     # GUI + API, HTTPS
+localm serve mymodel -H 0.0.0.0   # bare API, HTTPS
+```
+
+localm prints an `https://<ip>:<port>/` address (the port may differ from 8642
+if 8642 was busy - use the address it prints). Under the hood:
+
+- On first run it creates a small **local certificate authority** under
+  `<LOCALM_HOME>/tls/` (`ca.crt` + `ca.key`) and a server certificate signed by
+  it. The certificate covers 127.0.0.1, your LAN IP, any Tailscale IP, and the
+  hostname, so the same cert works however a device reaches you.
+- The certificate is reused across restarts and regenerated only when it expires
+  or your set of bind IPs changes. The CA is reused even then, so a device you
+  trusted once stays trusted after your IP changes.
+- The CA private key never leaves your machine.
+
+### The one-time "trust this certificate" step
+
+Because the certificate is signed by *your* CA and not a public one, the first
+time a device opens the `https://` address its browser shows a one-time "not
+secure" warning, and a phone will not offer **Install app** until the CA is
+trusted. This is a browser rule for any private/self-signed certificate on a raw
+IP, not a localm limitation - so localm makes clearing it one tap:
+
+1. Open the printed `https://<ip>:<port>/` address on the device.
+2. Proceed through the browser's one-time warning to reach the page.
+3. On the key screen tap **Install certificate** (or open
+   `https://<ip>:<port>/localm-ca.crt` directly) and trust it when prompted:
+   - **Android / desktop Chrome / Firefox:** open the downloaded `localm-ca.crt`
+     and confirm "trust for web sites".
+   - **iOS / iPadOS:** the profile downloads, then Settings > General > VPN &
+     Device Management installs it, and Settings > General > About > Certificate
+     Trust Settings turns it on.
+   - **Windows:** import `localm-ca.crt` into "Trusted Root Certification
+     Authorities" for the current user.
+
+After trusting it once: no more warning, and the PWA installs normally.
+
+### Turning it off or bringing your own certificate
+
+```powershell
+localm gui -H 0.0.0.0 --no-tls          # plain HTTP (key crosses the LAN in cleartext)
+localm gui -H 0.0.0.0 --tls-cert C:\certs\localm.crt --tls-key C:\certs\localm.key
+```
+
+`--no-tls` is an escape hatch for a trusted, isolated network only.
+`--tls-cert`/`--tls-key` let you supply your own certificate (for example one
+issued for a real hostname) instead of the built-in local CA.
+
+## Advanced: terminate TLS with a reverse proxy
+
+You only need this when you want a real domain name and a publicly trusted
+certificate (no per-device trust step), for example to reach localm from the
+public internet. Keep localm on 127.0.0.1 so the only way in is through the
+proxy.
+
+### Caddy (automatic certificates)
 
 `Caddyfile`:
 
 ```
 llm.example.internal {
-    tls internal              # self-signed CA for LAN use
+    tls internal              # self-signed CA for LAN use, or omit for ACME
     reverse_proxy 127.0.0.1:8642
 }
 ```
 
-Run `caddy run`. Keep localm itself on 127.0.0.1 so the only way in is
-through the proxy:
-
 ```powershell
 localm serve mymodel          # binds 127.0.0.1:8642
+caddy run
 ```
 
 ### nginx
@@ -72,20 +130,22 @@ The two SSE settings matter: `proxy_buffering off` and a generous
 `proxy_read_timeout`, otherwise streaming chat stalls and long generations
 get cut off.
 
-## Step 3: scope what you expose
+## Scope what you expose
 
-- Serve the bare API (`localm serve`) over the LAN, not the GUI. The GUI's
-  coder sessions execute code on the host; that should stay a localhost
-  tool.
+- Serve the bare API (`localm serve`) over the LAN, not the GUI, when you do not
+  need the coder agent remotely. The GUI's coder sessions execute code on the
+  host; that should stay a localhost tool unless you trust every device on the
+  network.
 - If remote machines need different origins in the browser, set
   `cors_origins` in `~/.localm/config.json` to an explicit list. Never use
   `"*"` on an exposed bind.
-- Firewall the localm port (8642-8741) so only the proxy host can reach it
-  when the proxy runs on a different machine.
+- Firewall the localm port (8642-8741) so only the machines you intend can reach
+  it.
 
 ## What this does not cover
 
-This setup is for a trusted LAN. Exposing localm to the public internet
-needs more: rate limiting, request size caps, fail2ban-style lockout, and a
-real certificate authority. If you need that, treat localm like any internal
-service behind a VPN instead.
+Built-in TLS and a key are right for a trusted LAN or a Tailscale network.
+Exposing localm to the public internet needs more: rate limiting, request size
+caps, fail2ban-style lockout, and a real certificate authority (the reverse
+proxy above). If you need that, treat localm like any internal service behind a
+VPN instead.
