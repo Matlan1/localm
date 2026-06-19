@@ -128,6 +128,35 @@ def test_any_key_configured(auth):
     assert auth.any_key_configured() is True
 
 
+def test_corrupt_keystore_fails_closed(auth):
+    # SEC: a scoped-keys-only install (no owner key) must NOT silently drop to
+    # open mode if auth.json gets corrupted/truncated. Before the fix this read
+    # as "no keys" -> open. Now a present-but-unparseable keystore counts as
+    # configured (fail CLOSED: every request needs a key, none verify -> locked).
+    auth.create_key("k", ["chat"])
+    auth.keystore_file().write_text("{ this is not valid json", encoding="utf-8")
+    assert auth.any_key_configured() is True          # fail closed, not open
+    assert auth.verify("anything") is None            # corrupt store grants nothing
+
+
+def test_unreadable_keystore_fails_closed(auth):
+    # A keystore path that exists but cannot be read as a file (here a directory,
+    # which makes read_text raise OSError) also counts as configured (fail
+    # closed), not open - distinct from the absent case.
+    auth.keystore_file().mkdir(parents=True, exist_ok=True)
+    assert auth.any_key_configured() is True
+
+
+def test_empty_keystore_is_not_configured(auth):
+    # A genuinely empty ([]) keystore is "no scoped keys" -> open is correct
+    # (must stay distinct from the corrupt case above).
+    auth.keystore_file().write_text("[]", encoding="utf-8")
+    assert auth.any_key_configured() is False
+    # A valid-JSON-but-malformed (non-list) keystore is treated as broken -> closed.
+    auth.keystore_file().write_text('{"oops": "object not list"}', encoding="utf-8")
+    assert auth.any_key_configured() is True
+
+
 def test_owner_key_is_admin(auth, monkeypatch):
     from localm import scopes as S
     monkeypatch.setenv("LOCALM_API_KEY", "ownersecret")
