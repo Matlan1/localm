@@ -428,6 +428,15 @@
             <span id="install-hint" class="sub">Use your browser's <em>Install app</em> /
             <em>Add to Home screen</em> to pin localm as an app.</span>
           </div>
+          <!-- iOS Safari fires no install prompt; the Share sheet is the only path. -->
+          <div id="install-ios" class="onboard-help" style="display:none">
+            <b>Add to Home Screen (iPhone / iPad):</b>
+            <ol class="dim">
+              <li>Open this page in <b>Safari</b>.</li>
+              <li>Tap the <b>Share</b> button (the square with an up-arrow).</li>
+              <li>Choose <b>Add to Home Screen</b>, then <b>Add</b>.</li>
+            </ol>
+          </div>
         </div>
       </div>
     </section>
@@ -537,27 +546,33 @@
   var originEl = document.getElementById("conn-origin");
   if (originEl) originEl.textContent = location.origin;
 
+  // applyInstallUI / detection live in app.js (loaded just above). In the real
+  // browser app.js has executed by now; under jsdom the inline script runs at
+  // parse before app.js is injected, so guard and let the unit tests drive
+  // applyInstallUI() directly.
+  if (typeof window.applyInstallUI !== "function") return;
+
+  var standalone = window.pwaDisplayMode && window.pwaDisplayMode() === "standalone";
+  var ios = !standalone && window.isIOSSafari && window.isIOSSafari();
+  window.applyInstallUI({ standalone: standalone, ios: ios, canPrompt: false });
+
   var deferred = null;
   var btn = document.getElementById("install-app");
-  var hint = document.getElementById("install-hint");
   window.addEventListener("beforeinstallprompt", function (e) {
     e.preventDefault();
     deferred = e;
-    if (btn) btn.style.display = "";
-    if (hint) hint.style.display = "none";
+    window.applyInstallUI({ canPrompt: true });
   });
   if (btn) btn.addEventListener("click", function () {
     if (!deferred) return;
     deferred.prompt();
     deferred.userChoice.finally(function () {
       deferred = null;
-      btn.style.display = "none";
-      if (hint) hint.style.display = "";
+      window.applyInstallUI({ standalone: false, ios: ios, canPrompt: false });
     });
   });
   window.addEventListener("appinstalled", function () {
-    if (btn) btn.style.display = "none";
-    if (hint) hint.textContent = "Installed. Find localm with your other apps.";
+    window.applyInstallUI({ standalone: true });
   });
 })();
 </script>
