@@ -14,8 +14,10 @@ Start programmatically:
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import os
+import secrets
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -46,6 +48,16 @@ _inference_sem: asyncio.Semaphore | None = None
 
 # Optional bearer-token auth - enabled when LOCALM_API_KEY is set.
 _bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def _bearer_token(request) -> Optional[str]:
+    """Extract a presented bearer token from the raw Authorization header (used
+    by the origin/management middleware, which has the request but not the
+    parsed HTTPBearer credentials)."""
+    header = request.headers.get("authorization", "")
+    if header[:7].lower() == "bearer ":
+        return header[7:].strip() or None
+    return None
 
 
 def _enforce_scope(
@@ -145,6 +157,13 @@ def create_app(engine: Engine) -> FastAPI:
     # request.app.state.chat_pipeline. A pipeline with no hooks is a no-op.
     app.state.chat_pipeline = ChatPipeline()
 
+    # Per-process "shell token" (H5): in open mode the management routes require
+    # this token, which the loopback GUI shell injects into the SPA (web.py
+    # _gui_index). It gates the no-Origin local-client path that bearer auth /
+    # the Origin guard alone do not cover. Per-process so it dies on restart;
+    # never persisted.
+    app.state.shell_token = secrets.token_urlsafe(32)
+
     # Debug mode: log every request with timing to the debug log file
     from localm.debuglog import debug_enabled, logger as _dbg
     if debug_enabled():
@@ -205,15 +224,37 @@ def create_app(engine: Engine) -> FastAPI:
         if (request.method in _UNSAFE_METHODS and not _cors_wildcard
                 and request.url.path.startswith(_GUARDED_PREFIXES)):
             origin = request.headers.get("origin")
+            allowlisted = bool(origin) and origin in _cors_allowlist
             if origin:
                 host = request.headers.get("host", "")
                 same_origin = origin.split("://", 1)[-1] == host
-                if not (same_origin or origin in _cors_allowlist):
+                if not (same_origin or allowlisted):
                     return JSONResponse(
                         status_code=403,
                         content={"detail": "Cross-origin request refused for a "
                                  "management endpoint (set 'cors_origins' to "
                                  "allow this origin)."},
+                    )
+            # H5: open-mode management gate. With no key configured, management
+            # routes still require the per-process shell token (injected into the
+            # loopback GUI shell), so a no-Origin local client - curl, a script -
+            # can no longer mint a key, flip config, install a plugin, load a
+            # model, or browse the filesystem unauthenticated. Protected mode (a
+            # key exists) is handled by bearer auth on the route; a require_auth-
+            # without-key install 503s at the route. An operator-allowlisted CORS
+            # origin is explicit trust and is exempt.
+            from localm.auth import any_key_configured, require_auth_enabled
+            if (not allowlisted and not any_key_configured()
+                    and not require_auth_enabled()):
+                token = getattr(request.app.state, "shell_token", None)
+                presented = _bearer_token(request)
+                if not (token and presented
+                        and hmac.compare_digest(presented, token)):
+                    return JSONResponse(
+                        status_code=403,
+                        content={"detail": "Open-mode management requires the "
+                                 "localm GUI shell on this machine, or an API key "
+                                 "(run 'localm key generate')."},
                     )
         return await call_next(request)
 

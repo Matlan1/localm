@@ -796,7 +796,11 @@ class TestPlatformEndpoints:
         from localm.inference.http_server import create_app
         engine = type("E", (), {"display_name": "model-a", "loaded": False})()
         app = create_app(engine)
-        with TestClient(app) as client:
+        # H5: /v1/config + /v1/plugins are management routes; in open mode they
+        # need the loopback shell token (the GUI carries it).
+        with TestClient(
+            app, headers={"Authorization": f"Bearer {app.state.shell_token}"}
+        ) as client:
             yield client
 
     def test_model_detail_404(self, v1_client):

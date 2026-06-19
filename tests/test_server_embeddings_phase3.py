@@ -174,8 +174,13 @@ class TestMcpEmbedToolCapability:
 
 class TestRequireAuthLockoutGuard:
     def _client(self):
-        return TestClient(create_app(_make_engine()),
-                          raise_server_exceptions=True)
+        # H5: PATCH /v1/config is a management route; in open mode it needs the
+        # loopback shell token. Seed it by default (tests that set their own key
+        # override the header and hit protected-mode bearer auth instead).
+        app = create_app(_make_engine())
+        return TestClient(
+            app, raise_server_exceptions=True,
+            headers={"Authorization": f"Bearer {app.state.shell_token}"})
 
     def test_enable_require_auth_without_key_rejected_400(self):
         os.environ.pop("LOCALM_API_KEY", None)
