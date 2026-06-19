@@ -278,8 +278,11 @@ def _stream_once(engine, messages: list, **kwargs) -> str:
         for token in engine.chat_stream(messages, **kwargs):
             print(token, end="", flush=True)
             parts.append(token)
-    except UnsupportedInputError as exc:
-        console.print(f"\n[red]{exc}[/red]")
+    except UnsupportedInputError:
+        # Capability-aware guidance instead of a flat "can't do that": name a
+        # vision model this install has, or how to get one.
+        from localm.model_manager import vision_input_guidance
+        console.print(f"\n[yellow]{vision_input_guidance()}[/yellow]")
         return ""
     elapsed = _time.monotonic() - t0
     print()
