@@ -67,3 +67,23 @@ test("NET-1: over plain HTTP the cert link stays hidden (loopback dev gate)", as
   assert.ok(cert, "#key-gate-cert exists");
   assert.equal(cert.style.display, "none", "no CA to install over plain HTTP, so hidden");
 });
+
+test("NET-1 hard gate: a keyless (401) boot HIDES the app shell - nothing of localm loads behind the gate", async () => {
+  const { window } = loadApp({ fetchImpl: keyless401 });
+  await tick();
+  const app = window.document.getElementById("app");
+  assert.equal(app.style.display, "none", "#app is hidden while locked (no shell behind the onboarding)");
+  assert.equal(window.__localmLocked, true, "the lock flag is set so late boot steps bail too");
+  const gate = window.document.getElementById("key-gate");
+  assert.notEqual(gate.style.display, "none", "the onboarding/key gate is shown");
+});
+
+test("NET-1 hard gate: a working (200) boot reveals the app and hides the gate", async () => {
+  const { window } = loadApp({ fetchImpl: allOk });
+  await tick();
+  const app = window.document.getElementById("app");
+  assert.notEqual(app.style.display, "none", "#app is visible when authed / open mode");
+  assert.equal(window.__localmLocked, false, "unlocked");
+  const gate = window.document.getElementById("key-gate");
+  assert.equal(gate.style.display, "none", "gate hidden when authed / open mode");
+});
