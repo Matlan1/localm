@@ -3455,9 +3455,40 @@ if ($("key-gate-input")) {
     if (e.key === "Enter") { e.preventDefault(); submitKeyGate(); }
   });
 }
-refreshModels().then(() => populateSetupModels());
-// Server persistence depends on knowing the privacy state first.
-refreshCtxLimit().then(initServerConversations);
+
+// Hard auth gate (NET-1): when the server REQUIRES a key and this browser has
+// none that works, show ONLY the onboarding - do NOT reveal the app shell or
+// load any /api data behind an unsatisfied gate. window.__localmLocked lets late
+// boot steps (deep-link restore, pages.js) bail too.
+function lockUI(message) {
+  window.__localmLocked = true;
+  const app = $("app");
+  if (app) app.style.display = "none";          // nothing of localm behind the gate
+  showKeyGate(message || "This localm server requires an API key.");
+}
+function unlockUI() {
+  window.__localmLocked = false;
+  const gate = $("key-gate");
+  if (gate) gate.style.display = "none";
+  const app = $("app");
+  if (app) app.style.display = "";
+}
+(async () => {
+  // Probe auth before loading any app data or revealing the shell.
+  let locked = false;
+  try {
+    const r = await fetch("/api/models", { headers: authHeaders() });
+    locked = (r.status === 401);
+  } catch (e) {
+    locked = true;   // unreachable / blocked -> never render a half-loaded app
+  }
+  if (locked) { lockUI(); return; }
+  unlockUI();
+  // Authenticated (or open/loopback mode): load the app.
+  refreshModels().then(() => populateSetupModels());
+  // Server persistence depends on knowing the privacy state first.
+  refreshCtxLimit().then(initServerConversations);
+})();
 refreshKbSelect();
 refreshPersonas();
 refreshMemory();
@@ -3486,7 +3517,8 @@ if (chat.conversations.length) {
 renderChat();
 reattachSessions();
 // Deep links + restore. Deferred a tick so pages.js has installed
-// window.onViewShown and the #pull-start handler.
+// window.onViewShown and the #pull-start handler. Skipped while the hard auth
+// gate is locked (nothing of the app should activate behind the onboarding).
 {
   const params = new URLSearchParams(location.search);
   const pullSpec = params.get("pull");      // from `localm gui --pull SPEC`
@@ -3495,6 +3527,7 @@ reattachSessions();
     // Strip the query so a reload doesn't restart the download.
     history.replaceState(null, "", location.pathname);
     setTimeout(() => {
+      if (window.__localmLocked) return;
       showView(VIEWS.includes(viewParam) ? viewParam : "models");
       if (pullSpec) {
         const specInput = $("pull-spec");
@@ -3507,6 +3540,8 @@ reattachSessions();
   } else {
     // Restore the last active page (set in non-privacy mode only).
     const savedView = localStorage.getItem("localm.activeView");
-    if (savedView && savedView !== "chat") setTimeout(() => showView(savedView), 0);
+    if (savedView && savedView !== "chat") {
+      setTimeout(() => { if (!window.__localmLocked) showView(savedView); }, 0);
+    }
   }
 }
