@@ -5,11 +5,78 @@ layer, so channel/harmony tokens never leak to the GUI regardless of backend.
 """
 
 from localm.inference.engine import Engine
-from localm.inference.textnorm import scrub_stream, scrub_text
+from localm.inference.textnorm import (
+    ThinkSplitter, scrub_stream, scrub_text, split_think,
+)
 
 
 def _scrub(pieces):
     return "".join(scrub_stream(iter(pieces)))
+
+
+def _stream_split(pieces):
+    """Drive ThinkSplitter over *pieces* and return (content, reasoning)."""
+    sp = ThinkSplitter()
+    cs, rs = [], []
+    for p in pieces:
+        c, r = sp.feed(p)
+        cs.append(c)
+        rs.append(r)
+    c, r = sp.flush()
+    cs.append(c)
+    rs.append(r)
+    return "".join(cs), "".join(rs)
+
+
+class TestSplitThink:
+    def test_one_shot_separates_block(self):
+        c, r = split_think("<think>\nreasoning here\n</think>\nThe answer.")
+        assert r.strip() == "reasoning here"
+        assert c.strip() == "The answer."
+
+    def test_no_think_is_all_content(self):
+        c, r = split_think("Just an answer, no reasoning.")
+        assert c == "Just an answer, no reasoning."
+        assert r == ""
+
+    def test_unclosed_think_runs_to_end(self):
+        c, r = split_think("<think>still thinking and never closed")
+        assert c == ""
+        assert "still thinking" in r
+
+    def test_content_before_and_after_block(self):
+        c, r = split_think("intro <think>mid</think> outro")
+        assert c == "intro  outro"
+        assert r == "mid"
+
+    def test_streaming_matches_one_shot(self):
+        full = "Pre <think>because reasons</think> Post."
+        # NEGATIVE-style: a naive concatenation of content deltas must equal the
+        # one-shot content, and the tags must never appear in either channel.
+        c_stream, r_stream = _stream_split(list(full))   # one char at a time
+        c_once, r_once = split_think(full)
+        assert c_stream == c_once
+        assert r_stream == r_once
+        assert "<think>" not in c_stream and "</think>" not in c_stream
+        assert "<think>" not in r_stream and "</think>" not in r_stream
+
+    def test_tag_split_across_pieces(self):
+        # The open tag is fragmented across three feeds; it must still be removed
+        # and the reasoning routed correctly (no leaked "<thi" / "nk>").
+        c, r = _stream_split(["answer <thi", "nk>secret rea", "soning</thi", "nk> done"])
+        assert c == "answer  done"
+        assert r == "secret reasoning"
+        assert "<thi" not in c and "nk>" not in c
+
+    def test_multiple_blocks_concatenate(self):
+        c, r = split_think("<think>a</think>X<think>b</think>Y")
+        assert c == "XY"
+        assert "a" in r and "b" in r
+
+    def test_lt_in_prose_is_not_a_tag(self):
+        c, r = split_think("if x < 3 and y > 2 then ok")
+        assert c == "if x < 3 and y > 2 then ok"
+        assert r == ""
 
 
 class TestSharedScrub:

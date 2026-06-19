@@ -268,16 +268,44 @@ def _file_to_data_uri(path: str) -> str:
     return f"data:{mime};base64,{b64}"
 
 
+class _ThinkPrinter:
+    """Stream a reply to stdout, dimming the model's ``<think>`` reasoning so it
+    reads as an aside rather than raw ``<think>`` tags inline with the answer
+    (H4). The full raw text (tags included) is still returned by the caller for
+    the audit/transcript, which separate it themselves."""
+
+    def __init__(self) -> None:
+        import sys as _sys
+        from localm.inference.textnorm import ThinkSplitter
+        tty = _sys.stdout.isatty()
+        self._dim, self._reset = ("\033[2m", "\033[22m") if tty else ("", "")
+        self._think = ThinkSplitter()
+
+    def _emit(self, content: str, reasoning: str) -> None:
+        if reasoning:
+            print(f"{self._dim}{reasoning}{self._reset}", end="", flush=True)
+        if content:
+            print(content, end="", flush=True)
+
+    def feed(self, token: str) -> None:
+        self._emit(*self._think.feed(token))
+
+    def flush(self) -> None:
+        self._emit(*self._think.flush())
+
+
 def _stream_once(engine, messages: list, **kwargs) -> str:
     """Stream response to stdout, print tok/s on completion, and return the full text."""
     import time as _time
     from localm.inference.backends.base import UnsupportedInputError
     parts: list[str] = []
+    printer = _ThinkPrinter()
     t0 = _time.monotonic()
     try:
         for token in engine.chat_stream(messages, **kwargs):
-            print(token, end="", flush=True)
             parts.append(token)
+            printer.feed(token)
+        printer.flush()
     except UnsupportedInputError:
         # Capability-aware guidance instead of a flat "can't do that": name a
         # vision model this install has, or how to get one.
@@ -362,13 +390,16 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
         console.print("\n[bold blue]Assistant[/bold blue]: ", end="")
 
         parts: list[str] = []
+        printer = _ThinkPrinter()
         import time as _time
         t0 = _time.monotonic()
         try:
             for token in engine.chat_stream(messages, **gen_opts):
-                print(token, end="", flush=True)
                 parts.append(token)
+                printer.feed(token)
+            printer.flush()
         except KeyboardInterrupt:
+            printer.flush()
             console.print("\n[dim](interrupted)[/dim]")
         except Exception as e:
             console.print(f"\n[red]Inference error: {e}[/red]")

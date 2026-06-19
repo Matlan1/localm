@@ -62,6 +62,87 @@ def scrub_text(text: str) -> str:
     return _MARKER_RE.sub("", text)
 
 
+_THINK_OPEN = "<think>"
+_THINK_CLOSE = "</think>"
+
+
+def split_think(text: str) -> tuple[str, str]:
+    """Split *text* (already scrubbed to canonical ``<think>...</think>``) into
+    ``(content, reasoning)``: the visible answer with the think block(s) removed,
+    and the concatenated reasoning with the tags removed. An unclosed ``<think>``
+    runs to the end. Multiple blocks are concatenated (reasoning joined by a
+    blank line)."""
+    sp = ThinkSplitter()
+    c, r = sp.feed(text)
+    c2, r2 = sp.flush()
+    content = c + c2
+    reasoning_parts = [p for p in (r, r2) if p]
+    return content, "".join(reasoning_parts)
+
+
+def _held_tag_suffix(s: str, tag: str) -> int:
+    """Length of the longest proper prefix of *tag* that is a suffix of *s* -
+    how much of the tail must be held back because it might begin *tag*."""
+    k = min(len(s), len(tag) - 1)
+    while k > 0:
+        if s.endswith(tag[:k]):
+            return k
+        k -= 1
+    return 0
+
+
+class ThinkSplitter:
+    """Stateful splitter for a token stream of already-scrubbed text.
+
+    Feed each piece; get ``(content, reasoning)`` for that piece with the
+    ``<think>`` / ``</think>`` tags removed and the reasoning routed out of the
+    visible content. Tags split across pieces are handled by holding back a short
+    tail until the next piece arrives; call :meth:`flush` at end of stream to
+    release any held tail (an unterminated think block flushes as reasoning).
+    """
+
+    def __init__(self) -> None:
+        self._buf = ""
+        self._in_think = False
+
+    def feed(self, piece: str) -> tuple[str, str]:
+        self._buf += piece
+        out_c: list[str] = []
+        out_r: list[str] = []
+        while True:
+            if self._in_think:
+                i = self._buf.find(_THINK_CLOSE)
+                if i == -1:
+                    hold = _held_tag_suffix(self._buf, _THINK_CLOSE)
+                    cut = len(self._buf) - hold
+                    out_r.append(self._buf[:cut])
+                    self._buf = self._buf[cut:]
+                    break
+                out_r.append(self._buf[:i])
+                self._buf = self._buf[i + len(_THINK_CLOSE):]
+                self._in_think = False
+            else:
+                i = self._buf.find(_THINK_OPEN)
+                if i == -1:
+                    hold = _held_tag_suffix(self._buf, _THINK_OPEN)
+                    cut = len(self._buf) - hold
+                    out_c.append(self._buf[:cut])
+                    self._buf = self._buf[cut:]
+                    break
+                out_c.append(self._buf[:i])
+                self._buf = self._buf[i + len(_THINK_OPEN):]
+                self._in_think = True
+        return "".join(out_c), "".join(out_r)
+
+    def flush(self) -> tuple[str, str]:
+        """Release the held tail at end of stream. A still-open think block
+        flushes its remainder as reasoning; otherwise as content."""
+        buf, self._buf = self._buf, ""
+        if self._in_think:
+            return "", buf
+        return buf, ""
+
+
 def scrub_stream(pieces: Iterator[str]) -> Iterator[str]:
     """Normalise/remove internal model markers in a text stream.
 

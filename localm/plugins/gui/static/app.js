@@ -1942,6 +1942,7 @@ async function runCompletion(conv, webDepth = 0) {
   chat.abort = new AbortController();
 
   let full = "";
+  let reasoning = "";   // H4: <think> reasoning now streams in delta.reasoning_content
   let usage = null;
   let finishReason = null;
   let aborted = false;
@@ -1962,11 +1963,18 @@ async function runCompletion(conv, webDepth = 0) {
       try { chunk = JSON.parse(payload); } catch { return; }
       if (chunk.usage) usage = chunk.usage;
       if (chunk.choices?.[0]?.finish_reason) finishReason = chunk.choices[0].finish_reason;
-      const delta = chunk.choices?.[0]?.delta?.content || "";
-      if (delta) {
-        full += delta;
+      const d = chunk.choices?.[0]?.delta || {};
+      const cDelta = d.content || "";
+      const rDelta = d.reasoning_content || "";   // H4: reasoning streamed apart
+      if (cDelta || rDelta) {
+        full += cDelta;
+        reasoning += rDelta;
         const stick = nearBottom(box);
-        renderMarkdown(liveBody, full);
+        // Rebuild <think> from the reasoning stream so splitThink renders the
+        // collapsible block exactly as before. Back-compat: an older server that
+        // still inlines <think> in content also renders (reasoning stays empty).
+        renderMarkdown(liveBody,
+          reasoning ? "<think>\n" + reasoning + "\n</think>\n" + full : full);
         if (stick) box.scrollTop = box.scrollHeight;
       }
     });
@@ -1987,7 +1995,13 @@ async function runCompletion(conv, webDepth = 0) {
   // read it aloud, or fire the web loop / recurse on a partial reply (BUG-13).
   if (aborted) return;
 
-  const reply = { role: "assistant", content: full };
+  // Persist content with <think> rebuilt (same shape as before this change), so
+  // reload + splitThink re-render the collapsible block and TTS/visibleText are
+  // unaffected.
+  const reply = {
+    role: "assistant",
+    content: reasoning ? "<think>\n" + reasoning + "\n</think>\n" + full : full,
+  };
   if (finishReason === "length") {
     // The reply was cut by the max-tokens budget, not finished by the model.
     reply.truncated = true;
