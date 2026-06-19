@@ -244,11 +244,12 @@ def create_app(engine: Engine) -> FastAPI:
             # can no longer mint a key, flip config, install a plugin, load a
             # model, or browse the filesystem unauthenticated. Protected mode (a
             # key exists) is handled by bearer auth on the route; a require_auth-
-            # without-key install 503s at the route. An operator-allowlisted CORS
-            # origin is explicit trust and is exempt.
+            # without-key install 503s at the route. The token is required even
+            # for an allowlisted CORS origin (F2): an Origin header is forgeable
+            # by a non-browser client, so it is not a management credential - a
+            # configured external origin must use an API key for state changes.
             from localm.auth import any_key_configured, require_auth_enabled
-            if (not allowlisted and not any_key_configured()
-                    and not require_auth_enabled()):
+            if not any_key_configured() and not require_auth_enabled():
                 token = getattr(request.app.state, "shell_token", None)
                 presented = _bearer_token(request)
                 if not (token and presented
