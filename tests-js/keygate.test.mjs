@@ -78,6 +78,21 @@ test("NET-1 hard gate: a keyless (401) boot HIDES the app shell - nothing of loc
   assert.notEqual(gate.style.display, "none", "the onboarding/key gate is shown");
 });
 
+test("P2b: scanning a localm-key QR saves the key (the prefix is stripped)", async () => {
+  const { window } = loadApp({ fetchImpl: keyless401 });
+  try { Object.defineProperty(window.location, "reload", { configurable: true, value: () => {} }); } catch { /* jsdom no-op nav */ }
+  await tick();
+  assert.equal(window.handleScannedKey("localm-key:secret-123"), true);
+  assert.equal(window.localStorage.getItem("localm.apiKey"), "secret-123");
+});
+
+test("P2b: a non-localm QR is ignored (no key saved)", async () => {
+  const { window } = loadApp({ fetchImpl: keyless401 });
+  await tick();
+  assert.equal(window.handleScannedKey("https://example.com"), false);
+  assert.equal(window.localStorage.getItem("localm.apiKey"), null);
+});
+
 test("NET-1 onboarding: the guided cert-install step + per-platform help render over HTTPS", async () => {
   const { window } = loadApp({ fetchImpl: keyless401, url: "https://192.168.0.5:8651/" });
   await tick();

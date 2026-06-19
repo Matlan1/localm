@@ -485,7 +485,25 @@
                placeholder="LOCALM_API_KEY">
         <div class="actions">
           <button class="btn-quiet" id="key-gate-submit">Connect</button>
+          <button class="btn-quiet" id="key-gate-scan" style="display:none">Scan QR code</button>
         </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Pairing QR scanner (phone): camera + BarcodeDetector to read the key QR
+     shown in the computer's Settings, so the key is saved without typing. -->
+<div id="qr-scanner" class="modal-backdrop" style="display:none">
+  <div class="modal onboarding">
+    <div class="modal-head"><span>Scan the pairing QR</span></div>
+    <div class="modal-body">
+      <p class="sub">On the computer running localm, open
+        <b>Settings &rarr; Companion app</b> and point your camera at the QR.</p>
+      <video id="qr-video" class="qr-video" playsinline muted></video>
+      <p id="qr-scan-status" class="sub"></p>
+      <div class="actions">
+        <button class="btn-quiet" id="qr-scan-cancel">Cancel</button>
       </div>
     </div>
   </div>
