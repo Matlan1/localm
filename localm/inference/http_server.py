@@ -784,6 +784,24 @@ def _audit_exchange(audit, transcript, messages: list, reply: str) -> None:
         pass  # auditing must never break serving
 
 
+def _reason_sse(content: str, reasoning: str,
+                model_id: str, chunk_id: str, ts: int) -> list:
+    """SSE ``data:`` lines for a (content, reasoning) split (H4). Reasoning is
+    emitted before content (it precedes the answer); empty parts produce
+    nothing, so an ordinary content-only token yields exactly one chunk."""
+    from localm.inference.protocol import ChatChunk, ChoiceDelta, StreamChoice
+    out = []
+    for field, value in (("reasoning_content", reasoning), ("content", content)):
+        if not value:
+            continue
+        chunk = ChatChunk(
+            id=chunk_id, created=ts, model=model_id,
+            choices=[StreamChoice(delta=ChoiceDelta(**{field: value}))],
+        )
+        out.append(f"data: {chunk.model_dump_json()}\n\n")
+    return out
+
+
 async def _stream_sse(
     engine: Engine,
     messages: list,
@@ -796,9 +814,11 @@ async def _stream_sse(
     **gen_kwargs,
 ) -> AsyncIterator[str]:
     from localm.inference.protocol import ChoiceDelta, StreamChoice
+    from localm.inference.textnorm import ThinkSplitter
 
     chunk_id = make_chunk_id()
     ts = int(time.time())
+    think = ThinkSplitter()   # route <think> reasoning into delta.reasoning_content (H4)
 
     # Exact prompt token count from the backend tokenizer
     prompt_text = " ".join(
@@ -864,11 +884,14 @@ async def _stream_sse(
             if pipeline is not None and ctx is not None and pipeline.has("stream"):
                 token = pipeline.run_stream(token, ctx)
             completion_parts.append(token)
-            chunk = ChatChunk.token(token, model_id, chunk_id, ts)
-            yield f"data: {chunk.model_dump_json()}\n\n"
+            for data in _reason_sse(*think.feed(token), model_id, chunk_id, ts):
+                yield data
 
         t.join()
         gen_elapsed = time.perf_counter() - gen_start
+        # Release any tail held back while disambiguating a partial <think> tag.
+        for data in _reason_sse(*think.flush(), model_id, chunk_id, ts):
+            yield data
 
     if gen_error is not None:
         err_chunk = ChatChunk.token(
@@ -1011,6 +1034,12 @@ async def _complete(
 
     _audit_exchange(audit, transcript, messages, text)
 
+    # Split the model's <think> reasoning out of the visible answer into a
+    # separate field (H4), so API clients get clean content (token count stays on
+    # the full generated text - reasoning was still generated).
+    from localm.inference.textnorm import split_think
+    answer, reasoning = split_think(text)
+
     completion_tokens = engine.count_tokens(text)
     usage = UsageInfo(
         prompt_tokens=prompt_tokens,
@@ -1025,7 +1054,8 @@ async def _complete(
         model=model_id,
         choices=[
             FullChoice(
-                message=Message(role="assistant", content=text),
+                message=Message(role="assistant", content=answer,
+                                reasoning_content=reasoning or None),
                 finish_reason=_engine_finish_reason(engine),
             )
         ],

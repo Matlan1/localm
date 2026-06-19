@@ -239,14 +239,24 @@ class MarkdownTranscript:
         return self._path
 
     def exchange(self, user: str, assistant: str) -> None:
-        """Append one user/assistant exchange. Best-effort, never raises."""
+        """Append one user/assistant exchange. Best-effort, never raises.
+
+        The model's ``<think>`` reasoning (H4) is separated from the answer and
+        written to a collapsed ``<details>`` block after it, so the transcript
+        reads as the conversation while still preserving the reasoning instead of
+        dumping the raw tags inline."""
+        from localm.inference.textnorm import split_think
+        answer, reasoning = split_think(assistant)
         try:
             with open(self._path, "a", encoding="utf-8") as fh:
                 if not self._wrote_header:
                     fh.write(f"# localm {self._label} transcript - "
                              f"{time.strftime('%Y-%m-%d %H:%M:%S')}\n")
                     self._wrote_header = True
-                fh.write(f"\n## You\n\n{user}\n\n## Assistant\n\n{assistant}\n")
+                fh.write(f"\n## You\n\n{user}\n\n## Assistant\n\n{answer}\n")
+                if reasoning.strip():
+                    fh.write("\n<details>\n<summary>reasoning</summary>\n\n"
+                             f"{reasoning.strip()}\n\n</details>\n")
         except Exception:
             pass
 
