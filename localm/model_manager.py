@@ -324,6 +324,19 @@ def pull_model(
     user-skipped), False on a real error, so callers can set a non-zero exit
     code and the GUI can mark the job failed instead of reporting "finished".
     """
+    # A local filesystem path is not a remote spec: register it in place rather
+    # than mis-parsing a Windows drive-colon as an owner/repo:file spec, or
+    # rejecting it as "Unknown spec" (H1). Only an absolute path or an existing
+    # file counts, so a bare HF "owner/repo" is never shadowed by a same-named
+    # local directory. add_local does the validation + dedup.
+    try:
+        local = Path(model_spec).expanduser()
+        is_local_path = local.exists() and (local.is_absolute() or local.is_file())
+    except OSError:
+        is_local_path = False
+    if is_local_path:
+        return add_local(str(local), name=name)
+
     spec = resolve_spec(model_spec)
     if spec.startswith("http://") or spec.startswith("https://"):
         return _pull_url(spec, _sanitize_name(name or _stem_from_url(spec)),
@@ -1390,11 +1403,14 @@ def add_local(
     name: Optional[str] = None,
     on_duplicate: str = "ask",
     no_hash: bool = False,
-) -> None:
+) -> bool:
+    """Register a local .gguf / HF dir / Ollama blob. Returns True on a successful
+    registration or a benign no-op (alias / user-skipped duplicate), False when the
+    path is not a usable model, so `localm pull <path>` can set its exit code."""
     p = Path(path_str).resolve()
     if not p.exists():
         console.print(f"[red]Not found:[/red] {path_str}")
-        return
+        return False
 
     # Ollama manifest directory -> resolve to actual GGUF blob
     ollama = _resolve_ollama_manifest(p)
@@ -1411,7 +1427,7 @@ def add_local(
             model_name, blob_path, "ollama",
             on_duplicate=on_duplicate, digest=digest,
         )
-        return
+        return True
 
     # Refuse the localm data directory (and its models root): its config.json is
     # the app's settings file, not a model config, so registering it would poison
@@ -1421,7 +1437,7 @@ def add_local(
             f"[red]That is the localm data folder, not a model:[/red] {p}\n"
             "Point at a .gguf file or a specific model directory."
         )
-        return
+        return False
 
     from localm.inference.engine import _is_hf_dir
     is_gguf = p.is_file() and p.suffix == ".gguf"
@@ -1434,7 +1450,7 @@ def add_local(
             "Expected a .gguf file or a HuggingFace model directory "
             "(config.json plus weights or a tokenizer)."
         )
-        return
+        return False
 
     # Sanitize the user-supplied -n name (GAP-CLI-1): never let '../evil' or
     # 'a/b' become a raw registry key. p.stem is already path-component-safe.
@@ -1460,6 +1476,7 @@ def add_local(
     _register_with_dedup(
         model_name, p, kind, on_duplicate=on_duplicate, digest=digest,
     )
+    return True
 
 
 def show_shortcuts() -> None:
