@@ -425,8 +425,14 @@ class HTTPBackend(BaseLLMBackend):
 #  Convenience constructors
 # ------------------------------------------------------------------ #
 
-def make_localm_backend(model: str, port: int = 8642, **kw) -> HTTPBackend:
-    return HTTPBackend(f"http://127.0.0.1:{port}/v1", model, api_key="localm", **kw)
+def make_localm_backend(model: str, port: int = 8642, *,
+                        api_key: str = "", **kw) -> HTTPBackend:
+    """Backend for a local ``localm serve``. The bearer key resolves to *api_key*
+    if given, else ``$LOCALM_API_KEY``, else ``"localm"`` (open-mode servers
+    accept any non-empty string). A hardcoded ``"localm"`` would 401 against a
+    ``require_auth`` server - the C1 keystone bug this resolves."""
+    key = api_key or os.environ.get("LOCALM_API_KEY") or "localm"
+    return HTTPBackend(f"http://127.0.0.1:{port}/v1", model, api_key=key, **kw)
 
 
 def make_openai_backend(model: str = "gpt-4o", **kw) -> HTTPBackend:

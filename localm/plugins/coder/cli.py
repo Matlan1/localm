@@ -76,8 +76,9 @@ def _complete_model(ctx, param, incomplete):
               help="Model name (must be registered in localm).")
 @click.option("-u", "--url",        default=None,  envvar="LOCALCODER_URL",
               help="OpenAI-compat base URL, e.g. http://127.0.0.1:8642/v1.")
-@click.option("-k", "--api-key",    default="localm",
-              help="API key (use any string for local servers).")
+@click.option("-k", "--api-key",    default="localm", envvar="LOCALM_API_KEY",
+              help="API key for the localm/custom server (also $LOCALM_API_KEY). "
+                   "A require_auth server needs the real key.")
 @click.option("-p", "--port",       default=None,  type=int,
               help="Port for the auto-started localm serve [default: first free in 8642-8741].")
 @click.option("-c", "--cwd",        default=None,  type=click.Path(exists=True, file_okay=False),
@@ -274,12 +275,12 @@ def main(
         srv_port = port or find_free_port()
 
         if no_server:
-            backend = make_localm_backend(model, port=srv_port)
+            backend = make_localm_backend(model, port=srv_port, api_key=api_key)
         else:
             server_ctx = ManagedServer(model, port=srv_port)
             if not server_ctx.start():
                 sys.exit(2 if ci else 1)
-            backend = make_localm_backend(model, port=srv_port)
+            backend = make_localm_backend(model, port=srv_port, api_key=api_key)
 
     # ------------------------------------------------------------------ #
     #  Create agent
