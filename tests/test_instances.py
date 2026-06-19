@@ -237,3 +237,101 @@ def test_whoami_endpoint_before_wiring_returns_nulls():
     body = client.get("/whoami").json()
     assert body["app"] == "localm"
     assert body["instance_id"] is None and body["mode"] is None
+
+
+# ------------------------------------------------------------------ #
+#  Phase 4: scheme + attach-or-spawn discovery                       #
+# ------------------------------------------------------------------ #
+
+def test_register_records_scheme(tmp_path):
+    p = instances.register_instance(
+        tmp_path, instance_id="i", port=1, host="0.0.0.0",
+        root_dir=str(tmp_path), mode="full", token="t", scheme="https")
+    assert json.loads(p.read_text(encoding="utf-8"))["scheme"] == "https"
+
+
+def test_attach_url():
+    assert instances.attach_url({"scheme": "https", "port": 8651}) == "https://127.0.0.1:8651/"
+    assert instances.attach_url({"port": 8642}) == "http://127.0.0.1:8642/"   # default http
+
+
+def test_find_attachable_returns_live_same_dir(tmp_path):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    instances.register_instance(
+        tmp_path, instance_id="live01", port=1, host="127.0.0.1",
+        root_dir=str(proj), mode="full", token="t", scheme="http")
+    got = instances.find_attachable(tmp_path, str(proj), probe=lambda e: True)
+    assert got is not None and got["instance_id"] == "live01"
+
+
+def test_find_attachable_reaps_confident_dead_same_dir(tmp_path, monkeypatch):
+    # Dead process + failing handshake -> confident dead -> reaped. Liveness is
+    # injected (a hardcoded "probably dead" PID is flaky on hosts with a high
+    # pid_max, e.g. CI Linux runners).
+    p = _raw(tmp_path, "dead01", 4242)
+    monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
+    assert instances.find_attachable(tmp_path, str(tmp_path), probe=lambda e: False) is None
+    assert not p.exists(), "a confident-dead same-dir entry must be reaped"
+
+
+def test_find_attachable_keeps_live_pid_on_probe_miss(tmp_path, monkeypatch):
+    # Live process but the handshake misses (slow /whoami, or an impostor): never
+    # attach, and never reap a live entry.
+    p = _raw(tmp_path, "slow01", 4242)
+    monkeypatch.setattr(instances, "pid_alive", lambda pid: True)
+    assert instances.find_attachable(tmp_path, str(tmp_path), probe=lambda e: False) is None
+    assert p.exists(), "a live-PID entry must NOT be reaped on a transient probe miss"
+
+
+def test_find_attachable_ignores_and_keeps_other_dir(tmp_path):
+    other = tmp_path / "other"
+    other.mkdir()
+    mine = tmp_path / "mine"
+    mine.mkdir()
+    p = instances.register_instance(
+        tmp_path, instance_id="o01", port=1, host="127.0.0.1",
+        root_dir=str(other), mode="full", token="t")
+    # Even a probe that would say "alive" must not match a different dir, and must
+    # not reap another dir's entry.
+    assert instances.find_attachable(tmp_path, str(mine), probe=lambda e: True) is None
+    assert p.exists()
+
+
+def test_find_attachable_case_insensitive_on_windows(tmp_path):
+    import os
+    proj = tmp_path / "Proj"
+    proj.mkdir()
+    instances.register_instance(
+        tmp_path, instance_id="ci01", port=1, host="127.0.0.1",
+        root_dir=str(proj), mode="full", token="t")
+    query = str(proj).upper() if os.name == "nt" else str(proj)
+    got = instances.find_attachable(tmp_path, query, probe=lambda e: True)
+    assert got is not None, "Windows paths are case-insensitive; root_dir must match"
+
+
+def test_default_probe_uses_recorded_scheme(monkeypatch):
+    calls = []
+    monkeypatch.setattr(instances, "_try_whoami",
+                        lambda s, p, i, t: (calls.append(s), s == "https")[1])
+    assert instances.default_probe({"port": 1, "instance_id": "i", "scheme": "https"}) is True
+    assert calls == ["https"], "a recorded scheme must be probed first/only"
+
+
+def test_default_probe_missing_scheme_tries_both(monkeypatch):
+    calls = []
+    monkeypatch.setattr(instances, "_try_whoami",
+                        lambda s, p, i, t: (calls.append(s), False)[1])
+    assert instances.default_probe({"port": 1, "instance_id": "i"}) is False
+    assert calls == ["http", "https"]
+
+
+def test_advertise_isolated_is_invisible(tmp_path):
+    app = _FakeApp()
+    with instances.advertise(app, tmp_path, host="127.0.0.1", port=1,
+                             mode="full", isolated=True) as info:
+        # /whoami still works (state set) but nothing is in the registry
+        assert app.state.instance_id
+        assert instances.list_entries(tmp_path) == []
+        assert info["path"] is None
+    assert instances.list_entries(tmp_path) == []

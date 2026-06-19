@@ -135,8 +135,19 @@ def _print_qr(url: str) -> None:
                    "phone can open localm without typing the address. Needs a "
                    "network bind (-H 0.0.0.0) and the optional 'qrcode' dep "
                    "(pip install \"localm[qr]\"). Experimental.")
+@click.option("--project", default=None, type=click.Path(file_okay=False),
+              help="Project root that keys this instance [default: nearest "
+                   ".git/.localcoder above the current directory].")
+@click.option("--new", "force_new", is_flag=True,
+              help="Start a fresh server even if one is already running for this "
+                   "project (by default a second 'localm gui' attaches to it).")
+@click.option("--isolated", is_flag=True,
+              help="Start a private server that is invisible to discovery - "
+                   "nothing attaches to it and it attaches to nothing (test "
+                   "safety). Implies --new.")
 def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, debug,
-         mode, insecure, no_tls, tls_cert, tls_key, show_qr):
+         mode, insecure, no_tls, tls_cert, tls_key, show_qr, project, force_new,
+         isolated):
     """Open the localm web GUI - chat and the coder agent in your browser.
 
     \b
@@ -174,6 +185,29 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
             "[yellow]⚠  privacy mode + --debug:[/yellow] the debug log records "
             "requests and raw model output - delete it after analysis if that "
             "matters.")
+
+    # Attach-or-spawn (H6 phase 4): if a localm is already running for this
+    # project dir, open ITS GUI instead of starting a second server that
+    # double-loads the model. --new / --isolated force a fresh server.
+    from localm.config import home_dir
+    from localm import instances
+    root_dir = instances.resolve_root_dir(override=project)
+    if not (force_new or isolated):
+        existing = instances.find_attachable(home_dir(), root_dir)
+        if existing:
+            url = instances.attach_url(existing)
+            console.print(
+                f"[bold green]Attaching[/bold green] to the localm already "
+                f"running for [cyan]{root_dir}[/cyan] "
+                f"(pid {existing.get('pid')}, port {existing.get('port')}).")
+            if existing.get("mode") != "full":
+                console.print(
+                    "  [yellow]That instance is API-only; opening its address "
+                    "anyway. On-demand GUI mount lands in a later phase.[/yellow]")
+            console.print(f"  [dim]Opening[/dim] [cyan]{url}[/cyan]")
+            if not no_browser:
+                webbrowser.open(url)
+            return
 
     from localm.config import load_registry, pick_port
     from localm.model_manager import get_model_info, sync_models_dir
@@ -376,15 +410,14 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     # loopback (a 127.0.0.1 bind) and can safely seed the API key into the page.
     app.state.bind_host = host
 
-    # Advertise this server in the instance registry (H6 phase 3) as a "full"
-    # surface (API + GUI) so a future launch in the same dir can discover it.
-    from localm import instances
-    from localm.config import home_dir
-
+    # Advertise this server in the instance registry (H6 phase 3/4) as a "full"
+    # surface (API + GUI) so a future launch in the same dir can discover and
+    # attach to it. --isolated keeps it invisible to discovery.
     import uvicorn
     try:
         with instances.advertise(app, home_dir(), host=host, port=chosen_port,
-                                 mode="full"):
+                                 mode="full", scheme=scheme, project=project,
+                                 isolated=isolated):
             uvicorn.run(app, host=host, port=chosen_port, log_level="warning",
                         ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
     finally:
