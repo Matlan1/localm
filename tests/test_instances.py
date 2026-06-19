@@ -265,18 +265,21 @@ def test_find_attachable_returns_live_same_dir(tmp_path):
     assert got is not None and got["instance_id"] == "live01"
 
 
-def test_find_attachable_reaps_confident_dead_same_dir(tmp_path):
-    # Dead process (pid 999999) + failing handshake -> confident dead -> reaped.
-    p = _raw(tmp_path, "dead01", 999999)
+def test_find_attachable_reaps_confident_dead_same_dir(tmp_path, monkeypatch):
+    # Dead process + failing handshake -> confident dead -> reaped. Liveness is
+    # injected (a hardcoded "probably dead" PID is flaky on hosts with a high
+    # pid_max, e.g. CI Linux runners).
+    p = _raw(tmp_path, "dead01", 4242)
+    monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
     assert instances.find_attachable(tmp_path, str(tmp_path), probe=lambda e: False) is None
     assert not p.exists(), "a confident-dead same-dir entry must be reaped"
 
 
-def test_find_attachable_keeps_live_pid_on_probe_miss(tmp_path):
-    # Live process (our pid) but the handshake misses (slow /whoami, or impostor):
-    # never attach, and never reap a live entry.
-    import os
-    p = _raw(tmp_path, "slow01", os.getpid())
+def test_find_attachable_keeps_live_pid_on_probe_miss(tmp_path, monkeypatch):
+    # Live process but the handshake misses (slow /whoami, or an impostor): never
+    # attach, and never reap a live entry.
+    p = _raw(tmp_path, "slow01", 4242)
+    monkeypatch.setattr(instances, "pid_alive", lambda pid: True)
     assert instances.find_attachable(tmp_path, str(tmp_path), probe=lambda e: False) is None
     assert p.exists(), "a live-PID entry must NOT be reaped on a transient probe miss"
 
