@@ -133,6 +133,16 @@ async def rag_add(name: str, req: RagAddRequest, request: Request):
     missing = [str(p) for p in paths if not p.exists()]
     if missing:
         raise HTTPException(400, f"Not found: {', '.join(missing[:5])}")
+    # Confine API-driven indexing to the user's home / working dir so a request
+    # from a loopback browser page or a remote client cannot read system files
+    # or credentials and serve them back (C2).
+    from localm.rag.store import confine_index_path, indexing_roots
+    roots = indexing_roots()
+    try:
+        for p in paths:
+            confine_index_path(p, roots)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     embed = req.embed
     jobs = request.app.state.jobs
     self_embed = _make_self_embed(request.app.state.self_url,
@@ -140,9 +150,14 @@ async def rag_add(name: str, req: RagAddRequest, request: Request):
 
     def _index(job):
         embed_fn = self_embed if embed else None
-        result = coll.add_paths(
-            paths, embed_fn=embed_fn,
-            on_progress=lambda t: job.push({"type": "line", "text": t}))
+        try:
+            result = coll.add_paths(
+                paths, embed_fn=embed_fn, allowed_roots=roots,
+                on_progress=lambda t: job.push({"type": "line", "text": t}))
+        except ValueError as e:
+            # e.g. an embedding-model dimension change (C3) - report, don't crash.
+            job.push({"type": "line", "text": f"error: {e}"})
+            return False
         summary = (f"done: {result['added']} added, "
                    f"{result['updated']} updated, "
                    f"{result['skipped']} unchanged, "
