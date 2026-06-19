@@ -76,3 +76,39 @@ class _FakeApp:
 
     def __init__(self):
         self.state = _FakeApp._State()
+
+
+# ------------------------------------------------------------------ #
+#  GET /localm-ca.crt (unit 3)                                       #
+# ------------------------------------------------------------------ #
+
+def _mock_engine():
+    from unittest.mock import MagicMock
+    e = MagicMock()
+    e.display_name = "test-model"
+    type(e).loaded = property(lambda self: True)
+    return e
+
+
+def test_ca_endpoint_404_when_no_ca():
+    from fastapi.testclient import TestClient
+    from localm.inference.http_server import create_app
+    client = TestClient(create_app(_mock_engine()))
+    assert client.get("/localm-ca.crt").status_code == 404
+
+
+def test_ca_endpoint_serves_cert_unauthenticated():
+    from fastapi.testclient import TestClient
+    from localm import tls
+    from localm.config import home_dir
+    from localm.inference.http_server import create_app
+
+    tls.ensure_cert(home_dir())   # CA + leaf under the throwaway LOCALM_HOME
+    client = TestClient(create_app(_mock_engine()))
+    r = client.get("/localm-ca.crt")        # no Authorization header
+
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("application/x-x509-ca-cert")
+    assert b"BEGIN CERTIFICATE" in r.content
+    # It is exactly the CA cert (a public artifact - carries no secret).
+    assert r.content == tls.ca_cert_path(home_dir()).read_bytes()
