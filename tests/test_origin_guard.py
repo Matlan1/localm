@@ -67,6 +67,36 @@ def test_cross_origin_delete_refused(client):
     assert r.status_code == 403
 
 
+def test_cross_origin_plugin_data_route_refused(client):
+    # SEC: a plugin DATA route (e.g. /api/rag) must be same-origin only too.
+    # Before the allowlist flip these were unguarded, letting a localhost-origin
+    # page index-and-read arbitrary files via /api/rag on a keyless install.
+    # The route need not be mounted - the middleware fires before routing.
+    r = client.post("/api/rag/collections/x/add",
+                    json={"paths": ["whatever"]},
+                    headers={"Origin": "http://localhost:9999"})
+    assert r.status_code == 403
+    assert "cross-origin" in r.json()["detail"].lower()
+
+
+def test_cross_origin_coder_route_refused(client):
+    # The coder agent (shell + file edits) must not be cross-origin drivable.
+    r = client.post("/api/coder/sessions", json={},
+                    headers={"Origin": "http://evil.localhost:8080"})
+    assert r.status_code == 403
+
+
+def test_inference_api_cross_origin_allowed(client):
+    # The OpenAI-compatible inference API stays deliberately cross-origin
+    # callable so a local app on another port can use it: the guard must NOT
+    # 403 it (any other status - 422/5xx with no engine - is fine here).
+    r = client.post("/v1/chat/completions",
+                    json={"model": "x",
+                          "messages": [{"role": "user", "content": "hi"}]},
+                    headers={"Origin": "http://localhost:9999"})
+    assert r.status_code != 403
+
+
 def test_configured_cors_origin_allowed(tmp_path, monkeypatch):
     # an explicitly allow-listed origin may drive state-changing endpoints
     import localm.config as cfg
