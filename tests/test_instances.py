@@ -326,6 +326,26 @@ def test_default_probe_missing_scheme_tries_both(monkeypatch):
     assert calls == ["http", "https"]
 
 
+def test_attach_target_for_running_instance(tmp_path):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    instances.register_instance(
+        tmp_path, instance_id="t01", port=8651, host="0.0.0.0",
+        root_dir=str(proj), mode="full", token="the-token", scheme="https")
+    tgt = instances.attach_target(tmp_path, str(proj), probe=lambda e: True)
+    assert tgt == {
+        "base_url": "https://127.0.0.1:8651/v1",
+        "token": "the-token",
+        "port": 8651,
+        "scheme": "https",
+        "mode": "full",
+    }
+
+
+def test_attach_target_none_when_no_instance(tmp_path):
+    assert instances.attach_target(tmp_path, str(tmp_path), probe=lambda e: True) is None
+
+
 def test_advertise_isolated_is_invisible(tmp_path):
     app = _FakeApp()
     with instances.advertise(app, tmp_path, host="127.0.0.1", port=1,

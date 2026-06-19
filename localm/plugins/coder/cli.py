@@ -86,6 +86,10 @@ def _complete_model(ctx, param, incomplete):
               help="Working directory [default: current directory].")
 @click.option("--no-server",        is_flag=True,
               help="Don't start localm serve - assume server is already running.")
+@click.option("--new",  "force_new", is_flag=True,
+              help="Start a dedicated server even if a localm is already running "
+                   "for this project (by default localcoder attaches to it and "
+                   "uses its loaded model, so chat + coder share one model in VRAM).")
 @click.option("--max-turns",        default=None,  type=int,
               help="Max agent iterations per task [default: 40, or from .localcoder/config.toml].")
 @click.option("--temperature",      default=None,  type=float,
@@ -145,7 +149,7 @@ def _complete_model(ctx, param, incomplete):
               ))
 def main(
     task, model, url, api_key, port, cwd,
-    no_server, max_turns, temperature, max_tokens,
+    no_server, force_new, max_turns, temperature, max_tokens,
     verbose, yes, interactive_confirm, dry_run, estimate, patch_mode, ci, output_format,
     native_tools, provider, mode, scope,
 ):
@@ -273,15 +277,42 @@ def main(
             )
             sys.exit(2 if ci else 1)
 
-        srv_port = port or find_free_port()
+        # H6 phase 6: attach to the localm already running for this project dir
+        # instead of starting a second server that loads its own model. This is
+        # the "one server handles chat + coder" fix - and it uses the running
+        # instance's own token, so it no longer 401s with a guessed key.
+        attached = None
+        if not (force_new or no_server):
+            try:
+                from localm import instances
+                from localm.config import home_dir
+                _root = instances.resolve_root_dir(start=str(work_dir))
+                _tgt = instances.attach_target(home_dir(), _root)
+            except Exception:
+                _tgt = None
+            if _tgt:
+                # Authenticate with the user's configured key (env / --api-key);
+                # an open-mode instance accepts any bearer. (The per-instance
+                # registry token as a keyless local-attach credential is a
+                # follow-up - it needs the server to accept it as a bearer.)
+                attached = HTTPBackend(_tgt["base_url"], model, api_key=api_key,
+                                       native_tools=native_tools)
+                console.print(
+                    f"[dim]Using the localm already running for[/dim] "
+                    f"[cyan]{_root}[/cyan] [dim](port {_tgt['port']}, "
+                    f"mode {_tgt.get('mode')}) - sharing its loaded model.[/dim]")
 
-        if no_server:
-            backend = make_localm_backend(model, port=srv_port, api_key=api_key)
+        if attached is not None:
+            backend = attached
         else:
-            server_ctx = ManagedServer(model, port=srv_port)
-            if not server_ctx.start():
-                sys.exit(2 if ci else 1)
-            backend = make_localm_backend(model, port=srv_port, api_key=api_key)
+            srv_port = port or find_free_port()
+            if no_server:
+                backend = make_localm_backend(model, port=srv_port, api_key=api_key)
+            else:
+                server_ctx = ManagedServer(model, port=srv_port)
+                if not server_ctx.start():
+                    sys.exit(2 if ci else 1)
+                backend = make_localm_backend(model, port=srv_port, api_key=api_key)
 
     # ------------------------------------------------------------------ #
     #  Create agent
