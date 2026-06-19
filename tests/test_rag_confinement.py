@@ -89,6 +89,48 @@ class TestConfineIndexPath:
             confine_index_path(localm / "registry.json", None)
 
 
+    def test_nested_credential_dir_under_home_rejected(self, home_env):
+        # R-C2-1: a credential dir that is NOT at the home root (here ~/proj/.ssh)
+        # must still be refused, even though it sits under the allowed home root.
+        home, _ = home_env
+        nested = home / "proj" / ".ssh"
+        nested.mkdir(parents=True)
+        key = nested / "id_rsa"
+        key.write_text("PRIVATE KEY", encoding="utf-8")
+        with pytest.raises(ValueError, match="credential"):
+            confine_index_path(key, [home])
+
+    def test_nested_credential_dir_under_nonhome_root_rejected(
+            self, home_env, tmp_path):
+        # A credential dir under ANY allowed root (e.g. the working directory)
+        # is refused too - the credential check runs before the roots check.
+        root = tmp_path / "workspace"
+        creds = root / "sub" / ".aws" / "credentials"
+        creds.parent.mkdir(parents=True)
+        creds.write_text("aws_secret_access_key=AKIA...", encoding="utf-8")
+        with pytest.raises(ValueError, match="credential"):
+            confine_index_path(creds, [root])
+
+    def test_credential_name_case_insensitive(self, home_env):
+        # ".SSH" must not slip past on a case-insensitive filesystem.
+        home, _ = home_env
+        d = home / "docs" / ".SSH"
+        d.mkdir(parents=True)
+        f = d / "key"
+        f.write_text("x", encoding="utf-8")
+        with pytest.raises(ValueError, match="credential"):
+            confine_index_path(f, [home])
+
+    def test_ordinary_dotdir_under_home_still_indexable(self, home_env):
+        # Regression: a non-credential dotted folder (e.g. .github) under an
+        # allowed root must NOT be over-blocked by the credential check.
+        home, _ = home_env
+        wf = home / "repo" / ".github" / "ci.yml"
+        wf.parent.mkdir(parents=True)
+        wf.write_text("on: push", encoding="utf-8")
+        assert confine_index_path(wf, [home]) == wf.resolve()
+
+
 class TestIndexingRoots:
     def test_includes_home_and_cwd(self, home_env):
         home, _ = home_env
