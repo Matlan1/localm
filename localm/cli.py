@@ -859,6 +859,110 @@ def search_cmd(query, limit, list_files):
         sys.exit(1)
 
 
+def _open_file(path: Path) -> None:
+    """Open *path* with the OS default application (best-effort, never fatal)."""
+    import os as _os
+    import subprocess as _sp
+    try:
+        if sys.platform == "win32":
+            _os.startfile(str(path))  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            _sp.Popen(["open", str(path)])
+        else:
+            _sp.Popen(["xdg-open", str(path)])
+    except Exception as e:
+        console.print(f"[dim]Could not open it automatically: {e}[/dim]")
+
+
+def _offer_open(path: Path) -> None:
+    """In an interactive terminal, offer to open/play the just-generated media.
+
+    The CLI cannot display an image or play audio/video itself, but the file is
+    on disk - so we offer to open it in the OS default app. Skipped silently in
+    a non-interactive shell (piped/scripted), where we only print the path.
+    """
+    try:
+        if not (sys.stdin and sys.stdin.isatty()):
+            return
+    except Exception:
+        return
+    try:
+        ans = console.input("  Open it now? [Y/n] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        console.print("")
+        return
+    if ans in ("", "y", "yes"):
+        _open_file(path)
+
+
+@main.command("image")
+@click.argument("prompt")
+@click.option("--negative", default=None,
+              help="Negative prompt (things to steer away from).")
+@click.option("--guidance", type=float, default=None,
+              help="FluxGuidance scale (default ~3.5; higher = follows prompt harder).")
+@click.option("--cfg", type=float, default=None,
+              help="CFG scale for the negative-prompt path (default keeps the workflow's).")
+@click.option("--seed", type=int, default=None, help="Reproducible seed.")
+@click.option("--image", "input_image", type=click.Path(exists=True), default=None,
+              help="Use this picture as a base (image-to-image) instead of noise.")
+@click.option("--denoise", type=float, default=None,
+              help="img2img strength 0-1 (lower keeps more of the base image).")
+@click.option("--lora", "lora_name", default=None,
+              help="Optional LoRA file name (in ComfyUI's loras dir) to apply.")
+@click.option("-o", "--out", default=None,
+              help="Output .png path [default: ./image_<timestamp>.png]")
+def image_cmd(prompt, negative, guidance, cfg, seed, input_image, denoise,
+              lora_name, out):
+    """Generate an image with the local ComfyUI FLUX workflow.
+
+    \b
+    Examples:
+      localm image "a red fox in snow, photographic"
+      localm image "make it look like sunset" --image photo.png --denoise 0.6
+
+    ComfyUI must be running (or start it via the GUI, which can auto-launch it
+    when comfy_launch_cmd is configured). The CLI cannot show the image, so it
+    is saved to --out (or ./image_<timestamp>.png) and, in an interactive
+    terminal, you are offered to open it.
+    """
+    import time as _time
+
+    from .audit import SessionMode, effective_mode
+    from .image_gen.comfy import (_comfy_alive, default_api_url,
+                                  free_comfy_vram, generate_image)
+
+    api_url = default_api_url()
+    if not _comfy_alive(api_url):
+        console.print(
+            f"[red]ComfyUI is not running at {api_url}.[/red] Start it and "
+            "retry - or use the GUI's Images page, which can launch it "
+            "automatically when comfy_launch_cmd is set.")
+        sys.exit(1)
+
+    out_path = Path(out) if out \
+        else Path(f"image_{_time.strftime('%Y%m%d_%H%M%S')}.png")
+    kwargs = {k: v for k, v in (
+        ("negative_prompt", negative), ("guidance", guidance), ("cfg", cfg),
+        ("seed", seed), ("denoise", denoise), ("lora_name", lora_name),
+    ) if v is not None}
+    if input_image:
+        kwargs["input_image"] = Path(input_image)
+
+    console.print("[dim]Generating image via ComfyUI (this can take a minute)...[/dim]")
+    ok, message = generate_image(
+        prompt, out_path,
+        api_url=api_url,
+        write_sidecar=effective_mode("server") != SessionMode.PRIVACY,
+        **kwargs,
+    )
+    console.print(f"[{'green' if ok else 'red'}]{message}[/{'green' if ok else 'red'}]")
+    if not ok:
+        sys.exit(1)
+    free_comfy_vram(api_url)
+    _offer_open(out_path)
+
+
 @main.command("music")
 @click.argument("tags")
 @click.option("--lyrics", type=click.Path(exists=True), default=None,
@@ -913,6 +1017,7 @@ def music_cmd(tags, lyrics, duration, out, seed, steps, cfg):
     console.print(f"[{'green' if ok else 'red'}]{message}[/{'green' if ok else 'red'}]")
     if not ok:
         sys.exit(1)
+    _offer_open(out_path)
 
 
 @main.command("video")
@@ -983,6 +1088,7 @@ def video_cmd(prompt, negative, duration, fps, width, height, input_image,
     console.print(f"[{'green' if ok else 'red'}]{message}[/{'green' if ok else 'red'}]")
     if not ok:
         sys.exit(1)
+    _offer_open(out_path)
 
 
 @main.command("list")
@@ -1059,7 +1165,8 @@ def add(path, name, no_hash, on_duplicate):
       localm add D:\\models\\gemma.gguf --name gemma4-12b
       localm add D:\\models\\gemma.gguf -n g2 --on-duplicate alias
     """
-    add_local(path, name, on_duplicate=on_duplicate, no_hash=no_hash)
+    if not add_local(path, name, on_duplicate=on_duplicate, no_hash=no_hash):
+        sys.exit(1)
 
 
 @main.group("rag")
