@@ -1,0 +1,67 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { loadApp } from "./harness.mjs";
+
+// PWA onboarding P2c: the Settings "Install app" affordance is platform-shaped.
+// applyInstallUI() is the single decision point - one branch visible at a time:
+//   standalone -> "installed" confirmation; canPrompt -> native Install button;
+//   ios -> Add-to-Home-Screen steps; otherwise the generic browser-menu hint.
+// (The camera/UA sniffers can't run headless; this pins the UI logic they feed.)
+
+const allOk = () => Promise.resolve({
+  ok: true, status: 200, json: async () => ({ models: [], active: "" }), text: async () => "",
+});
+
+const els = (window) => ({
+  btn: window.document.getElementById("install-app"),
+  hint: window.document.getElementById("install-hint"),
+  ios: window.document.getElementById("install-ios"),
+});
+const shown = (e) => e.style.display !== "none";
+
+test("P2c: a fired install prompt reveals the native Install button only", () => {
+  const { window } = loadApp({ fetchImpl: allOk });
+  window.applyInstallUI({ canPrompt: true });
+  const { btn, hint, ios } = els(window);
+  assert.ok(shown(btn), "Install button is shown");
+  assert.ok(!shown(hint), "generic hint is hidden");
+  assert.ok(!shown(ios), "iOS steps are hidden");
+});
+
+test("P2c: iOS shows Add-to-Home-Screen steps (no beforeinstallprompt on iOS)", () => {
+  const { window } = loadApp({ fetchImpl: allOk });
+  window.applyInstallUI({ ios: true });
+  const { btn, hint, ios } = els(window);
+  assert.ok(shown(ios), "iOS steps are shown");
+  assert.ok(!shown(btn), "no native button on iOS");
+  assert.ok(!shown(hint), "generic hint is hidden");
+  assert.match(ios.textContent, /Add to Home Screen/i);
+});
+
+test("P2c: an already-installed (standalone) launch confirms it, hides install paths", () => {
+  const { window } = loadApp({ fetchImpl: allOk });
+  window.applyInstallUI({ standalone: true });
+  const { btn, hint, ios } = els(window);
+  assert.ok(!shown(btn), "no install button when already installed");
+  assert.ok(!shown(ios), "no iOS steps when already installed");
+  assert.ok(shown(hint), "the installed confirmation is shown");
+  assert.match(hint.textContent, /installed app/i);
+});
+
+test("P2c: default (no prompt yet, not iOS) falls back to the generic hint", () => {
+  const { window } = loadApp({ fetchImpl: allOk });
+  window.applyInstallUI({});
+  const { btn, hint, ios } = els(window);
+  assert.ok(shown(hint), "generic hint is the fallback");
+  assert.ok(!shown(btn), "no button until beforeinstallprompt fires");
+  assert.ok(!shown(ios), "no iOS steps off iOS");
+});
+
+test("P2c: standalone wins even if a stale prompt flag is passed", () => {
+  const { window } = loadApp({ fetchImpl: allOk });
+  window.applyInstallUI({ standalone: true, canPrompt: true, ios: true });
+  const { btn, hint, ios } = els(window);
+  assert.ok(!shown(btn) && !shown(ios), "installed state suppresses both install paths");
+  assert.match(hint.textContent, /installed app/i);
+});
