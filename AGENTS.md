@@ -124,3 +124,28 @@ Keep it cheap and self-contained:
   variable to a temporary path for the test instance.
 - Bind to localhost only, and stop the instance once the check is done. Do not
   leave a server bound across turns.
+
+## Git and PR workflow
+
+This is a solo-maintained repo, and the maintainer has delegated the full change
+cycle: branch, commit, push, open a PR, and MERGE it yourself once it is ready.
+Do NOT wait for the maintainer to click merge.
+
+"Ready" means all of:
+
+- the work is verified: tests and `scripts/check_hygiene.py` pass, and where the
+  change is observable in the running app it was checked there, not only in the
+  suite;
+- CI is green; and
+- the PR is mergeable (no conflicts).
+
+Then squash-merge and delete the branch.
+
+Guardrails that still apply:
+
+- Never merge a PR with failing CI, merge conflicts, or unfinished or unverified
+  work. If it is not actually ready, say what is missing instead of merging.
+- Do not stack PRs: land one, then branch the next off the updated `master`.
+- Only on the maintainer's own repos.
+- A history rewrite or force-push still requires telling the maintainer first
+  (see the secret-hygiene section above).
