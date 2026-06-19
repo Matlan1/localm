@@ -444,21 +444,44 @@
      auto-seeded). An in-page form, NOT window.prompt() - mobile/PWA browsers
      suppress prompt(), which left a phone/LAN client on a blank page (NET-1). -->
 <div id="key-gate" class="modal-backdrop" style="display:none">
-  <div class="modal">
-    <div class="modal-head"><span>API key required</span></div>
+  <div class="modal onboarding">
+    <div class="modal-head"><span>Connect to localm</span></div>
     <div class="modal-body">
       <p id="key-gate-msg">This localm server requires an API key.</p>
-      <label for="key-gate-input">API key (sent as a Bearer token; stored in this browser only)</label>
-      <input type="password" id="key-gate-input" autocomplete="off" spellcheck="false"
-             placeholder="LOCALM_API_KEY">
-      <div class="actions">
-        <button class="btn-quiet" id="key-gate-submit">Connect</button>
+
+      <!-- Trust the certificate (shown only over HTTPS / built-in TLS). Mandatory
+           to remove the browser warning and to install the app. -->
+      <div id="key-gate-cert" class="onboard-step" style="display:none">
+        <div class="onboard-step-title">Trust this device's certificate</div>
+        <p class="dim">localm secures the connection with its own certificate.
+          Install it once to remove the browser's "not secure" warning and to enable
+          <b>Install app</b>.</p>
+        <a id="key-gate-cert-link" class="btn-quiet onboard-cta" href="/localm-ca.crt"
+           download="localm-ca.crt">Install certificate</a>
+        <details class="onboard-help">
+          <summary>How do I install it?</summary>
+          <ul class="dim">
+            <li><b>Android / Chrome / Firefox:</b> open the downloaded file and confirm
+              "trust for websites".</li>
+            <li><b>iOS / iPadOS:</b> the profile downloads, then Settings &rarr; General
+              &rarr; VPN &amp; Device Management installs it, and Settings &rarr; General
+              &rarr; About &rarr; Certificate Trust Settings turns it on.</li>
+            <li><b>Windows:</b> import it into "Trusted Root Certification Authorities"
+              for your user.</li>
+          </ul>
+        </details>
       </div>
-      <p id="key-gate-cert" style="display:none;margin-top:12px;font-size:13px">
-        <a id="key-gate-cert-link" href="/localm-ca.crt" download="localm-ca.crt">Install certificate</a>
-        <span class="dim"> - trust localm once on this device to remove the browser
-        warning and enable "Install app".</span>
-      </p>
+
+      <!-- Enter the API key -->
+      <div class="onboard-step">
+        <div class="onboard-step-title">Enter your API key</div>
+        <label for="key-gate-input">Sent as a Bearer token; stored in this browser only.</label>
+        <input type="password" id="key-gate-input" autocomplete="off" spellcheck="false"
+               placeholder="LOCALM_API_KEY">
+        <div class="actions">
+          <button class="btn-quiet" id="key-gate-submit">Connect</button>
+        </div>
+      </div>
     </div>
   </div>
 </div>

@@ -932,6 +932,21 @@ pre:hover .copy-btn { opacity: 1; }
 }
 .modal-head button:hover { color: var(--red); }
 .modal-body { padding: 14px 16px; overflow-y: auto; font-size: 13px; }
+
+/* Companion onboarding / key gate (NET-1) */
+.modal.onboarding { width: min(440px, 94vw); }
+.onboard-step {
+  border: 1px solid var(--border); border-radius: 10px;
+  padding: 12px 14px; margin-top: 12px; background: rgba(128, 128, 128, 0.05);
+}
+.onboard-step-title { font-weight: 600; margin-bottom: 6px; }
+.onboard-step label { display: block; color: var(--text-dim); margin: 8px 0 4px; }
+.onboard-step input { width: 100%; box-sizing: border-box; }
+.onboard-cta { display: inline-block; margin-top: 8px; }
+.onboard-help { margin-top: 10px; }
+.onboard-help summary { cursor: pointer; color: var(--accent); font-size: 12px; }
+.onboard-help ul { margin: 8px 0 0; padding-left: 18px; line-height: 1.5; }
+.onboard-help li { margin-bottom: 4px; }
 .modal-body .log-entry {
   font-family: var(--mono); font-size: 12px; padding: 4px 0;
   border-bottom: 1px solid var(--border); word-break: break-word;

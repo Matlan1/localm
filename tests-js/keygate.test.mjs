@@ -78,6 +78,18 @@ test("NET-1 hard gate: a keyless (401) boot HIDES the app shell - nothing of loc
   assert.notEqual(gate.style.display, "none", "the onboarding/key gate is shown");
 });
 
+test("NET-1 onboarding: the guided cert-install step + per-platform help render over HTTPS", async () => {
+  const { window } = loadApp({ fetchImpl: keyless401, url: "https://192.168.0.5:8651/" });
+  await tick();
+  const help = window.document.querySelector("#key-gate-cert .onboard-help");
+  assert.ok(help, "per-platform cert-install help is present");
+  assert.match(help.textContent, /iOS|iPadOS/, "includes the iOS trust steps");
+  const titles = [...window.document.querySelectorAll(".onboard-step-title")]
+    .map((e) => e.textContent);
+  assert.ok(titles.some((t) => /Trust this device/.test(t)), "cert step titled");
+  assert.ok(titles.some((t) => /Enter your API key/.test(t)), "key-entry step titled");
+});
+
 test("NET-1 hard gate: a working (200) boot reveals the app and hides the gate", async () => {
   const { window } = loadApp({ fetchImpl: allOk });
   await tick();
