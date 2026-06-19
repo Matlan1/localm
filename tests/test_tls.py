@@ -59,6 +59,27 @@ def test_is_tailscale_ip():
 
 
 # ------------------------------------------------------------------ #
+#  requests_verify (loopback self-call CA trust)                     #
+# ------------------------------------------------------------------ #
+
+def test_requests_verify_loopback_https_uses_local_ca():
+    # LOCALM_HOME is the per-test throwaway home (autouse conftest fixture).
+    from localm.config import home_dir
+    tls.ensure_cert(home_dir())
+    v = tls.requests_verify("https://127.0.0.1:9000/v1")
+    assert v == str(tls.ca_cert_path(home_dir()))
+
+
+def test_requests_verify_external_https_stays_public():
+    # External HTTPS (OpenAI/Anthropic) must keep normal public verification.
+    assert tls.requests_verify("https://api.openai.com/v1") is True
+
+
+def test_requests_verify_plain_http_is_noop():
+    assert tls.requests_verify("http://127.0.0.1:8642/v1") is True
+
+
+# ------------------------------------------------------------------ #
 #  ensure_cert - happy path                                          #
 # ------------------------------------------------------------------ #
 

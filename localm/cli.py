@@ -43,6 +43,47 @@ def _exposed_bind_warning(host: str) -> Optional[str]:
     )
 
 
+def _resolve_tls(host, *, no_tls, tls_cert, tls_key):
+    """Decide TLS for a bind and return ``(ssl_certfile, ssl_keyfile)`` - or
+    ``(None, None)`` for plain HTTP.
+
+    Built-in TLS (NET-1): on any non-loopback bind localm mints its own local-CA
+    certificate so HTTPS works out of the box (the API key and all traffic are
+    encrypted). ``--no-tls`` forces plain HTTP (the key would cross the network
+    in cleartext); ``--tls-cert``/``--tls-key`` override with a user-supplied
+    pair on any bind. Raises on a half-specified override; the cert-generation
+    path may raise on a broken crypto stack and the caller refuses to fall back
+    to cleartext.
+    """
+    if tls_cert or tls_key:
+        if not (tls_cert and tls_key):
+            raise click.UsageError(
+                "--tls-cert and --tls-key must be provided together.")
+        return str(tls_cert), str(tls_key)
+    if no_tls or host in _LOOPBACK_HOSTS:
+        return None, None
+    from localm import tls
+    from localm.config import home_dir
+    return tls.ensure_cert(home_dir(), hostnames=[host])
+
+
+def _setup_tls_or_exit(host, *, no_tls, tls_cert, tls_key):
+    """Resolve TLS for *host*, or exit(2) rather than silently serve a network
+    bind in cleartext. Returns ``(ssl_certfile, ssl_keyfile)`` (cert is None for
+    plain HTTP)."""
+    try:
+        return _resolve_tls(host, no_tls=no_tls, tls_cert=tls_cert, tls_key=tls_key)
+    except click.UsageError:
+        raise
+    except Exception as e:
+        console.print(f"[bold red]Could not set up built-in TLS: {e}[/bold red]")
+        console.print(
+            "[bold red]Refusing to serve a network bind in cleartext. Re-run with "
+            "--no-tls to force HTTP (the API key would cross the network "
+            "unencrypted), or pass --tls-cert/--tls-key.[/bold red]")
+        sys.exit(2)
+
+
 def _complete_model_name(ctx, param, incomplete):
     """Shell-completion callback: registered model names matching the prefix."""
     try:
@@ -620,6 +661,15 @@ def _save_chat(messages: list, filepath: str) -> None:
 @click.option("-g", "--gpu-layers",  default=None,        type=int)
 @click.option("--mmproj",            default=None)
 @click.option("--device",            default=None)
+@click.option("--no-tls", is_flag=True,
+              help="Serve plain HTTP even on a network bind. Built-in TLS is on "
+                   "by default past loopback; this disables it (the API key then "
+                   "crosses the network in cleartext - only on a trusted LAN).")
+@click.option("--tls-cert", type=click.Path(exists=True, dir_okay=False), default=None,
+              help="Use this certificate (PEM) instead of localm's built-in "
+                   "local-CA cert. Requires --tls-key.")
+@click.option("--tls-key", type=click.Path(exists=True, dir_okay=False), default=None,
+              help="Private key (PEM) for --tls-cert.")
 @click.option("--debug", is_flag=True,
               help="Write a debug log (~/.localm/logs/), capture native llama.cpp "
                    "stderr, and log requests.")
@@ -628,7 +678,8 @@ def _save_chat(messages: list, filepath: str) -> None:
               help="Session persistence [default: config 'mode', else privacy]. "
                    "privacy = nothing saved; log = JSONL audit of chat traffic; "
                    "full = log + markdown transcript.")
-def serve(model, host, port, ctx, gpu_layers, mmproj, device, debug, mode):
+def serve(model, host, port, ctx, gpu_layers, mmproj, device, no_tls, tls_cert,
+          tls_key, debug, mode):
     """Start an OpenAI-compatible inference server.
 
     \b
@@ -686,6 +737,11 @@ def serve(model, host, port, ctx, gpu_layers, mmproj, device, debug, mode):
             f"is in use - serving on {port} instead.[/yellow]"
         )
 
+    # Built-in TLS: encrypt the bind out of the box past loopback (NET-1).
+    ssl_certfile, ssl_keyfile = _setup_tls_or_exit(
+        host, no_tls=no_tls, tls_cert=tls_cert, tls_key=tls_key)
+    scheme = "https" if ssl_certfile else "http"
+
     engine = Engine(
         str(model_path),
         mmproj_path=mmproj,
@@ -698,12 +754,17 @@ def serve(model, host, port, ctx, gpu_layers, mmproj, device, debug, mode):
     engine.load()
     console.print(
         f"[green]✓[/green] Serving at "
-        f"[bold]http://{host}:{port}/v1/chat/completions[/bold]"
+        f"[bold]{scheme}://{host}:{port}/v1/chat/completions[/bold]"
     )
+    if scheme == "https":
+        console.print("[dim]Built-in TLS (self-signed via localm's local CA). "
+                      "First connection from a device shows a one-time trust "
+                      "warning; install the CA from /localm-ca.crt to remove it.[/dim]")
     console.print("[dim]Ctrl+C to stop[/dim]\n")
 
     try:
-        http_serve(engine, host=host, port=port)
+        http_serve(engine, host=host, port=port,
+                   ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
     except KeyboardInterrupt:
         pass
     finally:

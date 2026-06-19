@@ -172,6 +172,30 @@ def is_tailscale_ip(value: str) -> bool:
         return False
 
 
+def requests_verify(url: str):
+    """The value to pass as ``requests``' ``verify=`` for an in-process call to
+    *url*.
+
+    Built-in TLS gives a network bind an HTTPS endpoint whose leaf is signed by
+    this install's local CA, so an in-process loopback self-call (the coder
+    agent, media-job model reloads, RAG self-embedding) must trust that CA.
+    Returns the CA bundle path for a loopback HTTPS URL - or False when the CA
+    file is somehow absent, which is safe because the connection never leaves
+    127.0.0.1. Returns True (normal public verification) for plain HTTP and for
+    any non-loopback HTTPS URL, e.g. the OpenAI / Anthropic APIs - so this never
+    weakens verification of a real external endpoint."""
+    low = (url or "").lower()
+    if not low.startswith("https:"):
+        return True
+    from urllib.parse import urlsplit
+    host = (urlsplit(url).hostname or "").lower()
+    if host not in ("127.0.0.1", "::1", "localhost"):
+        return True
+    from localm.config import home_dir
+    ca = ca_cert_path(home_dir())
+    return str(ca) if ca.is_file() else False
+
+
 # ------------------------------------------------------------------ #
 #  Filesystem helpers                                                 #
 # ------------------------------------------------------------------ #

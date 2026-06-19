@@ -1100,9 +1100,21 @@ def _protocol_messages_to_dicts(messages: List[Message]) -> list:
 #  Entry point                                                         #
 # ------------------------------------------------------------------ #
 
-def serve(engine: Engine, host: str = "127.0.0.1", port: int = 8642) -> None:
-    """Start the server - blocks until Ctrl+C."""
+def serve(engine: Engine, host: str = "127.0.0.1", port: int = 8642,
+          ssl_certfile: Optional[str] = None,
+          ssl_keyfile: Optional[str] = None) -> None:
+    """Start the server - blocks until Ctrl+C.
+
+    When ``ssl_certfile`` / ``ssl_keyfile`` are given (built-in TLS, NET-1), the
+    server speaks HTTPS on this port; a plain-HTTP request to it then fails the
+    TLS handshake (effectively refused) rather than crossing the network in
+    cleartext.
+    """
     import uvicorn
 
     app = create_app(engine)
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+    # Record the bind host so routes that depend on it (open-mode seeding,
+    # CA download) can reason about loopback vs network binds.
+    app.state.bind_host = host
+    uvicorn.run(app, host=host, port=port, log_level="warning",
+                ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)

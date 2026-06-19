@@ -23,7 +23,9 @@ def _complete_model(ctx, param, incomplete):
 def _gui_bind_warning(host: str):
     """Warning text when the GUI binds past loopback without auth, or None when
     the bind is safe. Builds on the server's check, then escalates for the GUI:
-    it also exposes the coder agent (shell + file edits) and has no built-in TLS.
+    it also exposes the coder agent (shell + file edits). Traffic itself is
+    encrypted by built-in TLS on a network bind (NET-1); the warning is about the
+    coder agent's reach, not about cleartext.
     """
     from localm.cli import _exposed_bind_warning
     base = _exposed_bind_warning(host)
@@ -32,8 +34,7 @@ def _gui_bind_warning(host: str):
     return (
         base
         + "\n  The GUI also exposes the coder agent, which can run shell "
-        "commands and edit files here. There is no built-in TLS - put it behind "
-        "a reverse proxy (see docs/tls.md) for remote access."
+        "commands and edit files here - only expose it on a trusted network."
     )
 
 
@@ -120,12 +121,22 @@ def _print_qr(url: str) -> None:
               help="Allow binding past loopback WITHOUT LOCALM_API_KEY set. This "
                    "exposes the unauthenticated coder agent (shell + file edits) "
                    "to the network - only on a trusted, isolated network.")
+@click.option("--no-tls", is_flag=True,
+              help="Serve plain HTTP even on a network bind. Built-in TLS is on "
+                   "by default past loopback; this disables it (the API key then "
+                   "crosses the network in cleartext - only on a trusted LAN).")
+@click.option("--tls-cert", type=click.Path(exists=True, dir_okay=False), default=None,
+              help="Use this certificate (PEM) instead of localm's built-in "
+                   "local-CA cert. Requires --tls-key.")
+@click.option("--tls-key", type=click.Path(exists=True, dir_okay=False), default=None,
+              help="Private key (PEM) for --tls-cert.")
 @click.option("--qr", "show_qr", is_flag=True,
               help="[PoC] Print a scannable QR of the LAN URL at startup so a "
                    "phone can open localm without typing the address. Needs a "
                    "network bind (-H 0.0.0.0) and the optional 'qrcode' dep "
                    "(pip install \"localm[qr]\"). Experimental.")
-def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, debug, mode, insecure, show_qr):
+def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, debug,
+         mode, insecure, no_tls, tls_cert, tls_key, show_qr):
     """Open the localm web GUI - chat and the coder agent in your browser.
 
     \b
@@ -226,6 +237,28 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     if was_busy:
         console.print(f"[yellow]Requested port busy - using {chosen_port}.[/yellow]")
 
+    # Refuse to bind past loopback without auth unless explicitly forced: the GUI
+    # exposes not just the chat API but the coder agent, which can run shell
+    # commands and edit files on this machine. Checked before any setup work.
+    bind_warning = _gui_bind_warning(host)
+    if bind_warning and not insecure:
+        console.print(f"[bold red]{bind_warning}[/bold red]")
+        console.print(
+            "[bold red]Refusing to start: binding past loopback without auth. "
+            "Set $env:LOCALM_API_KEY first, or pass --insecure to override.[/bold red]")
+        sys.exit(2)
+    if bind_warning:
+        console.print(f"[bold yellow]{bind_warning}[/bold yellow]")
+        console.print("[bold yellow]  Proceeding anyway (--insecure set).[/bold yellow]")
+
+    # Built-in TLS (NET-1): a network bind serves HTTPS out of the box so the
+    # API key and all traffic are encrypted. Resolved before attach_gui so the
+    # coder/media/RAG self-call URL carries the right scheme.
+    from localm.cli import _setup_tls_or_exit
+    ssl_certfile, ssl_keyfile = _setup_tls_or_exit(
+        host, no_tls=no_tls, tls_cert=tls_cert, tls_key=tls_key)
+    scheme = "https" if ssl_certfile else "http"
+
     from localm.inference.engine import Engine
     from localm.inference import http_server as hs
     from .web import attach_gui
@@ -271,12 +304,12 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
 
     manager = attach_gui(
         app,
-        self_url=f"http://127.0.0.1:{chosen_port}/v1",
+        self_url=f"{scheme}://127.0.0.1:{chosen_port}/v1",
         switch_model=switch_model,
         active_model=lambda: state["model"],
     )
 
-    base_url = f"http://127.0.0.1:{chosen_port}/"
+    base_url = f"{scheme}://127.0.0.1:{chosen_port}/"
     # Deep-link the browser to the Models page (and a pending download) when
     # the GUI was opened with --pull or with nothing registered yet.
     open_url = base_url
@@ -285,20 +318,6 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         open_url = f"{base_url}?view=models&pull={quote(pull_spec, safe='')}"
     elif model_less:
         open_url = f"{base_url}?view=models"
-
-    # Refuse to bind past loopback without auth unless explicitly forced: the
-    # GUI exposes not just the chat API but the coder agent, which can run shell
-    # commands and edit files on this machine.
-    bind_warning = _gui_bind_warning(host)
-    if bind_warning and not insecure:
-        console.print(f"[bold red]{bind_warning}[/bold red]")
-        console.print(
-            "[bold red]Refusing to start: binding past loopback without auth. "
-            "Set $env:LOCALM_API_KEY first, or pass --insecure to override.[/bold red]")
-        sys.exit(2)
-    if bind_warning:
-        console.print(f"[bold yellow]{bind_warning}[/bold yellow]")
-        console.print("[bold yellow]  Proceeding anyway (--insecure set).[/bold yellow]")
 
     console.print(f"[bold green]localm GUI[/bold green] → {base_url}")
     if model_less:
@@ -323,11 +342,18 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     else:
         _ip = _lan_ip()
         if _ip:
-            phone_url = f"http://{_ip}:{chosen_port}/"
+            phone_url = f"{scheme}://{_ip}:{chosen_port}/"
             console.print(
                 f"  [dim]from a phone on this network:[/dim] "
                 f"[cyan]{phone_url}[/cyan] "
                 "[dim](open it, then Install as app)[/dim]")
+            if scheme == "https":
+                console.print(
+                    "  [dim]first visit shows a one-time certificate warning; tap "
+                    "[/dim][cyan]Install certificate[/cyan][dim] on the key screen "
+                    "(or open [/dim][cyan]" + f"{scheme}://{_ip}:{chosen_port}"
+                    "/localm-ca.crt[/cyan][dim]) to trust it once - then no warning "
+                    "and the app installs.[/dim]")
             if show_qr:
                 _print_qr(phone_url)
 
@@ -352,6 +378,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
 
     import uvicorn
     try:
-        uvicorn.run(app, host=host, port=chosen_port, log_level="warning")
+        uvicorn.run(app, host=host, port=chosen_port, log_level="warning",
+                    ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
     finally:
         manager.close_all()

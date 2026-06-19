@@ -119,7 +119,9 @@ def _reload_llm(job, self_url: str, s: dict) -> None:
         key = os.environ.get("LOCALM_API_KEY")
         if key:
             headers["Authorization"] = f"Bearer {key}"
-        _rq.post(f"{self_url}/models/load", headers=headers, timeout=300)
+        from localm import tls as _tls
+        _rq.post(f"{self_url}/models/load", headers=headers, timeout=300,
+                 verify=_tls.requests_verify(self_url))
         job.push({"type": "line", "text": "Chat model ready."})
     except Exception as e:
         job.push({"type": "line", "text": f"Reload deferred to the next message ({e})."})
