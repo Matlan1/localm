@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for localm.plugins.coder.skills (the SKILL.md importer)."""
 
 from pathlib import Path

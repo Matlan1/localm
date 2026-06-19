@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Decode base64-encoded or URL-fetched media into PIL / numpy objects."""
 
 from __future__ import annotations

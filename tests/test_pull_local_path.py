@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """H1: `localm pull <local path>` must register the file in place instead of
 mis-parsing a Windows drive-colon as owner/repo:file or rejecting "Unknown spec".
 """

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Best-effort accelerator detection for install-time and run-time backend choice.
 
 Pure stdlib, and NEVER raises: detection is advisory, so a probe that fails just

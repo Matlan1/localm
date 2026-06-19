@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Phase 3 hardening tests for localm.model_manager.
 
 Covers three previously-unguarded behaviours:

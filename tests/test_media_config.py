@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Media-plugin config resolution: the opt-in "use config from" share-config,
 its cycle-prevention, and source-unavailable fallback. Backend-agnostic - this
 only exercises localm.plugins.media_config dict logic."""

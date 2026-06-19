@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Abstract backend interface shared by HF and GGUF backends."""
 
 from __future__ import annotations

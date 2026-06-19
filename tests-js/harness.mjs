@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 // jsdom harness for the localm GUI (localm/plugins/gui/static/app.js).
 //
 // app.js is a 3200-line top-level "use strict" script (not a module). It defines

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """MCP server plugin (registry entry).
 
 Unlike the route-based plugins, MCP contributes a STDIO command, not HTTP routes:

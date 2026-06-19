@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """`localm plugin setup` - the installer's plugin-selection step (F3).
 
 Out of the box only chat is active; setup lets the user (or the installer, or a

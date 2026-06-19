@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """
 M2 Phase 3 regression tests for the coder plugin.
 

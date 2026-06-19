@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Phase 3 regression tests for `localm abliterate` (BUG-4).
 
 BUG-4: the command ignored Heretic's exit status. It only guarded

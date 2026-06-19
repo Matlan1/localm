@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 // jsdom tests for drag-and-drop file attachment on the chat view
 // (addAttachedFiles + the #view-chat drop handler in app.js). We assert the
 // observable effect - a chip appears in #attach-chips - because the underlying

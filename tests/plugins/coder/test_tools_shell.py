@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """
 Tests for shell and test-runner tools in localm.plugins.coder.tools:
   tool_run_shell, tool_run_tests, _detect_test_runner

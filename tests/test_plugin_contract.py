@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for the plugin contract interfaces (localm/plugins/contract.py)."""
 
 from localm.plugins import contract as c

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """
 Phase 3 (FAC-2) regression tests for localm.plugins.coder.privacy.
 

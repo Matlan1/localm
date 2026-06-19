@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for the settings schema (localm/settings_schema.py)."""
 
 import json

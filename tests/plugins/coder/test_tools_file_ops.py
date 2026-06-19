@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """
 Tests for file-operation tools in localm.plugins.coder.tools:
   tool_read_file, tool_write_file, tool_edit_file, tool_list_dir, tool_tree

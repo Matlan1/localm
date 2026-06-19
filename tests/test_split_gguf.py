@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for split GGUF support (multi-part *-00001-of-00003.gguf files)."""
 
 from pathlib import Path

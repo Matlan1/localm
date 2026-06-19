@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for the jobs plugin backend (store, cron matcher, scheduler, runner, CLI).
 
 Every test that touches disk points LOCALM_HOME at a tmp dir and patches the

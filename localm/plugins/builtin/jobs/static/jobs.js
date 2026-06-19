@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 // Jobs plugin client entry (ES module).
 //
 // loadClientPlugins() in the GUI (localm/plugins/gui/static/app.js) imports this

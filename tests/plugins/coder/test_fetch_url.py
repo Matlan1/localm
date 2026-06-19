@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """
 Tests for tool_fetch_url / tool_web_search in localm.plugins.coder.tools.
 

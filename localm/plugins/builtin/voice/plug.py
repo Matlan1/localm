@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Voice plugin: Whisper speech-to-text for the chat mic button.
 
 Routes (mounted by the engine, auto-scoped to the ``voice`` capability):

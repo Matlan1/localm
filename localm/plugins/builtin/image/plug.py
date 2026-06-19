@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Image plugin: ComfyUI image generation + a gallery for the chat surface.
 
 Routes (mounted by the engine, auto-scoped to the ``image`` capability):

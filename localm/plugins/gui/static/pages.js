@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 /* localm GUI - Models / Images / Plugins / Settings pages.
    Relies on helpers from app.js ($, el, authHeaders, toast, streamJob,
    fetchImageURL, openModal, refreshModels, modelCache, switchModel).

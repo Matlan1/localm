@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Per-plugin config resolution for the media plugins (image, music, video).
 
 Backend-agnostic: this only manipulates the config dict. It knows nothing about

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Chat-pipeline hooks: the ChatPipeline registry/runners (unit) and the
 inlet/stream/outlet chain wired through the real /v1/chat/completions handler
 with a stub engine and a synthetic plugin (integration).

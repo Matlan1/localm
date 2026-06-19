@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for localm.plugins.loader - external plugin discovery and management."""
 
 import sys

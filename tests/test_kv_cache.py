@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """
 Tests for persistent KV cache prefix reuse in the native llama.cpp wrapper.
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 /* Kokoro text-to-speech, rendered entirely in the browser.
  *
  * The SPA's plugin loader import()s this module for the active `tts` plugin and

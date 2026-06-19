@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """
 MCP server over stdio - exposes localm to any MCP client.
 

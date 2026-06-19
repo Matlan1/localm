@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """REAL end-to-end smoke test for the in-process GGUF backend.
 
 No mocks: downloads a small real instruct model (SmolLM2-135M-Instruct, ~88 MB

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Static tripwire against the GUI nav render/fetch loop.
 
 Bug (2026-06-16): loading the GUI / opening Settings fired ~230 GET /api/plugins

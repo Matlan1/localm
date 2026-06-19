@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """
 Plugin contract (v1): the interface every localm plugin implements, plus the
 host API the engine provides to it.

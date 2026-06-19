@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for the Wan video generation module (video_gen/comfy.py)."""
 
 import json

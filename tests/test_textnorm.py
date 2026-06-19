@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """
 Tests for the shared control-marker scrubber and its application at the engine
 layer, so channel/harmony tokens never leak to the GUI regardless of backend.

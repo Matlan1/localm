@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for tolerant tool-call parsing (mangled finetune dialects).
 
 The "logged" cases are verbatim model outputs from a real session where

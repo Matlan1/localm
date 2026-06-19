@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """End-to-end coverage for the cross-cutting graceful-failure handler
 (_GracefulGroup in cli.py).
 

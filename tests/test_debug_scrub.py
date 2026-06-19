@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for internal-marker scrubbing and the debug log module."""
 
 import logging

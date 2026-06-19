@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """C2: confine API-driven RAG indexing to safe roots so a request (a loopback
 browser page or a remote client) cannot index + serve back system files
 (C:/Windows/win.ini, /etc/passwd), the localm keystore, or credential folders.

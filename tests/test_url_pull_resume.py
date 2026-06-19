@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for resumable direct-URL model downloads (_pull_url).
 
 Only the fresh path was exercised before; the Range/206 resume logic and the

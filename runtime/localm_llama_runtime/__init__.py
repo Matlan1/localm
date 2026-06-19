@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Project-local home for localm's native llama.cpp inference binaries.
 
 Installed (editable) into localm's venv so the project carries its own

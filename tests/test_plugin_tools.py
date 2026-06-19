@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Plugins can export real, callable tools into the coder agent.
 
 Regression guard for the audit finding that plugin `tool_exports` were parsed
