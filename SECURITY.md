@@ -12,8 +12,11 @@ disclosure timeline.
 localm is a local-first, single-owner application. API access is gated by a
 **bearer key** (see `localm/inference/http_server.py`):
 
-- When **no key is configured**, the server is **fail-open by design** - it binds
-  to localhost and serves requests without auth, for frictionless local use.
+- When **no key is configured**, reads and the inference API are **fail-open by
+  design** - the server binds to localhost and serves them without auth, for
+  frictionless local use. State-changing management routes still require the
+  loopback shell token (see *State-changing endpoints* below), so another local
+  program cannot silently drive a keyless install.
 - When a key **is** configured (`LOCALM_API_KEY`), every `/v1` and `/api` route
   requires `Authorization: Bearer <key>`, gated by capability scopes: model-read
   routes (`GET /v1/models`, `GET /v1/models/{id}`) need `models:read`, plugin
@@ -21,14 +24,34 @@ localm is a local-first, single-owner application. API access is gated by a
   scopes (the owner key implies every scope). The sole exception is `GET /health`,
   an unauthenticated liveness probe that returns only the model name and load state.
 
-Because the default is fail-open, **do not bind localm to a non-localhost interface
-without setting an API key** (and ideally TLS - see `docs/tls.md`). Exposing the GUI
-also exposes the coder agent, which can run shell commands.
+Manage the key from the CLI: `localm key show` / `generate` / `set` / `clear`, and
+mint named, scope-limited keys with `localm key create --scope <scope>` (privileged
+scopes are never minted into a named key).
 
-State-changing endpoints (`POST`/`PUT`/`PATCH`/`DELETE`) additionally require the
-request to be same-origin (or an explicitly configured `cors_origins`), so a web page
-on another `localhost` port cannot drive them from your browser. Non-browser clients
-(the CLI and SDKs) send no `Origin` and are unaffected.
+Because the default is fail-open for reads, **do not bind localm to a non-localhost
+interface without setting an API key** (and ideally TLS - see `docs/tls.md`).
+Exposing the GUI also exposes the coder agent, which can run shell commands.
+
+### State-changing endpoints
+
+Every state-changing endpoint (`POST`/`PUT`/`PATCH`/`DELETE`) except the
+OpenAI-compatible inference API (`/v1/chat/completions`, `/v1/completions`,
+`/v1/embeddings`) is **same-origin only** by default, so a web page on another
+`localhost` port (a dev server, an npm postinstall page) cannot drive it from your
+browser. The guard is allowlist-by-default: it covers plugin data routes
+(`/api/rag`, `/api/coder`, ...) too, not just key/config/plugin administration, and
+a new route is protected the moment it is added. The inference API stays
+cross-origin callable so a local app can use it; `"cors_origins"` opts specific
+origins (or `"*"`) into cross-origin use.
+
+When **no key is configured** (open mode), those same state-changing routes also
+require a per-process **shell token** that only the loopback GUI shell carries. So a
+local non-browser client (curl, a script) cannot mint a key, change config, install
+a plugin, load a model, drive the coder agent, or index files in open mode: manage
+through the loopback GUI, or set a key (`localm key generate`). Reads and the
+inference API stay open. A configured `cors_origins` is trusted for cross-origin
+*reads*, but state changes still need a key or the shell token, so a forged `Origin`
+header cannot be used as a management credential.
 
 ## Capability scopes grant host access - only issue keys to trusted clients
 
@@ -37,9 +60,12 @@ localm process's own permissions rather than a sandbox:
 
 - **`coder`** runs shell commands and reads/writes files (the `--scope` glob narrows
   *which* files; `run_shell` is intentionally unscoped).
-- **`rag`** indexing reads any file the localm process can read (you point it at your
-  documents); a `rag`-scoped key can therefore read server-readable files back through
-  a query.
+- **`rag`** indexing over the HTTP API is confined to your home folder and the
+  working directory and refuses the localm data dir and credential folders
+  (`~/.ssh`, ...), so an API client cannot index-and-read arbitrary system files.
+  The `localm rag` CLI is unconfined (a local user can already read their own files).
+  A `rag`-scoped key can still read documents under the allowed roots back through a
+  query, so issue one only to clients you trust.
 - **`config:write` / `plugins:admin` / `keys:admin`** are privileged and are never
   granted implicitly - only the owner key may mint keys carrying them.
 
