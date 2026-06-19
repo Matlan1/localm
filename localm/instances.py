@@ -345,6 +345,27 @@ def attach_url(entry: dict) -> str:
     return f"{scheme}://127.0.0.1:{entry.get('port')}/"
 
 
+def attach_target(home: Path, root_dir: str,
+                  probe: Optional[Callable[[dict], bool]] = None) -> Optional[dict]:
+    """The thin-client attach point for the instance serving *root_dir*, or None.
+
+    A CLI chat / coder client uses this to talk to the running instance's ``/v1``
+    (with its registry ``token``) instead of starting its own server + model -
+    the H6 "one server handles chat + coder" fix. Returns
+    ``{base_url, token, port, scheme, mode}`` (loopback - same machine)."""
+    entry = find_attachable(home, root_dir, probe=probe)
+    if not entry:
+        return None
+    scheme = entry.get("scheme") or "http"
+    return {
+        "base_url": f"{scheme}://127.0.0.1:{entry.get('port')}/v1",
+        "token": entry.get("token"),
+        "port": entry.get("port"),
+        "scheme": scheme,
+        "mode": entry.get("mode"),
+    }
+
+
 # ------------------------------------------------------------------ #
 #  Advertise: the surface-startup context manager                    #
 # ------------------------------------------------------------------ #
