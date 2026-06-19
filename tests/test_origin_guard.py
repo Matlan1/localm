@@ -97,8 +97,12 @@ def test_inference_api_cross_origin_allowed(client):
     assert r.status_code != 403
 
 
-def test_configured_cors_origin_allowed(tmp_path, monkeypatch):
-    # an explicitly allow-listed origin may drive state-changing endpoints
+def test_configured_cors_origin_passes_cross_origin_but_still_needs_token(
+        tmp_path, monkeypatch):
+    # An allow-listed origin passes the cross-origin guard, but in open mode a
+    # state change still needs the shell token (F2): a forgeable Origin header is
+    # not a management credential, so a configured external origin must use a key
+    # (or the loopback shell token) to manage.
     import localm.config as cfg
     home = tmp_path / ".localm"
     home.mkdir(parents=True, exist_ok=True)
@@ -108,7 +112,14 @@ def test_configured_cors_origin_allowed(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
     from localm.config import save_config
     save_config({"cors_origins": ["https://app.example"]})
-    client = TestClient(create_app(None))
-    r = client.patch("/v1/config", json={"n_ctx": 8192},
-                     headers={"Origin": "https://app.example"})
-    assert r.status_code == 200
+    app = create_app(None)
+    client = TestClient(app)
+    # NEGATIVE (F2): an allow-listed Origin alone no longer bypasses the gate.
+    refused = client.patch("/v1/config", json={"n_ctx": 8192},
+                           headers={"Origin": "https://app.example"})
+    assert refused.status_code == 403
+    # With the shell token it goes through.
+    ok = client.patch("/v1/config", json={"n_ctx": 8192},
+                      headers={"Origin": "https://app.example",
+                               "Authorization": f"Bearer {app.state.shell_token}"})
+    assert ok.status_code == 200
