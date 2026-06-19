@@ -339,6 +339,13 @@ function showKeyGate(message) {
   if (!gate) return;
   if (message) { const m = $("key-gate-msg"); if (m) m.textContent = message; }
   gate.style.display = "flex";
+  // Offer the one-tap "Install certificate" link only over HTTPS - the built-in
+  // TLS network case (NET-1), where trusting the local CA once removes the
+  // browser warning and unlocks PWA install. On a plain-http loopback gate there
+  // is no CA to install, so keep it hidden.
+  const cert = $("key-gate-cert");
+  if (cert) cert.style.display =
+    (location.protocol === "https:") ? "block" : "none";
   const input = $("key-gate-input");
   if (input) {
     input.value = localStorage.getItem("localm.apiKey") || "";

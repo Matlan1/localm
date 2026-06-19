@@ -10,10 +10,11 @@ terminal.) So the only real questions are *how the phone reaches your server* an
 ## The short version
 
 - **Same Wi-Fi:** run `localm gui -H 0.0.0.0` (set an API key first); open the
-  `http://<your-ip>:<port>/` it prints, on your phone; choose *Install app*.
-- **Anywhere else:** put the machine and the phone on a [Tailscale](https://tailscale.com)
-  network and open the machine's Tailscale address. `tailscale serve` adds HTTPS,
-  which also makes the PWA fully installable.
+  `https://<your-ip>:<port>/` it prints on your phone; trust the certificate once
+  (one tap on the key screen); enter your key; choose *Install app*.
+- **Anywhere else:** put the machine and the phone on a
+  [Tailscale](https://tailscale.com) network and open the machine's Tailscale
+  address - localm serves HTTPS there too.
 
 ## On the same Wi-Fi (LAN)
 
@@ -22,23 +23,33 @@ terminal.) So the only real questions are *how the phone reaches your server* an
    API key first, because the GUI also exposes the coder agent:
    - set `LOCALM_API_KEY` to something only you know, then
    - `localm gui -H 0.0.0.0`
-2. **Open the printed address on the phone.** On startup the console now prints
-   the address to use, e.g. `http://192.168.1.50:8642/`. Type that into the phone
-   browser.
+
+   localm now serves **HTTPS automatically** on a network bind, so the key and
+   your prompts are encrypted in transit. No reverse proxy, no extra tools.
+2. **Open the printed address on the phone.** On startup the console prints the
+   address to use, e.g. `https://192.168.1.50:8642/` (the port may differ if 8642
+   was busy - use what it prints). Type that into the phone browser.
    - *Tip (experimental PoC):* `localm gui -H 0.0.0.0 --qr` prints a scannable QR
      of that address so you can point the phone camera at the terminal instead of
      typing it. Needs `pip install "localm[qr]"` and a terminal that renders block
      glyphs (Windows Terminal is fine). This is a proof-of-concept and may change.
-3. **Install it.** In the phone browser menu choose *Install app* / *Add to Home
-   screen*. localm now has its own icon.
+3. **Trust the certificate once.** Because localm signs its certificate with its
+   own local CA (not a public one), the first visit shows a one-time "not secure"
+   warning - this is a browser rule for any private certificate on a raw IP, not a
+   localm bug. Proceed past it to the page, then tap **Install certificate** on the
+   key screen (or open `https://<ip>:<port>/localm-ca.crt`) and trust it. After
+   that: no warning, and the app installs. See [tls.md](tls.md) for the exact
+   per-platform trust step (iOS has an extra toggle).
+4. **Enter your key and install.** Type the `LOCALM_API_KEY` into the key screen
+   (it is sent over the now-encrypted connection and stored only in that browser).
+   Then choose *Install app* / *Add to Home screen* from the browser menu - localm
+   gets its own icon.
 
-> **Install vs. shortcut (the HTTPS catch).** A *true* installed PWA (offline app
-> shell, real app icon) needs a "secure context" - HTTPS, or `localhost`. Over a
-> plain `http://192.168.x.x` LAN address your phone can still **use** the GUI
-> fully, but the browser may only offer a home-screen *shortcut*, not a full
-> install. To get the real install on a LAN, serve it over HTTPS (Tailscale
-> `serve`, below, or a reverse proxy with a certificate - see
-> [tls.md](tls.md)).
+> **Why the trust step exists.** A *true* installed PWA (offline app shell, real
+> app icon) needs a "secure context" - HTTPS or `localhost`. localm gives you the
+> HTTPS automatically; the only manual part is trusting its certificate once per
+> device, because no public certificate authority will issue a cert for a private
+> LAN IP. After the one-time trust, the full install works.
 
 ## From anywhere (remote): Tailscale (recommended)
 
@@ -50,11 +61,13 @@ port-forwarding, no domain, and no certificate wrangling is
 
 1. Install Tailscale on the machine running localm **and** on your phone; sign in
    to the same account on both. They are now on one private network.
-2. Run `localm gui -H 0.0.0.0` (with `LOCALM_API_KEY` set).
-3. Open the machine's Tailscale address on the phone, e.g. `http://100.x.y.z:8642/`.
-4. **For HTTPS** (a nicer name and full PWA install), run `tailscale serve` in
-   front of localm; your phone then opens
-   `https://<machine>.<tailnet>.ts.net/` from anywhere.
+2. Run `localm gui -H 0.0.0.0` (with `LOCALM_API_KEY` set). localm's certificate
+   already covers your Tailscale IP, so it serves HTTPS there too.
+3. Open the machine's Tailscale address on the phone, e.g.
+   `https://100.x.y.z:8642/`, and trust the certificate once (step 3 above).
+4. **Optional, for a public-CA cert with no trust step:** run `tailscale serve` in
+   front of localm; your phone then opens `https://<machine>.<tailnet>.ts.net/`
+   with a certificate browsers already trust, so there is no warning to clear.
 
 More involved remote options: a reverse proxy (Caddy) + a domain + Let's Encrypt
 (see [tls.md](tls.md)), or a Cloudflare Tunnel. **Avoid UPnP / manual
@@ -64,9 +77,11 @@ port-forwarding** - it is the classic way to expose a machine you did not mean t
 
 Binding past loopback exposes the coder agent (shell + file edits) and the API.
 Always set `LOCALM_API_KEY` before `-H 0.0.0.0`; localm refuses to bind to the
-network without a key unless you pass `--insecure`. On a trusted home LAN a key is
-enough; for anything reachable from the internet use Tailscale or a TLS reverse
-proxy. See [network.md](network.md) and [tls.md](tls.md).
+network without a key unless you pass `--insecure`. Traffic itself is encrypted by
+built-in TLS by default (`--no-tls` turns it off for a trusted, isolated LAN). On
+a trusted home LAN a key plus the built-in TLS is enough; for anything reachable
+from the internet use Tailscale or a TLS reverse proxy with a real certificate.
+See [network.md](network.md) and [tls.md](tls.md).
 
 ## What localm does NOT do (on purpose)
 
