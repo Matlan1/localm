@@ -84,6 +84,32 @@ def _spawn_detached(cmd: list, *, cwd: str, env: dict | None = None):
     return subprocess.Popen(cmd, **kwargs)
 
 
+def _invalid_numeric_fields(port: str, ctx: str, gpu: str):
+    """Return a human-readable message if any numeric launcher field is invalid,
+    else None. A stray letter or an out-of-range port used to crash the spawned
+    server in pick_port ("connect_ex: port must be 0-65535") before the bug
+    reporter could catch it - validate here and refuse with a clear message."""
+    if port:
+        try:
+            p = int(port)
+        except ValueError:
+            return f"Port must be a whole number (got '{port}')."
+        if not (1 <= p <= 65535):
+            return f"Port must be between 1 and 65535 (got {p})."
+    if ctx:
+        try:
+            if int(ctx) <= 0:
+                return f"Context must be a positive whole number (got {ctx})."
+        except ValueError:
+            return f"Context must be a whole number (got '{ctx}')."
+    if gpu:
+        try:
+            int(gpu)
+        except ValueError:
+            return f"GPU layers must be a whole number (got '{gpu}')."
+    return None
+
+
 def python_exe() -> str:
     """Prefer the repo venv's interpreter; fall back to the one running us.
     Handles both the Windows (Scripts/) and POSIX (bin/) venv layouts."""
@@ -544,6 +570,15 @@ class Launcher(tk.Tk):
         ctx = self.ctx.get().strip()
         gpu = self.gpu_layers.get().strip()
         port = self.port.get().strip()
+
+        # Validate the numeric fields before spawning - a letter or an
+        # out-of-range port used to crash the child in pick_port (socket
+        # connect_ex: "port must be 0-65535") before the bug reporter could
+        # catch it. Fail here with a clear message instead.
+        bad = _invalid_numeric_fields(port, ctx, gpu)
+        if bad:
+            self.status_msg(bad, error=True)
+            return None
 
         # Effective privacy mode for the surface being launched
         glob_mode = self.privacy_global.get() or "privacy"

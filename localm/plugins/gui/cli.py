@@ -97,7 +97,7 @@ def _print_qr(url: str) -> None:
 @click.argument("model", default="", required=False, shell_complete=_complete_model)
 @click.option("-H", "--host", default="127.0.0.1", show_default=True,
               help="Bind address. Keep 127.0.0.1 unless you know what you're doing.")
-@click.option("-p", "--port", default=None, type=int,
+@click.option("-p", "--port", default=None, type=click.IntRange(1, 65535),
               help="Port [default: config 'port' (8642); auto-bumps when busy].")
 @click.option("-c", "--ctx", default=None, type=int, help="Context window size.")
 @click.option("-g", "--gpu-layers", default=None, type=int)
