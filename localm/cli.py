@@ -655,7 +655,7 @@ def _save_chat(messages: list, filepath: str) -> None:
 @main.command()
 @click.argument("model", shell_complete=_complete_model_name)
 @click.option("-H", "--host",        default="127.0.0.1", help="Bind address (0.0.0.0 for LAN).")
-@click.option("-p", "--port",        default=None,        type=int,
+@click.option("-p", "--port",        default=None,        type=click.IntRange(1, 65535),
               help="Port [default: config 'port' (8642); auto-bumps when busy].")
 @click.option("-c", "--ctx",         default=None,        type=int)
 @click.option("-g", "--gpu-layers",  default=None,        type=int)

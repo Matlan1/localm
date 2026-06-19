@@ -189,6 +189,22 @@ def test_serve_expose_still_binds_network(launcher_mod):
     assert "serve" in cmd and "-H" in cmd and "0.0.0.0" in cmd
 
 
+def test_invalid_numeric_fields(launcher_mod):
+    """The launcher refuses a bad port/ctx/gpu before spawning (a stray letter or
+    an out-of-range port used to crash the child in pick_port)."""
+    f = launcher_mod._invalid_numeric_fields
+    # all-blank and all-valid -> no error
+    assert f("", "", "") is None
+    assert f("8642", "4096", "99") is None
+    # port: out of range or non-numeric
+    assert "65535" in f("70000", "", "")
+    assert f("0", "", "") is not None
+    assert "whole number" in f("abc", "", "")
+    # ctx / gpu non-numeric
+    assert "Context" in f("8642", "xx", "")
+    assert "GPU" in f("8642", "", "yy")
+
+
 def test_launch_handler_uses_helper_on_posix(launcher_mod, monkeypatch):
     """End-to-end-ish: the buried Launch handler routes through the helper, so a
     POSIX user clicking Launch spawns a real child instead of getting the
