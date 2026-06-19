@@ -24,11 +24,12 @@ import queue
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from localm.inference.http_server import _require_auth
+from localm import scopes
+from localm.inference.http_server import _require_auth, require_scope
 from localm.plugins.coder.sessions import SessionManager
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -197,6 +198,28 @@ def attach_gui(
         fits = (est["needed"] <= free) if isinstance(free, int) else None
         return {"model": name, "model_bytes": model_bytes, **est,
                 "free": free, "total": total, "fits": fits, "approximate": True}
+
+    @app.get("/api/pairing/qr",
+             dependencies=[Depends(require_scope(scopes.ADMIN))])
+    async def pairing_qr():
+        """An SVG QR encoding the API key (as ``localm-key:<key>``) so a phone can
+        scan it on the onboarding screen and SAVE the key - no typing. Owner scope
+        only: it carries the key, so a merely scoped key cannot read it. 404 in
+        open mode (no key configured -> nothing to pair). The key is rendered
+        server-side (the server already holds it); never cached."""
+        from localm import auth
+        key = auth.get_api_key()
+        if not key:
+            raise HTTPException(404, "No API key configured - nothing to pair.")
+        import io
+        import qrcode
+        import qrcode.image.svg
+        img = qrcode.make(f"localm-key:{key}",
+                          image_factory=qrcode.image.svg.SvgImage)
+        buf = io.BytesIO()
+        img.save(buf)
+        return Response(content=buf.getvalue(), media_type="image/svg+xml",
+                        headers={"Cache-Control": "no-store"})
 
     @app.get("/api/fs/dirs", dependencies=[Depends(_require_auth)])
     async def fs_dirs(path: str = ""):

@@ -981,9 +981,27 @@ function buildSettingControl(field) {
   return { field, node: wrap, read };
 }
 
+// Fetch the server-rendered key QR (owner-scope) and show the "Pair a phone"
+// block. Hidden in open mode / when no key is configured (the endpoint 404s).
+async function refreshPairingQR() {
+  const wrap = $("pairing"), box = $("pairing-qr");
+  if (!wrap || !box) return;
+  try {
+    const r = await fetch("/api/pairing/qr", { headers: authHeaders() });
+    if (!r.ok) { wrap.style.display = "none"; return; }
+    const svg = await r.text();   // server-rendered (qrcode) SVG, same-origin
+    // Sanitize even though it is our own endpoint (defense in depth, SVG profile).
+    box.innerHTML = DOMPurify.sanitize(svg, { USE_PROFILES: { svg: true, svgFilters: true } });
+    wrap.style.display = "block";
+  } catch (e) {
+    wrap.style.display = "none";
+  }
+}
+
 async function refreshSettingsPage() {
   const myToken = ++_settingsRenderToken;
   $("gui-api-key").value = localStorage.getItem("localm.apiKey") || "";
+  refreshPairingQR();
   const form = $("config-form");
   let fields;
   try {

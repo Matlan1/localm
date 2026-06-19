@@ -38,6 +38,9 @@ dependencies = [
     # bind serves HTTPS out of the box. Core, not an extra - encryption on an
     # exposed bind must never be opt-in. See localm/tls.py and docs/tls.md.
     "cryptography>=42",
+    # QR codes: the companion pairing flow renders a key QR server-side and the
+    # GUI/CLI print LAN-URL QRs. Core so phone pairing works out of the box.
+    "qrcode>=8.0",
 ]
 
 [project.optional-dependencies]
