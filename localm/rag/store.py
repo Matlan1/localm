@@ -59,6 +59,92 @@ def rag_dir() -> Path:
     return home_dir() / "rag"
 
 
+# Well-known credential / secret folders under the user's home that must never
+# be indexed even though they sit inside an allowed root. The localm data dir
+# (home_dir(), holding the API keystore + registry) is denied separately.
+_SENSITIVE_HOME_SUBDIRS = (
+    ".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure", ".localm",
+)
+
+
+def _path_within(child: Path, parent: Path) -> bool:
+    """True when *child* is *parent* or lives underneath it (both resolved)."""
+    try:
+        child, parent = child.resolve(), parent.resolve()
+    except (OSError, ValueError):
+        return False
+    if child == parent:
+        return True
+    if hasattr(child, "is_relative_to"):
+        return child.is_relative_to(parent)
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def indexing_roots(extra: Optional[list] = None) -> list[Path]:
+    """Default-allowed roots for API-driven indexing.
+
+    The user's home folder and the working directory cover legitimate document
+    libraries while excluding system paths (``C:/Windows``, ``/etc``). Power
+    users can widen this with the ``rag_indexing_roots`` config key. The localm
+    data dir and credential folders are still denied by ``confine_index_path``
+    even though they sit under home.
+    """
+    roots: list[Path] = [Path.home(), Path.cwd()]
+    try:
+        from localm.config import load_config
+        for r in load_config().get("rag_indexing_roots", []) or []:
+            roots.append(Path(r).expanduser())
+    except Exception:
+        pass
+    for r in (extra or []):
+        roots.append(Path(r).expanduser())
+    out: list[Path] = []
+    for r in roots:
+        try:
+            out.append(r.resolve())
+        except (OSError, ValueError):
+            continue
+    return out
+
+
+def confine_index_path(p, allowed_roots: Optional[list] = None) -> Path:
+    """Resolve *p* and verify it is safe for API-driven indexing.
+
+    Always rejects the localm data directory (it holds the API key, registry and
+    config) and well-known credential folders. When *allowed_roots* is given,
+    also require the path to live under one of them, so an API caller - a browser
+    page on the loopback port, or a remote client - cannot read arbitrary files
+    like ``C:/Windows/win.ini`` or ``/etc/passwd`` and serve them back (C2).
+    Raises ``ValueError`` on an out-of-bounds path. CLI callers pass no roots and
+    are not confined (a local user can already read their own files).
+    """
+    from localm.config import home_dir
+    try:
+        rp = Path(p).expanduser().resolve()
+    except (OSError, ValueError):
+        raise ValueError(f"Invalid path: {p}")
+
+    if _path_within(rp, home_dir()):
+        raise ValueError(
+            f"Refusing to index the localm data directory "
+            f"(it holds the API key and registry): {p}")
+    home = Path.home()
+    for sub in _SENSITIVE_HOME_SUBDIRS:
+        if _path_within(rp, home / sub):
+            raise ValueError(f"Refusing to index a credential directory: {p}")
+
+    if allowed_roots is not None and not any(
+            _path_within(rp, r) for r in allowed_roots):
+        raise ValueError(
+            f"Path is outside the allowed indexing roots "
+            f"(your home folder / the working directory): {p}")
+    return rp
+
+
 def _check_name(name: str) -> str:
     if not _NAME_RE.match(name or ""):
         raise ValueError(
@@ -176,8 +262,14 @@ class Collection:
     # ------------------------------------------------------------- #
 
     @staticmethod
-    def _expand(paths: list) -> list[Path]:
-        """Resolve files + recursive folder contents to indexable files."""
+    def _expand(paths: list,
+                allowed_roots: Optional[list] = None) -> list[Path]:
+        """Resolve files + recursive folder contents to indexable files.
+
+        When *allowed_roots* is given, files resolving outside the confinement
+        (system paths, credential dirs, or symlinks escaping an allowed folder)
+        are silently dropped - add_paths already validated the top-level inputs,
+        so this only catches sneaky nested escapes."""
         out: list[Path] = []
         for p in paths:
             p = Path(p).expanduser()
@@ -191,17 +283,38 @@ class Collection:
                         out.append(f.resolve())
         # de-dup, keep order
         seen: set = set()
-        return [p for p in out if not (p in seen or seen.add(p))]
+        deduped = [p for p in out if not (p in seen or seen.add(p))]
+        if allowed_roots is None:
+            return deduped
+        kept: list[Path] = []
+        for p in deduped:
+            try:
+                confine_index_path(p, allowed_roots)
+            except ValueError:
+                continue   # nested escape (symlink / credential dir) -> skip
+            kept.append(p)
+        return kept
 
     def add_paths(self, paths: list, *, embed_fn: Optional[EmbedFn] = None,
-                  on_progress: Optional[ProgressFn] = None) -> dict:
+                  on_progress: Optional[ProgressFn] = None,
+                  allowed_roots: Optional[list] = None) -> dict:
         """
         Index files/folders. Unchanged files (same mtime+size) are skipped;
         changed ones are re-indexed in place. Returns counters plus per-file
         failures. embed_fn failures degrade to lexical-only, never abort.
+
+        When *allowed_roots* is given (the HTTP API passes the user's home + the
+        working dir), an out-of-bounds top-level path raises ``ValueError`` and
+        nested escapes are dropped (C2). CLI callers omit it and stay unconfined.
+        Indexing with an embedding model whose dimensionality differs from the
+        collection's also raises ``ValueError`` rather than corrupting the
+        vectors with mixed dimensions (C3).
         """
         say = on_progress or (lambda _t: None)
-        files = self._expand(paths)
+        if allowed_roots is not None:
+            for p in paths:
+                confine_index_path(p, allowed_roots)   # raises ValueError
+        files = self._expand(paths, allowed_roots)
         if not files:
             return {"added": 0, "updated": 0, "skipped": 0, "failed": [],
                     "chunks": len(self._chunks)}
@@ -236,11 +349,26 @@ class Collection:
             if not embed_broken and new_chunks:
                 try:
                     vecs = embed_fn([c["text"] for c in new_chunks])
-                    if len(vecs) == len(new_chunks):
-                        vectors = vecs
                 except Exception as e:
                     embed_broken = True
                     say(f"embeddings unavailable ({e}) - indexing lexical-only")
+                else:
+                    if len(vecs) == len(new_chunks):
+                        new_dim = _first_dim(vecs)
+                        # A different embedding dimensionality means a different
+                        # model: refuse rather than store mixed-dim vectors that
+                        # would silently mis-score every query (C3).
+                        if (self._vec_dim is not None and new_dim is not None
+                                and new_dim != self._vec_dim):
+                            raise ValueError(
+                                f"Embedding dimension changed "
+                                f"({self._vec_dim} -> {new_dim}): this "
+                                f"collection was built with a different "
+                                f"embedding model. Rebuild it (delete and "
+                                f"re-add) or index with the original model.")
+                        vectors = vecs
+                        if self._vec_dim is None and new_dim is not None:
+                            self._vec_dim = new_dim
 
             # Replace any previous chunks (and vectors) for this document
             if known:
@@ -312,19 +440,25 @@ class Collection:
                        embed_fn: Optional[EmbedFn]) -> Optional[list[float]]:
         if embed_fn is None or self._vectors is None:
             return None
-        covered = sum(1 for v in self._vectors if v)
-        if not self._chunks or covered / len(self._chunks) < 0.8:
+        present = [v for v in self._vectors if v]
+        if not self._chunks or len(present) / len(self._chunks) < 0.8:
             return None
+        # Stored vectors must share one dimensionality. A legacy collection with
+        # mixed-dim vectors (built before the C3 add-time guard) is ambiguous -
+        # skip vector scoring and answer lexically rather than mis-score with
+        # zeros for the odd-dim chunks.
+        dims = {len(v) for v in present}
+        if len(dims) > 1:
+            return None
+        stored_dim = next(iter(dims))
         try:
             qvec = embed_fn([text])[0]
         except Exception:
             return None
         # A switched embedding model yields query vectors of a different
-        # dimensionality than the stored ones: numpy (va @ vb) would raise and
-        # the no-numpy path would silently truncate. Skip vector scoring and
-        # fall back to lexical-only rather than crash or return wrong scores.
-        dim = self._vec_dim or _first_dim(self._vectors)
-        if dim is not None and len(qvec) != dim:
+        # dimensionality than the stored ones: fall back to lexical-only rather
+        # than crash or return wrong scores.
+        if len(qvec) != stored_dim:
             return None
         out = []
         for v in self._vectors:
@@ -356,8 +490,13 @@ class Collection:
 
 
 def _cosine(a: list, b: list) -> float:
-    if len(a) != len(b):       # mismatched dims (switched embed model) -> no signal
-        return 0.0
+    if len(a) != len(b):
+        # Mismatched dims must never be scored as a real (zero) similarity - that
+        # silently mis-ranks. Callers (_vector_scores) guarantee equal lengths;
+        # reaching here is a bug or unrepaired mixed-dim data (C3).
+        raise ValueError(
+            f"cosine similarity needs equal-length vectors "
+            f"(got {len(a)} and {len(b)})")
     try:
         import numpy as np
         va, vb = np.asarray(a, dtype="float32"), np.asarray(b, dtype="float32")
