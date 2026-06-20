@@ -17,12 +17,17 @@ first-party plugins in Phase 3.
 from __future__ import annotations
 
 import importlib.util
+import logging
 import sys
 import tomllib
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from localm.plugins.contract import API_VERSION, PluginSpec, Surface
+
+# User-facing log of the sequential plugin load (one line per plugin). Distinct
+# from the debug-only debuglog so it shows in normal server logs (U2).
+_log = logging.getLogger("localm.plugins")
 
 
 # --------------------------------------------------------------------------- #
@@ -441,16 +446,41 @@ class PluginManager:
         update_config(_mutate)
 
     # ---- load / unload (in-process, isolated) ------------------------------
-    def load_enabled(self) -> None:
+    def load_enabled(
+        self,
+        on_event: Optional[Callable[[str, str, Optional[str]], None]] = None,
+    ) -> None:
         """Discover INSTALLED plugins and load every active one (installed AND
         enabled). Never raises - a failing plugin is recorded in errors and
-        skipped. A 'enabled' config entry for a plugin not on disk is ignored."""
+        skipped. A 'enabled' config entry for a plugin not on disk is ignored.
+
+        Each plugin is loaded sequentially and reported as it goes: a line is
+        logged (``localm.plugins`` logger) and, if given, *on_event* is called
+        ``on_event(name, status, error)`` with status "loaded" or "failed" - the
+        GUI uses this to show load progress (U2). A raising callback is ignored
+        so it can never break startup."""
         self._ensure_preinstalled()                # first-run: provision chat etc.
         self.discover()
         enabled = self._enabled_set()
+
+        def _emit(name: str, status: str, error: Optional[str]) -> None:
+            if status == "loaded":
+                _log.info("plugin %s loaded", name)
+            else:
+                _log.warning("plugin %s failed to load: %s", name, error)
+            if on_event is not None:
+                try:
+                    on_event(name, status, error)
+                except Exception:              # a bad callback must not break load
+                    pass
+
         for name in sorted(self._specs):           # _specs == installed (on disk)
             if name in enabled and name not in self._loaded:
                 self._safe_load(self._specs[name])
+                if name in self._loaded:
+                    _emit(name, "loaded", None)
+                else:
+                    _emit(name, "failed", self._errors.get(name))
 
     def _ensure_preinstalled(self) -> None:
         """First-run provisioning for preinstalled plugins (chat is plugin #0).

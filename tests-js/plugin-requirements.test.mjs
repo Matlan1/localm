@@ -39,8 +39,14 @@ function makeFetch(calls) {
 }
 
 async function renderCatalog(win) {
-  runScript(win, "renderCatalogPlugins();");
-  await new Promise((r) => setTimeout(r, 0));
+  // Drop the per-row stagger (U2) to 0 so the populate settles within a few
+  // macrotasks, then drain until the status line leaves its "Loading…" state.
+  runScript(win, "_catalogStaggerMs = 0; renderCatalogPlugins();");
+  for (let i = 0; i < 20; i++) {
+    await new Promise((r) => setTimeout(r, 0));
+    const s = win.document.querySelector(".catalog-status");
+    if (s && !/Loading/.test(s.textContent)) break;
+  }
 }
 
 test("catalog warns about missing required plugins; others show no warning", async () => {
