@@ -25,7 +25,12 @@ from typing import AsyncIterator, List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import (
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from localm import scopes
@@ -198,7 +203,7 @@ def mount_gui_surface(app) -> bool:
 #  App factory                                                         #
 # ------------------------------------------------------------------ #
 
-def create_app(engine: Engine) -> FastAPI:
+def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
     global _engine, _inference_sem
     _engine = engine
 
@@ -243,6 +248,14 @@ def create_app(engine: Engine) -> FastAPI:
     # the Origin guard alone do not cover. Per-process so it dies on restart;
     # never persisted.
     app.state.shell_token = secrets.token_urlsafe(32)
+
+    # api-mode landing: a bare `localm serve` has no GUI shell, so GET / would
+    # 404. Redirect it to the auto-generated API docs. Only on the api path so
+    # it never collides with the GUI's own "/" handler + StaticFiles catch-all.
+    if api_landing:
+        @app.get("/", include_in_schema=False)
+        async def _api_root() -> RedirectResponse:
+            return RedirectResponse(url="/docs", status_code=307)
 
     # Debug mode: log every request with timing to the debug log file
     from localm.debuglog import debug_enabled, logger as _dbg
@@ -1304,7 +1317,7 @@ def serve(engine: Engine, host: str = "127.0.0.1", port: int = 8642,
     from localm import instances
     from localm.config import home_dir
 
-    app = create_app(engine)
+    app = create_app(engine, api_landing=True)
     # Record the bind host so routes that depend on it (open-mode seeding,
     # CA download) can reason about loopback vs network binds.
     app.state.bind_host = host

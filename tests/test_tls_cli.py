@@ -61,7 +61,7 @@ def test_http_server_serve_passes_ssl_to_uvicorn(monkeypatch):
         captured["bind_host"] = getattr(app.state, "bind_host", None)
 
     monkeypatch.setattr(uvicorn, "run", fake_run)
-    monkeypatch.setattr(http_server, "create_app", lambda engine: _FakeApp())
+    monkeypatch.setattr(http_server, "create_app", lambda engine, **kw: _FakeApp())
 
     http_server.serve(object(), host="0.0.0.0", port=9443,
                       ssl_certfile="/x/server.crt", ssl_keyfile="/x/server.key")
