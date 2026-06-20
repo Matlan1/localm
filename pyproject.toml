@@ -56,6 +56,10 @@ coder = [
 # Install with:  uv pip install -e ".[gpu]"  (requires Python 3.12 venv)
 gpu = [
     "transformers[kernels]~=5.12",
+    # Pin the transitive tokenizers so it does not flip between resolver passes
+    # (the 0.23.1 <-> 0.22.2 churn on repeated setup runs). 0.22.2 is what
+    # transformers 5.12 (tokenizers<=0.23.0,>=0.22.0) resolves to.
+    "tokenizers==0.22.2",
     "accelerate>=1.0",
     "pillow>=10.0",
     "torch==2.9.1+rocm7.13.0; sys_platform == 'win32'",
