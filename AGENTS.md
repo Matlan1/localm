@@ -83,6 +83,12 @@ maintainer explicitly tells you, in the current session, to remove something.
   remove, and never overwrite `issues/issues.txt` wholesale. You may read it and
   append to it. If you believe anything under a protected path should be removed,
   STOP and ask the maintainer first.
+- `qa/` - the by-hand test campaign: the exhaustive feature matrix
+  (`qa/FEATURE-MATRIX-2026-06-18.md`), `qa/feature-results.json`,
+  `qa/byhand_record.py` (the recorder), the test plans, and throwaway scratch.
+  Also gitignored and local-only - treat it exactly like `issues/` (read/append,
+  never delete or `git clean` it). Run `python qa/byhand_record.py status` to see
+  coverage.
 
 Other gitignored local state (do not delete without being asked): `home/`,
 `config.json`, `registry.json`, the installed-plugins dir, and the personal
