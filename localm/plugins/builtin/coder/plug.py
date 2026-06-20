@@ -33,10 +33,11 @@ import os
 import queue
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from localm.inference.http_server import caller_scopes
 from localm.pathsafe import confined_file as _confined_file
 from localm.plugins.coder.sessions import CoderSession
 
@@ -103,14 +104,35 @@ async def list_sessions(request: Request):
 
 
 @_router.post("/api/coder/sessions")
-async def create_session(req: CreateSessionRequest, request: Request):
+async def create_session(req: CreateSessionRequest, request: Request,
+                         caller=Depends(caller_scopes)):
     mgr = _sessions(request)
     active_model = request.app.state.active_model
     self_url = request.app.state.self_url
 
-    cwd = Path(req.cwd).expanduser()
-    if not cwd.is_dir():
-        raise HTTPException(400, f"Not a directory: {req.cwd}")
+    # Safe-to-share scoping. The OWNER key (and open-mode loopback - caller is
+    # None) gets the full coder: any directory, run_shell included. A MINTED,
+    # non-owner coder-scoped key gets a RESTRICTED session - run_shell removed (no
+    # arbitrary host command exec / RCE) and confined to the instance project
+    # root - so a key you hand out cannot run shell commands or wander the
+    # filesystem. run_shell is cwd-independent, so confining the cwd is not enough
+    # on its own; disabling it is the actual containment.
+    from localm import scopes as S
+    restricted = caller is not None and S.ADMIN not in caller
+    disabled_tools = frozenset({"run_shell"}) if restricted else frozenset()
+
+    if restricted:
+        # Force the session into the instance's project root, ignoring req.cwd, so
+        # a scoped key cannot point the (confined) file tools at arbitrary paths.
+        root = getattr(request.app.state, "root_dir", None) or str(Path.cwd())
+        cwd = Path(root).expanduser().resolve()
+        if not cwd.is_dir():
+            raise HTTPException(400, f"Project root is not a directory: {cwd}")
+    else:
+        cwd = Path(req.cwd).expanduser()
+        if not cwd.is_dir():
+            raise HTTPException(400, f"Not a directory: {req.cwd}")
+        cwd = cwd.resolve()
 
     # Per-session model: the local GPU serves one engine at a time, so a
     # different model means switching the active engine for everyone.
@@ -145,13 +167,14 @@ async def create_session(req: CreateSessionRequest, request: Request):
     loop = asyncio.get_running_loop()
     # Agent construction scans the project (map build) - keep it off the loop
     session = await loop.run_in_executor(None, lambda: CoderSession(
-        cwd.resolve(),
+        cwd,
         backend,
         auto_approve=req.auto_approve,
         max_turns=req.max_turns,
         mode=session_mode,
         scope=req.scope,
         dry_run=req.dry_run,
+        disabled_tools=disabled_tools,
         **gen_kwargs,
     ))
     mgr.create(session)

@@ -64,6 +64,7 @@ class CoderSession:
         mode: str = "privacy",
         scope: Optional[str] = None,
         dry_run: bool = False,
+        disabled_tools: Optional[frozenset] = None,
         **gen_kwargs,
     ) -> None:
         from localm.plugins.coder.agent import Agent
@@ -96,6 +97,7 @@ class CoderSession:
             mode=parse_mode(mode),
             scope=scope,
             dry_run=dry_run,
+            disabled_tools=disabled_tools,
             on_event=self._on_agent_event,
             confirm_handler=None if auto_approve else self._confirm,
             **gen_kwargs,

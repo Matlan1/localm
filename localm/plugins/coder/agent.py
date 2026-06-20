@@ -261,6 +261,7 @@ class Agent:
         parent: Optional["Agent"] = None,
         mode: SessionMode = SessionMode.PRIVACY,
         scope: Optional[str] = None,
+        disabled_tools: Optional[frozenset] = None,
         self_verify: bool = True,
         turn_budget: Optional[int] = None,
         on_event=None,
@@ -280,6 +281,10 @@ class Agent:
         self.parent         = parent
         self.mode           = mode
         self.scope          = scope        # optional glob filter on file-access tools
+        # Tools removed from THIS session (e.g. {"run_shell"} for a restricted,
+        # shareable coder key): hidden from the model and hard-refused at dispatch
+        # so a minted scoped key cannot run arbitrary host commands (RCE).
+        self.disabled_tools = frozenset(disabled_tools or ())
         self.self_verify    = self_verify  # nudge agent to verify code changes before finishing
         # Per-task turn budget for uncertainty escalation. None → 2/3 of max_turns.
         self.turn_budget    = turn_budget if turn_budget is not None else max(3, (max_turns * 2) // 3)
@@ -384,11 +389,16 @@ class Agent:
             extra_tool_docs="\n\n".join(
                 d for d in (self._mcp_docs, self._plugin_docs, self._skill_docs) if d
             ),
+            disabled_tools=self.disabled_tools,
         )
 
         # Register OpenAI-format tool definitions when the backend supports it
+        # (excluding any tool disabled for this session).
         if getattr(backend, "native_tools", False):
-            backend.set_tools(_build_openai_tool_defs())
+            backend.set_tools([
+                d for d in _build_openai_tool_defs()
+                if d.get("function", {}).get("name") not in self.disabled_tools
+            ])
 
     @property
     def turns(self) -> int:
@@ -612,6 +622,7 @@ class Agent:
             memory=self._memory,
             model_name=self._model_name,
             extra_tool_docs=self._mcp_docs,
+            disabled_tools=self.disabled_tools,
         )
 
     def reindex(self) -> int:
@@ -624,6 +635,7 @@ class Agent:
             memory=self._memory,
             model_name=self._model_name,
             extra_tool_docs=self._mcp_docs,
+            disabled_tools=self.disabled_tools,
         )
         return self._project_map.file_count()
 
@@ -637,6 +649,7 @@ class Agent:
             memory=self._memory,
             model_name=self._model_name,
             extra_tool_docs=self._mcp_docs,
+            disabled_tools=self.disabled_tools,
         )
         return self._memory
 
@@ -775,7 +788,8 @@ class Agent:
                 # Pass the known tool names so the lenient, name-gated formats
                 # (bare JSON and ```json / bare fences) are recognised without
                 # mistaking a JSON example in prose for a call.
-                calls = parse_tool_calls(response, tool_names=set(TOOL_REGISTRY))
+                calls = parse_tool_calls(
+                    response, tool_names=set(TOOL_REGISTRY) - self.disabled_tools)
 
                 if not calls:
                     # Self-verification: don't accept a final answer while code
@@ -1355,6 +1369,17 @@ ws     ::= [ \t\n\r]*
     # ------------------------------------------------------------------ #
 
     def _execute_tool(self, call: ToolCall, interactive: bool) -> ToolResult:
+        # Hard gate: a tool disabled for this session (e.g. run_shell for a
+        # restricted, shareable coder key) can never execute, whatever the model
+        # emits. This is the security boundary - the prompt/parse exclusions below
+        # are only there so the model does not waste turns trying.
+        if call.name in self.disabled_tools:
+            result = ToolResult.error(
+                f"'{call.name}' is disabled for this session and was not run.")
+            if interactive:
+                print_tool_error(call.name, result.output)
+            return result
+
         tool_def = TOOL_REGISTRY.get(call.name)
 
         if tool_def is None:
@@ -1650,6 +1675,7 @@ ws     ::= [ \t\n\r]*
                 project_map=self._project_map,
                 memory=self._memory,
                 model_name=self._model_name,
+                disabled_tools=self.disabled_tools,
             )
 
     # ------------------------------------------------------------------ #
