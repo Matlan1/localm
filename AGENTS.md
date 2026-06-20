@@ -85,10 +85,11 @@ maintainer explicitly tells you, in the current session, to remove something.
   STOP and ask the maintainer first.
 - `qa/` - the by-hand test campaign: the exhaustive feature matrix
   (`qa/FEATURE-MATRIX-2026-06-18.md`), `qa/feature-results.json`,
-  `qa/byhand_record.py` (the recorder), the test plans, and throwaway scratch.
-  Also gitignored and local-only - treat it exactly like `issues/` (read/append,
-  never delete or `git clean` it). Run `python qa/byhand_record.py status` to see
-  coverage.
+  `qa/byhand_record.py` (the recorder), and the test plans. Also gitignored and
+  local-only - treat it exactly like `issues/` (read/append, never delete or
+  `git clean` it). Run `python qa/byhand_record.py status` to see coverage. (The
+  maintainer's test-instance logs/bug reports live in `issues/testinstance_home/`,
+  NOT here - despite the name, that is bug-report data, not test-campaign data.)
 
 Other gitignored local state (do not delete without being asked): `home/`,
 `config.json`, `registry.json`, the installed-plugins dir, and the personal
