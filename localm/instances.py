@@ -166,6 +166,34 @@ def unregister_instance(path) -> None:
         pass
 
 
+def set_mode(home: Path, instance_id: str, mode: str) -> bool:
+    """Update the SURFACE mode of this instance's registry entry in place
+    (e.g. ``api`` -> ``full`` after an on-demand GUI mount, phase 5), atomically.
+
+    Best-effort: returns True if the entry was rewritten, False if it is missing
+    or unwritable. Only the owning process should call this for its own id (it
+    rewrites the same 0600 file ``advertise`` created)."""
+    if not instance_id:
+        return False
+    path = registry_path(home, instance_id)
+    entry = read_entry(path)
+    if entry is None:
+        return False
+    entry.pop("_path", None)
+    entry["mode"] = mode
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(json.dumps(entry, indent=2), encoding="utf-8")
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        return False
+
+
 def read_entry(path) -> Optional[dict]:
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -390,6 +418,10 @@ def advertise(app, home: Path, *, host: str, port: int, mode: str,
     app.state.root_dir = root_dir
     app.state.instance_mode = mode
     app.state.instance_token = token
+    # The instance's own bind coordinates, so it can build its loopback /v1
+    # self-url when it mounts a surface on demand (phase 5 on-demand GUI mount).
+    app.state.instance_port = port
+    app.state.instance_scheme = scheme
 
     path = None
     if not isolated:
