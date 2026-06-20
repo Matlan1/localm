@@ -2,7 +2,6 @@
 """Tests for conversation compaction (localm.inference.compact)."""
 
 from localm.inference.compact import (
-    COMPACT_RATIO,
     KEEP_RECENT,
     compact_messages,
     estimate_tokens,

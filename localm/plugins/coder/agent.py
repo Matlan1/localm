@@ -26,7 +26,6 @@ import difflib
 import json
 import re
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
@@ -55,7 +54,7 @@ from .display import (
     print_turn_divider,
     print_warning,
 )
-from .audit import AuditLog, AuditLogT, NullAuditLog, SessionMode, make_audit_log
+from .audit import AuditLogT, SessionMode, make_audit_log
 from .prompts import build_system_prompt
 
 # Tools that mutate files - trigger a project map refresh after they run
@@ -1838,7 +1837,7 @@ ws     ::= [ \t\n\r]*
                         hint_str = f" `{str(hint)[:60]}`" if hint else ""
                         lines.append(f"  - `{tool}`{hint_str}")
                     except Exception:
-                        lines.append(f"  - (tool call)")
+                        lines.append("  - (tool call)")
 
                 lines.append("")
 

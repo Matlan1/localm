@@ -6,7 +6,6 @@ import re
 import shutil
 import sys
 import threading
-import time
 from pathlib import Path
 from typing import Callable, List, NamedTuple, Optional
 
@@ -1498,7 +1497,7 @@ def remove_model(name: str) -> None:
                     part_path.unlink()
                     console.print(f"[dim]Deleted {part_path}[/dim]")
     elif path.exists():
-        console.print(f"[dim]Unregistered (file not deleted - lives outside ~/.localm/models)[/dim]")
+        console.print("[dim]Unregistered (file not deleted - lives outside ~/.localm/models)[/dim]")
     del reg[name]
     save_registry(reg)
     console.print(f"[green]✓[/green] Removed [bold]{name}[/bold]")

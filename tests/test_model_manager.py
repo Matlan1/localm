@@ -5,9 +5,7 @@ and SHA256 verification.
 """
 
 import hashlib
-import pytest
-from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 from localm.model_manager import _check_disk_space, _sha256_file
 

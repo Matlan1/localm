@@ -31,7 +31,7 @@ from fastapi.responses import (
     Response,
     StreamingResponse,
 )
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.security import HTTPBearer
 
 from localm import scopes
 from localm.inference.backends.base import (

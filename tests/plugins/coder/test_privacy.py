@@ -14,7 +14,7 @@ Covers:
 import os
 import sys
 import pytest
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 from localm.plugins.coder.privacy import (
     subprocess_privacy_env,
@@ -93,7 +93,6 @@ class TestSubprocessPrivacyEnv:
 
     def test_includes_existing_env_vars(self):
         """Should be a copy of os.environ with overrides, not an empty dict."""
-        import os
         result = subprocess_privacy_env()
         # PATH (or PATHEXT on Windows) should be present
         assert "PATH" in result or "PATHEXT" in result

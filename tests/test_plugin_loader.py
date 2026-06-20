@@ -9,7 +9,6 @@ import pytest
 
 from localm.plugins.loader import (
     PluginError,
-    PluginManifest,
     discover_errors,
     discover_plugins,
     install_plugin,

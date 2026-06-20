@@ -10,7 +10,6 @@ walk *.gguf (non-recursive), register split GGUFs by their first part only.
 
 import pytest
 
-import localm.model_manager as mm
 from localm.config import load_registry
 from localm.model_manager import add_local, pull_model
 

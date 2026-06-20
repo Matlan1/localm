@@ -5,7 +5,6 @@ Tests for duplicate model detection, aliasing, and alias-aware removal.
 Two-tier identity: resolved path first, stored sha256 second.
 """
 
-import json
 from pathlib import Path
 from unittest.mock import patch
 

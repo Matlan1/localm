@@ -3,7 +3,7 @@
 
 import json
 import unittest
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 

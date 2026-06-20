@@ -1321,6 +1321,11 @@ class TestVoiceEndpoint:
             pytest.skip("faster-whisper installed - hint path unreachable")
         except ImportError:
             pass
+        except OSError as e:
+            # Installed but its native deps (onnxruntime / ctranslate2) fail to
+            # load on this machine - an environment issue, not the missing-package
+            # path under test. Skip rather than misreport it as a failure.
+            pytest.skip(f"faster-whisper present but native deps won't load: {e}")
         app = voice_app
         with TestClient(app) as client:
             r = client.post("/api/voice/transcribe", json={

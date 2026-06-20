@@ -6,10 +6,8 @@ _confine() is the security boundary for all file tools - it must reliably
 reject any path that resolves outside cwd.
 """
 
-import os
 import sys
 import pytest
-from pathlib import Path
 
 from localm.plugins.coder.tools import _confine, _verify_syntax
 

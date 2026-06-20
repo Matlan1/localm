@@ -6,7 +6,6 @@ When an agent has a scope glob set, file-access tools that target a path
 outside the glob pattern must be rejected without reaching the tool function.
 """
 
-import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -47,7 +46,7 @@ class TestScopeEnforcement:
 
         call = _make_tool_call("read_file", path="src.py")
         with patch("localm.plugins.coder.tools.tool_read_file",
-                   return_value=MagicMock(ok=True, output="ok", summary="ok")) as mock_fn:
+                   return_value=MagicMock(ok=True, output="ok", summary="ok")):
             pass
         # No scope → execute_tool reaches the actual tool
         result = agent._execute_tool(call, interactive=False)

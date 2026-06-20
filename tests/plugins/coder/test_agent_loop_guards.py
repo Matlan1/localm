@@ -9,7 +9,6 @@ Tests for the agent loop guards added for foundation hardening:
     blockers instead of guessing.
 """
 
-import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 

@@ -19,13 +19,12 @@ import re
 import subprocess
 import sys
 import textwrap
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 if TYPE_CHECKING:
-    from .agent import Agent
+    pass
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +263,9 @@ def _verify_syntax(path: Path, content: str) -> Optional[str]:
     """
     suffix = path.suffix.lower()
     if suffix == ".py":
-        import py_compile, tempfile, os as _os
+        import py_compile
+        import tempfile
+        import os as _os
         try:
             with tempfile.NamedTemporaryFile(suffix=".py", delete=False, mode="w",
                                              encoding="utf-8") as tmp:

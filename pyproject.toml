@@ -168,6 +168,9 @@ rocm-sdk-libraries-gfx103x-all = [
 testpaths = ["tests"]
 markers = [
     "integration: marks tests that require external tools (git, network) to be present",
+    "real_gguf: real end-to-end GGUF inference; needs the native llama runtime (localm setup-llama). Skipped unless available.",
+    "real_comfy: real ComfyUI round-trip; set LOCALM_TEST_COMFY_URL to a running instance. Skipped unless set.",
+    "real_browser: drives the GUI in a real browser; needs Playwright (pip install playwright && playwright install). Skipped unless available.",
 ]
 
 [tool.ruff]
@@ -177,6 +180,6 @@ target-version = "py310"
 # The codebase deliberately uses a compact style: one-line guards (if x: return),
 # short local names, and a few intentional late module-level imports. Ignore those
 # stylistic rules; keep the pyflakes (F) checks that catch real dead code plus the
-# rest of ruff's default E set. The remaining unused-import backlog (F401) is
-# tracked for a focused cleanup, after which CI's ruff step becomes blocking.
+# rest of ruff's default E set. The unused-import/variable backlog has been
+# cleared and CI's ruff step is now blocking (.github/workflows/ci.yml).
 ignore = ["E741", "E701", "E702", "E402"]

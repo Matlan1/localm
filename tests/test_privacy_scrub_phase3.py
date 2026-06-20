@@ -11,9 +11,7 @@ form and the legacy "localcoder ..." form, run the scrub against it, and assert
 that BOTH are removed while unrelated lines are kept.
 """
 
-import os
 
-import pytest
 
 from localm.plugins.coder.privacy import clear_shell_history_traces
 

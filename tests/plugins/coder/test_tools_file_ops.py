@@ -5,8 +5,6 @@ Tests for file-operation tools in localm.plugins.coder.tools:
 """
 
 import json
-import pytest
-from pathlib import Path
 
 from localm.plugins.coder.tools import (
     tool_read_file,
