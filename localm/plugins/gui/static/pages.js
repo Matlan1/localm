@@ -976,7 +976,24 @@ function buildSettingControl(field) {
     }
   }
   input.dataset.key = field.key;
-  wrap.appendChild(input);
+  // FOLDER / PATH fields get a "Browse..." button wired to the existing
+  // directory picker, so the user does not have to type a path by hand (U10).
+  if (field.widget === "folder" || field.widget === "path") {
+    const row = el("div", "dir-picker-row");
+    const browse = el("button", "btn-secondary dir-picker-btn", "Browse...");
+    browse.type = "button";                 // never submit the settings form
+    browse.dataset.browse = field.key;
+    browse.onclick = async () => {
+      const picked = await pickDirectory(
+        field.widget === "path" ? "Pick a location" : "Pick a directory",
+        input.value.trim());
+      if (picked) input.value = picked;
+    };
+    row.append(input, browse);
+    wrap.appendChild(row);
+  } else {
+    wrap.appendChild(input);
+  }
   if (field.help) wrap.appendChild(el("div", "sub", field.help));
   return { field, node: wrap, read };
 }
