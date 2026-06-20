@@ -670,6 +670,11 @@ def _save_chat(messages: list, filepath: str) -> None:
                    "local-CA cert. Requires --tls-key.")
 @click.option("--tls-key", type=click.Path(exists=True, dir_okay=False), default=None,
               help="Private key (PEM) for --tls-cert.")
+@click.option("--insecure", is_flag=True,
+              help="Allow binding past loopback WITHOUT LOCALM_API_KEY set. This "
+                   "serves the API (and any enabled plugin routes) "
+                   "unauthenticated to the whole network - only on a trusted, "
+                   "isolated network.")
 @click.option("--project", default=None, type=click.Path(file_okay=False),
               help="Project root that keys this instance [default: nearest "
                    ".git/.localcoder above the current directory].")
@@ -688,7 +693,7 @@ def _save_chat(messages: list, filepath: str) -> None:
                    "privacy = nothing saved; log = JSONL audit of chat traffic; "
                    "full = log + markdown transcript.")
 def serve(model, host, port, ctx, gpu_layers, mmproj, device, no_tls, tls_cert,
-          tls_key, project, force_new, isolated, debug, mode):
+          tls_key, insecure, project, force_new, isolated, debug, mode):
     """Start an OpenAI-compatible inference server.
 
     \b
@@ -720,6 +725,23 @@ def serve(model, host, port, ctx, gpu_layers, mmproj, device, no_tls, tls_cert,
             "requests and raw model output - delete it after analysis if that "
             "matters.")
 
+    # Refuse a keyless network bind before any other work (fail fast, and match
+    # `localm gui`, which already refuses): binding past loopback with no API key
+    # serves the OpenAI API - and any enabled plugin routes (e.g. the coder
+    # agent's history) - unauthenticated to the whole network. --insecure
+    # overrides for a trusted isolated network. (Security review 2026-06-20: this
+    # closes a serve-vs-gui fail-open asymmetry.)
+    bind_warning = _exposed_bind_warning(host)
+    if bind_warning and not insecure:
+        console.print(f"[bold red]{bind_warning}[/bold red]")
+        console.print(
+            "[bold red]Refusing to start: binding past loopback without auth. "
+            "Set $env:LOCALM_API_KEY first, or pass --insecure to override.[/bold red]")
+        sys.exit(2)
+    if bind_warning:
+        console.print(f"[bold yellow]{bind_warning}[/bold yellow]")
+        console.print("[bold yellow]  Proceeding anyway (--insecure set).[/bold yellow]")
+
     info = get_model_info(model)
     if info is None:
         console.print(f"[red]Model not found:[/red] {model}")
@@ -750,10 +772,6 @@ def serve(model, host, port, ctx, gpu_layers, mmproj, device, no_tls, tls_cert,
     from .model_manager import load_registry as _reg
 
     display_name = model if model in _reg() else _display_hint
-
-    warning = _exposed_bind_warning(host)
-    if warning:
-        console.print(f"[bold yellow]{warning}[/bold yellow]")
 
     from .config import pick_port
     requested = port

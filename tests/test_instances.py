@@ -268,6 +268,36 @@ def test_whoami_endpoint_before_wiring_returns_nulls():
     assert body["instance_id"] is None and body["mode"] is None
 
 
+def test_whoami_omits_root_dir_on_a_network_bind(tmp_path):
+    """root_dir is an absolute host path (it can carry the OS username); it must
+    not leak to LAN clients. It is disclosed only on a loopback bind - discovery
+    matches root_dir from the registry file, not /whoami, so identity still works
+    (security review 2026-06-20)."""
+    from fastapi.testclient import TestClient
+    from localm.inference.http_server import create_app
+
+    app = create_app(_mock_engine())
+    app.state.instance_id = "iid-net"
+    app.state.root_dir = str(tmp_path)
+    app.state.instance_mode = "api"
+    app.state.bind_host = "0.0.0.0"          # network bind
+    body = TestClient(app).get("/whoami").json()
+    assert body["root_dir"] is None           # omitted over the network
+    assert body["instance_id"] == "iid-net"   # identity handshake still works
+    assert body["mode"] == "api"
+
+
+def test_whoami_keeps_root_dir_on_a_loopback_bind(tmp_path):
+    from fastapi.testclient import TestClient
+    from localm.inference.http_server import create_app
+
+    app = create_app(_mock_engine())
+    app.state.root_dir = str(tmp_path)
+    app.state.bind_host = "127.0.0.1"
+    body = TestClient(app).get("/whoami").json()
+    assert body["root_dir"] == str(tmp_path)
+
+
 # ------------------------------------------------------------------ #
 #  Phase 4: scheme + attach-or-spawn discovery                       #
 # ------------------------------------------------------------------ #
