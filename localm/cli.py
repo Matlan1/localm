@@ -1833,6 +1833,7 @@ def doctor():
 
     # ----- llama.dll / llama.so -----
     binary_dir = find_binary_dir()
+    lib_healthy = False
     if binary_dir:
         dll_names = ["llama.dll", "llama.so", "libllama.so", "llama"]
         found_dll = next(
@@ -1868,6 +1869,7 @@ def doctor():
                     )
                 else:
                     console.print(f"  {ok_sym}  {found_dll.name} found in {binary_dir}")
+                    lib_healthy = True
         else:
             files = [f.name for f in binary_dir.iterdir() if f.is_file()][:8]
             console.print(
@@ -1876,6 +1878,42 @@ def doctor():
             )
     else:
         console.print(f"  {fail_sym}  llama binary dir not found - GGUF backend unavailable")
+
+    # ----- native ABI self-check (struct layout vs the actual DLL) -----
+    # Only when a healthy lib is present. Run in a SUBPROCESS (like setup-llama's
+    # load test) so a broken/incompatible DLL can never crash doctor itself, and
+    # so the GPU runtime is loaded out-of-process.
+    if lib_healthy:
+        import json as _json
+        abi_code = (
+            "import json;"
+            "from localm.inference.backends.llamacpp._abi import abi_report;"
+            "v=abi_report();"
+            "print('ABI_RESULT:'+json.dumps("
+            "{'status':v.status,'detail':v.detail,'failures':v.failures[:3]}))"
+        )
+        try:
+            r = subprocess.run([_sys.executable, "-c", abi_code],
+                               capture_output=True, text=True, timeout=120)
+            line = next((ln for ln in (r.stdout or "").splitlines()
+                         if ln.startswith("ABI_RESULT:")), "")
+            abi = _json.loads(line[len("ABI_RESULT:"):]) if line else {}
+        except Exception:
+            abi = {}
+        status = abi.get("status", "unchecked")
+        if status == "ok":
+            console.print(f"  {ok_sym}  native ABI: struct layout matches this build")
+        elif status == "mismatch":
+            console.print(f"  {fail_sym}  native ABI MISMATCH - the runtime's struct "
+                          "layout differs from this build; loading is refused to avoid "
+                          "memory corruption. Run 'localm setup-llama --force'.")
+            for f in abi.get("failures", []):
+                console.print(f"       [dim]{f}[/dim]")
+        elif status == "skipped":
+            console.print(f"  {warn_sym}  native ABI check skipped (LOCALM_SKIP_ABI_CHECK set)")
+        else:
+            console.print(f"  {warn_sym}  native ABI not verified "
+                          f"[dim]({abi.get('detail', 'runtime not loadable')})[/dim]")
 
     # ----- GPU driver (CUDA / ROCm) -----
     gpu_found = False
