@@ -54,25 +54,57 @@ _inference_sem: asyncio.Semaphore | None = None
 # Optional bearer-token auth - enabled when LOCALM_API_KEY is set.
 _bearer_scheme = HTTPBearer(auto_error=False)
 
+# S2: the browser GUI authenticates with an HttpOnly session cookie (the API key
+# the page JS can no longer read) instead of localStorage. Cookie-sourced auth on
+# a state-changing method must echo the readable CSRF cookie in this header
+# (double-submit); the Authorization-header path (CLI / SDK / coder) cannot be
+# forged cross-site and is therefore CSRF-exempt.
+SESSION_COOKIE = "localm_session"
+CSRF_COOKIE = "localm_csrf"
+CSRF_HEADER = "X-CSRF-Token"
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
+
 
 def _bearer_token(request) -> Optional[str]:
     """Extract a presented bearer token from the raw Authorization header (used
-    by the origin/management middleware, which has the request but not the
-    parsed HTTPBearer credentials)."""
+    by the origin/management middleware and the request-aware auth core)."""
     header = request.headers.get("authorization", "")
     if header[:7].lower() == "bearer ":
         return header[7:].strip() or None
     return None
 
 
-def _enforce_scope(
-    credentials: Optional[HTTPAuthorizationCredentials],
-    scope: Optional[str],
-) -> None:
-    """Shared auth core. Open/dev mode when no key is configured anywhere
-    (unless LOCALM_REQUIRE_AUTH forces fail-closed). Otherwise a valid key is
-    required; *scope* None means 'any valid key', else the key's scopes must
-    grant *scope* (the owner key implies every scope)."""
+def _request_token(request) -> tuple[Optional[str], str]:
+    """Resolve the presented key and where it came from. The Authorization
+    header wins (programmatic clients); otherwise the HttpOnly ``localm_session``
+    cookie (the browser GUI). Returns ``(token, source)`` with *source* one of
+    ``"header"`` / ``"cookie"`` / ``"none"``."""
+    header = _bearer_token(request)
+    if header:
+        return header, "header"
+    cookie = (request.cookies.get(SESSION_COOKIE) or "").strip()
+    if cookie:
+        return cookie, "cookie"
+    return None, "none"
+
+
+def _csrf_double_submit_ok(request) -> bool:
+    """Double-submit CSRF check: the ``X-CSRF-Token`` header must equal the
+    readable ``localm_csrf`` cookie (both set at login). A cross-site page can
+    neither read the cookie to forge the header nor (with SameSite=Strict) get
+    the browser to send the cookie at all - defence in depth."""
+    header = request.headers.get(CSRF_HEADER, "")
+    cookie = request.cookies.get(CSRF_COOKIE, "")
+    return bool(header and cookie and hmac.compare_digest(header, cookie))
+
+
+def _enforce_request(request: Request, scope: Optional[str]) -> None:
+    """Shared auth core (request-aware). Open/dev mode when no key is configured
+    anywhere (unless LOCALM_REQUIRE_AUTH forces fail-closed). Otherwise a valid
+    key is required - from the Authorization header OR the session cookie - and
+    *scope* (None = 'any valid key') must be granted (the owner key implies every
+    scope). Cookie-sourced auth on an unsafe method additionally requires a valid
+    double-submit CSRF token."""
     from localm.auth import any_key_configured, require_auth_enabled, verify
     if not any_key_configured():
         if require_auth_enabled():
@@ -81,34 +113,35 @@ def _enforce_scope(
                 detail="Auth required but no API key configured "
                        "(set one via the launcher or LOCALM_API_KEY)")
         return  # open/dev mode
-    held = verify(credentials.credentials) if credentials else None
+    token, source = _request_token(request)
+    held = verify(token) if token else None
     if held is None:
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
+    if source == "cookie" and request.method not in _SAFE_METHODS:
+        if not _csrf_double_submit_ok(request):
+            raise HTTPException(
+                status_code=403,
+                detail="Missing or invalid CSRF token for a cookie-"
+                       "authenticated state change.")
     if scope is not None and not scopes.grants(held, scope):
         raise HTTPException(status_code=403,
                             detail=f"Key lacks required scope: {scope}")
 
 
-def _require_auth(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
-) -> None:
+def _require_auth(request: Request) -> None:
     """Require any valid API key (no specific scope)."""
-    _enforce_scope(credentials, None)
+    _enforce_request(request, None)
 
 
 def require_scope(scope: str):
     """FastAPI dependency factory: require a key whose scopes grant *scope*.
     Use as ``dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))]``."""
-    def dep(
-        credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
-    ) -> None:
-        _enforce_scope(credentials, scope)
+    def dep(request: Request) -> None:
+        _enforce_request(request, scope)
     return dep
 
 
-def caller_scopes(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
-) -> Optional[set]:
+def caller_scopes(request: Request) -> Optional[set]:
     """The scope set the presented key grants (the owner key -> {ADMIN}), or
     None in open mode / when no valid key is presented. Routes use this to make
     authorisation decisions that depend on *who* the caller is (e.g. only an
@@ -116,7 +149,8 @@ def caller_scopes(
     from localm.auth import any_key_configured, verify
     if not any_key_configured():
         return None
-    return verify(credentials.credentials) if credentials else None
+    token, _ = _request_token(request)
+    return verify(token) if token else None
 
 
 # ------------------------------------------------------------------ #
@@ -375,6 +409,64 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
             "model":  _engine.display_name,
             "loaded": _engine.loaded,
         }
+
+    # ---------------------------------------------------------------- #
+    #  Session auth (S2): HttpOnly cookie + CSRF for the browser GUI    #
+    # ---------------------------------------------------------------- #
+
+    @app.post("/api/session", include_in_schema=False)
+    async def session_login(request: Request, response: Response):
+        """Exchange the API key for an HttpOnly session cookie so the browser
+        GUI never has to hold the key in JS-readable localStorage. The key is
+        read from the JSON body ``{"key": ...}`` or an Authorization: Bearer
+        header, verified, and on success set as the HttpOnly ``localm_session``
+        cookie plus a readable ``localm_csrf`` cookie (double-submit CSRF). 401
+        on a bad key; 400 in open mode (nothing to log into)."""
+        from localm.auth import any_key_configured, verify
+        presented: Optional[str] = None
+        try:
+            body = await request.json()
+            if isinstance(body, dict):
+                presented = (body.get("key") or "").strip() or None
+        except Exception:
+            presented = None
+        if not presented:
+            presented = _bearer_token(request)
+        if not any_key_configured():
+            raise HTTPException(
+                400, "This server runs in open mode (no API key configured); "
+                "there is nothing to log into.")
+        held = verify(presented) if presented else None
+        if held is None:
+            raise HTTPException(401, "Invalid API key")
+        secure = request.url.scheme == "https"
+        csrf = secrets.token_urlsafe(32)
+        response.set_cookie(SESSION_COOKIE, presented, httponly=True,
+                            secure=secure, samesite="strict", path="/")
+        response.set_cookie(CSRF_COOKIE, csrf, httponly=False,
+                            secure=secure, samesite="strict", path="/")
+        return {"authed": True, "scopes": sorted(held)}
+
+    @app.post("/api/session/logout", include_in_schema=False)
+    async def session_logout(response: Response):
+        """Clear the session + CSRF cookies (sign the browser out)."""
+        response.delete_cookie(SESSION_COOKIE, path="/")
+        response.delete_cookie(CSRF_COOKIE, path="/")
+        return {"authed": False}
+
+    @app.get("/api/session", include_in_schema=False)
+    async def session_state(request: Request):
+        """Report whether the caller is authenticated, so the GUI can show or
+        hide its key gate without ever reading the key. *authed* reflects the
+        presented cookie/header; *required* is True when a key is configured."""
+        from localm.auth import (any_key_configured, require_auth_enabled,
+                                  verify)
+        configured = any_key_configured()
+        token, _ = _request_token(request)
+        held = verify(token) if (configured and token) else None
+        return {"authed": held is not None,
+                "scopes": sorted(held) if held else [],
+                "required": configured or require_auth_enabled()}
 
     # ---------------------------------------------------------------- #
     #  Instance identity (H6 server-rework, phase 3)                    #
