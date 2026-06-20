@@ -1,19 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""C1 (GUI half): a fresh loopback `localm gui` launch must not be locked out
-when require_auth is on. The SPA shell seeds the configured API key into
-localStorage on a loopback bind, but never hands it to a non-loopback LAN client.
-"""
+"""S2 (GUI half): a loopback `localm gui` must not be locked out when require_auth
+is on, WITHOUT putting the API key in JS-readable localStorage. On a loopback bind
+the shell route sets the key as an HttpOnly session cookie (protected mode) or
+seeds the per-process shell token as a JS global (open mode); a non-loopback LAN
+client gets neither (it enters the key in the page -> POST /api/session)."""
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from localm.plugins.gui.web import (
     attach_gui,
-    _index_html_with_key,
+    _index_html_with_shell_token,
     _is_loopback_host,
 )
 
-BOOT = "localStorage.setItem('localm.apiKey'"
+SHELL_GLOBAL = "window.__LOCALM_SHELL_TOKEN__="
 
 
 def _app(bind_host):
@@ -25,7 +26,12 @@ def _app(bind_host):
     attach_gui(app, self_url="http://127.0.0.1:9/v1",
                switch_model=switch_model, active_model=lambda: "m")
     app.state.bind_host = bind_host
+    app.state.shell_token = "SHELLTOK123"
     return app
+
+
+def _set_cookies(resp):
+    return " ; ".join(resp.headers.get_list("set-cookie"))
 
 
 class TestIsLoopbackHost:
@@ -42,42 +48,54 @@ class TestIsLoopbackHost:
         assert not _is_loopback_host("testclient")
 
 
-class TestIndexInjection:
-    def test_injects_key(self):
-        html = _index_html_with_key("KEY-abc_123")
-        assert BOOT in html
-        assert '"KEY-abc_123"' in html
+class TestShellTokenInjection:
+    def test_injects_shell_token_global(self):
+        html = _index_html_with_shell_token("TOK-abc_123")
+        assert SHELL_GLOBAL in html
+        assert '"TOK-abc_123"' in html
 
-    def test_no_key_no_injection(self):
-        assert BOOT not in _index_html_with_key("")
+    def test_no_token_no_injection(self):
+        assert SHELL_GLOBAL not in _index_html_with_shell_token("")
 
     def test_script_breakout_escaped(self):
-        # a "<" in the (operator-set) key is unicode-escaped so it can never
-        # close the <script> element.
-        html = _index_html_with_key("a</script>b")
+        # a "<" in the token is unicode-escaped so it can never close the
+        # <script> element.
+        html = _index_html_with_shell_token("a</script>b")
         assert "a</script>b" not in html
         assert "a\\u003c/script>b" in html
 
 
 class TestShellRoute:
-    def test_loopback_bind_seeds_key(self, monkeypatch):
+    def test_loopback_protected_sets_httponly_cookie_not_localstorage(self, monkeypatch):
+        # Protected mode + loopback: the key is set as an HttpOnly cookie and is
+        # NEVER echoed into the page (S2 - no localStorage seeding).
         monkeypatch.setenv("LOCALM_API_KEY", "REALKEY123")
         r = TestClient(_app("127.0.0.1")).get("/")
         assert r.status_code == 200
-        assert BOOT in r.text
-        assert "REALKEY123" in r.text
+        assert "REALKEY123" not in r.text
+        assert "localStorage.setItem('localm.apiKey'" not in r.text
+        cookies = _set_cookies(r)
+        assert "localm_session=REALKEY123" in cookies
+        assert "httponly" in cookies.lower()
+        assert "samesite=strict" in cookies.lower()
+        assert "localm_csrf=" in cookies
 
-    def test_no_key_no_seed(self, monkeypatch):
+    def test_loopback_open_mode_seeds_shell_token_global(self, monkeypatch):
+        # Open mode + loopback: the per-process shell token is injected as a JS
+        # global (header-based management), not localStorage, and no auth cookie.
         monkeypatch.delenv("LOCALM_API_KEY", raising=False)
         r = TestClient(_app("127.0.0.1")).get("/")
         assert r.status_code == 200
-        assert BOOT not in r.text
+        assert SHELL_GLOBAL in r.text
+        assert "SHELLTOK123" in r.text
+        assert "localm_session=" not in _set_cookies(r)
 
     def test_lan_bind_never_seeds(self, monkeypatch):
-        # A non-loopback bind never seeds the key, regardless of the client - we
-        # do not trust request.client.host (a same-host proxy would read as
-        # loopback for remote users). The same-machine user enters the key.
+        # A non-loopback bind seeds nothing: no key in the page, no auth cookie,
+        # no shell-token global. The same-machine user enters the key.
         monkeypatch.setenv("LOCALM_API_KEY", "REALKEY123")
         r = TestClient(_app("0.0.0.0")).get("/")
         assert r.status_code == 200
         assert "REALKEY123" not in r.text
+        assert "localm_session=" not in _set_cookies(r)
+        assert SHELL_GLOBAL not in r.text

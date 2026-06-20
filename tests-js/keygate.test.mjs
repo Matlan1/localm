@@ -40,14 +40,27 @@ test("NET-1: a working backend leaves the gate hidden (loopback case unaffected)
   assert.equal(gate.style.display, "none", "key gate stays hidden when fetches succeed");
 });
 
-test("NET-1: submitting the gate stores the key (trimmed) for the next boot", async () => {
-  const { window } = loadApp({ fetchImpl: keyless401 });
+test("S2: submitting the gate POSTs the trimmed key to /api/session (no localStorage)", async () => {
+  const calls = [];
+  const fetchImpl = async (url, opts = {}) => {
+    calls.push({ url: String(url), opts });
+    if (String(url).includes("/api/session")) {
+      return { ok: true, status: 200, json: async () => ({ authed: true }), text: async () => "" };
+    }
+    return keyless401();
+  };
+  const { window } = loadApp({ fetchImpl });
   try { Object.defineProperty(window.location, "reload", { configurable: true, value: () => {} }); } catch { /* jsdom no-op nav */ }
   await tick();
   window.document.getElementById("key-gate-input").value = "  my-secret-key  ";
   window.document.getElementById("key-gate-submit").click();
-  assert.equal(window.localStorage.getItem("localm.apiKey"), "my-secret-key",
-    "submitting stores the trimmed key so the reloaded boot is authenticated");
+  await tick();
+  const login = calls.find((c) => c.url.includes("/api/session")
+    && (c.opts.method || "").toUpperCase() === "POST");
+  assert.ok(login, "submitting POSTs the key to /api/session");
+  assert.equal(JSON.parse(login.opts.body).key, "my-secret-key", "the trimmed key is sent");
+  assert.equal(window.localStorage.getItem("localm.apiKey"), null,
+    "the key is NOT written to localStorage (it lives only in the HttpOnly cookie)");
 });
 
 test("NET-1: over HTTPS the gate offers a one-tap Install-certificate link", async () => {
@@ -78,19 +91,36 @@ test("NET-1 hard gate: a keyless (401) boot HIDES the app shell - nothing of loc
   assert.notEqual(gate.style.display, "none", "the onboarding/key gate is shown");
 });
 
-test("P2b: scanning a localm-key QR saves the key (the prefix is stripped)", async () => {
-  const { window } = loadApp({ fetchImpl: keyless401 });
+test("P2b/S2: scanning a localm-key QR logs in via /api/session (prefix stripped, no localStorage)", async () => {
+  const calls = [];
+  const fetchImpl = async (url, opts = {}) => {
+    calls.push({ url: String(url), opts });
+    if (String(url).includes("/api/session")) {
+      return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+    }
+    return keyless401();
+  };
+  const { window } = loadApp({ fetchImpl });
   try { Object.defineProperty(window.location, "reload", { configurable: true, value: () => {} }); } catch { /* jsdom no-op nav */ }
   await tick();
   assert.equal(window.handleScannedKey("localm-key:secret-123"), true);
-  assert.equal(window.localStorage.getItem("localm.apiKey"), "secret-123");
+  await tick();
+  const login = calls.find((c) => c.url.includes("/api/session")
+    && (c.opts.method || "").toUpperCase() === "POST");
+  assert.ok(login, "a valid pairing QR logs in via /api/session");
+  assert.equal(JSON.parse(login.opts.body).key, "secret-123");
+  assert.equal(window.localStorage.getItem("localm.apiKey"), null);
 });
 
-test("P2b: a non-localm QR is ignored (no key saved)", async () => {
-  const { window } = loadApp({ fetchImpl: keyless401 });
+test("P2b: a non-localm QR is ignored (no login attempt)", async () => {
+  const calls = [];
+  const fetchImpl = async (url, opts = {}) => { calls.push({ url: String(url) }); return keyless401(); };
+  const { window } = loadApp({ fetchImpl });
   await tick();
   assert.equal(window.handleScannedKey("https://example.com"), false);
-  assert.equal(window.localStorage.getItem("localm.apiKey"), null);
+  await tick();
+  assert.ok(!calls.some((c) => c.url.includes("/api/session")),
+    "a non-localm QR triggers no /api/session login");
 });
 
 test("NET-1 onboarding: the guided cert-install step + per-platform help render over HTTPS", async () => {
@@ -113,4 +143,13 @@ test("NET-1 hard gate: a working (200) boot reveals the app and hides the gate",
   assert.equal(window.__localmLocked, false, "unlocked");
   const gate = window.document.getElementById("key-gate");
   assert.equal(gate.style.display, "none", "gate hidden when authed / open mode");
+});
+
+test("S2: authHeaders sends the CSRF token from the cookie and no localStorage bearer", async () => {
+  const { window } = loadApp({ fetchImpl: allOk });
+  await tick();
+  window.document.cookie = "localm_csrf=tok123";
+  const h = window.authHeaders();
+  assert.equal(h["X-CSRF-Token"], "tok123", "CSRF token echoed from the readable cookie");
+  assert.ok(!("Authorization" in h), "no bearer header (cookie auth; no localStorage key)");
 });

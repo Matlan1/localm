@@ -12,11 +12,22 @@
 
 const $ = (id) => document.getElementById(id);
 
-const API_KEY = localStorage.getItem("localm.apiKey") || "";
+// S2: the API key is no longer kept in JS-readable localStorage. Open-mode
+// management uses the per-process shell token (injected as a global, sent as a
+// bearer HEADER); protected mode rides the HttpOnly session cookie set at login
+// or loopback auto-seed (auto-sent same-origin) with a double-submit CSRF token.
+const SHELL_TOKEN = window.__LOCALM_SHELL_TOKEN__ || "";
+
+function readCookie(name) {
+  const m = document.cookie.match(new RegExp("(?:^|; )" + name + "=([^;]*)"));
+  return m ? decodeURIComponent(m[1]) : "";
+}
 
 function authHeaders(extra = {}) {
   const h = { "Content-Type": "application/json", ...extra };
-  if (API_KEY) h["Authorization"] = "Bearer " + API_KEY;
+  if (SHELL_TOKEN) h["Authorization"] = "Bearer " + SHELL_TOKEN;
+  const csrf = readCookie("localm_csrf");
+  if (csrf) h["X-CSRF-Token"] = csrf;
   return h;
 }
 
@@ -352,19 +363,32 @@ function showKeyGate(message) {
   if (scan) scan.style.display = scanSupported() ? "inline-block" : "none";
   const input = $("key-gate-input");
   if (input) {
-    input.value = localStorage.getItem("localm.apiKey") || "";
+    input.value = "";   // HttpOnly key is unreadable; the gate only shows unauthed
     input.focus();
   }
 }
 
-// Store the entered key (trimmed; empty clears it) and reload so the whole boot
-// re-runs authenticated. Mirrors the Settings "Save key" wiring (same storage).
+// POST the entered key to /api/session so the server sets the HttpOnly auth
+// cookie (the key never lives in JS), then reload so the boot re-runs
+// authenticated. The CSRF cookie set alongside it is read by authHeaders().
+async function loginWithKey(key) {
+  try {
+    const r = await fetch("/api/session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key }),
+    });
+    return r.ok;
+  } catch (e) { return false; }
+}
+
+// Submit the gate: log in with the entered key (trimmed) then reload. An empty
+// entry just reloads (still unauthenticated -> the gate shows again).
 function submitKeyGate() {
   const input = $("key-gate-input");
   const key = (input ? input.value : "").trim();
-  if (key) localStorage.setItem("localm.apiKey", key);
-  else localStorage.removeItem("localm.apiKey");
-  location.reload();
+  if (key) loginWithKey(key).then(() => location.reload());
+  else location.reload();
 }
 
 // --- Pairing QR scanner (phone) -------------------------------------------
@@ -387,8 +411,7 @@ function handleScannedKey(text) {
   if (typeof text !== "string" || !text.startsWith(prefix)) return false;
   const key = text.slice(prefix.length).trim();
   if (!key) return false;
-  localStorage.setItem("localm.apiKey", key);
-  location.reload();
+  loginWithKey(key).then(() => location.reload());
   return true;
 }
 
