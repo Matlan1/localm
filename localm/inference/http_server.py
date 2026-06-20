@@ -1456,9 +1456,7 @@ def serve(engine: Engine, host: str = "127.0.0.1", port: int = 8642,
     surface so a future launch can discover and attach to it; ``isolated`` keeps
     it invisible to discovery.
     """
-    import uvicorn
-
-    from localm import instances
+    from localm import instances, portmux
     from localm.config import home_dir
 
     app = create_app(engine, api_landing=True)
@@ -1468,5 +1466,7 @@ def serve(engine: Engine, host: str = "127.0.0.1", port: int = 8642,
     scheme = "https" if ssl_certfile else "http"
     with instances.advertise(app, home_dir(), host=host, port=port, mode="api",
                              scheme=scheme, project=project, isolated=isolated):
-        uvicorn.run(app, host=host, port=port, log_level="warning",
-                    ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
+        # On a TLS bind, also catch a plain-http request on the same port with an
+        # https redirect (issue 8); plain binds are a direct uvicorn.run.
+        portmux.run_server(app, host=host, port=port, log_level="warning",
+                           ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)

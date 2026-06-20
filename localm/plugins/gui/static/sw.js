@@ -6,7 +6,10 @@
  * must always hit the live server. The data lives on the server this app was
  * served from; the worker only caches the static front-end.
  */
-const CACHE = "localm-shell-v1";
+// Bump this whenever the cached shell assets (style.css, app.js, pages.js,
+// index.html, icons) change, so an installed PWA drops the old cache on activate
+// and re-precaches the new files instead of serving stale cache-first assets.
+const CACHE = "localm-shell-v2";
 const SHELL = [
   "/", "/index.html", "/style.css", "/app.js", "/pages.js",
   "/icon.svg", "/manifest.webmanifest",

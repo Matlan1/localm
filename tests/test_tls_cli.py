@@ -49,9 +49,12 @@ def test_half_specified_pair_is_a_usage_error(tmp_path):
         _resolve_tls("0.0.0.0", no_tls=False, tls_cert=None, tls_key=str(cert))
 
 
-def test_http_server_serve_passes_ssl_to_uvicorn(monkeypatch):
-    """serve() must forward ssl_certfile/ssl_keyfile to uvicorn.run."""
-    import uvicorn
+def test_http_server_serve_passes_ssl_to_runner(monkeypatch):
+    """serve() must forward ssl_certfile/ssl_keyfile to the server runner. The
+    runner is now portmux.run_server (it serves HTTPS and catches a plain-http
+    request on the same port with an https redirect); patch it so we assert the
+    threading without starting a real server."""
+    from localm import portmux
     from localm.inference import http_server
 
     captured = {}
@@ -60,7 +63,7 @@ def test_http_server_serve_passes_ssl_to_uvicorn(monkeypatch):
         captured.update(kwargs)
         captured["bind_host"] = getattr(app.state, "bind_host", None)
 
-    monkeypatch.setattr(uvicorn, "run", fake_run)
+    monkeypatch.setattr(portmux, "run_server", fake_run)
     monkeypatch.setattr(http_server, "create_app", lambda engine, **kw: _FakeApp())
 
     http_server.serve(object(), host="0.0.0.0", port=9443,
