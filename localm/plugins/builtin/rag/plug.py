@@ -41,6 +41,7 @@ class RagCreateRequest(BaseModel):
 class RagAddRequest(BaseModel):
     paths: list[str]
     embed: bool = True            # try embeddings; degrades to lexical-only
+    reindex: bool = False         # force re-index even unchanged files (repair)
 
 
 class RagQueryRequest(BaseModel):
@@ -155,7 +156,7 @@ async def rag_add(name: str, req: RagAddRequest, request: Request):
         embed_fn = self_embed if embed else None
         try:
             result = coll.add_paths(
-                paths, embed_fn=embed_fn, allowed_roots=roots,
+                paths, embed_fn=embed_fn, allowed_roots=roots, force=req.reindex,
                 on_progress=lambda t: job.push({"type": "line", "text": t}))
         except ValueError as e:
             # e.g. an embedding-model dimension change (C3) - report, don't crash.
