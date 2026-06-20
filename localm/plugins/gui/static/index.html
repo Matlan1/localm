@@ -60,7 +60,19 @@
     </div>
   </aside>
 
+  <!-- Off-canvas drawer backdrop (mobile): tap to close the sidebar. Inert on
+       desktop (CSS hides it). -->
+  <div id="sidebar-backdrop"></div>
+
   <main id="main">
+
+    <!-- Mobile top bar: hamburger to open the sidebar drawer. Hidden on desktop
+         (the sidebar is always visible there). -->
+    <div id="mobile-topbar">
+      <button id="nav-toggle" aria-label="Open menu" aria-controls="sidebar"
+              aria-expanded="false">&#9776;</button>
+      <div class="mtb-title">local<span>m</span></div>
+    </div>
 
     <!-- ============ CHAT ============ -->
     <section id="view-chat" class="view active">
@@ -533,6 +545,40 @@
   </div>
 </div>
 
+<!-- Onboarding install landing (mobile): shown once after auth so a phone can
+     install localm as an app BEFORE entering it. Desktop, already-installed, and
+     already-onboarded visits skip straight to the app (app.js shouldShowInstallGate). -->
+<div id="install-gate" class="modal-backdrop" style="display:none">
+  <div class="modal onboarding">
+    <div class="modal-head"><span>Add localm to your phone</span></div>
+    <div class="modal-body">
+      <p class="sub">localm runs as an installable app. Add it to your home screen
+        for a full-screen, app-like experience - then open it any time with one tap.
+        You can also just continue in the browser.</p>
+
+      <button class="btn-primary onboard-cta" id="install-gate-install"
+              style="display:none">Install app</button>
+
+      <div id="install-gate-ios" class="onboard-help" style="display:none">
+        <b>Add to Home Screen (iPhone / iPad):</b>
+        <ol class="dim">
+          <li>Tap the <b>Share</b> button (the square with an up-arrow).</li>
+          <li>Choose <b>Add to Home Screen</b>, then <b>Add</b>.</li>
+          <li>Open localm from the new home-screen icon.</li>
+        </ol>
+      </div>
+
+      <p id="install-gate-hint" class="sub" style="display:none">
+        To install, open your browser's menu and choose <em>Install app</em> /
+        <em>Add to Home screen</em>.</p>
+
+      <div class="actions">
+        <button class="btn-primary" id="install-gate-continue">Continue to localm &rarr;</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Command palette (Ctrl/Cmd+K): fuzzy-jump to any view or action. -->
 <div id="cmdk" class="modal-backdrop cmdk-backdrop" style="display:none">
   <div class="cmdk-panel" role="dialog" aria-label="Command palette">
@@ -571,23 +617,28 @@
   var ios = !standalone && window.isIOSSafari && window.isIOSSafari();
   window.applyInstallUI({ standalone: standalone, ios: ios, canPrompt: false });
 
-  var deferred = null;
+  // Single source of truth for the captured install prompt, shared by the
+  // Settings "Install app" button and the onboarding install gate (app.js).
   var btn = document.getElementById("install-app");
   window.addEventListener("beforeinstallprompt", function (e) {
     e.preventDefault();
-    deferred = e;
+    window.__deferredInstall = e;
     window.applyInstallUI({ canPrompt: true });
+    if (window.refreshInstallGateIfOpen) window.refreshInstallGateIfOpen();
   });
   if (btn) btn.addEventListener("click", function () {
-    if (!deferred) return;
-    deferred.prompt();
-    deferred.userChoice.finally(function () {
-      deferred = null;
+    var d = window.__deferredInstall;
+    if (!d) return;
+    d.prompt();
+    d.userChoice.finally(function () {
+      window.__deferredInstall = null;
       window.applyInstallUI({ standalone: false, ios: ios, canPrompt: false });
     });
   });
   window.addEventListener("appinstalled", function () {
+    window.__deferredInstall = null;
     window.applyInstallUI({ standalone: true });
+    if (window.dismissInstallGate) window.dismissInstallGate();
   });
 })();
 </script>

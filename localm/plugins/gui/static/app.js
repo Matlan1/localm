@@ -306,12 +306,37 @@ function showView(name) {
   _applyActiveClasses(name);
   // Remembered across reloads - but never in privacy mode (no traces).
   if (!chat.privacy) localStorage.setItem("localm.activeView", name);
+  // On a phone the sidebar is an off-canvas drawer; navigating closes it.
+  closeNav();
   // Lazy page refreshes live in pages.js
   if (window.onViewShown) window.onViewShown(name);
 }
 // Kernel nav buttons are static; plugin nav buttons get their handler in
 // renderNav() as they are (re)created from the active-plugin set.
 for (const v of CORE_VIEWS) $("nav-" + v).onclick = () => showView(v);
+
+// --- mobile sidebar drawer ------------------------------------------------
+// On a narrow screen the sidebar is off-canvas; the hamburger in the top bar
+// toggles it, the backdrop or any navigation closes it. No-ops on desktop,
+// where the sidebar is always visible and the toggle/backdrop are hidden.
+function setNavOpen(open) {
+  const app = $("app");
+  if (app) app.classList.toggle("nav-open", open);
+  const toggle = $("nav-toggle");
+  if (toggle) toggle.setAttribute("aria-expanded", open ? "true" : "false");
+}
+function closeNav() { setNavOpen(false); }
+if ($("nav-toggle")) {
+  $("nav-toggle").onclick = () => {
+    const app = $("app");
+    setNavOpen(!(app && app.classList.contains("nav-open")));
+  };
+}
+if ($("sidebar-backdrop")) $("sidebar-backdrop").onclick = closeNav;
+// Close the drawer if the viewport grows back to desktop width (e.g. rotate).
+window.addEventListener("resize", () => {
+  if (window.innerWidth > 760) closeNav();
+});
 
 /* ================================================================ */
 /*  Models (sidebar selector)                                        */
@@ -536,6 +561,66 @@ function applyInstallUI(env) {
   hint.style.display = "";   // generic browser-menu hint (default)
 }
 
+// --- Onboarding install gate (mobile, P-mobile) ----------------------------
+// After auth, a phone that has not installed localm yet lands on a one-time
+// install screen first (Install on Android / Add-to-Home-Screen steps on iOS),
+// then taps "Continue" to enter the app. Desktop, an already-installed launch,
+// and a return visit skip it. This is the "land on a setup page, reach localm
+// via Continue" flow - the install affordance was previously buried in Settings.
+function shouldShowInstallGate() {
+  if (pwaDisplayMode() === "standalone") return false;       // already installed
+  try { if (localStorage.getItem("localm.onboarded") === "1") return false; }
+  catch (e) { /* storage blocked - treat as not onboarded */ }
+  // Phones/tablets only: a touch device with a coarse pointer. A desktop
+  // `localm gui` (fine pointer) opens straight into the app.
+  return (navigator.maxTouchPoints || 0) > 0
+    || !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
+}
+
+// Render the gate's install affordance - mirror of applyInstallUI for the gate's
+// own elements. env = {ios, canPrompt}; missing fields treated as false.
+function applyInstallGateUI(env) {
+  env = env || {};
+  const btn = $("install-gate-install");
+  const ios = $("install-gate-ios");
+  const hint = $("install-gate-hint");
+  if (btn) btn.style.display = env.canPrompt ? "" : "none";
+  if (ios) ios.style.display = (!env.canPrompt && env.ios) ? "" : "none";
+  if (hint) hint.style.display = (!env.canPrompt && !env.ios) ? "" : "none";
+}
+
+function showInstallGate() {
+  const gate = $("install-gate");
+  if (!gate) return;
+  const app = $("app");
+  if (app) app.style.display = "none";   // the landing fully replaces the app
+  applyInstallGateUI({ ios: isIOSSafari(), canPrompt: !!window.__deferredInstall });
+  gate.style.display = "flex";
+}
+
+// Leave the gate and enter the app; remember it so we do not nag on return -
+// but never in privacy mode (no localStorage traces). refreshCtxLimit also wipes
+// the flag if privacy is detected after this runs, so the contract holds even if
+// Continue is tapped before the privacy state is known.
+function dismissInstallGate() {
+  const gate = $("install-gate");
+  if (gate) gate.style.display = "none";
+  const app = $("app");
+  if (app) app.style.display = "";
+  if (!chat.privacy) {
+    try { localStorage.setItem("localm.onboarded", "1"); } catch (e) { /* ignore */ }
+  }
+}
+
+// Let a late-arriving `beforeinstallprompt` (Chrome fires it after engagement)
+// upgrade the gate's generic hint to a real Install button while it is open.
+window.refreshInstallGateIfOpen = function () {
+  const gate = $("install-gate");
+  if (gate && gate.style.display !== "none") {
+    applyInstallGateUI({ ios: isIOSSafari(), canPrompt: !!window.__deferredInstall });
+  }
+};
+
 let modelCache = { models: [], active: "" };
 
 async function refreshModels() {
@@ -696,6 +781,7 @@ async function refreshCtxLimit() {
         localStorage.removeItem("localm.imgMoveDest");
         localStorage.removeItem("localm.musicMoveDest");
         localStorage.removeItem("localm.videoMoveDest");
+        localStorage.removeItem("localm.onboarded");
         const h = document.querySelector("#conversations h3");
         if (h && !document.getElementById("privacy-hint")) {
           const hint = document.createElement("div");
@@ -3634,6 +3720,18 @@ if ($("key-gate-input")) {
     if (e.key === "Enter") { e.preventDefault(); submitKeyGate(); }
   });
 }
+// Onboarding install gate (mobile): Continue enters the app; Install fires the
+// captured beforeinstallprompt (Android/desktop Chrome).
+if ($("install-gate-continue")) $("install-gate-continue").onclick = dismissInstallGate;
+if ($("install-gate-install")) $("install-gate-install").onclick = () => {
+  const d = window.__deferredInstall;
+  if (!d) return;
+  d.prompt();
+  d.userChoice.finally(() => {
+    window.__deferredInstall = null;
+    applyInstallGateUI({ ios: isIOSSafari(), canPrompt: false });
+  });
+};
 
 // Hard auth gate (NET-1): when the server REQUIRES a key and this browser has
 // none that works, show ONLY the onboarding - do NOT reveal the app shell or
@@ -3663,6 +3761,10 @@ function unlockUI() {
   }
   if (locked) { lockUI(); return; }
   unlockUI();
+  // On a phone not yet installed, show the one-time install landing first; the
+  // app still loads behind it and is revealed by "Continue". Desktop / installed
+  // / returning visits fall straight through.
+  if (shouldShowInstallGate()) showInstallGate();
   // Authenticated (or open/loopback mode): load the app.
   refreshModels().then(() => populateSetupModels());
   // Server persistence depends on knowing the privacy state first.

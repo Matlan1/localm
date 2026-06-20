@@ -223,14 +223,33 @@ def attach_gui(
         key = auth.get_api_key()
         if not key:
             raise HTTPException(404, "No API key configured - nothing to pair.")
-        import io
         import qrcode
-        import qrcode.image.svg
-        img = qrcode.make(f"localm-key:{key}",
-                          image_factory=qrcode.image.svg.SvgImage)
-        buf = io.BytesIO()
-        img.save(buf)
-        return Response(content=buf.getvalue(), media_type="image/svg+xml",
+        # Build the SVG ourselves from the module matrix: one black <path> of the
+        # dark modules over a white <rect>, with a viewBox so it scales crisply to
+        # any CSS size. The qrcode lib's SvgImage factory emits namespace-prefixed
+        # <svg:rect> in mm units with no viewBox - DOMPurify's SVG profile strips
+        # the prefixed tags (leaving a blank white box) and the mm/no-viewBox combo
+        # never scales into the CSS box anyway. Plain <rect>/<path> with explicit
+        # fills survive sanitisation and render black-on-white on any theme.
+        qr = qrcode.QRCode(
+            error_correction=qrcode.constants.ERROR_CORRECT_M, border=4)
+        qr.add_data(f"localm-key:{key}")
+        qr.make(fit=True)
+        matrix = qr.get_matrix()
+        n = len(matrix)
+        segments = [
+            f"M{x} {y}h1v1h-1z"
+            for y, row in enumerate(matrix)
+            for x, dark in enumerate(row) if dark
+        ]
+        svg = (
+            f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {n} {n}" '
+            f'shape-rendering="crispEdges" role="img" '
+            f'aria-label="localm pairing code">'
+            f'<rect width="{n}" height="{n}" fill="#ffffff"/>'
+            f'<path d="{"".join(segments)}" fill="#000000"/></svg>'
+        )
+        return Response(content=svg, media_type="image/svg+xml",
                         headers={"Cache-Control": "no-store"})
 
     @app.get("/api/fs/dirs", dependencies=[Depends(_require_auth)])
