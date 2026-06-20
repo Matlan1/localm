@@ -28,7 +28,7 @@ import queue
 import subprocess
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 from .tools import TOOL_REGISTRY, ToolDef, ToolResult
 

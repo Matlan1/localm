@@ -21,7 +21,7 @@ import uuid
 from typing import Dict, Generator, Iterable, Iterator, List, Optional
 
 from . import _api as api
-from ._structs import llama_token, LlamaChatMessage, LlamaContextParams, LlamaModelParams
+from ._structs import llama_token, LlamaChatMessage
 
 
 @contextlib.contextmanager
@@ -266,7 +266,6 @@ def _filtered_stream(pieces: Iterator[str]) -> Iterator[str]:
 # here (under the original private names) for the GGUF decode pipeline below; a
 # second pass at the engine layer is idempotent.
 from localm.inference.textnorm import scrub_stream as _scrub_stream  # noqa: E402
-from localm.inference.textnorm import scrub_text as _scrub_text      # noqa: E402
 
 
 # ---------------------------------------------------------------------------

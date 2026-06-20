@@ -4,7 +4,6 @@ Tests for Agent.context_chars() (multipart message handling) and
 Agent._patch_mode_intercept() (correct tool argument keys).
 """
 
-import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -94,7 +93,7 @@ class TestPatchModeIntercept:
         agent.patch_mode = True
 
         call = _make_call("write_file", path="x.py", content="print('hi')\n")
-        result = agent._patch_mode_intercept(call)
+        agent._patch_mode_intercept(call)
         # Returns a diff string (even if empty for new file) or None
         # Must not raise KeyError
 

@@ -10,7 +10,6 @@ import json
 import os
 from unittest.mock import MagicMock
 
-import pytest
 from fastapi.testclient import TestClient
 
 from localm.inference.http_server import create_app

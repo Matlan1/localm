@@ -7,7 +7,6 @@ edit_notebook_cell.
 """
 
 import json
-from pathlib import Path
 
 import pytest
 

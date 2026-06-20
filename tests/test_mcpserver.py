@@ -182,7 +182,8 @@ class TestClientServerIntegration:
     def test_own_client_can_drive_own_server(self, tmp_path):
         """localcoder's MCP client talks to localm's MCP server in-process
         logic via subprocess - the two halves must interoperate."""
-        import subprocess, sys, textwrap
+        import sys
+        import textwrap
         bridge = tmp_path / "bridge.py"
         bridge.write_text(textwrap.dedent("""\
             from unittest.mock import MagicMock

@@ -6,8 +6,6 @@ Tests for shell and test-runner tools in localm.plugins.coder.tools:
 
 import subprocess
 import sys
-import pytest
-from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from localm.plugins.coder.tools import (
@@ -245,7 +243,7 @@ class TestRunTests:
             return self._make_proc(stdout="2 passed")
 
         with patch("localm.plugins.coder.tools.subprocess.run", side_effect=fake_run):
-            r = tool_run_tests(tmp_path, runner="pytest")
+            tool_run_tests(tmp_path, runner="pytest")
         assert "pytest" in " ".join(captured)
 
     def test_failure_returns_not_ok(self, tmp_path):

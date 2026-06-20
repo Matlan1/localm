@@ -218,7 +218,6 @@ class TestServerModes:
 class TestCheckpointPrivacyGate:
     def _agent(self, tmp_path, mode):
         from localm.plugins.coder.agent import Agent
-        backend = MagicMock()
         agent = Agent.__new__(Agent)
         agent.mode = mode
         agent.cwd = tmp_path

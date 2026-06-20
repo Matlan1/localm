@@ -3,10 +3,8 @@
 
 import struct
 import zlib
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from localm.image_gen import comfy
 
@@ -95,7 +93,7 @@ class TestSidecarContent:
     def test_sidecar_written_next_to_output(self, tmp_path):
         """Drive generate_image fully mocked to the save step and verify
         the sidecar JSON lands as <output>.png.json with the seed."""
-        import io, json
+        import json
 
         out = tmp_path / "art.png"
 

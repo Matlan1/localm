@@ -23,7 +23,7 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Optional
 
 PROTOCOL_VERSION = "2025-03-26"
 SERVER_NAME = "localm"
@@ -375,7 +375,7 @@ class MCPStdioServer:
             try:
                 msg = json.loads(line)
             except json.JSONDecodeError:
-                _log(f"skipping non-JSON input line")
+                _log("skipping non-JSON input line")
                 continue
             # A JSON-RPC payload may be a single request object or a batch
             # array; a bare scalar / null is invalid. handle() replies -32600

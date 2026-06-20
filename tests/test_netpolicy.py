@@ -1,11 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for localm.netpolicy - the network policy for model-initiated requests."""
 
-from unittest.mock import patch
 
 import pytest
 
-from localm import netpolicy
 from localm.netpolicy import (
     NetworkPolicyError,
     _domain_list,

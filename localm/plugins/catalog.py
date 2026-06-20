@@ -18,7 +18,7 @@ This module holds NO plugin code and imports nothing heavy; it is just data.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 # Base for first-party plugin repos. Left blank until the plugins are published
 # to their own repos; the install fallback only tries GitHub when a repo is set

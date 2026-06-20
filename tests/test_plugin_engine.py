@@ -246,7 +246,6 @@ def test_enable_after_catchall_mount_is_not_shadowed(env, tmp_path):
     host relocates the plugin's routes ahead of it, or Starlette's "/" Mount
     would swallow every request (this is the whole point of enable-without-
     restart living alongside the SPA)."""
-    import os as _os
     from fastapi.staticfiles import StaticFiles
     from localm.plugins.engine import PluginManager
     plugins = env / "plugins"

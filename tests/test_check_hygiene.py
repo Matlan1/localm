@@ -9,7 +9,6 @@ pin that .html is scanned and that the shipped index.html is clean.
 import importlib.util
 from pathlib import Path
 
-import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 

@@ -10,7 +10,6 @@ relying on Origin headers. Inference + read routes stay open; protected mode
 CORS origin is exempt (explicit trust).
 """
 
-import os
 from unittest.mock import MagicMock
 
 import pytest

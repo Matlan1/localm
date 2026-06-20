@@ -11,7 +11,6 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from localm.plugins.coder.audit import SessionMode
 from localm.plugins.coder.tools import ToolDef, ToolResult
