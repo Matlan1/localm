@@ -157,3 +157,44 @@ def test_logout_clears_cookie(client):
     client.cookies.clear()  # belt and suspenders: drop anything stale
     r = client.get("/v1/models")
     assert r.status_code == 401, r.text
+
+
+# --------------------------------------------------------------------------- #
+#  Open-mode + fail-closed edges (adversarial-verify follow-ups)              #
+# --------------------------------------------------------------------------- #
+
+def _open_mode(monkeypatch, tmp_path):
+    """Isolate to a clean home with NO key configured anywhere (open mode):
+    env unset + auth.key/auth.json resolve into an empty throwaway dir."""
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
+    import localm.config as cfg
+    monkeypatch.setattr(cfg, "HOME_DIR", tmp_path)
+    monkeypatch.setattr(cfg, "MODELS_DIR", tmp_path / "models")
+    monkeypatch.setattr(cfg, "CONFIG_FILE", tmp_path / "config.json")
+    monkeypatch.setattr(cfg, "REGISTRY_FILE", tmp_path / "registry.json")
+
+
+def test_login_in_open_mode_no_bypass(tmp_path, monkeypatch):
+    """Open mode (no key anywhere): /api/session cannot grant access. It is
+    refused either by the route (400 - nothing to log into) or, first, by the
+    open-mode management gate (403 - that POST needs the loopback shell token);
+    either way it sets NO session cookie, so it is never a keyless bypass."""
+    _open_mode(monkeypatch, tmp_path)
+    with TestClient(create_app(_make_engine()), raise_server_exceptions=True) as c:
+        r = c.post("/api/session", json={"key": "anything"})
+    assert r.status_code in (400, 403), r.text
+    assert not [x for x in r.headers.get_list("set-cookie")
+                if x.startswith(SESSION_COOKIE + "=")]
+
+
+def test_require_auth_no_key_fails_closed_even_with_forged_cookie(tmp_path, monkeypatch):
+    """LOCALM_REQUIRE_AUTH with no key configured must fail CLOSED (503) on a
+    protected route, and a forged session cookie cannot bypass that gate."""
+    _open_mode(monkeypatch, tmp_path)
+    monkeypatch.setenv("LOCALM_REQUIRE_AUTH", "1")
+    with TestClient(create_app(_make_engine()), raise_server_exceptions=True) as c:
+        assert c.get("/v1/models").status_code == 503
+        c.cookies.set(SESSION_COOKIE, "forged-value")
+        assert c.get("/v1/models").status_code == 503
