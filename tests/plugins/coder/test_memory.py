@@ -2,7 +2,6 @@
 """Tests for localm.plugins.coder.memory"""
 
 import pytest
-from pathlib import Path
 
 from localm.plugins.coder.memory import (
     find_memory_file,

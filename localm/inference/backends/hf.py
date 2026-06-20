@@ -384,8 +384,6 @@ class HFBackend(BaseBackend):
             )
             inputs = tokenizer(text, return_tensors="pt").to(model.device)
 
-        input_len = inputs["input_ids"].shape[-1]
-
         # --- Streaming generation ---
         streamer = TextIteratorStreamer(
             tokenizer, skip_special_tokens=True, skip_prompt=True

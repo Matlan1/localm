@@ -12,7 +12,60 @@ this with their own ``monkeypatch.setenv`` (which runs after this autouse
 fixture).
 """
 
+import os
+
 import pytest
+
+
+# --------------------------------------------------------------------------- #
+#  Resource-gated integration markers (V2)                                     #
+#                                                                              #
+#  A test tagged real_gguf / real_comfy / real_browser needs a real external  #
+#  resource. Rather than each test re-implementing its own skip, gate them     #
+#  centrally here: a tagged test is skipped (never failed) unless its resource #
+#  is actually available, so the suite runs the real path the moment it is.    #
+# --------------------------------------------------------------------------- #
+
+def _runtime_available() -> bool:
+    """True when the native llama.cpp runtime is provisioned and loadable."""
+    try:
+        from localm.inference.backends.llamacpp._loader import load_lib
+        load_lib()
+        return True
+    except Exception:
+        return False
+
+
+def _comfy_configured() -> bool:
+    return bool(os.environ.get("LOCALM_TEST_COMFY_URL"))
+
+
+def _playwright_available() -> bool:
+    import importlib.util
+    return importlib.util.find_spec("playwright") is not None
+
+
+_RESOURCE_GATES = (
+    ("real_gguf", _runtime_available,
+     "native llama runtime not provisioned (run 'localm setup-llama')"),
+    ("real_comfy", _comfy_configured,
+     "set LOCALM_TEST_COMFY_URL to a running ComfyUI"),
+    ("real_browser", _playwright_available,
+     "Playwright not installed (pip install playwright && playwright install)"),
+)
+
+
+def pytest_collection_modifyitems(config, items):
+    available: dict = {}
+    for item in items:
+        for marker, check, reason in _RESOURCE_GATES:
+            if marker not in item.keywords:
+                continue
+            ok = available.get(marker)
+            if ok is None:
+                ok = available[marker] = check()
+            if not ok:
+                item.add_marker(pytest.mark.skip(reason=f"{marker}: {reason}"))
 
 
 @pytest.fixture(autouse=True)

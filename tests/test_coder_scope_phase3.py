@@ -30,7 +30,6 @@ import pytest
 
 from localm.plugins.coder.agent import Agent, _SCOPED_TOOLS
 from localm.plugins.coder.backends.http import (
-    HTTPBackend,
     make_anthropic_backend,
 )
 

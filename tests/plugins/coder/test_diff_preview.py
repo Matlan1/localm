@@ -3,10 +3,7 @@
 Tests for display.print_diff_preview and agent._confirm_tool diff path.
 """
 
-import pytest
-from io import StringIO
-from pathlib import Path
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 from localm.plugins.coder.display import print_diff_preview
 
@@ -18,7 +15,6 @@ from localm.plugins.coder.display import print_diff_preview
 class TestPrintDiffPreview:
     def _capture(self, old, new, label="test.py", max_lines=200):
         """Run print_diff_preview and return the Rich output as a string."""
-        buf = StringIO()
         # Patch console to write to our buffer (strip markup)
         with patch("localm.plugins.coder.display.console") as mock_console:
             printed = []
@@ -113,8 +109,7 @@ class TestAgentConfirmTool:
         backend = MagicMock()
         backend.model_id = "test-model"
         backend.last_usage = {}
-        with patch("localm.plugins.coder.agent.AuditLog"), \
-             patch("localm.plugins.coder.agent.load_memory", return_value=""), \
+        with patch("localm.plugins.coder.agent.load_memory", return_value=""), \
              patch("localm.plugins.coder.agent.ProjectMap") as mock_pm:
             mock_pm.build.return_value.file_count.return_value = 0
             agent = Agent(backend=backend, cwd=tmp_path, auto_approve=False)

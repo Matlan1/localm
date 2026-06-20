@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.real_gguf]
 
 _REPO = "bartowski/SmolLM2-135M-Instruct-GGUF"
 _FILE = "SmolLM2-135M-Instruct-Q4_K_M.gguf"

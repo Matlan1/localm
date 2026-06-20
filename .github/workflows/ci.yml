@@ -47,9 +47,7 @@ jobs:
           npm ci
           npm test
 
-      # ruff is configured (pyproject [tool.ruff]) but not yet blocking while an
-      # unused-import backlog remains. Flip continue-on-error to false once it is
-      # cleared.
+      # ruff is configured (pyproject [tool.ruff]) and blocking: the unused-import
+      # backlog (F401/F841/E401/F541) was cleared, so a new lint regression fails CI.
       - name: Lint (ruff)
-        continue-on-error: true
         run: ruff check .

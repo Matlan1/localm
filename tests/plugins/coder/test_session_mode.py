@@ -13,7 +13,6 @@ Covers:
 
 import json
 import pytest
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from localm.plugins.coder.audit import (
@@ -172,9 +171,7 @@ def _make_agent(tmp_path, mode):
     backend = MagicMock()
     backend.model_id = "test-model"
     backend.last_usage = {}
-    with patch("localm.plugins.coder.agent.AuditLog"), \
-         patch("localm.plugins.coder.agent.NullAuditLog"), \
-         patch("localm.plugins.coder.agent.make_audit_log") as mock_factory, \
+    with patch("localm.plugins.coder.agent.make_audit_log") as mock_factory, \
          patch("localm.plugins.coder.agent.load_memory", return_value=""), \
          patch("localm.plugins.coder.agent.ProjectMap") as mock_pm:
         mock_pm.build.return_value.file_count.return_value = 0

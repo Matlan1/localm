@@ -10,7 +10,7 @@ Covers:
 """
 
 import pytest
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 from localm.plugins.coder.agent import (
     Agent,

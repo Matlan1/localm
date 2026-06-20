@@ -2,8 +2,7 @@
 """Tests for localm.inference.engine.Engine - loaded property, auto-reload, idempotent load."""
 
 import unittest
-from unittest.mock import MagicMock, call, patch
-from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 
 def _make_mock_backend(loaded: bool = False):

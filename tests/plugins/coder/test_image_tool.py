@@ -6,7 +6,7 @@ import json
 import urllib.error
 
 # Import the tool function and class
-from localm.plugins.coder.tools import tool_generate_image, ToolResult
+from localm.plugins.coder.tools import tool_generate_image
 
 class TestFluxImageTool(unittest.TestCase):
     def setUp(self):
