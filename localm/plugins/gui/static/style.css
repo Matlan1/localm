@@ -662,7 +662,7 @@ pre:hover .copy-btn { opacity: 1; }
   flex: 1;
   overflow-y: auto;
   padding: 28px 32px 60px;
-  max-width: 900px;
+  max-width: 1280px;
   margin: 0 auto;
   width: 100%;
 }
@@ -1093,4 +1093,77 @@ pre:hover .copy-btn { opacity: 1; }
   font-size: 11px;
   font-style: italic;
   color: var(--text-dim);
+}
+
+/* ---------------- responsive: phone / narrow screens ---------------- */
+/* Desktop keeps the always-visible sidebar; the top bar + drawer backdrop are
+   inert. On a narrow screen the 230px fixed sidebar would eat most of the width
+   and squeeze the content to one word per line, so it becomes an off-canvas
+   drawer opened from a hamburger in a top bar. */
+#mobile-topbar { display: none; }
+#sidebar-backdrop { display: none; }
+
+/* Fill the real visible viewport (dvh excludes the mobile browser chrome that
+   100vh leaves an empty gap under); falls back to 100vh where dvh is absent. */
+@supports (height: 100dvh) {
+  #app { height: 100dvh; }
+}
+
+@media (max-width: 760px) {
+  #mobile-topbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+    padding: 8px 12px;
+    background: var(--bg-raised);
+    border-bottom: 1px solid var(--border);
+  }
+  #nav-toggle {
+    background: none; border: none; color: var(--text);
+    font-size: 22px; line-height: 1; cursor: pointer;
+    padding: 2px 8px; border-radius: 8px;
+  }
+  #nav-toggle:hover { background: var(--bg-input); }
+  .mtb-title { font-size: 17px; font-weight: 600; letter-spacing: 0.4px; }
+  .mtb-title span { color: var(--accent); }
+
+  /* Sidebar becomes an off-canvas drawer, hidden until the hamburger opens it. */
+  #sidebar {
+    position: fixed;
+    top: 0; left: 0; bottom: 0;
+    z-index: 60;
+    width: 82vw; max-width: 320px; min-width: 0;
+    transform: translateX(-100%);
+    transition: transform 0.22s ease;
+    box-shadow: 0 0 32px rgba(0, 0, 0, 0.5);
+  }
+  #app.nav-open #sidebar { transform: translateX(0); }
+
+  #sidebar-backdrop {
+    display: block;
+    position: fixed; inset: 0; z-index: 55;
+    background: rgba(0, 0, 0, 0.5);
+    opacity: 0; pointer-events: none;
+    transition: opacity 0.22s ease;
+  }
+  #app.nav-open #sidebar-backdrop { opacity: 1; pointer-events: auto; }
+
+  /* Main takes the full width (the sidebar is out of flow when fixed). */
+  #main { width: 100%; }
+
+  /* Tighter gutters so content is not squeezed. */
+  .page { padding: 18px 14px 48px; }
+  .msg-row { padding: 0 14px; }
+  .composer-wrap { padding: 10px 12px 14px; }
+
+  /* Stack 2-column form grids into one column. */
+  .grid2,
+  .settings-group { grid-template-columns: 1fr; }
+
+  /* Let row inputs + their buttons wrap instead of overflowing the card. */
+  .card .row { flex-wrap: wrap; }
+
+  /* Toolbars wrap rather than overflow. */
+  #coder-bar { flex-wrap: wrap; }
 }

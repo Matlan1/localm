@@ -447,12 +447,15 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     # Advertise this server in the instance registry (H6 phase 3/4) as a "full"
     # surface (API + GUI) so a future launch in the same dir can discover and
     # attach to it. --isolated keeps it invisible to discovery.
-    import uvicorn
+    from localm import portmux
     try:
         with instances.advertise(app, home_dir(), host=host, port=chosen_port,
                                  mode="full", scheme=scheme, project=project,
                                  isolated=isolated):
-            uvicorn.run(app, host=host, port=chosen_port, log_level="warning",
-                        ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
+            # On a TLS (network) bind, also catch a plain-http request on the same
+            # port with an https redirect (issue 8) instead of a bare connection
+            # reset; a loopback/plain bind is a direct uvicorn.run.
+            portmux.run_server(app, host=host, port=chosen_port, log_level="warning",
+                               ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
     finally:
         manager.close_all()

@@ -2334,6 +2334,15 @@ class TestPairingQR:
         assert b"<svg" in r.content
         # The key must NOT appear as plaintext in the SVG (it is QR-encoded).
         assert b"ownerkey123" not in r.content
+        # Issue 1: the QR must be a clean, scalable SVG, not the qrcode lib's
+        # SvgImage output (namespace-prefixed <svg:rect> in mm units, no viewBox)
+        # which DOMPurify strips to a blank white box.
+        assert b"viewBox=" in r.content          # scales to any CSS size
+        assert b"<svg:" not in r.content          # no namespace-prefixed tags
+        assert b"mm" not in r.content             # no mm units (the no-viewBox bug)
+        assert b"<path" in r.content              # dark modules drawn as a path
+        assert b'fill="#000000"' in r.content     # explicit black on white
+        assert b'fill="#ffffff"' in r.content
 
     def test_401_when_key_required_and_none_presented(self, gui_app, monkeypatch):
         from localm import auth
