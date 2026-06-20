@@ -18,12 +18,13 @@ The four rules, in short (see `AGENTS.md` for the full text and rationale):
 
 Enforce with `python scripts/check_hygiene.py` before committing.
 
-PROTECTED LOCAL PATHS (never delete): `issues/` is the maintainer's gitignored,
-local-only backlog/bug report. It is NOT in git, so deleting it is unrecoverable
-(it was lost once already). Never `rm` it, `git clean -x` it, treat it as a
-"stray/untracked" file to tidy, or overwrite `issues/issues.txt` wholesale. Read
-and append only; ask before removing anything under it. See AGENTS.md
-"Protected local paths".
+PROTECTED LOCAL PATHS (never delete): `issues/` (the maintainer's gitignored,
+local-only backlog/bug report) and `qa/` (the gitignored, local-only by-hand test
+campaign: the feature matrix, results, recorder, and test plans). Neither is in
+git, so deleting either is unrecoverable (`issues/` was lost once already). Never
+`rm` them, `git clean -x` them, treat them as "stray/untracked" files to tidy, or
+overwrite `issues/issues.txt` wholesale. Read and append only; ask before removing
+anything under them. See AGENTS.md "Protected local paths".
 
 Verifying changes: you are pre-approved to launch a local test instance of the
 full app (`localm gui`, `localm serve`, `localm run`) to check a change in the
