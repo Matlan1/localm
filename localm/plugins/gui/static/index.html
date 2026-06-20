@@ -413,6 +413,21 @@
             <button class="btn-quiet" id="gui-clear-convs">Delete all conversations</button>
           </div>
         </div>
+        <div class="card" id="keys-card">
+          <h3>API keys</h3>
+          <div class="sub">Mint named, scope-limited keys to share localm with
+            another device or person - each key gets only the capabilities you
+            check. A <b>coder</b> key is restricted (it can read and edit this
+            project but cannot run shell commands). The secret is shown once.</div>
+          <input type="text" id="key-name" placeholder="key name (e.g. phone)"
+                 spellcheck="false" autocomplete="off">
+          <div id="key-scopes" class="key-scopes"></div>
+          <div class="actions">
+            <button class="btn-quiet" id="key-create">Create key</button>
+          </div>
+          <div id="key-secret" class="key-secret" style="display:none"></div>
+          <div id="keys-list" class="keys-list"></div>
+        </div>
         <div class="card">
           <h3>Companion app</h3>
           <div class="sub">Connected to <code id="conn-origin">this server</code>. This app talks
