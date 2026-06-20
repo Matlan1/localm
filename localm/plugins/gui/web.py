@@ -449,4 +449,9 @@ def attach_gui(
 
     app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="gui")
 
+    # Single source of truth that the GUI surface is mounted on this app, so the
+    # on-demand mount (phase 5 mount_gui_surface) is idempotent whether the GUI
+    # was attached at startup (localm gui) or live on a running api instance.
+    app.state.gui_mounted = True
+
     return manager

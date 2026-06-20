@@ -38,6 +38,33 @@ def _gui_bind_warning(host: str):
     )
 
 
+def _mount_remote_gui(entry: dict) -> bool:
+    """Ask a running ``api``-mode instance to mount its GUI surface on demand
+    (H6 phase 5). POSTs to its loopback ``/v1/surfaces/gui`` with the instance's
+    own registry attach token (a local same-user secret). Returns True on
+    success, False on any failure - an older instance without the endpoint, a
+    missing token, or a network error - so the caller can fall back to just
+    opening the address."""
+    import requests
+    scheme = entry.get("scheme") or "http"
+    port = entry.get("port")
+    token = entry.get("token")
+    if not port or not token:
+        return False
+    url = f"{scheme}://127.0.0.1:{port}/v1/surfaces/gui"
+    try:
+        from localm.tls import requests_verify
+        verify = requests_verify(url)
+    except Exception:
+        verify = False
+    try:
+        r = requests.post(url, headers={"Authorization": f"Bearer {token}"},
+                          timeout=5, verify=verify)
+        return r.status_code == 200
+    except requests.RequestException:
+        return False
+
+
 def _lan_ip() -> str:
     """Best-effort primary LAN IPv4 of this machine, or "" if undetermined.
     Opens a UDP socket toward a TEST-NET address to learn the outbound interface;
@@ -201,9 +228,16 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
                 f"running for [cyan]{root_dir}[/cyan] "
                 f"(pid {existing.get('pid')}, port {existing.get('port')}).")
             if existing.get("mode") != "full":
-                console.print(
-                    "  [yellow]That instance is API-only; opening its address "
-                    "anyway. On-demand GUI mount lands in a later phase.[/yellow]")
+                # On-demand GUI mount (H6 phase 5): the running instance is
+                # API-only; ask it to mount the GUI surface live (no second
+                # server, no second model load) using its own attach token.
+                if _mount_remote_gui(existing):
+                    console.print(
+                        "  [green]Mounted the GUI on the running instance.[/green]")
+                else:
+                    console.print(
+                        "  [yellow]Could not mount the GUI on it (an older "
+                        "instance?); opening its address anyway.[/yellow]")
             console.print(f"  [dim]Opening[/dim] [cyan]{url}[/cyan]")
             if not no_browser:
                 webbrowser.open(url)
