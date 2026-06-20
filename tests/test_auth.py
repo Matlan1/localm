@@ -4,7 +4,15 @@ the HTTP server's _require_auth dependency."""
 
 import pytest
 from fastapi import HTTPException
-from fastapi.security import HTTPAuthorizationCredentials
+
+
+def _req(token=None, method="GET"):
+    """Minimal Starlette Request carrying an optional Bearer token, for unit-
+    calling the request-aware auth dependencies (S2: header-or-cookie auth)."""
+    from starlette.requests import Request
+    headers = [(b"authorization", f"Bearer {token}".encode())] if token else []
+    return Request({"type": "http", "method": method, "headers": headers,
+                    "path": "/", "query_string": b"", "client": ("test", 0)})
 
 
 @pytest.fixture
@@ -74,28 +82,26 @@ def test_require_auth_dependency(auth, monkeypatch):
     from localm.inference.http_server import _require_auth
 
     # open mode: no key, not required -> allowed
-    assert _require_auth(None) is None
+    assert _require_auth(_req()) is None
 
     # required but no key -> 503
     monkeypatch.setenv("LOCALM_REQUIRE_AUTH", "1")
     with pytest.raises(HTTPException) as exc:
-        _require_auth(None)
+        _require_auth(_req())
     assert exc.value.status_code == 503
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH")
 
     # key configured (file): missing/invalid credentials -> 401
     auth.set_api_key("k")
     with pytest.raises(HTTPException) as exc:
-        _require_auth(None)
+        _require_auth(_req())
     assert exc.value.status_code == 401
-    bad = HTTPAuthorizationCredentials(scheme="Bearer", credentials="wrong")
     with pytest.raises(HTTPException) as exc:
-        _require_auth(bad)
+        _require_auth(_req("wrong"))
     assert exc.value.status_code == 401
 
     # correct credentials -> allowed
-    good = HTTPAuthorizationCredentials(scheme="Bearer", credentials="k")
-    assert _require_auth(good) is None
+    assert _require_auth(_req("k")) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -166,16 +172,15 @@ def test_owner_key_is_admin(auth, monkeypatch):
 
 def test_require_scope_enforcement(auth):
     from fastapi import HTTPException
-    from fastapi.security import HTTPAuthorizationCredentials
     from localm import scopes as S
     from localm.inference.http_server import require_scope, _require_auth
 
     # open mode: no keys configured -> allowed
-    assert require_scope(S.PLUGINS_ADMIN)(None) is None
+    assert require_scope(S.PLUGINS_ADMIN)(_req()) is None
 
     # a named key WITHOUT plugins:admin
     made = auth.create_key("reader", [S.CHAT])
-    cred = HTTPAuthorizationCredentials(scheme="Bearer", credentials=made["key"])
+    cred = _req(made["key"])
 
     # now a key exists -> enforced; this key lacks plugins:admin -> 403
     with pytest.raises(HTTPException) as exc:
@@ -187,18 +192,16 @@ def test_require_scope_enforcement(auth):
     assert _require_auth(cred) is None
 
     # a wrong/unknown key -> 401
-    bad = HTTPAuthorizationCredentials(scheme="Bearer", credentials="wrong")
     with pytest.raises(HTTPException) as exc:
-        require_scope(S.CHAT)(bad)
+        require_scope(S.CHAT)(_req("wrong"))
     assert exc.value.status_code == 401
 
 
 def test_owner_key_grants_every_scope(auth, monkeypatch):
-    from fastapi.security import HTTPAuthorizationCredentials
     from localm import scopes as S
     from localm.inference.http_server import require_scope
     monkeypatch.setenv("LOCALM_API_KEY", "ownersecret")
-    cred = HTTPAuthorizationCredentials(scheme="Bearer", credentials="ownersecret")
+    cred = _req("ownersecret")
     assert require_scope(S.PLUGINS_ADMIN)(cred) is None
     assert require_scope(S.KEYS_ADMIN)(cred) is None
 
