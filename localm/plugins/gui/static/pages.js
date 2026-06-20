@@ -733,9 +733,58 @@ $("img-generate").onclick = async () => {
    shows install/enable/disable/uninstall depending on its state; chat is the
    protected #0 and has no actions. After any change the catalog table AND the
    slash-command hint cache re-derive from one fetch (nav follows in Phase 4). */
+// Each call supersedes the previous one (a newer refresh or leaving the page);
+// the staggered populate below checks the token so a stale render stops. The
+// per-row delay is a module var so tests can drop it to 0.
+let _catalogRenderToken = 0;
+let _catalogStaggerMs = 24;
+
+function _catalogRow(p) {
+  const tr = el("tr");
+  const nameTd = el("td");
+  nameTd.appendChild(el("span", "name", p.label || p.name));
+  tr.appendChild(nameTd);
+  const status = p.protected ? "protected"
+    : p.active ? "active"
+    : p.installed ? "installed (off)"
+    : "available";
+  tr.appendChild(el("td", "mono", status));
+  const descTd = el("td", "", p.description);
+  // Warn when a plugin needs other plugins that are not installed (B15).
+  const missing = Array.isArray(p.missing_requires) ? p.missing_requires : [];
+  if (missing.length) {
+    descTd.appendChild(el("div", "sub plugin-missing-req",
+      `requires ${(p.requires || []).join(", ")} (missing: ${missing.join(", ")})`));
+  }
+  tr.appendChild(descTd);
+  const actions = el("td");
+  actions.style.textAlign = "right";
+  if (!p.protected) {
+    if (!p.installed) {
+      actions.appendChild(_catalogBtn("install", p.name, "btn-primary", "Install"));
+    } else {
+      actions.appendChild(p.enabled
+        ? _catalogBtn("disable", p.name, "", "Disable")
+        : _catalogBtn("enable", p.name, "btn-primary", "Enable"));
+      actions.appendChild(_catalogBtn("uninstall", p.name, "danger", "Uninstall"));
+    }
+  }
+  // One-click install of any missing requirements (B15).
+  if (missing.length) {
+    const req = el("button", "btn-primary", "Install requirements");
+    req.style.marginLeft = "6px";
+    req.dataset.reqfor = p.name;
+    req.onclick = () => installRequirements(p.name, missing);
+    actions.appendChild(req);
+  }
+  tr.appendChild(actions);
+  return tr;
+}
+
 async function renderCatalogPlugins() {
   const box = $("catalog-table");
   if (!box) return;
+  const myToken = ++_catalogRenderToken;
   box.replaceChildren();
   let data;
   try {
@@ -746,7 +795,13 @@ async function renderCatalogPlugins() {
     box.appendChild(el("div", "sub", "Could not load plugins: " + e.message));
     return;
   }
+  if (myToken !== _catalogRenderToken) return;   // superseded while fetching
   const plugins = (data.plugins || []).filter((p) => p.builtin);
+
+  // A status line that tells the user what is loading / what loaded (U2).
+  const status = el("div", "sub catalog-status");
+  box.appendChild(status);
+
   const table = el("table", "data-table");
   const thead = el("thead");
   const hr = el("tr");
@@ -754,49 +809,25 @@ async function renderCatalogPlugins() {
   thead.appendChild(hr);
   table.appendChild(thead);
   const tbody = el("tbody");
-  for (const p of plugins) {
-    const tr = el("tr");
-    const nameTd = el("td");
-    nameTd.appendChild(el("span", "name", p.label || p.name));
-    tr.appendChild(nameTd);
-    const status = p.protected ? "protected"
-      : p.active ? "active"
-      : p.installed ? "installed (off)"
-      : "available";
-    tr.appendChild(el("td", "mono", status));
-    const descTd = el("td", "", p.description);
-    // Warn when a plugin needs other plugins that are not installed (B15).
-    const missing = Array.isArray(p.missing_requires) ? p.missing_requires : [];
-    if (missing.length) {
-      descTd.appendChild(el("div", "sub plugin-missing-req",
-        `requires ${(p.requires || []).join(", ")} (missing: ${missing.join(", ")})`));
-    }
-    tr.appendChild(descTd);
-    const actions = el("td");
-    actions.style.textAlign = "right";
-    if (!p.protected) {
-      if (!p.installed) {
-        actions.appendChild(_catalogBtn("install", p.name, "btn-primary", "Install"));
-      } else {
-        actions.appendChild(p.enabled
-          ? _catalogBtn("disable", p.name, "", "Disable")
-          : _catalogBtn("enable", p.name, "btn-primary", "Enable"));
-        actions.appendChild(_catalogBtn("uninstall", p.name, "danger", "Uninstall"));
-      }
-    }
-    // One-click install of any missing requirements (B15).
-    if (missing.length) {
-      const req = el("button", "btn-primary", "Install requirements");
-      req.style.marginLeft = "6px";
-      req.dataset.reqfor = p.name;
-      req.onclick = () => installRequirements(p.name, missing);
-      actions.appendChild(req);
-    }
-    tr.appendChild(actions);
-    tbody.appendChild(tr);
-  }
   table.appendChild(tbody);
   box.appendChild(table);
+
+  // Populate the rows one after another so the catalog visibly fills in instead
+  // of flashing all at once (U2). The token guard cancels a stale populate if a
+  // newer refresh started or the user left the page mid-fill.
+  for (let i = 0; i < plugins.length; i++) {
+    if (myToken !== _catalogRenderToken) return;
+    tbody.appendChild(_catalogRow(plugins[i]));
+    status.textContent = `Loading plugins… (${i + 1}/${plugins.length})`;
+    await new Promise((r) => setTimeout(r, _catalogStaggerMs));
+  }
+  if (myToken !== _catalogRenderToken) return;
+
+  const active = plugins.filter((p) => p.active).length;
+  const failed = plugins.filter((p) => p.error).length;
+  status.textContent =
+    `${active}/${plugins.length} plugins active` + (failed ? ` · ${failed} failed` : "");
+
   if (data.errors) {
     for (const [name, err] of Object.entries(data.errors)) {
       box.appendChild(el("div", "sub", `⚠ ${name}: ${err}`));
