@@ -57,7 +57,7 @@ _DISCLOSURE = [
 
 # ---- check 3: absolute paths in code/config (escapable) --------------------
 _CODE_EXTS = {".py", ".pyw", ".bat", ".cmd", ".ps1", ".sh", ".toml",
-              ".json", ".cfg", ".ini"}
+              ".json", ".cfg", ".ini", ".html"}
 _ABS_PATH = re.compile(
     r"""(["'(]|\br['"])\s*          # opening quote / r-string
         (?:[A-Za-z]:[\\/]           # Windows drive path
