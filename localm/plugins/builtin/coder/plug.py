@@ -33,11 +33,10 @@ import os
 import queue
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from localm.inference.http_server import caller_scopes
 from localm.pathsafe import confined_file as _confined_file
 from localm.plugins.coder.sessions import CoderSession
 
@@ -86,9 +85,36 @@ def _sessions(request: Request):
     return mgr
 
 
+def _principal_from_request(request: Request) -> tuple[bool, str | None]:
+    """Identify the caller for session isolation: returns ``(is_owner, principal)``.
+
+    The OWNER (an ADMIN/owner key, or open-mode loopback) is ``(True, None)`` and
+    may touch every session. A minted, non-owner scoped key is ``(False, <hash of
+    its bearer>)`` and may touch only the sessions IT created. The principal is a
+    SHA-256 of the presented bearer, so it identifies the key without storing it."""
+    from localm import scopes as S
+    from localm.auth import any_key_configured, verify
+    from localm.inference.http_server import _bearer_token
+    if not any_key_configured():
+        return True, None                       # open mode = loopback owner
+    bearer = _bearer_token(request)
+    held = verify(bearer) if bearer else None
+    if held is not None and S.ADMIN in held:
+        return True, None                       # the owner key
+    import hashlib
+    digest = hashlib.sha256((bearer or "").encode("utf-8")).hexdigest()
+    return False, digest
+
+
 def _get_session(request: Request, session_id: str):
     session = _sessions(request).get(session_id)
     if session is None:
+        raise HTTPException(404, f"No such session: {session_id}")
+    is_owner, principal = _principal_from_request(request)
+    # Isolation: a scoped caller may only touch the sessions IT created - it must
+    # not read or steer the owner's full-capability sessions (which keep run_shell).
+    # 404 (not 403) so a scoped key cannot even probe which session ids exist.
+    if not is_owner and session.principal != principal:
         raise HTTPException(404, f"No such session: {session_id}")
     return session
 
@@ -100,26 +126,28 @@ def _get_session(request: Request, session_id: str):
 @_router.get("/api/coder/sessions")
 async def list_sessions(request: Request):
     mgr = _sessions(request)
-    return {"sessions": mgr.list(), "active_model": request.app.state.active_model()}
+    is_owner, principal = _principal_from_request(request)
+    return {"sessions": mgr.list(principal=principal, is_owner=is_owner),
+            "active_model": request.app.state.active_model()}
 
 
 @_router.post("/api/coder/sessions")
-async def create_session(req: CreateSessionRequest, request: Request,
-                         caller=Depends(caller_scopes)):
+async def create_session(req: CreateSessionRequest, request: Request):
     mgr = _sessions(request)
     active_model = request.app.state.active_model
     self_url = request.app.state.self_url
 
-    # Safe-to-share scoping. The OWNER key (and open-mode loopback - caller is
-    # None) gets the full coder: any directory, run_shell included. A MINTED,
-    # non-owner coder-scoped key gets a RESTRICTED session - run_shell removed (no
-    # arbitrary host command exec / RCE) and confined to the instance project
-    # root - so a key you hand out cannot run shell commands or wander the
-    # filesystem. run_shell is cwd-independent, so confining the cwd is not enough
-    # on its own; disabling it is the actual containment.
-    from localm import scopes as S
-    restricted = caller is not None and S.ADMIN not in caller
-    disabled_tools = frozenset({"run_shell"}) if restricted else frozenset()
+    # Safe-to-share scoping. The OWNER (an ADMIN/owner key, or open-mode loopback)
+    # gets the full coder: any directory, every tool. A MINTED, non-owner coder-
+    # scoped key gets a RESTRICTED session - locked to read + confined-edit tools
+    # (no run_shell/run_tests/git-hooks/network/sub-agents, all RCE or exfil
+    # vectors), forced into the project root, and isolated to its own sessions. So
+    # a key you hand out can read and edit this project but cannot execute
+    # anything; you review and run. (run_shell is cwd-independent, and write_file +
+    # run_tests/git-hooks is RCE, so disabling the executing tools - not just
+    # confining the cwd - is the real containment.)
+    is_owner, principal = _principal_from_request(request)
+    restricted = not is_owner
 
     if restricted:
         # Force the session into the instance's project root, ignoring req.cwd, so
@@ -134,9 +162,13 @@ async def create_session(req: CreateSessionRequest, request: Request,
             raise HTTPException(400, f"Not a directory: {req.cwd}")
         cwd = cwd.resolve()
 
-    # Per-session model: the local GPU serves one engine at a time, so a
-    # different model means switching the active engine for everyone.
+    # A per-session model switch changes the one shared engine for EVERYONE, so a
+    # scoped key must not trigger it (DoS / interfering with the owner's session).
     if req.model and req.model != active_model():
+        if restricted:
+            raise HTTPException(
+                403, "Switching models needs the owner key; a scoped key uses the "
+                "active model.")
         from localm.config import load_registry
         if req.model not in load_registry():
             raise HTTPException(404, f"Model not registered: {req.model}")
@@ -174,9 +206,10 @@ async def create_session(req: CreateSessionRequest, request: Request,
         mode=session_mode,
         scope=req.scope,
         dry_run=req.dry_run,
-        disabled_tools=disabled_tools,
+        restricted=restricted,
         **gen_kwargs,
     ))
+    session.principal = principal      # who owns this session (None = the owner)
     mgr.create(session)
     return session.info()
 

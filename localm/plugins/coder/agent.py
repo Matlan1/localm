@@ -37,7 +37,7 @@ from .memory import load_memory, remember, forget
 from .parser import (
     ToolCall, looks_like_tool_attempt, parse_tool_calls, split_response,
 )
-from .tools import TOOL_REGISTRY, ToolResult
+from .tools import SAFE_RESTRICTED_TOOLS, TOOL_REGISTRY, ToolResult
 from .display import (
     confirm,
     confirm_diff,
@@ -262,6 +262,7 @@ class Agent:
         mode: SessionMode = SessionMode.PRIVACY,
         scope: Optional[str] = None,
         disabled_tools: Optional[frozenset] = None,
+        restricted: bool = False,
         self_verify: bool = True,
         turn_budget: Optional[int] = None,
         on_event=None,
@@ -281,9 +282,13 @@ class Agent:
         self.parent         = parent
         self.mode           = mode
         self.scope          = scope        # optional glob filter on file-access tools
-        # Tools removed from THIS session (e.g. {"run_shell"} for a restricted,
-        # shareable coder key): hidden from the model and hard-refused at dispatch
-        # so a minted scoped key cannot run arbitrary host commands (RCE).
+        # Restricted = a shareable, non-owner coder session: locked to the
+        # SAFE_RESTRICTED_TOOLS allowlist (read + confined edits, no execution,
+        # network, env, or sub-agents) and given no external (MCP/plugin/skill)
+        # tools. The effective disabled set is finalised after tool registration.
+        self.restricted = restricted
+        # Tools removed from THIS session: hidden from the model and hard-refused
+        # at dispatch so a minted scoped key cannot run them (RCE / data exfil).
         self.disabled_tools = frozenset(disabled_tools or ())
         self.self_verify    = self_verify  # nudge agent to verify code changes before finishing
         # Per-task turn budget for uncertainty escalation. None → 2/3 of max_turns.
@@ -379,6 +384,17 @@ class Agent:
                 )
         except Exception as e:
             print_warning(f"Skill setup failed: {e}")
+
+        if self.restricted:
+            # A shareable, non-owner session gets NO external (MCP/plugin/skill)
+            # tools and ONLY the SAFE_RESTRICTED_TOOLS allowlist. Drop the external
+            # docs and disable every tool not in the allowlist (run_shell, run_tests,
+            # git_commit/push, fetch_url, generate_image, read_env, spawn_agent, and
+            # any registered external tool) so the model is neither offered nor able
+            # to execute them. Default-deny: a newly-added tool is disabled here too.
+            self._mcp_docs = self._plugin_docs = self._skill_docs = ""
+            self.disabled_tools = self.disabled_tools | (
+                frozenset(TOOL_REGISTRY) - SAFE_RESTRICTED_TOOLS)
 
         self._system_prompt: str = build_system_prompt(
             cwd,

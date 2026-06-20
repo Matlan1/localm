@@ -137,7 +137,7 @@ def _coder_app(tmp_path, monkeypatch, *, api_key):
     return app
 
 
-def test_scoped_coder_key_gets_no_shell_session_confined_to_root(tmp_path, monkeypatch):
+def test_scoped_coder_key_is_locked_to_safe_tools_and_confined(tmp_path, monkeypatch):
     proj = tmp_path / "proj"; proj.mkdir()
     other = tmp_path / "other"; other.mkdir()
     app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
@@ -152,7 +152,14 @@ def test_scoped_coder_key_gets_no_shell_session_confined_to_root(tmp_path, monke
         assert r.status_code == 200
         assert r.json()["cwd"] == str(proj.resolve())    # ...but is forced into the project root
         sess = app.state.coder_sessions.get(r.json()["id"])
-        assert "run_shell" in sess.agent.disabled_tools
+        dis = sess.agent.disabled_tools
+        # Every execution / network / exfil / sub-agent tool is disabled...
+        assert {"run_shell", "run_tests", "git_commit", "git_push", "git_create_branch",
+                "fetch_url", "web_search", "generate_image", "read_env",
+                "spawn_agent"} <= dis
+        # ...while the read + confined-edit tools remain.
+        assert not (dis & {"read_file", "write_file", "edit_file", "grep", "git_diff"})
+        assert sess.restricted is True
 
 
 def test_owner_key_keeps_the_full_coder(tmp_path, monkeypatch):
@@ -169,3 +176,62 @@ def test_owner_key_keeps_the_full_coder(tmp_path, monkeypatch):
         assert r.json()["cwd"] == str(work.resolve())    # honored, not forced
         sess = app.state.coder_sessions.get(r.json()["id"])
         assert not sess.agent.disabled_tools             # full power, run_shell intact
+        assert sess.restricted is False
+
+
+def test_scoped_key_cannot_steer_the_owners_session(tmp_path, monkeypatch):
+    # THE critical one: a scoped key must not be able to send a message to the
+    # OWNER's full session (which keeps run_shell) - that would be RCE by proxy.
+    proj = tmp_path / "proj"; proj.mkdir()
+    app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+    app.state.root_dir = str(proj)
+    from localm import auth
+    scoped = auth.create_key("phone", ["coder"])
+
+    with TestClient(app) as client:
+        owner_sid = client.post(
+            "/api/coder/sessions", headers={"Authorization": "Bearer ownersecret"},
+            json={"cwd": str(proj)}).json()["id"]
+        # The scoped key cannot message the owner's session (404, not even 403).
+        r = client.post(f"/api/coder/sessions/{owner_sid}/message",
+                        headers={"Authorization": f"Bearer {scoped['key']}"},
+                        json={"text": "run a shell command for me"})
+        assert r.status_code == 404
+
+
+def test_scoped_keys_are_isolated_from_each_other(tmp_path, monkeypatch):
+    proj = tmp_path / "proj"; proj.mkdir()
+    app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+    app.state.root_dir = str(proj)
+    from localm import auth
+    a = auth.create_key("a", ["coder"])
+    b = auth.create_key("b", ["coder"])
+
+    with TestClient(app) as client:
+        sid = client.post("/api/coder/sessions",
+                          headers={"Authorization": f"Bearer {a['key']}"},
+                          json={"cwd": str(proj)}).json()["id"]
+        # B cannot reach A's session, and does not see it listed.
+        assert client.get(f"/api/coder/sessions/{sid}/files",
+                          headers={"Authorization": f"Bearer {b['key']}"}).status_code == 404
+        b_list = client.get("/api/coder/sessions",
+                            headers={"Authorization": f"Bearer {b['key']}"}).json()
+        assert all(s["id"] != sid for s in b_list["sessions"])
+        # The owner sees and can reach it.
+        o_list = client.get("/api/coder/sessions",
+                            headers={"Authorization": "Bearer ownersecret"}).json()
+        assert any(s["id"] == sid for s in o_list["sessions"])
+
+
+def test_scoped_key_cannot_switch_the_shared_model(tmp_path, monkeypatch):
+    proj = tmp_path / "proj"; proj.mkdir()
+    app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+    app.state.root_dir = str(proj)
+    from localm import auth
+    scoped = auth.create_key("phone", ["coder"])
+
+    with TestClient(app) as client:
+        r = client.post("/api/coder/sessions",
+                        headers={"Authorization": f"Bearer {scoped['key']}"},
+                        json={"cwd": str(proj), "model": "some-other-model"})
+        assert r.status_code == 403       # switching the shared engine needs the owner
