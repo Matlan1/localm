@@ -73,6 +73,7 @@ DEFAULT_CONFIG: dict = {
     # the cap exists only as a runaway guard, not a cost control.
     "max_tokens": 4096,
     "confirm_remove": True,   # ask before localm rm deletes files
+    "import_max_depth": 3,    # `localm add <dir>` recurses up to this many levels
     "port": 8642,             # default inference server port (auto-bumps if busy)
     "cors_origins": None,     # None = localhost only; list of origins; or "*"
     # Require a configured API key on protected endpoints. When true the server

@@ -133,8 +133,9 @@ class TestFolderOfLooseGGUFs:
         assert reg["hfmodel"]["source"] == "hf"
         assert reg["hfmodel"]["path"].rstrip("/\\").endswith("hfmodel")
 
-    def test_glob_is_non_recursive(self, tmp_path, isolated_home):
-        # A .gguf nested in a subfolder is NOT picked up by the (non-recursive) walk.
+    def test_import_is_recursive_by_default(self, tmp_path, isolated_home):
+        # B1: import recurses by default (was top-level only). A .gguf one
+        # subfolder deep IS now picked up.
         d = tmp_path / "drop"
         d.mkdir()
         _gguf(d, "top.gguf")
@@ -143,7 +144,39 @@ class TestFolderOfLooseGGUFs:
         _gguf(sub, "deep.gguf")
         assert add_local(str(d)) is True
         reg = load_registry()
-        assert set(reg) == {"top"}
+        assert set(reg) == {"top", "deep"}
+
+    def test_import_depth_cap(self, tmp_path, isolated_home):
+        # Default import_max_depth=3 counts the filename as level 1, so a file
+        # two subfolders down (depth 3) is found and one three down (depth 4) is not.
+        d = tmp_path / "drop"
+        d.mkdir()
+        lvl3 = d / "a" / "b"          # file here = depth 3
+        lvl3.mkdir(parents=True)
+        _gguf(lvl3, "found.gguf")
+        lvl4 = d / "a" / "b" / "c"    # file here = depth 4
+        lvl4.mkdir(parents=True)
+        _gguf(lvl4, "toodeep.gguf")
+        assert add_local(str(d)) is True
+        reg = load_registry()
+        assert "found" in reg
+        assert "toodeep" not in reg
+
+    def test_import_depth_respects_config(self, tmp_path, isolated_home):
+        import localm.model_manager as _mm
+        from localm.config import load_config, save_config
+        cfg = load_config()
+        cfg["import_max_depth"] = 1          # top-level only
+        save_config(cfg)
+        d = tmp_path / "drop"
+        d.mkdir()
+        _gguf(d, "top.gguf")
+        sub = d / "nested"
+        sub.mkdir()
+        _gguf(sub, "deep.gguf")
+        assert _mm.add_local(str(d)) is True
+        reg = load_registry()
+        assert set(reg) == {"top"}         # depth 1 only -> nested not picked up
 
 
 # ---------------------------------------------------------------------------
