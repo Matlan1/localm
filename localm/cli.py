@@ -1343,18 +1343,20 @@ def rag_list():
 @rag_group.command("add")
 @click.argument("collection")
 @click.argument("paths", nargs=-1, required=True)
-def rag_add(collection, paths):
+@click.option("--force", is_flag=True,
+              help="Re-index even unchanged files (rebuild stale entries).")
+def rag_add(collection, paths, force):
     """Index files/folders into COLLECTION (created if missing).
 
     Folders are indexed recursively (txt/md/pdf/docx/html/code). Unchanged
-    files are skipped; changed ones are re-indexed. CLI indexing is
-    lexical-only - index from the GUI to add embeddings when the active
-    model supports them.
+    files (same content) are skipped; changed ones are re-indexed. Use --force
+    to re-index regardless. CLI indexing is lexical-only - index from the GUI to
+    add embeddings when the active model supports them.
 
     \b
     Examples:
-      localm rag add manuals D:\\docs\\printer-manual.pdf
-      localm rag add project D:\\projects\\myapp
+      localm rag add manuals path/to/printer-manual.pdf
+      localm rag add project path/to/myapp
     """
     from rich.console import Console
     from .rag import Collection
@@ -1365,10 +1367,41 @@ def rag_add(collection, paths):
         console.print(f"[red]{e}[/red]")
         sys.exit(1)
     coll.create()
-    result = coll.add_paths(list(paths),
+    result = coll.add_paths(list(paths), force=force,
                             on_progress=lambda t: console.print(f"  [dim]{t}[/dim]"))
     console.print(f"[green]{result['added']} added, {result['updated']} updated, "
                   f"{result['skipped']} unchanged[/green] - "
+                  f"{result['chunks']} chunks in '{collection}'")
+    for f in result["failed"]:
+        console.print(f"  [yellow]failed:[/yellow] {f['path']}: {f['error']}")
+    if result["failed"]:
+        sys.exit(1)
+
+
+@rag_group.command("repair")
+@click.argument("collection")
+def rag_repair(collection):
+    """Re-index every file in COLLECTION, rebuilding stale entries.
+
+    Use this when an index may be out of date (e.g. files edited in place
+    without a size change). Re-reads and re-chunks every indexed document.
+    """
+    from rich.console import Console
+    from .rag import Collection
+    console = Console()
+    try:
+        coll = Collection(collection)
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        sys.exit(1)
+    paths = coll.documents()
+    if not paths:
+        console.print(f"[yellow]'{collection}' has no indexed documents.[/yellow]")
+        return
+    result = coll.add_paths(paths, force=True,
+                            on_progress=lambda t: console.print(f"  [dim]{t}[/dim]"))
+    console.print(f"[green]repaired: {result['updated']} re-indexed, "
+                  f"{result['added']} added[/green] - "
                   f"{result['chunks']} chunks in '{collection}'")
     for f in result["failed"]:
         console.print(f"  [yellow]failed:[/yellow] {f['path']}: {f['error']}")

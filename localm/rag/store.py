@@ -21,6 +21,7 @@ max-normalised BM25 and cosine similarity.
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import re
 import time
@@ -307,11 +308,14 @@ class Collection:
 
     def add_paths(self, paths: list, *, embed_fn: Optional[EmbedFn] = None,
                   on_progress: Optional[ProgressFn] = None,
-                  allowed_roots: Optional[list] = None) -> dict:
+                  allowed_roots: Optional[list] = None,
+                  force: bool = False) -> dict:
         """
-        Index files/folders. Unchanged files (same mtime+size) are skipped;
-        changed ones are re-indexed in place. Returns counters plus per-file
-        failures. embed_fn failures degrade to lexical-only, never abort.
+        Index files/folders. Unchanged files (same mtime+size+content hash) are
+        skipped; changed ones are re-indexed in place. Pass ``force=True`` to
+        re-index every file regardless (``localm rag add --force`` / repair).
+        Returns counters plus per-file failures. embed_fn failures degrade to
+        lexical-only, never abort.
 
         When *allowed_roots* is given (the HTTP API passes the user's home + the
         working dir), an out-of-bounds top-level path raises ``ValueError`` and
@@ -341,8 +345,20 @@ class Collection:
                 failed.append({"path": key, "error": str(e)})
                 continue
             known = self._meta["docs"].get(key)
-            if known and known.get("mtime") == stat.st_mtime \
-                    and known.get("size") == stat.st_size:
+            # Content hash, not just (mtime, size): a same-size edit whose mtime
+            # is unchanged (coarse-mtime FS, cp -p / rsync --times, git restore,
+            # restore-from-backup, mtime-preserving editors) would otherwise be
+            # silently skipped and the index left stale. Legacy entries lacking
+            # "hash" compare unequal and self-heal on the next add.
+            try:
+                digest = hashlib.sha256(f.read_bytes()).hexdigest()
+            except OSError as e:
+                failed.append({"path": key, "error": str(e)})
+                continue
+            if not force and known \
+                    and known.get("mtime") == stat.st_mtime \
+                    and known.get("size") == stat.st_size \
+                    and known.get("hash") == digest:
                 skipped += 1
                 continue
             try:
@@ -396,6 +412,7 @@ class Collection:
             self._vectors.extend(vectors)
             self._meta["docs"][key] = {
                 "mtime": stat.st_mtime, "size": stat.st_size,
+                "hash": digest,
                 "chunks": len(new_chunks),
             }
             say(f"indexed {f.name} ({len(new_chunks)} chunks)")
@@ -403,6 +420,10 @@ class Collection:
         self._save()
         return {"added": added, "updated": updated, "skipped": skipped,
                 "failed": failed, "chunks": len(self._chunks)}
+
+    def documents(self) -> list:
+        """The source paths currently indexed in this collection (for repair)."""
+        return list(self._meta.get("docs", {}).keys())
 
     def remove_doc(self, source: str) -> bool:
         if source not in self._meta.get("docs", {}):
