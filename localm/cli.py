@@ -1409,12 +1409,62 @@ def rag_repair(collection):
         sys.exit(1)
 
 
+def _cli_rag_embed_fn(url):
+    """Build a query embedder that calls a running localm server's
+    /v1/embeddings (for `rag query --embed`), so the CLI gets the same hybrid
+    retrieval the GUI does. Returns a lazy callable - it only connects when the
+    query is actually embedded, so a missing server degrades to lexical-only
+    inside Collection.query rather than failing the command. *url* overrides the
+    auto-discovered base URL."""
+    import os
+
+    base = url
+    if not base:
+        try:
+            from localm import instances
+            from localm.config import home_dir
+            entry = instances.attach_target(home_dir(), instances.resolve_root_dir())
+            base = instances.attach_url(entry) if entry else None
+        except Exception:
+            base = None
+    if not base:
+        from localm.config import load_config
+        base = f"http://127.0.0.1:{load_config().get('port', 8642)}"
+    base = base.rstrip("/")
+    embeddings_url = base + ("/embeddings" if base.endswith("/v1") else "/v1/embeddings")
+
+    def _embed(texts: list) -> list:
+        import requests
+        from localm import tls as _tls
+        headers = {}
+        key = os.environ.get("LOCALM_API_KEY")
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        r = requests.post(embeddings_url, json={"input": texts, "model": "localm"},
+                          headers=headers, timeout=120,
+                          verify=_tls.requests_verify(embeddings_url))
+        r.raise_for_status()
+        return [d["embedding"] for d in r.json()["data"]]
+    return _embed
+
+
 @rag_group.command("query")
 @click.argument("collection")
 @click.argument("text")
 @click.option("-k", default=4, show_default=True, help="Number of results.")
-def rag_query(collection, text, k):
-    """Show the top-K chunks COLLECTION returns for TEXT."""
+@click.option("--embed", is_flag=True,
+              help="Embed the query via a running localm server for hybrid "
+                   "(vector+lexical) retrieval, matching the GUI. Degrades to "
+                   "lexical-only if no server is reachable.")
+@click.option("--url", default=None,
+              help="Server base URL for --embed (default: auto-discover a running "
+                   "instance, else the configured port on localhost).")
+def rag_query(collection, text, k, embed, url):
+    """Show the top-K chunks COLLECTION returns for TEXT.
+
+    By default the CLI scores lexically (BM25). Pass --embed to also embed the
+    query against a running localm server, matching the GUI's hybrid ranking.
+    """
     from rich.console import Console
     from .rag import Collection
     console = Console()
@@ -1422,7 +1472,8 @@ def rag_query(collection, text, k):
     if not coll.exists():
         console.print(f"[red]No such collection:[/red] {collection}")
         sys.exit(1)
-    hits = coll.query(text, k=k)
+    embed_fn = _cli_rag_embed_fn(url) if embed else None
+    hits = coll.query(text, k=k, embed_fn=embed_fn)
     if not hits:
         console.print("[dim](no matches)[/dim]")
         return
