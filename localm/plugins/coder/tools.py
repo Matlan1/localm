@@ -841,6 +841,10 @@ def tool_spawn_agent(
         auto_approve=True,
         parent=_parent_agent,
         mode=inherited_mode,
+        # A child must be no MORE capable than its parent: inherit disabled tools
+        # so a restricted (no-shell) session cannot spawn a child that re-enables
+        # run_shell - that would be an RCE escape from a shareable scoped key.
+        disabled_tools=getattr(_parent_agent, "disabled_tools", frozenset()),
     )
     result_text = child.run_task(full_task)
     turns_used  = child.turns

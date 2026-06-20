@@ -75,6 +75,30 @@ def test_gate_is_selective_other_tools_still_dispatch(tmp_path):
     assert "disabled" not in res.output.lower()
 
 
+def test_spawned_child_inherits_disabled_tools(tmp_path, monkeypatch):
+    # A restricted (no-shell) parent must not be able to spawn a child agent that
+    # re-enables run_shell - that would be an RCE escape from a shareable key.
+    import localm.plugins.coder.agent as agent_mod
+    from localm.plugins.coder.tools import tool_spawn_agent
+
+    captured = {}
+
+    class _SpyChild:
+        turns = 0
+
+        def __init__(self, **kw):
+            captured.update(kw)
+
+        def run_task(self, task):
+            return "done"
+
+    monkeypatch.setattr(agent_mod, "Agent", _SpyChild)
+    parent = Agent(_StubBackend(), cwd=tmp_path,
+                   disabled_tools=frozenset({"run_shell"}))
+    tool_spawn_agent(tmp_path, "do a thing", _parent_agent=parent)
+    assert "run_shell" in captured.get("disabled_tools", frozenset())
+
+
 def test_without_disabling_the_gate_does_not_block_run_shell(tmp_path):
     # The default (owner) agent does not refuse run_shell at the gate. We assert it
     # is not the "disabled" refusal without actually running a command: a blank
