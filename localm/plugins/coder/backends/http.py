@@ -27,6 +27,28 @@ _MAX_RETRIES = 4
 _BACKOFF_BASE_S = 2.0
 
 
+class CoderAuthError(RuntimeError):
+    """The inference server rejected the request for auth reasons (401/403).
+
+    Carries an actionable hint (how to find/set the API key) instead of the bare
+    '401 Client Error' that requests.raise_for_status would raise.
+    """
+
+
+def _raise_for_status(resp) -> None:
+    """Turn a 401/403 into a CoderAuthError whose message tells the user how to
+    supply an API key; otherwise behave like resp.raise_for_status()."""
+    if resp.status_code in (401, 403):
+        raise CoderAuthError(
+            f"Authentication failed (HTTP {resp.status_code}) for {resp.url}. "
+            "This server requires an API key. Run `localm key show --reveal` to "
+            "view the current key (or `localm key generate` to mint one), then "
+            "pass it with `--api-key <key>` or set the LOCALM_API_KEY environment "
+            "variable."
+        )
+    resp.raise_for_status()
+
+
 def _retry_delay(response, attempt: int) -> float:
     """Honour Retry-After when present, else exponential backoff."""
     retry_after = response.headers.get("Retry-After", "")
@@ -285,7 +307,7 @@ class HTTPBackend(BaseLLMBackend):
             timeout=self._timeout,
             verify=self._verify,
         )
-        resp.raise_for_status()
+        _raise_for_status(resp)
         data = resp.json()
         if self.anthropic:
             return self._parse_anthropic_response(data)
@@ -317,7 +339,7 @@ class HTTPBackend(BaseLLMBackend):
             stream=True,
             verify=self._verify,
         ) as resp:
-            resp.raise_for_status()
+            _raise_for_status(resp)
             for line in resp.iter_lines():
                 if not line:
                     continue
@@ -381,7 +403,7 @@ class HTTPBackend(BaseLLMBackend):
             stream=True,
             verify=self._verify,
         ) as resp:
-            resp.raise_for_status()
+            _raise_for_status(resp)
             for line in resp.iter_lines():
                 if not line:
                     continue

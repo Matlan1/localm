@@ -28,6 +28,7 @@ from .backends.http import (
 )
 from .agent import Agent
 from .audit import SessionMode, parse_mode
+from .backends.http import CoderAuthError
 from .privacy import (
     clear_shell_history_traces,
     suppress_readline_history,
@@ -373,6 +374,11 @@ def main(
                 )
             _repl(agent)
 
+    except CoderAuthError as e:
+        # Single-shot / estimate path: surface the actionable key hint instead
+        # of a bare 401 traceback.
+        print_error(str(e))
+        sys.exit(2 if ci else 1)
     finally:
         # Flush patch output before closing
         if patch_mode and agent._patch_chunks:
@@ -567,6 +573,9 @@ def _repl(agent: Agent) -> None:
         except KeyboardInterrupt:
             # Checkpoint was already saved inside _loop; just swallow here
             pass
+        except CoderAuthError as e:
+            # Print the actionable key hint cleanly (no "Agent error:" noise).
+            print_error(str(e))
         except Exception as e:
             print_error(f"Agent error: {e}")
             import traceback
