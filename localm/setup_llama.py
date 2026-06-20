@@ -333,6 +333,65 @@ def _extract_archive(path: Path, dest: Path) -> None:
             tf.extractall(dest)                    # older python: best effort
 
 
+# Fallback notice written next to the bundled binaries when the upstream archive
+# ships no LICENSE file, so a release never redistributes the MIT-licensed
+# llama.cpp/ggml binaries without their license text (MIT requires it).
+_LLAMA_CPP_MIT_NOTICE = """MIT License
+
+Copyright (c) 2023-2024 The ggml authors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+"""
+
+_LICENSE_NAME_PREFIXES = ("license", "licence", "copying", "notice")
+
+
+def _copy_license_files(src_dir: Path, target: Path) -> int:
+    """Copy upstream license/notice files from *src_dir* into *target* so the MIT
+    text travels with the binaries. Falls back to a bundled llama.cpp/ggml MIT
+    notice when the archive ships none. Returns the number of files written."""
+    found = [f for f in sorted(src_dir.rglob("*"))
+             if _safe_is_file(f)
+             and any(f.name.lower().startswith(k) for k in _LICENSE_NAME_PREFIXES)]
+    if found:
+        written = 0
+        for i, f in enumerate(found):
+            dest = target / ("LICENSE.llama-cpp" if i == 0
+                             else f"LICENSE.llama-cpp.{i}")
+            try:
+                shutil.copy2(f, dest)
+                written += 1
+            except OSError:
+                pass
+        if written:
+            return written
+    (target / "LICENSE.llama-cpp").write_text(_LLAMA_CPP_MIT_NOTICE, encoding="utf-8")
+    return 1
+
+
+def _safe_is_file(f: Path) -> bool:
+    try:
+        return f.is_file()
+    except OSError:
+        return False
+
+
 def _copy_binaries(src_dir: Path, target: Path) -> int:
     """Copy the llama/ggml/runtime libraries from *src_dir* (recursively) into
     *target*. Returns the number of files copied."""
@@ -341,6 +400,10 @@ def _copy_binaries(src_dir: Path, target: Path) -> int:
         if f.is_file() and _is_wanted(f):
             shutil.copy2(f, target / f.name)
             n += 1
+    # MIT requires the license to accompany the binaries; capture it (or a
+    # bundled fallback) alongside them whenever we actually placed binaries.
+    if n:
+        _copy_license_files(src_dir, target)
     return n
 
 
