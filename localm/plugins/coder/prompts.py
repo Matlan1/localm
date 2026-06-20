@@ -221,6 +221,7 @@ def _rules_section(family: str) -> str:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 RULES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+0. GROUNDING: before answering a question about the project, read or search the relevant files first - never answer from assumption or memory.
 1. Always read_file before edit_file or patch_file.
 2. Use relative paths.
 3. Run tests after changes (pytest / cargo test / npm test).
@@ -231,6 +232,7 @@ RULES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 RULES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+0. GROUNDING: before answering a question about this project (how it works, where something is, whether something exists), read or search the relevant files first with read_file / grep / search_files - never answer from assumption or memory. Base every claim about the code on a tool result.
 1. Always read_file before edit_file or patch_file - you need the exact text.
 2. Use relative paths unless an absolute path is necessary.
 3. Prefer edit_file for single small changes; patch_file for multi-hunk edits; write_file for new files or complete rewrites.
