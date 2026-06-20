@@ -161,6 +161,65 @@ def _preload(path: Path) -> None:
         pass  # already loaded or not needed on this system
 
 
+# ggml shared libraries that are NOT compute backends (do not register them).
+_GGML_NON_BACKENDS = {"ggml-base", "ggml"}
+
+
+def _register_ggml_backends(binary_dir: Path, lib: ctypes.CDLL) -> bool:
+    """Register the ggml compute backends so a model can actually load.
+
+    Newer llama.cpp ships each compute backend (CPU, Vulkan, CUDA, HIP, ...) as a
+    separate ``ggml-*`` plugin library that must be registered at runtime.
+    Without it, ``llama_load_model_from_file`` aborts with "no backends are
+    loaded" - which is every current upstream cpu/vulkan/cuda prebuilt (i.e. all
+    non-AMD users). Older self-contained builds (e.g. the bundled lemonade gfx103X
+    build) statically register their backend and do NOT export the loader symbol,
+    so this is best-effort and fully guarded: a build that lacks it is untouched.
+
+    We register each ``ggml-*`` plugin EXPLICITLY by absolute path via
+    ``ggml_backend_load`` (deterministic) rather than rely on directory discovery,
+    which searches next to the host executable (python) and the binary-dir layout
+    confuses it. Returns True if at least one backend registered."""
+    # Find ggml_backend_load on whichever handle exports it (ggml-base, else lib).
+    candidates: List[ctypes.CDLL] = [lib]
+    try:
+        for p in sorted(binary_dir.glob(_ggml_glob())):
+            try:
+                candidates.append(ctypes.CDLL(str(p)))
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+    load_fn = None
+    for h in candidates:
+        fn = getattr(h, "ggml_backend_load", None)
+        if fn is not None:
+            fn.restype = ctypes.c_void_p          # ggml_backend_reg_t (or NULL)
+            fn.argtypes = [ctypes.c_char_p]
+            load_fn = fn
+            break
+    if load_fn is None:
+        return False   # old build: backends are statically registered, nothing to do
+
+    loaded_any = False
+    try:
+        for p in sorted(binary_dir.glob(_ggml_glob())):
+            stem = p.stem.lower()
+            if stem.startswith("lib"):
+                stem = stem[3:]
+            if stem in _GGML_NON_BACKENDS:
+                continue
+            try:
+                if load_fn(str(p).encode("utf-8")):
+                    loaded_any = True
+            except Exception:
+                continue
+    except OSError:
+        pass
+    return loaded_any
+
+
 def load_lib() -> ctypes.CDLL:
     """Load (and cache) the native llama shared library.
 
@@ -219,6 +278,16 @@ def load_lib() -> ctypes.CDLL:
             "  localm setup-llama --backend cuda --force      (NVIDIA)\n"
             "  localm setup-llama --backend amd-rocm --force  (AMD RX 6000)"
         ) from e
+
+    # Register the ggml compute backends. Newer llama.cpp loads them as separate
+    # plugin DLLs that must be registered before any model loads ("no backends are
+    # loaded" otherwise - the failure mode on every current upstream cpu/vulkan/
+    # cuda build). Older self-contained builds auto-register and lack the entry
+    # point, so this is best-effort and guarded.
+    try:
+        _register_ggml_backends(binary_dir, _loaded_lib)
+    except Exception:
+        pass
 
     # Validate the runtime's struct layout BEFORE any by-value struct crosses the
     # FFI boundary. A layout that differs from this build's ctypes structs would
