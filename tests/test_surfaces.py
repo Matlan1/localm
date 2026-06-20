@@ -60,6 +60,33 @@ class TestMountGuiSurfaceUnit:
         app.state.gui_mounted = True   # a 'full' instance already has the GUI
         assert mount_gui_surface(app) is False
 
+    def test_attach_failure_rolls_back_the_mounted_flag(self, tmp_path, monkeypatch):
+        """If attach_gui raises, the claimed gui_mounted flag is rolled back so a
+        later real attempt can still mount (no permanently-wedged surface)."""
+        monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
+        app = _api_app(tmp_path)
+        import localm.plugins.gui.web as web
+
+        def _boom(*a, **k):
+            raise RuntimeError("attach failed")
+
+        monkeypatch.setattr(web, "attach_gui", _boom)
+        with pytest.raises(RuntimeError):
+            mount_gui_surface(app)
+        assert getattr(app.state, "gui_mounted", False) is False
+
+    def test_missing_port_raises_rather_than_dialling_none(self, tmp_path, monkeypatch):
+        """No bind port on app.state -> a loud 500, not a broken
+        'http://127.0.0.1:None/v1' self-url. The flag must not be claimed."""
+        from fastapi import HTTPException
+        monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
+        app = _api_app(tmp_path)
+        app.state.instance_port = None
+        with pytest.raises(HTTPException) as ei:
+            mount_gui_surface(app)
+        assert ei.value.status_code == 500
+        assert getattr(app.state, "gui_mounted", False) is False
+
 
 # ------------------------------------------------------------------ #
 #  POST /v1/surfaces/gui (integration, open mode)                   #

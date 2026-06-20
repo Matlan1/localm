@@ -136,6 +136,12 @@ def mount_gui_surface(app) -> bool:
 
     scheme = getattr(app.state, "instance_scheme", "http")
     port = getattr(app.state, "instance_port", None)
+    if not port:
+        # advertise() sets instance_port before uvicorn accepts connections, so a
+        # real request can never reach here without it; guard anyway so a manual
+        # app build fails loudly instead of dialling "http://127.0.0.1:None/v1".
+        raise HTTPException(500, "Instance not fully started (no bind port); "
+                            "cannot mount the GUI surface yet.")
     self_url = f"{scheme}://127.0.0.1:{port}/v1"
 
     def active_model() -> str:
@@ -162,9 +168,19 @@ def mount_gui_surface(app) -> bool:
             _engine = new_engine
 
     from localm.plugins.gui.web import attach_gui
-    manager = attach_gui(
-        app, self_url=self_url, switch_model=switch_model, active_model=active_model)
-    # attach_gui sets app.state.gui_mounted; also reflect the surface change in
+    # Claim the mount BEFORE attaching so a re-entrant (or, after some future
+    # refactor, a concurrent) call cannot double-register the GUI routes; roll the
+    # flag back if the attach itself fails. Today mount_gui_surface + attach_gui
+    # run fully synchronously inside the request handler, so the event loop never
+    # interleaves two of them - this just makes the invariant explicit and robust.
+    app.state.gui_mounted = True
+    try:
+        manager = attach_gui(
+            app, self_url=self_url, switch_model=switch_model, active_model=active_model)
+    except Exception:
+        app.state.gui_mounted = False
+        raise
+    # attach_gui re-affirms app.state.gui_mounted; reflect the surface change in
     # discovery so /whoami and the registry report this is now a full instance.
     app.state.coder_sessions = manager
     app.state.instance_mode = "full"
