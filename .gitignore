@@ -83,6 +83,20 @@ issues/
 # issues/testinstance_home/ - those are bug reports, not test-campaign data.)
 qa/
 
+# Local-only working files - the agent's / maintainer's notes, worklogs, design
+# docs, handoffs, status reports, scratch. NONE of this belongs on GitHub.
+# THE RULE: every local working file lives in an ignored dir below (issues/, qa/,
+# dev-notes/, scratch/) - put new notes / worklogs / plans / handoffs THERE, never
+# at the repo root or in docs/. The filename globs are a backstop for stray files.
+dev-notes/
+scratch/
+*.worklog
+*.workorder
+*-worklog.md
+*_worklog.md
+*-workorder.md
+*-handoff.md
+
 # Native llama.cpp binaries - provisioned locally by `localm setup-llama`,
 # never committed (large, GPU/platform-specific, license-encumbered).
 runtime/localm_llama_runtime/lib/*
