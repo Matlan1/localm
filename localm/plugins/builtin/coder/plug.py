@@ -342,6 +342,7 @@ async def session_stop(session_id: str, request: Request):
 
 @_router.delete("/api/coder/sessions/{session_id}")
 async def session_delete(session_id: str, request: Request):
+    _get_session(request, session_id)   # principal check: 404 unless it is the caller's
     if _sessions(request).remove(session_id) is None:
         raise HTTPException(404, f"No such session: {session_id}")
     return {"status": "closed"}
@@ -356,7 +357,13 @@ async def session_delete(session_id: str, request: Request):
 # so the list is simply empty.
 
 @_router.get("/api/coder/history")
-async def coder_history():
+async def coder_history(request: Request):
+    # Past session logs are the OWNER's audit trail (other coder sessions' commands
+    # and file contents). They are not tagged per-key, so a scoped/shared key sees
+    # none of them - only the owner browses history.
+    is_owner, _ = _principal_from_request(request)
+    if not is_owner:
+        return {"enabled": False, "logs": []}
     from localm import audit as _audit
     from localm.audit import SessionMode, effective_mode
     sessions_dir = _audit._SESSIONS_DIR
@@ -374,7 +381,12 @@ async def coder_history():
 
 
 @_router.get("/api/coder/history/{name}")
-async def coder_history_entries(name: str):
+async def coder_history_entries(name: str, request: Request):
+    # Reading a past log would expose the owner's coder transcript (commands, file
+    # contents); a scoped/shared key may not (the logs are not per-key tagged).
+    is_owner, _ = _principal_from_request(request)
+    if not is_owner:
+        raise HTTPException(404, "No such log")
     from localm import audit as _audit
     if not name.endswith(".jsonl"):
         raise HTTPException(400, "Invalid log name")

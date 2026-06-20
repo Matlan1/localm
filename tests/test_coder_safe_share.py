@@ -223,6 +223,42 @@ def test_scoped_keys_are_isolated_from_each_other(tmp_path, monkeypatch):
         assert any(s["id"] == sid for s in o_list["sessions"])
 
 
+def test_scoped_key_cannot_delete_the_owners_session(tmp_path, monkeypatch):
+    proj = tmp_path / "proj"; proj.mkdir()
+    app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+    app.state.root_dir = str(proj)
+    from localm import auth
+    scoped = auth.create_key("phone", ["coder"])
+
+    with TestClient(app) as client:
+        owner_sid = client.post(
+            "/api/coder/sessions", headers={"Authorization": "Bearer ownersecret"},
+            json={"cwd": str(proj)}).json()["id"]
+        # DELETE must enforce the principal too (not just GET/POST routes).
+        r = client.delete(f"/api/coder/sessions/{owner_sid}",
+                          headers={"Authorization": f"Bearer {scoped['key']}"})
+        assert r.status_code == 404
+        # The owner's session survived.
+        assert app.state.coder_sessions.get(owner_sid) is not None
+
+
+def test_scoped_key_cannot_browse_or_read_history(tmp_path, monkeypatch):
+    proj = tmp_path / "proj"; proj.mkdir()
+    app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+    app.state.root_dir = str(proj)
+    from localm import auth
+    scoped = auth.create_key("phone", ["coder"])
+
+    with TestClient(app) as client:
+        h = {"Authorization": f"Bearer {scoped['key']}"}
+        # A scoped key sees no past-session history and cannot read any log.
+        assert client.get("/api/coder/history", headers=h).json()["logs"] == []
+        assert client.get("/api/coder/history/anything.jsonl", headers=h).status_code == 404
+        # The owner is not denied (200, real history - empty here, but not forced 404).
+        o = {"Authorization": "Bearer ownersecret"}
+        assert client.get("/api/coder/history", headers=o).status_code == 200
+
+
 def test_scoped_key_cannot_switch_the_shared_model(tmp_path, monkeypatch):
     proj = tmp_path / "proj"; proj.mkdir()
     app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
