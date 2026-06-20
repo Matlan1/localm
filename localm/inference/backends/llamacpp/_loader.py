@@ -220,4 +220,16 @@ def load_lib() -> ctypes.CDLL:
             "  localm setup-llama --backend amd-rocm --force  (AMD RX 6000)"
         ) from e
 
+    # Validate the runtime's struct layout BEFORE any by-value struct crosses the
+    # FFI boundary. A layout that differs from this build's ctypes structs would
+    # otherwise corrupt memory silently; verify_abi refuses with a clear,
+    # reportable error instead (and fails OPEN if its own probe cannot run).
+    # A failed check resets the cache so a re-provision can retry cleanly.
+    from ._abi import verify_abi
+    try:
+        verify_abi(_loaded_lib, str(lib_path))
+    except Exception:
+        _loaded_lib = None
+        raise
+
     return _loaded_lib

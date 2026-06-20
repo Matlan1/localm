@@ -42,7 +42,22 @@ ggml-base.dll → ggml-cpu.dll → ggml-hip.dll → ggml.dll → llama.dll
 
 Struct layouts were derived by probing `llama_model_default_params()` and `llama_context_default_params()` against known default values, then cross-referenced with `llama.h`.
 
-### `LlamaModelParams` (72 bytes)
+upstream llama.cpp appends fields to the params structs several times a quarter
+with no ABI or soname bump, so `_structs.py` stays safe two ways:
+
+- it OVER-allocates the two by-value params structs (a named trailing field for
+  what we know, plus a reserved pad), and the code round-trips
+  `*_default_params()` (overwriting only the fields it names). A newer build
+  therefore never reads past our buffer in `llama_load_model_from_file` /
+  `llama_init_from_model`, and any field we do not name keeps its native default.
+  A trailing field ADDITION is harmless.
+- a mid-struct REORDER (the memory-corrupting kind of drift) is caught at load
+  time by `_abi.verify_abi` (below), which refuses rather than corrupting memory.
+
+The `sizeof` asserts in `_structs.py` are a self-consistency guard on our own
+definitions; they do NOT validate against the loaded DLL.
+
+### `LlamaModelParams` (72 bytes native, over-allocated to 104)
 
 | Offset | Type | Field | Default |
 |--------|------|-------|---------|
@@ -58,7 +73,7 @@ Struct layouts were derived by probing `llama_model_default_params()` and `llama
 | 56 | ptr | `kv_overrides` | NULL |
 | 64-71 | 8×bool | flags: `vocab_only`, `use_mmap`, `use_direct_io`, `use_mlock`, `check_tensors`, `use_extra_bufts`, `no_host`, `no_alloc` | |
 
-### `LlamaContextParams` (152 bytes)
+### `LlamaContextParams` (152 bytes native on b1288; 160 on b9682+, over-allocated to 224)
 
 Key fields:
 
@@ -73,7 +88,10 @@ Key fields:
 | 129 | bool | `offload_kqv` | True |
 | 131 | bool | `op_offload` | True |
 
-Size asserts in `_structs.py` will catch layout drift at import time.
+b9682+ appended a trailing `ctx_other` (`struct llama_context *`), taking the
+native struct to 160 bytes; localm names it and over-allocates to 224 for
+headroom. Layout drift is caught at load time by `_abi.verify_abi`, not by the
+size asserts.
 
 ### `LlamaBatch` (56 bytes)
 
@@ -87,6 +105,65 @@ typedef struct {
     const char * content;  // [8]
 } llama_chat_message;
 ```
+
+## Runtime ABI self-check (`_abi.py`)
+
+`verify_abi(lib)` runs once inside `load_lib()`, right after the native library
+loads and before any by-value struct crosses the FFI boundary. It calls
+`llama_model_default_params()` / `llama_context_default_params()` (no model, no
+GPU needed) and checks a structural fingerprint of the returned defaults:
+
+- the long-stable `*_UNSPECIFIED == -1` enums (`rope_scaling_type`,
+  `pooling_type`, `attention_type`) - three consecutive `-1` int32s that a
+  shifted layout essentially never reproduces;
+- a valid `split_mode` (0/1/2/3 = NONE/LAYER/ROW/TENSOR) and ordered window sizes
+  (`1 <= n_ubatch <= n_batch`, `n_ctx >= 1`, `n_seq_max >= 1`). Absolute size
+  magnitudes are only a non-fatal diagnostic, so a future build that defaults
+  higher is never refused.
+
+On a proven mismatch it raises `AbiMismatch` (a reportable `LocalmError`) naming
+the offending field, instead of letting a wrong layout corrupt memory. It is
+deliberately false-positive-proof: only structural invariants and the `-1`
+keystone gate the refusal, so a legitimate build whose *default values* drift
+still loads (the drift is logged and shown by `localm doctor`). Two safety valves:
+
+- it fails OPEN - if its own probe cannot run (a symbol missing on a very old
+  build, a call raising), it logs and allows the load;
+- `LOCALM_SKIP_ABI_CHECK=1` bypasses it entirely (logged), so a false alarm on an
+  untested build can never permanently block a user.
+
+The fingerprint was validated byte-for-byte against the cpu, vulkan and amd-rocm
+prebuilts (commits b1288..b9740); offsets for these POD fields are
+commit-determined, not OS-determined, so a given build matches on every OS.
+`localm doctor` surfaces the verdict ("native ABI: ...") by running the check in a
+subprocess so a broken DLL cannot crash the diagnostic.
+
+## Checking against upstream (`scripts/check_llama_abi.py`)
+
+A header-diff VERIFIER (not a generator). It parses `llama_model_params` /
+`llama_context_params` / `llama_batch` out of a real `llama.h`, computes each
+field's natural-alignment offset, and diffs them against `_structs.py`:
+
+```
+python scripts/check_llama_abi.py                 # the pinned ref (LLAMA_ABI_REF)
+python scripts/check_llama_abi.py --ref latest    # newest upstream release
+python scripts/check_llama_abi.py --header path/to/llama.h
+```
+
+A mid-struct reorder/insert exits non-zero; a purely trailing addition is a note
+(it is absorbed by the reserved pad). A weekly CI job (`abi-check`) runs
+`--ref latest` and also provisions the real cpu prebuilt to run `verify_abi`
+against the actual binary.
+
+### Bumping the bundled build
+
+When you change the prebuilt localm fetches (`DEFAULT_URL` or the pinned tag):
+
+1. run `python scripts/check_llama_abi.py --ref <the build's tag>` and reconcile
+   any reported field drift in `_structs.py`;
+2. if a field was reordered or inserted mid-struct, update `_structs.py` to match
+   and re-probe a real build; update the `_abi` anchors only if a keystone moved;
+3. bump `LLAMA_ABI_REF` in `scripts/check_llama_abi.py`.
 
 ## API Bindings (`_api.py`)
 
