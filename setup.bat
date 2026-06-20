@@ -154,7 +154,7 @@ if /i "%VENDOR%"=="amd" (
     echo.
     echo  Installing PyTorch ^(NVIDIA CUDA^) + transformers for HuggingFace models ...
     uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu124 || echo  [!] CUDA torch failed - GGUF chat still works without it.
-    uv pip install -p .venv "transformers[kernels]~=5.12" "accelerate>=1.0" "pillow>=10.0" "soundfile>=0.12" || echo  [!] transformers stack failed - GGUF chat still works.
+    uv pip install -p .venv "transformers[kernels]~=5.12" "tokenizers==0.22.2" "accelerate>=1.0" "pillow>=10.0" "soundfile>=0.12" || echo  [!] transformers stack failed - GGUF chat still works.
 ) else (
     echo.
     echo  Skipping the PyTorch/transformers stack ^(not needed for GGUF chat^).

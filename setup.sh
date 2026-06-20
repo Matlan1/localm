@@ -149,13 +149,13 @@ case "$GPU" in
     say "  Installing PyTorch (ROCm) + transformers ..."
     uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/rocm6.2 \
       || say "  [!] ROCm torch install failed - install a matching torch+rocm manually (see docs/linux-setup.md)."
-    uv pip install -p .venv "transformers[kernels]~=5.12" "accelerate>=1.0" "pillow>=10.0" || true
+    uv pip install -p .venv "transformers[kernels]~=5.12" "tokenizers==0.22.2" "accelerate>=1.0" "pillow>=10.0" || true
     ;;
   cuda)
     say "  Installing PyTorch (CUDA) + transformers ..."
     uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu124 \
       || say "  [!] CUDA torch install failed - install a matching torch+cuda manually (see docs/linux-setup.md)."
-    uv pip install -p .venv "transformers[kernels]~=5.12" "accelerate>=1.0" "pillow>=10.0" || true
+    uv pip install -p .venv "transformers[kernels]~=5.12" "tokenizers==0.22.2" "accelerate>=1.0" "pillow>=10.0" || true
     ;;
   intel)
     say "  Intel Arc detected - skipping the PyTorch/transformers stack (no standard"
