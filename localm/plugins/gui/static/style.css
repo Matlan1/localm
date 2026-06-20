@@ -898,6 +898,8 @@ pre:hover .copy-btn { opacity: 1; }
 .dir-picker-row { display: flex; gap: 6px; align-items: stretch; }
 .dir-picker-row input { flex: 1 1 auto; }
 .dir-picker-btn { flex: 0 0 auto; white-space: nowrap; }
+/* Plugin catalog: "requires X (missing)" warning under a plugin's description. */
+.plugin-missing-req { color: var(--danger, #d9534f); }
 
 /* coder session bar */
 
