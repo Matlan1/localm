@@ -206,7 +206,18 @@ if "%DATAPICK%"=="2" (
     rem an empty/no marker + no home\ dir = shared default; remove a stale
     rem portable dir only if it is empty
     if exist "home" rd "home" 2>nul
-    echo  Data directory: %USERPROFILE%\.localm  ^(shared^)
+    if exist "home" (
+        rem A non-empty ./home survived: localm prefers a portable ./home, so
+        rem shared mode would be silently ignored. Warn loudly and record the
+        rem dir localm will actually use, rather than printing a false "shared".
+        echo  [!] ./home is not empty - shared mode will NOT take effect while it
+        echo      exists ^(localm keeps using the portable ./home^). It may hold
+        echo      your models/config, so it was left in place. Remove it manually
+        echo      and re-run setup to switch to the shared dir.
+        set "DATADIR=%CD%\home"
+    ) else (
+        echo  Data directory: %USERPROFILE%\.localm  ^(shared^)
+    )
 )
 if "%DATAPICK%"=="3" (
     set /p CUSTOMHOME="  Enter data directory path: "

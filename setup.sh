@@ -222,8 +222,19 @@ if [ "$dpick" = 1 ]; then
 else
   rm -f localm-home.cfg
   [ -d home ] && rmdir home 2>/dev/null || true
-  DATA_DIR="$HOME/.localm"; DATA_CREATED=0       # localm creates it on first run, not us
-  say "  Data directory: $DATA_DIR (shared)"
+  if [ -d home ]; then
+    # A non-empty ./home survived: localm prefers a portable ./home, so shared
+    # mode would be silently ignored. Warn loudly and record the dir localm will
+    # actually use, rather than printing a false "shared".
+    say "  [!] ./home is not empty - shared mode will NOT take effect while it"
+    say "      exists (localm keeps using the portable ./home). It may hold your"
+    say "      models/config, so it was left in place. Remove it manually and"
+    say "      re-run setup to switch to the shared dir."
+    DATA_DIR="$(pwd)/home"; DATA_CREATED=1
+  else
+    DATA_DIR="$HOME/.localm"; DATA_CREATED=0       # localm creates it on first run, not us
+    say "  Data directory: $DATA_DIR (shared)"
+  fi
 fi
 
 # ---- application menu entry --------------------------------------------------
