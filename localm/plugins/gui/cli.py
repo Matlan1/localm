@@ -127,7 +127,7 @@ def _print_qr(url: str) -> None:
 @click.option("-p", "--port", default=None, type=click.IntRange(1, 65535),
               help="Port [default: config 'port' (8642); auto-bumps when busy].")
 @click.option("-c", "--ctx", default=None, type=int, help="Context window size.")
-@click.option("-g", "--gpu-layers", default=None, type=int)
+@click.option("-g", "--gpu-layers", default=None, type=click.IntRange(0, 1000))
 @click.option("--no-browser", is_flag=True, help="Don't open the browser automatically.")
 @click.option("--no-model", "no_model", is_flag=True,
               help="Open with no model loaded even when the registry has usable "

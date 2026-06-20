@@ -95,7 +95,7 @@ CORE_FIELDS: list = [
                  group="Engine", applies=Applies.NEXT_LOAD),
     SettingField("n_gpu_layers", Widget.NUMBER, "GPU layers",
                  "99 = offload everything to GPU.",
-                 group="Engine", applies=Applies.NEXT_LOAD, min=0),
+                 group="Engine", applies=Applies.NEXT_LOAD, min=0, max=1000),
     # ---- Sampling ----
     SettingField("temperature", Widget.NUMBER, "Temperature",
                  group="Sampling", min=0, max=2, step=0.05),
