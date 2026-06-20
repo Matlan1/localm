@@ -1,0 +1,122 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// U4: the model download bar showed only "<pct>%  ·  <downloaded> / <total>".
+// It now also shows a smoothed (rolling-window) speed and an ETA, computed by
+// the pure downloadRate() helper and formatted with fmtDuration().
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { loadApp, loadAppWithPages, runScript } from "./harness.mjs";
+
+function call(win, expr) {
+  runScript(win, `globalThis.__out = ${expr};`);
+  return win.__out;
+}
+
+// Default fetch shape so app.js's lazy refreshes don't throw on the bare window.
+function stubFetch() {
+  return async () => ({
+    ok: true, status: 200, text: async () => "",
+    json: async () => ({ models: [], active: "", conversations: [], plugins: [] }),
+  });
+}
+
+// Cross-realm objects (built inside jsdom) fail deepStrictEqual on prototype
+// identity, so assert the two fields directly.
+function assertNull(r) {
+  assert.equal(r.bytesPerSec, null);
+  assert.equal(r.etaSec, null);
+}
+
+// --------------------------------------------------------------------------- //
+//  downloadRate(samples, total) - smoothed bytes/sec + ETA                     //
+// --------------------------------------------------------------------------- //
+
+test("downloadRate averages over the sample window", () => {
+  const { window: win } = loadApp({ fetchImpl: stubFetch() });
+  // 10s window, 10 MB transferred -> 1 MB/s, regardless of per-chunk jitter.
+  const r = call(win,
+    `downloadRate([{t:0,downloaded:0},{t:3000,downloaded:5000000},` +
+    `{t:10000,downloaded:10000000}], 20000000)`);
+  assert.equal(r.bytesPerSec, 1000000, "averaged from first..last sample");
+  // ETA over the remaining 10 MB at 1 MB/s = 10s.
+  assert.equal(r.etaSec, 10);
+});
+
+test("downloadRate needs two samples and forward progress", () => {
+  const { window: win } = loadApp({ fetchImpl: stubFetch() });
+  assertNull(call(win, "downloadRate([], 100)"));
+  assertNull(call(win, "downloadRate([{t:0,downloaded:5}], 100)"));
+  // zero elapsed time -> cannot divide
+  assertNull(call(win, "downloadRate([{t:5,downloaded:0},{t:5,downloaded:9}], 100)"));
+  // no forward progress -> null
+  assertNull(call(win, "downloadRate([{t:0,downloaded:9},{t:1000,downloaded:9}], 100)"));
+});
+
+test("downloadRate: speed without a known total still works; eta null", () => {
+  const { window: win } = loadApp({ fetchImpl: stubFetch() });
+  const r = call(win,
+    "downloadRate([{t:0,downloaded:0},{t:2000,downloaded:2000}], null)");
+  assert.equal(r.bytesPerSec, 1000);
+  assert.equal(r.etaSec, null);
+});
+
+test("downloadRate: at the finish line eta is 0", () => {
+  const { window: win } = loadApp({ fetchImpl: stubFetch() });
+  const r = call(win,
+    "downloadRate([{t:0,downloaded:0},{t:1000,downloaded:1000}], 1000)");
+  assert.equal(r.etaSec, 0);
+});
+
+// --------------------------------------------------------------------------- //
+//  fmtDuration(sec)                                                            //
+// --------------------------------------------------------------------------- //
+
+test("fmtDuration formats seconds / minutes / hours", () => {
+  const { window: win } = loadApp({ fetchImpl: stubFetch() });
+  assert.equal(call(win, "fmtDuration(0)"), "0s");
+  assert.equal(call(win, "fmtDuration(45)"), "45s");
+  assert.equal(call(win, "fmtDuration(90)"), "1m 30s");
+  assert.equal(call(win, "fmtDuration(3661)"), "1h 01m");
+  assert.equal(call(win, "fmtDuration(null)"), "");
+  assert.equal(call(win, "fmtDuration(-5)"), "");
+});
+
+// --------------------------------------------------------------------------- //
+//  Wiring: the pull handler renders speed + ETA in the bar text               //
+// --------------------------------------------------------------------------- //
+
+function makeFetch() {
+  return async (url, opts = {}) => {
+    if (url === "/api/models/pull") {
+      return { ok: true, status: 200, json: async () => ({ job_id: "j1" }), text: async () => "" };
+    }
+    return {
+      ok: true, status: 200, text: async () => "",
+      json: async () => ({ models: [], active: "", conversations: [], plugins: [] }),
+    };
+  };
+}
+
+test("pull progress text includes the smoothed speed and ETA", async () => {
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch() });
+  // Deterministic rate so the test does not depend on wall-clock timing, and a
+  // stubbed streamJob that fires one progress event and captures the bar text
+  // before the handler overwrites it with "done".
+  runScript(win, `
+    downloadRate = () => ({ bytesPerSec: 5 * 1024 * 1024, etaSec: 90 });
+    streamJob = async (jobId, onLine, onProgress) => {
+      onProgress({ pct: 50, total: 1000000, downloaded: 500000 });
+      globalThis.__pct = document.getElementById("pull-pct").textContent;
+      return { status: "done" };
+    };
+  `);
+
+  win.document.getElementById("pull-spec").value = "owner/repo:m.gguf";
+  win.document.getElementById("pull-start").click();
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+
+  const text = win.__pct;
+  assert.match(text, /50%/, "still shows percent");
+  assert.match(text, /5\.0 MB\/s/, "shows the smoothed speed");
+  assert.match(text, /ETA 1m 30s/, "shows the ETA");
+});
