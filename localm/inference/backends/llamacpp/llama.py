@@ -496,6 +496,7 @@ class LlamaCpp:
         top_p: float,
         repeat_penalty: float,
         grammar: Optional[str] = None,
+        seed: Optional[int] = None,
     ) -> Iterator[int]:
         """
         Yield generated token ids one at a time.
@@ -544,7 +545,10 @@ class LlamaCpp:
             top_k=top_k,
             top_p=top_p,
             repeat_penalty=repeat_penalty,
-            seed=self._seed,
+            # A per-request seed (when provided) overrides the instance default
+            # so temperature>0 sampling is reproducible; masked to uint32 to match
+            # llama_sampler_init_dist's c_uint32 binding.
+            seed=self._seed if seed is None else (seed & 0xFFFFFFFF),
             grammar=grammar,
         )
 
@@ -750,6 +754,7 @@ class LlamaCpp:
         repeat_penalty: float = 1.1,
         stream: bool = False,
         grammar: Optional[str] = None,
+        seed: Optional[int] = None,
         **_ignored,
     ):
         """
@@ -781,6 +786,7 @@ class LlamaCpp:
             top_p=top_p,
             repeat_penalty=repeat_penalty,
             grammar=grammar,
+            seed=seed,
         )
 
         if stream:
