@@ -764,7 +764,14 @@ async function renderCatalogPlugins() {
       : p.installed ? "installed (off)"
       : "available";
     tr.appendChild(el("td", "mono", status));
-    tr.appendChild(el("td", "", p.description));
+    const descTd = el("td", "", p.description);
+    // Warn when a plugin needs other plugins that are not installed (B15).
+    const missing = Array.isArray(p.missing_requires) ? p.missing_requires : [];
+    if (missing.length) {
+      descTd.appendChild(el("div", "sub plugin-missing-req",
+        `requires ${(p.requires || []).join(", ")} (missing: ${missing.join(", ")})`));
+    }
+    tr.appendChild(descTd);
     const actions = el("td");
     actions.style.textAlign = "right";
     if (!p.protected) {
@@ -776,6 +783,14 @@ async function renderCatalogPlugins() {
           : _catalogBtn("enable", p.name, "btn-primary", "Enable"));
         actions.appendChild(_catalogBtn("uninstall", p.name, "danger", "Uninstall"));
       }
+    }
+    // One-click install of any missing requirements (B15).
+    if (missing.length) {
+      const req = el("button", "btn-primary", "Install requirements");
+      req.style.marginLeft = "6px";
+      req.dataset.reqfor = p.name;
+      req.onclick = () => installRequirements(p.name, missing);
+      actions.appendChild(req);
     }
     tr.appendChild(actions);
     tbody.appendChild(tr);
@@ -794,6 +809,28 @@ function _catalogBtn(action, name, cls, label) {
   b.style.marginLeft = "6px";
   b.onclick = () => pluginCatalogAction(action, name);
   return b;
+}
+
+// Install every plugin a given plugin requires but that is not yet installed
+// (B15). Best-effort and sequential; each result is toasted, then the catalog
+// re-renders so the warnings clear.
+async function installRequirements(name, missing) {
+  for (const dep of missing) {
+    try {
+      const r = await fetch(`/api/plugins/${encodeURIComponent(dep)}/install`,
+                            { method: "POST", headers: authHeaders() });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        toast(`install ${dep}: ${d.detail || "failed"}`, true);
+      } else {
+        toast(`${dep}: ${d.status || "installed"}`);
+      }
+    } catch (e) {
+      toast(`install ${dep} failed: ${e.message}`, true);
+    }
+  }
+  renderCatalogPlugins();
+  refreshPluginCommands();
 }
 
 async function pluginCatalogAction(action, name) {
