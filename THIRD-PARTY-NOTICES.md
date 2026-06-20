@@ -28,8 +28,10 @@ All are permissive.
 
 The `localm-llama-runtime` package carries native inference binaries that are NOT
 committed to this repository; they are provisioned locally by `localm setup-llama`.
-Any installer or release that ships these binaries must ship their upstream
-licenses alongside them:
+`setup-llama` copies the upstream `LICENSE` into the runtime `lib/` alongside the
+binaries at provision time (as `LICENSE.llama-cpp`), falling back to a bundled
+MIT notice if the archive omits one, so any installer or release that ships these
+binaries also ships their license text:
 
 | Component | License |
 |---|---|
