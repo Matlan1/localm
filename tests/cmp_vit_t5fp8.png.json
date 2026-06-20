@@ -1,0 +1,14 @@
+{
+  "prompt": "A woman with long auburn hair and green eyes, light freckles across her nose, wearing a casual white linen shirt, standing in a sunlit cafe. Natural light, shallow depth of field, realistic skin texture, raw photo.",
+  "negative_prompt": "old, mature, middle-aged, elderly, aging",
+  "cfg": 3.5,
+  "seed": 958943583724,
+  "guidance": 3.5,
+  "lora_name": "aidmaNSFWunlock-FLUX-V0.2.safetensors",
+  "lora_strength_model": 1.0,
+  "lora_strength_clip": 0.5,
+  "clip_name1": "ViT-L-14-TEXT-detail-improved-hiT-GmP-TE-only-HF.safetensors",
+  "clip_name2": "t5xxl_fp8_e4m3fn.safetensors",
+  "elapsed_seconds": 340.6,
+  "created": "2026-06-20T17:51:04"
+}
