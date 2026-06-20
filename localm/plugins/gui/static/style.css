@@ -894,6 +894,10 @@ pre:hover .copy-btn { opacity: 1; }
 .dir-picker-item:hover { background: var(--bg-input); color: var(--accent); }
 .dir-picker-item.up { color: var(--text-dim); }
 .dir-picker-empty { padding: 10px; font-size: 12px; color: var(--text-dim); }
+/* Settings FOLDER/PATH field: text input + a "Browse..." button on one row. */
+.dir-picker-row { display: flex; gap: 6px; align-items: stretch; }
+.dir-picker-row input { flex: 1 1 auto; }
+.dir-picker-btn { flex: 0 0 auto; white-space: nowrap; }
 
 /* coder session bar */
 
