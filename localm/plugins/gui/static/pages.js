@@ -271,6 +271,7 @@ $("pull-start").onclick = async () => {
   bar.classList.add("indeterminate");
   bar.style.width = "35%";
   pct.textContent = "starting…";
+  const samples = [];   // rolling {t, downloaded} window for speed/ETA (U4)
   try {
     const r = await fetch("/api/models/pull", {
       method: "POST", headers: authHeaders(),
@@ -285,8 +286,15 @@ $("pull-start").onclick = async () => {
       if (ev.pct != null && ev.total) {
         bar.classList.remove("indeterminate");
         bar.style.width = ev.pct + "%";
+        // Smoothed speed + ETA from a rolling ~10-sample window (U4).
+        samples.push({ t: Date.now(), downloaded: ev.downloaded });
+        if (samples.length > 10) samples.shift();
+        const { bytesPerSec, etaSec } = downloadRate(samples, ev.total);
+        let extra = "";
+        if (bytesPerSec) extra += `  ·  ${fmtBytes(bytesPerSec)}/s`;
+        if (etaSec != null) extra += `  ·  ETA ${fmtDuration(etaSec)}`;
         pct.textContent =
-          `${ev.pct.toFixed(0)}%  ·  ${fmtBytes(ev.downloaded)} / ${fmtBytes(ev.total)}`;
+          `${ev.pct.toFixed(0)}%  ·  ${fmtBytes(ev.downloaded)} / ${fmtBytes(ev.total)}${extra}`;
       } else {
         // Unknown total - busy bar with a running byte count
         bar.classList.add("indeterminate");

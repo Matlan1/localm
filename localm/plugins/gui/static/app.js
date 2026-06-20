@@ -213,6 +213,37 @@ function fmtBytes(n) {
   return n + " B";
 }
 
+/** Smoothed download rate + ETA from a rolling window of {t, downloaded}
+ *  samples (ms timestamps, oldest first). Averaging over the whole window
+ *  (first..last) instead of the last chunk damps per-chunk jitter so the
+ *  readout does not flicker. Returns {bytesPerSec, etaSec}; either is null when
+ *  it cannot be computed - needs >=2 samples, a positive time span, and forward
+ *  progress; etaSec also needs a known total >= the bytes so far. */
+function downloadRate(samples, total) {
+  const out = { bytesPerSec: null, etaSec: null };
+  if (!samples || samples.length < 2) return out;
+  const first = samples[0], last = samples[samples.length - 1];
+  const dt = (last.t - first.t) / 1000;
+  const db = last.downloaded - first.downloaded;
+  if (dt <= 0 || db <= 0) return out;
+  out.bytesPerSec = db / dt;
+  if (total != null && total >= last.downloaded) {
+    out.etaSec = (total - last.downloaded) / out.bytesPerSec;
+  }
+  return out;
+}
+
+/** Seconds -> a compact ETA string: "1h 01m" / "1m 30s" / "45s". Empty for a
+ *  missing / non-finite / negative value. */
+function fmtDuration(sec) {
+  if (sec == null || !isFinite(sec) || sec < 0) return "";
+  sec = Math.round(sec);
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  if (h) return `${h}h ${String(m).padStart(2, "0")}m`;
+  if (m) return `${m}m ${String(s).padStart(2, "0")}s`;
+  return `${s}s`;
+}
+
 /** Fetch an auth-protected image into an object URL. */
 async function fetchImageURL(path) {
   const r = await fetch(path, { headers: authHeaders() });
