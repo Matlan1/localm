@@ -1291,22 +1291,30 @@ def rm(model, yes):
 @click.option("-n", "--name", default=None, help="Name to register the model as.")
 @click.option("--no-hash", is_flag=True,
               help="Skip SHA256 computation (disables content-level duplicate detection).")
+@click.option("--fast", is_flag=True,
+              help="Skip the full-file SHA256 and dedup on file size only. "
+                   "Faster for known-unique bulk imports; size matching is a "
+                   "weaker (stat-only) duplicate check than the content hash.")
 @click.option("--on-duplicate", default="ask",
               type=click.Choice(["ask", "alias", "copy", "move", "register", "skip"]),
               help="What to do when the model is already registered (default: ask).")
-def add(path, name, no_hash, on_duplicate):
+def add(path, name, no_hash, fast, on_duplicate):
     """Register a local model file or HuggingFace directory.
 
     Duplicate detection is two-tier: the resolved path is checked first,
-    then the file's SHA256 against digests stored in the registry.
+    then the file's SHA256 against digests stored in the registry. For large
+    files that hash runs off the main thread with a live progress bar; pass
+    --fast to skip it and dedup on size alone.
 
     \b
     Examples:
       localm add C:\\models\\mymodel.gguf
       localm add D:\\models\\gemma.gguf --name gemma4-12b
       localm add D:\\models\\gemma.gguf -n g2 --on-duplicate alias
+      localm add D:\\models\\bulk-dir --fast
     """
-    if not add_local(path, name, on_duplicate=on_duplicate, no_hash=no_hash):
+    if not add_local(path, name, on_duplicate=on_duplicate,
+                     no_hash=no_hash, fast=fast):
         sys.exit(1)
 
 

@@ -8,7 +8,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import List, NamedTuple, Optional
+from typing import Callable, List, NamedTuple, Optional
 
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -757,13 +757,30 @@ def _pull_hf_snapshot(
     return True
 
 
-def _sha256_file(path: Path) -> str:
-    """Return the hex SHA256 digest of a file."""
+def _sha256_file(
+    path: Path,
+    progress: Optional[Callable[[int, int], None]] = None,
+) -> str:
+    """Return the hex SHA256 digest of a file.
+
+    When *progress* is given it is called ``progress(bytes_done, total_bytes)``
+    after each block so a caller can drive a progress bar; *total_bytes* is the
+    file size (0 if it cannot be stat'd). The callback must not raise."""
     import hashlib
     h = hashlib.sha256()
+    total = 0
+    if progress is not None:
+        try:
+            total = path.stat().st_size
+        except OSError:
+            total = 0
+    done = 0
     with open(path, "rb") as f:
         for block in iter(lambda: f.read(65536), b""):
             h.update(block)
+            if progress is not None:
+                done += len(block)
+                progress(done, total)
     return h.hexdigest()
 
 
@@ -826,20 +843,86 @@ def find_by_sha256(digest: str, reg: Optional[dict] = None) -> List[str]:
     )
 
 
-def _hash_with_notice(path: Path) -> Optional[str]:
-    """
-    SHA256 a model file, telling the user why the wait is happening.
-    Returns None for directories (HF models are identified by path only).
-    """
+def find_by_size(size: int, reg: Optional[dict] = None) -> List[str]:
+    """Registered names whose on-disk file is exactly *size* bytes.
+
+    A cheap (stat-only) content heuristic used by ``--fast`` imports: it skips
+    the full SHA-256 and dedups on size alone. Weaker than the hash tier (two
+    different files can share a length), which is why it is opt-in. Entries whose
+    path is missing or is a directory are skipped."""
+    if not size or size <= 0:
+        return []
+    reg = reg if reg is not None else load_registry()
+    out = []
+    for name, info in reg.items():
+        path = info.get("path")
+        if not path:
+            continue
+        try:
+            p = Path(path)
+            if p.is_file() and p.stat().st_size == size:
+                out.append(name)
+        except OSError:
+            continue
+    return sorted(out)
+
+
+# Files at or below this size hash inline (silently); larger ones get the
+# off-main-thread progress bar - the threading/UI overhead isn't worth it for
+# small files. ~0.5 GB, matching the prior notice threshold.
+_HASH_PROGRESS_MIN_BYTES = 512 * 1024 * 1024
+
+
+def _hash_with_progress(path: Path) -> Optional[str]:
+    """SHA256 a model file, showing live progress for large files.
+
+    For files larger than ``_HASH_PROGRESS_MIN_BYTES`` the hash runs in a
+    background worker thread so the main thread stays responsive and can render a
+    progress bar (a one-time cost stored in the registry for duplicate
+    detection); smaller files hash inline without any UI. Returns None for
+    directories (HF models are identified by path only)."""
     if not path.is_file():
         return None
-    size_gb = path.stat().st_size / 1024**3
-    if size_gb > 0.5:
-        console.print(
-            f"[dim]Hashing {path.name} ({size_gb:.1f} GB) for duplicate "
-            f"detection - one-time cost, stored in the registry…[/dim]"
+    try:
+        size = path.stat().st_size
+    except OSError:
+        size = 0
+
+    if size <= _HASH_PROGRESS_MIN_BYTES:
+        return _sha256_file(path)
+
+    from rich.progress import (BarColumn, DownloadColumn, Progress,
+                               SpinnerColumn, TextColumn, TimeRemainingColumn)
+
+    result: dict = {}
+
+    def _worker(report):
+        try:
+            result["digest"] = _sha256_file(path, progress=report)
+        except Exception as exc:                      # surface on the main thread
+            result["error"] = exc
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[dim]Hashing {task.description} for duplicate detection[/dim]"),
+        BarColumn(),
+        DownloadColumn(),
+        TimeRemainingColumn(),
+        transient=True,
+        console=console,
+    ) as prog:
+        task = prog.add_task(path.name, total=size)
+        worker = threading.Thread(
+            target=_worker,
+            args=(lambda done, total: prog.update(task, completed=done),),
+            daemon=True,
         )
-    return _sha256_file(path)
+        worker.start()
+        worker.join()
+
+    if "error" in result:
+        raise result["error"]
+    return result.get("digest")
 
 
 def alias_model(existing: str, new_name: str) -> bool:
@@ -1283,12 +1366,14 @@ def _register_with_dedup(
     *,
     on_duplicate: str = "ask",
     digest: Optional[str] = None,
+    size: Optional[int] = None,
 ) -> None:
     """
     Register a model, detecting duplicates first.
 
-    Two-tier identity: resolved path (instant), then stored sha256 when a
-    *digest* for the new file is known. ``on_duplicate`` is one of
+    Identity tiers: resolved path (instant), then stored sha256 when a *digest*
+    for the new file is known, then file *size* alone (the ``--fast`` heuristic,
+    used only when no digest was computed). ``on_duplicate`` is one of
     "ask" / "alias" / "copy" / "move" / "register" / "skip" - "ask" prompts
     interactively and degrades to "skip" without a TTY.
     """
@@ -1327,11 +1412,15 @@ def _register_with_dedup(
                           "Pick another name with -n.[/dim]")
             return
 
-    # Duplicate content under other names? (path tier, then hash tier)
+    # Duplicate content under other names? (path tier, then hash tier, then the
+    # fast size-only tier when no digest was computed)
     dup_names, reason = aliases, "same file"
     if not dup_names and digest:
         dup_names = find_by_sha256(digest, reg)
         reason = "byte-identical content"
+    elif not dup_names and not digest and size:
+        dup_names = find_by_size(size, reg)
+        reason = "same size (--fast: content not hashed)"
 
     if dup_names:
         action = (
@@ -1502,6 +1591,7 @@ def _add_local_gguf_dir(
     name: Optional[str],
     on_duplicate: str,
     no_hash: bool,
+    fast: bool = False,
 ) -> bool:
     """Register every loose .gguf model in a folder (the *first_parts* list).
 
@@ -1519,18 +1609,27 @@ def _add_local_gguf_dir(
         wanted = _sanitize_name(name) if use_given_name else base
         model_name = _unique_registry_name(reg, wanted)
 
+        size = None
         if no_hash:
             digest = None
+        elif fast:
+            # --fast: skip the SHA, dedup on size alone (cheap stat).
+            digest = None
+            try:
+                size = gguf.stat().st_size
+            except OSError:
+                size = None
         else:
             # Hash only when it can change the outcome (unknown path / missing
             # digest), exactly like the single-file branch below.
             already_known = find_aliases_by_path(gguf, reg)
             needs_backfill = any(not reg[n].get("sha256") for n in already_known)
-            digest = _hash_with_notice(gguf) \
+            digest = _hash_with_progress(gguf) \
                 if (not already_known or needs_backfill) else None
 
         _register_with_dedup(
-            model_name, gguf, "local", on_duplicate=on_duplicate, digest=digest,
+            model_name, gguf, "local", on_duplicate=on_duplicate,
+            digest=digest, size=size,
         )
     return True
 
@@ -1540,6 +1639,7 @@ def add_local(
     name: Optional[str] = None,
     on_duplicate: str = "ask",
     no_hash: bool = False,
+    fast: bool = False,
 ) -> bool:
     """Register a local .gguf / HF dir / Ollama blob. Returns True on a successful
     registration or a benign no-op (alias / user-skipped duplicate), False when the
@@ -1590,7 +1690,7 @@ def add_local(
         max_depth = max(1, int(load_config().get("import_max_depth", 3)))
         first_parts = _gguf_first_parts(p, max_depth=max_depth)
         if first_parts:
-            return _add_local_gguf_dir(first_parts, name, on_duplicate, no_hash)
+            return _add_local_gguf_dir(first_parts, name, on_duplicate, no_hash, fast)
 
     if not (is_gguf or is_hf or is_blob):
         console.print(
@@ -1621,10 +1721,18 @@ def add_local(
     model_name = _sanitize_name(name) if name else (split_base or p.stem)
     kind = "hf" if is_hf else "local"
 
+    size: Optional[int] = None
     if is_blob:
         digest = p.name.removeprefix("sha256-")
     elif no_hash or p.is_dir():
         digest = None   # HF dirs are identified by path only
+    elif fast:
+        # --fast: skip the full-file SHA, dedup on size alone (cheap stat).
+        digest = None
+        try:
+            size = p.stat().st_size
+        except OSError:
+            size = None
     else:
         # Hash when it can change the outcome: unknown path (content-tier
         # check) or known path missing its digest (lazy backfill)
@@ -1635,10 +1743,10 @@ def add_local(
         )
         digest = None
         if not already_known or needs_backfill:
-            digest = _hash_with_notice(p)
+            digest = _hash_with_progress(p)
 
     _register_with_dedup(
-        model_name, p, kind, on_duplicate=on_duplicate, digest=digest,
+        model_name, p, kind, on_duplicate=on_duplicate, digest=digest, size=size,
     )
     return True
 
