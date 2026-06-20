@@ -180,8 +180,17 @@ class PluginHost:
         prefix = "/" + (url_prefix or f"/plugins/{self._spec.name}").strip("/")
         if prefix in self._static_prefixes:
             return prefix                    # already serving this prefix (idempotent)
-        base = Path(self._spec.path or ".")
+        base = Path(self._spec.path or ".").resolve()
         d = (base / directory).resolve()
+        # *directory* comes verbatim from a (possibly third-party) manifest or a
+        # plugin's own mount_static call. Confine it to the plugin dir: reject
+        # traversal ('../x') and absolute escapes (resolve() collapses both, and
+        # symlink escapes) before mounting it as public static assets. The plugin
+        # dir itself (d == base) is allowed.
+        if not d.is_relative_to(base):
+            raise ValueError(
+                f"plugin {self._spec.name!r}: static dir {directory!r} escapes "
+                f"the plugin dir")
         if not d.is_dir():
             raise ValueError(
                 f"plugin {self._spec.name!r}: static dir {directory!r} not found")
