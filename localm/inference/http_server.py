@@ -115,6 +115,70 @@ def caller_scopes(
 
 
 # ------------------------------------------------------------------ #
+#  Surface mounting (H6 phase 5: on-demand GUI on a running instance)  #
+# ------------------------------------------------------------------ #
+
+def mount_gui_surface(app) -> bool:
+    """Add the GUI surface (its /api routes + the SPA static mount) to a running
+    ``api``-mode app, in place. Idempotent: returns False if a GUI is already
+    mounted (a ``full`` instance, or a second call), True if it mounted now.
+
+    Safe at runtime because ``attach_gui`` only appends routes + a ``/`` catch-all
+    mount and sets ``app.state`` services - it adds NO middleware (Starlette reads
+    ``app.router.routes`` per request, so appended routes take effect immediately;
+    only new middleware would need a stack rebuild). The engine + inference
+    semaphore are this instance's own (it already loaded the model for /v1), so no
+    second model load happens; ``switch_model`` swaps the shared ``_engine`` under
+    ``_inference_sem`` exactly as the GUI launcher does."""
+    global _engine
+    if getattr(app.state, "gui_mounted", False):
+        return False
+
+    scheme = getattr(app.state, "instance_scheme", "http")
+    port = getattr(app.state, "instance_port", None)
+    self_url = f"{scheme}://127.0.0.1:{port}/v1"
+
+    def active_model() -> str:
+        return _engine.display_name if _engine is not None else ""
+
+    async def switch_model(name: str) -> None:
+        global _engine
+        from localm.config import load_registry
+        from localm.model_manager import get_model_info
+        info = get_model_info(name)
+        if info is None:
+            raise ValueError(f"Model not found: {name}")
+        m_path, m_hint = info
+        new_engine = Engine(
+            str(m_path),
+            display_name=name if name in load_registry() else m_hint,
+        )
+        loop = asyncio.get_running_loop()
+        async with _inference_sem:
+            old = _engine
+            if old is not None and old.loaded:
+                await loop.run_in_executor(None, old.unload)
+            await loop.run_in_executor(None, new_engine.load)
+            _engine = new_engine
+
+    from localm.plugins.gui.web import attach_gui
+    manager = attach_gui(
+        app, self_url=self_url, switch_model=switch_model, active_model=active_model)
+    # attach_gui sets app.state.gui_mounted; also reflect the surface change in
+    # discovery so /whoami and the registry report this is now a full instance.
+    app.state.coder_sessions = manager
+    app.state.instance_mode = "full"
+    app.openapi_schema = None   # force the schema to include the new routes
+    try:
+        from localm import instances
+        from localm.config import home_dir
+        instances.set_mode(home_dir(), getattr(app.state, "instance_id", ""), "full")
+    except Exception:
+        pass
+    return True
+
+
+# ------------------------------------------------------------------ #
 #  App factory                                                         #
 # ------------------------------------------------------------------ #
 
@@ -217,6 +281,14 @@ def create_app(engine: Engine) -> FastAPI:
     _UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
     _CROSS_ORIGIN_OK = (
         "/v1/chat/completions", "/v1/completions", "/v1/embeddings",
+        # Surface management (phase 5 on-demand GUI mount) is driven by a local
+        # process (the attaching `localm gui`), not the browser shell: it sends
+        # no Origin and has no shell_token. The route does its OWN strict auth
+        # (this instance's attach token, or an owner API key), which - not the
+        # same-origin gate - is the real credential, so it is exempt here. A
+        # cross-origin browser page still cannot set the Authorization header
+        # without a secret it cannot read, so the exemption adds no CSRF surface.
+        "/v1/surfaces/",
     )
     _cors_allowlist = cors_cfg if isinstance(cors_cfg, list) else []
     _cors_wildcard = cors_cfg == "*"
@@ -293,6 +365,43 @@ def create_app(engine: Engine) -> FastAPI:
             root_dir=getattr(st, "root_dir", None),
             mode=getattr(st, "instance_mode", None),
         )
+
+    # ---------------------------------------------------------------- #
+    #  Surface management: on-demand GUI mount (H6 phase 5)              #
+    # ---------------------------------------------------------------- #
+
+    @app.post("/v1/surfaces/gui", include_in_schema=False)
+    async def mount_gui(request: Request):
+        """Mount the GUI surface on this running instance (the phase-5 on-demand
+        mount). An ``api``-mode instance (``localm serve``) serves only /v1; a
+        later ``localm gui`` in the same dir calls this to add the GUI + coder
+        live - one process, no second model load - then opens it.
+
+        Mounting the GUI exposes the coder agent (shell + file edits), so this is
+        an OWNER-level action. Authorized by EITHER this instance's attach token
+        (the local same-user secret in the 0600 ``run/`` file, which the
+        attaching process reads) OR an API key granting ADMIN. It is exempt from
+        the same-origin guard (a local non-browser caller has no Origin); this
+        token/key check is the gate. Idempotent: a full instance returns
+        already_mounted."""
+        presented = _bearer_token(request)
+        st = request.app.state
+        inst_token = getattr(st, "instance_token", None)
+        ok = bool(presented and inst_token
+                  and hmac.compare_digest(presented, inst_token))
+        if not ok and presented:
+            # Fall back to an owner/ADMIN API key (protected mode).
+            from localm.auth import any_key_configured, verify
+            if any_key_configured():
+                held = verify(presented)
+                ok = held is not None and scopes.grants(held, scopes.ADMIN)
+        if not ok:
+            raise HTTPException(
+                403, "Surface management requires this instance's attach token "
+                "or an owner API key.")
+        mounted = mount_gui_surface(request.app)
+        return {"status": "mounted" if mounted else "already_mounted",
+                "mode": "full"}
 
     # ---------------------------------------------------------------- #
     #  Built-in TLS: CA download (NET-1)                                 #

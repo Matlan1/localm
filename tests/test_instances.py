@@ -194,6 +194,35 @@ def test_advertise_project_override(tmp_path):
         assert info["root_dir"] == str(proj.resolve())
 
 
+def test_advertise_sets_bind_coordinates_on_state(tmp_path):
+    """Phase 5: the instance records its own port + scheme on app.state so it can
+    build its loopback /v1 self-url when it mounts a surface on demand."""
+    app = _FakeApp()
+    with instances.advertise(app, tmp_path, host="0.0.0.0", port=8651,
+                             mode="api", scheme="https"):
+        assert app.state.instance_port == 8651
+        assert app.state.instance_scheme == "https"
+
+
+def test_set_mode_rewrites_entry_in_place(tmp_path):
+    """Phase 5: an on-demand GUI mount flips this instance's registry mode."""
+    iid = instances.new_instance_id()
+    instances.register_instance(
+        tmp_path, instance_id=iid, port=8642, host="127.0.0.1",
+        root_dir=str(tmp_path), mode="api", token="tok", scheme="http")
+    assert instances.set_mode(tmp_path, iid, "full") is True
+    entry = instances.read_entry(instances.registry_path(tmp_path, iid))
+    assert entry["mode"] == "full"
+    # The token + other fields survive the rewrite.
+    assert entry["token"] == "tok"
+    assert entry["port"] == 8642
+
+
+def test_set_mode_missing_entry_is_false(tmp_path):
+    assert instances.set_mode(tmp_path, "nonexistent-id", "full") is False
+    assert instances.set_mode(tmp_path, "", "full") is False
+
+
 # ------------------------------------------------------------------ #
 #  GET /whoami endpoint                                              #
 # ------------------------------------------------------------------ #
