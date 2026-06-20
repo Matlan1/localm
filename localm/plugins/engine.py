@@ -811,6 +811,10 @@ class PluginManager:
                                 else ""),
                 "requires_extras": spec.requires_extras if spec else [],
                 "requires": spec.requires if spec else [],
+                # Declared requirements that are not currently installed, so the
+                # GUI can warn "requires X (missing)" + offer one-click install.
+                "missing_requires": [r for r in (spec.requires if spec else [])
+                                     if r not in installed],
                 "extra": cat.extra if cat else "",
                 "commands": list(cat.commands) if cat else [],
                 "installed": name in installed,
