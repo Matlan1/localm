@@ -1030,7 +1030,7 @@ function renderChat() {
   conv.messages.forEach((m, i) => {
     const tag = m.tag || (m.web ? "web" : null);
     const actions = [];
-    if (m.role === "user" && !tag) {
+    if (m.role === "user" && !tag && !chat.abort) {
       actions.push(["edit", () => editMessage(conv, i)]);
     }
     if (m.role === "assistant" && !tag) {
@@ -1142,6 +1142,10 @@ function pruneBranches(conv) {
 }
 
 function editMessage(conv, index) {
+  // Editing forks the branch tree (forkAt); doing that mid-stream parks the
+  // messages before the streaming reply has landed, corrupting the branch
+  // state. Bail while a reply streams, like switchBranch / regenerate do.
+  if (chat.abort) { toast("Wait for the current reply to finish", true); return; }
   const m = conv.messages[index];
   $("chat-input").value = msgText(m);
   autoGrow($("chat-input"));
