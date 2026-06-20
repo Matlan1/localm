@@ -116,6 +116,28 @@ def test_split_mode_garbage_refuses():
     assert evaluate(mp, good_ctx()).status == "mismatch"
 
 
+@pytest.mark.parametrize("mode", [0, 1, 2, 3])
+def test_all_valid_split_modes_allowed(mode):
+    # NONE/LAYER/ROW/TENSOR = 0/1/2/3 are all real upstream enumerators; none may
+    # be mistaken for layout corruption (TENSOR=3 was the regression caught in
+    # review - it must NOT false-refuse).
+    mp = good_model()
+    mp.split_mode = mode
+    assert evaluate(mp, good_ctx()).status == "ok"
+
+
+def test_large_window_is_diagnostic_not_fatal():
+    # Magnitudes above the misaligned-read tripwire bounds must NOT refuse a
+    # legitimate (ordered) build - only note it. Guards against the upper-bound
+    # checks regressing back into a false-positive refusal.
+    cp = good_ctx()
+    cp.n_ubatch = 2_000_000
+    cp.n_batch = 2_000_000       # ordered, but above _MAX_BATCH
+    v = evaluate(good_model(), cp)
+    assert v.status == "ok"
+    assert any("large window" in d for d in v.diagnostics)
+
+
 def test_batch_ordering_violation_refuses():
     cp = good_ctx()
     cp.n_ubatch = 4096

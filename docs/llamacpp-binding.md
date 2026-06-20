@@ -116,8 +116,10 @@ GPU needed) and checks a structural fingerprint of the returned defaults:
 - the long-stable `*_UNSPECIFIED == -1` enums (`rope_scaling_type`,
   `pooling_type`, `attention_type`) - three consecutive `-1` int32s that a
   shifted layout essentially never reproduces;
-- a valid `split_mode` (0/1/2) and ordered, bounded window sizes
-  (`1 <= n_ubatch <= n_batch`, a sane `n_ctx`, `n_seq_max >= 1`).
+- a valid `split_mode` (0/1/2/3 = NONE/LAYER/ROW/TENSOR) and ordered window sizes
+  (`1 <= n_ubatch <= n_batch`, `n_ctx >= 1`, `n_seq_max >= 1`). Absolute size
+  magnitudes are only a non-fatal diagnostic, so a future build that defaults
+  higher is never refused.
 
 On a proven mismatch it raises `AbiMismatch` (a reportable `LocalmError`) naming
 the offending field, instead of letting a wrong layout corrupt memory. It is

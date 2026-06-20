@@ -51,9 +51,10 @@ from ._structs import LlamaContextParams, LlamaModelParams
 # maintainer could not test). Any non-empty value enables the bypass.
 SKIP_ENV = "LOCALM_SKIP_ABI_CHECK"
 
-# Generous bounds for the plausibility checks. They exist to catch a misaligned
-# read (a pointer or garbage landing in a numeric field), NOT to police real
-# configuration - so they sit far above any value a real build would ever use.
+# Misaligned-read tripwire magnitudes (NON-FATAL): a pointer or garbage landing in
+# a numeric field reads as a huge value. These are heuristics far above any real
+# default, NOT structural invariants, so EXCEEDING them is a diagnostic note, never
+# a refusal - a future build may legitimately default higher and must still load.
 _MAX_BATCH = 1 << 20      # 1,048,576 tokens
 _MAX_CTX = 1 << 24        # 16,777,216 tokens
 
@@ -121,23 +122,34 @@ def evaluate(mp: LlamaModelParams, cp: LlamaContextParams) -> AbiVerdict:
             )
 
     # --- structural invariants: true for ANY aligned build, value-drift safe ---
-    if mp.split_mode not in (0, 1, 2):
+    # split_mode is a small enum; accept its FULL valid set (NONE/LAYER/ROW/TENSOR
+    # = 0/1/2/3). A misaligned read landing here is overwhelmingly outside 0..3, so
+    # this still catches drift without refusing a legitimate value (TENSOR=3 is a
+    # real upstream enumerator - do not narrow this set without checking llama.h).
+    if mp.split_mode not in (0, 1, 2, 3):
         failures.append(
             f"model_params.split_mode = {mp.split_mode} "
-            "(expected a valid LLAMA_SPLIT_MODE: 0, 1 or 2)"
+            "(expected a valid LLAMA_SPLIT_MODE: 0, 1, 2 or 3)"
         )
-    if not (1 <= cp.n_ubatch <= cp.n_batch <= _MAX_BATCH):
+    # Ordering + lower bounds hold for ANY aligned build regardless of defaults:
+    if not (1 <= cp.n_ubatch <= cp.n_batch):
         failures.append(
             f"context_params batch sizes implausible: n_ubatch={cp.n_ubatch}, "
-            f"n_batch={cp.n_batch} (expected 1 <= n_ubatch <= n_batch <= {_MAX_BATCH})"
+            f"n_batch={cp.n_batch} (expected 1 <= n_ubatch <= n_batch)"
         )
-    if not (1 <= cp.n_ctx <= _MAX_CTX):
-        failures.append(
-            f"context_params.n_ctx = {cp.n_ctx} (expected 1..{_MAX_CTX})"
-        )
+    if cp.n_ctx < 1:
+        failures.append(f"context_params.n_ctx = {cp.n_ctx} (expected >= 1)")
     if cp.n_seq_max < 1:
         failures.append(
             f"context_params.n_seq_max = {cp.n_seq_max} (expected >= 1)"
+        )
+    # Absolute magnitude bounds are a misaligned-read tripwire, NOT a structural
+    # invariant or config policy, so a value above them is a NON-FATAL diagnostic
+    # (a future build may default higher) - never a false refusal.
+    if cp.n_batch > _MAX_BATCH or cp.n_ctx > _MAX_CTX:
+        diags.append(
+            f"unusually large window (n_batch={cp.n_batch}, n_ctx={cp.n_ctx}); "
+            "if generation misbehaves, suspect ABI drift"
         )
 
     # --- diagnostics (NOT fatal): exact stable values observed on every shipped
