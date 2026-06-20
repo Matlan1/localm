@@ -1470,19 +1470,25 @@ def _resolve_ollama_manifest(p: Path):
     return None
 
 
-def _gguf_first_parts(d: Path) -> List[Path]:
-    """First-part GGUF files directly inside *d* (non-recursive).
+def _gguf_first_parts(d: Path, max_depth: int = 3) -> List[Path]:
+    """First-part GGUF files inside *d*, scanning up to *max_depth* levels deep.
 
-    Split GGUFs (``model-00001-of-00003.gguf``) contribute only their first
-    part - llama.cpp finds the siblings on its own; loose single-file GGUFs
-    contribute themselves. Mirrors the first-part filter in sync_models_dir.
+    *max_depth* counts the filename as level 1 (depth 1 = files directly in *d*,
+    depth 3 = up to two subfolders down), so batch imports of models organised in
+    subdirectories are picked up. Split GGUFs (``model-00001-of-00003.gguf``)
+    contribute only their first part - llama.cpp finds the siblings on its own;
+    loose single-file GGUFs contribute themselves. Mirrors the first-part filter
+    in sync_models_dir.
     """
     out: List[Path] = []
-    for f in sorted(d.glob("*.gguf")):
+    for f in sorted(d.rglob("*.gguf")):
         try:
             if not f.is_file():
                 continue
-        except OSError:
+            depth = len(f.relative_to(d).parts)
+        except (OSError, ValueError):
+            continue
+        if depth > max_depth:
             continue
         parts = split_gguf_parts(f.name)
         if parts and f.name != parts[0]:
@@ -1581,7 +1587,8 @@ def add_local(
     # dir-as-one-model path below; an empty / non-gguf dir falls through to the
     # "Not a model" message so existing rejection tests stay green.
     if p.is_dir() and not is_hf:
-        first_parts = _gguf_first_parts(p)
+        max_depth = max(1, int(load_config().get("import_max_depth", 3)))
+        first_parts = _gguf_first_parts(p, max_depth=max_depth)
         if first_parts:
             return _add_local_gguf_dir(first_parts, name, on_duplicate, no_hash)
 

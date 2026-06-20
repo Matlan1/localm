@@ -96,6 +96,9 @@ CORE_FIELDS: list = [
     SettingField("n_gpu_layers", Widget.NUMBER, "GPU layers",
                  "99 = offload everything to GPU.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=0, max=1000),
+    SettingField("import_max_depth", Widget.NUMBER, "Folder import depth",
+                 "How many subfolder levels `localm add <dir>` scans for models.",
+                 group="Models", min=1, max=10, step=1),
     # ---- Sampling ----
     SettingField("temperature", Widget.NUMBER, "Temperature",
                  group="Sampling", min=0, max=2, step=0.05),
