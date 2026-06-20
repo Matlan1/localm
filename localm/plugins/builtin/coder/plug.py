@@ -85,9 +85,36 @@ def _sessions(request: Request):
     return mgr
 
 
+def _principal_from_request(request: Request) -> tuple[bool, str | None]:
+    """Identify the caller for session isolation: returns ``(is_owner, principal)``.
+
+    The OWNER (an ADMIN/owner key, or open-mode loopback) is ``(True, None)`` and
+    may touch every session. A minted, non-owner scoped key is ``(False, <hash of
+    its bearer>)`` and may touch only the sessions IT created. The principal is a
+    SHA-256 of the presented bearer, so it identifies the key without storing it."""
+    from localm import scopes as S
+    from localm.auth import any_key_configured, verify
+    from localm.inference.http_server import _bearer_token
+    if not any_key_configured():
+        return True, None                       # open mode = loopback owner
+    bearer = _bearer_token(request)
+    held = verify(bearer) if bearer else None
+    if held is not None and S.ADMIN in held:
+        return True, None                       # the owner key
+    import hashlib
+    digest = hashlib.sha256((bearer or "").encode("utf-8")).hexdigest()
+    return False, digest
+
+
 def _get_session(request: Request, session_id: str):
     session = _sessions(request).get(session_id)
     if session is None:
+        raise HTTPException(404, f"No such session: {session_id}")
+    is_owner, principal = _principal_from_request(request)
+    # Isolation: a scoped caller may only touch the sessions IT created - it must
+    # not read or steer the owner's full-capability sessions (which keep run_shell).
+    # 404 (not 403) so a scoped key cannot even probe which session ids exist.
+    if not is_owner and session.principal != principal:
         raise HTTPException(404, f"No such session: {session_id}")
     return session
 
@@ -99,7 +126,9 @@ def _get_session(request: Request, session_id: str):
 @_router.get("/api/coder/sessions")
 async def list_sessions(request: Request):
     mgr = _sessions(request)
-    return {"sessions": mgr.list(), "active_model": request.app.state.active_model()}
+    is_owner, principal = _principal_from_request(request)
+    return {"sessions": mgr.list(principal=principal, is_owner=is_owner),
+            "active_model": request.app.state.active_model()}
 
 
 @_router.post("/api/coder/sessions")
@@ -108,13 +137,38 @@ async def create_session(req: CreateSessionRequest, request: Request):
     active_model = request.app.state.active_model
     self_url = request.app.state.self_url
 
-    cwd = Path(req.cwd).expanduser()
-    if not cwd.is_dir():
-        raise HTTPException(400, f"Not a directory: {req.cwd}")
+    # Safe-to-share scoping. The OWNER (an ADMIN/owner key, or open-mode loopback)
+    # gets the full coder: any directory, every tool. A MINTED, non-owner coder-
+    # scoped key gets a RESTRICTED session - locked to read + confined-edit tools
+    # (no run_shell/run_tests/git-hooks/network/sub-agents, all RCE or exfil
+    # vectors), forced into the project root, and isolated to its own sessions. So
+    # a key you hand out can read and edit this project but cannot execute
+    # anything; you review and run. (run_shell is cwd-independent, and write_file +
+    # run_tests/git-hooks is RCE, so disabling the executing tools - not just
+    # confining the cwd - is the real containment.)
+    is_owner, principal = _principal_from_request(request)
+    restricted = not is_owner
 
-    # Per-session model: the local GPU serves one engine at a time, so a
-    # different model means switching the active engine for everyone.
+    if restricted:
+        # Force the session into the instance's project root, ignoring req.cwd, so
+        # a scoped key cannot point the (confined) file tools at arbitrary paths.
+        root = getattr(request.app.state, "root_dir", None) or str(Path.cwd())
+        cwd = Path(root).expanduser().resolve()
+        if not cwd.is_dir():
+            raise HTTPException(400, f"Project root is not a directory: {cwd}")
+    else:
+        cwd = Path(req.cwd).expanduser()
+        if not cwd.is_dir():
+            raise HTTPException(400, f"Not a directory: {req.cwd}")
+        cwd = cwd.resolve()
+
+    # A per-session model switch changes the one shared engine for EVERYONE, so a
+    # scoped key must not trigger it (DoS / interfering with the owner's session).
     if req.model and req.model != active_model():
+        if restricted:
+            raise HTTPException(
+                403, "Switching models needs the owner key; a scoped key uses the "
+                "active model.")
         from localm.config import load_registry
         if req.model not in load_registry():
             raise HTTPException(404, f"Model not registered: {req.model}")
@@ -145,15 +199,17 @@ async def create_session(req: CreateSessionRequest, request: Request):
     loop = asyncio.get_running_loop()
     # Agent construction scans the project (map build) - keep it off the loop
     session = await loop.run_in_executor(None, lambda: CoderSession(
-        cwd.resolve(),
+        cwd,
         backend,
         auto_approve=req.auto_approve,
         max_turns=req.max_turns,
         mode=session_mode,
         scope=req.scope,
         dry_run=req.dry_run,
+        restricted=restricted,
         **gen_kwargs,
     ))
+    session.principal = principal      # who owns this session (None = the owner)
     mgr.create(session)
     return session.info()
 
@@ -286,6 +342,7 @@ async def session_stop(session_id: str, request: Request):
 
 @_router.delete("/api/coder/sessions/{session_id}")
 async def session_delete(session_id: str, request: Request):
+    _get_session(request, session_id)   # principal check: 404 unless it is the caller's
     if _sessions(request).remove(session_id) is None:
         raise HTTPException(404, f"No such session: {session_id}")
     return {"status": "closed"}
@@ -300,7 +357,13 @@ async def session_delete(session_id: str, request: Request):
 # so the list is simply empty.
 
 @_router.get("/api/coder/history")
-async def coder_history():
+async def coder_history(request: Request):
+    # Past session logs are the OWNER's audit trail (other coder sessions' commands
+    # and file contents). They are not tagged per-key, so a scoped/shared key sees
+    # none of them - only the owner browses history.
+    is_owner, _ = _principal_from_request(request)
+    if not is_owner:
+        return {"enabled": False, "logs": []}
     from localm import audit as _audit
     from localm.audit import SessionMode, effective_mode
     sessions_dir = _audit._SESSIONS_DIR
@@ -318,7 +381,12 @@ async def coder_history():
 
 
 @_router.get("/api/coder/history/{name}")
-async def coder_history_entries(name: str):
+async def coder_history_entries(name: str, request: Request):
+    # Reading a past log would expose the owner's coder transcript (commands, file
+    # contents); a scoped/shared key may not (the logs are not per-key tagged).
+    is_owner, _ = _principal_from_request(request)
+    if not is_owner:
+        raise HTTPException(404, "No such log")
     from localm import audit as _audit
     if not name.endswith(".jsonl"):
         raise HTTPException(400, "Invalid log name")

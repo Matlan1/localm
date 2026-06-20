@@ -64,6 +64,8 @@ class CoderSession:
         mode: str = "privacy",
         scope: Optional[str] = None,
         dry_run: bool = False,
+        disabled_tools: Optional[frozenset] = None,
+        restricted: bool = False,
         **gen_kwargs,
     ) -> None:
         from localm.plugins.coder.agent import Agent
@@ -72,6 +74,11 @@ class CoderSession:
         self.id = uuid.uuid4().hex[:12]
         self.cwd = cwd
         self.created_at = time.time()
+        # Caller identity that created this session (None = the owner). Set by the
+        # /api/coder route so a scoped key can only see/steer the sessions IT made,
+        # not the owner's full-capability sessions (session isolation).
+        self.principal: Optional[str] = None
+        self.restricted = restricted
         self.model = getattr(backend, "model_id", "")
         self.auto_approve = auto_approve
         self.mode = mode
@@ -96,6 +103,8 @@ class CoderSession:
             mode=parse_mode(mode),
             scope=scope,
             dry_run=dry_run,
+            disabled_tools=disabled_tools,
+            restricted=restricted,
             on_event=self._on_agent_event,
             confirm_handler=None if auto_approve else self._confirm,
             **gen_kwargs,
@@ -360,9 +369,14 @@ class SessionManager:
         with self._lock:
             return self._sessions.get(session_id)
 
-    def list(self) -> list:
+    def list(self, *, principal: Optional[str] = None, is_owner: bool = True) -> list:
+        """Session summaries. The owner sees all; a scoped caller (is_owner=False)
+        sees only the sessions matching its *principal* - so a handed-out key
+        cannot enumerate the owner's sessions."""
         with self._lock:
             sessions = list(self._sessions.values())
+        if not is_owner:
+            sessions = [s for s in sessions if s.principal == principal]
         return [s.info() for s in sorted(sessions, key=lambda s: s.created_at)]
 
     def remove(self, session_id: str) -> Optional[CoderSession]:

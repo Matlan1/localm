@@ -110,12 +110,15 @@ def _example_args(name: str, tool) -> dict:
     }
 
 
-def _full_tool_docs() -> str:
+def _full_tool_docs(disabled: frozenset = frozenset()) -> str:
     """One block per registered tool: description (the 'when to use this'
-    signal), a concrete example call, and the optional params."""
+    signal), a concrete example call, and the optional params. Tools in
+    *disabled* are omitted (e.g. run_shell for a restricted, shareable key)."""
     from .tools import TOOL_REGISTRY
     blocks = []
     for name, tool in TOOL_REGISTRY.items():
+        if name in disabled:
+            continue
         example = json.dumps({"name": name, "args": _example_args(name, tool)},
                              ensure_ascii=False)
         lines = [f"## {name} - {tool.description}", example]
@@ -127,11 +130,14 @@ def _full_tool_docs() -> str:
     return "\n\n".join(blocks)
 
 
-def _brief_tool_docs() -> str:
-    """Condensed list for small models - one line per tool, no JSON examples."""
+def _brief_tool_docs(disabled: frozenset = frozenset()) -> str:
+    """Condensed list for small models - one line per tool, no JSON examples.
+    Tools in *disabled* are omitted."""
     from .tools import TOOL_REGISTRY
     lines = []
     for name, tool in TOOL_REGISTRY.items():
+        if name in disabled:
+            continue
         params = _tool_params(tool)
         req = [n for n, s in params.items() if s.get("required")]
         opt = [f"[{n}]" for n, s in params.items() if not s.get("required")]
@@ -247,6 +253,7 @@ def build_system_prompt(
     memory: str = "",
     model_name: str = "",
     extra_tool_docs: str = "",
+    disabled_tools: frozenset = frozenset(),
 ) -> str:
     """
     Build the system prompt for the main agent.
@@ -277,7 +284,8 @@ def build_system_prompt(
     if memory:
         memory_section = f"\n## Project Memory\n\n{memory}\n"
 
-    tool_docs = _brief_tool_docs() if family == "small" else _full_tool_docs()
+    tool_docs = (_brief_tool_docs(disabled_tools) if family == "small"
+                 else _full_tool_docs(disabled_tools))
     tool_block = _tool_call_block(family)
     think_hint = _thinking_hint(family)
     rules      = _rules_section(family)
