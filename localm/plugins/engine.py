@@ -590,6 +590,14 @@ class PluginManager:
         src = Path(source)
         spec0 = parse_spec(src)                       # validate + name (raises)
         name = spec0.name
+        # A third-party plugin must not shadow a built-in command name
+        # (run/serve/config/coder/...). Builtins install via install() from the
+        # trusted store; only arbitrary-source third-party installs are gated.
+        # Reuse the legacy loader's set so the two loaders cannot drift.
+        from localm.plugins.loader import _RESERVED_NAMES
+        if name in _RESERVED_NAMES:
+            raise ValueError(
+                f"plugin name {name!r} clashes with a built-in command")
         dest = self._installed_dir(name)
         if dest.exists():
             if not force:
@@ -623,6 +631,14 @@ class PluginManager:
         src = Path(source)
         spec0 = parse_spec(src)                       # validate manifest + name (raises)
         name = spec0.name
+        # A third-party plugin must not shadow a built-in command name
+        # (run/serve/config/coder/...). Builtins install via install() from the
+        # trusted store; only arbitrary-source third-party installs are gated.
+        # Reuse the legacy loader's set so the two loaders cannot drift.
+        from localm.plugins.loader import _RESERVED_NAMES
+        if name in _RESERVED_NAMES:
+            raise ValueError(
+                f"plugin name {name!r} clashes with a built-in command")
         dest = self._installed_dir(name)
         if dest.exists():
             if not force:
