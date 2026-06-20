@@ -955,12 +955,26 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
     # ---------------------------------------------------------------- #
 
     @app.post("/v1/completions", dependencies=[Depends(_require_auth)])
-    async def completions(req: CompletionRequest):
+    async def completions(req: CompletionRequest, request: Request):
         if _engine is None:
             raise HTTPException(503, "No model loaded")
 
-        # Wrap the prompt as a single user message so the chat backend handles it
+        # Wrap the prompt as a single user message so raw completions flow through
+        # the SAME chat-pipeline hooks and audit/transcript as
+        # /v1/chat/completions (B17). Otherwise this is a parallel, unguarded,
+        # unaudited path to the model: plugin safety/transform inlet/stream/outlet
+        # hooks never fire and nothing is recorded.
         messages = [{"role": "user", "content": req.prompt}]
+
+        pipeline = getattr(request.app.state, "chat_pipeline", None)
+        ctx = None
+        if pipeline is not None:
+            ctx = ChatHookContext(
+                model_id=req.model, stream=req.stream,
+                request_id=make_chunk_id(),
+            )
+            if pipeline.has("inlet"):
+                messages = await pipeline.run_inlet(messages, ctx)
 
         gen_kwargs = dict(
             max_tokens=req.max_tokens,
@@ -975,19 +989,29 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
 
         if req.stream:
             return StreamingResponse(
-                _stream_sse_completion(_engine, req.prompt, req.model, _inference_sem, **gen_kwargs),
+                _stream_sse_completion(_engine, messages, req.model, _inference_sem,
+                                       audit=_audit, transcript=_transcript,
+                                       pipeline=pipeline, ctx=ctx, **gen_kwargs),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
 
         loop = asyncio.get_running_loop()
-        prompt_tokens = _engine.count_tokens(req.prompt)
+        # Count tokens on the (possibly inlet-transformed) messages - what
+        # inference actually sees, matching the chat path.
+        prompt_tokens = _engine.count_tokens(_messages_prompt_text(messages))
 
         def _run():
             return "".join(_engine.chat_stream(messages, **gen_kwargs))
 
         async with _inference_sem:
             text = await loop.run_in_executor(None, _run)
+
+        # Outlet fully controls the returned content in the non-streaming path;
+        # then record the exchange (audit + transcript), exactly like chat.
+        if pipeline is not None and ctx is not None and pipeline.has("outlet"):
+            text = await pipeline.run_outlet(text, messages, ctx)
+        _audit_exchange(_audit, _transcript, messages, text)
 
         completion_tokens = _engine.count_tokens(text)
         ts  = int(time.time())
@@ -1056,6 +1080,17 @@ def _last_user_text(messages: list) -> str:
             return " ".join(p.get("text", "") for p in (content or [])
                             if isinstance(p, dict) and p.get("type") == "text")
     return ""
+
+
+def _messages_prompt_text(messages: list) -> str:
+    """Flatten chat messages to plain text for prompt token counting (text parts
+    of multimodal content included; non-text parts ignored)."""
+    return " ".join(
+        m.get("content") if isinstance(m.get("content"), str)
+        else " ".join(p.get("text", "") for p in (m.get("content") or [])
+                      if p.get("type") == "text")
+        for m in messages
+    )
 
 
 def _audit_exchange(audit, transcript, messages: list, reply: str) -> None:
@@ -1218,15 +1253,20 @@ async def _stream_sse(
 
 async def _stream_sse_completion(
     engine: Engine,
-    prompt: str,
+    messages: list,
     model_id: str,
     sem: asyncio.Semaphore,
+    audit=None,
+    transcript=None,
+    pipeline=None,
+    ctx=None,
     **gen_kwargs,
 ) -> AsyncIterator[str]:
-    messages = [{"role": "user", "content": prompt}]
     chunk_id = make_chunk_id()
     ts = int(time.time())
-    prompt_tokens = engine.count_tokens(prompt)
+    # *messages* arrive already inlet-transformed; count tokens on what
+    # inference sees (matches the chat path).
+    prompt_tokens = engine.count_tokens(_messages_prompt_text(messages))
 
     loop = asyncio.get_running_loop()
     token_queue: asyncio.Queue[str | None] = asyncio.Queue()
@@ -1253,6 +1293,10 @@ async def _stream_sse_completion(
                 break
             if first_token_at is None:
                 first_token_at = time.perf_counter()
+            # Stream hook transforms each piece before it is recorded and sent,
+            # so usage and the audit trail reflect what the client receives.
+            if pipeline is not None and ctx is not None and pipeline.has("stream"):
+                token = pipeline.run_stream(token, ctx)
             completion_parts.append(token)
             chunk = {
                 "id": chunk_id, "object": "text_completion.chunk",
@@ -1264,7 +1308,15 @@ async def _stream_sse_completion(
         t.join()
         gen_elapsed = time.perf_counter() - gen_start
 
-    completion_tokens = engine.count_tokens("".join(completion_parts))
+    streamed = "".join(completion_parts)
+    # Outlet shapes only the recorded reply (the live stream already went out);
+    # then record the exchange (audit + transcript), exactly like chat.
+    reply = streamed
+    if pipeline is not None and ctx is not None and pipeline.has("outlet"):
+        reply = await pipeline.run_outlet(streamed, messages, ctx)
+    _audit_exchange(audit, transcript, messages, reply)
+
+    completion_tokens = engine.count_tokens(streamed)
     done = {
         "id": chunk_id, "object": "text_completion.chunk",
         "created": ts, "model": model_id,
