@@ -7,10 +7,25 @@ values and cross-referencing against llama.h.  The prebuilt is from a commit
 that sits between the introduction of llama_init_from_model and the addition of
 the 'devices' / 'tensor_buft_overrides' fields to llama_model_params.
 
-Verified sizes:
-    llama_model_params   = 56 bytes
-    llama_context_params = 152 bytes
+The ``sizeof`` asserts below guard against editing these definitions wrong; they
+do NOT validate against the loaded DLL (a struct is the same size whatever the
+DLL contains).  The runtime cross-check against the ACTUAL native layout lives in
+``_abi.py`` (``verify_abi``), called from ``_loader.load_lib`` on first load.
+
+Verified NATIVE sizes (against the cpu / vulkan / amd-rocm prebuilts, b1288..b9740):
+    llama_model_params   = 72 bytes
+    llama_context_params = 152 bytes on b1288; 160 bytes on b9682+ (adds a
+                           trailing ``ctx_other`` pointer)
     llama_batch          = 56 bytes (7 pointers + 1 int32 + padding)
+
+upstream appends fields to the params structs several times a quarter with no ABI
+or soname bump, so localm OVER-allocates both by-value params structs (a named
+trailing field for what we know plus a reserved pad) and round-trips
+``*_default_params()`` - we only overwrite the fields we name, so any field we do
+not know keeps its native default and a newer build never reads past our buffer
+in ``llama_load_model_from_file`` / ``llama_init_from_model``. A trailing append
+is therefore harmless; a mid-struct REORDER is caught at load time by
+``_abi.verify_abi``.
 """
 
 from __future__ import annotations
@@ -72,10 +87,16 @@ class LlamaModelParams(ctypes.Structure):
         ("use_extra_bufts",             ctypes.c_bool),
         ("no_host",                     ctypes.c_bool),
         ("no_alloc",                    ctypes.c_bool),
+        # Forward-compat headroom (see the module docstring). The native struct
+        # ends at no_alloc (72 bytes today); we over-allocate so a newer build
+        # that appends trailing fields never reads past our buffer.
+        ("_reserved",                   ctypes.c_uint8 * 32),
     ]
 
-assert ctypes.sizeof(LlamaModelParams) == 72, (
-    f"LlamaModelParams size mismatch: {ctypes.sizeof(LlamaModelParams)} != 72"
+# Self-consistency guard ONLY (this does NOT validate against the DLL - that is
+# _abi.verify_abi). 72 native bytes + 32 reserved = 104.
+assert ctypes.sizeof(LlamaModelParams) == 104, (
+    f"LlamaModelParams size mismatch: {ctypes.sizeof(LlamaModelParams)} != 104"
 )
 
 
@@ -135,10 +156,21 @@ class LlamaContextParams(ctypes.Structure):
         # --- sampler chain hooks ---
         ("samplers",    ctypes.c_void_p),         # [136]
         ("n_samplers",  ctypes.c_uint64),         # [144]
+        # ctx_other was appended upstream after the b1288 build localm's layout
+        # was first probed (present b9682+; absent on older builds, which simply
+        # ignore this trailing field). Naming it keeps the round-trip through
+        # llama_context_default_params() correct on newer builds.
+        ("ctx_other",   ctypes.c_void_p),         # [152] struct llama_context*
+        # Forward-compat headroom (see the module docstring): future trailing
+        # fields land here, keep their native default via the default_params
+        # round-trip, and never cause llama_init_from_model to read past us.
+        ("_reserved",   ctypes.c_uint8 * 64),     # [160]
     ]
 
-assert ctypes.sizeof(LlamaContextParams) == 152, (
-    f"LlamaContextParams size mismatch: {ctypes.sizeof(LlamaContextParams)} != 152"
+# Self-consistency guard ONLY (NOT a check against the DLL - that is
+# _abi.verify_abi). 152 native bytes + 8 (ctx_other) + 64 reserved = 224.
+assert ctypes.sizeof(LlamaContextParams) == 224, (
+    f"LlamaContextParams size mismatch: {ctypes.sizeof(LlamaContextParams)} != 224"
 )
 
 
