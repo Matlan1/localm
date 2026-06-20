@@ -51,30 +51,42 @@ def _is_loopback_host(host: str) -> bool:
         return False
 
 
-def _index_html_with_key(key: str) -> str:
-    """The SPA shell, optionally seeding *key* into localStorage so a fresh
-    loopback launch is not locked out when require_auth is on (the C1 keystone).
+def _index_html_with_shell_token(token: str) -> str:
+    """The SPA shell, optionally seeding the per-process open-mode *token* (the
+    shell token) as a JS global so a loopback launch can still perform management
+    when no API key is configured. The protected-mode API key is NOT injected
+    here - the shell route sets it as an HttpOnly cookie instead, so it never
+    reaches page JS / localStorage (S2). An empty *token* injects nothing.
 
-    The key is embedded only in same-origin HTML served to a trusted loopback
-    client: a cross-origin page cannot read another origin's document or its
-    localStorage, so this is not a new exposure beyond local filesystem access to
-    auth.key. An empty *key* injects nothing (open mode, or a non-loopback LAN
-    client)."""
+    The token is embedded only in same-origin HTML served to a trusted loopback
+    client and is a short-lived per-process secret, not the durable API key."""
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-    if not key:
+    if not token:
         return html
     # json.dumps escapes quotes/backslashes; also escape "<" so the value can
-    # never break out of the <script> element (defence in depth - keys are
-    # operator-set and URL-safe, but the value still lands inside a script tag).
-    snippet = ("<script>try{localStorage.setItem('localm.apiKey',"
-               + json.dumps(key).replace("<", "\\u003c")
-               + ")}catch(e){}</script>")
+    # never break out of the <script> element (defence in depth).
+    snippet = ("<script>window.__LOCALM_SHELL_TOKEN__="
+               + json.dumps(token).replace("<", "\\u003c")
+               + ";</script>")
     lower = html.lower()
     i = lower.find("<head>")
     if i != -1:
         cut = i + len("<head>")
         return html[:cut] + snippet + html[cut:]
     return snippet + html
+
+
+def _set_session_cookies(response, key: str, *, secure: bool) -> None:
+    """Set the S2 auth cookies on *response*: the HttpOnly ``localm_session``
+    cookie (the API key, unreadable by page JS) plus a readable ``localm_csrf``
+    token for double-submit CSRF. Names match http_server's SESSION_COOKIE /
+    CSRF_COOKIE."""
+    import secrets as _secrets
+    from localm.inference.http_server import CSRF_COOKIE, SESSION_COOKIE
+    response.set_cookie(SESSION_COOKIE, key, httponly=True, secure=secure,
+                        samesite="strict", path="/")
+    response.set_cookie(CSRF_COOKIE, _secrets.token_urlsafe(32), httponly=False,
+                        secure=secure, samesite="strict", path="/")
 
 
 # ------------------------------------------------------------------ #
@@ -430,22 +442,29 @@ def attach_gui(
     @app.get("/index.html", include_in_schema=False)
     async def _gui_index(request: Request):
         from localm import auth
-        key = auth.get_api_key() or ""
-        if not key:
-            # Open mode: seed the per-process shell token so the loopback SPA can
-            # still perform management (H5). app.js sends it as the bearer; the
-            # server accepts it only for management routes in open mode. A real
-            # key, once set, takes precedence and is seeded instead.
-            key = getattr(request.app.state, "shell_token", "") or ""
         # Only a loopback BIND (the default `localm gui`, reachable solely from
-        # this machine) auto-seeds the key/token. We deliberately do NOT trust
+        # this machine) auto-seeds anything. We deliberately do NOT trust
         # request.client.host: behind a same-host reverse proxy it reads as
-        # loopback for REMOTE users, which would leak it. A non-loopback bind
-        # (e.g. -H 0.0.0.0) never seeds - enter the key in the page instead, and
-        # open-mode management is unavailable there (set a key).
-        if key and not _is_loopback_host(getattr(request.app.state, "bind_host", "127.0.0.1")):
-            key = ""
-        return HTMLResponse(_index_html_with_key(key))
+        # loopback for REMOTE users, which would leak the secret. A non-loopback
+        # bind (e.g. -H 0.0.0.0) seeds nothing - the user enters the key in the
+        # page, which POSTs it to /api/session to set the session cookie.
+        loopback = _is_loopback_host(
+            getattr(request.app.state, "bind_host", "127.0.0.1"))
+        key = auth.get_api_key() or ""
+        if key and loopback:
+            # Protected mode on loopback: establish the HttpOnly session cookie
+            # directly so the key never touches page JS / localStorage (S2).
+            resp = HTMLResponse(_index_html_with_shell_token(""))
+            _set_session_cookies(resp, key, secure=request.url.scheme == "https")
+            return resp
+        if not key and loopback:
+            # Open mode on loopback: seed the per-process shell token as a JS
+            # global so the loopback SPA can still manage (H5). app.js sends it
+            # as a bearer HEADER (the open-mode gate is header-based); it is
+            # never persisted.
+            token = getattr(request.app.state, "shell_token", "") or ""
+            return HTMLResponse(_index_html_with_shell_token(token))
+        return HTMLResponse(_index_html_with_shell_token(""))
 
     app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="gui")
 

@@ -1103,7 +1103,7 @@ async function refreshKeysPanel() {
 
 async function refreshSettingsPage() {
   const myToken = ++_settingsRenderToken;
-  $("gui-api-key").value = localStorage.getItem("localm.apiKey") || "";
+  $("gui-api-key").value = "";   // HttpOnly key is unreadable; field is for entry only
   refreshPairingQR();
   refreshKeysPanel();
   const form = $("config-form");
@@ -1167,10 +1167,16 @@ $("config-save").onclick = async () => {
   }
 };
 
-$("gui-key-save").onclick = () => {
+$("gui-key-save").onclick = async () => {
   const key = $("gui-api-key").value.trim();
-  if (key) localStorage.setItem("localm.apiKey", key);
-  else localStorage.removeItem("localm.apiKey");
+  if (key) {
+    await loginWithKey(key);   // POST /api/session -> server sets the HttpOnly cookie
+  } else {
+    // Empty -> sign out (clear the session cookie).
+    try {
+      await fetch("/api/session/logout", { method: "POST", headers: authHeaders() });
+    } catch (e) { /* offline / already cleared */ }
+  }
   toast("Key saved - reloading");
   setTimeout(() => location.reload(), 600);
 };
