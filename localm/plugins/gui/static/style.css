@@ -959,6 +959,18 @@ pre:hover .copy-btn { opacity: 1; }
   width: 100%; max-width: 320px; border-radius: 8px; background: #000;
   display: block; margin: 4px 0;
 }
+/* Settings -> API keys */
+.key-scopes { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; }
+.key-scope { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.key-scope input { width: auto; margin: 0; }
+.keys-list { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+.key-row { display: flex; align-items: center; gap: 8px; }
+.key-row .name { font-weight: 600; }
+.key-scope-tags { flex: 1; font-size: 12px; opacity: 0.8; }
+.key-secret { margin-top: 10px; }
+.key-secret-value {
+  font-family: var(--mono); font-size: 12px; margin: 4px 0; width: 100%;
+}
 .modal-body .log-entry {
   font-family: var(--mono); font-size: 12px; padding: 4px 0;
   border-bottom: 1px solid var(--border); word-break: break-word;
