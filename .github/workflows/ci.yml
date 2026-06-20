@@ -3,6 +3,11 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
+  schedule:
+    # Weekly drift check of the hand-written llama.cpp ctypes binding against the
+    # MOVING upstream release the cpu/vulkan/cuda backends track. Mon 06:00 UTC.
+    - cron: "0 6 * * 1"
 
 permissions:
   contents: read
@@ -53,3 +58,47 @@ jobs:
       - name: Lint (ruff)
         continue-on-error: true
         run: ruff check .
+
+  # Validate the hand-written ctypes binding against the ACTUAL upstream binary.
+  # Heavy (downloads the cpu prebuilt) and checks a MOVING upstream target, so it
+  # runs weekly + on manual dispatch only, not on every push. Per-push coverage of
+  # the binding lives in the offline unit tests (test_llamacpp_abi.py,
+  # test_check_llama_abi.py) on the job above.
+  abi-check:
+    name: native llama.cpp ABI drift
+    runs-on: windows-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e "."
+
+      # Header-level drift: diff our struct offsets against the latest upstream
+      # llama.h. A mid-struct reorder/insert exits non-zero here.
+      - name: Header ABI diff vs latest upstream release
+        shell: bash
+        run: python scripts/check_llama_abi.py --ref latest
+
+      # Binary-level drift: provision the real cpu prebuilt (GPU-free, loads on a
+      # plain runner). setup-llama load-tests it, which runs verify_abi; the
+      # explicit report below fails the job on a proven mismatch.
+      - name: Provision cpu prebuilt and verify ABI against the real binary
+        shell: bash
+        run: |
+          python -m localm setup-llama --backend cpu --yes
+          python - <<'PY'
+          import sys
+          from localm.inference.backends.llamacpp._abi import abi_report
+          v = abi_report()
+          print("ABI status:", v.status, "| detail:", v.detail)
+          for f in v.failures:
+              print("  -", f)
+          sys.exit(1 if v.status == "mismatch" else 0)
+          PY

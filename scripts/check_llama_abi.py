@@ -49,6 +49,27 @@ _STRUCTS = ("llama_model_params", "llama_context_params", "llama_batch")
 #  Header acquisition
 # --------------------------------------------------------------------------- #
 
+def _resolve_ref(ref: str) -> str:
+    """Resolve ``latest`` to the newest upstream release tag (for CI drift checks);
+    any other value is used as-is. Falls back to the pin if the lookup fails."""
+    if ref != "latest":
+        return ref
+    import json
+    api = f"https://api.github.com/repos/{_REPO}/releases/latest"
+    try:
+        req = urllib.request.Request(
+            api, headers={"User-Agent": "localm-abi-check",
+                          "Accept": "application/vnd.github+json"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            tag = json.loads(r.read().decode("utf-8")).get("tag_name")
+        if tag:
+            return tag
+    except Exception as e:  # noqa: BLE001
+        print(f"  (could not resolve latest tag, using {LLAMA_ABI_REF}: {e})",
+              file=sys.stderr)
+    return LLAMA_ABI_REF
+
+
 def _fetch_header(ref: str) -> str:
     """Fetch llama.h for *ref*, trying the modern include/ path then the old root."""
     last_err = None
@@ -225,7 +246,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ref", default=LLAMA_ABI_REF,
-                    help=f"upstream tag/commit/branch (default {LLAMA_ABI_REF})")
+                    help=f"upstream tag/commit/branch, or 'latest' to resolve the "
+                         f"newest release (default {LLAMA_ABI_REF})")
     ap.add_argument("--header", default=None,
                     help="path to a local llama.h instead of fetching")
     args = ap.parse_args()
@@ -234,8 +256,9 @@ def main() -> int:
         header = Path(args.header).read_text(encoding="utf-8", errors="replace")
         print(f"Checking localm structs against header: {args.header}")
     else:
-        print(f"Checking localm structs against {_REPO}@{args.ref}")
-        header = _fetch_header(args.ref)
+        ref = _resolve_ref(args.ref)
+        print(f"Checking localm structs against {_REPO}@{ref}")
+        header = _fetch_header(ref)
 
     total = 0
     for s in _STRUCTS:
