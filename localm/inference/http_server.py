@@ -373,12 +373,29 @@ def create_app(engine: Engine) -> FastAPI:
         localm server and which instance/project it serves. Unauthenticated like
         /health; never returns the attach token or pid. Fields are set on
         app.state by the surface's advertise() wrapper (None before startup
-        wiring, e.g. an app mounted standalone in tests)."""
+        wiring, e.g. an app mounted standalone in tests).
+
+        root_dir is an absolute host path that can carry the OS username, so it is
+        disclosed only on a loopback bind and omitted over the network. Discovery
+        matches root_dir from the 0600 registry file (not from /whoami), so this
+        omission breaks nothing (security review 2026-06-20)."""
         from localm import instances
         st = request.app.state
+        root = getattr(st, "root_dir", None)
+        if root is not None:
+            bind = getattr(st, "bind_host", "127.0.0.1")
+            loopback = bind in ("127.0.0.1", "localhost", "::1")
+            if not loopback:
+                try:
+                    import ipaddress
+                    loopback = ipaddress.ip_address(bind).is_loopback
+                except ValueError:
+                    loopback = False
+            if not loopback:
+                root = None
         return instances.whoami_payload(
             instance_id=getattr(st, "instance_id", None),
-            root_dir=getattr(st, "root_dir", None),
+            root_dir=root,
             mode=getattr(st, "instance_mode", None),
         )
 

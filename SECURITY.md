@@ -28,9 +28,13 @@ Manage the key from the CLI: `localm key show` / `generate` / `set` / `clear`, a
 mint named, scope-limited keys with `localm key create --scope <scope>` (privileged
 scopes are never minted into a named key).
 
-Because the default is fail-open for reads, **do not bind localm to a non-localhost
-interface without setting an API key** (and ideally TLS - see `docs/tls.md`).
-Exposing the GUI also exposes the coder agent, which can run shell commands.
+Because the default is fail-open for reads, a network bind without a key is unsafe,
+so **both `localm gui` and `localm serve` refuse to bind past loopback unless an API
+key is set** (printing how to set one). `--insecure` overrides this for a trusted,
+isolated network - it then serves unauthenticated, the GUI's coder agent included. A
+network bind also gets built-in TLS automatically (see `docs/tls.md`), so the key and
+all traffic are encrypted. Exposing the GUI exposes the coder agent, which can run
+shell commands.
 
 ### State-changing endpoints
 
