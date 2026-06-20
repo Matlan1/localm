@@ -1593,9 +1593,25 @@ def add_local(
         )
         return False
 
+    # A directly-supplied split-GGUF part (e.g. `localm add big-00002-of-00002.gguf`)
+    # must be normalised: llama.cpp needs *-00001-of-N to load the whole set, so the
+    # registry key drops the -NNNNN-of-NNNNN suffix (-> "big") and the stored path
+    # points at the first part. Mirrors the folder branch (_add_local_gguf_dir) and
+    # the read-time normalisation in get_model_info.
+    split_base: Optional[str] = None
+    if is_gguf:
+        split = _SPLIT_GGUF_RE.match(p.name)
+        if split and split_gguf_parts(p.name):
+            split_base = split.group("stem")
+            first = first_split_part(p.name)
+            if first != p.name:
+                first_path = p.parent / first
+                if first_path.is_file():
+                    p = first_path
+
     # Sanitize the user-supplied -n name (GAP-CLI-1): never let '../evil' or
     # 'a/b' become a raw registry key. p.stem is already path-component-safe.
-    model_name = _sanitize_name(name) if name else p.stem
+    model_name = _sanitize_name(name) if name else (split_base or p.stem)
     kind = "hf" if is_hf else "local"
 
     if is_blob:
