@@ -998,10 +998,114 @@ async function refreshPairingQR() {
   }
 }
 
+// Non-privileged scopes offered in the GUI key minter (label per scope). The
+// /v1/keys API refuses privileged scopes (admin/keys:admin/plugins:admin/
+// config:write) for a non-owner anyway; mint those from the CLI if ever needed.
+const KEY_SCOPES = [
+  ["coder", "Coder agent - restricted: read + edit this project (no shell)"],
+  ["models:read", "List and inspect models"],
+  ["models:write", "Load, download, or remove models"],
+  ["rag", "Knowledge (RAG)"],
+  ["chat", "Chat history"],
+  ["image", "Image generation"],
+  ["music", "Music generation"],
+  ["video", "Video generation"],
+  ["voice", "Voice"],
+  ["web", "Web access"],
+  ["mcp", "MCP"],
+];
+
+// Settings -> API keys: mint named, scope-limited keys, list them, revoke them.
+// Owner-gated (/v1/keys needs keys:admin); the card hides for a non-owner key.
+async function refreshKeysPanel() {
+  const card = $("keys-card"), list = $("keys-list"), scopesBox = $("key-scopes");
+  if (!card || !list || !scopesBox) return;
+
+  if (!scopesBox.childElementCount) {           // render the checkboxes once
+    for (const [scope, label] of KEY_SCOPES) {
+      const lab = el("label", "key-scope");
+      const cb = document.createElement("input");
+      cb.type = "checkbox"; cb.value = scope; cb.className = "key-scope-cb";
+      lab.appendChild(cb);
+      lab.appendChild(document.createTextNode(" " + label));
+      scopesBox.appendChild(lab);
+    }
+  }
+
+  let keys = [];
+  try {
+    const r = await fetch("/v1/keys", { headers: authHeaders() });
+    if (!r.ok) { card.style.display = "none"; return; }  // 401/403 -> not the owner
+    card.style.display = "";
+    keys = (await r.json()).keys || [];
+  } catch (e) { card.style.display = "none"; return; }
+
+  list.replaceChildren();
+  if (!keys.length) {
+    list.appendChild(el("div", "sub", "No named keys yet."));
+  }
+  for (const k of keys) {
+    const row = el("div", "key-row");
+    row.appendChild(el("span", "name", k.name || k.id));
+    row.appendChild(el("span", "mono key-scope-tags", (k.scopes || []).join(", ")));
+    const rm = el("button", "btn-quiet", "Revoke");
+    rm.onclick = async () => {
+      if (!confirm(`Revoke key "${k.name || k.id}"?`)) return;
+      const d = await fetch(`/v1/keys/${encodeURIComponent(k.id)}`,
+                            { method: "DELETE", headers: authHeaders() });
+      if (d.ok) { toast("Key revoked"); refreshKeysPanel(); }
+      else { toast("Revoke failed"); }
+    };
+    row.appendChild(rm);
+    list.appendChild(row);
+  }
+
+  $("key-create").onclick = async () => {
+    const name = ($("key-name").value || "").trim();
+    if (!name) { toast("Enter a key name"); return; }
+    const scopes = [...scopesBox.querySelectorAll(".key-scope-cb")]
+      .filter((c) => c.checked).map((c) => c.value);
+    if (!scopes.length) { toast("Pick at least one capability"); return; }
+    let r;
+    try {
+      r = await fetch("/v1/keys", {
+        method: "POST",
+        headers: { ...authHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({ name, scopes }),
+      });
+    } catch (e) { toast("Create failed"); return; }
+    if (!r.ok) {
+      const e = await r.json().catch(() => ({}));
+      toast(e.detail || "Create failed"); return;
+    }
+    const made = await r.json();
+    const box = $("key-secret");
+    box.replaceChildren();
+    box.appendChild(el("div", "sub", `New key "${made.name}" `
+      + `(${(made.scopes || []).join(", ")}) - copy it now, it is shown only once:`));
+    const secret = document.createElement("input");
+    secret.type = "text"; secret.readOnly = true; secret.value = made.key;
+    secret.className = "key-secret-value";
+    box.appendChild(secret);
+    const copy = el("button", "btn-quiet", "Copy");
+    copy.onclick = () => {
+      secret.select();
+      if (navigator.clipboard) navigator.clipboard.writeText(made.key);
+      toast("Copied");
+    };
+    box.appendChild(copy);
+    box.style.display = "";
+    $("key-name").value = "";
+    scopesBox.querySelectorAll(".key-scope-cb").forEach((c) => { c.checked = false; });
+    refreshKeysPanel();
+  };
+}
+
 async function refreshSettingsPage() {
   const myToken = ++_settingsRenderToken;
   $("gui-api-key").value = localStorage.getItem("localm.apiKey") || "";
   refreshPairingQR();
+  refreshKeysPanel();
   const form = $("config-form");
   let fields;
   try {
