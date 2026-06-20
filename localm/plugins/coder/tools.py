@@ -1097,8 +1097,12 @@ def _detect_test_runner(cwd: Path) -> list[str]:
     if (cwd / "package.json").exists():
         lock = "yarn" if (cwd / "yarn.lock").exists() else "npm"
         return [lock, "test", "--passWithNoTests"]
-    # Python - prefer pytest; fall back to unittest
-    return ["python", "-m", "pytest", "--tb=short", "-q", "--no-header"]
+    # Python - prefer pytest; fall back to unittest. Use the SAME interpreter that
+    # runs localm (sys.executable), not a bare "python" off PATH - on many machines
+    # PATH `python` is a different env (uv/conda/system) without pytest or the
+    # project deps, which made run_tests report "No module named pytest" on a suite
+    # that passes under the project venv.
+    return [sys.executable, "-m", "pytest", "--tb=short", "-q", "--no-header"]
 
 
 def tool_run_tests(
@@ -1123,7 +1127,7 @@ def tool_run_tests(
     if runner == "auto":
         cmd = _detect_test_runner(cwd)
     elif runner == "pytest":
-        cmd = ["python", "-m", "pytest", "--tb=short", "-q", "--no-header"]
+        cmd = [sys.executable, "-m", "pytest", "--tb=short", "-q", "--no-header"]
     elif runner == "cargo":
         cmd = ["cargo", "test", "--color=never"]
     elif runner == "go":
