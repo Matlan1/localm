@@ -189,6 +189,16 @@ class TestDetectTestRunner:
         cmd = _detect_test_runner(tmp_path)
         assert "pytest" in " ".join(cmd)
 
+    def test_python_runner_uses_current_interpreter(self, tmp_path):
+        # Regression: the pytest runner must invoke sys.executable (the interpreter
+        # running localm), NOT a bare "python" off PATH. On machines where PATH
+        # `python` is a different env (uv/conda/system) without pytest, a bare
+        # "python -m pytest" reports "No module named pytest" on a passing suite.
+        import sys
+        cmd = _detect_test_runner(tmp_path)
+        assert cmd[0] == sys.executable
+        assert cmd[1:3] == ["-m", "pytest"]
+
     def test_detects_cargo_for_rust(self, tmp_path):
         (tmp_path / "Cargo.toml").write_text('[package]\nname = "x"\n')
         cmd = _detect_test_runner(tmp_path)
