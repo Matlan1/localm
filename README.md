@@ -751,6 +751,3 @@ In short: you may use, study, modify, and redistribute localm freely, including
 commercially. But if you redistribute it, or run a modified version as a network
 service, you must make the complete corresponding source available to your users
 under the same license. This keeps localm, and anything built on top of it, open.
-
-A separate commercial license (for terms other than the AGPL, such as embedding
-localm in a closed-source product) is available on request.
