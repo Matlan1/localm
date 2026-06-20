@@ -39,6 +39,14 @@ class TestValidateUpdate:
         with pytest.raises(ValueError, match="not a boolean"):
             ss.validate_update({"n_ctx": True})
 
+    def test_gpu_layers_out_of_range(self):
+        # n_gpu_layers had min=0 but no max, so an absurd value (1111) sailed
+        # through to the native layer and surfaced as a misleading "repair
+        # llama" error. It now has a ceiling.
+        with pytest.raises(ValueError, match="above the maximum"):
+            ss.validate_update({"n_gpu_layers": 1111})
+        assert ss.validate_update({"n_gpu_layers": 99}) == {"n_gpu_layers": 99}
+
     def test_toggle_coercion(self):
         assert ss.validate_update({"require_auth": "true"}) == {"require_auth": True}
         assert ss.validate_update({"require_auth": "false"}) == {"require_auth": False}
@@ -197,3 +205,18 @@ class TestPatchConfig:
         r = client.patch("/v1/config", json={"n_gpu_layers": "20"})
         assert r.status_code == 200
         assert client.get("/v1/config").json()["n_gpu_layers"] == 20
+
+    def test_gpu_layers_out_of_range_400(self, client):
+        r = client.patch("/v1/config", json={"n_gpu_layers": 1111})
+        assert r.status_code == 400
+        assert "maximum" in r.text
+
+
+class TestGpuLayersCliRange:
+    def test_run_rejects_out_of_range_gpu_layers(self, cli_runner):
+        from localm.cli import main
+        result = cli_runner.invoke(main, ["run", "-g", "1111", "dummy-model"])
+        assert result.exit_code != 0
+        # The IntRange ceiling (1000) appears in the error only post-fix; pre-fix
+        # the bare type=int accepted 1111 and failed later on model resolution.
+        assert "1000" in result.output

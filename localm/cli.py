@@ -157,7 +157,7 @@ def main() -> None:
 @click.option("-m", "--max-tokens",   default=None,  type=int,   help="Max tokens to generate.")
 @click.option("-t", "--temperature",  default=None,  type=float, help="Sampling temperature.")
 @click.option("-c", "--ctx",          default=None,  type=int,   help="Context window (GGUF only).")
-@click.option("-g", "--gpu-layers",   default=None,  type=int,   help="GPU layers (GGUF only, 99=all).")
+@click.option("-g", "--gpu-layers",   default=None,  type=click.IntRange(0, 1000),   help="GPU layers (GGUF only, 99=all).")
 @click.option("--mmproj",             default=None,
               help="Multimodal projection GGUF path (reserved; GGUF vision is "
                    "not yet implemented - the backend is text-only).")
@@ -658,7 +658,7 @@ def _save_chat(messages: list, filepath: str) -> None:
 @click.option("-p", "--port",        default=None,        type=click.IntRange(1, 65535),
               help="Port [default: config 'port' (8642); auto-bumps when busy].")
 @click.option("-c", "--ctx",         default=None,        type=int)
-@click.option("-g", "--gpu-layers",  default=None,        type=int)
+@click.option("-g", "--gpu-layers",  default=None,        type=click.IntRange(0, 1000))
 @click.option("--mmproj",            default=None)
 @click.option("--device",            default=None)
 @click.option("--no-tls", is_flag=True,
@@ -828,7 +828,7 @@ def serve(model, host, port, ctx, gpu_layers, mmproj, device, no_tls, tls_cert,
 @click.option("--prompts", default="64,512,2048", show_default=True,
               help="Comma-separated approximate prompt sizes in tokens.")
 @click.option("-c", "--ctx",        default=None, type=int)
-@click.option("-g", "--gpu-layers", default=None, type=int)
+@click.option("-g", "--gpu-layers", default=None, type=click.IntRange(0, 1000))
 def benchmark(model, gen_tokens, prompts, ctx, gpu_layers):
     """Measure TTFT and generation throughput at increasing prompt lengths.
 
