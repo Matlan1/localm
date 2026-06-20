@@ -77,6 +77,11 @@ chatlogs_errorlogs/
 # See AGENTS.md "Protected local paths".
 issues/
 
+# Local by-hand test campaign: the exhaustive feature matrix, results, plans,
+# recorder, and throwaway test-instance scratch. Local-only working data (like
+# issues/), kept out of git. Lives in qa/ (moved out of issues/).
+qa/
+
 # Native llama.cpp binaries - provisioned locally by `localm setup-llama`,
 # never committed (large, GPU/platform-specific, license-encumbered).
 runtime/localm_llama_runtime/lib/*
