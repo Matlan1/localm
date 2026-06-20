@@ -841,6 +841,13 @@ def tool_spawn_agent(
         auto_approve=True,
         parent=_parent_agent,
         mode=inherited_mode,
+        # A child must be no MORE capable than its parent: inherit the restriction
+        # and disabled tools so a restricted session cannot spawn a child that
+        # re-enables run_shell etc. - that would be an RCE escape from a shareable
+        # key. (spawn_agent is itself disabled for a restricted session, so this is
+        # belt-and-suspenders.)
+        restricted=getattr(_parent_agent, "restricted", False),
+        disabled_tools=getattr(_parent_agent, "disabled_tools", frozenset()),
     )
     result_text = child.run_task(full_task)
     turns_used  = child.turns
@@ -1353,6 +1360,22 @@ class ToolDef:
     description: str
     params:      dict
     destructive: bool = False
+
+
+# The ONLY tools a RESTRICTED (shareable, non-owner) coder session may use: an
+# allowlist, so a newly-added tool is denied to a restricted key by default. These
+# read the project or edit files WITHIN the confined cwd; NONE spawn a process, run
+# code, hit the network, read the environment, or re-enter the agent. Everything
+# else - run_shell/run_tests (RCE; a planted conftest runs), git_commit/git_push
+# (git hooks run), web_search/fetch_url (network), generate_image, read_env
+# (secret disclosure), spawn_agent, and every dynamically-registered MCP/plugin/
+# skill tool - is disabled for a restricted session. So a key you hand out can read
+# and edit this project, but cannot execute anything; you review and run.
+SAFE_RESTRICTED_TOOLS: frozenset[str] = frozenset({
+    "read_file", "list_dir", "tree", "grep", "search_files",
+    "write_file", "edit_file", "patch_file", "search_replace", "edit_notebook_cell",
+    "git_status", "git_diff", "git_log",
+})
 
 
 TOOL_REGISTRY: dict[str, ToolDef] = {
