@@ -90,6 +90,7 @@ qa/
 # at the repo root or in docs/. The filename globs are a backstop for stray files.
 dev-notes/
 scratch/
+_qa_scratch/
 *.worklog
 *.workorder
 *-worklog.md
