@@ -97,22 +97,41 @@ function scrubMarkers(text) {
 function renderMarkdown(target, text) {
   const { think, open, rest: rawRest } = splitThink(scrubMarkers(text));
   const rest = formatToolCalls(rawRest);
-  target.innerHTML = "";
+
+  // Think block: update IN PLACE rather than rebuilding it every token. The old
+  // code wiped target.innerHTML on each streamed chunk and recreated the
+  // <details>, which reset its open/closed state every tick - so the reasoning
+  // bubble could not be toggled WHILE the model was working. Keeping the same
+  // element lets the user open/collapse it mid-stream and have that stick.
+  // Default: open while still thinking, collapse once done - until the user
+  // clicks it (data-userset), after which their choice is left alone.
+  let det = target.querySelector("details.think-block");
   if (think) {
-    const det = document.createElement("details");
-    det.className = "think-block";
-    if (open) det.open = true;
-    const sum = document.createElement("summary");
-    sum.textContent = open ? "Thinking…" : "Thoughts";
-    det.appendChild(sum);
-    const body = document.createElement("div");
-    body.innerHTML = DOMPurify.sanitize(marked.parse(think));
-    det.appendChild(body);
-    target.appendChild(det);
+    if (!det) {
+      det = document.createElement("details");
+      det.className = "think-block";
+      const sum = document.createElement("summary");
+      sum.addEventListener("click", () => { det.dataset.userset = "1"; });
+      det.appendChild(sum);
+      det.appendChild(document.createElement("div"));
+      target.insertBefore(det, target.firstChild);
+    }
+    det.querySelector("summary").textContent = open ? "Thinking…" : "Thoughts";
+    det.querySelector("div").innerHTML = DOMPurify.sanitize(marked.parse(think));
+    if (!det.dataset.userset) det.open = open;
+  } else if (det) {
+    det.remove();
   }
-  const main = document.createElement("div");
+
+  // Main content lives in its own container so refreshing it never disturbs the
+  // think block (and its toggle state) above it.
+  let main = target.querySelector(".md-main");
+  if (!main) {
+    main = document.createElement("div");
+    main.className = "md-main";
+    target.appendChild(main);
+  }
   main.innerHTML = DOMPurify.sanitize(marked.parse(rest || ""));
-  while (main.firstChild) target.appendChild(main.firstChild);
   // LaTeX math: $...$, $$...$$, \(...\), \[...\]. KaTeX only rewrites text
   // nodes after sanitisation, so this stays XSS-safe.
   if (typeof renderMathInElement !== "undefined") {
@@ -1618,6 +1637,56 @@ $("chat-file").addEventListener("change", (e) => {
   e.target.value = "";
 });
 
+// Dedicated camera button (mobile): opens the camera directly to attach a photo.
+// The OS file picker on the attach button already offers camera + gallery, but a
+// one-tap "take a photo" makes the phone feel like a real input, not a website.
+{
+  const cam = $("chat-camera"), camFile = $("chat-camera-file");
+  if (cam && camFile) {
+    cam.onclick = () => camFile.click();
+    camFile.addEventListener("change", (e) => {
+      addAttachedFiles(e.target.files);
+      e.target.value = "";
+    });
+  }
+}
+
+/** Ingest images shared INTO localm from the phone's share sheet (PWA share
+ *  target). The server stashed them; we pull them as chat attachments and then
+ *  clear the server inbox. Text/links shared in drop into the composer. */
+async function ingestSharedFiles() {
+  let items;
+  try {
+    const r = await fetch("/api/share/pending", { headers: authHeaders() });
+    if (!r.ok) return;
+    items = (await r.json()).items || [];
+  } catch (e) { return; }
+  if (!items.length) return;
+  const ids = [];
+  let imgs = 0;
+  for (const it of items) {
+    ids.push(it.id);
+    if ((it.type || "").startsWith("image/")) {
+      chat.attachments.push({ name: it.name, dataUri: it.data_uri });
+      imgs++;
+    } else if (it.data_uri) {
+      try {
+        const txt = decodeURIComponent(escape(atob(it.data_uri.split(",", 2)[1] || "")));
+        const ta = $("chat-input");
+        if (ta) { ta.value = (ta.value ? ta.value + "\n" : "") + txt; autoGrow(ta); }
+      } catch (e) { /* not decodable text */ }
+    }
+  }
+  renderAttachChips();
+  // We have the data client-side now; clear the server inbox.
+  fetch("/api/share/clear", {
+    method: "POST",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({ ids }),
+  }).catch(() => {});
+  if (imgs) toast(`${imgs} image${imgs > 1 ? "s" : ""} shared into chat`);
+}
+
 /** Drag-and-drop files anywhere on the chat view to attach them, with a
  *  highlight while a file is hovering. Only reacts to file drags (not text
  *  selections), and preventDefault stops the browser opening the dropped file. */
@@ -2129,7 +2198,7 @@ let pluginState = [];
 
 // Each plugin's manifest icon name -> the nav emoji. Kernel buttons keep their
 // own emoji in index.html; "studio" is the media parent.
-const NAV_ICON = { chat: "💬", code: "⚙️", image: "🖼️", music: "🎵", video: "🎬", book: "📚" };
+const NAV_ICON = { chat: "💬", code: "⚙️", image: "🖼️", music: "🎵", video: "🎬", book: "📚", clock: "⏰" };
 // Canonical rail order of first-party plugin tabs (stable so the rail does not
 // reshuffle as plugins toggle); "studio" is the media slot (image/music/video).
 const NAV_TAB_ORDER = ["coder", "studio", "knowledge"];
@@ -3465,6 +3534,14 @@ async function openFilesModal() {
       row.appendChild(document.createTextNode(
         `${f.path} - ${f.writes} write(s)` + (f.exists ? "" : " (deleted since)")));
       row.onclick = () => showDiff(f.path);
+      // Download the file itself (pull coder output onto this device / phone).
+      // Only for files that still exist on disk.
+      if (f.exists) {
+        const dl = el("button", "btn-quiet file-dl", "download");
+        dl.title = "Download this file to your device";
+        dl.onclick = (ev) => { ev.stopPropagation(); downloadCoderFile(s, f.path); };
+        row.appendChild(dl);
+      }
       body.appendChild(row);
     }
     const all = el("button", "btn-quiet", "full session diff");
@@ -3472,6 +3549,31 @@ async function openFilesModal() {
     body.appendChild(all);
     body.appendChild(diffBox);
   });
+}
+
+/** Download one coder-created/changed file to this device (a phone, say). Fetched
+ *  with auth so it works behind a key; saved via a blob so the OS "save file"
+ *  flow runs. The server confines the download to tracked, in-root files. */
+async function downloadCoderFile(s, path) {
+  try {
+    const r = await fetch(
+      `/api/coder/sessions/${s.info.id}/files/download?path=` +
+      encodeURIComponent(path), { headers: authHeaders() });
+    if (!r.ok) {
+      const e = await r.json().catch(() => ({}));
+      throw new Error(e.detail || r.statusText);
+    }
+    const blob = await r.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = path.split(/[\\/]/).pop() || "file";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(a.href);
+  } catch (e) {
+    toast("Download failed: " + e.message, true);
+  }
 }
 
 /** Download the active session's feed as markdown (explicit user action -
@@ -4027,7 +4129,16 @@ reattachSessions();
   const params = new URLSearchParams(location.search);
   const pullSpec = params.get("pull");      // from `localm gui --pull SPEC`
   const viewParam = params.get("view");
-  if (pullSpec || viewParam) {
+  const sharedTo = params.get("shared");    // from the PWA share target (phone)
+  if (sharedTo) {
+    // A phone shared image(s) into localm: land on chat and ingest them.
+    history.replaceState(null, "", location.pathname);
+    setTimeout(() => {
+      if (window.__localmLocked) return;
+      showView("chat");
+      ingestSharedFiles();
+    }, 0);
+  } else if (pullSpec || viewParam) {
     // Strip the query so a reload doesn't restart the download.
     history.replaceState(null, "", location.pathname);
     setTimeout(() => {

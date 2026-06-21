@@ -27,10 +27,38 @@ class _RecordingLoad:
         return 1   # truthy ggml_backend_reg_t
 
 
+class _FakeFn:
+    """A callable with a settable ``restype`` (ctypes function-pointer shape),
+    returning whatever ``impl`` produces. Records its call count."""
+
+    def __init__(self, impl):
+        self.restype = None
+        self.argtypes = None
+        self._impl = impl
+        self.calls = 0
+
+    def __call__(self, *a):
+        self.calls += 1
+        return self._impl(*a)
+
+
 class _FakeLib:
-    def __init__(self, with_loader: bool):
+    def __init__(self, with_loader: bool = False, dev_count=None,
+                 load_all_registers: bool = False):
         if with_loader:
             self.ggml_backend_load = _RecordingLoad()
+        # When dev_count is given, expose ggml_backend_dev_count. If
+        # load_all_registers, it reports 0 until ggml_backend_load_all() runs,
+        # then the post-load count (so the loader can confirm success).
+        self._registered = bool(dev_count) and not load_all_registers
+        self._post = dev_count if dev_count is not None else 0
+        if dev_count is not None:
+            self.ggml_backend_dev_count = _FakeFn(
+                lambda: self._post if self._registered else 0)
+        if load_all_registers:
+            def _load_all():
+                self._registered = True
+            self.ggml_backend_load_all = _FakeFn(_load_all)
 
 
 def _touch(d, names):
@@ -68,3 +96,27 @@ def test_no_backends_when_dir_empty(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "platform", "win32")
     # Loader symbol present but no plugin files -> nothing registered, no error.
     assert _loader._register_ggml_backends(tmp_path, _FakeLib(with_loader=True)) is False
+
+
+def test_already_registered_skips_probing(tmp_path, monkeypatch):
+    # The bundled AMD build self-registers: a device is already present. We must
+    # NOT then call ggml_backend_load on the ggml-* libs (that probe is what
+    # printed the bogus "failed to find ggml_backend_init in ggml-cpu.dll").
+    monkeypatch.setattr(sys, "platform", "win32")
+    _touch(tmp_path, ["ggml-base.dll", "ggml.dll", "ggml-cpu.dll",
+                      "ggml-hip.dll", "llama.dll"])
+    lib = _FakeLib(with_loader=True, dev_count=2)   # a GPU + CPU already present
+    assert _loader._register_ggml_backends(tmp_path, lib) is True
+    assert lib.ggml_backend_load.calls == [], \
+        "must not probe ggml-* plugins when backends are already registered"
+
+
+def test_load_all_used_when_nothing_registered(tmp_path, monkeypatch):
+    # No device registered yet -> prefer the build's own ggml_backend_load_all
+    # discovery; once it registers a device we stop (no per-path probing).
+    monkeypatch.setattr(sys, "platform", "win32")
+    _touch(tmp_path, ["ggml-base.dll", "ggml.dll", "ggml-cpu.dll", "llama.dll"])
+    lib = _FakeLib(with_loader=True, dev_count=2, load_all_registers=True)
+    assert _loader._register_ggml_backends(tmp_path, lib) is True
+    assert lib.ggml_backend_load_all.calls == 1
+    assert lib.ggml_backend_load.calls == [], "load_all succeeded; no per-path probe"

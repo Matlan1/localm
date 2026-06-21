@@ -252,7 +252,7 @@ nav button.active { background: var(--accent-soft); color: var(--accent); }
 .cmdk-item.sel { background: var(--accent-soft); color: var(--accent); }
 
 /* Settings: performance sliders + VRAM estimate */
-#perf-card input[type="range"] { width: 100%; margin: 4px 0 12px; accent-color: var(--accent); }
+#sec-performance input[type="range"] { width: 100%; margin: 4px 0 12px; accent-color: var(--accent); }
 .perf-estimate { font-variant-numeric: tabular-nums; margin: 4px 0 2px; }
 .perf-estimate.perf-warn { color: var(--yellow); }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); }
@@ -725,19 +725,47 @@ pre:hover .copy-btn { opacity: 1; }
 .card .actions { margin-top: 14px; display: flex; gap: 10px; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 14px; }
 
-/* schema-driven settings: a vertical stack of per-group sections, each a
-   2-column field grid with a full-width heading. */
+/* Settings: a left section nav + a content area that shows one section (tab) at
+   a time. Each core group and each plugin is its own section with its own Save. */
+.settings-layout { display: flex; gap: 20px; align-items: flex-start; }
+.settings-nav {
+  position: sticky; top: 12px; flex: 0 0 192px;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.settings-nav-link {
+  text-align: left; background: transparent; border: 0; color: var(--text-dim);
+  padding: 8px 12px; border-radius: 8px; cursor: pointer;
+  font: inherit; font-size: 13.5px; width: 100%;
+}
+.settings-nav-link:hover { background: var(--bg-input); color: var(--text); }
+.settings-nav-link.active {
+  background: var(--accent-soft); color: var(--accent); font-weight: 600;
+}
+.settings-content { flex: 1 1 auto; min-width: 0; }
 #config-form { display: block; }
-.settings-group {
-  display: grid; grid-template-columns: 1fr 1fr; gap: 4px 14px;
-  margin-bottom: 22px;
+.settings-section { display: none; }
+.settings-section.active { display: block; }
+.settings-section.sec-hidden { display: none !important; }
+.settings-section-head {
+  margin: 0 0 4px; font-size: 15px;
+  border-bottom: 1px solid var(--border); padding-bottom: 8px;
 }
-.settings-group-head {
-  grid-column: 1 / -1; margin: 8px 0 4px;
-  font-size: 14px; color: var(--text-dim);
-  border-bottom: 1px solid var(--border); padding-bottom: 6px;
+.settings-fields {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 4px 14px; margin-top: 10px;
 }
-.settings-group .sub { margin: 0 0 10px; font-size: 12px; }
+.settings-fields .sub { margin: 0 0 10px; font-size: 12px; }
+/* An auto-detected path shown in a blank "Blank = auto-detect" field: greyed so
+   it reads as "this is what would be used", not a value you typed. */
+input.auto-detected { color: var(--text-dim); font-style: italic; }
+
+/* Camera button: only useful on a device with a camera + touch (a phone). The
+   attach button already offers camera+gallery on mobile via the OS picker, so
+   hide the dedicated one on a mouse-pointer (desktop) device to avoid clutter. */
+.chat-camera { display: none; }
+@media (pointer: coarse) { .chat-camera { display: inline-flex; } }
+
+/* "download" button on a coder changed-file row (pull output onto a phone). */
+.file-dl { margin-left: 8px; }
 
 /* download progress bar (model pull) */
 .dl-progress { margin-top: 12px; }
@@ -1185,7 +1213,14 @@ pre:hover .copy-btn { opacity: 1; }
 
   /* Stack 2-column form grids into one column. */
   .grid2,
-  .settings-group { grid-template-columns: 1fr; }
+  .settings-fields { grid-template-columns: 1fr; }
+
+  /* Settings nav stacks above the content and wraps as a row of chips. */
+  .settings-layout { flex-direction: column; }
+  .settings-nav {
+    position: static; flex-basis: auto; flex-direction: row; flex-wrap: wrap;
+  }
+  .settings-nav-link { width: auto; }
 
   /* Let row inputs + their buttons wrap instead of overflowing the card. */
   .card .row { flex-wrap: wrap; }

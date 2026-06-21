@@ -83,45 +83,69 @@ class SettingField:
 # Order = display order. `owner != "core"` flags keys that migrate to a plugin.
 CORE_FIELDS: list = [
     # ---- Engine ----
-    SettingField("binary_dir", Widget.FOLDER, "llama.cpp binary dir",
-                 "Folder containing llama.dll / ggml. Blank = auto-detect.",
+    SettingField("binary_dir", Widget.FOLDER, "llama.cpp binary folder",
+                 "Folder holding llama.dll / ggml libraries. Leave blank to use "
+                 "the bundled runtime; the auto-detected path is shown so you can "
+                 "see what is in use, and you only set this to point at a custom "
+                 "build.",
                  group="Engine", applies=Applies.NEXT_LOAD),
     SettingField("n_ctx", Widget.NUMBER, "Context window (initial)",
-                 "Starting context size; grows on demand.",
+                 "How many tokens of history the model starts with. It grows on "
+                 "demand up to the maximum below.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=512, step=512),
     SettingField("n_ctx_max", Widget.NUMBER, "Context window (max)",
-                 "Ceiling the window may grow to (0 = unlimited).",
+                 "The largest the context window may grow to (0 = unlimited). "
+                 "Bigger needs more VRAM.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=0, step=512),
     SettingField("n_ctx_grow", Widget.NUMBER, "Context growth step",
+                 "When the window fills up, it expands by this many tokens at a "
+                 "time rather than all at once.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=256, step=256),
     SettingField("ctx_auto", Widget.TOGGLE, "Auto-size context from VRAM",
+                 "Pick the context ceiling from free GPU memory when the model "
+                 "loads, instead of always using the fixed maximum above.",
                  group="Engine", applies=Applies.NEXT_LOAD),
     SettingField("n_gpu_layers", Widget.NUMBER, "GPU layers",
-                 "99 = offload everything to GPU.",
+                 "How many model layers to run on the GPU. 99 puts the whole "
+                 "model on the GPU; lower it if you run out of VRAM.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=0, max=1000),
     SettingField("import_max_depth", Widget.NUMBER, "Folder import depth",
                  "How many subfolder levels `localm add <dir>` scans for models.",
                  group="Models", min=1, max=10, step=1),
     # ---- Sampling ----
     SettingField("temperature", Widget.NUMBER, "Temperature",
+                 "Randomness of replies. Lower is more focused and repeatable; "
+                 "higher is more varied and creative.",
                  group="Sampling", min=0, max=2, step=0.05),
-    SettingField("top_p", Widget.NUMBER, "top_p",
+    SettingField("top_p", Widget.NUMBER, "Top-p (nucleus sampling)",
+                 "Consider only the most likely tokens whose probabilities add up "
+                 "to this fraction. 1.0 turns it off.",
                  group="Sampling", min=0, max=1, step=0.05),
-    SettingField("top_k", Widget.NUMBER, "top_k", group="Sampling", min=0, step=1),
+    SettingField("top_k", Widget.NUMBER, "Top-k",
+                 "Consider only the k most likely tokens at each step. 0 turns it "
+                 "off.",
+                 group="Sampling", min=0, step=1),
     SettingField("repeat_penalty", Widget.NUMBER, "Repeat penalty",
+                 "How strongly to discourage repeating tokens already used. 1.0 "
+                 "is no penalty; higher reduces loops.",
                  group="Sampling", min=0, step=0.05),
     SettingField("max_tokens", Widget.NUMBER, "Max tokens per reply",
+                 "Upper limit on tokens generated per reply, a runaway guard "
+                 "rather than a target. Thinking models need plenty of room.",
                  group="Sampling", min=1, step=1),
     # ---- Server ----
     SettingField("port", Widget.NUMBER, "Server port",
-                 "Default 8642; auto-bumps if busy.",
+                 "Port the API/GUI server binds to. Default 8642; it auto-bumps "
+                 "to the next free port if that one is busy.",
                  group="Server", applies=Applies.RESTART, min=1, max=65535, step=1),
     SettingField("cors_origins", Widget.TEXT, "CORS origins",
-                 'Blank = localhost only; a comma list of origins; or "*".',
+                 "Browser origins allowed to call the API. Blank = localhost "
+                 'only; a comma-separated list of origins; or "*" for any.',
                  group="Server", applies=Applies.RESTART),
     # ---- Security ----
     SettingField("require_auth", Widget.TOGGLE, "Require an API key",
-                 "Refuse requests until a key is configured (fail closed).",
+                 "Refuse every request until an API key is configured (fail "
+                 "closed). Required before exposing localm on a network.",
                  group="Security", applies=Applies.RESTART),
     # ---- Interface ----
     # HIDDEN: chosen with the logo picker in the GUI (Settings -> GUI), not a
@@ -132,19 +156,28 @@ CORE_FIELDS: list = [
                  group="General"),
     # ---- Privacy ----
     SettingField("mode", Widget.SELECT, "Session persistence",
-                 "privacy = nothing saved; log = JSONL audit; full = log + transcript.",
+                 "What localm saves: privacy = nothing written automatically; "
+                 "log = a JSONL audit trail; full = log plus a chat transcript.",
                  group="Privacy", options=_PRIVACY),
-    SettingField("chat_mode", Widget.SELECT, "Chat persistence",
-                 "Overrides the global mode for chat. Blank = inherit.",
+    SettingField("chat_mode", Widget.SELECT, "Chat persistence override",
+                 "Overrides the global persistence for chat only. Blank inherits "
+                 "the global mode above.",
                  group="Privacy", options=_PRIVACY_INHERIT),
-    SettingField("coder_mode", Widget.SELECT, "Coder persistence",
-                 "Overrides the global mode for the coder. Blank = inherit.",
+    SettingField("coder_mode", Widget.SELECT, "Coder persistence override",
+                 "Overrides the global persistence for the coder only. Blank "
+                 "inherits the global mode.",
                  group="Privacy", owner="coder", options=_PRIVACY_INHERIT),
     # ---- Models ----
     SettingField("confirm_remove", Widget.TOGGLE,
-                 "Confirm before deleting models", group="Models"),
+                 "Confirm before deleting models",
+                 "Ask for confirmation before `localm rm` deletes a model's "
+                 "files on disk.",
+                 group="Models"),
     SettingField("autoprune_missing_models", Widget.TOGGLE,
-                 "Auto-remove registry entries for missing files", group="Models"),
+                 "Auto-remove entries for missing files",
+                 "When a registered model's file has gone, delete its registry "
+                 "entry automatically instead of flagging it as missing.",
+                 group="Models"),
     # ---- Plugins ----
     SettingField("suggest_plugins", Widget.TOGGLE,
                  "Suggest installing a plugin for its command",
@@ -161,8 +194,10 @@ CORE_FIELDS: list = [
                  group="Plugins"),
     # ---- Coder (plugin) ----
     SettingField("coder_confirm_timeout", Widget.NUMBER,
-                 "Coder approval timeout (s)", group="Coder", owner="coder",
-                 min=0, step=10),
+                 "Coder approval timeout (s)",
+                 "Seconds a coder approval card waits for an answer before it is "
+                 "auto-rejected and the agent moves on (0 = wait forever).",
+                 group="Coder", owner="coder", min=0, step=10),
     SettingField("coder_tool_grammar", Widget.TOGGLE,
                  "Grammar-constrain coder tool calls (experimental)",
                  "Force valid tool-call JSON via a GBNF grammar. Only takes effect on "
@@ -171,21 +206,42 @@ CORE_FIELDS: list = [
                  "tool-only output, so leave off unless you know you want that.",
                  group="Coder", owner="coder", applies=Applies.NEXT_LOAD),
     # ---- ComfyUI (image / music / video plugins) ----
-    SettingField("comfy_launch_cmd", Widget.TEXT, "ComfyUI launch command",
+    SettingField("comfy_workdir", Widget.FOLDER, "ComfyUI folder",
+                 "Your ComfyUI install directory. localm runs from here, "
+                 "auto-detects a launcher inside it when no launch command is "
+                 "set, and derives the output folder from it. The single setting "
+                 "most setups need.",
                  group="ComfyUI", owner="image"),
-    SettingField("comfy_workdir", Widget.FOLDER, "ComfyUI working dir",
-                 "Blank runs the launch command from the launcher file's own "
-                 "folder (the ComfyUI / ZLUDA convention).",
+    SettingField("comfy_launch_cmd", Widget.TEXT, "ComfyUI launch command",
+                 "Command or launcher script (.bat/.sh) that starts ComfyUI. "
+                 "Leave blank to let localm auto-detect a launcher in the ComfyUI "
+                 "folder above; set it only to force a specific launcher.",
+                 group="ComfyUI", owner="image"),
+    SettingField("comfy_api_url", Widget.TEXT, "ComfyUI API URL",
+                 "Where ComfyUI is listening. Blank uses the FLUX_API_URL "
+                 "environment variable if set, else http://127.0.0.1:8188.",
                  group="ComfyUI", owner="image"),
     SettingField("comfy_launch_timeout", Widget.NUMBER,
                  "ComfyUI launch timeout (s)",
                  "How long to wait for ComfyUI after launching it. A ZLUDA / "
                  "ROCm cold start compiles kernels and can take minutes.",
                  group="ComfyUI", owner="image", min=30, step=30),
-    SettingField("comfy_output_dir", Widget.FOLDER, "ComfyUI output dir",
+    SettingField("comfy_output_dir", Widget.FOLDER, "ComfyUI output folder",
+                 "ComfyUI's own output directory. Set it so localm can delete "
+                 "ComfyUI's duplicate copy after a generation; blank derives it "
+                 "from the ComfyUI folder.",
+                 group="ComfyUI", owner="image"),
+    SettingField("comfy_fast_dequant", Widget.TOGGLE,
+                 "Fast GGUF dequant (fp16)",
+                 "Rewrite a slow float32 GGUF dequant to fp16/bf16 when a Flux "
+                 "workflow is submitted. float32 doubles the model size in VRAM "
+                 "and is the usual cause of very slow generation on smaller cards.",
                  group="ComfyUI", owner="image"),
     SettingField("reload_llm_after_imagine", Widget.TOGGLE,
                  "Reload chat model after generating",
+                 "After an image is made, free the image model's VRAM and reload "
+                 "the chat model so the next reply is instant. Turn off when "
+                 "generating many images in a row.",
                  group="ComfyUI", owner="image"),
     SettingField("model_swap_policy", Widget.SELECT, "Media VRAM swap",
                  "auto = keep chat loaded when the media model fits alongside it; "
@@ -195,28 +251,42 @@ CORE_FIELDS: list = [
                  options=["auto", "always", "never"]),
     # ---- Network (web plugin) ----
     SettingField("net_mode", Widget.SELECT, "Network access",
-                 "off = blocked; ask = per-request approval; allow = no prompt.",
+                 "Model-initiated web access: off = blocked; ask = approve each "
+                 "request; allow = no prompt.",
                  group="Network", owner="web", options=["off", "ask", "allow"]),
     SettingField("net_allow", Widget.LIST, "Allowed domains",
-                 "Empty = any. e.g. example.com (covers *.example.com).",
+                 "Domains the model may reach. Empty = any. e.g. example.com "
+                 "(also covers *.example.com).",
                  group="Network", owner="web"),
     SettingField("net_deny", Widget.LIST, "Denied domains",
+                 "Domains always refused, even if allowed above (deny wins). "
+                 "Empty = none.",
                  group="Network", owner="web"),
     SettingField("net_allow_private", Widget.TOGGLE,
                  "Allow private/loopback targets (disables the SSRF guard)",
+                 "Permit requests to localhost and private IP ranges. Off by "
+                 "default because it is a common server-side request forgery "
+                 "(SSRF) vector; only enable for a trusted local setup.",
                  group="Network", owner="web"),
     SettingField("net_search_url", Widget.TEXT, "Search backend URL",
-                 "SearXNG JSON URL; blank = DuckDuckGo.",
+                 "A SearXNG JSON search endpoint for web search. Blank uses "
+                 "DuckDuckGo (no key needed).",
                  group="Network", owner="web"),
     # ---- Voice (plugin) ----
     SettingField("voice_stt_model", Widget.SELECT, "Speech-to-text model",
+                 "Whisper model size for the microphone button. Larger is more "
+                 "accurate but slower and uses more memory.",
                  group="Voice", owner="voice",
                  options=["tiny", "base", "small", "medium"]),
-    SettingField("voice_stt_language", Widget.TEXT, "STT language",
-                 "Blank = auto-detect; or en, de, ...",
+    SettingField("voice_stt_language", Widget.TEXT, "Speech-to-text language",
+                 "Force a language for transcription, e.g. en or de. Blank "
+                 "auto-detects from the audio.",
                  group="Voice", owner="voice"),
     # ---- Abliterate (plugin) ----
     SettingField("heretic_path", Widget.FOLDER, "Heretic checkout path",
+                 "Folder of a Heretic checkout for the abliterate plugin (a "
+                 "separate program run via subprocess). Blank auto-detects, or "
+                 "localm offers to clone it.",
                  group="Advanced", owner="abliterate"),
 ]
 
@@ -370,7 +440,12 @@ def fields_by_owner(owner: str) -> list:
 
 def schema_json(values: Optional[dict] = None) -> list:
     """Serialize the core schema, injecting each non-secret field's current
-    default from DEFAULT_CONFIG (or *values* if given). The GUI renders this."""
+    default from DEFAULT_CONFIG (or *values* if given). The GUI renders this.
+
+    Auto-detect fields also carry an ``auto`` value: the path localm would
+    resolve when the field is left blank, so the GUI can SHOW it (filled, greyed)
+    instead of an empty box that hides what is actually in use. Today only
+    ``binary_dir`` resolves one (the bundled llama.cpp runtime)."""
     from localm.config import DEFAULT_CONFIG
     base = DEFAULT_CONFIG if values is None else values
     out = []
@@ -378,5 +453,12 @@ def schema_json(values: Optional[dict] = None) -> list:
         d = f.to_json()
         if not f.secret and f.key in base:
             d["default"] = base[f.key]
+        if f.key == "binary_dir":
+            try:
+                from localm.config import find_binary_dir
+                resolved = find_binary_dir()
+                d["auto"] = str(resolved) if resolved else ""
+            except Exception:
+                d["auto"] = ""
         out.append(d)
     return out

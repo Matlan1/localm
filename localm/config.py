@@ -103,6 +103,15 @@ DEFAULT_CONFIG: dict = {
     # When set, the duplicate ComfyUI keeps after generation is deleted so the
     # only copy is the one localm saved.
     "comfy_output_dir": None,
+    # ComfyUI base URL localm talks to. None/blank uses the FLUX_API_URL env
+    # override when set, else http://127.0.0.1:8188 (the ComfyUI default).
+    "comfy_api_url": None,
+    # Rewrite a slow `dequant_dtype: "float32"` in a Flux GGUF UNet loader to the
+    # fast default (fp16/bf16) when the workflow is submitted. float32 dequant
+    # doubles the unpacked model size and forces CPU offload on a VRAM-limited
+    # card - the ~36 s/it vs ~6-7 s/it gap. True (default) auto-corrects it; set
+    # False to submit your workflow's dequant choice verbatim.
+    "comfy_fast_dequant": True,
     # Session persistence mode for ALL surfaces (chat, server, GUI, coder):
     #   privacy = no traces written automatically (default)
     #   log     = JSONL audit trail in ~/.localm/sessions/

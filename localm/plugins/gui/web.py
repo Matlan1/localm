@@ -24,7 +24,8 @@ import queue
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, Response, StreamingResponse
+from fastapi.responses import (HTMLResponse, RedirectResponse, Response,
+                               StreamingResponse)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -109,6 +110,77 @@ class RemoveModelRequest(BaseModel):
 class AliasRequest(BaseModel):
     model: str
     alias: str
+
+
+class ShareClearRequest(BaseModel):
+    ids: list[str] = []
+
+
+# Image types accepted from a phone share-sheet into the chat composer.
+_SHARE_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".heic", ".heif"}
+
+
+def _share_inbox() -> Path:
+    """Transient inbox for files shared INTO localm from a phone (PWA share
+    target). Lives under the data dir; entries are deleted once the app ingests
+    them, so it never accumulates."""
+    from localm.config import home_dir
+    d = home_dir() / "share_inbox"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _multipart_boundary(content_type: str) -> "bytes | None":
+    """The boundary token from a multipart/form-data Content-Type, or None."""
+    if "multipart/form-data" not in (content_type or "").lower():
+        return None
+    for part in content_type.split(";"):
+        part = part.strip()
+        if part.lower().startswith("boundary="):
+            b = part[len("boundary="):].strip().strip('"')
+            return b.encode("latin-1") if b else None
+    return None
+
+
+def _disp_param(disposition: bytes, key: bytes) -> "bytes | None":
+    """Value of a Content-Disposition parameter, e.g. name= or filename=."""
+    token = key + b'="'
+    i = disposition.find(token)
+    if i == -1:
+        return None
+    i += len(token)
+    j = disposition.find(b'"', i)
+    return disposition[i:j] if j != -1 else None
+
+
+def _parse_multipart(body: bytes, boundary: bytes):
+    """Minimal multipart/form-data parser - no python-multipart dependency, in
+    keeping with localm's self-contained rule (it already hand-builds multipart
+    for ComfyUI uploads). Returns (fields: dict[str,str], files: list of
+    (filename, content_type, data))."""
+    fields: dict = {}
+    files: list = []
+    for raw in body.split(b"--" + boundary):
+        part = raw.strip(b"\r\n")
+        if not part or part == b"--":
+            continue                       # preamble / closing delimiter
+        head, sep, data = part.partition(b"\r\n\r\n")
+        if not sep:
+            continue
+        headers: dict = {}
+        for line in head.split(b"\r\n"):
+            k, _, v = line.partition(b":")
+            headers[k.strip().lower()] = v.strip()
+        disposition = headers.get(b"content-disposition", b"")
+        name = _disp_param(disposition, b"name")
+        filename = _disp_param(disposition, b"filename")
+        if filename is not None:
+            ctype = headers.get(b"content-type", b"application/octet-stream")
+            files.append((filename.decode("utf-8", "replace"),
+                          ctype.decode("latin-1"), data))
+        elif name is not None:
+            fields[name.decode("utf-8", "replace")] = data.decode("utf-8", "replace")
+    return fields, files
 
 
 # ------------------------------------------------------------------ #
@@ -442,6 +514,84 @@ def attach_gui(
     # Knowledge / RAG (/api/rag/*) moved to the builtin "rag" plugin
     # (localm/plugins/builtin/rag) in Phase 3; it ships disabled by default and
     # reaches the shared job manager + self-embed URL via request.app.state.
+
+    # -------------------- Web Share Target (PWA) ------------------ #
+    # The phone shares an image (or text/link) from any app INTO localm via the
+    # OS share sheet (manifest "share_target"). The browser POSTs it to
+    # /share-target; we stash it in a transient server inbox and bounce back to
+    # the app, which ingests the images as chat attachments and clears the inbox.
+    # This makes phone content actually reach the model, not just "open a link".
+
+    @app.post("/share-target", dependencies=[Depends(_require_auth)],
+              include_in_schema=False)
+    async def share_target(request: Request):
+        import uuid as _uuid
+        boundary = _multipart_boundary(request.headers.get("content-type", ""))
+        if boundary is None:
+            raise HTTPException(400, "Expected a multipart/form-data share")
+        body = await request.body()
+        fields, files = _parse_multipart(body, boundary)
+        inbox = _share_inbox()
+        n = 0
+        for filename, _ctype, data in files:
+            if not data:
+                continue
+            # Only images are ingested (the chat vision path); ignore other types.
+            if Path(filename or "").suffix.lower() not in _SHARE_IMAGE_EXTS:
+                continue
+            safe = Path(filename or "shared").name[:80] or "shared"
+            (inbox / f"{_uuid.uuid4().hex}__{safe}").write_bytes(data)
+            n += 1
+        shared_text = (fields.get("text") or fields.get("url") or "").strip()
+        if shared_text:
+            (inbox / f"{_uuid.uuid4().hex}__shared.txt").write_text(
+                shared_text[:20000], encoding="utf-8")
+            n += 1
+        # 303 so the browser GETs the app shell (a POST-redirect-GET); the app
+        # reads ?shared and pulls the inbox.
+        return RedirectResponse(url=f"/?shared={n}", status_code=303)
+
+    @app.get("/api/share/pending", dependencies=[Depends(_require_auth)])
+    async def share_pending():
+        """Pending shared files as data URIs, for the app to ingest as chat
+        attachments. Does not delete - the app calls /api/share/clear after it
+        has the data, so a failed fetch does not lose the share."""
+        import base64
+        import mimetypes as _mt
+        inbox = _share_inbox()
+        items = []
+        for p in sorted(inbox.glob("*__*")):
+            if not p.is_file():
+                continue
+            fid, _, name = p.name.partition("__")
+            mime = _mt.guess_type(name)[0] or "application/octet-stream"
+            try:
+                data = p.read_bytes()
+            except OSError:
+                continue
+            items.append({
+                "id": fid, "name": name, "type": mime,
+                "data_uri": f"data:{mime};base64," + base64.b64encode(data).decode(),
+            })
+        return {"items": items}
+
+    @app.post("/api/share/clear", dependencies=[Depends(_require_auth)])
+    async def share_clear(req: ShareClearRequest):
+        """Delete shared inbox entries the app has ingested. With no ids, clears
+        all. The id is matched as a filename prefix (no path is built from it),
+        so it cannot traverse out of the inbox."""
+        inbox = _share_inbox()
+        keep = set(req.ids)
+        removed = 0
+        for p in inbox.glob("*__*"):
+            fid = p.name.partition("__")[0]
+            if not req.ids or fid in keep:
+                try:
+                    p.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+        return {"removed": removed}
 
     # ------------------------- static ----------------------------- #
     # Mounted last: API routes above take precedence over the SPA files.

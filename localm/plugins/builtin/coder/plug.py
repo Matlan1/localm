@@ -34,7 +34,7 @@ import queue
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from localm.pathsafe import confined_file as _confined_file
@@ -331,6 +331,33 @@ async def session_files_diff(session_id: str, request: Request, path: str = ""):
     if path and not diff:
         raise HTTPException(404, f"'{path}' was not changed this session")
     return {"diff": diff}
+
+
+@_router.get("/api/coder/sessions/{session_id}/files/download")
+async def session_file_download(session_id: str, request: Request, path: str = ""):
+    """Download one file the agent created/changed this session.
+
+    For pulling coder output onto a phone (or any client). Restricted to files
+    the session's change tracker recorded AND confined to the session root, so
+    it is NOT an arbitrary-file-read primitive - an untracked path, an escaping
+    path, or a since-deleted file is refused."""
+    session = _get_session(request, session_id)
+    if not path:
+        raise HTTPException(400, "path is required")
+    tracked = {f["path"] for f in session.changed_files()}
+    if path not in tracked:
+        raise HTTPException(404, f"'{path}' was not changed this session")
+    try:
+        root = Path(session.cwd).resolve()
+        abs_path = (root / path).resolve()
+    except (OSError, ValueError, RuntimeError):
+        raise HTTPException(400, "Invalid path")
+    if abs_path != root and root not in abs_path.parents:
+        raise HTTPException(400, "Path escapes the session root")
+    if not abs_path.is_file():
+        raise HTTPException(404, f"'{path}' no longer exists on disk")
+    return FileResponse(str(abs_path), filename=abs_path.name,
+                        media_type="application/octet-stream")
 
 
 @_router.post("/api/coder/sessions/{session_id}/stop")

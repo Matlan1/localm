@@ -134,7 +134,7 @@
   "30": {
     "inputs": {
       "unet_name": "flux1-dev-Q8_0.gguf",
-      "dequant_dtype": "float32",
+      "dequant_dtype": "default",
       "patch_dtype": "default",
       "patch_on_device": false
     },
