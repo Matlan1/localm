@@ -33,6 +33,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
+from localm.debuglog import logger
+
 APP_NAME = "localm"
 
 # Markers that identify a project root, walked up from cwd (decision 2). Mirrors
@@ -195,10 +197,20 @@ def set_mode(home: Path, instance_id: str, mode: str) -> bool:
 
 
 def read_entry(path) -> Optional[dict]:
+    """Read one registry entry, or None. A MISSING file (FileNotFoundError) is
+    normal and returns None silently; a CORRUPT or unreadable file
+    (JSONDecodeError/OSError) ALSO collapses to None but is logged first, so a
+    reap that deletes a live-but-unreadable entry is at least discoverable under
+    --debug instead of looking identical to "no such file"."""
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else None
-    except Exception:
+    except FileNotFoundError:
+        return None  # missing entry is the normal case; do not log
+    except (json.JSONDecodeError, OSError) as e:
+        # Surface (not silence) a corrupt/permission-denied entry before it gets
+        # treated as missing and potentially reaped while the process is live.
+        logger.warning("registry entry %s unreadable: %s", path, e)
         return None
 
 
@@ -232,7 +244,11 @@ def pid_alive(pid: int) -> bool:
         try:
             import psutil
             return psutil.pid_exists(pid)
-        except Exception:
+        except Exception as e:
+            # Conservative: keep returning True (a broken psutil must never reap a
+            # live instance), but log so --debug users can see WHY stale entries
+            # are persisting rather than silently disabling reaping.
+            logger.debug("psutil check failed (%s); assuming pid alive - reaping disabled", e)
             return True   # cannot determine -> assume alive (do not reap)
     try:
         os.kill(pid, 0)
@@ -305,8 +321,15 @@ def _try_whoami(scheme: str, port: int, instance_id: Optional[str],
     try:
         from localm.tls import requests_verify
         verify = requests_verify(url)
-    except Exception:
+    except FileNotFoundError:
+        # CA file genuinely absent: verify=False is the intended best-effort path
+        # on 127.0.0.1 (loopback, same machine), so keep it.
         verify = False
+    except Exception as e:
+        # Any OTHER error determining verification is unexpected: do NOT silently
+        # downgrade to unverified HTTPS - treat the instance as unverifiable.
+        logger.debug("could not determine TLS verification for %s: %s; skipping", url, e)
+        return False
     try:
         r = requests.get(url, timeout=timeout, verify=verify)
     except requests.RequestException:

@@ -100,8 +100,10 @@ class EngineCache:
             _log(f"switching model {self._loaded_name} -> {name}")
             try:
                 self._engine.unload()
-            except Exception:
-                pass
+            except Exception as e:
+                # Unload is best-effort (we still load the new model), but a
+                # cleanup failure must be visible, not silently swallowed.
+                _log(f"warning: failed to unload {self._loaded_name}: {e}")
         _log(f"loading model {name}")
         self._engine = self._factory(name)
         self._loaded_name = name

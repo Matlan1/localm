@@ -228,8 +228,11 @@ def mount_gui_surface(app) -> bool:
         from localm import instances
         from localm.config import home_dir
         instances.set_mode(home_dir(), getattr(app.state, "instance_id", ""), "full")
-    except Exception:
-        pass
+    except Exception as e:
+        # The mount already succeeded; this is best-effort registry sync (so
+        # discovery advertises "full" not "api"), not fatal - but now visible.
+        from localm.debuglog import logger as _dbg
+        _dbg.warning("registry mode not updated to full: %s", e)
     return True
 
 
@@ -1034,9 +1037,13 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
     try:
         from localm.plugins.engine import attach_engine
         attach_engine(app, _engine)
-    except Exception:
+    except Exception as e:
+        # Server must still start, but make the loss visible: WARNING (not a buried
+        # debug line) plus a sentinel so plugin_manager being unset is diagnosable.
         from localm.debuglog import logger as _dbg
+        _dbg.warning("plugins unavailable: %s", e)
         _dbg.exception("plugin engine attach failed")
+        app.state.plugin_engine_error = str(e)
 
     return app
 
@@ -1103,7 +1110,11 @@ def _audit_exchange(audit, transcript, messages: list, reply: str) -> None:
         audit.llm(reply)
         if transcript is not None:
             transcript.exchange(user_text, reply)
-    except Exception:
+    except Exception as e:
+        # In log/full mode a failed write silently drops the record; surface it
+        # so the gap is discoverable instead of invisible.
+        from localm.debuglog import logger as _dbg
+        _dbg.warning("audit/transcript write failed: %s; this exchange was not recorded", e)
         pass  # auditing must never break serving
 
 

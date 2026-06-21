@@ -727,12 +727,18 @@ def tool_grep(cwd: Path, pattern: str, path: str = ".", glob: str = "", context:
     results = []
     total_hits = 0
     capped_note = ""
+    unreadable = []  # files we could not read, surfaced below so coverage stays honest
     for file_idx, fp in enumerate(files):
         if not fp.is_file():
             continue
         try:
             lines = fp.read_text(encoding="utf-8", errors="replace").splitlines()
         except Exception:
+            # Record (do not silence) the skip so an incomplete match set is not reported as complete.
+            try:
+                unreadable.append(str(fp.relative_to(cwd)))
+            except ValueError:
+                unreadable.append(str(fp))
             continue
 
         hits = []
@@ -766,10 +772,25 @@ def tool_grep(cwd: Path, pattern: str, path: str = ".", glob: str = "", context:
                     )
                 break
 
+    # Note unreadable files so an incomplete search is not mistaken for complete.
+    unreadable_note = ""
+    if unreadable:
+        shown = ", ".join(unreadable[:20])
+        if len(unreadable) > 20:
+            shown += f", ... (+{len(unreadable) - 20} more)"
+        unreadable_note = (
+            f"\n[{len(unreadable)} file(s) could not be read and were not searched: {shown}]"
+        )
+
     if not results:
-        return ToolResult.success(f"No matches for '{pattern}'", summary="0 matches")
+        msg = f"No matches for '{pattern}'"
+        if unreadable_note:
+            msg += unreadable_note
+        return ToolResult.success(msg, summary="0 matches")
     if capped_note:
         results.append(capped_note)
+    if unreadable_note:
+        results.append(unreadable_note)
 
     output, trunc = _truncate("\n".join(results))
     return ToolResult(
@@ -1307,11 +1328,17 @@ def tool_search_replace(
         if p.is_file() and p.resolve().is_relative_to(cwd_resolved)
     )
     changes: list[tuple[Path, Path, str, int]] = []  # (abs, rel, new_text, count)
+    unreadable: list[str] = []  # files we could not read; a replacement may be left partial
 
     for fp in candidates:
         try:
             text = fp.read_text(encoding="utf-8", errors="replace")
         except Exception:
+            # Record (do not silence) the skip so a partial mutation is not reported as complete.
+            try:
+                unreadable.append(str(fp.relative_to(cwd)))
+            except ValueError:
+                unreadable.append(str(fp))
             continue
         matches = rx.findall(text)
         if not matches:
@@ -1323,9 +1350,21 @@ def tool_search_replace(
             rel = fp
         changes.append((fp, rel, new_text, len(matches)))
 
+    # Warn about unreadable files so the user knows the replacement may be partial
+    # (matches in these files were skipped, not applied) - surface, do not silence.
+    unreadable_note = ""
+    if unreadable:
+        shown = ", ".join(unreadable[:20])
+        if len(unreadable) > 20:
+            shown += f", ... (+{len(unreadable) - 20} more)"
+        unreadable_note = (
+            f"\n[WARNING: {len(unreadable)} file(s) could not be read and were "
+            f"skipped; any matches there were NOT replaced: {shown}]"
+        )
+
     if not changes:
         return ToolResult.success(
-            f"No matches for pattern '{pattern}'.",
+            f"No matches for pattern '{pattern}'.{unreadable_note}",
             summary="search_replace - 0 matches",
         )
 
@@ -1338,7 +1377,7 @@ def tool_search_replace(
 
     if dry_run:
         return ToolResult.success(
-            f"[dry-run] Would replace {total} match(es) in {len(changes)} file(s):\n{report}",
+            f"[dry-run] Would replace {total} match(es) in {len(changes)} file(s):\n{report}{unreadable_note}",
             summary=f"[dry-run] {total} replacement(s) in {len(changes)} file(s)",
         )
 
@@ -1349,7 +1388,7 @@ def tool_search_replace(
             return ToolResult.error(f"Failed to write {rel}: {e}")
 
     return ToolResult.success(
-        f"Replaced {total} match(es) in {len(changes)} file(s):\n{report}",
+        f"Replaced {total} match(es) in {len(changes)} file(s):\n{report}{unreadable_note}",
         summary=f"search_replace: {total} replacement(s) in {len(changes)} file(s)",
     )
 

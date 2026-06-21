@@ -25,6 +25,7 @@ edits the report before sending regardless.
 from __future__ import annotations
 
 import platform
+import re
 import sys
 import threading
 import traceback
@@ -150,12 +151,21 @@ def _format_error(error: Optional[BaseException]) -> str:
     # Drop the home directory (which contains the username) from frame paths so a
     # tester's report does not leak their account name; the file/line structure
     # that matters for debugging is kept.
+    # Guard ONLY the home lookup: if Path.home() raises or is empty we must NOT
+    # ship the raw traceback as if scrubbed (privacy fail), so fail safe and strip
+    # the username with a fallback regex over common home-path prefixes.
+    home = ""
     try:
         home = str(Path.home())
-        if home:
-            tb = tb.replace(home, "~")
     except Exception:
-        pass
+        home = ""
+    if home:
+        tb = tb.replace(home, "~")  # cannot fail once home is a non-empty string
+    else:
+        # Home lookup failed: redact the username segment in known home roots so
+        # the account name still does not leak (e.g. C:\Users\<name>, /home/<name>).
+        tb = re.sub(r"([Cc]:\\Users\\|/home/|/Users/)[^\\/\r\n]+",
+                    r"\1<redacted>", tb)
     # Keep the tail - the last frames are the useful ones, and a shorter report
     # is more likely to be read and sent.
     lines = tb.strip().splitlines()

@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import os
+import tempfile
 import threading
 import time
 import uuid
@@ -42,6 +43,9 @@ def _quiet_stderr():
     from localm.debuglog import native_stderr_target
     target_fd = native_stderr_target()
     if target_fd is None:
+        # devnull discards native output: load diagnostics are only retained
+        # under LOCALM_DEBUG here (the load site uses _capture_stderr separately
+        # so a load FAILURE still surfaces its reason without this log).
         target_fd = os.open(os.devnull, os.O_WRONLY)
     saved_fd = os.dup(2)
     os.dup2(target_fd, 2)
@@ -51,6 +55,48 @@ def _quiet_stderr():
     finally:
         os.dup2(saved_fd, 2)
         os.close(saved_fd)
+
+
+class _CapturedStderr:
+    """Holder yielded by _capture_stderr; .tail() reads the captured native text."""
+
+    def __init__(self, path: str) -> None:
+        self._path = path
+
+    def tail(self, max_chars: int = 1500) -> str:
+        # Best-effort read of the captured native stderr (the OOM / no-backends /
+        # bad-quant reason); never raise from a diagnostics helper.
+        try:
+            with open(self._path, "r", encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+        except OSError:
+            return ""
+        text = text.strip()
+        return text[-max_chars:] if len(text) > max_chars else text
+
+
+@contextlib.contextmanager
+def _capture_stderr():
+    """
+    Redirect fd 2 (native stderr) into a temp file for the duration of the block
+    so the load-failure reason is retainable even when chat output must stay
+    clean. On success the temp file is simply discarded (stderr stays clean);
+    on failure the caller surfaces .tail() in the raised error. In debug mode
+    the native stream still also lands in the debug log via _quiet_stderr at
+    other sites, so this only adds the failure-diagnostic capture, not noise.
+    """
+    fd, path = tempfile.mkstemp(prefix="localm_load_", suffix=".log")
+    saved_fd = os.dup(2)
+    os.dup2(fd, 2)
+    os.close(fd)
+    try:
+        yield _CapturedStderr(path)
+    finally:
+        os.dup2(saved_fd, 2)
+        os.close(saved_fd)
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+
 
 # LLAMA_DEFAULT_SEED from llama.h
 _DEFAULT_SEED = 0xFFFF_FFFF
@@ -408,10 +454,22 @@ class LlamaCpp:
         mp = api.llama_model_default_params()
         mp.n_gpu_layers = n_gpu_layers
 
-        with _ctx():
+        # Capture native stderr for the load span (non-verbose only) so a NULL
+        # return still carries its cause (OOM / no-backends / bad-quant); without
+        # this the only native diagnostic is discarded to devnull and the error is
+        # blind. Success path stays clean: the captured text is just discarded.
+        # In verbose mode the native stream already reaches the terminal/debug
+        # log, so we leave it (nullcontext) and the failure detail comes via .tail.
+        _load_ctx = _capture_stderr if not verbose else contextlib.nullcontext
+        with _load_ctx() as captured:
             self._model_ptr = api.llama_load_model_from_file(model_path, mp)
         if not self._model_ptr:
-            raise RuntimeError(f"Failed to load model: {model_path}")
+            detail = captured.tail() if captured is not None else ""
+            hint = ("" if detail
+                    else " (run with LOCALM_DEBUG=1 for the native load log)")
+            suffix = f"\n{detail}" if detail else ""
+            raise RuntimeError(
+                f"Failed to load model: {model_path}{hint}{suffix}")
 
         # --- create context ---
         cp = api.llama_context_default_params()
