@@ -91,6 +91,7 @@ def generate(s: dict, tags: str, out_path: Path, *,
              lyrics: Optional[str] = None,
              duration_seconds: float = 120.0,
              swap: bool = True,
+             cancel_check=None,
              **kwargs) -> tuple[bool, str]:
     # generate_music has no comfy_output_dir param; feed the per-plugin value
     # through the env var its containment step resolves from (FAC-3).
@@ -106,5 +107,6 @@ def generate(s: dict, tags: str, out_path: Path, *,
             launch_cmd=s["launch_cmd"] or None,
             workdir=s["workdir"] or None,
             swap=swap,
+            cancel_check=cancel_check,
             **kwargs,
         )

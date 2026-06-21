@@ -678,6 +678,24 @@ $("img-reload-llm").onchange = async () => {
   }
 };
 
+// Media-generation Stop button: reveal it while a job runs and wire it to
+// cancel that job; hide it again when the job ends. Shared by image/music/video.
+function showStop(btnId, jobId) {
+  const btn = $(btnId);
+  if (!btn) return;
+  btn.style.display = "inline-block";
+  btn.disabled = false;
+  btn.onclick = () => { btn.disabled = true; btn.textContent = "Stopping…"; cancelJob(jobId); };
+}
+function hideStop(btnId) {
+  const btn = $(btnId);
+  if (!btn) return;
+  btn.style.display = "none";
+  btn.disabled = false;
+  btn.textContent = "Stop";
+  btn.onclick = null;
+}
+
 $("img-generate").onclick = async () => {
   const promptText = $("img-prompt").value.trim();
   if (!promptText) { toast("Enter a prompt", true); return; }
@@ -704,6 +722,7 @@ $("img-generate").onclick = async () => {
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
+    showStop("img-stop", data.job_id);
     const end = await streamJob(data.job_id, (line) => {
       log.textContent += line + "\n";
       log.scrollTop = log.scrollHeight;
@@ -716,12 +735,13 @@ $("img-generate").onclick = async () => {
       toast("Image generated");
       refreshImageHistory();
     } else {
-      toast("Generation " + end.status, true);
+      toast("Generation " + end.status, end.status !== "cancelled");
     }
   } catch (e) {
     toast("Generation failed: " + e.message, true);
   } finally {
     $("img-generate").disabled = false;
+    hideStop("img-stop");
   }
 };
 
@@ -1303,6 +1323,7 @@ $("music-generate").onclick = async () => {
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
+    showStop("music-stop", data.job_id);
     const end = await streamJob(data.job_id, (line) => {
       log.textContent += line + "\n";
       log.scrollTop = log.scrollHeight;
@@ -1318,12 +1339,13 @@ $("music-generate").onclick = async () => {
       $("music-result").appendChild(player);
       refreshMusicHistory();
     } else {
-      toast("Generation " + end.status, true);
+      toast("Generation " + end.status, end.status !== "cancelled");
     }
   } catch (e) {
     toast("Music generation failed: " + e.message, true);
   } finally {
     $("music-generate").disabled = false;
+    hideStop("music-stop");
   }
 };
 
@@ -1358,6 +1380,7 @@ $("video-generate").onclick = async () => {
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
+    showStop("video-stop", data.job_id);
     const end = await streamJob(data.job_id, (line) => {
       log.textContent += line + "\n";
       log.scrollTop = log.scrollHeight;
@@ -1373,12 +1396,13 @@ $("video-generate").onclick = async () => {
       $("video-result").appendChild(player);
       refreshVideoHistory();
     } else {
-      toast("Generation " + end.status, true);
+      toast("Generation " + end.status, end.status !== "cancelled");
     }
   } catch (e) {
     toast("Video generation failed: " + e.message, true);
   } finally {
     $("video-generate").disabled = false;
+    hideStop("video-stop");
   }
 };
 
