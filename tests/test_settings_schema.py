@@ -78,7 +78,7 @@ def test_binary_dir_schema_exposes_auto_resolved_path():
 
 def test_new_comfy_fields_present_and_owned_by_image():
     by_key = {f.key: f for f in ss.CORE_FIELDS}
-    for key in ("comfy_api_url", "comfy_fast_dequant"):
+    for key in ("comfy_api_url", "comfy_fast_dequant", "comfy_delete_outputs"):
         assert key in by_key, f"{key} missing from the schema"
         assert by_key[key].owner == "image"
-        assert by_key[key].group == "ComfyUI"
+        assert by_key[key].group == "Media"

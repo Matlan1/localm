@@ -197,10 +197,9 @@ CORE_FIELDS: list = [
                  group="Coder", owner="coder", min=0, step=10),
     SettingField("coder_tool_grammar", Widget.TOGGLE,
                  "Grammar-constrain coder tool calls (experimental)",
-                 "Force valid tool-call JSON via a GBNF grammar. Only takes effect on "
-                 "a grammar-capable backend (the bundled GGUF runtime soft-degrades; "
-                 "HF needs the [grammar] extra). Experimental: currently forces "
-                 "tool-only output, so leave off unless you know you want that.",
+                 "Force valid tool-call JSON via a GBNF grammar (grammar-capable "
+                 "backend only). Experimental: forces tool-only output, so leave "
+                 "off unless you want that.",
                  group="Coder", owner="coder", applies=Applies.NEXT_LOAD),
     # ---- Media (ComfyUI: image / music / video plugins) ----
     SettingField("comfy_workdir", Widget.FOLDER, "ComfyUI folder",
@@ -261,8 +260,7 @@ CORE_FIELDS: list = [
     SettingField("net_allow_private", Widget.TOGGLE,
                  "Allow private/loopback targets (disables the SSRF guard)",
                  "Permit requests to localhost and private IP ranges. Off by "
-                 "default because it is a common server-side request forgery "
-                 "(SSRF) vector; only enable for a trusted local setup.",
+                 "default (a common SSRF vector); only enable for a trusted setup.",
                  group="Network", owner="web"),
     SettingField("net_search_url", Widget.TEXT, "Search backend URL",
                  "A SearXNG JSON search endpoint for web search. Blank uses "
