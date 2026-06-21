@@ -133,5 +133,54 @@ class TestEngineContextManager(unittest.TestCase):
         self.assertFalse(engine.loaded)
 
 
+class TestEngineLoadSerialization(unittest.TestCase):
+    """Model loads must serialise process-wide, even across separate Engine
+    instances (server chat vs a background job), to avoid the concurrent-load
+    VRAM storm that can freeze the machine (issue B1)."""
+
+    def _slow_backend(self, state, lock):
+        """A backend whose load() takes ~40ms and records peak concurrency."""
+        import time
+        backend = MagicMock()
+        _loaded = {"v": False}
+
+        def _load():
+            with lock:
+                state["concurrent"] += 1
+                state["max"] = max(state["max"], state["concurrent"])
+            time.sleep(0.04)
+            _loaded["v"] = True
+            with lock:
+                state["concurrent"] -= 1
+
+        backend.load.side_effect = _load
+        type(backend).loaded = property(lambda self: _loaded["v"])
+        return backend
+
+    def _make_engine(self, state, lock):
+        from localm.inference.engine import Engine
+        engine = object.__new__(Engine)
+        engine.model_path = "/fake/model.gguf"
+        engine.display_name = "fake-model"
+        engine._backend = self._slow_backend(state, lock)
+        return engine
+
+    def test_loads_serialise_across_engine_instances(self):
+        import threading
+        state = {"concurrent": 0, "max": 0}
+        counter_lock = threading.Lock()   # guards the counter only
+        engines = [self._make_engine(state, counter_lock) for _ in range(4)]
+        threads = [threading.Thread(target=e.load) for e in engines]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        # The process-global _LOAD_LOCK must keep loads one-at-a-time.
+        self.assertEqual(state["max"], 1,
+                         "model loads must serialise process-wide")
+        for e in engines:
+            self.assertTrue(e.loaded)
+
+
 if __name__ == "__main__":
     unittest.main()
