@@ -127,6 +127,9 @@ def _unload_chat(job, self_url: str) -> bool:
         try:
             data = resp.json()
         except Exception:
+            # resp.ok already confirmed the server accepted the unload; a missing
+            # or unparseable body just means we have no VRAM stats to report, so
+            # fall through to the generic "Chat model unloaded." message.
             pass
         if data.get("status") == "already_unloaded":
             job.push({"type": "line", "text":
@@ -231,21 +234,33 @@ async def video(req: VideoRequest, request: Request):
             value = getattr(req, field)
             if value is not None:
                 kwargs[field] = value
+        is_privacy = effective_mode("server") == SessionMode.PRIVACY
+        # privacy mode forces deletion of ComfyUI's own output copy: no traces
+        # left anywhere, regardless of the configured delete_outputs preference.
+        delete_outputs = bool(s.get("delete_outputs")) or is_privacy
         ok, message = _backend.generate(
             s, req.prompt, out_path,
             self_url=self_url,
-            write_sidecar=effective_mode("server") != SessionMode.PRIVACY,
+            # privacy mode: the prompt never touches disk
+            write_sidecar=not is_privacy,
             on_progress=lambda t: job.push({"type": "line", "text": t}),
             input_image=input_image,
             swap=gen_swap,
+            delete_outputs=delete_outputs,
             cancel_check=lambda: job.cancel_requested,
             **kwargs,
         )
         job.push({"type": "line", "text": message})
         if ok:
             job.result = out_path.name
-            if swap:
-                _reload_llm(job, self_url, s)
+        # Restore VRAM on EVERY exit path once we have unloaded the chat model -
+        # success, failure, OR cancel. The old code reloaded only on success, so
+        # a failed or cancelled video gen left the chat model unloaded AND the Wan
+        # backend resident in VRAM (a GPU hang). _reload_llm frees the backend's
+        # VRAM first, then reloads the chat model, so it is the right restore on
+        # the error and cancel paths too. Mirrors image/plug.py.
+        if swap:
+            _reload_llm(job, self_url, s)
         return ok
 
     job = jobs.start_fn("video", _generate, result_path=out_path.name)

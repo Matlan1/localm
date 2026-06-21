@@ -129,8 +129,10 @@ def free_comfy_vram(api_url: Optional[str] = None) -> bool:
 
     Returns True when ComfyUI accepted the request. Used after generation
     so the chat model can be reloaded immediately instead of spilling into
-    system RAM next to a resident FLUX. Older ComfyUI builds without /free
-    return False; callers should then leave the LLM reload lazy.
+    system RAM next to a resident FLUX. Both an HTTP error (older ComfyUI
+    builds without /free) and a network error return False, but each is now
+    logged at debug level so --debug-discoverable can tell the two apart;
+    callers then leave the LLM reload lazy.
     """
     url = (api_url or default_api_url()).rstrip("/")
     try:
@@ -141,7 +143,18 @@ def free_comfy_vram(api_url: Optional[str] = None) -> bool:
         )
         with urllib.request.urlopen(req, timeout=30):
             return True
-    except Exception:
+    except urllib.error.HTTPError as e:
+        # Distinguish the documented older-build case (no /free endpoint) from a
+        # real network failure below, so a missing endpoint is not mistaken for
+        # ComfyUI being unreachable.
+        from localm.debuglog import logger
+        logger.debug("free_comfy_vram: ComfyUI /free returned HTTP %s (%s) at %s; "
+                     "likely an older build without /free", e.code, e.reason, url)
+        return False
+    except (urllib.error.URLError, Exception) as e:
+        # A real network/connection failure reaching ComfyUI, not a missing endpoint.
+        from localm.debuglog import logger
+        logger.debug("free_comfy_vram: could not reach ComfyUI /free at %s: %s", url, e)
         return False
 
 
@@ -335,10 +348,21 @@ def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
         argv: "str | list" = 'cmd /S /c "' + launch_cmd + '"'
     else:
         argv = shlex.split(launch_cmd)
+    # Redirect the launcher's own stdout+stderr to a log file instead of
+    # discarding them, so a ComfyUI that fails to start leaves its reason on
+    # disk for the user (and for --debug-discoverable). Best-effort: fall back
+    # to DEVNULL if the log cannot be opened, so launching still proceeds.
+    from localm.config import home_dir
+    launch_log_path = home_dir() / "comfy-launch.log"
+    try:
+        launch_out = open(launch_log_path, "w", encoding="utf-8", errors="replace")
+    except OSError:
+        launch_out = subprocess.DEVNULL
+        launch_log_path = None
     try:
         subprocess.Popen(argv, cwd=workdir,
-                         stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL)
+                         stdout=launch_out,
+                         stderr=subprocess.STDOUT)
     except Exception as e:
         return False, f"Could not launch ComfyUI ({launch_cmd}): {e}"
 
@@ -352,11 +376,16 @@ def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
             _say(f"Waiting for ComfyUI… ({int(elapsed)}s)")
             last_said = elapsed
         _t.sleep(2)
+    # Point the user at the captured launcher log (when we managed to open one):
+    # a ComfyUI that died on startup wrote its own error there, not to the window.
+    log_hint = (f" The launcher's own output was captured to {launch_log_path} - "
+                "check it for the reason it failed to start." if launch_log_path else "")
     return False, (
         f"ComfyUI did not come up within {wait_seconds // 60} minutes - "
         "check the launcher window for errors. If it is just a slow first "
         "(ZLUDA / ROCm) start, raise the limit: "
         "localm config comfy_launch_timeout 600"
+        f"{log_hint}"
     )
 
 
@@ -452,15 +481,16 @@ def _upload_image(image_path: Path, api_url: str) -> str:
 #  Output containment
 # ---------------------------------------------------------------------------
 #
-#  localm's rule: NOTHING a generation produces may remain visible inside
-#  ComfyUI - the only copy is the one localm saved. Left alone, ComfyUI
-#  (a) records every job in /history, which the Queue/History panel and gallery
-#  extensions read, and (b) keeps the rendered file in its own output/ dir, plus
-#  any img2img source we uploaded into input/. After the artifact has been
-#  fetched into localm's own location we therefore clear the history entry AND
-#  delete ComfyUI's on-disk copies. Deleting files needs ComfyUI's output/ dir;
-#  when it cannot be resolved we still clear history and return a loud warning
-#  rather than leaking silently. Shared by image, music, and video generation.
+#  Default: localm LEAVES ComfyUI's own copies alone. A user may run ComfyUI for
+#  its own gallery and legitimately want the generated files and the /history
+#  entry, so deleting them is NOT the default. Containment is opt-in (the
+#  comfy_delete_outputs config / a per-plugin delete_outputs), and privacy mode
+#  forces it on (no trace anywhere). When enabled, after the artifact has been
+#  fetched into localm's own location we clear ComfyUI's /history entry AND delete
+#  its on-disk copy of the output plus any img2img source we uploaded into input/.
+#  Deleting files needs ComfyUI's output/ dir; when it cannot be resolved we
+#  return a loud warning rather than silently leaving a copy the user asked to
+#  remove. Shared by image, music, and video generation.
 
 def _comfy_output_root(comfy_output_dir: Optional[str] = None) -> Optional[Path]:
     """ComfyUI's output/ directory, or None when it cannot be resolved.
@@ -508,47 +538,54 @@ def contain_comfy_artifacts(
     *,
     comfy_output_dir: Optional[str] = None,
     uploaded_input: Optional[str] = None,
+    delete_outputs: bool = False,
 ) -> str:
-    """Enforce output containment after an artifact has been fetched locally.
+    """Optionally remove ComfyUI's own copies of a generation.
 
-    Clears the ComfyUI /history entry, deletes ComfyUI's own copy of the output
-    (when its output dir is known), and removes any img2img source we uploaded
-    into ComfyUI's input/ dir. Returns a warning string to surface to the user
-    when full containment could NOT be guaranteed (the on-disk copy could not be
-    deleted), or "" when fully contained."""
+    By DEFAULT (delete_outputs=False) this is a no-op: ComfyUI keeps its /history
+    entry and its on-disk output, because a user may run ComfyUI for its own
+    gallery and want them. When the user opts in (or privacy mode forces no-trace),
+    it clears the history entry and deletes ComfyUI's duplicate output plus any
+    img2img source we uploaded into input/. Returns a WARNING string when
+    containment was requested but a copy could NOT be removed (so the user is told
+    a copy remains), or "" otherwise."""
+    if not delete_outputs:
+        return ""   # keep ComfyUI's history + on-disk copy by default
+
     clear_comfy_history(api_url, prompt_id)
-
     root = _comfy_output_root(comfy_output_dir)
 
+    warnings: list = []
     # Remove the uploaded img2img source from ComfyUI's input/ dir (sibling of
-    # output/). Best-effort: the source image is not in the output browser, but
-    # it is still a stray copy of the user's input.
+    # output/). Surface a failure (do not silence): it is still a stray copy of
+    # the user's input that they asked to contain.
     if uploaded_input and root is not None:
         try:
             inp = root.parent / "input" / uploaded_input
             if inp.exists():
                 inp.unlink()
-        except Exception:
-            pass
+        except OSError as e:
+            warnings.append(
+                f"a copy of your input image remains in ComfyUI's input folder ({e})")
 
     # Delete ComfyUI's on-disk copy of the output. type "temp" is auto-purged
     # by ComfyUI, so only a real "output" artifact needs removing.
-    if (info.get("type") or "output") != "output":
-        return ""
-    if root is None:
-        return (
-            "WARNING: a copy of this file remains in ComfyUI's output folder. "
-            "localm cleared the ComfyUI history entry, but cannot delete the "
-            "file until you set the ComfyUI output dir (Settings -> ComfyUI "
-            "output dir, or: localm config comfy_output_dir <path>)."
-        )
-    try:
-        copy = root / info.get("subfolder", "") / info.get("filename", "")
-        if copy.exists():
-            copy.unlink()
-        return ""
-    except Exception as e:
-        return f"WARNING: could not delete ComfyUI's copy of the output ({e})."
+    if (info.get("type") or "output") == "output":
+        if root is None:
+            warnings.append(
+                "a copy of this file remains in ComfyUI's output folder; localm "
+                "cleared the ComfyUI history entry but cannot delete the file "
+                "until you set the ComfyUI output dir (Settings -> Media, or: "
+                "localm config comfy_output_dir <path>)")
+        else:
+            try:
+                copy = root / info.get("subfolder", "") / info.get("filename", "")
+                if copy.exists():
+                    copy.unlink()
+            except OSError as e:
+                warnings.append(f"could not delete ComfyUI's copy of the output ({e})")
+
+    return ("WARNING: " + "; ".join(warnings) + ".") if warnings else ""
 
 
 def interrupt_comfy(api_url: str) -> bool:
@@ -608,6 +645,7 @@ def generate_image(
     launch_cmd: Optional[str] = None,
     workdir: Optional[str] = None,
     comfy_output_dir: Optional[str] = None,
+    delete_outputs: bool = False,
     swap: bool = True,
     fast_dequant: bool = True,
     cancel_check: Optional[callable] = None,
@@ -916,6 +954,7 @@ def generate_image(
     filename = None
     subfolder = ""
     img_type = "output"
+    last_poll_err: Optional[Exception] = None
 
     with Progress(
         SpinnerColumn(),
@@ -950,13 +989,21 @@ def generate_image(
                             break
                     break
 
-            except Exception:
-                pass
+            except Exception as e:
+                # Keep retrying within the loop (ComfyUI may just be busy), but
+                # remember the last failure so a crashed/unreachable ComfyUI is
+                # distinguishable from a merely slow one if we time out below.
+                last_poll_err = e
 
             time.sleep(2)
 
     if not finished:
-        return False, f"Image generation timed out after {max_poll_seconds // 60} minutes."
+        # Surface the last poll error (if any) so an unreachable ComfyUI reads
+        # differently from one that was simply still working when time ran out.
+        err_note = (f"; last error contacting ComfyUI: {last_poll_err}"
+                    if last_poll_err is not None else "")
+        return False, (f"Image generation timed out after "
+                       f"{max_poll_seconds // 60} minutes{err_note}.")
 
     if not filename:
         return False, (
@@ -976,7 +1023,10 @@ def generate_image(
         with urllib.request.urlopen(img_url, timeout=10) as response:
             output_path.write_bytes(response.read())
 
-        # Strip PNG metadata/EXIF for privacy (pure-Python, zero deps)
+        # Strip PNG metadata/EXIF for privacy (pure-Python, zero deps). A failure
+        # here must NOT be silent: ComfyUI PNGs embed the full prompt/workflow, so
+        # a strip that did not run means the saved file still carries that data.
+        strip_warning = ""
         try:
             png_bytes = output_path.read_bytes()
             if png_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
@@ -990,56 +1040,60 @@ def generate_image(
                         clean.extend(png_bytes[pos:pos + total_len])
                     pos += total_len
                 output_path.write_bytes(bytes(clean))
-        except Exception:
-            pass
+        except (OSError, ValueError) as e:
+            strip_warning = ("WARNING: could not strip image metadata "
+                             f"({e}); the file may still contain prompt/EXIF data.")
 
-        # Enforce output containment: clear ComfyUI's history entry (the
-        # Queue/History + gallery view) and delete ComfyUI's own on-disk copy
-        # of the image plus any uploaded img2img source. Returns a warning when
-        # the file copy could not be removed (e.g. comfy_output_dir unset).
+        # Output containment (opt-in): clear ComfyUI's history entry and delete its
+        # own on-disk copy + any uploaded img2img source ONLY when delete_outputs
+        # is set (user opted in, or privacy mode forces no-trace). Default keeps
+        # ComfyUI's copies. Returns a warning when a copy could not be removed.
         contain_warning = contain_comfy_artifacts(
             api_url, prompt_id,
             {"filename": filename, "subfolder": subfolder, "type": img_type},
             comfy_output_dir=comfy_output_dir,
             uploaded_input=uploaded_name,
+            delete_outputs=delete_outputs,
         )
 
-        # Sidecar JSON: everything needed to reproduce or tweak this image.
-        # Saved as <output>.json next to the image; failure is non-fatal.
-        # Skipped entirely in privacy mode (write_sidecar=False).
-        if not write_sidecar:
-            return True, _with_warning(
-                f"Image saved to {output_path} "
-                f"(seed {seed} - reuse it to reproduce)", contain_warning)
-        try:
-            sidecar = {
-                "prompt": prompt,
-                "negative_prompt": negative_prompt,
-                "cfg": (cfg if cfg is not None else 3.5) if negative_prompt else None,
-                "seed": seed,
-                "guidance": guidance,
-                "lora_name": lora_name,
-                "lora_strength_model": lora_strength_model if lora_name else None,
-                "lora_strength_clip": lora_strength_clip if lora_name else None,
-                "input_image": str(input_image) if input_image else None,
-                "denoise": (denoise if denoise is not None else 0.75)
-                           if input_image else None,
-                "clip_name1": clip_name1,
-                "clip_name2": clip_name2,
-                "elapsed_seconds": round(time.time() - start_time, 1),
-                "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            }
-            output_path.with_suffix(output_path.suffix + ".json").write_text(
-                json.dumps({k: v for k, v in sidecar.items() if v is not None},
-                           indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
-        except Exception:
-            pass
+        # Sidecar JSON: everything needed to reproduce or tweak this image. Saved
+        # as <output>.json next to the image. Skipped in privacy mode
+        # (write_sidecar=False). A write failure is surfaced (not silent): the
+        # success message promises the reproducibility the sidecar provides.
+        sidecar_warning = ""
+        if write_sidecar:
+            try:
+                sidecar = {
+                    "prompt": prompt,
+                    "negative_prompt": negative_prompt,
+                    "cfg": (cfg if cfg is not None else 3.5) if negative_prompt else None,
+                    "seed": seed,
+                    "guidance": guidance,
+                    "lora_name": lora_name,
+                    "lora_strength_model": lora_strength_model if lora_name else None,
+                    "lora_strength_clip": lora_strength_clip if lora_name else None,
+                    "input_image": str(input_image) if input_image else None,
+                    "denoise": (denoise if denoise is not None else 0.75)
+                               if input_image else None,
+                    "clip_name1": clip_name1,
+                    "clip_name2": clip_name2,
+                    "elapsed_seconds": round(time.time() - start_time, 1),
+                    "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                }
+                output_path.with_suffix(output_path.suffix + ".json").write_text(
+                    json.dumps({k: v for k, v in sidecar.items() if v is not None},
+                               indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+            except OSError as e:
+                sidecar_warning = ("WARNING: the reproducibility sidecar could not "
+                                   f"be saved ({e}); the image itself was saved.")
 
+        combined = "\n".join(w for w in (strip_warning, contain_warning,
+                                         sidecar_warning) if w)
         return True, _with_warning(
             f"Image saved to {output_path} (seed {seed} - reuse it to reproduce)",
-            contain_warning)
+            combined)
 
     except Exception as e:
         return False, f"Failed to download generated image from ComfyUI: {e}"

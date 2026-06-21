@@ -59,14 +59,19 @@ def active_plugins(cfg: dict) -> set:
     folder rather than reading a (no-longer-written) config list."""
     from pathlib import Path
 
+    from localm.debuglog import logger
     from localm.plugins.loader import plugins_dir
     installed = set()
     try:
         for child in Path(plugins_dir()).glob("*"):
             if child.is_dir() and (child / "plugin.toml").is_file():
                 installed.add(child.name)
-    except OSError:
-        pass
+    except OSError as exc:
+        # Surface a real disk/permission fault on the plugins-dir scan so it is
+        # discoverable under --debug-discoverable; an empty result here does NOT
+        # prove no plugins exist, it can just mean the scan itself failed.
+        logger.debug("active_plugins: failed to scan plugins dir %s: %s",
+                     plugins_dir(), exc)
     enabled = set(cfg.get("plugins_enabled", []) or [])
     return installed & enabled
 

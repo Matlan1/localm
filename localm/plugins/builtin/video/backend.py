@@ -67,6 +67,11 @@ def settings(full_config: dict) -> dict:
         or full_config.get("comfy_workdir", "") or "",
         "output_dir": comfy_blk.get("output_dir")
         or full_config.get("comfy_output_dir", "") or "",
+        # Opt-in output containment: per-plugin delete_outputs wins, else the
+        # global comfy_delete_outputs (default False = keep ComfyUI's own copy).
+        # Privacy mode forces deletion later in plug.py regardless of this.
+        "delete_outputs": bool(comfy_blk.get(
+            "delete_outputs", full_config.get("comfy_delete_outputs", False))),
         "reload_after": bool(block.get(
             "reload_llm_after_generate",
             full_config.get("reload_llm_after_imagine", True))),
@@ -90,8 +95,15 @@ def generate(s: dict, prompt: str, out_path: Path, *,
              self_url: str, write_sidecar: bool, on_progress=None,
              input_image: Optional[Path] = None,
              swap: bool = True,
+             delete_outputs: Optional[bool] = None,
              cancel_check=None,
              **kwargs) -> tuple[bool, str]:
+    # delete_outputs: None means "use the configured preference"; the privacy-
+    # aware caller (plug.py) passes an explicit bool that already folds in
+    # privacy mode, so honour that when given and fall back to the setting only
+    # when it is not.
+    if delete_outputs is None:
+        delete_outputs = bool(s.get("delete_outputs", False))
     # generate_video has no comfy_output_dir param; feed the per-plugin value
     # through the env var its containment step resolves from (FAC-3). This is
     # also what lets the uploaded image-to-video source be cleaned up, since the
@@ -107,6 +119,7 @@ def generate(s: dict, prompt: str, out_path: Path, *,
             launch_cmd=s["launch_cmd"] or None,
             workdir=s["workdir"] or None,
             swap=swap,
+            delete_outputs=delete_outputs,
             cancel_check=cancel_check,
             **kwargs,
         )

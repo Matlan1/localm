@@ -90,6 +90,7 @@ def generate_video(
     workdir: Optional[str] = None,
     swap: bool = True,
     cancel_check: Optional[callable] = None,
+    delete_outputs: bool = False,
 ) -> tuple[bool, str]:
     """
     Generate a short video clip and save it to *output_path* (MP4).
@@ -242,6 +243,7 @@ def generate_video(
     start_time = time.time()
     video_info = None
     last_said = 0.0
+    last_poll_error: Optional[str] = None  # remember the last poll failure so a timeout can tell "crashed/unreachable" from "slow render"
     while time.time() - start_time < max_poll_seconds:
         if cancel_check and cancel_check():
             from localm.image_gen.comfy import clear_comfy_history, interrupt_comfy
@@ -265,13 +267,20 @@ def generate_video(
                     if video_info:
                         break
                 break
-        except Exception:
-            pass
+        except Exception as e:
+            # Keep retrying (ComfyUI may still be rendering), but remember the
+            # failure so a timeout can surface an unreachable/crashed server.
+            last_poll_error = str(e)
         time.sleep(2)
     else:
-        return False, (
+        msg = (
             f"Video generation timed out after {max_poll_seconds // 60} minutes."
         )
+        if last_poll_error:
+            # A persistent poll error means ComfyUI likely crashed or went
+            # unreachable, not just a slow render - say so instead of hiding it.
+            msg += f" Last poll error: {last_poll_error}"
+        return False, msg
 
     if not video_info:
         return False, (
@@ -297,12 +306,17 @@ def generate_video(
     # Queue/History + gallery view) and delete ComfyUI's own on-disk copy of
     # the clip plus any uploaded img2video source. Returns a warning when the
     # file copy could not be removed (e.g. comfy_output_dir unset).
+    # delete_outputs controls whether ComfyUI's own on-disk copy is removed:
+    # opt-in containment (default False keeps the copy), forced True by the
+    # caller in privacy mode so no traces remain. The history entry and any
+    # uploaded img2video source are always cleared regardless.
     contain_warning = contain_comfy_artifacts(
         api_url, prompt_id,
         {"filename": video_info.get("filename"),
          "subfolder": video_info.get("subfolder", ""),
          "type": video_info.get("type", "output")},
         uploaded_input=uploaded_name,
+        delete_outputs=delete_outputs,
     )
 
     # Sidecar JSON - everything needed to reproduce or tweak the clip.
@@ -312,6 +326,7 @@ def generate_video(
         return True, _with_warning(
             f"Clip saved to {output_path} "
             f"(seed {seed} - reuse it to reproduce)", contain_warning)
+    sidecar_warning: Optional[str] = None
     try:
         sidecar = {
             "prompt": prompt,
@@ -333,9 +348,16 @@ def generate_video(
                        indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
-    except Exception:
-        pass
+    except OSError as e:
+        # The clip is already saved; a failed sidecar must not fail the whole
+        # generation - surface it as a note instead of silently swallowing it.
+        sidecar_warning = (
+            f"the reproducibility sidecar could not be saved ({e}); "
+            "the clip itself was saved."
+        )
 
     return True, _with_warning(
-        f"Clip saved to {output_path} "
-        f"(seed {seed} - reuse it to reproduce)", contain_warning)
+        _with_warning(
+            f"Clip saved to {output_path} "
+            f"(seed {seed} - reuse it to reproduce)", contain_warning),
+        sidecar_warning)

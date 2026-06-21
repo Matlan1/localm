@@ -100,9 +100,15 @@ DEFAULT_CONFIG: dict = {
     # several minutes, so the default is generous.
     "comfy_launch_timeout": 300,
     # ComfyUI's own output directory (e.g. StabilityMatrix's Images folder).
-    # When set, the duplicate ComfyUI keeps after generation is deleted so the
-    # only copy is the one localm saved.
+    # Only needed if you enable comfy_delete_outputs: localm uses it to find and
+    # delete ComfyUI's duplicate copy. Left blank, localm derives it from the
+    # ComfyUI folder when it needs it.
     "comfy_output_dir": None,
+    # Whether to delete ComfyUI's OWN copy (and /history entry) of a generation
+    # after localm has saved its own. Default False: KEEP them, because a user
+    # may run ComfyUI for its own gallery and want the files. Privacy mode forces
+    # deletion regardless (no traces). Per-plugin config can override this.
+    "comfy_delete_outputs": False,
     # ComfyUI base URL localm talks to. None/blank uses the FLUX_API_URL env
     # override when set, else http://127.0.0.1:8188 (the ComfyUI default).
     "comfy_api_url": None,

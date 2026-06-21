@@ -85,6 +85,9 @@ def _unload_chat(job, self_url: str) -> bool:
         try:
             data = resp.json()
         except Exception:
+            # resp.ok already confirmed the server accepted the unload, so a
+            # body that does not parse is non-fatal: fall through with empty
+            # data to the generic "Chat model unloaded." message below.
             pass
         if data.get("status") == "already_unloaded":
             job.push({"type": "line", "text":
@@ -158,6 +161,10 @@ async def music(req: MusicRequest, request: Request):
 
     def _generate(job):
         from localm.audit import SessionMode, effective_mode
+        # Privacy mode forces no on-disk traces: it suppresses the sidecar AND
+        # forces ComfyUI's own output copy to be deleted, regardless of the
+        # opt-in delete_outputs setting.
+        is_privacy = effective_mode("server") == SessionMode.PRIVACY
         if s.get("warning"):
             job.push({"type": "line", "text": s["warning"]})
         ok, msg = _backend.ensure_available(
@@ -190,7 +197,10 @@ async def music(req: MusicRequest, request: Request):
         ok, message = _backend.generate(
             s, req.tags, out_path,
             self_url=self_url,
-            write_sidecar=effective_mode("server") != SessionMode.PRIVACY,
+            write_sidecar=not is_privacy,
+            # Delete ComfyUI's own copy when the user opted in OR privacy mode
+            # forces no traces.
+            delete_outputs=bool(s.get("delete_outputs")) or is_privacy,
             on_progress=lambda t: job.push({"type": "line", "text": t}),
             lyrics=req.lyrics,
             duration_seconds=req.duration_seconds,
@@ -201,8 +211,13 @@ async def music(req: MusicRequest, request: Request):
         job.push({"type": "line", "text": message})
         if ok:
             job.result = out_path.name
-            if swap:
-                _reload_llm(job, self_url, s)
+        # Restore VRAM on EVERY exit path once we have unloaded the chat model -
+        # success, failure, OR cancel. Mirrors image/plug.py: the old code reloaded
+        # only on success, so a failed or cancelled generation left the chat model
+        # unloaded AND the music backend resident in VRAM (GPU hang). _reload_llm
+        # frees the backend's VRAM first, then reloads the chat model.
+        if swap:
+            _reload_llm(job, self_url, s)
         return ok
 
     job = jobs.start_fn("music", _generate, result_path=out_path.name)
