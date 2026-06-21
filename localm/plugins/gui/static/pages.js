@@ -786,6 +786,10 @@ function _catalogRow(p) {
       actions.appendChild(p.enabled
         ? _catalogBtn("disable", p.name, "", "Disable")
         : _catalogBtn("enable", p.name, "btn-primary", "Enable"));
+      // Re-copy this builtin from the bundled store if a localm upgrade shipped
+      // newer code (the installed copy would otherwise keep shadowing it). Only
+      // builtins refresh from the store; a third-party install is never a target.
+      if (p.builtin) actions.appendChild(_catalogBtn("refresh", p.name, "", "Refresh"));
       actions.appendChild(_catalogBtn("uninstall", p.name, "danger", "Uninstall"));
     }
   }

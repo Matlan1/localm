@@ -16,7 +16,9 @@ first-party plugins in Phase 3.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import json
 import logging
 import sys
 import tomllib
@@ -28,6 +30,76 @@ from localm.plugins.contract import API_VERSION, PluginSpec, Surface
 # User-facing log of the sequential plugin load (one line per plugin). Distinct
 # from the debug-only debuglog so it shows in normal server logs (U2).
 _log = logging.getLogger("localm.plugins")
+
+# Provenance sidecar written into an installed plugin dir. Records WHERE the copy
+# came from ("store" = bundled first-party shelf, "external" = a third-party
+# source dir) and a content hash of that source at install time. The refresh
+# pass uses it to re-copy a builtin whose shipped source changed on upgrade,
+# while never clobbering a third-party plugin. A hidden file, so discovery
+# (which only walks directories) ignores it.
+_PLUGIN_MARKER = ".localm-source.json"
+
+
+def _dir_content_hash(d: Path) -> str:
+    """Deterministic sha256 over a plugin directory's tracked content: every
+    file's POSIX relative path plus its bytes. Compiled artefacts (``__pycache__``,
+    ``*.pyc``) and the provenance marker itself are excluded, so a bundled store
+    source and an installed copy of the same code hash equal."""
+    h = hashlib.sha256()
+    try:
+        files = [p for p in Path(d).rglob("*") if p.is_file()]
+    except OSError:
+        return ""
+    entries = []
+    for p in files:
+        if p.name == _PLUGIN_MARKER or p.suffix == ".pyc" or "__pycache__" in p.parts:
+            continue
+        try:
+            rel = p.relative_to(d).as_posix()
+        except ValueError:
+            continue
+        entries.append((rel, p))
+    for rel, p in sorted(entries):
+        h.update(rel.encode("utf-8"))
+        h.update(b"\0")
+        try:
+            h.update(p.read_bytes())
+        except OSError:
+            h.update(b"\0<unreadable>\0")
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+def _read_marker(dest: Path) -> Optional[dict]:
+    """Read the provenance marker from an installed plugin dir, or None."""
+    f = Path(dest) / _PLUGIN_MARKER
+    try:
+        if f.is_file():
+            data = json.loads(f.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _write_marker(dest: Path, source: str, src_hash: str) -> None:
+    """Record provenance + the source content hash in an installed plugin dir.
+    Best-effort: a write failure must never break an install."""
+    try:
+        (Path(dest) / _PLUGIN_MARKER).write_text(
+            json.dumps({"source": source, "src_hash": src_hash}),
+            encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _purge_plugin_modules(uniq: str) -> None:
+    """Remove a plugin's module namespace ("<uniq>" and every "<uniq>.*"
+    submodule) from sys.modules so the next import reads fresh from disk."""
+    for cached in [k for k in list(sys.modules)
+                   if k == uniq or k.startswith(uniq + ".")]:
+        sys.modules.pop(cached, None)
 
 
 # --------------------------------------------------------------------------- #
@@ -98,6 +170,14 @@ def _import_module(spec: PluginSpec):
         else:
             raise ValueError(f"plugin {spec.name!r}: module {mod_name!r} not found in {base}")
     uniq = f"_localm_plugin_{spec.name.replace('-', '_')}"
+    # Drop any modules cached from a PRIOR load of this plugin - the top-level
+    # name AND its submodules (e.g. "<uniq>.backend"). _unload historically
+    # popped only the top-level name, so a stale submodule could survive in
+    # sys.modules and shadow a freshly installed/refreshed copy: re-running
+    # `from . import backend` returns the cached stale module instead of reading
+    # the new file. Purge the whole namespace so every module loads from the
+    # current directory on disk.
+    _purge_plugin_modules(uniq)
     importlib_spec = importlib.util.spec_from_file_location(
         uniq, mod_file, submodule_search_locations=[str(mod_file.parent)])
     if importlib_spec is None or importlib_spec.loader is None:
@@ -460,6 +540,7 @@ class PluginManager:
         GUI uses this to show load progress (U2). A raising callback is ignored
         so it can never break startup."""
         self._ensure_preinstalled()                # first-run: provision chat etc.
+        self._refresh_installed_builtins()         # upgrade: re-copy stale builtins
         self.discover()
         enabled = self._enabled_set()
 
@@ -538,7 +619,8 @@ class PluginManager:
         except Exception:
             pass            # teardown errors must not block the unmount
         host.unmount()
-        sys.modules.pop(uniq, None)     # drop so a re-enable re-imports fresh
+        _purge_plugin_modules(uniq)     # drop the whole namespace so a re-enable
+        #                                 re-imports every module fresh from disk
 
     def _invoke_hook(self, name: str, hook_name: str, **kwargs) -> None:
         """Call an optional plugin lifecycle hook if the loaded module defines it.
@@ -569,6 +651,7 @@ class PluginManager:
         if src is not None:
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copytree(src, dest)
+            _write_marker(dest, "store", _dir_content_hash(src))
             return
         from localm.plugins import catalog as _cat
         entry = _cat.get(name)
@@ -587,6 +670,136 @@ class PluginManager:
                 shutil.rmtree(d)
         except OSError:
             pass
+
+    # ---- refresh stale builtin copies (upgrade safety) ---------------------
+    # An installed builtin is a COPY of the bundled store source taken at install
+    # time. A localm upgrade ships newer store code, but the older installed copy
+    # keeps shadowing it (install/provision no-op when the dir exists) - so the
+    # user silently runs stale plugin code, including missing bug/security fixes.
+    # The plugin VERSION is an unreliable signal (a bugfix often does not bump it
+    # - e.g. image stayed v1.0.0 across a fix), so staleness is detected by a
+    # CONTENT HASH of the store source recorded in the provenance marker.
+    def _maybe_refresh_builtin(self, name: str) -> bool:
+        """Re-copy an installed builtin from the bundled store when the shipped
+        source changed since it was installed. Returns True if a refresh ran.
+
+        Safe by construction:
+          - Only plugins WITH a bundled-store source are considered; a third-party
+            plugin (no store dir, or a marker recording ``source != "store"``) is
+            never touched.
+          - User config is NOT in the plugin dir (it lives in config.json under
+            ``plugins.<name>``); plugin data lives under ``data_subdir`` in the
+            data dir. Re-copying the plugin dir therefore preserves both.
+          - The swap goes through temp/backup siblings so a failure leaves the
+            existing copy intact.
+        """
+        store_src = self._store_dir(name)
+        if store_src is None:
+            return False                              # not a bundled/builtin plugin
+        dest = self._installed_dir(name)
+        if not (dest / "plugin.toml").is_file():
+            return False                              # not installed on disk
+        marker = _read_marker(dest)
+        if marker and marker.get("source") not in (None, "store"):
+            return False                              # third-party: never clobber
+        cur = _dir_content_hash(store_src)
+        # What we last synced FROM: the recorded source hash, or - for a legacy
+        # copy with no marker - the installed copy's own current content.
+        known = marker.get("src_hash") if marker else _dir_content_hash(dest)
+        if known == cur:
+            if marker is None:                        # adopt provenance, no re-copy
+                _write_marker(dest, "store", cur)
+            return False
+        if not self._swap_in_store_copy(name, store_src, dest, cur):
+            return False
+        # If the plugin is live on an app, reload it so the new code takes effect.
+        if self.app is not None and name in self._loaded:
+            self._unload(name)
+            self.discover()
+            if name in self._specs and name in self._enabled_set():
+                self._safe_load(self._specs[name])
+        _log.info("plugin %s refreshed from the bundled store", name)
+        return True
+
+    def _swap_in_store_copy(self, name: str, store_src: Path, dest: Path,
+                            cur_hash: str) -> bool:
+        """Replace *dest* with a fresh copy of *store_src* (+ marker) as safely as
+        the platform allows. The original install is never deleted until the new
+        copy is in place, so any failure leaves a usable plugin dir. Returns True
+        only on a completed swap."""
+        import shutil
+        tmp = dest.parent / f".{name}.refresh.tmp"
+        backup = dest.parent / f".{name}.refresh.bak"
+        # Stage 1 - build the fresh copy in a temp sibling. A failure here leaves
+        # the existing install completely untouched.
+        try:
+            for stale in (tmp, backup):
+                if stale.exists():
+                    shutil.rmtree(stale)
+            shutil.copytree(store_src, tmp)
+            _write_marker(tmp, "store", cur_hash)
+        except OSError as e:
+            shutil.rmtree(tmp, ignore_errors=True)
+            _log.warning("plugin %s: could not stage a refresh: %s", name, e)
+            return False
+        # Stage 2 - swap it into place. Move the stale copy aside first; if the
+        # move-in fails, put it back. The original is kept (at dest, or at the
+        # backup if even the restore fails) so a refresh never destroys a plugin.
+        try:
+            dest.rename(backup)
+        except OSError as e:
+            shutil.rmtree(tmp, ignore_errors=True)
+            _log.warning("plugin %s: could not refresh stale copy: %s", name, e)
+            return False
+        try:
+            tmp.rename(dest)
+        except OSError as e:
+            try:
+                backup.rename(dest)                   # restore the original
+            except OSError as restore_err:
+                _log.error("plugin %s: refresh failed and the original could not "
+                           "be restored; the previous copy is kept at %s (%s)",
+                           name, backup, restore_err)
+                shutil.rmtree(tmp, ignore_errors=True)
+                return False
+            shutil.rmtree(tmp, ignore_errors=True)
+            _log.warning("plugin %s: could not refresh stale copy: %s", name, e)
+            return False
+        shutil.rmtree(backup, ignore_errors=True)
+        return True
+
+    def _refresh_installed_builtins(self) -> None:
+        """Refresh every installed builtin whose bundled-store source changed
+        since install (an upgrade left a stale copy). Best-effort; never raises -
+        a failing refresh must not break startup."""
+        if not self._store_root:
+            return
+        for name in sorted(self._installed_set()):
+            try:
+                self._maybe_refresh_builtin(name)
+            except Exception as e:
+                self._discover_errors[name] = f"refresh: {e}"
+
+    def refresh(self, name: Optional[str] = None) -> list:
+        """Re-sync installed builtin plugins with the bundled store, re-copying
+        any whose shipped source changed since install. With *name*, refresh just
+        that plugin (KeyError if it is not an installed builtin). Returns the
+        names actually refreshed. A live, active plugin is reloaded in place."""
+        self.discover()
+        if name is not None:
+            if self._store_dir(name) is None:
+                raise KeyError(f"no such builtin plugin: {name}")
+            if not (self._installed_dir(name) / "plugin.toml").is_file():
+                raise KeyError(f"plugin {name!r} is not installed")
+            return [name] if self._maybe_refresh_builtin(name) else []
+        refreshed = []
+        for n in sorted(self._installed_set()):
+            try:
+                if self._maybe_refresh_builtin(n):
+                    refreshed.append(n)
+            except Exception as e:
+                self._errors[n] = f"refresh: {e}"
+        return refreshed
 
     def _is_protected(self, name: str) -> bool:
         from localm.plugins import catalog as _cat
@@ -635,6 +848,7 @@ class PluginManager:
             self._remove_installed_dir(name)
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(src, dest)
+        _write_marker(dest, "external", _dir_content_hash(src))
         try:
             self.discover()
             if name not in self._specs:
@@ -676,6 +890,7 @@ class PluginManager:
             self._remove_installed_dir(name)
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(src, dest)
+        _write_marker(dest, "external", _dir_content_hash(src))
         self.discover()
         if name not in self._specs:
             detail = self._discover_errors.get(name, "bad manifest")
@@ -692,6 +907,8 @@ class PluginManager:
             if _cat.get(name) or self._store_dir(name):
                 raise ValueError(f"plugin {name!r} is not installed; install it first")
             raise KeyError(f"no such plugin: {name}")
+        self._maybe_refresh_builtin(name)             # pick up an upgraded builtin
+        self.discover()                               # re-read the refreshed spec
         if name not in self._loaded:
             self._load(self._specs[name])             # load first; surface errors
         self._set_enabled(name, True)
@@ -910,6 +1127,22 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
         except Exception as e:
             raise HTTPException(400, f"Uninstall failed: {e}")
         return {"status": "uninstalled", "name": name}
+
+    @app.post("/api/plugins/refresh",
+              dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
+    async def refresh_all_plugins_engine():
+        return {"status": "ok", "refreshed": manager.refresh()}
+
+    @app.post("/api/plugins/{name}/refresh",
+              dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
+    async def refresh_plugin_engine(name: str):
+        try:
+            refreshed = manager.refresh(name)
+        except KeyError:
+            raise HTTPException(404, f"No such installed builtin plugin: {name}")
+        except Exception as e:
+            raise HTTPException(400, f"Refresh failed: {e}")
+        return {"status": "refreshed" if refreshed else "up-to-date", "name": name}
 
     @app.post("/api/plugins/{name}/enable",
               dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
