@@ -2335,6 +2335,30 @@ def plugin_disable(name):
     console.print(f"[yellow]Disabled[/yellow] plugin [bold]{name}[/bold]")
 
 
+@plugin.command("refresh")
+@click.argument("name", required=False)
+def plugin_refresh(name):
+    """Re-sync installed first-party plugins with the bundled store.
+
+    A localm upgrade ships newer plugin code, but an already-installed copy in
+    your data dir keeps shadowing it until refreshed - so you silently run stale
+    plugin code (including missing fixes). With no NAME, refreshes every
+    installed first-party plugin whose code changed; with a NAME, just that one.
+    A running GUI server picks the new code up on its next start.
+    """
+    mgr = _engine_manager()
+    try:
+        refreshed = mgr.refresh(name)
+    except KeyError:
+        console.print(f"[red]No such installed first-party plugin: {name}[/red]")
+        sys.exit(1)
+    if refreshed:
+        for n in refreshed:
+            console.print(f"[green]Refreshed[/green] plugin [bold]{n}[/bold]")
+    else:
+        console.print("[dim]All first-party plugins are up to date.[/dim]")
+
+
 @plugin.command("status")
 def plugin_status():
     """Show engine plugins: installed/available and their enabled state."""
