@@ -167,17 +167,29 @@ class TestGenerateVideo:
         assert not ok
         assert "no video output" in msg
 
-    def test_comfy_side_copy_deleted_when_dir_known(self, tmp_path):
-        """The duplicate in ComfyUI's own output dir is removed when
-        COMFY_OUTPUT_DIR / comfy_output_dir points at it."""
+    def test_comfy_side_copy_deleted_when_delete_outputs(self, tmp_path):
+        """With delete_outputs=True, the duplicate in ComfyUI's own output dir is
+        removed when COMFY_OUTPUT_DIR / comfy_output_dir points at it."""
         comfy_out = tmp_path / "comfy_out"
         comfy_out.mkdir()
         orig = comfy_out / "clip.mp4"          # matches the fake history
         orig.write_bytes(b"comfy-side copy")
-        ok, _, _ = self._run(tmp_path)
+        ok, _, _ = self._run(tmp_path, delete_outputs=True)
         assert ok
         assert not orig.exists()
         assert (tmp_path / "out.mp4").is_file()   # local save unaffected
+
+    def test_comfy_side_copy_kept_by_default(self, tmp_path):
+        """By default (delete_outputs off) ComfyUI's own copy is LEFT in place -
+        a user may run ComfyUI for its own gallery and want the file."""
+        comfy_out = tmp_path / "comfy_out"
+        comfy_out.mkdir()
+        orig = comfy_out / "clip.mp4"
+        orig.write_bytes(b"comfy-side copy")
+        ok, _, _ = self._run(tmp_path)
+        assert ok
+        assert orig.exists()                       # kept by default
+        assert (tmp_path / "out.mp4").is_file()
 
     def test_image_to_video_wires_start_image(self, tmp_path):
         img = tmp_path / "start.png"

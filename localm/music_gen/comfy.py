@@ -42,6 +42,15 @@ _WORKFLOW_LOCAL_PATH = Path(__file__).parent / "ace_workflow_local.json"
 
 
 def _workflow_path() -> Path:
+    # 1. a workflow the user selected for the music plugin, 2. the legacy
+    # ace_workflow_local.json, 3. the committed template. Selection is additive.
+    try:
+        from localm.media_workflows import active_workflow_path
+        selected = active_workflow_path("music")
+        if selected is not None:
+            return selected
+    except Exception:
+        pass
     return _WORKFLOW_LOCAL_PATH if _WORKFLOW_LOCAL_PATH.is_file() else _WORKFLOW_PATH
 
 # Instrumental marker ACE-Step understands when no lyrics are given
@@ -68,6 +77,7 @@ def generate_music(
     workdir: Optional[str] = None,
     swap: bool = True,
     cancel_check: Optional[callable] = None,
+    delete_outputs: bool = False,
 ) -> tuple[bool, str]:
     """
     Generate a music track and save it to *output_path* (FLAC).
@@ -183,6 +193,7 @@ def generate_music(
     start_time = time.time()
     audio_info = None
     last_said = 0.0
+    last_poll_error = None  # remember the last /history failure so a timeout can say WHY
     while time.time() - start_time < max_poll_seconds:
         if cancel_check and cancel_check():
             from localm.image_gen.comfy import clear_comfy_history, interrupt_comfy
@@ -203,13 +214,21 @@ def generate_music(
                         audio_info = node_output["audio"][0]
                         break
                 break
-        except Exception:
-            pass
+        except Exception as e:
+            # Keep retrying (ComfyUI may be mid-render), but record the failure
+            # so a timeout can distinguish a crashed/unreachable server from a slow one.
+            last_poll_error = e
         time.sleep(2)
     else:
-        return False, (
+        timeout_msg = (
             f"Music generation timed out after {max_poll_seconds // 60} minutes."
         )
+        if last_poll_error is not None:
+            # Surface the last poll error: an unreachable ComfyUI looks like a timeout otherwise.
+            timeout_msg += (
+                f" The last attempt to reach ComfyUI failed: {last_poll_error}"
+            )
+        return False, timeout_msg
 
     if not audio_info:
         return False, (
@@ -231,15 +250,18 @@ def generate_music(
     except Exception as e:
         return False, f"Failed to download generated track from ComfyUI: {e}"
 
-    # Enforce output containment: clear ComfyUI's history entry and delete its
-    # own copy of the track. ACE-Step's SaveAudio node writes into ComfyUI's
-    # output dir and records the job in /history, both of which its output
-    # browser surfaces - so the only copy left must be the one localm saved.
+    # Output containment (opt-in): clear ComfyUI's history entry and delete its
+    # own copy of the track ONLY when delete_outputs is set (user opted in, or
+    # privacy mode forces no-trace). ACE-Step's SaveAudio node writes into
+    # ComfyUI's output dir and records the job in /history, both of which its
+    # output browser surfaces - so when the user wants no second copy, that copy
+    # must be the one localm saved. Default keeps ComfyUI's own copies.
     contain_warning = contain_comfy_artifacts(
         api_url, prompt_id,
         {"filename": audio_info.get("filename"),
          "subfolder": audio_info.get("subfolder", ""),
          "type": audio_info.get("type", "output")},
+        delete_outputs=delete_outputs,
     )
 
     # Sidecar JSON - everything needed to reproduce or tweak the track.
@@ -266,8 +288,12 @@ def generate_music(
                        indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
-    except Exception:
-        pass
+    except OSError as e:
+        # Surface, don't silence: the track is the deliverable and is already
+        # saved, so note the sidecar miss in the message instead of failing.
+        contain_warning = _with_warning(
+            "the reproducibility sidecar could not be saved "
+            f"({e}); the track itself was saved.", contain_warning)
 
     return True, _with_warning(
         f"Track saved to {output_path} "

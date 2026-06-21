@@ -47,6 +47,8 @@ import socket
 import urllib.parse
 from typing import Optional
 
+from localm.debuglog import logger
+
 NET_MODES = ("off", "ask", "allow")
 NET_MODE_ENV_VAR = "LOCALM_NET_MODE"
 
@@ -97,7 +99,14 @@ def _config() -> dict:
     try:
         from localm.config import load_config
         return load_config()
-    except Exception:
+    except Exception as exc:
+        # Surface, do not silence: an unreadable config drops the explicit
+        # net_allow / net_deny lists (a denied host would then pass). The
+        # SSRF / private-IP guard is unaffected because net_allow_private
+        # defaults to False on this empty dict, so loopback/metadata stays blocked.
+        logger.warning("netpolicy: could not load config (%s); "
+                       "net_allow / net_deny lists are not enforced this call "
+                       "(loopback/private SSRF guard still active)", exc)
         return {}
 
 

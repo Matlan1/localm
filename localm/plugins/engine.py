@@ -584,8 +584,8 @@ class PluginManager:
                 spec = parse_spec(self._installed_dir(name))
                 if spec.default_enabled and name not in self._enabled_set():
                     self._set_enabled(name, True)
-            except Exception:
-                pass
+            except Exception as e:                  # record (don't swallow) a corrupt just-provisioned manifest
+                self._discover_errors[name] = f"preinstall-parse: {e}"
 
     def _safe_load(self, spec: PluginSpec) -> None:
         try:

@@ -28,6 +28,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from localm.debuglog import logger
 from localm.plugins.builtin.jobs.store import Job
 
 
@@ -149,8 +150,12 @@ def _run_coder(job: Job, *, engine=None) -> str:
         if callable(close):
             try:
                 close()
-            except Exception:
-                pass
+            except Exception as e:
+                # Surface (not silence) a failed cleanup: a hung subprocess or
+                # leaked handle would otherwise accumulate across scheduled runs
+                # while the job still reports success. Stay best-effort: the job
+                # result is unaffected.
+                logger.warning("coder agent cleanup failed: %s", e)
 
 
 def _coder_backend(job: Job):

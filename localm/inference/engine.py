@@ -10,6 +10,7 @@ from typing import Iterator, List, Optional
 from rich.console import Console
 
 from localm.config import load_config
+from localm.debuglog import logger
 from localm.inference.backends.base import BaseBackend
 from localm.inference.textnorm import scrub_stream
 
@@ -100,8 +101,11 @@ def model_display_name(model_path: str) -> str:
                 cfg = json.loads(cfg_file.read_text())
                 if "_name_or_path" in cfg and cfg["_name_or_path"]:
                     return cfg["_name_or_path"]
-            except Exception:
-                pass
+            except Exception as exc:
+                # config.json is optional for the display name only; load() validates
+                # it later. Falling back to the dir name is fine, but surface the
+                # corrupt config here so it is discoverable under --debug.
+                logger.debug("model_display_name: unreadable config.json at %s: %s", cfg_file, exc)
         return p.name
     return p.stem
 

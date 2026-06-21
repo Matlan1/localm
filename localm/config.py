@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import copy
 import json
 import os
 import socket
@@ -100,9 +101,15 @@ DEFAULT_CONFIG: dict = {
     # several minutes, so the default is generous.
     "comfy_launch_timeout": 300,
     # ComfyUI's own output directory (e.g. StabilityMatrix's Images folder).
-    # When set, the duplicate ComfyUI keeps after generation is deleted so the
-    # only copy is the one localm saved.
+    # Only needed if you enable comfy_delete_outputs: localm uses it to find and
+    # delete ComfyUI's duplicate copy. Left blank, localm derives it from the
+    # ComfyUI folder when it needs it.
     "comfy_output_dir": None,
+    # Whether to delete ComfyUI's OWN copy (and /history entry) of a generation
+    # after localm has saved its own. Default False: KEEP them, because a user
+    # may run ComfyUI for its own gallery and want the files. Privacy mode forces
+    # deletion regardless (no traces). Per-plugin config can override this.
+    "comfy_delete_outputs": False,
     # ComfyUI base URL localm talks to. None/blank uses the FLUX_API_URL env
     # override when set, else http://127.0.0.1:8188 (the ComfyUI default).
     "comfy_api_url": None,
@@ -274,7 +281,11 @@ def _read_json(path: Path, default):
 
 def load_config() -> dict:
     ensure_dirs()
-    cfg = DEFAULT_CONFIG.copy()
+    # DEEP copy: a shallow .copy() shares the nested mutable defaults (e.g. the
+    # "plugins" dict) with DEFAULT_CONFIG, so a caller mutating cfg["plugins"][x]
+    # (per-plugin media config, workflow selection) would silently corrupt the
+    # module-level DEFAULT_CONFIG for the rest of the process.
+    cfg = copy.deepcopy(DEFAULT_CONFIG)
     with _io_lock:
         stored = _read_json(CONFIG_FILE, {})
     if isinstance(stored, dict):
@@ -297,7 +308,7 @@ def update_config(mutator: Callable[[dict], None]) -> dict:
     (e.g. two in-process writers toggling different plugins concurrently)."""
     ensure_dirs()
     with _io_lock:
-        cfg = DEFAULT_CONFIG.copy()
+        cfg = copy.deepcopy(DEFAULT_CONFIG)   # deep: see load_config (nested dicts)
         stored = _read_json(CONFIG_FILE, {})
         if isinstance(stored, dict):
             cfg.update(stored)

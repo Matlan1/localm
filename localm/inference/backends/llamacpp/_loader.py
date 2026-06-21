@@ -25,6 +25,8 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+from localm.debuglog import logger
+
 _loaded_lib: Optional[ctypes.CDLL] = None
 
 
@@ -334,7 +336,14 @@ def load_lib() -> ctypes.CDLL:
     # ship separate backend plugins must be loaded ("no backends are loaded"
     # otherwise). _register_ggml_backends checks first and only acts when needed.
     try:
-        _register_ggml_backends(binary_dir, _loaded_lib)
+        # Capture the result: False here means even the explicit-load fallback
+        # registered no compute backends, so record the root cause now instead of
+        # leaving only the opaque deferred native "no backends are loaded" error.
+        if not _register_ggml_backends(binary_dir, _loaded_lib):
+            logger.warning(
+                'no ggml compute backends registered; model load will fail '
+                'with "no backends are loaded"'
+            )
     except Exception:
         pass
 

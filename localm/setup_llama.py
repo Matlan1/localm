@@ -50,6 +50,8 @@ from typing import Optional
 import click
 from rich.console import Console
 
+from localm.debuglog import logger
+
 console = Console(highlight=False)
 
 # Self-contained AMD build: lemonade-sdk llama.cpp ROCm build for gfx103X
@@ -163,7 +165,11 @@ def _auto_backend() -> str:
     try:
         from localm import hwdetect
         det = hwdetect.detect()
-    except Exception:
+    except Exception as e:
+        # Surface the skipped GPU setup so a detection failure is visible and the
+        # user knows how to force a GPU backend, rather than a silent CPU default.
+        console.print(f"[yellow]GPU detection failed ({e}); defaulting to CPU - "
+                      "override with --backend.[/yellow]")
         return "cpu"
     if not det.has_gpu:
         return "cpu" if sys.platform != "darwin" else det.recommended
@@ -188,6 +194,10 @@ def _latest_tag() -> str:
             return tag
     except Exception:
         pass
+    # Surface the fallback so the user knows the build may not be current (the
+    # latest-release lookup was unreachable); offer to rerun later for the latest.
+    console.print(f"[yellow]Could not reach GitHub; using pinned llama.cpp "
+                  f"{_FALLBACK_TAG} - rerun later for the latest.[/yellow]")
     return _FALLBACK_TAG
 
 
@@ -227,11 +237,19 @@ def _resolve_backend_url(backend: str) -> str:
                 return a["browser_download_url"]
     except Exception:
         pass
-    # Fallback: construct the canonical URL from the first matcher token.
+    # Fallback: construct the canonical URL from the first matcher token. The
+    # asset list could not be fetched, so this URL is a guess that was NOT
+    # confirmed against the release - warn so a later 404 is attributable to it
+    # (offline/rate-limited) rather than looking like a silent failure.
     stem = matchers[0]
     ext = "zip" if plat == "win32" else "tar.gz"
     fname = f"llama-{tag}-{stem}.{ext}"
-    return f"https://github.com/{_UPSTREAM_REPO}/releases/download/{tag}/{fname}"
+    guess = f"https://github.com/{_UPSTREAM_REPO}/releases/download/{tag}/{fname}"
+    console.print(f"[yellow]Could not verify the release asset list (offline or "
+                  f"rate-limited); using an unverified URL: {guess}[/yellow]\n"
+                  "[yellow]If the download 404s, pass --from <build dir> or "
+                  "--url <archive>.[/yellow]")
+    return guess
 
 
 # --------------------------------------------------------------------------- #
@@ -410,14 +428,24 @@ def _copy_binaries(src_dir: Path, target: Path) -> int:
 def _install_runtime_wheel(pkg_dir: Path) -> bool:
     """Install the runtime wheel editable into the active venv. Tries uv, then
     pip. Returns True on success."""
+    last_err = ""
     for cmd in (["uv", "pip", "install", "-e", str(pkg_dir)],
                 [sys.executable, "-m", "pip", "install", "-e", str(pkg_dir)]):
         try:
             r = subprocess.run(cmd, capture_output=True, text=True)
             if r.returncode == 0:
                 return True
+            # Keep the real pip/uv failure instead of discarding it, so the user
+            # can see the actual cause (missing build tools, conflicting deps).
+            last_err = (r.stderr or r.stdout or "").strip()
         except FileNotFoundError:
             continue
+    # Surface the last failed attempt's output: full to the debug log, a trimmed
+    # tail to stderr so the caller's "did not load" path has the real reason.
+    if last_err:
+        logger.debug("runtime wheel install failed: %s", last_err)
+        tail = "\n".join(last_err.splitlines()[-8:])
+        console.print(f"[yellow]Runtime wheel install failed:[/yellow]\n{tail}")
     return False
 
 
@@ -441,11 +469,13 @@ _CUDA_LINE = "cuda-12"
 _MIN_DRIVER_CUDA = (12, 4)
 
 
-def _ver_tuple(v: str) -> tuple:
+def _ver_tuple(v: str) -> Optional[tuple]:
+    # Return None (not (0,0)) on an unparseable version so an unmeasurable
+    # capability reads as "unknown", never as a too-old driver we falsely block.
     try:
         return tuple(int(x) for x in str(v).split(".")[:2])
     except Exception:
-        return (0, 0)
+        return None
 
 
 @dataclass
@@ -462,7 +492,11 @@ class NvidiaInfo:
         Unknown capability is treated as OK (do not block on a parse miss)."""
         if not self.cuda_capability:
             return True
-        return _ver_tuple(self.cuda_capability) >= _MIN_DRIVER_CUDA
+        parsed = _ver_tuple(self.cuda_capability)
+        # An unparseable capability is unknown, not old: cannot judge, do not block.
+        if parsed is None:
+            return True
+        return parsed >= _MIN_DRIVER_CUDA
 
 
 def _nvidia_smi(*args: str) -> str:

@@ -192,8 +192,16 @@ def _scrub_history_file(path: Path, pattern: re.Pattern) -> bool:
         # Preserve original line ending style
         nl = "\r\n" if "\r\n" in raw else "\n"
         path.write_text(nl.join(clean) + (nl if clean else ""), encoding="utf-8")
-    except (OSError, PermissionError):
-        pass   # best-effort; don't crash on permission errors
+    except (OSError, PermissionError) as exc:
+        # Surface, don't silence: the secret-bearing lines are STILL on disk.
+        # Reporting changed=True here would tell the user a scrub happened that
+        # did not, breaking the privacy guarantee, so return False instead and
+        # warn so the unscrubbed file is discoverable.
+        console.print(
+            f"\n[bold yellow]Warning:[/bold yellow] could not scrub history "
+            f"file [yellow]{path}[/yellow] ({exc}); command lines remain on disk."
+        )
+        return False
 
     return changed
 

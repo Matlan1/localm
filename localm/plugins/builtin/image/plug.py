@@ -225,17 +225,22 @@ async def imagine(req: ImagineRequest, request: Request):
                       "Both models fit in VRAM - keeping the chat model loaded "
                       "(no swap)."})
         job.push({"type": "line", "text": "Submitting workflow to the image backend..."})
+        is_privacy = effective_mode("server") == SessionMode.PRIVACY
+        # privacy mode forces deletion of ComfyUI's own output copy: no traces
+        # left anywhere, regardless of the configured delete_outputs preference.
+        delete_outputs = bool(s.get("delete_outputs")) or is_privacy
         ok, message = _backend.generate(
             s, req.prompt, out_path,
             self_url=self_url,
             # privacy mode: the prompt never touches disk
-            write_sidecar=effective_mode("server") != SessionMode.PRIVACY,
+            write_sidecar=not is_privacy,
             guidance=req.guidance,
             negative_prompt=req.negative_prompt,
             seed=req.seed,
             input_image=input_image,
             denoise=req.denoise,
             swap=gen_swap,
+            delete_outputs=delete_outputs,
             cancel_check=lambda: job.cancel_requested,
         )
         job.push({"type": "line", "text": message})
@@ -335,6 +340,10 @@ async def imagine_history():
 
 def register(host) -> None:
     host.mount_router(_router)
+    # Workflow management (list/upload/select/delete) for the Image page, scoped
+    # to this plugin's capability.
+    from localm.media_workflows import make_workflow_router
+    host.mount_router(make_workflow_router("image"))
 
 
 def unregister() -> None:

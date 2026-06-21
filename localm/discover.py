@@ -19,6 +19,8 @@ from __future__ import annotations
 import re
 from typing import Optional
 
+from localm.debuglog import logger
+
 HF_API = "https://huggingface.co"
 _TIMEOUT = 20
 
@@ -196,7 +198,13 @@ def vram_info() -> dict:
                                 key, "HardwareInformation.qwMemorySize")
                             if isinstance(val, int) and val > best:
                                 best = val   # largest adapter wins (skip iGPU)
-                    except OSError:
+                    except OSError as e:
+                        # Unexpected (vs the EnumKey end-of-list break above):
+                        # access denied or a removed key. Surface under --debug
+                        # so incomplete VRAM detection is diagnosable; the silent
+                        # fallback is deliberate (a note beats crashing fit badges).
+                        logger.debug("vram_info: registry subkey %s unreadable: %s",
+                                     sub, e)
                         continue
             if best:
                 return {"total": int(best)}

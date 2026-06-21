@@ -44,6 +44,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Optional, Union
 
+from localm.debuglog import logger
+
 
 # ---------------------------------------------------------------------------
 #  SessionMode
@@ -171,6 +173,7 @@ class AuditLog:
         filename = f"{ts}_{pid}{suffix}.jsonl"
         self._path = _sessions_dir() / filename
         self._turn = 0
+        self._warned_write_fail = False  # warn once, not per line, on write failure
         self._fh = open(self._path, "a", encoding="utf-8")  # noqa: SIM115
         self._write("system", {"msg": "session started"})
 
@@ -211,8 +214,13 @@ class AuditLog:
             }
             self._fh.write(json.dumps(record, ensure_ascii=False) + "\n")
             self._fh.flush()
-        except Exception:
-            pass   # never crash the host due to logging
+        except Exception as e:
+            # never crash the host due to logging; but surface a one-time
+            # warning so a disk-full/permission failure does not silently
+            # truncate the audit trail with no signal at all
+            if not self._warned_write_fail:
+                self._warned_write_fail = True
+                logger.warning("audit log write failed: %s; trail may be incomplete", e)
 
 
 # ---------------------------------------------------------------------------
