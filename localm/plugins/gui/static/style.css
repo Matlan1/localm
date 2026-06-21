@@ -765,9 +765,13 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
   padding: 10px 12px; margin-top: 12px;
 }
 .media-sub-head { margin: 0; font-size: 14px; }
-/* A field inheriting the shared default (no per-plugin override yet): its label
-   reads dimmer so an override stands out from an inherited value. */
+/* A field inheriting the shared default (no per-plugin override yet): the whole
+   row reads dimmer (label AND the value box) so an override clearly stands out
+   from an inherited value, matching the auto-detected-path cue above. */
 .media-inherited label { color: var(--text-dim); }
+.media-inherited input, .media-inherited select {
+  color: var(--text-dim); font-style: italic;
+}
 
 /* Per-plugin workflow panel (Image/Music/Video pages). */
 .workflow-list { display: flex; flex-direction: column; gap: 4px; margin: 6px 0; }

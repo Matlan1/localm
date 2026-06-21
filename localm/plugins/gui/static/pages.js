@@ -1437,7 +1437,20 @@ async function buildMediaSection(form) {
     if (!r.ok) throw new Error(r.statusText);
     data = await r.json();
   } catch (e) {
-    return;   // media config unavailable; skip the section (do not break settings)
+    // Surface, do not hide (binding rule 5): the group=Media fields are skipped
+    // from the flat form, so if this fetch fails we must SHOW that the media
+    // settings could not load - silently dropping the section would make those
+    // settings vanish with no clue why.
+    const fail = el("section", "card settings-section");
+    fail.id = "settings-sec-media";
+    fail.dataset.sec = "media";
+    fail.dataset.secLabel = "Media";
+    fail.appendChild(el("h3", "settings-section-head", "Media"));
+    fail.appendChild(el("div", "sub",
+      "Could not load media settings (" + e.message + "). The image/music/video "
+      + "config is unavailable - check the server logs."));
+    form.appendChild(fail);
+    return;
   }
   const byName = {};
   for (const p of (data.plugins || [])) byName[p.plugin] = p;
@@ -1508,6 +1521,9 @@ async function saveMediaPlugin(name, controls) {
 /** Render the workflow panel for a media plugin: the built-in default plus each
  *  uploaded workflow, with select + delete, and an upload control. */
 async function refreshWorkflowPanel(media) {
+  // Allowlist the media type before it ever reaches a selector/URL (defensive:
+  // today it is only ever called with a hardcoded type).
+  if (!MEDIA_PLUGIN_ORDER.includes(media)) return;
   // Query by data-media (not id): the image page uses the "img-" id prefix while
   // the media type is "image", so the data attribute is the stable handle.
   const box = document.querySelector(`[data-media="${media}"]`);

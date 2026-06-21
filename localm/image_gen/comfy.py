@@ -375,6 +375,13 @@ def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
                          stderr=subprocess.STDOUT)
     except Exception as e:
         return False, f"Could not launch ComfyUI ({launch_cmd}): {e}"
+    finally:
+        # Close the PARENT's copy of the log handle on every path: the child
+        # inherited its own dup'd descriptor, so leaving this open would leak a
+        # file handle per launch (and on Windows hold a write lock the next
+        # launch's re-open would contend with). DEVNULL is a sentinel, not a file.
+        if hasattr(launch_out, "close"):
+            launch_out.close()
 
     deadline = _t.monotonic() + wait_seconds
     last_said = 0.0
