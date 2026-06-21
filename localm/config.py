@@ -85,8 +85,14 @@ DEFAULT_CONFIG: dict = {
     # not running - from the GUI, the CLI, or the coder's generate_image tool.
     "comfy_launch_cmd": None,
     # Working directory for comfy_launch_cmd (launchers that assume their own
-    # folder, e.g. plain "python main.py" inside a ComfyUI checkout).
+    # folder, e.g. plain "python main.py" inside a ComfyUI checkout). When left
+    # blank and comfy_launch_cmd points at a launcher file, localm runs it from
+    # that file's own folder - the ComfyUI / ZLUDA .bat convention.
     "comfy_workdir": None,
+    # How long to wait for ComfyUI to answer after launching it, in seconds. A
+    # ZLUDA / ROCm cold start compiles GPU kernels on first run and can take
+    # several minutes, so the default is generous.
+    "comfy_launch_timeout": 300,
     # ComfyUI's own output directory (e.g. StabilityMatrix's Images folder).
     # When set, the duplicate ComfyUI keeps after generation is deleted so the
     # only copy is the one localm saved.

@@ -90,6 +90,7 @@ def generate(s: dict, prompt: str, out_path: Path, *,
              self_url: str, write_sidecar: bool, on_progress=None,
              input_image: Optional[Path] = None,
              swap: bool = True,
+             cancel_check=None,
              **kwargs) -> tuple[bool, str]:
     # generate_video has no comfy_output_dir param; feed the per-plugin value
     # through the env var its containment step resolves from (FAC-3). This is
@@ -106,5 +107,6 @@ def generate(s: dict, prompt: str, out_path: Path, *,
             launch_cmd=s["launch_cmd"] or None,
             workdir=s["workdir"] or None,
             swap=swap,
+            cancel_check=cancel_check,
             **kwargs,
         )

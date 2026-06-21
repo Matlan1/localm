@@ -36,6 +36,13 @@ class Job:
     result: Optional[str] = None   # kind-specific payload (e.g. output image path)
     created_at: float = field(default_factory=time.time)
     _proc: Optional[subprocess.Popen] = None
+    # Set by cancel(); in-thread jobs (start_fn, e.g. media gen) poll this to
+    # stop cooperatively since there is no subprocess to terminate.
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+
+    @property
+    def cancel_requested(self) -> bool:
+        return self.cancel_event.is_set()
 
     def push(self, event: dict) -> None:
         try:
@@ -51,9 +58,14 @@ class Job:
                 pass
 
     def cancel(self) -> None:
+        """Request cancellation. Sets the cooperative flag (polled by in-thread
+        jobs like media generation) and terminates the subprocess when there is
+        one (CLI jobs like model pulls)."""
+        if self.status == "running":
+            self.status = "cancelled"
+        self.cancel_event.set()
         proc = self._proc
         if proc is not None and proc.poll() is None:
-            self.status = "cancelled"
             proc.terminate()
 
 

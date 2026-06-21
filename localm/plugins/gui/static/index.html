@@ -254,6 +254,7 @@
           <input type="text" id="img-input" placeholder="path to a base image" spellcheck="false">
           <div class="actions">
             <button class="btn-primary" id="img-generate">Generate</button>
+            <button class="btn-quiet" id="img-stop" style="display:none" title="Stop this generation and free the GPU">Stop</button>
             <label class="inline-check" title="When off, ComfyUI stays loaded for fast batch generation; the chat model reloads on the next chat message.">
               <input type="checkbox" id="img-reload-llm" checked> reload chat model after generation
             </label>
@@ -291,6 +292,7 @@
           </div>
           <div class="actions">
             <button class="btn-primary" id="music-generate">Generate</button>
+            <button class="btn-quiet" id="music-stop" style="display:none" title="Stop this generation and free the GPU">Stop</button>
           </div>
           <pre id="music-log" class="job-log" style="display:none"></pre>
           <div id="music-result"></div>
@@ -328,6 +330,7 @@
           </div>
           <div class="actions">
             <button class="btn-primary" id="video-generate">Generate</button>
+            <button class="btn-quiet" id="video-stop" style="display:none" title="Stop this generation and free the GPU">Stop</button>
           </div>
           <pre id="video-log" class="job-log" style="display:none"></pre>
           <div id="video-result"></div>

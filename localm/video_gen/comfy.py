@@ -89,6 +89,7 @@ def generate_video(
     launch_cmd: Optional[str] = None,
     workdir: Optional[str] = None,
     swap: bool = True,
+    cancel_check: Optional[callable] = None,
 ) -> tuple[bool, str]:
     """
     Generate a short video clip and save it to *output_path* (MP4).
@@ -242,6 +243,11 @@ def generate_video(
     video_info = None
     last_said = 0.0
     while time.time() - start_time < max_poll_seconds:
+        if cancel_check and cancel_check():
+            from localm.image_gen.comfy import clear_comfy_history, interrupt_comfy
+            interrupt_comfy(api_url)
+            clear_comfy_history(api_url, prompt_id)
+            return False, "Generation cancelled."
         elapsed = time.time() - start_time
         if elapsed - last_said >= 15:
             _say(f"Rendering… ({int(elapsed)}s elapsed)")
