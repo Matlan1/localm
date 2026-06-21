@@ -740,6 +740,66 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
         return cfg
 
     # ---------------------------------------------------------------- #
+    #  Per-plugin media config (image / music / video)                   #
+    # ---------------------------------------------------------------- #
+
+    @app.get("/v1/media/config",
+             dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
+    async def get_media_config():
+        """Per-plugin media (ComfyUI) config for image/music/video, each with its
+        editable fields and RESOLVED values (the per-plugin block value, else the
+        shared global comfy_* fallback). The GUI 'Media' section renders one
+        subsection per plugin so the three are configured independently."""
+        from localm.config import load_config
+        from localm.settings_schema import MEDIA_PLUGINS, media_schema_json
+        cfg = load_config()
+        plugins = cfg.get("plugins") if isinstance(cfg.get("plugins"), dict) else {}
+        labels = {"image": "Image", "music": "Music", "video": "Video"}
+        out = []
+        for name in MEDIA_PLUGINS:
+            block = plugins.get(name) if isinstance(plugins.get(name), dict) else {}
+            out.append({"plugin": name, "label": labels[name],
+                        "fields": media_schema_json(name, block, cfg)})
+        return {"plugins": out}
+
+    @app.post("/v1/media/config/{name}",
+              dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
+    async def set_media_config(name: str, body: dict):
+        """Save ONE media plugin's own config block, deep-merged so the other
+        fields and the other plugins are untouched. A blank field clears that
+        plugin's override (it falls back to the shared global default)."""
+        from localm.config import load_config, update_config
+        from localm.settings_schema import (MEDIA_PLUGINS, media_schema_json,
+                                             validate_media_block)
+        if name not in MEDIA_PLUGINS:
+            raise HTTPException(404, f"unknown media plugin: {name}")
+        try:
+            merge = validate_media_block(name, body or {})
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+        def _deep_merge(dst: dict, src: dict) -> None:
+            for k, v in src.items():
+                if isinstance(v, dict) and isinstance(dst.get(k), dict):
+                    _deep_merge(dst[k], v)
+                else:
+                    dst[k] = v
+
+        def _mutate(cfg: dict) -> None:
+            plugins = cfg.get("plugins")
+            if not isinstance(plugins, dict):
+                plugins = cfg["plugins"] = {}
+            block = plugins.get(name)
+            if not isinstance(block, dict):
+                block = plugins[name] = {}
+            _deep_merge(block, merge)
+
+        update_config(_mutate)
+        cfg = load_config()
+        block = (cfg.get("plugins") or {}).get(name) or {}
+        return {"plugin": name, "fields": media_schema_json(name, block, cfg)}
+
+    # ---------------------------------------------------------------- #
     #  API keys - scoped keystore (auth.json)                            #
     # ---------------------------------------------------------------- #
 

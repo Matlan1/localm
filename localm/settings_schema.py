@@ -456,3 +456,137 @@ def schema_json(values: Optional[dict] = None) -> list:
                 d["auto"] = ""
         out.append(d)
     return out
+
+
+# --------------------------------------------------------------------------- #
+#  Per-plugin media config (image / music / video).                           #
+#                                                                              #
+#  Each media plugin keeps its OWN settings block under config["plugins"][name]#
+#  so the three are configured INDEPENDENTLY. The backends already read it     #
+#  (block value, else the global comfy_* fallback - see media_config.py and    #
+#  the media backends). This is what the GUI "Media" section edits, one        #
+#  subsection per plugin. The global comfy_* keys remain the shared fallback   #
+#  (and the CLI / PATCH /v1/config path) for back-compat.                      #
+# --------------------------------------------------------------------------- #
+
+MEDIA_PLUGINS = ("image", "music", "video")
+
+
+@dataclass
+class MediaField:
+    key: str                       # API field name, e.g. "workdir"
+    block_path: tuple              # where it lives in the plugin block
+    global_key: str                # global DEFAULT_CONFIG fallback key
+    widget: str
+    label: str
+    help: str = ""
+    options: Optional[list] = None
+    image_only: bool = False       # fast_dequant only applies to the Flux image backend
+
+
+# Order = display order within each plugin subsection.
+MEDIA_PLUGIN_FIELDS: list = [
+    MediaField("workdir", ("comfy", "workdir"), "comfy_workdir", Widget.FOLDER,
+               "ComfyUI folder",
+               "This plugin's ComfyUI install folder. Blank uses the shared default."),
+    MediaField("launch_cmd", ("comfy", "launch_cmd"), "comfy_launch_cmd", Widget.TEXT,
+               "ComfyUI launch command",
+               "Launcher that starts ComfyUI for this plugin. Blank auto-detects one "
+               "in the folder."),
+    MediaField("api_url", ("comfy", "api_url"), "comfy_api_url", Widget.TEXT,
+               "ComfyUI API URL",
+               "Where this plugin's ComfyUI listens. Blank uses the shared default."),
+    MediaField("output_dir", ("comfy", "output_dir"), "comfy_output_dir", Widget.FOLDER,
+               "ComfyUI output folder",
+               "Only needed if 'Remove ComfyUI's copy' is on; blank derives it."),
+    MediaField("delete_outputs", ("comfy", "delete_outputs"), "comfy_delete_outputs",
+               Widget.TOGGLE, "Remove ComfyUI's copy after generating",
+               "Delete ComfyUI's own copy once localm saved its own. Off = keep; "
+               "privacy mode forces it on."),
+    MediaField("fast_dequant", ("comfy", "fast_dequant"), "comfy_fast_dequant",
+               Widget.TOGGLE, "Fast GGUF dequant (fp16)",
+               "Rewrite a slow float32 Flux GGUF dequant to fp16/bf16 on submit.",
+               image_only=True),
+    MediaField("reload_after", ("reload_llm_after_generate",), "reload_llm_after_imagine",
+               Widget.TOGGLE, "Reload chat model after generating",
+               "Free this backend's VRAM and reload the chat model after a gen."),
+    MediaField("swap_policy", ("model_swap_policy",), "model_swap_policy",
+               Widget.SELECT, "Media VRAM swap",
+               "auto = keep chat if it fits; always = unload chat; never = keep chat hot.",
+               options=["auto", "always", "never"]),
+]
+
+
+def _block_get(block: dict, path: tuple):
+    """Read a (possibly nested) value out of a plugin block, or None."""
+    cur = block
+    for p in path:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(p)
+    return cur
+
+
+def media_fields_for(name: str) -> list:
+    """The MediaFields that apply to plugin *name* (drops image-only ones else)."""
+    return [f for f in MEDIA_PLUGIN_FIELDS if not (f.image_only and name != "image")]
+
+
+def media_schema_json(name: str, block: Optional[dict], full_config: dict) -> list:
+    """Serialize one media plugin's editable fields with their RESOLVED values.
+
+    ``value`` is the per-plugin block value when set, else the global comfy_*
+    fallback, so the GUI shows what is actually in effect. ``is_override`` flags
+    whether this plugin has its own value (vs inheriting the shared default)."""
+    block = block if isinstance(block, dict) else {}
+    out = []
+    for f in media_fields_for(name):
+        block_val = _block_get(block, f.block_path)
+        has_own = block_val not in (None, "")
+        value = block_val if has_own else full_config.get(f.global_key)
+        d = {"key": f.key, "widget": f.widget, "label": f.label, "help": f.help,
+             "value": value, "is_override": has_own, "global": full_config.get(f.global_key)}
+        if f.options:
+            d["options"] = f.options
+        out.append(d)
+    return out
+
+
+def _coerce_media_value(f: "MediaField", val):
+    """Coerce one media-field value to its widget type (mirrors validate_update)."""
+    if f.widget == Widget.TOGGLE:
+        return _to_bool(f.key, val)
+    if f.widget == Widget.SELECT:
+        s = "" if val is None else str(val)
+        if f.options and s in f.options:
+            return s
+        raise ValueError(f"{f.key}: {val!r} is not one of {f.options}")
+    # TEXT / FOLDER: empty string clears the override (back to the shared default)
+    if val is None:
+        return None
+    s = str(val).strip()
+    return s or None
+
+
+def validate_media_block(name: str, updates: dict) -> dict:
+    """Coerce + validate a per-plugin media update into a block-merge dict.
+
+    Returns a nested dict shaped like the stored plugin block (e.g.
+    ``{"comfy": {"workdir": ...}, "model_swap_policy": ...}``) ready to DEEP-MERGE
+    into config["plugins"][name]. Raises ValueError on an unknown plugin/field or
+    a bad value. A field set to "" (blank) is written as None, clearing the
+    per-plugin override so the plugin falls back to the shared default."""
+    if name not in MEDIA_PLUGINS:
+        raise ValueError(f"unknown media plugin: {name!r}")
+    by_key = {f.key: f for f in media_fields_for(name)}
+    merge: dict = {}
+    for key, val in updates.items():
+        f = by_key.get(key)
+        if f is None:
+            raise ValueError(f"unknown media field for {name!r}: {key!r}")
+        coerced = _coerce_media_value(f, val)
+        cur = merge
+        for p in f.block_path[:-1]:
+            cur = cur.setdefault(p, {})
+        cur[f.block_path[-1]] = coerced
+    return merge
