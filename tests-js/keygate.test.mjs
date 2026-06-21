@@ -123,6 +123,32 @@ test("P2b: a non-localm QR is ignored (no login attempt)", async () => {
     "a non-localm QR triggers no /api/session login");
 });
 
+const _safeFetch = async () => ({ ok: true, status: 200,
+  json: async () => ({ models: [], conversations: [], plugins: [] }), text: async () => "" });
+
+test("scanSupported: offered wherever a camera can open, not only with BarcodeDetector", async () => {
+  const { window } = loadApp({ fetchImpl: _safeFetch });
+  await tick();
+  // No camera API -> hidden (e.g. an insecure context).
+  assert.equal(window.scanSupported(), false);
+  // A camera + getUserMedia is enough; the jsQR fallback covers decoding even
+  // with no BarcodeDetector (Firefox / Brave / Opera / iOS Safari).
+  Object.defineProperty(window.navigator, "mediaDevices",
+    { value: { getUserMedia() {} }, configurable: true });
+  assert.equal("BarcodeDetector" in window, false, "no native detector in this env");
+  assert.equal(window.scanSupported(), true, "still offered via the jsQR fallback");
+});
+
+test("loadJsQR injects the bundled decoder script once", async () => {
+  const { window } = loadApp({ fetchImpl: _safeFetch });
+  await tick();
+  const p1 = window.loadJsQR();
+  const p2 = window.loadJsQR();
+  assert.equal(p1, p2, "concurrent calls share one load promise (no double-inject)");
+  const scripts = [...window.document.querySelectorAll('script[src="/vendor/jsQR.min.js"]')];
+  assert.equal(scripts.length, 1, "exactly one jsQR script tag added");
+});
+
 test("NET-1 onboarding: the guided cert-install step + per-platform help render over HTTPS", async () => {
   const { window } = loadApp({ fetchImpl: keyless401, url: "https://192.168.0.5:8651/" });
   await tick();

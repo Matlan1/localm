@@ -12,17 +12,21 @@
 const CACHE = "localm-shell-v3";
 const SHELL = [
   "/", "/index.html", "/style.css", "/app.js", "/pages.js",
-  "/icon.svg", "/manifest.webmanifest",
+  "/icon.svg", "/icon-192.png", "/icon-512.png", "/icon-maskable-512.png",
+  "/manifest.webmanifest",
   "/vendor/marked.min.js", "/vendor/purify.min.js", "/vendor/highlight.min.js",
   "/vendor/katex.min.js", "/vendor/auto-render.min.js",
   "/vendor/github-dark.min.css", "/vendor/katex.min.css",
 ];
 
 self.addEventListener("install", (e) => {
-  // Pre-cache the shell; addAll is best-effort so one missing asset is not fatal.
+  // Pre-cache the shell; best-effort so one missing asset is not fatal. Force a
+  // network fetch (cache: "reload") so a NEW worker never re-caches a stale copy
+  // from the browser's HTTP cache on update - it must precache the new assets.
   e.waitUntil(
     caches.open(CACHE)
-      .then((c) => Promise.allSettled(SHELL.map((u) => c.add(u))))
+      .then((c) => Promise.allSettled(
+        SHELL.map((u) => c.add(new Request(u, { cache: "reload" })))))
       .then(() => self.skipWaiting())
   );
 });

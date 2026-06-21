@@ -440,8 +440,9 @@ function showKeyGate(message) {
   const cert = $("key-gate-cert");
   if (cert) cert.style.display =
     (location.protocol === "https:") ? "block" : "none";
-  // Offer "Scan QR code" only where it can work: a touch device with the native
-  // BarcodeDetector + a camera (Android Chrome). iOS / unsupported -> manual entry.
+  // Offer "Scan QR code" wherever the browser can open a camera (a secure
+  // context). Decoding uses the native BarcodeDetector when present, else the
+  // bundled jsQR fallback, so it is not limited to Android Chrome.
   const scan = $("key-gate-scan");
   if (scan) scan.style.display = scanSupported() ? "inline-block" : "none";
   const input = $("key-gate-input");
@@ -476,15 +477,29 @@ function submitKeyGate() {
 
 // --- Pairing QR scanner (phone) -------------------------------------------
 // Reads the key QR shown in the computer's Settings (Companion app) with the
-// browser-native BarcodeDetector + camera, and saves the key without typing.
-// Capability = Android Chrome / Chromium; iOS Safari has no BarcodeDetector, so
-// the button stays hidden there and manual entry is the path.
+// camera and saves the key without typing. Decoding prefers the native
+// BarcodeDetector and falls back to the bundled jsQR, so it works on browsers
+// that lack BarcodeDetector (Firefox, Brave, Opera, iOS Safari, ...) - any
+// browser that can open a camera in a secure context.
 function scanSupported() {
-  const cap = ("BarcodeDetector" in window)
-    && !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
-  const touchLike = (navigator.maxTouchPoints || 0) > 0
-    || !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
-  return cap && touchLike;
+  return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+}
+
+// Lazily load the bundled jsQR decoder (only fetched when a scan starts on a
+// browser without BarcodeDetector). Sets window.jsQR (UMD). Cached after first
+// load; the service worker caches the file for later offline pairing.
+let _jsqrPromise = null;
+function loadJsQR() {
+  if (window.jsQR) return Promise.resolve(window.jsQR);
+  if (_jsqrPromise) return _jsqrPromise;
+  _jsqrPromise = new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = "/vendor/jsQR.min.js";
+    s.onload = () => resolve(window.jsQR);
+    s.onerror = () => { _jsqrPromise = null; reject(new Error("jsQR failed to load")); };
+    document.head.appendChild(s);
+  });
+  return _jsqrPromise;
 }
 
 // Decode a scanned payload -> save the key + reload. Returns true when it was a
@@ -512,9 +527,19 @@ async function startQrScan() {
   if (!overlay || !video) return;
   overlay.style.display = "flex";
   if (status) status.textContent = "Starting camera…";
-  let detector;
-  try { detector = new window.BarcodeDetector({ formats: ["qr_code"] }); }
-  catch (e) { if (status) status.textContent = "QR scanning is not available here."; return; }
+
+  // Prefer the native BarcodeDetector; otherwise load the bundled jsQR decoder.
+  let detector = null;
+  if ("BarcodeDetector" in window) {
+    try { detector = new window.BarcodeDetector({ formats: ["qr_code"] }); }
+    catch (e) { detector = null; }
+  }
+  let jsqr = null;
+  if (!detector) {
+    try { jsqr = await loadJsQR(); }
+    catch (e) { if (status) status.textContent = "QR scanning is not available here."; return; }
+  }
+
   try {
     _qrStream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: "environment" }, audio: false });
@@ -525,18 +550,35 @@ async function startQrScan() {
   video.srcObject = _qrStream;
   try { await video.play(); } catch (e) { /* autoplay guard */ }
   if (status) status.textContent = "Point at the QR in the computer's Settings.";
+
+  // Decode one video frame -> the QR text, or null. BarcodeDetector reads the
+  // <video> directly; jsQR needs the pixels sampled onto a canvas first.
+  const canvas = document.createElement("canvas");
+  const decodeFrame = async () => {
+    if (detector) {
+      const codes = await detector.detect(video);
+      return codes.length ? codes[0].rawValue : null;
+    }
+    const w = video.videoWidth, h = video.videoHeight;
+    if (!w || !h) return null;
+    canvas.width = w; canvas.height = h;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    ctx.drawImage(video, 0, 0, w, h);
+    const img = ctx.getImageData(0, 0, w, h);
+    const res = jsqr(img.data, w, h, { inversionAttempts: "dontInvert" });
+    return res ? res.data : null;
+  };
+
   let busy = false;
   _qrTimer = setInterval(async () => {
     if (busy || !_qrStream) return;
     busy = true;
     try {
-      const codes = await detector.detect(video);
-      for (const c of codes) {
-        if (handleScannedKey(c.rawValue)) { stopQrScan(); return; }
-      }
+      const value = await decodeFrame();
+      if (value && handleScannedKey(value)) { stopQrScan(); return; }
     } catch (e) { /* transient detect error - keep scanning */ }
     finally { busy = false; }
-  }, 300);
+  }, detector ? 300 : 200);
 }
 
 // --- PWA install affordance (P2c) -----------------------------------------
@@ -585,6 +627,15 @@ function applyInstallUI(env) {
   }
   if (env.canPrompt && btn) { btn.style.display = ""; return; }
   if (env.ios && ios) { ios.style.display = ""; return; }
+  if (env.certNeeded) {
+    // On HTTPS the service worker only registers behind a TRUSTED certificate;
+    // without it the browser can only make a plain shortcut, not an installed
+    // app. Point the user at the certificate step instead of the generic hint.
+    hint.textContent = "To install localm as an app, trust this device's "
+      + "certificate first (the “Install certificate” step above), then reload.";
+    hint.style.display = "";
+    return;
+  }
   hint.style.display = "";   // generic browser-menu hint (default)
 }
 

@@ -57,6 +57,8 @@ localm/video_gen/wan_workflow_local.json
 
 # Local screenshots / scratch media
 *.png
+# ...but ship the GUI PWA icons (rasterized from icon.svg for the manifest).
+!localm/plugins/gui/static/icon-*.png
 
 # Internal development / planning docs - not public documentation
 task.md
