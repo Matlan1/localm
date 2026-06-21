@@ -35,25 +35,49 @@ def _workflow_path() -> Path:
 #  VRAM management
 # ---------------------------------------------------------------------------
 
-def _localm_unload(localm_url: Optional[str] = None) -> None:
+def _localm_unload(localm_url: Optional[str] = None) -> Optional[dict]:
     """
     Ask a localm server to release its model from GPU memory.
 
-    Reads LOCALM_URL from the environment if *localm_url* is not given.
-    Silent no-op when the variable is unset or the request fails - never
-    blocks image generation if localm is not in the picture.
+    Reads LOCALM_URL from the environment if *localm_url* is not given, and
+    authenticates with the LOCALM_API_KEY bearer token when one is set. The
+    ``/v1/models/unload`` endpoint requires the models-write scope, so an
+    UNAUTHENTICATED POST is rejected with 401 and the chat model stays resident
+    in VRAM - the media model then loads on top of it, exceeds total VRAM and
+    hangs the GPU driver (the AMD TDR the user hit). For the same reason the
+    built-in TLS cert of a loopback ``https`` self-call must be trusted, exactly
+    as the media-job model reload does (``localm.tls.requests_verify``); plain
+    ``urllib`` would reject the self-signed cert and silently skip the unload.
+
+    Silent no-op when the URL is unset. Returns the server's JSON result
+    (``status`` / ``vram_freed`` / ``vram_before_bytes`` / ``vram_after_bytes``)
+    on success, or None on any failure - never blocks generation if localm is
+    not in the picture.
     """
     url = (localm_url or os.environ.get("LOCALM_URL", "")).rstrip("/")
     if not url:
-        return
+        return None
     try:
-        req = urllib.request.Request(f"{url}/models/unload", data=b"", method="POST")
-        # Unload waits for any in-flight generation to finish (it must not
-        # free the context mid-decode), so give it time
-        with urllib.request.urlopen(req, timeout=180):
-            pass
+        import requests as _rq
+
+        from localm import tls as _tls
+        headers = {}
+        key = os.environ.get("LOCALM_API_KEY")
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        # Unload waits for any in-flight generation to finish AND for VRAM to be
+        # actually reclaimed before it returns (it must not free the context
+        # mid-decode), so give it time.
+        resp = _rq.post(f"{url}/models/unload", headers=headers, timeout=180,
+                        verify=_tls.requests_verify(url))
+        if not resp.ok:
+            return None
+        try:
+            return resp.json()
+        except Exception:
+            return {"status": "unloaded"}
     except Exception:
-        pass
+        return None
 
 
 def default_api_url() -> str:
@@ -96,8 +120,33 @@ def _comfy_alive(api_url: str, timeout: float = 3.0) -> bool:
         return False
 
 
+def _derive_workdir_from_cmd(launch_cmd: str) -> Optional[str]:
+    """The folder of the launcher script, so a .bat / .sh that references paths
+    relative to its own location (the ComfyUI + ZLUDA convention, e.g. a copied
+    ``launch-comfyui.bat`` next to ``python_embeded`` / ``venv``) runs from the
+    right place even when ``comfy_workdir`` was not set. Best-effort: returns the
+    parent of the first token that is an existing file, else None."""
+    import shlex
+    try:
+        tokens = shlex.split(launch_cmd, posix=(os.name != "nt"))
+    except ValueError:
+        tokens = launch_cmd.split()
+    for tok in tokens:
+        tok = tok.strip().strip('"').strip("'")
+        if not tok:
+            continue
+        try:
+            p = Path(tok)
+        except Exception:
+            break
+        if p.is_file():
+            return str(p.parent)
+        break  # only the first token is the program/script being launched
+    return None
+
+
 def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
-                 wait_seconds: int = 180,
+                 wait_seconds: Optional[int] = None,
                  launch_cmd: Optional[str] = None,
                  workdir: Optional[str] = None) -> tuple[bool, str]:
     """
@@ -145,6 +194,15 @@ def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
             '  localm config comfy_workdir "<path>\\ComfyUI"   (optional cwd)'
         )
 
+    # A ZLUDA / ROCm cold start compiles GPU kernels and can take minutes, so
+    # honour the configurable timeout when the caller did not pin one.
+    if wait_seconds is None:
+        try:
+            wait_seconds = int(cfg.get("comfy_launch_timeout") or 300)
+        except (TypeError, ValueError):
+            wait_seconds = 300
+    wait_seconds = max(30, wait_seconds)
+
     _say(f"ComfyUI not running - launching: {launch_cmd}")
     # The command is the user's own config value (their launcher script).
     # On Windows pass `cmd /S /c "<line>"` as a single string: /S strips the
@@ -153,6 +211,12 @@ def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
     # mangles them). POSIX uses shlex.
     if workdir is None:
         workdir = cfg.get("comfy_workdir")
+    if not workdir:
+        # No explicit cwd: run the launcher from its own folder so a .bat/.sh
+        # that uses paths relative to itself (ComfyUI + ZLUDA) still works.
+        workdir = _derive_workdir_from_cmd(launch_cmd)
+        if workdir:
+            _say(f"Running the launcher from {workdir}")
     workdir = workdir or None
     if _sys.platform == "win32":
         argv: "str | list" = 'cmd /S /c "' + launch_cmd + '"'
@@ -177,7 +241,9 @@ def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
         _t.sleep(2)
     return False, (
         f"ComfyUI did not come up within {wait_seconds // 60} minutes - "
-        "check the launcher window for errors."
+        "check the launcher window for errors. If it is just a slow first "
+        "(ZLUDA / ROCm) start, raise the limit: "
+        "localm config comfy_launch_timeout 600"
     )
 
 
@@ -372,6 +438,32 @@ def contain_comfy_artifacts(
         return f"WARNING: could not delete ComfyUI's copy of the output ({e})."
 
 
+def interrupt_comfy(api_url: str) -> bool:
+    """Abort ComfyUI's currently running prompt and clear its queue (POST
+    ``/interrupt`` + POST ``/queue {"clear": true}``).
+
+    Best-effort, used to honour a user's Stop so a long media gen actually stops
+    instead of running to completion. Shared by image, music, and video. Returns
+    True when the interrupt was accepted."""
+    ok = False
+    try:
+        req = urllib.request.Request(f"{api_url}/interrupt", data=b"", method="POST")
+        with urllib.request.urlopen(req, timeout=10):
+            ok = True
+    except Exception:
+        pass
+    try:
+        body = json.dumps({"clear": True}).encode()
+        req = urllib.request.Request(
+            f"{api_url}/queue", data=body,
+            headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=10):
+            pass
+    except Exception:
+        pass
+    return ok
+
+
 def _with_warning(message: str, warning: str) -> str:
     """Append a containment warning to a success message when present."""
     return f"{message}\n{warning}" if warning else message
@@ -404,6 +496,7 @@ def generate_image(
     workdir: Optional[str] = None,
     comfy_output_dir: Optional[str] = None,
     swap: bool = True,
+    cancel_check: Optional[callable] = None,
 ) -> tuple[bool, str]:
     """
     Generate an image from *prompt* and save it to *output_path*.
@@ -711,6 +804,10 @@ def generate_image(
         task_id = progress.add_task("Generating image…", total=None)
 
         while time.time() - start_time < max_poll_seconds:
+            if cancel_check and cancel_check():
+                interrupt_comfy(api_url)
+                clear_comfy_history(api_url, prompt_id)
+                return False, "Generation cancelled."
             elapsed = int(time.time() - start_time)
             progress.update(task_id, description=f"Generating image… ({elapsed}s)")
 

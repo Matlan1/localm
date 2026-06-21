@@ -99,6 +99,57 @@ def _video_path(name: str) -> Path:
     return confined_file(_video_dir(), name, "clip")
 
 
+def _unload_chat(job, self_url: str) -> bool:
+    """Unload the chat model BEFORE the video model loads, so it gets the VRAM.
+
+    Uses the same bearer-token + TLS handling as the reload path: the
+    ``/v1/models/unload`` endpoint needs the models-write scope, so an
+    unauthenticated call is rejected and the chat model stays resident - the
+    video model then loads on top of it and hangs the GPU driver. Logs the
+    outcome (and the VRAM freed) so a failure is visible instead of silent.
+    Returns True when the server confirmed the chat model is unloaded."""
+    job.push({"type": "line", "text": "Freeing VRAM: unloading the chat model..."})
+    try:
+        import requests as _rq
+        headers = {}
+        key = os.environ.get("LOCALM_API_KEY")
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        from localm import tls as _tls
+        resp = _rq.post(f"{self_url}/models/unload", headers=headers, timeout=300,
+                        verify=_tls.requests_verify(self_url))
+        if not resp.ok:
+            job.push({"type": "line", "text":
+                      f"Could not unload the chat model (HTTP {resp.status_code}) - "
+                      "the video backend may run low on VRAM."})
+            return False
+        data = {}
+        try:
+            data = resp.json()
+        except Exception:
+            pass
+        if data.get("status") == "already_unloaded":
+            job.push({"type": "line", "text":
+                      "No chat model was loaded - VRAM already free."})
+            return True
+        before, after = data.get("vram_before_bytes"), data.get("vram_after_bytes")
+        if data.get("vram_freed") and before is not None and after is not None:
+            gb = max(0.0, (after - before) / 1024 ** 3)
+            job.push({"type": "line", "text":
+                      f"Chat model unloaded - freed {gb:.1f} GB of VRAM."})
+        elif data.get("vram_freed") is False:
+            job.push({"type": "line", "text":
+                      "Chat model unloaded, but VRAM has not dropped yet - continuing."})
+        else:
+            job.push({"type": "line", "text": "Chat model unloaded."})
+        return True
+    except Exception as e:
+        job.push({"type": "line", "text":
+                  f"Could not unload the chat model ({e}) - "
+                  "the video backend may run low on VRAM."})
+        return False
+
+
 def _reload_llm(job, self_url: str, s: dict) -> None:
     """Hand VRAM back: ask the backend to drop its models, then reload the chat
     model. Skipped when reload-after-generate is off."""
@@ -163,7 +214,11 @@ async def video(req: VideoRequest, request: Request):
             return False
         from localm.vram import decide_media_swap
         swap = decide_media_swap(s)
-        if not swap:
+        gen_swap = False
+        if swap:
+            if not _unload_chat(job, self_url):
+                gen_swap = True
+        else:
             job.push({"type": "line", "text":
                       "Both models fit in VRAM - keeping the chat model loaded "
                       "(no swap)."})
@@ -182,7 +237,8 @@ async def video(req: VideoRequest, request: Request):
             write_sidecar=effective_mode("server") != SessionMode.PRIVACY,
             on_progress=lambda t: job.push({"type": "line", "text": t}),
             input_image=input_image,
-            swap=swap,
+            swap=gen_swap,
+            cancel_check=lambda: job.cancel_requested,
             **kwargs,
         )
         job.push({"type": "line", "text": message})

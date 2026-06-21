@@ -164,7 +164,14 @@ CORE_FIELDS: list = [
     SettingField("comfy_launch_cmd", Widget.TEXT, "ComfyUI launch command",
                  group="ComfyUI", owner="image"),
     SettingField("comfy_workdir", Widget.FOLDER, "ComfyUI working dir",
+                 "Blank runs the launch command from the launcher file's own "
+                 "folder (the ComfyUI / ZLUDA convention).",
                  group="ComfyUI", owner="image"),
+    SettingField("comfy_launch_timeout", Widget.NUMBER,
+                 "ComfyUI launch timeout (s)",
+                 "How long to wait for ComfyUI after launching it. A ZLUDA / "
+                 "ROCm cold start compiles kernels and can take minutes.",
+                 group="ComfyUI", owner="image", min=30, step=30),
     SettingField("comfy_output_dir", Widget.FOLDER, "ComfyUI output dir",
                  group="ComfyUI", owner="image"),
     SettingField("reload_llm_after_imagine", Widget.TOGGLE,

@@ -185,6 +185,16 @@ async function readSSE(response, onData) {
 
 /** Stream a background job's events. onLine gets text lines; the optional
  *  onProgress gets {downloaded,total,pct,phase} events. Resolves with end. */
+// Ask the server to cancel a running job (model pull, media generation). The
+// job's worker stops cooperatively (media gen interrupts ComfyUI mid-render),
+// so streamJob's "end" event arrives with status "cancelled".
+async function cancelJob(jobId) {
+  try {
+    await fetch(`/api/jobs/${jobId}/cancel`,
+                { method: "POST", headers: authHeaders() });
+  } catch (e) { /* best-effort - the stream will still end */ }
+}
+
 async function streamJob(jobId, onLine, onProgress) {
   const r = await fetch(`/api/jobs/${jobId}/events`, { headers: authHeaders() });
   if (!r.ok) throw new Error(r.statusText);

@@ -61,7 +61,8 @@ def generate(s: dict, prompt: str, out_path: Path, *,
              seed: Optional[int] = None,
              input_image: Optional[Path] = None,
              denoise: Optional[float] = None,
-             swap: bool = True) -> tuple[bool, str]:
+             swap: bool = True,
+             cancel_check=None) -> tuple[bool, str]:
     return _comfy.generate_image(
         prompt, out_path,
         api_url=s["api_url"],
@@ -76,4 +77,5 @@ def generate(s: dict, prompt: str, out_path: Path, *,
         workdir=s["workdir"] or None,
         comfy_output_dir=s["output_dir"] or None,
         swap=swap,
+        cancel_check=cancel_check,
     )
