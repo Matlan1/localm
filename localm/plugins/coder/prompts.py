@@ -47,8 +47,16 @@ def detect_model_family(model_name: str) -> str:
     if n.startswith("gemma"):
         return "gemma"
 
-    # Thinking / reasoning models (chain-of-thought fine-tunes)
-    if any(p in n for p in ("deepseek-r1", "deepseek_r1", "qwq", "qwen3")):
+    # Thinking / reasoning models (chain-of-thought fine-tunes). Match the explicit
+    # reasoning families AND the common naming substrings so a descriptively-named
+    # reasoning fine-tune (e.g. "Llama-3.3-...-Thinking-...-High-Reasoning") also gets
+    # the <think> tuning instead of the default prompt. NOTE: detection keys on the
+    # model NAME we are given; an opaque registry alias ("m8") still resolves to
+    # "default" - threading the model's true id/metadata here is a separate follow-up.
+    if any(p in n for p in (
+        "deepseek-r1", "deepseek_r1", "qwq", "qwen3",
+        "thinking", "reasoning", "-r1", "_r1", "cot", "magistral",
+    )):
         return "thinking"
 
     # Small / resource-constrained models

@@ -103,6 +103,15 @@ DEFAULT_CONFIG: dict = {
     # Seconds a GUI coder approval card may sit unanswered before it is
     # auto-rejected and the agent moves on.
     "coder_confirm_timeout": 600,
+    # EXPERIMENTAL + dormant: constrain coder tool-call output with a GBNF grammar
+    # (localm.inference.gbnf.TOOL_CALLS_ONLY) so the model cannot emit malformed
+    # tool JSON. OFF by default because (a) it only takes effect on a grammar-capable
+    # backend - the bundled GGUF runtime's grammar sampler faults and soft-degrades,
+    # HF needs the [grammar] extra - and (b) TOOL_CALLS_ONLY forces tool-only output
+    # (no free-text final answer), so it suits a "must call a tool" sub-mode, not the
+    # general loop yet. Wired so it activates the moment a grammar runtime + a
+    # text-or-tool grammar land. See dev-notes/coder-local-ux-improvement-2026-06-21.
+    "coder_tool_grammar": False,
     # After an image is generated, ask ComfyUI to release its VRAM and reload
     # the chat model so the next reply is instant. Turn off when generating
     # many images in a row - the chat model then reloads lazily on the next
