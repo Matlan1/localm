@@ -278,13 +278,17 @@ class Launcher(tk.Tk):
 
         header = ttk.Frame(root)
         header.pack(fill="x", pady=(0, 14))
+        # Two labels (white + accent half) with the wordmark drawn as one word:
+        # zero each label's internal padx/border so the halves butt together with
+        # no gap (a tk.Label defaults to padx=1 + a 1px border, which otherwise
+        # shows as a space between, e.g., "LocaL" and "M").
         white, blue = logo_parts()
-        tk.Label(header, text=white, bg=BG, fg=TEXT,
-                 font=("Segoe UI", 18, "bold")).pack(side="left")
-        tk.Label(header, text=blue, bg=BG, fg=ACCENT,
-                 font=("Segoe UI", 18, "bold")).pack(side="left")
-        tk.Label(header, text="  launcher", bg=BG, fg=TEXT_DIM,
-                 font=("Segoe UI", 12)).pack(side="left", pady=(5, 0))
+        tk.Label(header, text=white, bg=BG, fg=TEXT, padx=0, bd=0,
+                 highlightthickness=0, font=("Segoe UI", 18, "bold")).pack(side="left")
+        tk.Label(header, text=blue, bg=BG, fg=ACCENT, padx=0, bd=0,
+                 highlightthickness=0, font=("Segoe UI", 18, "bold")).pack(side="left")
+        tk.Label(header, text="  launcher", bg=BG, fg=TEXT_DIM, padx=0, bd=0,
+                 highlightthickness=0, font=("Segoe UI", 12)).pack(side="left", pady=(5, 0))
 
         # ----- mode -----
         mode_card = self._card(root)
