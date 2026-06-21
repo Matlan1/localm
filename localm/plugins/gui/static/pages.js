@@ -17,9 +17,9 @@ window.onViewShown = (name) => {
   if (name === "chat" || name === "coder") refreshPluginCommands();
   if (name === "coder") { populateSetupModels(); presetCoderMode(); }
   if (name === "models") refreshModelsPage();
-  if (name === "images") refreshImageHistory();
-  if (name === "music") refreshMusicHistory();
-  if (name === "video") refreshVideoHistory();
+  if (name === "images") { refreshImageHistory(); refreshWorkflowPanel("image"); }
+  if (name === "music") { refreshMusicHistory(); refreshWorkflowPanel("music"); }
+  if (name === "video") { refreshVideoHistory(); refreshWorkflowPanel("video"); }
   if (name === "knowledge") refreshKnowledgePage();
   if (name === "plugins") { renderCatalogPlugins(); refreshPluginsPage(); }
   if (name === "settings") refreshSettingsPage();
@@ -1498,6 +1498,105 @@ async function saveMediaPlugin(name, controls) {
     refreshSettingsPage();
   } else {
     toast(data.detail || "Save failed", true);
+  }
+}
+
+/* ================================================================ */
+/*  Per-plugin workflow management (on the Image/Music/Video pages)   */
+/* ================================================================ */
+
+/** Render the workflow panel for a media plugin: the built-in default plus each
+ *  uploaded workflow, with select + delete, and an upload control. */
+async function refreshWorkflowPanel(media) {
+  // Query by data-media (not id): the image page uses the "img-" id prefix while
+  // the media type is "image", so the data attribute is the stable handle.
+  const box = document.querySelector(`[data-media="${media}"]`);
+  if (!box) return;
+  let data;
+  try {
+    const r = await fetch(`/api/${media}/workflows`, { headers: authHeaders() });
+    if (!r.ok) throw new Error(r.statusText);
+    data = await r.json();
+  } catch (e) {
+    box.replaceChildren(el("div", "sub", "Could not load workflows: " + e.message));
+    return;
+  }
+  box.replaceChildren();
+  const list = el("div", "workflow-list");
+  // "Built-in default" = no selection (falls back to the committed/legacy template).
+  list.appendChild(workflowRow(media, null, "Built-in default",
+                               data.selected == null, false));
+  for (const w of (data.workflows || [])) {
+    list.appendChild(workflowRow(media, w.name, w.name, !!w.is_active, true));
+  }
+  box.appendChild(list);
+
+  const up = el("div", "workflow-upload");
+  const file = document.createElement("input");
+  file.type = "file";
+  file.accept = ".json,application/json";
+  const btn = el("button", "btn-secondary", "Upload + use");
+  btn.type = "button";
+  btn.onclick = () => uploadWorkflow(media, file);
+  up.append(file, btn);
+  box.appendChild(up);
+}
+
+function workflowRow(media, name, label, active, deletable) {
+  const row = el("div", "workflow-row" + (active ? " active" : ""));
+  const pick = el("button", "workflow-pick", (active ? "● " : "○ ") + label);
+  pick.type = "button";
+  pick.title = active ? "In use" : "Use this workflow";
+  pick.onclick = () => selectWorkflow(media, name);
+  row.appendChild(pick);
+  if (deletable) {
+    const del = el("button", "workflow-del", "Delete");
+    del.type = "button";
+    del.title = "Delete this workflow file";
+    del.onclick = () => deleteWorkflow(media, name);
+    row.appendChild(del);
+  }
+  return row;
+}
+
+async function selectWorkflow(media, name) {
+  const r = await fetch(`/api/${media}/workflows/select`, {
+    method: "POST", headers: authHeaders(), body: JSON.stringify({ name }),
+  });
+  if (r.ok) { toast("Workflow selected"); refreshWorkflowPanel(media); }
+  else toast((await r.json().catch(() => ({}))).detail || "Failed", true);
+}
+
+async function deleteWorkflow(media, name) {
+  if (!confirm(`Delete workflow "${name}"?`)) return;
+  const r = await fetch(`/api/${media}/workflows/${encodeURIComponent(name)}`, {
+    method: "DELETE", headers: authHeaders(),
+  });
+  if (r.ok) { toast("Deleted"); refreshWorkflowPanel(media); }
+  else toast((await r.json().catch(() => ({}))).detail || "Failed", true);
+}
+
+async function uploadWorkflow(media, fileInput) {
+  const f = fileInput.files && fileInput.files[0];
+  if (!f) { toast("Choose a .json file first", true); return; }
+  let wf;
+  try {
+    wf = JSON.parse(await f.text());
+  } catch (e) {
+    toast("That file is not valid JSON", true);
+    return;
+  }
+  const r = await fetch(`/api/${media}/workflows`, {
+    method: "POST", headers: authHeaders(),
+    body: JSON.stringify({ name: f.name, workflow: wf, activate: true }),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (r.ok) {
+    toast("Uploaded and selected");
+    fileInput.value = "";
+    refreshWorkflowPanel(media);
+  } else {
+    toast(d.detail || "Upload failed", true);
   }
 }
 

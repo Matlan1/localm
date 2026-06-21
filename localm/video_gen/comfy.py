@@ -52,6 +52,15 @@ _WORKFLOW_LOCAL_PATH = Path(__file__).parent / "wan_workflow_local.json"
 
 
 def _workflow_path() -> Path:
+    # 1. a workflow the user selected for the video plugin, 2. the legacy
+    # wan_workflow_local.json, 3. the committed template. Selection is additive.
+    try:
+        from localm.media_workflows import active_workflow_path
+        selected = active_workflow_path("video")
+        if selected is not None:
+            return selected
+    except Exception:
+        pass
     return _WORKFLOW_LOCAL_PATH if _WORKFLOW_LOCAL_PATH.is_file() else _WORKFLOW_PATH
 
 

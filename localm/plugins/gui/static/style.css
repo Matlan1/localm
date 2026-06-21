@@ -769,6 +769,25 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
    reads dimmer so an override stands out from an inherited value. */
 .media-inherited label { color: var(--text-dim); }
 
+/* Per-plugin workflow panel (Image/Music/Video pages). */
+.workflow-list { display: flex; flex-direction: column; gap: 4px; margin: 6px 0; }
+.workflow-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 6px; border-radius: 6px;
+}
+.workflow-row.active { background: var(--bg-elevated, rgba(127,127,127,0.08)); }
+.workflow-pick {
+  flex: 1; text-align: left; background: none; border: none;
+  color: var(--text); cursor: pointer; padding: 4px 2px; font-size: 13px;
+}
+.workflow-pick:hover { color: var(--accent); }
+.workflow-del {
+  background: none; border: 1px solid var(--border); color: var(--text-dim);
+  border-radius: 6px; padding: 2px 8px; cursor: pointer; font-size: 12px;
+}
+.workflow-del:hover { color: var(--danger, #d66); border-color: var(--danger, #d66); }
+.workflow-upload { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+
 /* Camera button: only useful on a device with a camera + touch (a phone). The
    attach button already offers camera+gallery on mobile via the OS picker, so
    hide the dedicated one on a mouse-pointer (desktop) device to avoid clutter. */

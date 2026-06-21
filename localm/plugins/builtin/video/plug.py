@@ -332,6 +332,10 @@ async def video_history():
 
 def register(host) -> None:
     host.mount_router(_router)
+    # Workflow management (list/upload/select/delete) for the Video page, scoped
+    # to this plugin's capability.
+    from localm.media_workflows import make_workflow_router
+    host.mount_router(make_workflow_router("video"))
 
 
 def unregister() -> None:

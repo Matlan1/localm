@@ -28,6 +28,16 @@ _WORKFLOW_EXAMPLE_PATH = Path(__file__).parent / "flux_workflow.example.json"
 
 
 def _workflow_path() -> Path:
+    # Resolution order: 1. a workflow the user selected for the image plugin
+    # (uploaded + picked on the Image page), 2. the legacy personal
+    # flux_workflow.json, 3. the committed example. Selection is purely additive.
+    try:
+        from localm.media_workflows import active_workflow_path
+        selected = active_workflow_path("image")
+        if selected is not None:
+            return selected
+    except Exception:
+        pass
     return _WORKFLOW_PATH if _WORKFLOW_PATH.is_file() else _WORKFLOW_EXAMPLE_PATH
 
 
