@@ -758,6 +758,17 @@ pre:hover .copy-btn { opacity: 1; }
    it reads as "this is what would be used", not a value you typed. */
 input.auto-detected { color: var(--text-dim); font-style: italic; }
 
+/* Media section: one subsection per plugin (image/music/video), each its own
+   little card with its own Save, so the three are clearly configured apart. */
+.media-subsection {
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 12px; margin-top: 12px;
+}
+.media-sub-head { margin: 0; font-size: 14px; }
+/* A field inheriting the shared default (no per-plugin override yet): its label
+   reads dimmer so an override stands out from an inherited value. */
+.media-inherited label { color: var(--text-dim); }
+
 /* Camera button: only useful on a device with a camera + touch (a phone). The
    attach button already offers camera+gallery on mobile via the OS picker, so
    hide the dedicated one on a mouse-pointer (desktop) device to avoid clutter. */

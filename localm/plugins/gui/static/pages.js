@@ -1364,6 +1364,10 @@ async function refreshSettingsPage() {
   const controls = [];
   const sections = new Map();        // id -> { id, label, plugin, ctrls: [] }
   for (const field of fields) {
+    // Media (ComfyUI) config is rendered in its own Media section below, one
+    // subsection per plugin (image/music/video), edited per-plugin via the
+    // /v1/media/config endpoint - not as flat keys here.
+    if (field.group === "Media") continue;
     const ctrl = buildSettingControl(field);
     if (!ctrl) continue;             // HIDDEN
     controls.push(ctrl);
@@ -1396,12 +1400,105 @@ async function refreshSettingsPage() {
     form.appendChild(panel);
   }
 
+  // Per-plugin Media (ComfyUI) config: one "Media" section with image/music/video
+  // subsections, each editing that plugin's own block independently. Appended
+  // after the core schema sections so it sits among the plugin tabs.
+  await buildMediaSection(form);
+  if (myToken !== _settingsRenderToken) return;  // a newer refresh superseded us
+
   // Build the nav now that the schema sections exist, so the first config
   // section (not a static card) is the default tab. The owner-gated panels then
   // refresh: each may rebuild the nav, but they preserve the active section.
   buildSettingsNav();
   refreshPairingQR();
   refreshKeysPanel();
+}
+
+// Media plugins, in display order, that the Media section configures.
+const MEDIA_PLUGIN_ORDER = ["image", "music", "video"];
+
+/** Did a media control's value change from what was displayed? Treats
+ *  null/undefined/"" as the same "empty", so saving an untouched inherited field
+ *  does not pin it as an override. */
+function _mediaChanged(cur, orig) {
+  const empty = (v) => v === null || v === undefined || v === "";
+  if (empty(cur) && empty(orig)) return false;
+  return cur !== orig;
+}
+
+/** Build the "Media" settings section: one subsection per media plugin
+ *  (image/music/video), each editing that plugin's own ComfyUI config block via
+ *  /v1/media/config. A field left at its inherited value is not sent, so the
+ *  plugin keeps falling back to the shared default until the user overrides it. */
+async function buildMediaSection(form) {
+  let data;
+  try {
+    const r = await fetch("/v1/media/config", { headers: authHeaders() });
+    if (!r.ok) throw new Error(r.statusText);
+    data = await r.json();
+  } catch (e) {
+    return;   // media config unavailable; skip the section (do not break settings)
+  }
+  const byName = {};
+  for (const p of (data.plugins || [])) byName[p.plugin] = p;
+
+  const panel = el("section", "card settings-section");
+  panel.id = "settings-sec-media";
+  panel.dataset.sec = "media";
+  panel.dataset.secLabel = "Media";
+  panel.appendChild(el("h3", "settings-section-head", "Media"));
+  panel.appendChild(el("div", "sub",
+    "ComfyUI settings for image, music, and video, each configured "
+    + "independently. A blank field uses the shared default."));
+
+  for (const name of MEDIA_PLUGIN_ORDER) {
+    const p = byName[name];
+    if (!p) continue;
+    const sub = el("div", "media-subsection");
+    sub.appendChild(el("h4", "media-sub-head", p.label));
+    const grid = el("div", "settings-fields");
+    const controls = [];
+    for (const f of (p.fields || [])) {
+      const ctrl = buildSettingControl({
+        key: f.key, widget: f.widget, label: f.label, help: f.help,
+        default: f.value, options: f.options,
+      });
+      if (!ctrl) continue;
+      ctrl.orig = f.value;
+      if (!f.is_override) ctrl.node.classList.add("media-inherited");
+      controls.push(ctrl);
+      grid.appendChild(ctrl.node);
+    }
+    sub.appendChild(grid);
+    const actions = el("div", "actions");
+    const save = el("button", "btn-primary", "Save " + p.label);
+    save.onclick = () => saveMediaPlugin(p.plugin, controls);
+    actions.appendChild(save);
+    sub.appendChild(actions);
+    panel.appendChild(sub);
+  }
+  form.appendChild(panel);
+}
+
+/** Save one media plugin's block: POST only the fields the user changed (so an
+ *  untouched inherited field is not pinned), then re-render. */
+async function saveMediaPlugin(name, controls) {
+  const updates = {};
+  for (const c of controls) {
+    const cur = c.read();
+    if (_mediaChanged(cur, c.orig)) updates[c.field.key] = cur === undefined ? "" : cur;
+  }
+  if (!Object.keys(updates).length) { toast("Nothing changed"); return; }
+  const r = await fetch("/v1/media/config/" + encodeURIComponent(name), {
+    method: "POST", headers: authHeaders(), body: JSON.stringify(updates),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (r.ok) {
+    toast("Saved");
+    refreshSettingsPage();
+  } else {
+    toast(data.detail || "Save failed", true);
+  }
 }
 
 $("gui-key-save").onclick = async () => {
