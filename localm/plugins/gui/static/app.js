@@ -273,6 +273,23 @@ function openModal(title, bodyBuilder) {
 $("modal-close").onclick = () => ($("modal").style.display = "none");
 $("modal").onclick = (e) => { if (e.target === $("modal")) $("modal").style.display = "none"; };
 
+/** Confirm a destructive action with the in-page modal. window.confirm() is
+ *  suppressed in some mobile / PWA browsers (the NET-1 prompt() class of bug),
+ *  so we render our own Cancel / <confirm> dialog. */
+function confirmDanger(title, message, confirmLabel, onConfirm) {
+  openModal(title, (body) => {
+    body.appendChild(el("p", "", message));
+    const row = el("div", "actions");
+    const cancel = el("button", "btn-quiet", "Cancel");
+    cancel.onclick = () => ($("modal").style.display = "none");
+    const ok = el("button", "btn-quiet btn-danger", confirmLabel);
+    ok.onclick = () => { $("modal").style.display = "none"; onConfirm(); };
+    row.appendChild(cancel);
+    row.appendChild(ok);
+    body.appendChild(row);
+  });
+}
+
 /* ================================================================ */
 /*  Theme                                                            */
 /* ================================================================ */
@@ -1182,6 +1199,7 @@ function renderChat() {
     const actions = [];
     if (m.role === "user" && !tag && !chat.abort) {
       actions.push(["edit", () => editMessage(conv, i)]);
+      actions.push(["revert", () => revertTo(conv, i)]);
     }
     if (m.role === "assistant" && !tag) {
       actions.push(["🔊", () => speak(msgText(m), { toggle: true })]);
@@ -1315,6 +1333,65 @@ function regenerate(conv) {
   saveConversations(conv);
   renderChat();
   runCompletion(conv);
+}
+
+/** Count the sibling timelines a revert to *index* would permanently destroy:
+ *  every fork point at or after the revert point keeps its alternatives in the
+ *  region being removed. Used to warn before reverting *past* a branch point. */
+function branchesLostByRevert(conv, index) {
+  let lost = 0;
+  for (let i = index; i < conv.messages.length; i++) {
+    const pid = i > 0 ? conv.messages[i - 1].id : "root";
+    const rec = (conv.branches || []).find((b) => b.parent === pid);
+    if (rec && rec.tails.length > 1) {
+      lost += rec.tails.filter((t, ti) => ti !== rec.current && t && t.length).length;
+    }
+  }
+  return lost;
+}
+
+/** Revert the conversation to *index*: drop this message and everything after it
+ *  DESTRUCTIVELY (unlike editMessage, which forks a sibling), and drop the
+ *  clicked message back into the composer to modify and resend. Stays in the
+ *  SAME branch. Reverting past a fork point destroys the sibling branches in the
+ *  removed region, so confirm first when that would happen (the safeguard). */
+function revertTo(conv, index) {
+  if (chat.abort) { toast("Wait for the current reply to finish", true); return; }
+  if (index < 0 || index >= conv.messages.length) return;
+  const text = msgText(conv.messages[index]);
+  const lost = branchesLostByRevert(conv, index);
+
+  const apply = () => {
+    const orig = conv.messages;
+    // Keep only forks that diverge STRICTLY before the revert point. A fork at
+    // or after it (parent inside the removed region, or the live tail being
+    // reverted) is destroyed; a fork whose parent is not on the live branch
+    // (nested in a surviving parked tail) is left for pruneBranches to judge.
+    conv.branches = (conv.branches || []).filter((rec) => {
+      if (rec.parent === "root") return index > 0;
+      const p = orig.findIndex((x) => x.id === rec.parent);
+      if (p === -1) return true;
+      return p + 1 < index;
+    });
+    conv.messages = orig.slice(0, index);
+    pruneBranches(conv);
+    $("chat-input").value = text;
+    autoGrow($("chat-input"));
+    saveConversations(conv);
+    renderChat();
+    $("chat-input").focus();
+  };
+
+  if (lost > 0) {
+    confirmDanger(
+      "Revert conversation",
+      `This permanently deletes ${lost} alternative branch` +
+      `${lost === 1 ? "" : "es"} and everything after this message - it ` +
+      "can't be undone. Revert anyway?",
+      "Revert", apply);
+  } else {
+    apply();
+  }
 }
 
 function chatParams() {
