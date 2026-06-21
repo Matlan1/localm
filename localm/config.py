@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import copy
 import json
 import os
 import socket
@@ -280,7 +281,11 @@ def _read_json(path: Path, default):
 
 def load_config() -> dict:
     ensure_dirs()
-    cfg = DEFAULT_CONFIG.copy()
+    # DEEP copy: a shallow .copy() shares the nested mutable defaults (e.g. the
+    # "plugins" dict) with DEFAULT_CONFIG, so a caller mutating cfg["plugins"][x]
+    # (per-plugin media config, workflow selection) would silently corrupt the
+    # module-level DEFAULT_CONFIG for the rest of the process.
+    cfg = copy.deepcopy(DEFAULT_CONFIG)
     with _io_lock:
         stored = _read_json(CONFIG_FILE, {})
     if isinstance(stored, dict):
@@ -303,7 +308,7 @@ def update_config(mutator: Callable[[dict], None]) -> dict:
     (e.g. two in-process writers toggling different plugins concurrently)."""
     ensure_dirs()
     with _io_lock:
-        cfg = DEFAULT_CONFIG.copy()
+        cfg = copy.deepcopy(DEFAULT_CONFIG)   # deep: see load_config (nested dicts)
         stored = _read_json(CONFIG_FILE, {})
         if isinstance(stored, dict):
             cfg.update(stored)
