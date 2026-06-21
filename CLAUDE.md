@@ -15,6 +15,14 @@ The four rules, in short (see `AGENTS.md` for the full text and rationale):
    hyphen-minus, commas, periods, or parentheses.
 4. Self-contained: depend only on this venv and this data dir, never a sibling
    folder on disk.
+5. We do not hide problems. Root-cause, document, fix. Never silence a warning,
+   swallow an error, or assume "it did not crash, so it is fine". Ignore a warning
+   ONLY if it is proven harmless (cosmetic / a documented fallback) AND that proof
+   is written at the site as a why-comment. A privacy or security step that fails
+   must NEVER report success. Surface real failures (a debug/WARNING line, a
+   returned warning) rather than muting them; but a note/log is the right altitude,
+   not escalating a legitimate best-effort path into a hard failure. See AGENTS.md
+   "We do not hide problems".
 
 Enforce with `python scripts/check_hygiene.py` before committing.
 

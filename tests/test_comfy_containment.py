@@ -1,23 +1,23 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """
-Output-containment regression tests (B4).
+Output-containment regression tests.
 
-localm's hard rule: nothing a ComfyUI generation produces may remain visible
-inside ComfyUI - the only copy is the one localm saved. These tests stand up a
-real (loopback) HTTP stub that behaves like ComfyUI's relevant endpoints and
-drive the actual generation/containment code over real sockets, so they fail if
-containment regresses (the previous tests only asserted "a file was deleted",
-which is exactly how B4 slipped through).
+Containment is OPT-IN. By DEFAULT localm LEAVES ComfyUI's own copies and /history
+entry alone, because a user may run ComfyUI for its own gallery and want the
+files. When the user opts in (delete_outputs=True, or privacy mode forces it),
+nothing a generation produces may remain visible inside ComfyUI - the only copy
+is the one localm saved. These tests stand up a real (loopback) HTTP stub that
+behaves like ComfyUI's relevant endpoints and drive the actual
+generation/containment code over real sockets.
 
 Covered:
-  * contain_comfy_artifacts clears the /history entry, deletes ComfyUI's on-disk
-    output copy, and deletes an uploaded img2img source.
-  * when the ComfyUI output dir cannot be resolved it still clears history but
-    returns a loud WARNING instead of leaking silently.
-  * generate_image end-to-end: saves locally, deletes the ComfyUI copy, clears
-    history (with dir) / warns (without dir).
-  * generate_music end-to-end: music had NO cleanup before this fix; prove it
-    now contains via the COMFY_OUTPUT_DIR env resolution path.
+  * default (delete_outputs=False) is a NO-OP: ComfyUI keeps its copy + history.
+  * contain_comfy_artifacts(delete_outputs=True) clears the /history entry,
+    deletes ComfyUI's on-disk output copy, and deletes an uploaded img2img source.
+  * when deletion is requested but the output dir cannot be resolved it still
+    clears history and returns a loud WARNING instead of leaking silently.
+  * generate_image / generate_music end-to-end with delete_outputs=True contain;
+    by default they keep ComfyUI's copy.
 """
 
 from __future__ import annotations
@@ -147,8 +147,28 @@ def _no_localm_url(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  contain_comfy_artifacts - the shared containment helper
+#  contain_comfy_artifacts - the shared containment helper                     #
 # --------------------------------------------------------------------------- #
+
+def test_contain_default_keeps_comfy_copy_and_history(stub):
+    # DEFAULT (delete_outputs not set / False): a no-op. ComfyUI keeps its copy
+    # AND its history entry, because a user may want them.
+    fn = "ComfyUI_00001_.png"
+    (stub.output_dir / fn).write_bytes(b"X")
+    stub.history["pidK"] = {"9": {"images": [
+        {"filename": fn, "subfolder": "", "type": "output"}]}}
+
+    warn = comfy.contain_comfy_artifacts(
+        stub.base_url, "pidK",
+        {"filename": fn, "subfolder": "", "type": "output"},
+        comfy_output_dir=str(stub.output_dir),
+    )
+
+    assert warn == ""                              # nothing to warn about
+    assert (stub.output_dir / fn).exists()         # ComfyUI copy kept
+    assert "pidK" not in stub.history_deleted      # history NOT cleared
+    assert "pidK" in stub.history
+
 
 def test_contain_with_dir_clears_history_and_deletes_copies(stub):
     fn = "ComfyUI_99999_.png"
@@ -162,6 +182,7 @@ def test_contain_with_dir_clears_history_and_deletes_copies(stub):
         {"filename": fn, "subfolder": "", "type": "output"},
         comfy_output_dir=str(stub.output_dir),
         uploaded_input="src.png",
+        delete_outputs=True,
     )
 
     assert warn == ""                                  # fully contained
@@ -172,7 +193,7 @@ def test_contain_with_dir_clears_history_and_deletes_copies(stub):
 
 
 def test_contain_without_dir_warns_but_still_clears_history(stub, monkeypatch):
-    # no explicit dir, no env, empty config -> dir cannot be resolved
+    # delete requested, but no dir / env / config -> dir cannot be resolved
     monkeypatch.setattr("localm.config.load_config", lambda: {})
     fn = "leak.png"
     (stub.output_dir / fn).write_bytes(b"X")
@@ -183,6 +204,7 @@ def test_contain_without_dir_warns_but_still_clears_history(stub, monkeypatch):
         stub.base_url, "pidY",
         {"filename": fn, "subfolder": "", "type": "output"},
         comfy_output_dir=None,
+        delete_outputs=True,
     )
 
     assert "WARNING" in warn                       # loud, not silent
@@ -191,18 +213,38 @@ def test_contain_without_dir_warns_but_still_clears_history(stub, monkeypatch):
 
 
 def test_contain_skips_delete_for_temp_artifacts(stub):
-    # type "temp" is auto-purged by ComfyUI; we must not error, and no warning
+    # type "temp" is auto-purged by ComfyUI; even when delete is requested we must
+    # not error, and no warning.
     warn = comfy.contain_comfy_artifacts(
         stub.base_url, "pidT",
         {"filename": "x.png", "subfolder": "", "type": "temp"},
         comfy_output_dir=None,
+        delete_outputs=True,
     )
     assert warn == ""
 
 
 # --------------------------------------------------------------------------- #
-#  generate_image - end to end over the stub
+#  generate_image - end to end over the stub                                  #
 # --------------------------------------------------------------------------- #
+
+def test_generate_image_default_keeps_comfy_copy(stub, tmp_path, monkeypatch):
+    # By default a generation leaves ComfyUI's own copy + history in place.
+    monkeypatch.setattr(comfy, "_workflow_path",
+                        lambda: comfy._WORKFLOW_EXAMPLE_PATH)
+    out = tmp_path / "saved" / "img.png"
+
+    ok, msg = comfy.generate_image(
+        "a cat", out, api_url=stub.base_url,
+        comfy_output_dir=str(stub.output_dir), write_sidecar=False,
+    )
+
+    assert ok, msg
+    assert out.is_file()                                  # localm saved a copy
+    assert list(stub.output_dir.glob("ComfyUI_*"))        # ComfyUI copy KEPT
+    assert not stub.history_deleted                       # history NOT cleared
+    assert "WARNING" not in msg
+
 
 def test_generate_image_contains_with_dir(stub, tmp_path, monkeypatch):
     # force the committed example workflow so the test is independent of any
@@ -213,7 +255,8 @@ def test_generate_image_contains_with_dir(stub, tmp_path, monkeypatch):
 
     ok, msg = comfy.generate_image(
         "a cat", out, api_url=stub.base_url,
-        comfy_output_dir=str(stub.output_dir), write_sidecar=False,
+        comfy_output_dir=str(stub.output_dir), delete_outputs=True,
+        write_sidecar=False,
     )
 
     assert ok, msg
@@ -231,7 +274,7 @@ def test_generate_image_warns_without_dir(stub, tmp_path, monkeypatch):
 
     ok, msg = comfy.generate_image(
         "a dog", out, api_url=stub.base_url,
-        comfy_output_dir=None, write_sidecar=False,
+        comfy_output_dir=None, delete_outputs=True, write_sidecar=False,
     )
 
     assert ok, msg
@@ -242,7 +285,7 @@ def test_generate_image_warns_without_dir(stub, tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  generate_music - end to end (music had NO cleanup before this fix)
+#  generate_music - end to end (delete_outputs threads through the env path)  #
 # --------------------------------------------------------------------------- #
 
 def test_generate_music_contains_via_env_dir(stub, tmp_path, monkeypatch):
@@ -257,7 +300,7 @@ def test_generate_music_contains_via_env_dir(stub, tmp_path, monkeypatch):
 
     ok, msg = music_comfy.generate_music(
         "lofi, chill", out, api_url=stub.base_url,
-        duration_seconds=5.0, write_sidecar=False,
+        duration_seconds=5.0, delete_outputs=True, write_sidecar=False,
     )
 
     assert ok, msg

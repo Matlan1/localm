@@ -69,6 +69,59 @@ into the venv with `localm setup-llama` and resolved from the
 `localm-llama-runtime` wheel or from user config, never from a hardcoded
 external folder.
 
+### 5. We do not hide problems (root-cause, document, fix)
+
+When something goes wrong - a warning, an error, an unexpected value, a failed
+step - the answer is to understand WHY, document it, and fix it. It is NEVER to
+silence the message, swallow the exception, or assume "it did not crash, so it is
+probably fine". That assumption is how a real fault ships disguised as working
+software.
+
+The canonical anti-pattern we will not repeat: the bundled llama.cpp runtime
+printed `failed to find ggml_backend_init ...` to stderr, the model loaded anyway,
+and the first instinct was to suppress those lines because "it loads fine". That
+hid a real question (are the compute backends actually registered, and on which
+builds?). The correct fix was to understand the cause and gate on
+`ggml_backend_dev_count`, not to mute the symptom. "The car drives fine with two
+of five wheel screws missing, so let us hide the warning light" is not engineering.
+
+Why this matters:
+
+- A hidden problem becomes an invisible failure the user hits LATER, with the
+  real cause already thrown away, so they cannot diagnose it and neither can we.
+- A silenced diagnostic that was actually masking a fault wastes the person's
+  debugging time and burns trust in the tool.
+- For a PRIVACY or SECURITY operation (stripping metadata, scrubbing history,
+  redacting a path, writing an audit record, enforcing auth), a silent failure is
+  the worst kind: the user is told a safety property held when it did not. A
+  privacy/security step that fails must NEVER report success - fail safe and say so.
+
+The only thing you may ignore is a warning PROVEN harmless - genuinely cosmetic,
+or a deliberate documented fallback - and only when that proof is written AT THE
+SITE as a one-line why-comment. "Proven" means you found the cause and can state
+why it does not matter; it does not mean "it seemed fine in one run".
+
+The right altitude (this is not a license to over-engineer):
+
+- Best-effort cleanup that genuinely does not matter on failure (deleting a temp
+  file, clearing a remote queue entry) is fine - but still say WHY in a comment,
+  and prefer a debug-level log over total silence so a failure is discoverable.
+- When a swallow could hide a REAL failure, the fix is usually to SURFACE it (a
+  debug/WARNING line, a warning folded into the returned message, a recorded
+  error) - NOT to silence it, and NOT to escalate a legitimate best-effort path
+  into a hard failure that breaks working setups. A note or a log is almost always
+  the right altitude; failing the whole operation usually is not.
+- Distinguish the intended benign case from the unexpected one: a default that is
+  safe when a file is simply absent may be unsafe when the file exists but is
+  unreadable. Branch on it; do not collapse "missing" and "corrupt" into one
+  silent path.
+
+There is no automated linter for this (a blanket "no `except: pass`" rule would
+flag 150+ legitimate sites and train people to ignore it). It is a code-review
+discipline, periodically reinforced by a codebase honesty audit (see
+`dev-notes/` for the latest). When you touch code that swallows something, leave
+it better: either surface the real failure or document why it is safe.
+
 ## Protected local paths (NEVER DELETE)
 
 Some directories are local-only working state that is deliberately gitignored.

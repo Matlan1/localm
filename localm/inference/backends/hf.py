@@ -17,6 +17,8 @@ from typing import Iterator, List, Optional
 
 from rich.console import Console
 
+from localm.debuglog import logger
+
 from .base import BaseBackend
 
 console = Console()
@@ -172,8 +174,15 @@ class HFBackend(BaseBackend):
             )
             self._is_multimodal = has_image or has_audio
             self._tokenizer = getattr(self._processor, "tokenizer", self._processor)
-        except Exception:
-            # Fall back to plain tokenizer
+        except Exception as e:
+            # Fall back to plain tokenizer. This is intentional for text-only
+            # models (no processor to load), but a logged failure here may mean
+            # a genuine multimodal model lost its image/audio capability, so
+            # surface it under --debug rather than swallowing it silently.
+            logger.debug(
+                "processor load failed (%s: %s); falling back to text-only tokenizer",
+                type(e).__name__, e,
+            )
             self._processor = None
             self._tokenizer = tr.AutoTokenizer.from_pretrained(
                 self.model_path, trust_remote_code=True
@@ -191,6 +200,7 @@ class HFBackend(BaseBackend):
         # encoder-decoder, then causal LM (text-only), then generic fallback.
         # getattr-with-default skips a class that this transformers version does
         # not expose (the names drift between major releases) instead of raising.
+        errors: list[str] = []
         for cls_name in (
             "AutoModelForImageTextToText",   # modern multimodal, transformers 5+
             "AutoModelForSeq2SeqLM",         # encoder-decoder
@@ -204,11 +214,15 @@ class HFBackend(BaseBackend):
                 self._model = cls.from_pretrained(self.model_path, **load_kwargs)
                 console.print(f"[dim]  class    : {cls_name}[/dim]")
                 break
-            except (ValueError, OSError, RuntimeError, KeyError):
+            except (ValueError, OSError, RuntimeError, KeyError) as e:
+                # Record why each class was rejected so the final error names
+                # the actual failures instead of a bare "could not load".
+                errors.append(f"{cls_name}: {type(e).__name__}: {e}")
                 continue
 
         if self._model is None:
-            raise RuntimeError(f"Could not load model from {self.model_path}")
+            detail = "; tried: " + "; ".join(errors) if errors else ""
+            raise RuntimeError(f"Could not load model from {self.model_path}{detail}")
 
         self._loaded = True
         mm_note = " (multimodal)" if self._is_multimodal else ""
@@ -223,8 +237,10 @@ class HFBackend(BaseBackend):
                         f"[dim]  vram     : {allocated:.2f} GB allocated / "
                         f"{reserved:.2f} GB reserved (device {i})[/dim]"
                     )
-            except Exception:
-                pass
+            except Exception as e:
+                # VRAM readout is cosmetic; a failure here must not fail the
+                # load, but surface it under --debug so a broken stat is visible.
+                logger.debug("could not read VRAM after load (%s)", type(e).__name__)
 
         console.print(f"[green]✓[/green] Model loaded{mm_note}")
 
@@ -238,8 +254,10 @@ class HFBackend(BaseBackend):
         try:
             import torch
             torch.cuda.empty_cache()
-        except Exception:
-            pass
+        except Exception as e:
+            # Best-effort cache release; log under --debug so a failed reclaim
+            # (cache may not be cleared) is discoverable without failing unload.
+            logger.debug("empty_cache failed (%s); cache may not be cleared", type(e).__name__)
 
     @property
     def loaded(self) -> bool:
@@ -255,8 +273,14 @@ class HFBackend(BaseBackend):
             try:
                 ids = self._tokenizer.encode(text, add_special_tokens=False)
                 return max(1, len(ids))
-            except Exception:
-                pass
+            except Exception as e:
+                # Surface the failure under --debug: the return below is then a
+                # chars/4 ESTIMATE, not an exact count, and context-budgeting
+                # downstream is trusting an approximation.
+                logger.debug(
+                    "tokenizer.encode failed (%s); using heuristic estimate",
+                    type(e).__name__,
+                )
         return max(1, len(text) // 4)
 
     # ------------------------------------------------------------------ #

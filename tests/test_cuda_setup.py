@@ -23,8 +23,11 @@ from localm import setup_llama as sl
 def test_ver_tuple_parses_and_tolerates_junk():
     assert sl._ver_tuple("12.4") == (12, 4)
     assert sl._ver_tuple("13") == (13,)
-    assert sl._ver_tuple("") == (0, 0)
-    assert sl._ver_tuple("not.a.version") == (0, 0)
+    # Unparseable version -> None ("unknown"), NOT (0, 0): an unmeasurable
+    # capability must read as unknown so driver_ok does not falsely block it as a
+    # too-old driver (the old (0, 0) contradicted driver_ok's own docstring).
+    assert sl._ver_tuple("") is None
+    assert sl._ver_tuple("not.a.version") is None
 
 
 def test_nvidia_preflight_parses_banner(monkeypatch):

@@ -42,6 +42,8 @@ def settings(full_config: dict) -> dict:
             full_config.get("reload_llm_after_imagine", True))),
         "fast_dequant": bool(comfy_blk.get(
             "fast_dequant", full_config.get("comfy_fast_dequant", True))),
+        "delete_outputs": bool(comfy_blk.get(
+            "delete_outputs", full_config.get("comfy_delete_outputs", False))),
         "swap_policy": resolve_swap_policy(block, full_config),
         "vram_estimate_bytes": media_estimate_bytes("image", block),
         "warning": warning,
@@ -66,7 +68,10 @@ def generate(s: dict, prompt: str, out_path: Path, *,
              input_image: Optional[Path] = None,
              denoise: Optional[float] = None,
              swap: bool = True,
+             delete_outputs: Optional[bool] = None,
              cancel_check=None) -> tuple[bool, str]:
+    if delete_outputs is None:
+        delete_outputs = bool(s.get("delete_outputs", False))
     return _comfy.generate_image(
         prompt, out_path,
         api_url=s["api_url"],
@@ -82,5 +87,6 @@ def generate(s: dict, prompt: str, out_path: Path, *,
         comfy_output_dir=s["output_dir"] or None,
         swap=swap,
         fast_dequant=s.get("fast_dequant", True),
+        delete_outputs=delete_outputs,
         cancel_check=cancel_check,
     )

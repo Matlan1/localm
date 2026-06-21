@@ -84,75 +84,72 @@ class SettingField:
 CORE_FIELDS: list = [
     # ---- Engine ----
     SettingField("binary_dir", Widget.FOLDER, "llama.cpp binary folder",
-                 "Folder holding llama.dll / ggml libraries. Leave blank to use "
-                 "the bundled runtime; the auto-detected path is shown so you can "
-                 "see what is in use, and you only set this to point at a custom "
-                 "build.",
+                 "Folder holding llama.dll / ggml libraries. Blank uses the "
+                 "bundled runtime (auto-detected path shown); set it to point at "
+                 "a custom build.",
                  group="Engine", applies=Applies.NEXT_LOAD),
     SettingField("n_ctx", Widget.NUMBER, "Context window (initial)",
-                 "How many tokens of history the model starts with. It grows on "
-                 "demand up to the maximum below.",
+                 "Tokens of history the model starts with; grows on demand up to "
+                 "the maximum below.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=512, step=512),
     SettingField("n_ctx_max", Widget.NUMBER, "Context window (max)",
-                 "The largest the context window may grow to (0 = unlimited). "
-                 "Bigger needs more VRAM.",
+                 "Largest the context window may grow to (0 = unlimited); bigger "
+                 "needs more VRAM.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=0, step=512),
     SettingField("n_ctx_grow", Widget.NUMBER, "Context growth step",
-                 "When the window fills up, it expands by this many tokens at a "
-                 "time rather than all at once.",
+                 "When the window fills, it expands by this many tokens at a time.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=256, step=256),
     SettingField("ctx_auto", Widget.TOGGLE, "Auto-size context from VRAM",
-                 "Pick the context ceiling from free GPU memory when the model "
-                 "loads, instead of always using the fixed maximum above.",
+                 "Pick the context ceiling from free GPU memory at load time "
+                 "instead of the fixed maximum above.",
                  group="Engine", applies=Applies.NEXT_LOAD),
     SettingField("n_gpu_layers", Widget.NUMBER, "GPU layers",
-                 "How many model layers to run on the GPU. 99 puts the whole "
-                 "model on the GPU; lower it if you run out of VRAM.",
+                 "Model layers to run on the GPU. 99 puts the whole model on the "
+                 "GPU; lower it if you run out of VRAM.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=0, max=1000),
     SettingField("import_max_depth", Widget.NUMBER, "Folder import depth",
-                 "How many subfolder levels `localm add <dir>` scans for models.",
+                 "Subfolder levels `localm add <dir>` scans for models.",
                  group="Models", min=1, max=10, step=1),
     # ---- Sampling ----
     SettingField("temperature", Widget.NUMBER, "Temperature",
-                 "Randomness of replies. Lower is more focused and repeatable; "
-                 "higher is more varied and creative.",
+                 "Randomness of replies. Lower is more focused; higher is more "
+                 "varied and creative.",
                  group="Sampling", min=0, max=2, step=0.05),
     SettingField("top_p", Widget.NUMBER, "Top-p (nucleus sampling)",
-                 "Consider only the most likely tokens whose probabilities add up "
-                 "to this fraction. 1.0 turns it off.",
+                 "Consider only the top tokens whose probabilities sum to this "
+                 "fraction. 1.0 turns it off.",
                  group="Sampling", min=0, max=1, step=0.05),
     SettingField("top_k", Widget.NUMBER, "Top-k",
-                 "Consider only the k most likely tokens at each step. 0 turns it "
-                 "off.",
+                 "Consider only the k most likely tokens at each step. 0 turns it off.",
                  group="Sampling", min=0, step=1),
     SettingField("repeat_penalty", Widget.NUMBER, "Repeat penalty",
-                 "How strongly to discourage repeating tokens already used. 1.0 "
-                 "is no penalty; higher reduces loops.",
+                 "How strongly to discourage reusing tokens. 1.0 is no penalty; "
+                 "higher reduces loops.",
                  group="Sampling", min=0, step=0.05),
     SettingField("max_tokens", Widget.NUMBER, "Max tokens per reply",
-                 "Upper limit on tokens generated per reply, a runaway guard "
-                 "rather than a target. Thinking models need plenty of room.",
+                 "Upper limit on tokens per reply, a runaway guard not a target. "
+                 "Thinking models need plenty of room.",
                  group="Sampling", min=1, step=1),
     # ---- Server ----
     SettingField("port", Widget.NUMBER, "Server port",
-                 "Port the API/GUI server binds to. Default 8642; it auto-bumps "
-                 "to the next free port if that one is busy.",
+                 "Port the API/GUI server binds to (default 8642); auto-bumps to "
+                 "the next free port if busy.",
                  group="Server", applies=Applies.RESTART, min=1, max=65535, step=1),
     SettingField("cors_origins", Widget.TEXT, "CORS origins",
                  "Browser origins allowed to call the API. Blank = localhost "
-                 'only; a comma-separated list of origins; or "*" for any.',
+                 'only; comma-separated list; or "*" for any.',
                  group="Server", applies=Applies.RESTART),
     # ---- Security ----
     SettingField("require_auth", Widget.TOGGLE, "Require an API key",
-                 "Refuse every request until an API key is configured (fail "
-                 "closed). Required before exposing localm on a network.",
+                 "Refuse all requests until an API key is set (fail closed). "
+                 "Required before exposing localm on a network.",
                  group="Security", applies=Applies.RESTART),
     # ---- Interface ----
     # HIDDEN: chosen with the logo picker in the GUI (Settings -> GUI), not a
     # form control. Accepted by PATCH /v1/config so the launcher stays in sync.
     SettingField("logo_style", Widget.HIDDEN, "Logo style",
-                 "Sidebar wordmark treatment, chosen with the logo picker and "
-                 "shared with the desktop launcher.",
+                 "Sidebar wordmark, chosen with the logo picker and shared with "
+                 "the desktop launcher.",
                  group="General"),
     # ---- Privacy ----
     SettingField("mode", Widget.SELECT, "Session persistence",
@@ -200,54 +197,52 @@ CORE_FIELDS: list = [
                  group="Coder", owner="coder", min=0, step=10),
     SettingField("coder_tool_grammar", Widget.TOGGLE,
                  "Grammar-constrain coder tool calls (experimental)",
-                 "Force valid tool-call JSON via a GBNF grammar. Only takes effect on "
-                 "a grammar-capable backend (the bundled GGUF runtime soft-degrades; "
-                 "HF needs the [grammar] extra). Experimental: currently forces "
-                 "tool-only output, so leave off unless you know you want that.",
+                 "Force valid tool-call JSON via a GBNF grammar (grammar-capable "
+                 "backend only). Experimental: forces tool-only output, so leave "
+                 "off unless you want that.",
                  group="Coder", owner="coder", applies=Applies.NEXT_LOAD),
-    # ---- ComfyUI (image / music / video plugins) ----
+    # ---- Media (ComfyUI: image / music / video plugins) ----
     SettingField("comfy_workdir", Widget.FOLDER, "ComfyUI folder",
-                 "Your ComfyUI install directory. localm runs from here, "
-                 "auto-detects a launcher inside it when no launch command is "
-                 "set, and derives the output folder from it. The single setting "
-                 "most setups need.",
-                 group="ComfyUI", owner="image"),
+                 "Your ComfyUI install folder. localm runs it from here and "
+                 "auto-detects a launcher inside. The one setting most setups need.",
+                 group="Media", owner="image"),
     SettingField("comfy_launch_cmd", Widget.TEXT, "ComfyUI launch command",
-                 "Command or launcher script (.bat/.sh) that starts ComfyUI. "
-                 "Leave blank to let localm auto-detect a launcher in the ComfyUI "
-                 "folder above; set it only to force a specific launcher.",
-                 group="ComfyUI", owner="image"),
+                 "Launcher script (.bat/.sh) that starts ComfyUI. Blank "
+                 "auto-detects one in the ComfyUI folder above.",
+                 group="Media", owner="image"),
     SettingField("comfy_api_url", Widget.TEXT, "ComfyUI API URL",
-                 "Where ComfyUI is listening. Blank uses the FLUX_API_URL "
-                 "environment variable if set, else http://127.0.0.1:8188.",
-                 group="ComfyUI", owner="image"),
+                 "Where ComfyUI listens. Blank uses FLUX_API_URL, else "
+                 "http://127.0.0.1:8188.",
+                 group="Media", owner="image"),
     SettingField("comfy_launch_timeout", Widget.NUMBER,
                  "ComfyUI launch timeout (s)",
-                 "How long to wait for ComfyUI after launching it. A ZLUDA / "
-                 "ROCm cold start compiles kernels and can take minutes.",
-                 group="ComfyUI", owner="image", min=30, step=30),
+                 "Seconds to wait for ComfyUI after launching. A ZLUDA/ROCm cold "
+                 "start can take minutes.",
+                 group="Media", owner="image", min=30, step=30),
     SettingField("comfy_output_dir", Widget.FOLDER, "ComfyUI output folder",
-                 "ComfyUI's own output directory. Set it so localm can delete "
-                 "ComfyUI's duplicate copy after a generation; blank derives it "
-                 "from the ComfyUI folder.",
-                 group="ComfyUI", owner="image"),
+                 "ComfyUI's own output folder. Only needed if you turn on "
+                 "'Remove ComfyUI's copy' below; blank derives it.",
+                 group="Media", owner="image"),
+    SettingField("comfy_delete_outputs", Widget.TOGGLE,
+                 "Remove ComfyUI's copy after generating",
+                 "Delete ComfyUI's own copy and history entry once localm has "
+                 "saved its own. Off by default (keep them); privacy mode forces "
+                 "it on.",
+                 group="Media", owner="image"),
     SettingField("comfy_fast_dequant", Widget.TOGGLE,
                  "Fast GGUF dequant (fp16)",
-                 "Rewrite a slow float32 GGUF dequant to fp16/bf16 when a Flux "
-                 "workflow is submitted. float32 doubles the model size in VRAM "
-                 "and is the usual cause of very slow generation on smaller cards.",
-                 group="ComfyUI", owner="image"),
+                 "Rewrite a slow float32 Flux GGUF dequant to fp16/bf16 on submit. "
+                 "float32 is the usual cause of very slow gen on smaller cards.",
+                 group="Media", owner="image"),
     SettingField("reload_llm_after_imagine", Widget.TOGGLE,
                  "Reload chat model after generating",
-                 "After an image is made, free the image model's VRAM and reload "
-                 "the chat model so the next reply is instant. Turn off when "
-                 "generating many images in a row.",
-                 group="ComfyUI", owner="image"),
+                 "Free the media model's VRAM and reload the chat model after a "
+                 "gen. Turn off when making many in a row.",
+                 group="Media", owner="image"),
     SettingField("model_swap_policy", Widget.SELECT, "Media VRAM swap",
-                 "auto = keep chat loaded when the media model fits alongside it; "
-                 "always = always unload chat for media; never = keep chat hot "
-                 "(media may run out of VRAM on a small card).",
-                 group="ComfyUI", owner="image",
+                 "auto = keep chat loaded if the media model fits alongside; "
+                 "always = always unload chat; never = keep chat hot.",
+                 group="Media", owner="image",
                  options=["auto", "always", "never"]),
     # ---- Network (web plugin) ----
     SettingField("net_mode", Widget.SELECT, "Network access",
@@ -265,8 +260,7 @@ CORE_FIELDS: list = [
     SettingField("net_allow_private", Widget.TOGGLE,
                  "Allow private/loopback targets (disables the SSRF guard)",
                  "Permit requests to localhost and private IP ranges. Off by "
-                 "default because it is a common server-side request forgery "
-                 "(SSRF) vector; only enable for a trusted local setup.",
+                 "default (a common SSRF vector); only enable for a trusted setup.",
                  group="Network", owner="web"),
     SettingField("net_search_url", Widget.TEXT, "Search backend URL",
                  "A SearXNG JSON search endpoint for web search. Blank uses "
@@ -462,3 +456,137 @@ def schema_json(values: Optional[dict] = None) -> list:
                 d["auto"] = ""
         out.append(d)
     return out
+
+
+# --------------------------------------------------------------------------- #
+#  Per-plugin media config (image / music / video).                           #
+#                                                                              #
+#  Each media plugin keeps its OWN settings block under config["plugins"][name]#
+#  so the three are configured INDEPENDENTLY. The backends already read it     #
+#  (block value, else the global comfy_* fallback - see media_config.py and    #
+#  the media backends). This is what the GUI "Media" section edits, one        #
+#  subsection per plugin. The global comfy_* keys remain the shared fallback   #
+#  (and the CLI / PATCH /v1/config path) for back-compat.                      #
+# --------------------------------------------------------------------------- #
+
+MEDIA_PLUGINS = ("image", "music", "video")
+
+
+@dataclass
+class MediaField:
+    key: str                       # API field name, e.g. "workdir"
+    block_path: tuple              # where it lives in the plugin block
+    global_key: str                # global DEFAULT_CONFIG fallback key
+    widget: str
+    label: str
+    help: str = ""
+    options: Optional[list] = None
+    image_only: bool = False       # fast_dequant only applies to the Flux image backend
+
+
+# Order = display order within each plugin subsection.
+MEDIA_PLUGIN_FIELDS: list = [
+    MediaField("workdir", ("comfy", "workdir"), "comfy_workdir", Widget.FOLDER,
+               "ComfyUI folder",
+               "This plugin's ComfyUI install folder. Blank uses the shared default."),
+    MediaField("launch_cmd", ("comfy", "launch_cmd"), "comfy_launch_cmd", Widget.TEXT,
+               "ComfyUI launch command",
+               "Launcher that starts ComfyUI for this plugin. Blank auto-detects one "
+               "in the folder."),
+    MediaField("api_url", ("comfy", "api_url"), "comfy_api_url", Widget.TEXT,
+               "ComfyUI API URL",
+               "Where this plugin's ComfyUI listens. Blank uses the shared default."),
+    MediaField("output_dir", ("comfy", "output_dir"), "comfy_output_dir", Widget.FOLDER,
+               "ComfyUI output folder",
+               "Only needed if 'Remove ComfyUI's copy' is on; blank derives it."),
+    MediaField("delete_outputs", ("comfy", "delete_outputs"), "comfy_delete_outputs",
+               Widget.TOGGLE, "Remove ComfyUI's copy after generating",
+               "Delete ComfyUI's own copy once localm saved its own. Off = keep; "
+               "privacy mode forces it on."),
+    MediaField("fast_dequant", ("comfy", "fast_dequant"), "comfy_fast_dequant",
+               Widget.TOGGLE, "Fast GGUF dequant (fp16)",
+               "Rewrite a slow float32 Flux GGUF dequant to fp16/bf16 on submit.",
+               image_only=True),
+    MediaField("reload_after", ("reload_llm_after_generate",), "reload_llm_after_imagine",
+               Widget.TOGGLE, "Reload chat model after generating",
+               "Free this backend's VRAM and reload the chat model after a gen."),
+    MediaField("swap_policy", ("model_swap_policy",), "model_swap_policy",
+               Widget.SELECT, "Media VRAM swap",
+               "auto = keep chat if it fits; always = unload chat; never = keep chat hot.",
+               options=["auto", "always", "never"]),
+]
+
+
+def _block_get(block: dict, path: tuple):
+    """Read a (possibly nested) value out of a plugin block, or None."""
+    cur = block
+    for p in path:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(p)
+    return cur
+
+
+def media_fields_for(name: str) -> list:
+    """The MediaFields that apply to plugin *name* (drops image-only ones else)."""
+    return [f for f in MEDIA_PLUGIN_FIELDS if not (f.image_only and name != "image")]
+
+
+def media_schema_json(name: str, block: Optional[dict], full_config: dict) -> list:
+    """Serialize one media plugin's editable fields with their RESOLVED values.
+
+    ``value`` is the per-plugin block value when set, else the global comfy_*
+    fallback, so the GUI shows what is actually in effect. ``is_override`` flags
+    whether this plugin has its own value (vs inheriting the shared default)."""
+    block = block if isinstance(block, dict) else {}
+    out = []
+    for f in media_fields_for(name):
+        block_val = _block_get(block, f.block_path)
+        has_own = block_val not in (None, "")
+        value = block_val if has_own else full_config.get(f.global_key)
+        d = {"key": f.key, "widget": f.widget, "label": f.label, "help": f.help,
+             "value": value, "is_override": has_own, "global": full_config.get(f.global_key)}
+        if f.options:
+            d["options"] = f.options
+        out.append(d)
+    return out
+
+
+def _coerce_media_value(f: "MediaField", val):
+    """Coerce one media-field value to its widget type (mirrors validate_update)."""
+    if f.widget == Widget.TOGGLE:
+        return _to_bool(f.key, val)
+    if f.widget == Widget.SELECT:
+        s = "" if val is None else str(val)
+        if f.options and s in f.options:
+            return s
+        raise ValueError(f"{f.key}: {val!r} is not one of {f.options}")
+    # TEXT / FOLDER: empty string clears the override (back to the shared default)
+    if val is None:
+        return None
+    s = str(val).strip()
+    return s or None
+
+
+def validate_media_block(name: str, updates: dict) -> dict:
+    """Coerce + validate a per-plugin media update into a block-merge dict.
+
+    Returns a nested dict shaped like the stored plugin block (e.g.
+    ``{"comfy": {"workdir": ...}, "model_swap_policy": ...}``) ready to DEEP-MERGE
+    into config["plugins"][name]. Raises ValueError on an unknown plugin/field or
+    a bad value. A field set to "" (blank) is written as None, clearing the
+    per-plugin override so the plugin falls back to the shared default."""
+    if name not in MEDIA_PLUGINS:
+        raise ValueError(f"unknown media plugin: {name!r}")
+    by_key = {f.key: f for f in media_fields_for(name)}
+    merge: dict = {}
+    for key, val in updates.items():
+        f = by_key.get(key)
+        if f is None:
+            raise ValueError(f"unknown media field for {name!r}: {key!r}")
+        coerced = _coerce_media_value(f, val)
+        cur = merge
+        for p in f.block_path[:-1]:
+            cur = cur.setdefault(p, {})
+        cur[f.block_path[-1]] = coerced
+    return merge

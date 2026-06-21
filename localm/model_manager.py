@@ -30,6 +30,7 @@ from .config import (
     save_registry,
     update_registry,
 )
+from .debuglog import logger
 
 console = Console()
 
@@ -441,6 +442,10 @@ def _check_disk_space(dest_dir: Path, required_bytes: int) -> bool:
     holds *dest_dir*.  Prints a warning and returns False when space is
     insufficient; returns True when fine or when the check is skipped
     (e.g. ``required_bytes == 0``).
+
+    If the free-space check itself cannot be measured (offline models dir,
+    permission denied, etc.) it is treated as OK by design: a WARNING is
+    logged and the download proceeds rather than blocking a working setup.
     """
     if not required_bytes:
         return True
@@ -454,8 +459,10 @@ def _check_disk_space(dest_dir: Path, required_bytes: int) -> bool:
                 f"Need {need_gb:.1f} GB, have {free_gb:.1f} GB free on {dest_dir}"
             )
             return False
-    except Exception:
-        pass   # disk_usage failure is non-fatal; proceed with the download
+    except Exception as e:
+        # Surface an unmeasurable check (do not silence) but stay non-fatal:
+        # an unknown free-space value is treated as OK so the download proceeds.
+        logger.warning("could not check free space on %s (%s); proceeding", dest_dir, e)
     return True
 
 

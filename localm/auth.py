@@ -34,6 +34,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from localm.debuglog import logger
+
 ENV_VAR = "LOCALM_API_KEY"
 REQUIRE_ENV_VAR = "LOCALM_REQUIRE_AUTH"
 _TRUTHY = ("1", "true", "yes", "on")
@@ -113,6 +115,17 @@ def require_auth_enabled() -> bool:
         from localm.config import load_config
         return bool(load_config().get("require_auth", False))
     except Exception:
+        # Surface that we could not confirm require_auth instead of silently
+        # dropping to keyless mode: if an admin set require_auth: true and the
+        # config later becomes unreadable this fails OPEN, so log it loudly.
+        logger.warning(
+            "config unreadable; cannot confirm require_auth - treating as "
+            "not-required")
+        # Deliberate fail-open-vs-lockout tradeoff: a local-first loopback
+        # default must not brick itself on a transient config read error, so we
+        # return False rather than hard-locking. Admins who need a
+        # config-independent fail-closed switch can set LOCALM_REQUIRE_AUTH
+        # (checked above the try), which never depends on the config file.
         return False
 
 

@@ -254,8 +254,14 @@ class GgufBackend(BaseBackend):
         if self._llm is not None and hasattr(self._llm, "close"):
             try:
                 self._llm.close()
-            except Exception:
-                pass
+            except Exception as e:
+                # Surface the failed native close: leftover VRAM/context here can
+                # make a later load fail mysteriously, so log a correlatable line
+                # rather than swallowing it. Teardown is best-effort, so we still
+                # drop the instance below instead of escalating to a hard failure.
+                from localm.debuglog import logger as _dbg
+                _dbg.debug("llama close() failed (%s); context may not be fully freed",
+                           type(e).__name__)
         self._llm = None
         self._loaded = False
 
