@@ -460,6 +460,9 @@ pre:hover .copy-btn { opacity: 1; }
   cursor: pointer;
 }
 .btn-quiet:hover { color: var(--text); border-color: var(--text-dim); }
+/* Destructive confirm (e.g. Revert) - red to flag the action can't be undone. */
+.btn-danger { color: var(--red); border-color: var(--red); }
+.btn-danger:hover { color: #fff; background: var(--red); border-color: var(--red); }
 
 #coder-bar {
   display: none;
@@ -666,6 +669,10 @@ pre:hover .copy-btn { opacity: 1; }
   margin: 0 auto;
   width: 100%;
 }
+/* Settings is a dense two-column form, not prose: let it stretch to fill a wide
+   screen instead of sitting in a centred 1280px column. The prose pages
+   (Models / Plugins / Knowledge) keep the readable cap above. */
+#view-settings .page { max-width: 1700px; }
 .page h2 { margin: 0 0 6px; }
 .page .sub { color: var(--text-dim); font-size: 13.5px; margin-bottom: 18px; }
 .page code {

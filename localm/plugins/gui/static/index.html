@@ -7,7 +7,8 @@
 <link rel="manifest" href="/manifest.webmanifest">
 <meta name="theme-color" content="#0f1115">
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
-<link rel="apple-touch-icon" href="/icon.svg">
+<link rel="icon" href="/icon-192.png" sizes="192x192" type="image/png">
+<link rel="apple-touch-icon" href="/icon-192.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="localm">
@@ -602,9 +603,27 @@
 /* PWA: register the service worker, show which server we are connected to, and
    wire an "Install as app" button when the browser offers the install prompt. */
 (function () {
+  // On HTTPS the service worker registers only behind a TRUSTED certificate.
+  // Track whether it failed so the install affordance can steer the user to
+  // install the certificate first (otherwise "install" makes a plain shortcut,
+  // not a real app - the "it's just a shortcut" report).
+  function ios() { return window.isIOSSafari && window.isIOSSafari(); }
+  function standalone() { return window.pwaDisplayMode && window.pwaDisplayMode() === "standalone"; }
+  function renderInstall() {
+    if (typeof window.applyInstallUI !== "function") return;
+    var sa = standalone();
+    var canPrompt = !!window.__deferredInstall;
+    var certNeeded = location.protocol === "https:" && window.__swFailed === true
+      && !sa && !canPrompt && !(!sa && ios());
+    window.applyInstallUI({ standalone: sa, ios: !sa && ios(),
+                            canPrompt: canPrompt, certNeeded: certNeeded });
+    if (window.refreshInstallGateIfOpen) window.refreshInstallGateIfOpen();
+  }
   if ("serviceWorker" in navigator) {
     window.addEventListener("load", function () {
-      navigator.serviceWorker.register("/sw.js").catch(function () {});
+      navigator.serviceWorker.register("/sw.js")
+        .then(function () { window.__swFailed = false; renderInstall(); })
+        .catch(function () { window.__swFailed = true; renderInstall(); });
     });
   }
   var originEl = document.getElementById("conn-origin");
@@ -615,10 +634,8 @@
   // parse before app.js is injected, so guard and let the unit tests drive
   // applyInstallUI() directly.
   if (typeof window.applyInstallUI !== "function") return;
-
-  var standalone = window.pwaDisplayMode && window.pwaDisplayMode() === "standalone";
-  var ios = !standalone && window.isIOSSafari && window.isIOSSafari();
-  window.applyInstallUI({ standalone: standalone, ios: ios, canPrompt: false });
+  window.__renderInstall = renderInstall;
+  renderInstall();
 
   // Single source of truth for the captured install prompt, shared by the
   // Settings "Install app" button and the onboarding install gate (app.js).
@@ -626,8 +643,7 @@
   window.addEventListener("beforeinstallprompt", function (e) {
     e.preventDefault();
     window.__deferredInstall = e;
-    window.applyInstallUI({ canPrompt: true });
-    if (window.refreshInstallGateIfOpen) window.refreshInstallGateIfOpen();
+    renderInstall();
   });
   if (btn) btn.addEventListener("click", function () {
     var d = window.__deferredInstall;
@@ -635,7 +651,7 @@
     d.prompt();
     d.userChoice.finally(function () {
       window.__deferredInstall = null;
-      window.applyInstallUI({ standalone: false, ios: ios, canPrompt: false });
+      renderInstall();
     });
   });
   window.addEventListener("appinstalled", function () {

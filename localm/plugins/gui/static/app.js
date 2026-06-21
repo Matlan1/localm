@@ -273,6 +273,23 @@ function openModal(title, bodyBuilder) {
 $("modal-close").onclick = () => ($("modal").style.display = "none");
 $("modal").onclick = (e) => { if (e.target === $("modal")) $("modal").style.display = "none"; };
 
+/** Confirm a destructive action with the in-page modal. window.confirm() is
+ *  suppressed in some mobile / PWA browsers (the NET-1 prompt() class of bug),
+ *  so we render our own Cancel / <confirm> dialog. */
+function confirmDanger(title, message, confirmLabel, onConfirm) {
+  openModal(title, (body) => {
+    body.appendChild(el("p", "", message));
+    const row = el("div", "actions");
+    const cancel = el("button", "btn-quiet", "Cancel");
+    cancel.onclick = () => ($("modal").style.display = "none");
+    const ok = el("button", "btn-quiet btn-danger", confirmLabel);
+    ok.onclick = () => { $("modal").style.display = "none"; onConfirm(); };
+    row.appendChild(cancel);
+    row.appendChild(ok);
+    body.appendChild(row);
+  });
+}
+
 /* ================================================================ */
 /*  Theme                                                            */
 /* ================================================================ */
@@ -423,8 +440,9 @@ function showKeyGate(message) {
   const cert = $("key-gate-cert");
   if (cert) cert.style.display =
     (location.protocol === "https:") ? "block" : "none";
-  // Offer "Scan QR code" only where it can work: a touch device with the native
-  // BarcodeDetector + a camera (Android Chrome). iOS / unsupported -> manual entry.
+  // Offer "Scan QR code" wherever the browser can open a camera (a secure
+  // context). Decoding uses the native BarcodeDetector when present, else the
+  // bundled jsQR fallback, so it is not limited to Android Chrome.
   const scan = $("key-gate-scan");
   if (scan) scan.style.display = scanSupported() ? "inline-block" : "none";
   const input = $("key-gate-input");
@@ -459,15 +477,29 @@ function submitKeyGate() {
 
 // --- Pairing QR scanner (phone) -------------------------------------------
 // Reads the key QR shown in the computer's Settings (Companion app) with the
-// browser-native BarcodeDetector + camera, and saves the key without typing.
-// Capability = Android Chrome / Chromium; iOS Safari has no BarcodeDetector, so
-// the button stays hidden there and manual entry is the path.
+// camera and saves the key without typing. Decoding prefers the native
+// BarcodeDetector and falls back to the bundled jsQR, so it works on browsers
+// that lack BarcodeDetector (Firefox, Brave, Opera, iOS Safari, ...) - any
+// browser that can open a camera in a secure context.
 function scanSupported() {
-  const cap = ("BarcodeDetector" in window)
-    && !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
-  const touchLike = (navigator.maxTouchPoints || 0) > 0
-    || !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
-  return cap && touchLike;
+  return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+}
+
+// Lazily load the bundled jsQR decoder (only fetched when a scan starts on a
+// browser without BarcodeDetector). Sets window.jsQR (UMD). Cached after first
+// load; the service worker caches the file for later offline pairing.
+let _jsqrPromise = null;
+function loadJsQR() {
+  if (window.jsQR) return Promise.resolve(window.jsQR);
+  if (_jsqrPromise) return _jsqrPromise;
+  _jsqrPromise = new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = "/vendor/jsQR.min.js";
+    s.onload = () => resolve(window.jsQR);
+    s.onerror = () => { _jsqrPromise = null; reject(new Error("jsQR failed to load")); };
+    document.head.appendChild(s);
+  });
+  return _jsqrPromise;
 }
 
 // Decode a scanned payload -> save the key + reload. Returns true when it was a
@@ -495,9 +527,19 @@ async function startQrScan() {
   if (!overlay || !video) return;
   overlay.style.display = "flex";
   if (status) status.textContent = "Starting camera…";
-  let detector;
-  try { detector = new window.BarcodeDetector({ formats: ["qr_code"] }); }
-  catch (e) { if (status) status.textContent = "QR scanning is not available here."; return; }
+
+  // Prefer the native BarcodeDetector; otherwise load the bundled jsQR decoder.
+  let detector = null;
+  if ("BarcodeDetector" in window) {
+    try { detector = new window.BarcodeDetector({ formats: ["qr_code"] }); }
+    catch (e) { detector = null; }
+  }
+  let jsqr = null;
+  if (!detector) {
+    try { jsqr = await loadJsQR(); }
+    catch (e) { if (status) status.textContent = "QR scanning is not available here."; return; }
+  }
+
   try {
     _qrStream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: "environment" }, audio: false });
@@ -508,18 +550,35 @@ async function startQrScan() {
   video.srcObject = _qrStream;
   try { await video.play(); } catch (e) { /* autoplay guard */ }
   if (status) status.textContent = "Point at the QR in the computer's Settings.";
+
+  // Decode one video frame -> the QR text, or null. BarcodeDetector reads the
+  // <video> directly; jsQR needs the pixels sampled onto a canvas first.
+  const canvas = document.createElement("canvas");
+  const decodeFrame = async () => {
+    if (detector) {
+      const codes = await detector.detect(video);
+      return codes.length ? codes[0].rawValue : null;
+    }
+    const w = video.videoWidth, h = video.videoHeight;
+    if (!w || !h) return null;
+    canvas.width = w; canvas.height = h;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    ctx.drawImage(video, 0, 0, w, h);
+    const img = ctx.getImageData(0, 0, w, h);
+    const res = jsqr(img.data, w, h, { inversionAttempts: "dontInvert" });
+    return res ? res.data : null;
+  };
+
   let busy = false;
   _qrTimer = setInterval(async () => {
     if (busy || !_qrStream) return;
     busy = true;
     try {
-      const codes = await detector.detect(video);
-      for (const c of codes) {
-        if (handleScannedKey(c.rawValue)) { stopQrScan(); return; }
-      }
+      const value = await decodeFrame();
+      if (value && handleScannedKey(value)) { stopQrScan(); return; }
     } catch (e) { /* transient detect error - keep scanning */ }
     finally { busy = false; }
-  }, 300);
+  }, detector ? 300 : 200);
 }
 
 // --- PWA install affordance (P2c) -----------------------------------------
@@ -568,6 +627,15 @@ function applyInstallUI(env) {
   }
   if (env.canPrompt && btn) { btn.style.display = ""; return; }
   if (env.ios && ios) { ios.style.display = ""; return; }
+  if (env.certNeeded) {
+    // On HTTPS the service worker only registers behind a TRUSTED certificate;
+    // without it the browser can only make a plain shortcut, not an installed
+    // app. Point the user at the certificate step instead of the generic hint.
+    hint.textContent = "To install localm as an app, trust this device's "
+      + "certificate first (the “Install certificate” step above), then reload.";
+    hint.style.display = "";
+    return;
+  }
   hint.style.display = "";   // generic browser-menu hint (default)
 }
 
@@ -1182,6 +1250,7 @@ function renderChat() {
     const actions = [];
     if (m.role === "user" && !tag && !chat.abort) {
       actions.push(["edit", () => editMessage(conv, i)]);
+      actions.push(["revert", () => revertTo(conv, i)]);
     }
     if (m.role === "assistant" && !tag) {
       actions.push(["🔊", () => speak(msgText(m), { toggle: true })]);
@@ -1315,6 +1384,65 @@ function regenerate(conv) {
   saveConversations(conv);
   renderChat();
   runCompletion(conv);
+}
+
+/** Count the sibling timelines a revert to *index* would permanently destroy:
+ *  every fork point at or after the revert point keeps its alternatives in the
+ *  region being removed. Used to warn before reverting *past* a branch point. */
+function branchesLostByRevert(conv, index) {
+  let lost = 0;
+  for (let i = index; i < conv.messages.length; i++) {
+    const pid = i > 0 ? conv.messages[i - 1].id : "root";
+    const rec = (conv.branches || []).find((b) => b.parent === pid);
+    if (rec && rec.tails.length > 1) {
+      lost += rec.tails.filter((t, ti) => ti !== rec.current && t && t.length).length;
+    }
+  }
+  return lost;
+}
+
+/** Revert the conversation to *index*: drop this message and everything after it
+ *  DESTRUCTIVELY (unlike editMessage, which forks a sibling), and drop the
+ *  clicked message back into the composer to modify and resend. Stays in the
+ *  SAME branch. Reverting past a fork point destroys the sibling branches in the
+ *  removed region, so confirm first when that would happen (the safeguard). */
+function revertTo(conv, index) {
+  if (chat.abort) { toast("Wait for the current reply to finish", true); return; }
+  if (index < 0 || index >= conv.messages.length) return;
+  const text = msgText(conv.messages[index]);
+  const lost = branchesLostByRevert(conv, index);
+
+  const apply = () => {
+    const orig = conv.messages;
+    // Keep only forks that diverge STRICTLY before the revert point. A fork at
+    // or after it (parent inside the removed region, or the live tail being
+    // reverted) is destroyed; a fork whose parent is not on the live branch
+    // (nested in a surviving parked tail) is left for pruneBranches to judge.
+    conv.branches = (conv.branches || []).filter((rec) => {
+      if (rec.parent === "root") return index > 0;
+      const p = orig.findIndex((x) => x.id === rec.parent);
+      if (p === -1) return true;
+      return p + 1 < index;
+    });
+    conv.messages = orig.slice(0, index);
+    pruneBranches(conv);
+    $("chat-input").value = text;
+    autoGrow($("chat-input"));
+    saveConversations(conv);
+    renderChat();
+    $("chat-input").focus();
+  };
+
+  if (lost > 0) {
+    confirmDanger(
+      "Revert conversation",
+      `This permanently deletes ${lost} alternative branch` +
+      `${lost === 1 ? "" : "es"} and everything after this message - it ` +
+      "can't be undone. Revert anyway?",
+      "Revert", apply);
+  } else {
+    apply();
+  }
 }
 
 function chatParams() {

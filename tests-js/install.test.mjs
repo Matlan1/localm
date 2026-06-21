@@ -65,3 +65,20 @@ test("P2c: standalone wins even if a stale prompt flag is passed", () => {
   assert.ok(!shown(btn) && !shown(ios), "installed state suppresses both install paths");
   assert.match(hint.textContent, /installed app/i);
 });
+
+test("PWA cert gate: HTTPS without a trusted cert points at the certificate step", () => {
+  const { window } = loadApp({ fetchImpl: allOk });
+  window.applyInstallUI({ certNeeded: true });
+  const { btn, hint, ios } = els(window);
+  assert.ok(shown(hint), "the cert hint is shown");
+  assert.ok(!shown(btn) && !shown(ios), "no install paths until the cert is trusted");
+  assert.match(hint.textContent, /certificate/i, "steers the user to install the certificate");
+});
+
+test("PWA cert gate: a usable install prompt overrides certNeeded", () => {
+  const { window } = loadApp({ fetchImpl: allOk });
+  window.applyInstallUI({ canPrompt: true, certNeeded: true });
+  const { btn, hint } = els(window);
+  assert.ok(shown(btn), "an install prompt wins over the cert hint");
+  assert.ok(!shown(hint));
+});
