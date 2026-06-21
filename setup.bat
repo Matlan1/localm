@@ -14,10 +14,10 @@ rem  offered for peak performance; CPU for machines with no GPU.
 rem ===========================================================================
 setlocal EnableDelayedExpansion
 cd /d "%~dp0"
-title localm setup
+title LocaLM setup
 
 echo.
-echo  localm setup - self-contained install in: %CD%
+echo  LocaLM setup - self-contained install in: %CD%
 echo.
 
 rem ---- uninstall / rollback (report first, then remove) ---------------------
@@ -242,28 +242,28 @@ echo    [3] No shortcut
 choice /c 123 /n /m "  Pick 1, 2 or 3: "
 set "SCPICK=%errorlevel%"
 set "SCPATH="
-if "%SCPICK%"=="1" set "SCPATH=%USERPROFILE%\Desktop\localm.lnk"
-if "%SCPICK%"=="2" set "SCPATH=%USERPROFILE%\Desktop\localm.lnk"
+if "%SCPICK%"=="1" set "SCPATH=%USERPROFILE%\Desktop\LocaLM.lnk"
+if "%SCPICK%"=="2" set "SCPATH=%USERPROFILE%\Desktop\LocaLM.lnk"
 if "%SCPICK%"=="1" (
     powershell -NoProfile -Command ^
-        "$s = (New-Object -ComObject WScript.Shell).CreateShortcut([Environment]::GetFolderPath('Desktop') + '\localm.lnk');" ^
+        "$s = (New-Object -ComObject WScript.Shell).CreateShortcut([Environment]::GetFolderPath('Desktop') + '\LocaLM.lnk');" ^
         "$s.TargetPath = '%CD%\localm-launcher.bat';" ^
         "$s.WorkingDirectory = '%CD%';" ^
         "$s.IconLocation = '%CD%\assets\localm.ico';" ^
-        "$s.Description = 'localm - open the launcher';" ^
+        "$s.Description = 'LocaLM - open the launcher';" ^
         "$s.Save()"
-    if not errorlevel 1 echo  Shortcut created: Desktop\localm.lnk  ^(opens the launcher^)
+    if not errorlevel 1 echo  Shortcut created: Desktop\LocaLM.lnk  ^(opens the launcher^)
 )
 if "%SCPICK%"=="2" (
     powershell -NoProfile -Command ^
-        "$s = (New-Object -ComObject WScript.Shell).CreateShortcut([Environment]::GetFolderPath('Desktop') + '\localm.lnk');" ^
+        "$s = (New-Object -ComObject WScript.Shell).CreateShortcut([Environment]::GetFolderPath('Desktop') + '\LocaLM.lnk');" ^
         "$s.TargetPath = '%CD%\.venv\Scripts\localm.exe';" ^
         "$s.Arguments = 'gui';" ^
         "$s.WorkingDirectory = '%CD%';" ^
         "$s.IconLocation = '%CD%\assets\localm.ico';" ^
-        "$s.Description = 'localm - open the web GUI';" ^
+        "$s.Description = 'LocaLM - open the web GUI';" ^
         "$s.Save()"
-    if not errorlevel 1 echo  Shortcut created: Desktop\localm.lnk  ^(opens the GUI^)
+    if not errorlevel 1 echo  Shortcut created: Desktop\LocaLM.lnk  ^(opens the GUI^)
 )
 if "%SCPICK%"=="3" echo  No shortcut created.
 
@@ -307,7 +307,7 @@ rem  cannot delete its own venv).
 rem ===========================================================================
 :uninstall
 echo.
-echo  localm uninstall / rollback for this clone:
+echo  LocaLM uninstall / rollback for this clone:
 echo    %CD%
 echo.
 set "PYBIN=.venv\Scripts\python.exe"

@@ -1,6 +1,6 @@
 {
-  "name": "localm",
-  "short_name": "localm",
+  "name": "LocaLM",
+  "short_name": "LocaLM",
   "description": "Local AI - chat, the coder agent, and your models, served from your own machine.",
   "start_url": "/",
   "scope": "/",

@@ -73,6 +73,12 @@ DEFAULT_CONFIG: dict = {
     # the cap exists only as a runaway guard, not a cost control.
     "max_tokens": 4096,
     "confirm_remove": True,   # ask before localm rm deletes files
+    # Sidebar wordmark treatment, shared by the web GUI and the desktop launcher
+    # (the web logo picker writes it here; the launcher reads it). One of:
+    # local-m (LocaL white + M blue, the default), loca-lm (Loca white + LM blue),
+    # localm (lowercase, m blue). The console command, app icon, and desktop
+    # shortcut are fixed and unaffected by this.
+    "logo_style": "local-m",
     "import_max_depth": 3,    # `localm add <dir>` recurses up to this many levels
     "port": 8642,             # default inference server port (auto-bumps if busy)
     "cors_origins": None,     # None = localhost only; list of origins; or "*"

@@ -28,7 +28,7 @@ ask() {  # ask "prompt" "default"  ->  echoes the answer (the default in --yes m
 }
 
 say ""
-say "  localm setup - self-contained install in: $(pwd)"
+say "  LocaLM setup - self-contained install in: $(pwd)"
 say ""
 
 # ---- uninstall / rollback (report first, then remove) -----------------------
@@ -246,11 +246,13 @@ case "$mk" in
     apps="$HOME/.local/share/applications"
     mkdir -p "$apps"
     SHORTCUT="$apps/localm.desktop"
-    icon="$(pwd)/assets/localm.png"; [ -f "$icon" ] || icon="$(pwd)/assets/localm.ico"
+    # Prefer the scalable SVG (the freedesktop-friendly format); fall back to
+    # the .ico that ships for the Windows shortcut if it is ever missing.
+    icon="$(pwd)/assets/localm.svg"; [ -f "$icon" ] || icon="$(pwd)/assets/localm.ico"
     cat > "$apps/localm.desktop" <<EOF
 [Desktop Entry]
 Type=Application
-Name=localm
+Name=LocaLM
 Comment=Local LLM - chat, coder, models, images
 Exec=$(pwd)/localm-launcher.sh
 Icon=$icon

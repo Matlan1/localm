@@ -61,6 +61,29 @@ USE_GLOBAL = "(use global)"
 # GUI). Only valid for the Web GUI mode; chat/serve/coder need a real model.
 NO_MODEL_LABEL = "(no model - choose later in the GUI)"
 
+# Wordmark treatments, shared with the web GUI through the logo_style config key
+# (see localm/config.py). The blue half is the accent colour; the rest is normal
+# text. Mirrors LOGO_STYLES in localm/plugins/gui/static/app.js. The console
+# command, app icon, and desktop shortcut are fixed regardless of this.
+LOGO_STYLES = {
+    "local-m": ("LocaL", "M"),    # default: single blue M, matches the icon
+    "loca-lm": ("Loca", "LM"),
+    "localm": ("local", "m"),
+}
+LOGO_DEFAULT = "local-m"
+
+
+def logo_parts() -> tuple:
+    """(white_part, blue_part) of the wordmark for the configured logo style."""
+    style = LOGO_DEFAULT
+    try:
+        sys.path.insert(0, str(REPO_DIR))
+        from localm.config import load_config
+        style = load_config().get("logo_style", LOGO_DEFAULT)
+    except Exception:
+        pass
+    return LOGO_STYLES.get(style, LOGO_STYLES[LOGO_DEFAULT])
+
 
 def _spawn_detached(cmd: list, *, cwd: str, env: dict | None = None):
     """Start a child mode process detached from the launcher, cross-platform.
@@ -168,7 +191,7 @@ def save_settings(data: dict) -> None:
 class Launcher(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("localm launcher")
+        self.title("LocaLM launcher")
         self.configure(bg=BG)
         self.resizable(False, False)
         self._style()
@@ -255,10 +278,10 @@ class Launcher(tk.Tk):
 
         header = ttk.Frame(root)
         header.pack(fill="x", pady=(0, 14))
-        title = tk.Label(header, text="local", bg=BG, fg=TEXT,
-                         font=("Segoe UI", 18, "bold"))
-        title.pack(side="left")
-        tk.Label(header, text="m", bg=BG, fg=ACCENT,
+        white, blue = logo_parts()
+        tk.Label(header, text=white, bg=BG, fg=TEXT,
+                 font=("Segoe UI", 18, "bold")).pack(side="left")
+        tk.Label(header, text=blue, bg=BG, fg=ACCENT,
                  font=("Segoe UI", 18, "bold")).pack(side="left")
         tk.Label(header, text="  launcher", bg=BG, fg=TEXT_DIM,
                  font=("Segoe UI", 12)).pack(side="left", pady=(5, 0))
