@@ -241,8 +241,15 @@ async def imagine(req: ImagineRequest, request: Request):
         job.push({"type": "line", "text": message})
         if ok:
             job.result = out_path.name
-            if swap:
-                _reload_llm(job, self_url, s)
+        # Restore VRAM on EVERY exit path once we have unloaded the chat model -
+        # success, failure, OR cancel. The old code reloaded only on success, so
+        # hitting Stop mid-generation left the chat model unloaded AND ComfyUI's
+        # model resident in VRAM (the reported "fails unloading the image model,
+        # loading chat - not sure it even tried"). _reload_llm frees the backend's
+        # VRAM first, then reloads the chat model, so it is the right restore on
+        # both the cancel and the error paths too.
+        if swap:
+            _reload_llm(job, self_url, s)
         return ok
 
     job = jobs.start_fn("imagine", _generate, result_path=out_path.name)

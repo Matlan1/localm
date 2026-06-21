@@ -105,7 +105,9 @@
         <div class="composer">
           <button class="attach" id="chat-attach" title="Attach images or documents (pdf, docx, txt, md, …)">&#128206;</button>
           <button class="attach" id="chat-mic" title="Hold a thought, speak it - click to record, click again to transcribe (needs the [voice] extra)">&#127908;</button>
+          <button class="attach chat-camera" id="chat-camera" title="Take a photo with the camera">&#128247;</button>
           <input type="file" id="chat-file" accept="image/*,.pdf,.docx,.txt,.md,.markdown,.rst,.html,.htm,.ipynb,.json,.jsonl,.yaml,.yml,.toml,.csv,.tsv,.log,.py,.js,.ts,.java,.c,.h,.cpp,.cs,.go,.rs,.rb,.sh,.ps1,.sql,.xml,.css" multiple style="display:none">
+          <input type="file" id="chat-camera-file" accept="image/*" capture="environment" style="display:none">
           <textarea id="chat-input" rows="1" placeholder="Message the model…  (Enter to send · Shift+Enter for a new line)"></textarea>
           <button class="send" id="chat-send" title="Send">&#10148;</button>
         </div>
@@ -394,82 +396,87 @@
 
     <!-- ============ SETTINGS ============ -->
     <section id="view-settings" class="view">
-      <div class="page">
+      <div class="page settings-page">
         <h2>Settings</h2>
-        <div class="card">
-          <h3>Server configuration</h3>
-          <div class="sub">Stored in <code>~/.localm/config.json</code>. Engine values apply on
-          the next model load.</div>
-          <div id="config-form" class="grid2"></div>
-          <div class="actions">
-            <button class="btn-primary" id="config-save">Save</button>
-          </div>
-        </div>
-        <div class="card" id="perf-card">
-          <h3>Performance</h3>
-          <div class="sub">How much of the model runs on the GPU, and how large its context window
-          is. Applies on the next model load. The VRAM figure is an estimate.</div>
-          <label>GPU layers - how much of the model to offload to the GPU
-            (<span id="perf-gl-val">all</span>)</label>
-          <input type="range" id="perf-gpu-layers" min="0" max="99" step="1" value="99">
-          <label>Context window - the most tokens the model can attend to
-            (<span id="perf-ctx-val">4096</span>)</label>
-          <input type="range" id="perf-ctx" min="512" max="32768" step="512" value="4096">
-          <div id="perf-estimate" class="sub perf-estimate">estimate unavailable</div>
-          <div class="actions">
-            <button class="btn-primary" id="perf-apply">Apply</button>
-          </div>
-        </div>
-        <div class="card">
-          <h3>GUI</h3>
-          <label>Logo style</label>
-          <div class="sub">How the wordmark is drawn in the sidebar. Saved in this browser only.</div>
-          <div id="logo-style-picker" class="logo-style-picker"></div>
-          <label>API key (sent as Bearer token; stored in this browser only)</label>
-          <input type="password" id="gui-api-key" placeholder="only needed when LOCALM_API_KEY is set">
-          <div class="actions">
-            <button class="btn-quiet" id="gui-key-save">Save key</button>
-            <button class="btn-quiet" id="gui-clear-convs">Delete all conversations</button>
-          </div>
-        </div>
-        <div class="card" id="keys-card">
-          <h3>API keys</h3>
-          <div class="sub">Mint named, scope-limited keys to share localm with
-            another device or person - each key gets only the capabilities you
-            check. A <b>coder</b> key is restricted (it can read and edit this
-            project but cannot run shell commands). The secret is shown once.</div>
-          <input type="text" id="key-name" placeholder="key name (e.g. phone)"
-                 spellcheck="false" autocomplete="off">
-          <div id="key-scopes" class="key-scopes"></div>
-          <div class="actions">
-            <button class="btn-quiet" id="key-create">Create key</button>
-          </div>
-          <div id="key-secret" class="key-secret" style="display:none"></div>
-          <div id="keys-list" class="keys-list"></div>
-        </div>
-        <div class="card">
-          <h3>Companion app</h3>
-          <div class="sub">Connected to <code id="conn-origin">this server</code>. This app talks
-          only to the server that served it - to use it from your phone, open that address on the
-          phone (over your LAN, or a private network like Tailscale) and install it from there.</div>
-          <div id="pairing" class="pairing" style="display:none">
-            <div class="sub">Pair a phone: open LocaLM on the phone, tap <b>Scan QR code</b> on the
-            onboarding screen, and point it at this code to copy the API key over - no typing.</div>
-            <div id="pairing-qr" class="pairing-qr"></div>
-          </div>
-          <div class="actions">
-            <button class="btn-primary" id="install-app" style="display:none">Install as app</button>
-            <span id="install-hint" class="sub">Use your browser's <em>Install app</em> /
-            <em>Add to Home screen</em> to pin LocaLM as an app.</span>
-          </div>
-          <!-- iOS Safari fires no install prompt; the Share sheet is the only path. -->
-          <div id="install-ios" class="onboard-help" style="display:none">
-            <b>Add to Home Screen (iPhone / iPad):</b>
-            <ol class="dim">
-              <li>Open this page in <b>Safari</b>.</li>
-              <li>Tap the <b>Share</b> button (the square with an up-arrow).</li>
-              <li>Choose <b>Add to Home Screen</b>, then <b>Add</b>.</li>
-            </ol>
+        <div class="sub">Stored in <code>~/.localm/config.json</code>. Pick a section on the left;
+        each one saves on its own. Engine values apply on the next model load.</div>
+        <div class="settings-layout">
+          <nav id="settings-nav" class="settings-nav" aria-label="Settings sections"></nav>
+          <div id="settings-content" class="settings-content">
+            <!-- Schema-driven per-plugin config sections are injected here, each
+                 with its own heading + Save button (built by refreshSettingsPage). -->
+            <div id="config-form"></div>
+
+            <section class="card settings-section" id="sec-performance" data-sec-label="Performance">
+              <h3>Performance</h3>
+              <div class="sub">How much of the model runs on the GPU, and how large its context window
+              is. Applies on the next model load. The VRAM figure is an estimate.</div>
+              <label>GPU layers - how much of the model to offload to the GPU
+                (<span id="perf-gl-val">all</span>)</label>
+              <input type="range" id="perf-gpu-layers" min="0" max="99" step="1" value="99">
+              <label>Context window - the most tokens the model can attend to
+                (<span id="perf-ctx-val">4096</span>)</label>
+              <input type="range" id="perf-ctx" min="512" max="32768" step="512" value="4096">
+              <div id="perf-estimate" class="sub perf-estimate">estimate unavailable</div>
+              <div class="actions">
+                <button class="btn-primary" id="perf-apply">Apply</button>
+              </div>
+            </section>
+
+            <section class="card settings-section" id="sec-appearance" data-sec-label="Appearance">
+              <h3>Appearance</h3>
+              <label>Logo style</label>
+              <div class="sub">How the wordmark is drawn in the sidebar. Saved in this browser only.</div>
+              <div id="logo-style-picker" class="logo-style-picker"></div>
+              <label>API key (sent as Bearer token; stored in this browser only)</label>
+              <input type="password" id="gui-api-key" placeholder="only needed when LOCALM_API_KEY is set">
+              <div class="actions">
+                <button class="btn-quiet" id="gui-key-save">Save key</button>
+                <button class="btn-quiet" id="gui-clear-convs">Delete all conversations</button>
+              </div>
+            </section>
+
+            <section class="card settings-section" id="keys-card" data-sec-label="API keys">
+              <h3>API keys</h3>
+              <div class="sub">Mint named, scope-limited keys to share localm with
+                another device or person - each key gets only the capabilities you
+                check. A <b>coder</b> key is restricted (it can read and edit this
+                project but cannot run shell commands). The secret is shown once.</div>
+              <input type="text" id="key-name" placeholder="key name (e.g. phone)"
+                     spellcheck="false" autocomplete="off">
+              <div id="key-scopes" class="key-scopes"></div>
+              <div class="actions">
+                <button class="btn-quiet" id="key-create">Create key</button>
+              </div>
+              <div id="key-secret" class="key-secret" style="display:none"></div>
+              <div id="keys-list" class="keys-list"></div>
+            </section>
+
+            <section class="card settings-section" id="sec-companion" data-sec-label="Companion app">
+              <h3>Companion app</h3>
+              <div class="sub">Connected to <code id="conn-origin">this server</code>. This app talks
+              only to the server that served it - to use it from your phone, open that address on the
+              phone (over your LAN, or a private network like Tailscale) and install it from there.</div>
+              <div id="pairing" class="pairing" style="display:none">
+                <div class="sub">Pair a phone: open LocaLM on the phone, tap <b>Scan QR code</b> on the
+                onboarding screen, and point it at this code to copy the API key over - no typing.</div>
+                <div id="pairing-qr" class="pairing-qr"></div>
+              </div>
+              <div class="actions">
+                <button class="btn-primary" id="install-app" style="display:none">Install as app</button>
+                <span id="install-hint" class="sub">Use your browser's <em>Install app</em> /
+                <em>Add to Home screen</em> to pin LocaLM as an app.</span>
+              </div>
+              <!-- iOS Safari fires no install prompt; the Share sheet is the only path. -->
+              <div id="install-ios" class="onboard-help" style="display:none">
+                <b>Add to Home Screen (iPhone / iPad):</b>
+                <ol class="dim">
+                  <li>Open this page in <b>Safari</b>.</li>
+                  <li>Tap the <b>Share</b> button (the square with an up-arrow).</li>
+                  <li>Choose <b>Add to Home Screen</b>, then <b>Add</b>.</li>
+                </ol>
+              </div>
+            </section>
           </div>
         </div>
       </div>

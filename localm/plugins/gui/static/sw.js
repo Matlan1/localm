@@ -9,7 +9,7 @@
 // Bump this whenever the cached shell assets (style.css, app.js, pages.js,
 // index.html, icons) change, so an installed PWA drops the old cache on activate
 // and re-precaches the new files instead of serving stale cache-first assets.
-const CACHE = "localm-shell-v4";
+const CACHE = "localm-shell-v5";
 const SHELL = [
   "/", "/index.html", "/style.css", "/app.js", "/pages.js",
   "/icon.svg", "/icon-192.png", "/icon-512.png", "/icon-maskable-512.png",

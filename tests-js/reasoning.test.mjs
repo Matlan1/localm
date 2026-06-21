@@ -58,3 +58,43 @@ test("H4 back-compat: an old server inlining <think> in content still renders", 
   // still finds the inline block on render).
   assert.equal(reply.content, "<think>old style</think>answer");
 });
+
+// The reasoning bubble must be toggleable WHILE the model is still streaming.
+// Regression: renderMarkdown rebuilt the <details> on every token, resetting its
+// open/closed state, so a mid-stream collapse was undone by the next chunk.
+test("thoughts bubble toggles mid-stream and the choice sticks", () => {
+  const { window } = loadApp();
+  const target = window.document.createElement("div");
+  window.document.body.appendChild(target);
+
+  window.renderMarkdown(target, "<think>step one");
+  const det = target.querySelector("details.think-block");
+  assert.ok(det, "think block created while streaming");
+  assert.equal(det.open, true, "open by default while thinking");
+  assert.equal(det.querySelector("summary").textContent, "Thinking…");
+
+  // User collapses it mid-stream (jsdom does not auto-toggle on click, so set
+  // the state too; the click marks the manual override).
+  det.querySelector("summary").dispatchEvent(new window.Event("click"));
+  det.open = false;
+
+  window.renderMarkdown(target, "<think>step one, step two");
+  const det2 = target.querySelector("details.think-block");
+  assert.equal(det2, det, "same <details> reused, not rebuilt each token");
+  assert.equal(det2.open, false, "user collapse survives streaming updates");
+
+  window.renderMarkdown(target, "<think>step one</think>Final answer.");
+  assert.equal(det.open, false, "still collapsed after reasoning ends (user owns it)");
+  assert.match(target.querySelector(".md-main").textContent, /Final answer/);
+});
+
+test("thoughts bubble auto-collapses when done if the user never touched it", () => {
+  const { window } = loadApp();
+  const target = window.document.createElement("div");
+  window.document.body.appendChild(target);
+  window.renderMarkdown(target, "<think>reasoning");
+  assert.equal(target.querySelector("details.think-block").open, true);
+  window.renderMarkdown(target, "<think>reasoning</think>answer");
+  assert.equal(target.querySelector("details.think-block").open, false,
+    "auto-collapses when reasoning ends and the user never toggled it");
+});

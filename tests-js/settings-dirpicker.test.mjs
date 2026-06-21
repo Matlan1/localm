@@ -21,6 +21,12 @@ const SCHEMA = {
   ],
 };
 
+// Save the section that contains the given input (per-section Save button).
+function saveSectionOf(win, key) {
+  win.document.querySelector(`[data-key="${key}"]`)
+    .closest(".settings-section").querySelector(".settings-section-save").click();
+}
+
 function makeFetch(patches) {
   return async (url, opts = {}) => {
     if (url === "/v1/config/schema") {
@@ -45,18 +51,18 @@ async function render(win) {
 test("folder/path fields render a Browse button; other widgets do not", async () => {
   const { window: win } = loadAppWithPages({ fetchImpl: makeFetch([]) });
   await render(win);
-  const form = win.document.getElementById("config-form");
+  const doc = win.document;
 
-  assert.ok(form.querySelector('button[data-browse="binary_dir"]'),
+  assert.ok(doc.querySelector('button[data-browse="binary_dir"]'),
     "folder field has a Browse button");
-  assert.ok(form.querySelector('button[data-browse="some_path"]'),
+  assert.ok(doc.querySelector('button[data-browse="some_path"]'),
     "path field has a Browse button");
   // The browse buttons must not submit anything.
-  assert.equal(form.querySelector('button[data-browse="binary_dir"]').type, "button");
+  assert.equal(doc.querySelector('button[data-browse="binary_dir"]').type, "button");
 
-  assert.equal(form.querySelector('button[data-browse="n_ctx"]'), null,
+  assert.equal(doc.querySelector('button[data-browse="n_ctx"]'), null,
     "number field has no Browse button");
-  assert.equal(form.querySelector('button[data-browse="mode"]'), null,
+  assert.equal(doc.querySelector('button[data-browse="mode"]'), null,
     "select field has no Browse button");
 });
 
@@ -64,7 +70,7 @@ test("clicking Browse fills the input from pickDirectory and saves it", async ()
   const patches = [];
   const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(patches) });
   await render(win);
-  const form = win.document.getElementById("config-form");
+  const doc = win.document;
 
   // Stub the picker so no modal/fetchDirs machinery is needed; capture its args.
   runScript(win, `
@@ -72,10 +78,10 @@ test("clicking Browse fills the input from pickDirectory and saves it", async ()
     pickDirectory = (title, start) => { globalThis.__pickArgs = [title, start]; return Promise.resolve("/picked/dir"); };
   `);
 
-  const input = form.querySelector('input[data-key="binary_dir"]');
+  const input = doc.querySelector('input[data-key="binary_dir"]');
   assert.equal(input.value, "/old/dir", "input prefilled with current value");
 
-  form.querySelector('button[data-browse="binary_dir"]').click();
+  doc.querySelector('button[data-browse="binary_dir"]').click();
   await new Promise((r) => setTimeout(r, 0));
   await new Promise((r) => setTimeout(r, 0));
 
@@ -83,8 +89,8 @@ test("clicking Browse fills the input from pickDirectory and saves it", async ()
   // pickDirectory was started from the field's current value.
   assert.deepEqual(win.__pickArgs[1], "/old/dir");
 
-  // The picked value persists through save.
-  win.document.getElementById("config-save").click();
+  // The picked value persists through the section's own Save.
+  saveSectionOf(win, "binary_dir");
   await new Promise((r) => setTimeout(r, 0));
   assert.equal(patches.length, 1, "one PATCH sent");
   assert.equal(patches[0].binary_dir, "/picked/dir");
@@ -93,12 +99,54 @@ test("clicking Browse fills the input from pickDirectory and saves it", async ()
 test("cancelling the picker (null) leaves the input unchanged", async () => {
   const { window: win } = loadAppWithPages({ fetchImpl: makeFetch([]) });
   await render(win);
-  const form = win.document.getElementById("config-form");
+  const doc = win.document;
   runScript(win, "pickDirectory = () => Promise.resolve(null);");
 
-  const input = form.querySelector('input[data-key="binary_dir"]');
-  form.querySelector('button[data-browse="binary_dir"]').click();
+  const input = doc.querySelector('input[data-key="binary_dir"]');
+  doc.querySelector('button[data-browse="binary_dir"]').click();
   await new Promise((r) => setTimeout(r, 0));
   await new Promise((r) => setTimeout(r, 0));
   assert.equal(input.value, "/old/dir", "cancel keeps the original value");
+});
+
+// "Blank = auto-detect" must SHOW the resolved path (filled, greyed), not an
+// empty box - but saving an unchanged auto value keeps it dynamic (sends null).
+test("blank auto-detect field shows the resolved path and stays dynamic on save", async () => {
+  const patches = [];
+  const AUTO_SCHEMA = {
+    fields: [
+      { key: "binary_dir", widget: "folder", label: "Binary dir",
+        help: "Blank auto-detects", group: "Engine", owner: "core",
+        default: null, auto: "/runtime/lib" },
+    ],
+  };
+  const fetchImpl = async (url, opts = {}) => {
+    if (url === "/v1/config/schema")
+      return { ok: true, status: 200, json: async () => AUTO_SCHEMA, text: async () => "" };
+    if (url === "/v1/config" && (opts.method || "GET") === "PATCH") {
+      patches.push(JSON.parse(opts.body));
+      return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+    }
+    return { ok: true, status: 200, text: async () => "",
+             json: async () => ({ models: [], active: "", conversations: [], plugins: [] }) };
+  };
+  const { window: win } = loadAppWithPages({ fetchImpl });
+  await render(win);
+  const input = win.document.querySelector('input[data-key="binary_dir"]');
+
+  assert.equal(input.value, "/runtime/lib", "auto-detected path is shown, not empty");
+  assert.ok(input.classList.contains("auto-detected"), "shown as auto-detected (greyed)");
+
+  // Save without touching it -> nothing changed (binary_dir stays blank/dynamic).
+  saveSectionOf(win, "binary_dir");
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(patches.length, 0, "unchanged auto value does not pin the path");
+
+  // Override it with a real path -> that IS sent.
+  input.value = "/my/custom/build";
+  input.dispatchEvent(new win.Event("input"));
+  saveSectionOf(win, "binary_dir");
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(patches.length, 1);
+  assert.equal(patches[0].binary_dir, "/my/custom/build");
 });

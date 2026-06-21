@@ -165,22 +165,47 @@ def _preload(path: Path) -> None:
 _GGML_NON_BACKENDS = {"ggml-base", "ggml"}
 
 
+def _ggml_dev_count(handles: "List[ctypes.CDLL]") -> Optional[int]:
+    """Number of ggml backend DEVICES currently registered, queried from
+    whichever handle exports ``ggml_backend_dev_count`` (ggml.dll), or None when
+    no handle exports it (an older build without the registry query). A count > 0
+    means the compute backends are already registered and there is nothing to do."""
+    for h in handles:
+        fn = getattr(h, "ggml_backend_dev_count", None)
+        if fn is not None:
+            fn.restype = ctypes.c_size_t
+            try:
+                return int(fn())
+            except Exception:
+                return None
+    return None
+
+
 def _register_ggml_backends(binary_dir: Path, lib: ctypes.CDLL) -> bool:
-    """Register the ggml compute backends so a model can actually load.
+    """Ensure the ggml compute backends (CPU, GPU, ...) are registered.
 
-    Newer llama.cpp ships each compute backend (CPU, Vulkan, CUDA, HIP, ...) as a
-    separate ``ggml-*`` plugin library that must be registered at runtime.
-    Without it, ``llama_load_model_from_file`` aborts with "no backends are
-    loaded" - which is every current upstream cpu/vulkan/cuda prebuilt (i.e. all
-    non-AMD users). Older self-contained builds (e.g. the bundled lemonade gfx103X
-    build) statically register their backend and do NOT export the loader symbol,
-    so this is best-effort and fully guarded: a build that lacks it is untouched.
+    Registration model differs by build, so we DETECT before acting:
 
-    We register each ``ggml-*`` plugin EXPLICITLY by absolute path via
-    ``ggml_backend_load`` (deterministic) rather than rely on directory discovery,
-    which searches next to the host executable (python) and the binary-dir layout
-    confuses it. Returns True if at least one backend registered."""
-    # Find ggml_backend_load on whichever handle exports it (ggml-base, else lib).
+    * The bundled AMD ROCm build and any statically-linked build self-register
+      their backends the moment ``ggml.dll`` loads - verified: a GPU device is
+      already present (``ggml_backend_dev_count() > 0``) with no extra step. For
+      these we do NOTHING. Critically, we must NOT then call ``ggml_backend_load``
+      on the ``ggml-*`` libraries: that is the generic *dynamic-plugin* loader,
+      it looks for a ``ggml_backend_init`` entry point these non-plugin DLLs do
+      not export, and every such call prints a scary-looking but meaningless
+      ``load_backend: failed to find ggml_backend_init in ...ggml-cpu.dll`` to
+      stderr. The backends are already there; the probe is pure noise.
+
+    * Some upstream prebuilts ship the backends as real ``GGML_BACKEND_DL``
+      plugins that are NOT auto-registered, so a model load aborts with "no
+      backends are loaded". Only THEN do we register them - preferring the
+      build's own ``ggml_backend_load_all`` discovery, falling back to loading
+      each ``ggml-*`` plugin explicitly by absolute path (those genuine plugins
+      DO export ``ggml_backend_init``, so the load succeeds silently).
+
+    Returns True when backends are registered (already, or by us)."""
+    # Handles that may export the registry-query / loader symbols (they live in
+    # ggml.dll on a split build, possibly the main lib on a monolithic one).
     candidates: List[ctypes.CDLL] = [lib]
     try:
         for p in sorted(binary_dir.glob(_ggml_glob())):
@@ -191,6 +216,30 @@ def _register_ggml_backends(binary_dir: Path, lib: ctypes.CDLL) -> bool:
     except OSError:
         pass
 
+    # Already registered (the bundled AMD build and any static build)? Done -
+    # no probing, no spurious "failed to find ggml_backend_init" noise.
+    dev_count = _ggml_dev_count(candidates)
+    if dev_count is not None and dev_count > 0:
+        return True
+
+    # Nothing registered. Prefer the build's own backend discovery.
+    for h in candidates:
+        load_all = getattr(h, "ggml_backend_load_all", None)
+        if load_all is not None:
+            load_all.restype = None
+            try:
+                load_all()
+            except Exception:
+                pass
+            after = _ggml_dev_count(candidates)
+            if after is not None and after > 0:
+                return True
+            break
+
+    # Last resort: explicit per-plugin load by absolute path (genuine DL-plugin
+    # builds). On those the plugins export ggml_backend_init so this is silent;
+    # if it still fails the model load will surface "no backends are loaded",
+    # which is the correct, honest error for a build with no usable backend.
     load_fn = None
     for h in candidates:
         fn = getattr(h, "ggml_backend_load", None)
@@ -200,7 +249,7 @@ def _register_ggml_backends(binary_dir: Path, lib: ctypes.CDLL) -> bool:
             load_fn = fn
             break
     if load_fn is None:
-        return False   # old build: backends are statically registered, nothing to do
+        return False   # no loader symbol: nothing more we can do
 
     loaded_any = False
     try:
@@ -279,11 +328,11 @@ def load_lib() -> ctypes.CDLL:
             "  localm setup-llama --backend amd-rocm --force  (AMD RX 6000)"
         ) from e
 
-    # Register the ggml compute backends. Newer llama.cpp loads them as separate
-    # plugin DLLs that must be registered before any model loads ("no backends are
-    # loaded" otherwise - the failure mode on every current upstream cpu/vulkan/
-    # cuda build). Older self-contained builds auto-register and lack the entry
-    # point, so this is best-effort and guarded.
+    # Ensure the ggml compute backends are registered before any model loads.
+    # Builds that already self-register (the bundled AMD build, and any
+    # statically-linked build) need nothing; only the upstream prebuilts that
+    # ship separate backend plugins must be loaded ("no backends are loaded"
+    # otherwise). _register_ggml_backends checks first and only acts when needed.
     try:
         _register_ggml_backends(binary_dir, _loaded_lib)
     except Exception:

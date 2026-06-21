@@ -54,3 +54,31 @@ def test_fields_by_owner_partitions():
     for f in ss.CORE_FIELDS:
         assert f.owner == "core" or scopes.is_valid_scope(f.owner)
     assert ss.fields_by_owner("web"), "expected web-owned network settings"
+
+
+def test_every_visible_field_has_a_description():
+    """The settings overhaul requires EVERY rendered field to carry a clear
+    description (HIDDEN fields are not rendered, so they are exempt)."""
+    missing = [f.key for f in ss.CORE_FIELDS
+               if f.widget != ss.Widget.HIDDEN and not (f.help or "").strip()]
+    assert not missing, f"fields missing a description: {missing}"
+
+
+def test_every_field_has_a_label():
+    missing = [f.key for f in ss.CORE_FIELDS if not (f.label or "").strip()]
+    assert not missing, f"fields missing a label: {missing}"
+
+
+def test_binary_dir_schema_exposes_auto_resolved_path():
+    """Blank binary_dir must surface the auto-detected path so the GUI can show
+    it (the 'blank autodetect leaves the field empty' complaint)."""
+    by_key = {f["key"]: f for f in ss.schema_json()}
+    assert "auto" in by_key["binary_dir"], "binary_dir must carry an 'auto' value"
+
+
+def test_new_comfy_fields_present_and_owned_by_image():
+    by_key = {f.key: f for f in ss.CORE_FIELDS}
+    for key in ("comfy_api_url", "comfy_fast_dequant"):
+        assert key in by_key, f"{key} missing from the schema"
+        assert by_key[key].owner == "image"
+        assert by_key[key].group == "ComfyUI"
