@@ -36,11 +36,31 @@ localm plugin install <name>    # copy store -> installed, and enable
 localm plugin enable <name>     # enable an already-installed plugin
 localm plugin disable <name>    # keep installed, make inactive
 localm plugin uninstall <name>  # remove from the installed folder (keeps data unless --delete-data)
+localm plugin refresh [<name>]  # re-copy installed builtins whose store code changed
 ```
 
 A running GUI server picks up newly enabled HTTP plugins on its next start;
 toggling a plugin while the server runs (via the GUI Plugins page or the
 `/api/plugins/{name}/...` routes) mounts/unmounts it without a restart.
+
+### Upgrades: refreshing a stale installed copy
+
+An installed first-party plugin is a *copy* of the store source taken at install
+time. A localm upgrade ships newer plugin code, but the older installed copy in
+your data dir keeps shadowing it - so without a refresh you would silently run
+stale plugin code (including missing fixes). Staleness is detected by a content
+hash of the store source (the plugin version is an unreliable signal - a bugfix
+often does not bump it), recorded in a `.localm-source.json` marker written into
+the installed dir at install time.
+
+Builtins are refreshed automatically on server launch (and on `enable`); you can
+also force it with `localm plugin refresh` (all installed builtins) or
+`localm plugin refresh <name>` (one), or the **Refresh** button on the GUI
+Plugins page. The refresh re-copies only the plugin directory, so your per-plugin
+config (kept in `config.json`, see [Per-plugin config](#per-plugin-config-and-privacy))
+and plugin data (under the data dir) are preserved. A plugin you installed from
+your own directory (a third-party plugin, marked `source = "external"`) is never
+a refresh target and is never overwritten.
 
 Some plugins need heavy Python dependencies shipped as a pip extra (see
 [Dependencies](#dependencies)). Installing the plugin selects it; installing the
