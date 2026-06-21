@@ -691,7 +691,11 @@ class TestStaticFiles:
             assert m.headers["content-type"].startswith("application/manifest+json")
             body = m.json()
             assert body["start_url"] == "/" and body["display"] == "standalone"
-            assert body["icons"][0]["src"] == "/icon.svg"
+            # PNG icons (192 + 512) are required for a real standalone install on
+            # Android; a maskable variant + the SVG round it out.
+            srcs = [i["src"] for i in body["icons"]]
+            assert "/icon-192.png" in srcs and "/icon-512.png" in srcs
+            assert any(i.get("purpose") == "maskable" for i in body["icons"])
 
             sw = client.get("/sw.js")
             assert sw.status_code == 200
