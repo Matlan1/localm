@@ -64,6 +64,25 @@ html, body {
 }
 #logo span { color: var(--accent); }
 
+/* Logo-style picker (Settings -> GUI): one tile per wordmark treatment, each
+   drawn like the sidebar logo. The blue half is the <span>, as in #logo. */
+.logo-style-picker { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 14px; }
+.logo-tile {
+  font-family: var(--sans);
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  color: var(--text);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 16px;
+  cursor: pointer;
+}
+.logo-tile span { color: var(--accent); }
+.logo-tile:hover { border-color: var(--accent); }
+.logo-tile.active { border-color: var(--accent); background: var(--accent-soft); }
+
 nav { padding: 0 8px; }
 nav button {
   display: flex;

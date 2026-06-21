@@ -2,7 +2,7 @@
 rem localm launcher - double-click to open an interactive chat.
 rem Picks the first registered model unless you set LOCALM_MODEL.
 cd /d "%~dp0"
-title localm
+title LocaLM
 
 rem Prefer this clone's own .venv (created by setup.bat) - self-contained
 set "PY=python"
@@ -30,6 +30,6 @@ if "%MODEL%"=="" (
 )
 
 :run
-echo Starting localm with model: %MODEL%
+echo Starting LocaLM with model: %MODEL%
 "%PY%" -m localm run %MODEL%
 if errorlevel 1 pause
