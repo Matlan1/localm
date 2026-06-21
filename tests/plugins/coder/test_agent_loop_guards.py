@@ -195,14 +195,17 @@ class TestRepairTurn:
         assert result == "Done."
         assert len(self._repairs(agent)) == 1
 
-    def test_repair_fires_only_once(self, tmp_path):
+    def test_repair_capped_then_surfaces_raw_attempt(self, tmp_path):
         agent = _make_agent(tmp_path)
-        # The model keeps emitting the same unparseable attempt: repair fires
-        # once, then the next one is accepted as the final answer (no loop).
-        with patch.object(agent, "_call_llm",
-                          return_value='{"name": "read_file", "args": {"path"'):
-            agent.run_task("task")
-        assert len(self._repairs(agent)) == 1
+        # The model keeps emitting the same unparseable attempt: repair fires up to
+        # the cap (no infinite loop), then the raw attempt is SURFACED rather than
+        # silently finalised as a hidden tool-call block (the old empty-bubble no-op).
+        raw = '{"name": "read_file", "args": {"path"'
+        with patch.object(agent, "_call_llm", return_value=raw):
+            result = agent.run_task("task")
+        assert len(self._repairs(agent)) == 2          # capped at _MAX_TOOL_REPAIRS
+        assert "could not produce valid tool-call JSON" in result
+        assert raw in result                           # the raw attempt is not lost
 
     def test_no_repair_on_plain_answer(self, tmp_path):
         agent = _make_agent(tmp_path)
@@ -226,6 +229,65 @@ class TestRepairTurn:
         assert result == "Done."
         ex.assert_called_once()          # the bare JSON was dispatched as a call
         assert self._repairs(agent) == []
+
+
+class TestNoProgressBreaker:
+    """Global no-progress breaker: many VARIED failing tool calls (which the
+    per-tool 4-identical breaker misses) must trip the breaker so a weak model
+    cannot spin and burn the whole budget."""
+
+    def test_varied_failures_trip_global_breaker(self, tmp_path):
+        agent = _make_agent(tmp_path)
+        # 6 failing calls, no single tool reaching 4 (read_file x3, list_dir x3).
+        failing = [
+            _make_call("read_file", path="missing1.txt"),
+            _make_call("read_file", path="missing2.txt"),
+            _make_call("list_dir",  path="nope_dir1"),
+            _make_call("list_dir",  path="nope_dir2"),
+            _make_call("read_file", path="missing3.txt"),
+            _make_call("list_dir",  path="nope_dir3"),
+        ]
+        for c in failing:
+            r = agent._execute_tool(c, interactive=False)
+            assert not r.ok                          # each call really failed
+        assert agent._abort_no_progress is True       # global breaker tripped
+        assert agent._abort_streak_tool is None       # per-tool breaker did NOT
+
+    def test_success_resets_global_streak(self, tmp_path):
+        agent = _make_agent(tmp_path)
+        (tmp_path / "real.txt").write_text("hi", encoding="utf-8")
+        agent._global_error_streak = 4
+        r = agent._execute_tool(_make_call("read_file", path="real.txt"),
+                                interactive=False)
+        assert r.ok
+        assert agent._global_error_streak == 0
+
+
+class TestDormantToolGrammar:
+    """The TOOL_CALLS_ONLY grammar is WIRED but dormant: off unless the config flag
+    is set AND the backend supports grammar."""
+
+    def test_dormant_by_default(self, tmp_path):
+        agent = _make_agent(tmp_path)
+        agent.backend.supports_grammar = True
+        assert agent._tool_call_grammar() is None        # flag off by default
+        assert "grammar" not in agent._llm_kwargs()
+
+    def test_active_when_flag_on_and_supported(self, tmp_path, monkeypatch):
+        agent = _make_agent(tmp_path)
+        agent.backend.supports_grammar = True
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"coder_tool_grammar": True})
+        g = agent._tool_call_grammar()
+        assert g is not None and "tool_call" in g
+        assert agent._llm_kwargs().get("grammar") == g
+
+    def test_off_when_backend_unsupported(self, tmp_path, monkeypatch):
+        agent = _make_agent(tmp_path)
+        agent.backend.supports_grammar = False
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"coder_tool_grammar": True})
+        assert agent._tool_call_grammar() is None
 
 
 # ---------------------------------------------------------------------------

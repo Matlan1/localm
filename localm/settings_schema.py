@@ -153,6 +153,13 @@ CORE_FIELDS: list = [
     SettingField("coder_confirm_timeout", Widget.NUMBER,
                  "Coder approval timeout (s)", group="Coder", owner="coder",
                  min=0, step=10),
+    SettingField("coder_tool_grammar", Widget.TOGGLE,
+                 "Grammar-constrain coder tool calls (experimental)",
+                 "Force valid tool-call JSON via a GBNF grammar. Only takes effect on "
+                 "a grammar-capable backend (the bundled GGUF runtime soft-degrades; "
+                 "HF needs the [grammar] extra). Experimental: currently forces "
+                 "tool-only output, so leave off unless you know you want that.",
+                 group="Coder", owner="coder", applies=Applies.NEXT_LOAD),
     # ---- ComfyUI (image / music / video plugins) ----
     SettingField("comfy_launch_cmd", Widget.TEXT, "ComfyUI launch command",
                  group="ComfyUI", owner="image"),

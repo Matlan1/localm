@@ -110,6 +110,28 @@ def looks_like_tool_attempt(text: str) -> bool:
     return bool(_RE_NAME_KEY.search(text) and _RE_ARGS_KEY.search(text))
 
 
+def _detriple_quoted(s: str) -> str:
+    """Convert Python triple-quoted string VALUES into valid JSON strings.
+
+    Local models frequently emit multi-line ``content`` as a Python triple-quoted
+    string (``"content": \"\"\"...\"\"\"``), which is NOT valid JSON, so the call
+    silently failed to parse (an empty assistant bubble, no file written). Replace
+    each ``\"\"\"...\"\"\"`` run with a properly escaped JSON string. Best-effort:
+    a fallback recovery, so a wrong guess just fails json.loads and we move on.
+    """
+    return re.sub(r'"""(.*?)"""',
+                  lambda m: json.dumps(m.group(1)), s, flags=re.DOTALL)
+
+
+def _strip_trailing_commas(s: str) -> str:
+    """Remove trailing commas before } or ] (common LLM JSON mistake)."""
+    return re.sub(r',(\s*[}\]])', r'\1', s)
+
+
+def _quote_single_keys(s: str) -> str:
+    return re.sub(r"'([^']+)':", r'"\1":', s)
+
+
 def _lenient_json(body: str) -> Optional[dict]:
     """
     JSON parse tolerating the mangles local finetunes actually produce:
@@ -119,18 +141,29 @@ def _lenient_json(body: str) -> Optional[dict]:
     - a doubled outer brace:  call:write_file{{"path": "x"}}  (seen from
       Gemma finetunes in the wild; it silently broke tool calling)
     - single-quoted keys:  {'path': "x"}
+    - Python triple-quoted string VALUES:  {"content": \"\"\"...\"\"\"} (a very
+      common local-model mistake that used to silently break write_file)
+    - trailing commas before } or ]
     """
     candidates = [body]
     if body.startswith("{{") and body.endswith("}}"):
         candidates.append(body[1:-1])
+    # Each transform is a recovery layer; the last applies all of them so a body
+    # with several mangles at once (triple-quotes + a trailing comma) still parses.
+    transforms = (
+        lambda s: s,
+        _quote_single_keys,
+        _detriple_quoted,
+        _strip_trailing_commas,
+        lambda s: _strip_trailing_commas(_detriple_quoted(_quote_single_keys(s))),
+    )
     for cand in candidates:
-        for fix in (lambda s: s,
-                    lambda s: re.sub(r"'([^']+)':", r'"\1":', s)):
+        for fix in transforms:
             try:
                 obj = json.loads(fix(cand), strict=False)
                 if isinstance(obj, dict):
                     return obj
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, ValueError, re.error):
                 continue
     return None
 

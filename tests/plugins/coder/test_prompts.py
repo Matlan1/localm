@@ -22,6 +22,11 @@ from localm.plugins.coder.prompts import detect_model_family, build_system_promp
     ("deepseek-r1",      "thinking"),
     ("qwq-32b",          "thinking"),
     ("qwen3-8b",         "thinking"),
+    # Descriptively-named reasoning fine-tunes (broadened markers)
+    ("Llama-3.3-8B-Instruct-Thinking-High-Reasoning", "thinking"),
+    ("mistral-nemo-12b-thinking",                     "thinking"),
+    ("some-model-reasoning-v2",                        "thinking"),
+    ("magistral-small",                                "thinking"),
     # Small / phi
     ("phi3-mini-4k",     "small"),
     ("phi-4-mini",       "small"),
