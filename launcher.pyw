@@ -73,6 +73,21 @@ LOGO_STYLES = {
 LOGO_DEFAULT = "local-m"
 
 
+# The launcher window must keep a FIXED width: neither a long status message
+# nor a long model name in the dropdown may grow it. Status text is ellipsized
+# to this many characters; the window width is also hard-pinned after build.
+_STATUS_MAX_CHARS = 46
+
+
+def _ellipsize(text: str, limit: int = _STATUS_MAX_CHARS) -> str:
+    """Clip *text* to *limit* characters with a trailing ellipsis, so a long
+    status line cannot widen the launcher window."""
+    text = text or ""
+    if len(text) <= limit:
+        return text
+    return text[: max(1, limit - 1)].rstrip() + "…"
+
+
 def logo_parts() -> tuple:
     """(white_part, blue_part) of the wordmark for the configured logo style."""
     style = LOGO_DEFAULT
@@ -220,6 +235,24 @@ class Launcher(tk.Tk):
 
         self._build()
         self._on_mode_change()
+        self._pin_width()
+
+    def _pin_width(self) -> None:
+        """Lock the window to its built width so nothing can widen it later.
+
+        tkinter auto-fits a non-resizable window to its content, so a long model
+        name in the dropdown or a long status line would otherwise stretch it.
+        We compute the natural width once (after the layout settles) and clamp
+        min == max width; height stays free so mode-switch rows can show/hide.
+        The model combobox is a fixed character width and the status label is
+        ellipsized, so the content never needs more than this width anyway."""
+        try:
+            self.update_idletasks()
+            w = self.winfo_reqwidth()
+            self.minsize(w, self.winfo_reqheight())
+            self.maxsize(w, self.winfo_screenheight())
+        except Exception:
+            pass
 
     # ------------------------------------------------------------- #
 
@@ -442,8 +475,12 @@ class Launcher(tk.Tk):
         ttk.Checkbutton(footer, text="Keep launcher open",
                         variable=self.keep_open,
                         style="TCheckbutton").pack(side="left")
+        # Fixed-character-width + left anchor so the status label keeps a stable
+        # footprint: short messages do not stretch it and long ones are clipped
+        # (status_msg ellipsizes), never widening the window.
         self.status = tk.Label(footer, text="", bg=BG, fg=GREEN,
-                               font=("Segoe UI", 9))
+                               font=("Segoe UI", 9), width=_STATUS_MAX_CHARS,
+                               anchor="w")
         self.status.pack(side="left", padx=12)
         ttk.Button(footer, text="Launch", style="Launch.TButton",
                    command=self._launch).pack(side="right")
@@ -566,7 +603,10 @@ class Launcher(tk.Tk):
             state="normal" if mode in ("gui", "serve") else "disabled")
 
     def status_msg(self, text: str, error: bool = False) -> None:
-        self.status.configure(text=text, fg="#e25d5d" if error else GREEN)
+        # Ellipsize so a long line cannot widen the window (the label is fixed
+        # width; the full text is still available as a tooltip-style title).
+        self.status.configure(text=_ellipsize(text),
+                              fg="#e25d5d" if error else GREEN)
 
     def _gen_key(self) -> None:
         a = _auth()

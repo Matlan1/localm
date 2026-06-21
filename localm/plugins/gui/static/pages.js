@@ -1003,6 +1003,9 @@ let _settingsControls = [];
 // Monotonic token so overlapping refreshes don't both render (the old text
 // dumper doubled every field when two refreshes raced; we keep the guard).
 let _settingsRenderToken = 0;
+// The section the user explicitly navigated to (a section element id). Survives
+// re-renders so saving a section keeps you on it. Null = use the default tab.
+let _activeSettingsSection = null;
 
 /** Build one labelled control for a schema field. Returns { field, read } or
  *  null for HIDDEN fields (never rendered). */
@@ -1070,8 +1073,30 @@ function buildSettingControl(field) {
     default: {   // text / folder / path
       input = document.createElement("input");
       input.type = "text";
-      input.value = value ?? "";
-      read = () => (input.value.trim() === "" ? null : input.value.trim());
+      const stored = value ?? "";
+      const auto = field.auto || "";   // resolved path for a blank auto-detect field
+      if (!stored && auto) {
+        // "Blank = auto-detect" used to leave the box EMPTY, hiding what was
+        // actually in use. Show the auto-detected path (greyed) so the field is
+        // never blank; read() returns null while it is unchanged, so saving
+        // keeps the value dynamic (auto) instead of pinning a stale path.
+        input.value = auto;
+        input.classList.add("auto-detected");
+        input.dataset.auto = auto;
+        input.addEventListener("input", () => {
+          input.classList.toggle("auto-detected", input.value === auto);
+        });
+        read = () => {
+          const v = input.value.trim();
+          // Unchanged auto (or cleared back to blank) -> omit from the PATCH, so
+          // the field stays dynamic (auto-detect) instead of being pinned.
+          if (v === auto || v === "") return undefined;
+          return v;
+        };
+      } else {
+        input.value = stored;
+        read = () => (input.value.trim() === "" ? null : input.value.trim());
+      }
       break;
     }
   }
@@ -1087,7 +1112,7 @@ function buildSettingControl(field) {
       const picked = await pickDirectory(
         field.widget === "path" ? "Pick a location" : "Pick a directory",
         input.value.trim());
-      if (picked) input.value = picked;
+      if (picked) { input.value = picked; input.classList.remove("auto-detected"); }
     };
     row.append(input, browse);
     wrap.appendChild(row);
@@ -1149,13 +1174,20 @@ async function refreshKeysPanel() {
     }
   }
 
+  // The keys card is a settings SECTION; hide/show it via a class so the section
+  // nav (built by buildSettingsNav) drops/re-adds its link for non-owners,
+  // rather than an inline display style that would fight the section show/hide.
+  const setHidden = (hidden) => {
+    card.classList.toggle("sec-hidden", hidden);
+    if (typeof buildSettingsNav === "function") buildSettingsNav();
+  };
   let keys = [];
   try {
     const r = await fetch("/v1/keys", { headers: authHeaders() });
-    if (!r.ok) { card.style.display = "none"; return; }  // 401/403 -> not the owner
-    card.style.display = "";
+    if (!r.ok) { setHidden(true); return; }   // 401/403 -> not the owner
+    setHidden(false);
     keys = (await r.json()).keys || [];
-  } catch (e) { card.style.display = "none"; return; }
+  } catch (e) { setHidden(true); return; }
 
   list.replaceChildren();
   if (!keys.length) {
@@ -1218,11 +1250,101 @@ async function refreshKeysPanel() {
   };
 }
 
+// Friendly section label per plugin owner (falls back to the capitalized scope).
+const PLUGIN_SECTION_LABEL = {
+  image: "Image", web: "Web access", voice: "Voice", coder: "Coder",
+  abliterate: "Abliterate", music: "Music", video: "Video", rag: "Knowledge",
+  mcp: "MCP", chat: "Chat",
+};
+
+/** Which settings section a field belongs to: each core `group` is its own
+ *  section; each plugin (owner != core) is its own section (its own tab). */
+function settingsSectionOf(field) {
+  if (field.owner && field.owner !== "core") {
+    return {
+      id: "plugin-" + field.owner,
+      label: PLUGIN_SECTION_LABEL[field.owner]
+        || (field.owner.charAt(0).toUpperCase() + field.owner.slice(1)),
+      plugin: true,
+    };
+  }
+  return { id: "core-" + field.group, label: field.group, plugin: false };
+}
+
+/** Show one settings section (others hidden) and highlight its nav link. */
+function showSettingsSection(secId) {
+  const content = $("settings-content");
+  if (!content) return;
+  for (const sec of content.querySelectorAll(".settings-section")) {
+    sec.classList.toggle("active", sec.id === secId);
+  }
+  const nav = $("settings-nav");
+  if (nav) {
+    for (const link of nav.querySelectorAll(".settings-nav-link")) {
+      link.classList.toggle("active", link.dataset.target === secId);
+    }
+  }
+}
+
+/** (Re)build the left nav from every section currently in the content area,
+ *  skipping any hidden by their own gating (e.g. the owner-only API keys card).
+ *  The active tab is the user's explicit choice if still present, else the first
+ *  config section - chosen deterministically so a stray rebuild (e.g. the
+ *  owner-only keys panel resolving) can never leave a static card selected. */
+function buildSettingsNav() {
+  const nav = $("settings-nav"), content = $("settings-content");
+  if (!nav || !content) return;
+  const secs = [...content.querySelectorAll(".settings-section")]
+    .filter((s) => !s.classList.contains("sec-hidden"));
+  nav.replaceChildren();
+  for (const sec of secs) {
+    const label = sec.dataset.secLabel || sec.querySelector("h3")?.textContent || sec.id;
+    const link = el("button", "settings-nav-link", label);
+    link.dataset.target = sec.id;
+    link.onclick = () => { _activeSettingsSection = sec.id; showSettingsSection(sec.id); };
+    nav.appendChild(link);
+  }
+  const schema = secs.filter((s) => s.id.startsWith("settings-sec-"));
+  let target = null;
+  if (_activeSettingsSection && secs.some((s) => s.id === _activeSettingsSection)) {
+    target = _activeSettingsSection;             // the user's chosen tab, still present
+  } else if (schema.length) {
+    target = schema[0].id;                        // default: first config section
+  }
+  if (target) showSettingsSection(target);
+  else if (!content.querySelector(".settings-section.active:not(.sec-hidden)") && secs.length) {
+    showSettingsSection(secs[0].id);             // nothing config-y yet: pick something
+  }
+}
+
+/** Save just one section: PATCH only the keys whose controls live in it. */
+async function saveSettingsSection(secId) {
+  const panel = $("settings-sec-" + secId);
+  if (!panel) return;
+  const updates = {};
+  for (const { field, node, read } of _settingsControls) {
+    if (!node || !panel.contains(node)) continue;
+    const value = read();
+    if (value === undefined) continue;     // untouched secret / blank number
+    updates[field.key] = value;
+  }
+  if (!Object.keys(updates).length) { toast("Nothing changed"); return; }
+  const r = await fetch("/v1/config", {
+    method: "PATCH", headers: authHeaders(),
+    body: JSON.stringify(updates),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (r.ok) {
+    toast("Saved - engine values apply on the next model load");
+    refreshSettingsPage();   // re-render to reflect server-normalized values
+  } else {
+    toast(data.detail || "Save failed", true);
+  }
+}
+
 async function refreshSettingsPage() {
   const myToken = ++_settingsRenderToken;
   $("gui-api-key").value = "";   // HttpOnly key is unreadable; field is for entry only
-  refreshPairingQR();
-  refreshKeysPanel();
   const form = $("config-form");
   let fields;
   try {
@@ -1237,52 +1359,50 @@ async function refreshSettingsPage() {
   }
   if (myToken !== _settingsRenderToken) return;  // a newer refresh superseded us
 
-  // Group by `group`; render plugin-owned (owner != "core") fields under a
-  // per-plugin section heading so each plugin's settings are clearly separated.
+  // One section per core group and per plugin. Core sections first (in field
+  // order), then plugin sections (each its own tab with its own Save button).
   const controls = [];
-  const groups = new Map();          // group label -> [control...]
+  const sections = new Map();        // id -> { id, label, plugin, ctrls: [] }
   for (const field of fields) {
     const ctrl = buildSettingControl(field);
     if (!ctrl) continue;             // HIDDEN
     controls.push(ctrl);
-    const owner = field.owner && field.owner !== "core" ? field.owner : null;
-    const heading = owner ? `${field.group} (${owner} plugin)` : field.group;
-    if (!groups.has(heading)) groups.set(heading, []);
-    groups.get(heading).push(ctrl);
-  }
-
-  form.replaceChildren();
-  for (const [heading, ctrls] of groups) {
-    const section = el("div", "settings-group");
-    section.appendChild(el("h3", "settings-group-head", heading));
-    for (const c of ctrls) section.appendChild(c.node);
-    form.appendChild(section);
+    const s = settingsSectionOf(field);
+    if (!sections.has(s.id)) sections.set(s.id, { ...s, ctrls: [] });
+    sections.get(s.id).ctrls.push(ctrl);
   }
   _settingsControls = controls;
-}
 
-$("config-save").onclick = async () => {
-  const updates = {};
-  for (const { field, read } of _settingsControls) {
-    const value = read();
-    if (value === undefined) continue;   // untouched secret / blank number
-    updates[field.key] = value;
+  const ordered = [...sections.values()]
+    .sort((a, b) => (a.plugin ? 1 : 0) - (b.plugin ? 1 : 0));   // core first, stable
+
+  form.replaceChildren();
+  for (const sec of ordered) {
+    const panel = el("section", "card settings-section");
+    panel.id = "settings-sec-" + sec.id;
+    panel.dataset.sec = sec.id;
+    panel.dataset.secLabel = sec.label + (sec.plugin ? " plugin" : "");
+    panel.appendChild(el("h3", "settings-section-head",
+                         sec.label + (sec.plugin ? " plugin" : "")));
+    const grid = el("div", "settings-fields");
+    for (const c of sec.ctrls) grid.appendChild(c.node);
+    panel.appendChild(grid);
+    const actions = el("div", "actions");
+    const save = el("button", "btn-primary settings-section-save", "Save " + sec.label);
+    save.dataset.sec = sec.id;
+    save.onclick = () => saveSettingsSection(sec.id);
+    actions.appendChild(save);
+    panel.appendChild(actions);
+    form.appendChild(panel);
   }
-  if (!Object.keys(updates).length) { toast("Nothing changed"); return; }
-  const r = await fetch("/v1/config", {
-    method: "PATCH", headers: authHeaders(),
-    body: JSON.stringify(updates),
-  });
-  const data = await r.json();
-  if (r.ok) {
-    toast("Saved - engine values apply on the next model load");
-    // Re-render from the freshly persisted config so the form reflects what
-    // the server normalized (e.g. a comma list collapsed to an array).
-    refreshSettingsPage();
-  } else {
-    toast(data.detail || "Save failed", true);
-  }
-};
+
+  // Build the nav now that the schema sections exist, so the first config
+  // section (not a static card) is the default tab. The owner-gated panels then
+  // refresh: each may rebuild the nav, but they preserve the active section.
+  buildSettingsNav();
+  refreshPairingQR();
+  refreshKeysPanel();
+}
 
 $("gui-key-save").onclick = async () => {
   const key = $("gui-api-key").value.trim();

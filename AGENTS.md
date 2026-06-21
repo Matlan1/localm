@@ -95,6 +95,31 @@ Other gitignored local state (do not delete without being asked): `home/`,
 `config.json`, `registry.json`, the installed-plugins dir, and the personal
 `*_workflow*.json` / `tts.json` overrides listed under rule 2.
 
+### `issues/` belongs to the maintainer; agent files go in `dev-notes/` (BINDING)
+
+`issues/` (the `ISSUES/` directory) holds ONLY files the maintainer put there by
+hand: their backlog, bug reports, logs, and notes. It is their inbox, not agent
+workspace. This rule is absolute and global for this repo:
+
+- Every file an agent or contributor creates - worklogs, loop state, `*.md`
+  plans, design docs, handoffs, status reports, scratch, audits, any generated
+  artifact - lives in `dev-notes/` (or `qa/`, `scratch/`), NEVER in `issues/`.
+  Do not write into `issues/` to "keep related things together".
+- ONE narrow exception: a todo list or progress report that is specifically
+  about working through the maintainer's `issues/` backlog MAY live in `issues/`
+  while that work is actively in progress. The moment it stops being relevant
+  (the issues are fixed, or the work is parked), MOVE it to `dev-notes/` or
+  DELETE it. An agent-authored file must never linger in `issues/` after it has
+  served its purpose. The default home is still `dev-notes/`; only reach for this
+  exception when keeping the working list next to the issues genuinely helps.
+- A file the maintainer created is NEVER deleted and NEVER moved, under any
+  circumstance, for any reason, including "cleanup", "tidying", "it looked
+  stray", or "it seemed obsolete". Read it and append to it; otherwise leave it
+  exactly where it is. If you believe a maintainer-authored file should be moved
+  or removed, STOP and ask the maintainer first. The self-cleaning exception
+  above applies ONLY to files the agent itself authored, never to anything the
+  maintainer wrote.
+
 ## How these rules are enforced
 
 Run the hygiene check before you commit:

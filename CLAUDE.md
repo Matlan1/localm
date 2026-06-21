@@ -26,6 +26,17 @@ git, so deleting either is unrecoverable (`issues/` was lost once already). Neve
 overwrite `issues/issues.txt` wholesale. Read and append only; ask before removing
 anything under them. See AGENTS.md "Protected local paths".
 
+ISSUES IS THE MAINTAINER'S, NOT AGENT WORKSPACE (BINDING): `issues/` holds ONLY
+files the maintainer put there. Every agent-created file (worklogs, loop md,
+plans, design docs, handoffs, status reports, scratch, any generated artifact)
+goes in `dev-notes/` (or `qa/`, `scratch/`), NEVER in `issues/`. The one
+exception: a todo list / progress report specifically for working through the
+`issues/` backlog may sit in `issues/` while that work is active, but MUST be
+moved to `dev-notes/` or deleted the moment it is no longer relevant - never let
+an agent file linger there. A maintainer-created file is NEVER deleted or moved,
+for any reason; read/append only, and ask first if you think one should go. See
+AGENTS.md "`issues/` belongs to the maintainer".
+
 Verifying changes: you are pre-approved to launch a local test instance of the
 full app (`localm gui`, `localm serve`, `localm run`) to check a change in the
 real product, no need to ask. Use a small model (a tiny GGUF, or

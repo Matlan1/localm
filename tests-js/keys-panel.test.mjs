@@ -36,7 +36,9 @@ test("keys panel: hides the card for a non-owner (/v1/keys 403)", async () => {
   });
   await tick();
   await window.refreshKeysPanel();
-  assert.equal(window.document.getElementById("keys-card").style.display, "none");
+  // The keys card is a settings section; a non-owner hides it via the sec-hidden
+  // class (so the section nav drops its link), not an inline display style.
+  assert.ok(window.document.getElementById("keys-card").classList.contains("sec-hidden"));
 });
 
 test("keys panel: renders the scope checkboxes and lists existing keys", async () => {
@@ -48,7 +50,7 @@ test("keys panel: renders the scope checkboxes and lists existing keys", async (
   });
   await tick();
   await window.refreshKeysPanel();
-  assert.notEqual(window.document.getElementById("keys-card").style.display, "none");
+  assert.ok(!window.document.getElementById("keys-card").classList.contains("sec-hidden"));
   assert.ok(window.document.querySelectorAll(".key-scope-cb").length >= 5);
   const list = window.document.getElementById("keys-list").textContent;
   assert.match(list, /phone/);

@@ -2,7 +2,7 @@
 """ComfyUI launch robustness: derive the launcher's own folder as the working
 directory, and honour the configurable cold-start timeout."""
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from localm.image_gen import comfy
 
@@ -38,3 +38,117 @@ def test_ensure_comfy_uses_configured_timeout(monkeypatch):
         ok, msg = comfy.ensure_comfy("http://127.0.0.1:8188")
     assert ok is False
     assert "not reachable" in msg  # no launch cmd -> the configure hint
+
+
+# --------------------------------------------------------------------------- #
+#  Launcher auto-discovery from the ComfyUI folder (work with the user's setup) #
+# --------------------------------------------------------------------------- #
+
+def _ext():
+    import os
+    return "bat" if os.name == "nt" else "sh"
+
+
+def test_discover_prefers_user_launcher(tmp_path):
+    # When both a custom launch-comfyui.* and the stock comfyui.* exist, the
+    # user's own launcher wins - localm uses the setup they already have.
+    (tmp_path / f"comfyui.{_ext()}").write_text("stock\n", encoding="utf-8")
+    (tmp_path / f"launch-comfyui.{_ext()}").write_text("mine\n", encoding="utf-8")
+    cmd = comfy.discover_launch_cmd(tmp_path)
+    assert cmd is not None
+    assert "launch-comfyui" in cmd
+    assert str(tmp_path) in cmd          # absolute, quoted
+
+
+def test_discover_stock_launcher(tmp_path):
+    (tmp_path / f"comfyui.{_ext()}").write_text("stock\n", encoding="utf-8")
+    cmd = comfy.discover_launch_cmd(tmp_path)
+    assert cmd is not None and "comfyui" in cmd
+
+
+def test_discover_none_when_no_launcher(tmp_path):
+    (tmp_path / "readme.txt").write_text("nothing here\n", encoding="utf-8")
+    assert comfy.discover_launch_cmd(tmp_path) is None
+
+
+def test_discover_main_py_with_venv(tmp_path):
+    import os
+    (tmp_path / "main.py").write_text("print(1)\n", encoding="utf-8")
+    if os.name == "nt":
+        venv = tmp_path / "venv" / "Scripts"
+        py = venv / "python.exe"
+    else:
+        venv = tmp_path / "venv" / "bin"
+        py = venv / "python"
+    venv.mkdir(parents=True)
+    py.write_text("", encoding="utf-8")
+    cmd = comfy.discover_launch_cmd(tmp_path)
+    assert cmd is not None
+    assert "main.py" in cmd and str(py) in cmd
+
+
+def test_ensure_comfy_discovers_launcher_in_workdir(tmp_path):
+    # comfy_workdir set + no launch_cmd -> localm finds the launcher itself and
+    # spawns it with the folder as cwd. The old code gave up ("not reachable").
+    launcher = tmp_path / f"comfyui.{_ext()}"
+    launcher.write_text("echo hi\n", encoding="utf-8")
+    cfg = {"comfy_launch_cmd": None, "comfy_workdir": str(tmp_path),
+           "comfy_launch_timeout": 30}
+    alive = iter([False, True])     # dead, then up after spawn
+    spawned = {}
+
+    def fake_popen(argv, cwd=None, **kw):
+        spawned["argv"], spawned["cwd"] = argv, cwd
+        return MagicMock()
+
+    with patch("localm.config.load_config", return_value=cfg), \
+         patch.object(comfy, "_comfy_alive", side_effect=lambda *a, **k: next(alive)), \
+         patch("subprocess.Popen", side_effect=fake_popen):
+        ok, msg = comfy.ensure_comfy("http://127.0.0.1:8188")
+    assert ok is True, msg
+    assert spawned["cwd"] == str(tmp_path)
+    assert "comfyui" in str(spawned["argv"])
+
+
+def test_ensure_comfy_error_points_at_the_folder():
+    cfg = {"comfy_launch_cmd": None, "comfy_workdir": None,
+           "comfy_launch_timeout": 30}
+    with patch("localm.config.load_config", return_value=cfg), \
+         patch.object(comfy, "_comfy_alive", return_value=False):
+        ok, msg = comfy.ensure_comfy("http://127.0.0.1:8188")
+    assert ok is False
+    assert "comfy_workdir" in msg          # guides the user to set the folder
+
+
+# --------------------------------------------------------------------------- #
+#  Fast GGUF dequant (the 36 s/it -> ~6-7 s/it fix)                            #
+# --------------------------------------------------------------------------- #
+
+def test_apply_fast_dequant_rewrites_float32():
+    wf = {"30": {"class_type": "UnetLoaderGGUFAdvanced",
+                 "inputs": {"dequant_dtype": "float32"}}}
+    assert comfy.apply_fast_dequant(wf) == 1
+    assert wf["30"]["inputs"]["dequant_dtype"] == "default"
+
+
+def test_apply_fast_dequant_leaves_explicit_choices():
+    wf = {
+        "a": {"class_type": "UnetLoaderGGUF", "inputs": {"dequant_dtype": "float16"}},
+        "b": {"class_type": "UnetLoaderGGUFAdvanced", "inputs": {"dequant_dtype": "bfloat16"}},
+        "c": {"class_type": "UnetLoaderGGUFAdvanced", "inputs": {"dequant_dtype": "default"}},
+        "d": {"class_type": "VAELoader", "inputs": {"vae_name": "ae.safetensors"}},
+    }
+    assert comfy.apply_fast_dequant(wf) == 0
+    assert wf["a"]["inputs"]["dequant_dtype"] == "float16"
+    assert wf["b"]["inputs"]["dequant_dtype"] == "bfloat16"
+
+
+def test_shipped_example_workflow_uses_fast_dequant():
+    # The committed template must not regress to the slow float32 dequant.
+    import json
+    wf = json.loads(comfy._WORKFLOW_EXAMPLE_PATH.read_text(encoding="utf-8"))
+    loaders = [n for n in wf.values()
+               if n.get("class_type") in comfy._GGUF_UNET_LOADERS]
+    assert loaders, "example should load the UNet via a GGUF loader"
+    for n in loaders:
+        assert n["inputs"].get("dequant_dtype") != "float32"

@@ -31,6 +31,33 @@ def _workflow_path() -> Path:
     return _WORKFLOW_PATH if _WORKFLOW_PATH.is_file() else _WORKFLOW_EXAMPLE_PATH
 
 
+# GGUF UNet loader node classes whose `dequant_dtype` controls how the quantized
+# weights are unpacked for compute.
+_GGUF_UNET_LOADERS = ("UnetLoaderGGUF", "UnetLoaderGGUFAdvanced")
+
+
+def apply_fast_dequant(workflow: dict) -> int:
+    """Rewrite a slow ``dequant_dtype: "float32"`` to the loader's fast default.
+
+    A float32 dequant unpacks a Q8 Flux UNet to roughly twice the size of the
+    fp16 path, which on a VRAM-limited card (e.g. a 16 GB 6900 XT) spills several
+    GB to system RAM and drags iterations from ~6-7 s to ~36 s. "default" lets
+    ComfyUI-GGUF dequant to the model's own compute dtype (fp16/bf16), which is
+    what a fast Flux config uses. Only the known-slow "float32" value is touched;
+    an explicit "float16"/"bfloat16"/"target" choice is left alone. Mutates
+    *workflow* in place and returns how many loader nodes were changed."""
+    changed = 0
+    for node in workflow.values():
+        if not isinstance(node, dict):
+            continue
+        if node.get("class_type") in _GGUF_UNET_LOADERS:
+            inputs = node.get("inputs")
+            if isinstance(inputs, dict) and inputs.get("dequant_dtype") == "float32":
+                inputs["dequant_dtype"] = "default"
+                changed += 1
+    return changed
+
+
 # ---------------------------------------------------------------------------
 #  VRAM management
 # ---------------------------------------------------------------------------
@@ -81,8 +108,19 @@ def _localm_unload(localm_url: Optional[str] = None) -> Optional[dict]:
 
 
 def default_api_url() -> str:
-    """ComfyUI base URL: FLUX_API_URL env override, else the default port."""
-    return os.environ.get("FLUX_API_URL", "http://127.0.0.1:8188").rstrip("/")
+    """ComfyUI base URL: FLUX_API_URL env override, then the ``comfy_api_url``
+    config key, else the ComfyUI default port."""
+    env = os.environ.get("FLUX_API_URL")
+    if env:
+        return env.rstrip("/")
+    try:
+        from localm.config import load_config
+        cfg_url = load_config().get("comfy_api_url")
+        if cfg_url:
+            return str(cfg_url).rstrip("/")
+    except Exception:
+        pass
+    return "http://127.0.0.1:8188"
 
 
 def free_comfy_vram(api_url: Optional[str] = None) -> bool:
@@ -145,6 +183,60 @@ def _derive_workdir_from_cmd(launch_cmd: str) -> Optional[str]:
     return None
 
 
+# Common ComfyUI launcher scripts, in priority order. A user's own
+# launch-comfyui.* (the convention from the ComfyUI + ZLUDA community, and what
+# this repo's own issue reporter hand-made) is preferred over the stock launcher,
+# so localm uses the setup the user already has instead of imposing its own.
+_LAUNCHER_NAMES_WIN = (
+    "launch-comfyui.bat", "comfyui.bat", "run_nvidia_gpu.bat",
+    "run_amd_gpu.bat", "run_cpu.bat", "run.bat",
+)
+_LAUNCHER_NAMES_POSIX = (
+    "launch-comfyui.sh", "comfyui.sh", "run_nvidia_gpu.sh",
+    "run_amd_gpu.sh", "run_cpu.sh", "run.sh",
+)
+
+
+def _venv_python(folder: Path) -> Optional[Path]:
+    """A ComfyUI install's own venv interpreter, if present (venv/ or .venv/)."""
+    if os.name == "nt":
+        cands = [folder / "venv" / "Scripts" / "python.exe",
+                 folder / ".venv" / "Scripts" / "python.exe"]
+    else:
+        cands = [folder / "venv" / "bin" / "python",
+                 folder / ".venv" / "bin" / "python"]
+    for c in cands:
+        if c.is_file():
+            return c
+    return None
+
+
+def discover_launch_cmd(folder: Path) -> Optional[str]:
+    """Build a launch command for an existing ComfyUI install in *folder*.
+
+    Prefers a launcher script the user already has (their own launch-comfyui.*,
+    else the stock comfyui.* / run.*), falling back to running ``main.py`` with
+    the install's own venv. Returns an absolute, quoted command string (run with
+    *folder* as the working dir) or None when nothing recognizable is found.
+    Absolute paths keep it cwd-independent and cross-platform (no PATH lookup,
+    no bare-name resolution differences between cmd.exe and a POSIX shell)."""
+    try:
+        if not folder.is_dir():
+            return None
+    except OSError:
+        return None
+    names = _LAUNCHER_NAMES_WIN if os.name == "nt" else _LAUNCHER_NAMES_POSIX
+    for name in names:
+        p = folder / name
+        if p.is_file():
+            return f'"{p}"'
+    py = _venv_python(folder)
+    main = folder / "main.py"
+    if py and main.is_file():
+        return f'"{py}" "{main}"'
+    return None
+
+
 def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
                  wait_seconds: Optional[int] = None,
                  launch_cmd: Optional[str] = None,
@@ -182,16 +274,36 @@ def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
         return True, "ComfyUI is running."
 
     cfg = load_config()
+
+    # Resolve the ComfyUI folder (working dir) FIRST: explicit arg, then config.
+    # It anchors both launcher discovery and the cwd a relative launcher name
+    # runs from, so a bare "launch-comfyui.bat" works once the folder is known.
+    if workdir is None:
+        workdir = cfg.get("comfy_workdir")
+
+    # Resolve the launch command: explicit arg, then config, then - when the
+    # ComfyUI folder is known - auto-discover a launcher inside it (the user's
+    # own launch-comfyui.bat, else the stock comfyui.bat / run.bat). This is the
+    # "work with the install the user already has" path: pointing localm at the
+    # ComfyUI folder is enough; naming a script is optional.
     if not launch_cmd:
         launch_cmd = cfg.get("comfy_launch_cmd")
+    discovered = False
+    if not launch_cmd and workdir:
+        found = discover_launch_cmd(Path(workdir))
+        if found:
+            launch_cmd, discovered = found, True
     if not launch_cmd:
         return False, (
             f"ComfyUI is not reachable at {api_url}.\n"
-            "Start ComfyUI first (default: http://127.0.0.1:8188), set the "
-            "FLUX_API_URL environment variable if it runs elsewhere, or let "
-            "localm start it for you:\n"
+            "Point localm at your ComfyUI install so it can start it for you:\n"
+            '  localm config comfy_workdir "<path-to-your-ComfyUI-folder>"\n'
+            "localm then runs the launcher it finds there (your own "
+            "launch-comfyui.bat, or the stock comfyui.bat / run.bat).\n"
+            "To name a specific launcher instead of auto-detecting:\n"
             '  localm config comfy_launch_cmd "<path>\\launch-comfyui.bat"\n'
-            '  localm config comfy_workdir "<path>\\ComfyUI"   (optional cwd)'
+            "Or start ComfyUI yourself first (default http://127.0.0.1:8188), or "
+            "set the FLUX_API_URL environment variable if it runs elsewhere."
         )
 
     # A ZLUDA / ROCm cold start compiles GPU kernels and can take minutes, so
@@ -204,16 +316,17 @@ def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
     wait_seconds = max(30, wait_seconds)
 
     _say(f"ComfyUI not running - launching: {launch_cmd}")
+    if discovered:
+        _say(f"Found a ComfyUI launcher in {workdir}")
     # The command is the user's own config value (their launcher script).
     # On Windows pass `cmd /S /c "<line>"` as a single string: /S strips the
     # outer quotes and runs the line verbatim, so quoted executable paths
     # survive (a `["cmd", "/c", line]` list gets re-quoted by subprocess and
     # mangles them). POSIX uses shlex.
-    if workdir is None:
-        workdir = cfg.get("comfy_workdir")
     if not workdir:
-        # No explicit cwd: run the launcher from its own folder so a .bat/.sh
-        # that uses paths relative to itself (ComfyUI + ZLUDA) still works.
+        # No configured ComfyUI folder: fall back to the launcher file's own
+        # folder so a .bat/.sh that uses paths relative to itself (ComfyUI +
+        # ZLUDA) still works when the user gave an absolute launcher path.
         workdir = _derive_workdir_from_cmd(launch_cmd)
         if workdir:
             _say(f"Running the launcher from {workdir}")
@@ -496,6 +609,7 @@ def generate_image(
     workdir: Optional[str] = None,
     comfy_output_dir: Optional[str] = None,
     swap: bool = True,
+    fast_dequant: bool = True,
     cancel_check: Optional[callable] = None,
 ) -> tuple[bool, str]:
     """
@@ -596,6 +710,15 @@ def generate_image(
         workflow = json.loads(_workflow_path().read_text(encoding="utf-8"))
     except Exception as e:
         return False, f"Failed to load FLUX workflow template: {e}"
+
+    # 2a. Perf: a float32 GGUF dequant unpacks Flux to ~2x size and forces CPU
+    # offload on a VRAM-limited card (the ~36 s/it vs ~6-7 s/it slowdown). Rewrite
+    # it to the loader's fast default unless the caller opted out. Applies to both
+    # the shipped example and a personal flux_workflow.json exported from ComfyUI.
+    if fast_dequant:
+        if apply_fast_dequant(workflow):
+            _con.print("[dim]Using fast fp16 GGUF dequant (was float32) for speed; "
+                       "set comfy_fast_dequant=false to keep your workflow's value.[/dim]")
 
     # 3. Override text encoder models if requested
     if clip_name1 is not None or clip_name2 is not None:

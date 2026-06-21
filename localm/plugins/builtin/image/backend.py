@@ -28,7 +28,9 @@ def settings(full_config: dict) -> dict:
     comfy_blk = block.get("comfy") if isinstance(block.get("comfy"), dict) else {}
     return {
         "backend": block.get("backend", "comfy"),
-        "api_url": (comfy_blk.get("api_url") or _comfy.default_api_url()).rstrip("/"),
+        "api_url": (comfy_blk.get("api_url")
+                    or full_config.get("comfy_api_url")
+                    or _comfy.default_api_url()).rstrip("/"),
         "launch_cmd": comfy_blk.get("launch_cmd")
         or full_config.get("comfy_launch_cmd", "") or "",
         "workdir": comfy_blk.get("workdir")
@@ -38,6 +40,8 @@ def settings(full_config: dict) -> dict:
         "reload_after": bool(block.get(
             "reload_llm_after_generate",
             full_config.get("reload_llm_after_imagine", True))),
+        "fast_dequant": bool(comfy_blk.get(
+            "fast_dequant", full_config.get("comfy_fast_dequant", True))),
         "swap_policy": resolve_swap_policy(block, full_config),
         "vram_estimate_bytes": media_estimate_bytes("image", block),
         "warning": warning,
@@ -77,5 +81,6 @@ def generate(s: dict, prompt: str, out_path: Path, *,
         workdir=s["workdir"] or None,
         comfy_output_dir=s["output_dir"] or None,
         swap=swap,
+        fast_dequant=s.get("fast_dequant", True),
         cancel_check=cancel_check,
     )

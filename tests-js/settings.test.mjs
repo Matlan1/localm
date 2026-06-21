@@ -50,63 +50,89 @@ async function render(win) {
   await new Promise((r) => setTimeout(r, 0));
 }
 
-test("settings form renders a typed control per schema field", async () => {
+async function drain(times = 6) {
+  for (let i = 0; i < times; i++) await new Promise((r) => setTimeout(r, 0));
+}
+
+test("settings renders a typed control per schema field, split into sections", async () => {
   const patches = [];
   const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(patches) });
   await render(win);
-  const form = win.document.getElementById("config-form");
+  const doc = win.document;
 
   // SELECT -> <select> with the field's options, current value selected.
-  const modeSel = form.querySelector('select[data-key="mode"]');
+  const modeSel = doc.querySelector('select[data-key="mode"]');
   assert.ok(modeSel, "mode renders as a <select>");
   const opts = [...modeSel.options].map((o) => o.value);
   assert.deepEqual(opts, ["privacy", "log", "full"], "select carries its options");
   assert.equal(modeSel.value, "log", "current value is selected");
 
   // NUMBER -> <input type=number> with min/step.
-  const nctx = form.querySelector('input[data-key="n_ctx"]');
+  const nctx = doc.querySelector('input[data-key="n_ctx"]');
   assert.equal(nctx.type, "number");
   assert.equal(nctx.min, "512");
   assert.equal(nctx.value, "4096");
 
   // SECRET -> <input type=password>, never prefilled.
-  const secret = form.querySelector('input[data-key="fake_secret"]');
+  const secret = doc.querySelector('input[data-key="fake_secret"]');
   assert.equal(secret.type, "password");
   assert.equal(secret.value, "", "secret input is never prefilled");
 
   // LIST -> text input edited as a comma list.
-  const list = form.querySelector('input[data-key="net_allow"]');
+  const list = doc.querySelector('input[data-key="net_allow"]');
   assert.equal(list.type, "text");
   assert.equal(list.value, "a.com, b.com");
 
   // HIDDEN -> not rendered.
-  assert.equal(form.querySelector('[data-key="plugins_enabled"]'), null,
+  assert.equal(doc.querySelector('[data-key="plugins_enabled"]'), null,
     "hidden fields are not rendered");
 
-  // Plugin-owned (owner != core) field grouped under a per-plugin heading.
-  const heads = [...form.querySelectorAll(".settings-group-head")].map((h) => h.textContent);
-  assert.ok(heads.some((h) => h.includes("web")), "web-owned section has a plugin heading");
+  // The web-owned field is in its OWN plugin section, each section has a Save.
+  const webInput = doc.querySelector('input[data-key="net_allow"]');
+  const webSec = webInput.closest(".settings-section");
+  assert.ok(webSec.querySelector(".settings-section-save"),
+    "each section has its own Save button");
+  assert.ok(/web/i.test(webSec.querySelector(".settings-section-head").textContent),
+    "web plugin has its own section heading");
+  // n_ctx (core Engine) is a DIFFERENT section from net_allow (web plugin).
+  assert.notEqual(nctx.closest(".settings-section"), webSec,
+    "core and plugin settings live in separate sections");
+
+  // Left nav lists the sections (incl. the web plugin) so they can be jumped to.
+  const navLabels = [...doc.querySelectorAll("#settings-nav .settings-nav-link")]
+    .map((l) => l.textContent);
+  assert.ok(navLabels.some((l) => /web/i.test(l)), "web section appears in the nav");
+  // Exactly one section is shown at a time.
+  assert.equal(doc.querySelectorAll("#settings-content .settings-section.active").length, 1);
 });
 
-test("save PATCHes native types (number for n_ctx, array for a LIST key)", async () => {
+test("each section saves only its own keys (per-section PATCH)", async () => {
   const patches = [];
   const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(patches) });
   await render(win);
-  const form = win.document.getElementById("config-form");
+  const doc = win.document;
 
-  // User edits n_ctx and net_allow.
-  form.querySelector('input[data-key="n_ctx"]').value = "8192";
-  form.querySelector('input[data-key="net_allow"]').value = "x.com, y.com ,";
+  // Edit n_ctx (core Engine) and save THAT section.
+  const nctx = doc.querySelector('input[data-key="n_ctx"]');
+  nctx.value = "8192";
+  nctx.closest(".settings-section").querySelector(".settings-section-save").click();
+  await drain();
 
-  win.document.getElementById("config-save").click();
-  await new Promise((r) => setTimeout(r, 0));
-
-  assert.equal(patches.length, 1, "exactly one PATCH sent");
+  assert.equal(patches.length, 1, "one PATCH for the Engine section");
   const body = patches[0];
   assert.equal(typeof body.n_ctx, "number", "n_ctx sent as a number");
   assert.equal(body.n_ctx, 8192);
-  assert.ok(Array.isArray(body.net_allow), "net_allow sent as an array");
-  assert.deepEqual(body.net_allow, ["x.com", "y.com"], "trimmed, blanks dropped");
-  // The untouched secret must NOT be sent (no real value to send).
+  assert.equal("net_allow" in body, false, "another section's key is NOT sent");
   assert.equal("fake_secret" in body, false, "untouched secret is omitted");
+
+  // Now edit net_allow (web plugin) and save its section -> array round-trip.
+  const list = doc.querySelector('input[data-key="net_allow"]');
+  list.value = "x.com, y.com ,";
+  list.closest(".settings-section").querySelector(".settings-section-save").click();
+  await drain();
+
+  assert.equal(patches.length, 2, "a second PATCH for the web section");
+  assert.ok(Array.isArray(patches[1].net_allow), "net_allow sent as an array");
+  assert.deepEqual(patches[1].net_allow, ["x.com", "y.com"], "trimmed, blanks dropped");
+  assert.equal("n_ctx" in patches[1], false, "Engine key not resent from the web section");
 });
