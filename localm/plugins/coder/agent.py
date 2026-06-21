@@ -99,6 +99,17 @@ _COMPACT_WARN_RATIO  = 0.70   # warn user in interactive mode
 _COMPACT_AUTO_RATIO  = 0.90   # silently compact in non-interactive mode
 _DEFAULT_CTX_TOKENS  = 4096   # fallback when n_ctx is unknown
 
+# How many times to re-prompt when a response looks like a tool call but cannot be
+# parsed. After this, the raw attempt is SURFACED (never silently finalised as a
+# hidden <tool_call> block - which rendered as an empty bubble + no file written).
+_MAX_TOOL_REPAIRS = 2
+
+# Abort a task after this many tool calls fail in a row across ANY tools. The
+# per-tool breaker only catches N IDENTICAL failures; a weak model can spin on
+# VARIED failing calls (e.g. git_show with invented hashes) and burn the whole
+# turn/token budget. Any successful tool call resets the streak.
+_GLOBAL_ERROR_ABORT = 6
+
 # Code file extensions that should be verified (tests / syntax) after writes
 _CODE_EXTS: frozenset[str] = frozenset({
     ".py", ".js", ".ts", ".jsx", ".tsx", ".rs", ".go", ".java",
@@ -308,6 +319,8 @@ class Agent:
         self._last_turn_tokens: int = 0   # tokens used in the most recently completed turn
         self._consecutive_errors: dict[str, int] = {}  # tool_name → failure streak
         self._abort_streak_tool: Optional[str] = None  # set when the circuit breaker trips
+        self._global_error_streak: int = 0     # consecutive failed tool calls (ANY tool)
+        self._abort_no_progress: bool = False  # set when the no-progress breaker trips
         self._compact_warned: bool = False
         self._last_run_ok: bool = True    # False when the last _loop hit max_turns
         self._undo_stack: list[dict] = []
@@ -623,6 +636,8 @@ class Agent:
         self._last_turn_tokens = 0
         self._compact_warned = False
         self._consecutive_errors.clear()
+        self._global_error_streak = 0
+        self._abort_no_progress = False
         self._last_run_ok = True
         self._unverified_writes.clear()
 
@@ -715,7 +730,7 @@ class Agent:
         start_turns = self._turns          # turns used by *this* task only
         verify_nudged = False              # self-verification fires at most once per task
         budget_escalated = False           # uncertainty escalation fires at most once per task
-        repair_nudged = False              # tool-call reformat fires at most once per task
+        repair_count = 0                   # tool-call reformat re-prompts (capped)
 
         try:
             while self._turns < self.max_turns:
@@ -840,11 +855,11 @@ class Agent:
                     # once with the exact format instead of printing the broken
                     # call as the final answer.
                     if (
-                        not repair_nudged
+                        repair_count < _MAX_TOOL_REPAIRS
                         and self._turns < self.max_turns
                         and looks_like_tool_attempt(response)
                     ):
-                        repair_nudged = True
+                        repair_count += 1
                         self._add_assistant(response)
                         self._add_user(
                             "[tool-call format] That looked like a tool call, "
@@ -853,15 +868,38 @@ class Agent:
                             "<tool_call>\n"
                             '{"name": "TOOL_NAME", "args": {"PARAM": "VALUE"}}\n'
                             "</tool_call>\n"
-                            "Use one of the available tools by its exact name. "
-                            "If you did NOT mean to call a tool, ignore this and "
-                            "give your final answer as plain text."
+                            "The args must be valid JSON: use a single double-quoted "
+                            'string with \\n escapes for multi-line "content" - NOT a '
+                            "Python triple-quoted string. Use one of the available "
+                            "tools by its exact name. If you did NOT mean to call a "
+                            "tool, ignore this and give your final answer as plain text."
                         )
                         if interactive:
                             print_info(
                                 "(re-prompting: tool call could not be parsed)"
                             )
                         continue
+
+                    # Give-up case: it STILL looks like a tool call we could not parse
+                    # after the repair attempts. SURFACE the raw attempt instead of
+                    # finalising a hidden <tool_call> block - which the streaming
+                    # display hides, leaving an empty bubble + "task finished" + no
+                    # file (a silent no-op the user gets zero feedback on).
+                    if looks_like_tool_attempt(response):
+                        self._emit("info", text=(
+                            "the model tried to call a tool but emitted invalid output "
+                            f"{repair_count + 1} times - surfacing its raw attempt "
+                            "(nothing was run or written)"))
+                        notice = (
+                            "[I tried to call a tool but could not produce valid "
+                            "tool-call JSON after several attempts, so nothing was run "
+                            "or written. My raw attempt was:]\n\n" + response
+                        )
+                        if not interactive and self.on_event is None:
+                            print_assistant_response(notice, name=self.name)
+                        final_response = notice
+                        self._add_assistant(response)
+                        break
 
                     # No tool calls → this is the final answer
                     if not interactive and self.on_event is None:
@@ -900,6 +938,22 @@ class Agent:
                         "row - stopping so you can take a look instead of "
                         "burning more turns. The conversation is intact; "
                         "adjust the approach and continue.]"
+                    )
+                    print_warning(final_response)
+                    self._emit("info", text=final_response)
+                    self._last_run_ok = False
+                    break
+
+                # No-progress breaker: many tool calls failed in a row across ANY
+                # tools (a weak model spinning on varied junk calls). Stop instead
+                # of burning the whole budget.
+                if self._abort_no_progress:
+                    self._abort_no_progress = False
+                    self._global_error_streak = 0
+                    final_response = (
+                        "[circuit breaker: many tool calls failed in a row with no "
+                        "progress - stopping so you can take a look instead of burning "
+                        "more turns. The conversation is intact; adjust and continue.]"
                     )
                     print_warning(final_response)
                     self._emit("info", text=final_response)
@@ -1268,13 +1322,42 @@ ws     ::= [ \t\n\r]*
         if buf:
             yield buf, in_call   # unclosed tag at stream end - display as-is
 
+    def _tool_call_grammar(self) -> Optional[str]:
+        """The GBNF grammar to constrain tool-call output, or None (dormant default).
+
+        Returns ``gbnf.TOOL_CALLS_ONLY`` only when the ``coder_tool_grammar`` config
+        flag is set AND the backend can enforce grammar. OFF by default: the bundled
+        GGUF runtime's grammar sampler faults and soft-degrades (a no-op), and
+        TOOL_CALLS_ONLY forces tool-only output (no free-text final answer), so this
+        is wired-but-dormant until a grammar-capable runtime + a text-or-tool grammar
+        exist. See dev-notes/coder-local-ux-improvement-2026-06-21."""
+        if not getattr(self.backend, "supports_grammar", False):
+            return None
+        try:
+            from localm.config import load_config
+            if not load_config().get("coder_tool_grammar", False):
+                return None
+            from localm.inference.gbnf import TOOL_CALLS_ONLY
+            return TOOL_CALLS_ONLY
+        except Exception:
+            return None
+
+    def _llm_kwargs(self) -> dict:
+        """gen_kwargs for an LLM call, adding the tool-call grammar when enabled
+        (dormant by default - see :meth:`_tool_call_grammar`)."""
+        kw = dict(self.gen_kwargs)
+        grammar = self._tool_call_grammar()
+        if grammar and "grammar" not in kw:
+            kw["grammar"] = grammar
+        return kw
+
     def _call_llm(self, messages: list[dict], interactive: bool) -> str:
         if self.on_event is not None:
             # Event-sink mode (GUI/web session): stream tokens to the sink,
             # keep the server terminal quiet.
             full = ""
             for piece, hidden in self._stream_hiding_tool_calls(
-                self.backend.chat_stream(messages, **self.gen_kwargs)
+                self.backend.chat_stream(messages, **self._llm_kwargs())
             ):
                 full += piece
                 if not hidden:
@@ -1304,7 +1387,7 @@ ws     ::= [ \t\n\r]*
             return full
         else:
             # Silent call - used by sub-agents and non-interactive mode
-            result = self.backend.chat(messages, **self.gen_kwargs)
+            result = self.backend.chat(messages, **self._llm_kwargs())
             self._accumulate_usage()
             self._audit.llm(result, tokens=self._total_tokens)
             return result
@@ -1547,8 +1630,14 @@ ws     ::= [ \t\n\r]*
                 )
             if streak >= 4:
                 self._abort_streak_tool = call.name
+            # Global no-progress breaker: count failures across ANY tool so a model
+            # spinning on varied failing calls cannot burn the whole budget.
+            self._global_error_streak += 1
+            if self._global_error_streak >= _GLOBAL_ERROR_ABORT:
+                self._abort_no_progress = True
         else:
             self._consecutive_errors.pop(call.name, None)
+            self._global_error_streak = 0
 
         self._audit.tool_result(call.name, result.ok, result.summary)
         if interactive:

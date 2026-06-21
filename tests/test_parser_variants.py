@@ -221,3 +221,45 @@ class TestStreamHiding:
             ["a <|tool_", 'call>{"name": "t"}', "<tool_call|> b"])
         assert shown == "a  b"
         assert '{"name": "t"}' in hidden
+
+
+class TestRecoveredMalformations:
+    """Local models often emit JSON that is not quite valid - recover it instead of
+    silently failing to parse (which showed an empty bubble + wrote nothing)."""
+
+    def test_python_triple_quoted_content(self):
+        # Verbatim iter-11 GUI failure: write_file with triple-quoted content.
+        text = (
+            '<tool_call>\n'
+            '{"name": "write_file",\n'
+            ' "args": {\n'
+            '   "path": "calc.py",\n'
+            '   "content": """\n'
+            '# Simple Calculator\n'
+            'def add(a, b):\n'
+            '    return a + b\n'
+            '"""\n'
+            ' }}\n'
+            '</tool_call>'
+        )
+        calls = parse_tool_calls(text, tool_names={"write_file"})
+        assert len(calls) == 1
+        assert calls[0].name == "write_file"
+        assert calls[0].args["path"] == "calc.py"
+        assert "def add" in calls[0].args["content"]
+
+    def test_trailing_comma(self):
+        text = '<tool_call>\n{"name": "read_file", "args": {"path": "x.py",}}\n</tool_call>'
+        calls = parse_tool_calls(text, tool_names={"read_file"})
+        assert len(calls) == 1
+        assert calls[0].args == {"path": "x.py"}
+
+    def test_triple_quoted_plus_trailing_comma(self):
+        text = (
+            '<tool_call>\n'
+            '{"name": "write_file", "args": {"path": "a.py", "content": """x = 1""",}}\n'
+            '</tool_call>'
+        )
+        calls = parse_tool_calls(text, tool_names={"write_file"})
+        assert len(calls) == 1
+        assert calls[0].args["content"] == "x = 1"
