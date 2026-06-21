@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from typing import Iterator, List, Optional
 
@@ -15,6 +16,16 @@ from localm.inference.backends.base import BaseBackend
 from localm.inference.textnorm import scrub_stream
 
 console = Console()
+
+
+# Process-global model-load lock. Loading a model onto the GPU is the dangerous,
+# memory-spiking step; running two loads at once (e.g. a chat request and a
+# background job, each with its own Engine) thrashes VRAM, garbles the interleaved
+# console output, and can freeze the machine. Serialise every load process-wide so
+# only one model is ever loading at a time. Inference itself is NOT held here, only
+# the load. RLock (not Lock) so a re-entrant load on the same thread cannot
+# deadlock.
+_LOAD_LOCK = threading.RLock()
 
 
 # A bare config.json is not enough to call a directory a model: localm's own
@@ -132,11 +143,12 @@ class Engine:
         device: Optional[str] = None,
         display_name: Optional[str] = None,
     ) -> None:
-        import threading
         self.model_path = model_path
         self.display_name = display_name or model_display_name(model_path)
-        # Serialise load() across threads (HTTP requests vs background preload)
-        self._load_lock = threading.Lock()
+        # Every Engine shares the one process-global load lock (see _LOAD_LOCK), so
+        # loads serialise across the server, jobs, and embeds, not just within a
+        # single Engine instance.
+        self._load_lock = _LOAD_LOCK
         self._backend = create_backend(
             model_path,
             mmproj_path=mmproj_path,
@@ -151,8 +163,7 @@ class Engine:
 
     def load(self) -> None:
         if not hasattr(self, "_load_lock"):
-            import threading
-            self._load_lock = threading.Lock()
+            self._load_lock = _LOAD_LOCK
         with self._load_lock:
             if self._backend.loaded:
                 return
@@ -207,7 +218,9 @@ class Engine:
         loaded model does not support embeddings.
         """
         if not self._backend.loaded:
-            self._backend.load()
+            with _LOAD_LOCK:
+                if not self._backend.loaded:
+                    self._backend.load()
         return self._backend.embed(texts)
 
     def chat_stream(
@@ -222,12 +235,17 @@ class Engine:
         grammar: Optional[str] = None,
         seed: Optional[int] = None,
     ) -> Iterator[str]:
-        # Auto-reload if the model was unloaded (e.g. to free VRAM for image gen)
+        # Auto-reload if the model was unloaded (e.g. to free VRAM for image gen).
+        # Hold the process-global load lock so a reload cannot race another load
+        # (chat vs job vs embed) onto the GPU, and double-check inside the lock so
+        # we do not reload a model another thread just brought back.
         if not self._backend.loaded:
-            console.print(
-                f"[dim]Reloading [bold]{self.display_name}[/bold]…[/dim]"
-            )
-            self._backend.load()
+            with _LOAD_LOCK:
+                if not self._backend.loaded:
+                    console.print(
+                        f"[dim]Reloading [bold]{self.display_name}[/bold]…[/dim]"
+                    )
+                    self._backend.load()
 
         cfg = load_config()
         # Normalise model-internal control markers (harmony/Gemma channel tags,

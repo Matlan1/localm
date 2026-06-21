@@ -39,9 +39,15 @@ const JOB = {
   last_result_id: "2026-06-17T00-00-00",
 };
 
+// Installed models as /api/models returns them: {models:[{name,active,...}],active}.
+const MODELS = [
+  { name: "chat-model", active: true },
+  { name: "coder-model", active: false },
+];
+
 // Build a fresh jsdom env per test, install it as the module's globals, and
 // return { window, calls } where calls records every fetch (method + url).
-function makeEnv({ jobs = [JOB] } = {}) {
+function makeEnv({ jobs = [JOB], models = MODELS, active = "chat-model" } = {}) {
   const dom = new JSDOM(
     `<!DOCTYPE html><html><body><main id="main"></main></body></html>`,
     { url: "http://localhost:8642/" });
@@ -54,6 +60,9 @@ function makeEnv({ jobs = [JOB] } = {}) {
     calls.push({ url: String(url), method, body: opts.body });
     if (method === "GET" && /\/api\/jobs$/.test(url)) {
       return { ok: true, status: 200, json: async () => ({ jobs }) };
+    }
+    if (method === "GET" && /\/api\/models$/.test(url)) {
+      return { ok: true, status: 200, json: async () => ({ models, active }) };
     }
     if (method === "POST" && /\/api\/jobs\/[^/]+\/run$/.test(url)) {
       return { ok: true, status: 200,
@@ -134,6 +143,24 @@ test("Run now issues a POST to /api/jobs/<id>/run", async () => {
   const ran = calls.find(
     (c) => c.method === "POST" && c.url.endsWith(`/api/jobs/${JOB.id}/run`));
   assert.ok(ran, "clicking Run now POSTs to /api/jobs/<id>/run");
+});
+
+test("the Model field is a dropdown populated from /api/models", async () => {
+  const { win, calls } = makeEnv();
+  const mod = await importJobs();
+  await mod.register({ toast: () => {}, authHeaders: () => ({}) });
+  await settle();   // let the async populateModels() fetch resolve
+
+  const sel = win.document.getElementById("jobs-model");
+  assert.ok(sel, "the Model field exists");
+  assert.equal(sel.tagName, "SELECT",
+    "the Model field is a <select>, not a free-text input");
+  const values = [...sel.options].map((o) => o.value);
+  assert.ok(values.includes(""), "keeps a blank = active/default option");
+  assert.ok(values.includes("chat-model") && values.includes("coder-model"),
+    "installed model names are added as options");
+  assert.ok(calls.some((c) => c.method === "GET" && /\/api\/models$/.test(c.url)),
+    "the dropdown is sourced from GET /api/models");
 });
 
 test("authHeaders() is applied to the list fetch", async () => {

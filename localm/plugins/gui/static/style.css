@@ -827,6 +827,33 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
   font-size: 11.5px; color: var(--text-dim);
 }
 
+/* jobs list: without these rules the name/state and schedule/task/last-run
+   spans collapse together ("look up the weatherenabled", "every 1mtask: chat"). */
+.jobs-list { display: flex; flex-direction: column; gap: 10px; }
+.job-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+.job-head { display: flex; align-items: center; gap: 10px; }
+.job-name { font-weight: 600; }
+.job-state {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+.job-state.on { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.job-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  align-items: center;
+  margin-top: 6px;
+}
+.job-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+
 .job-log {
   background: var(--code-bg);
   border: 1px solid var(--border);

@@ -272,8 +272,12 @@ export function register(ctx) {
     const schedHint = el("div", "sub",
       "interval: seconds between runs (e.g. 3600). cron: minute hour dom month dow.");
 
-    const model = inputRow("Model (optional)", "text", "jobs-model",
-      "blank = active/default model");
+    // Model is a dropdown of installed models (blank = active/default). It is
+    // populated asynchronously from /api/models so the form renders immediately.
+    const model = selectRow("Model (optional)", "jobs-model", [
+      ["", "active / default model"],
+    ]);
+    populateModels(model.querySelector("select"));
     const cwd = inputRow("Working dir (coder jobs)", "text", "jobs-cwd",
       "required for coder jobs");
     const scope = inputRow("Scope glob (optional, coder)", "text", "jobs-scope",
@@ -297,7 +301,7 @@ export function register(ctx) {
         prompt: promptTa.value,
         schedule_kind: kind,
         schedule,
-        model: model.querySelector("input").value.trim() || null,
+        model: model.querySelector("select").value.trim() || null,
         cwd: cwd.querySelector("input").value.trim() || null,
         scope: scope.querySelector("input").value.trim() || null,
       };
@@ -316,6 +320,27 @@ export function register(ctx) {
     };
 
     return card;
+  }
+
+  // Fill a <select> with the installed models (from /api/models). Best-effort:
+  // on any failure the field keeps just its "active / default" option and stays
+  // usable. Uses raw fetch (not api(), which is namespaced to /api/jobs).
+  async function populateModels(sel) {
+    try {
+      const r = await fetch("/api/models", { headers: authHeaders() });
+      if (!r.ok) return;
+      const data = await r.json();
+      for (const m of (data && data.models) || []) {
+        const name = m && m.name;
+        if (!name) continue;
+        const opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = m.active ? `${name} (active)` : name;
+        sel.appendChild(opt);
+      }
+    } catch {
+      /* leave just the default option */
+    }
   }
 
   function inputRow(label, type, id, placeholder) {
