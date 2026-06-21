@@ -37,10 +37,3 @@ def decode_audio(b64: str, fmt: str) -> Tuple[np.ndarray, int]:
     buf = io.BytesIO(raw)
     samples, sr = sf.read(buf, dtype="float32")
     return samples, sr
-
-
-def pil_to_data_uri(img) -> str:
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG")
-    b64 = base64.b64encode(buf.getvalue()).decode()
-    return f"data:image/jpeg;base64,{b64}"

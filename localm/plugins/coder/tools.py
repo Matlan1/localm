@@ -21,10 +21,7 @@ import sys
 import textwrap
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Optional
-
-if TYPE_CHECKING:
-    pass
+from typing import Any, Callable, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -101,12 +98,6 @@ def _render_notebook(nb: dict) -> str:
                     parts.append("".join(out_lines).rstrip())
         parts.append("")
     return "\n".join(parts)
-
-
-def _resolve(cwd: Path, path: str) -> Path:
-    """Resolve a possibly-relative path against cwd."""
-    p = Path(path)
-    return p if p.is_absolute() else cwd / p
 
 
 def _confine(cwd: Path, path: str) -> Path:
