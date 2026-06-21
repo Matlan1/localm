@@ -44,6 +44,9 @@ class Applies:
 
 _PRIVACY = ["privacy", "log", "full"]
 _PRIVACY_INHERIT = ["", "privacy", "log", "full"]   # "" = inherit the global mode
+# Sidebar wordmark treatments (see config.py logo_style). Shared by the web GUI
+# logo picker and the desktop launcher; kept here so PATCH /v1/config validates.
+LOGO_STYLE_IDS = ["local-m", "loca-lm", "localm"]
 
 
 @dataclass
@@ -120,6 +123,13 @@ CORE_FIELDS: list = [
     SettingField("require_auth", Widget.TOGGLE, "Require an API key",
                  "Refuse requests until a key is configured (fail closed).",
                  group="Security", applies=Applies.RESTART),
+    # ---- Interface ----
+    # HIDDEN: chosen with the logo picker in the GUI (Settings -> GUI), not a
+    # form control. Accepted by PATCH /v1/config so the launcher stays in sync.
+    SettingField("logo_style", Widget.HIDDEN, "Logo style",
+                 "Sidebar wordmark treatment, chosen with the logo picker and "
+                 "shared with the desktop launcher.",
+                 group="General"),
     # ---- Privacy ----
     SettingField("mode", Widget.SELECT, "Session persistence",
                  "privacy = nothing saved; log = JSONL audit; full = log + transcript.",
@@ -292,6 +302,11 @@ def _validate_one(key: str, val, field: "SettingField", default):
         return _to_str_list(key, val)
 
     if widget == Widget.HIDDEN:
+        if key == "logo_style":
+            s = str(val)
+            if s in LOGO_STYLE_IDS:
+                return s
+            raise ValueError(f"{key}: {val!r} is not one of {LOGO_STYLE_IDS}")
         # plugins_enabled (list) / plugins (dict): managed by the engine, not the
         # settings form, but accepted with the right container type for the
         # GET->PATCH round-trip the GUI does.

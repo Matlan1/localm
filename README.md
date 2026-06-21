@@ -1,4 +1,4 @@
-# localm
+# LocaLM
 
 **Run local LLMs offline, then build on them.**
 
@@ -6,7 +6,7 @@
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Platform: Windows | Linux](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey)
 
-localm runs GGUF models through a pure-Python ctypes binding to `llama.dll`
+LocaLM runs GGUF models through a pure-Python ctypes binding to `llama.dll`
 (no `llama-cpp-python`), runs HuggingFace Transformers models, and exposes both
 through an OpenAI-compatible HTTP server. At its core it is a **model loader
 plus a plugin engine**: the only always-present feature is **chat**, shipped as
