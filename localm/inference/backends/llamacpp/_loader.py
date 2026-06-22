@@ -133,6 +133,28 @@ def rocm_runtime_dirs() -> List[Path]:
     return found
 
 
+def _ensure_rocblas_tensile_path() -> None:
+    """Point rocBLAS at its Tensile library if the caller has not already.
+
+    The bundled rocm-sdk wheel ships ``rocblas/library/*.dat`` (the gfx-specific
+    GEMM kernels), but rocBLAS otherwise looks beside its own DLL - often an empty
+    location in our layout - and aborts a GEMM with "Cannot read
+    TensileLibrary.dat". Text matmuls have a fallback, but the multimodal/clip
+    encode (mtmd, GGUF vision) needs Tensile, so set ``ROCBLAS_TENSILE_LIBPATH``
+    best-effort. No-op when already set or when no such directory exists (non-ROCm
+    builds, or a runtime without the rocm-sdk wheel)."""
+    if os.environ.get("ROCBLAS_TENSILE_LIBPATH"):
+        return
+    for d in rocm_runtime_dirs():
+        lib = d / "rocblas" / "library"
+        try:
+            if lib.is_dir():
+                os.environ["ROCBLAS_TENSILE_LIBPATH"] = str(lib)
+                return
+        except OSError:
+            continue
+
+
 def _add_to_search_path(directory: Path) -> None:
     """Make *directory* resolvable by the OS loader for transitive deps."""
     if sys.platform == "win32":
@@ -302,6 +324,7 @@ def load_lib() -> ctypes.CDLL:
     _add_to_search_path(binary_dir)
     for d in rocm_runtime_dirs():
         _add_to_search_path(d)
+    _ensure_rocblas_tensile_path()
 
     # Pre-load ggml deps (dependency order: base < cpu < hip/vulkan < ggml,
     # which sorts correctly since '-'/'.' precede the suffix) by absolute path,
