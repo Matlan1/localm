@@ -56,8 +56,9 @@ localm job remove <job_id>      # delete the job and its stored results
 
 | Option | Meaning |
 |---|---|
-| `--prompt` (required) | The prompt to run on schedule. |
-| `--cron "M H Dom Mon Dow"` | A 5-field cron schedule (0 = Sunday). Mutually exclusive with `--every`. |
+| `--prompt` | The prompt to run on schedule (required for chat/coder jobs; omit for `--memory`). |
+| `--memory` | Synthesise durable facts from recent sessions into the assistant memory; needs no `--prompt`. |
+| `--cron "M H Dom Month Dow"` | A 5-field cron schedule: minute, hour, day-of-month, month, day-of-week (0 = Sunday). Mutually exclusive with `--every`. |
 | `--every SECONDS` | Interval schedule in seconds. Defaults to hourly if neither schedule flag is given. |
 | `--coder` | Run a coder agent task instead of a chat prompt. |
 | `--cwd DIR` | Working directory for a coder job. |

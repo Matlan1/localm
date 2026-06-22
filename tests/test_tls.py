@@ -221,3 +221,53 @@ def test_key_files_are_owner_only_on_posix(tmp_path):
     _, key_path = tls.ensure_cert(tmp_path)
     mode = stat.S_IMODE(__import__("os").stat(key_path).st_mode)
     assert mode == 0o600
+
+
+# ------------------------------------------------------------------ #
+#  companion_addresses (the phone-reachable LAN / Tailscale address)  #
+# ------------------------------------------------------------------ #
+
+def test_is_tailscale_ip_cgnat_range():
+    assert tls.is_tailscale_ip("100.101.102.103") is True   # 100.64.0.0/10
+    assert tls.is_tailscale_ip("100.63.255.255") is False   # just below CGNAT
+    assert tls.is_tailscale_ip("192.168.1.50") is False
+    assert tls.is_tailscale_ip("not-an-ip") is False
+
+
+def test_companion_addresses_picks_lan_and_tailscale(monkeypatch):
+    # Primary outbound is the LAN address; the candidate pool also offers a
+    # Tailscale (CGNAT), loopback, and link-local address that must NOT leak in.
+    monkeypatch.setattr(tls, "_primary_lan_ip", lambda: "192.168.1.50")
+    monkeypatch.setattr(tls, "_host_ips", lambda: ["127.0.0.1", "169.254.3.4"])
+    monkeypatch.setattr(tls, "_iface_ips", lambda: ["100.101.102.103", "192.168.1.50"])
+    addrs = tls.companion_addresses()
+    assert addrs == {"lan": "192.168.1.50", "tailscale": "100.101.102.103"}
+
+
+def test_companion_addresses_tailscale_absent_is_empty(monkeypatch):
+    monkeypatch.setattr(tls, "_primary_lan_ip", lambda: "10.0.0.7")
+    monkeypatch.setattr(tls, "_host_ips", lambda: ["127.0.0.1"])
+    monkeypatch.setattr(tls, "_iface_ips", lambda: [])
+    addrs = tls.companion_addresses()
+    assert addrs["lan"] == "10.0.0.7"
+    assert addrs["tailscale"] == ""
+
+
+def test_companion_addresses_never_raises_and_has_both_keys(monkeypatch):
+    # Even with nothing detectable (every probe empty) it returns the shape.
+    monkeypatch.setattr(tls, "_primary_lan_ip", lambda: "")
+    monkeypatch.setattr(tls, "_host_ips", lambda: [])
+    monkeypatch.setattr(tls, "_iface_ips", lambda: [])
+    addrs = tls.companion_addresses()
+    assert addrs == {"lan": "", "tailscale": ""}
+
+
+def test_companion_addresses_skips_loopback_only_primary(monkeypatch):
+    # A loopback "primary" (e.g. Linux gethostbyname returning 127.0.1.1) must
+    # not be shown as a LAN address; a real private IP from another probe wins.
+    monkeypatch.setattr(tls, "_primary_lan_ip", lambda: "127.0.1.1")
+    monkeypatch.setattr(tls, "_host_ips", lambda: ["127.0.1.1"])
+    monkeypatch.setattr(tls, "_iface_ips", lambda: ["192.168.50.10"])
+    addrs = tls.companion_addresses()
+    assert addrs["lan"] == "192.168.50.10"
+    assert addrs["tailscale"] == ""

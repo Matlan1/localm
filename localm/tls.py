@@ -172,6 +172,69 @@ def is_tailscale_ip(value: str) -> bool:
         return False
 
 
+def _iface_ips() -> list[str]:
+    """Every IPv4 bound to a local interface, via psutil when it is installed
+    (the ``[monitor]`` extra). Catches a Tailscale address that hostname
+    resolution misses - notably on Linux, where ``gethostbyname_ex`` often
+    returns only loopback. Empty when psutil is absent; never raises."""
+    out: list[str] = []
+    try:
+        import psutil
+    except Exception:
+        return out
+    try:
+        for addrs in psutil.net_if_addrs().values():
+            for a in addrs:
+                if getattr(a, "family", None) == socket.AF_INET:
+                    out.append(a.address)
+    except Exception:
+        pass
+    return out
+
+
+def companion_addresses() -> dict:
+    """Best-effort ``{"lan": ip, "tailscale": ip}`` for the Companion-app card, so
+    a phone is shown a REACHABLE address instead of the meaningless loopback one
+    (``127.0.0.1`` on a phone is the phone itself).
+
+    ``lan`` is this machine's primary private (RFC 1918) IPv4 - the interface a
+    phone on the same Wi-Fi reaches; ``tailscale`` is a 100.64.0.0/10 (CGNAT)
+    address when Tailscale is up, else "". Either may be "" when it cannot be
+    determined. Purely informational - never raises."""
+    lan = ""
+    tailscale = ""
+    primary = _norm_ip(_primary_lan_ip()) or ""
+    seen: set[str] = set()
+    # Candidate IPv4s this machine owns: the primary outbound interface first
+    # (the preferred LAN pick), then hostname + per-interface addresses.
+    for ip in (primary, *_host_ips(), *_iface_ips()):
+        norm = _norm_ip(ip)
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        try:
+            addr = ipaddress.ip_address(norm)
+        except ValueError:
+            continue
+        if addr.version != 4:
+            continue
+        # Check Tailscale BEFORE is_private: Python treats 100.64.0.0/10 as
+        # private, so this ordering keeps a Tailscale IP out of the LAN slot.
+        if is_tailscale_ip(norm):
+            if not tailscale:
+                tailscale = norm
+            continue
+        if addr.is_loopback or addr.is_link_local or not addr.is_private:
+            continue
+        # The primary outbound interface always wins the LAN slot; otherwise
+        # take the first private address seen.
+        if norm == primary:
+            lan = norm
+        elif not lan:
+            lan = norm
+    return {"lan": lan, "tailscale": tailscale}
+
+
 def requests_verify(url: str):
     """The value to pass as ``requests``' ``verify=`` for an in-process call to
     *url*.

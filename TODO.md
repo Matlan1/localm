@@ -18,9 +18,11 @@ The verifiable source of truth for what actually works is, in order:
 1. `issues/audit-ground-truth-2026-06-16.md` + `qa/test-plans/` - the per-subsystem
    audit and adversarial test plans (claimed-vs-actual, with file:line evidence).
    (The by-hand test campaign - matrix, results, plans, recorder - lives in `qa/`.)
-2. The test suite + CI: `pytest` (~1556 tests) and `npm test` (the GUI jsdom harness),
-   run by GitHub Actions on every PR. A feature is "done" here only when a test fails
-   without the fix and passes with it.
+2. The test suite: `pytest` (~2264 tests) and `npm test` (the GUI jsdom harness). A CI
+   workflow exists (`.github/workflows/ci.yml`), but GitHub Actions is currently disabled
+   (quota), so PRs are verified LOCALLY (`ruff check .` + the full suite; see the note at
+   the end of this file). A feature is "done" here only when a test fails without the fix
+   and passes with it.
 
 Several `[x]` items the audit proved were facades have since been genuinely fixed and
 test-guarded (settings page / `--scope` confinement / MCP `--print-config` / B4 media

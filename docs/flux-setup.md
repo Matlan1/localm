@@ -28,9 +28,8 @@ localm config comfy_launch_cmd "D:\path\to\comfyui.bat"
 ```
 
 Quantized FLUX dev (Q8_0) generates in roughly 30 to 60 seconds on a 16 GB
-card. On AMD, a native Windows ROCm environment works well; the decisions
-behind that setup are recorded in
-[archive/rocm-migration.md](archive/rocm-migration.md).
+card. On AMD, a native Windows ROCm environment works well; the AMD ROCm /
+HIP setup is documented in [gpu-setup.md](gpu-setup.md).
 
 ## How localm drives it
 

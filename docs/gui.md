@@ -75,7 +75,7 @@ same flows (file / folder / URL).
   "Voice" settings group and has no tab of its own; `speechSynthesis` remains
   the fallback whenever the plugin is not installed or its model has not
   loaded.
-- Conversation persistence follows the session mode. In `privacy` (the default) conversations live in memory only and vanish on reload. In `log`/`full` they are saved to `chats/` in the localm data directory (with localStorage as a cache), so they survive reloads, browser profile wipes, and server restarts. Deleting one removes it everywhere.
+- Conversation persistence follows the session mode. In `privacy` (the default) conversations live in memory only and vanish on reload. In `log`/`full` they are saved to `sessions/` in the localm data directory (with localStorage as a cache), so they survive reloads, browser profile wipes, and server restarts. Deleting one removes it everywhere.
 - The sidebar search filters chats by title **and** message content (content
   matches show a snippet). Hover a chat for 📌 pin-to-top and 📁 move-to-folder;
   folders are collapsible groups, and `/pin` and `/folder <name>` do the same

@@ -22,7 +22,7 @@ localm is a local-first, single-owner application. API access is gated by a
   routes (`GET /v1/models`, `GET /v1/models/{id}`) need `models:read`, plugin
   routes their per-plugin scope, key/config/plugin administration their privileged
   scopes (the owner key implies every scope). The sole exception is `GET /health`,
-  an unauthenticated liveness probe that returns only the model name and load state.
+  an unauthenticated liveness probe that returns the status, model name, and load state.
 
 Manage the key from the CLI: `localm key show` / `generate` / `set` / `clear`, and
 mint named, scope-limited keys with `localm key create --scope <scope>` (privileged
@@ -62,8 +62,9 @@ header cannot be used as a management credential.
 Some capabilities reach the host filesystem and process by design, bounded by the
 localm process's own permissions rather than a sandbox:
 
-- **`coder`** runs shell commands and reads/writes files (the `--scope` glob narrows
-  *which* files; `run_shell` is intentionally unscoped).
+- **`coder:full`** runs shell commands and reads/writes files (the `--scope` glob
+  narrows *which* files; `run_shell` is intentionally unscoped). The plain **`coder`**
+  scope is restricted - read plus confined file edits within the scope, no shell.
 - **`rag`** indexing over the HTTP API is confined to your home folder and the
   working directory and refuses the localm data dir and credential folders
   (`~/.ssh`, ...), so an API client cannot index-and-read arbitrary system files.
