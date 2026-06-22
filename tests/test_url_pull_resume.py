@@ -71,6 +71,22 @@ class TestUrlPull:
         assert "Range" not in cap["headers"]               # nothing to resume
         reg_spy.assert_called_once()
 
+    def test_gui_mode_streams_json_progress(self, url_env, monkeypatch, capsys):
+        # In GUI mode (LOCALM_PROGRESS_JSON=1) a direct-URL pull must stream the
+        # same PROGRESS_SENTINEL JSON lines the GUI parses, not just a Rich bar it
+        # cannot render - else a URL download looks frozen until it finishes (G1).
+        import json
+        _, _ = url_env
+        monkeypatch.setenv("LOCALM_PROGRESS_JSON", "1")
+        _wire_http(monkeypatch, 10, _resp(200, b"0123456789"))
+        mm._pull_url("http://example.com/model.gguf", "mymodel")
+        out = capsys.readouterr().out
+        lines = [l for l in out.splitlines() if mm.PROGRESS_SENTINEL in l]
+        assert lines, "GUI mode must stream progress sentinels for a direct-URL pull"
+        payloads = [json.loads(l.split(mm.PROGRESS_SENTINEL, 1)[1]) for l in lines]
+        assert any(p.get("total") == 10 for p in payloads)   # known size reported
+        assert payloads[-1]["downloaded"] == 10              # finishes at 100%
+
     def test_resume_appends_from_part_file(self, url_env, monkeypatch):
         models, _ = url_env
         (models / "model.gguf.part").write_bytes(b"01234")   # 5 bytes already have

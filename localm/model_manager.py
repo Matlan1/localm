@@ -1100,20 +1100,39 @@ def _pull_url(
     content_length = int(r.headers.get("content-length", 0))
     total_display  = (already_have + content_length) or None
 
-    with Progress(
-        TextColumn("[bold blue]{task.description}"),
-        BarColumn(),
-        DownloadColumn(),
-        TransferSpeedColumn(),
-        TimeRemainingColumn(),
-        console=console,
-    ) as prog:
-        task = prog.add_task(filename, total=total_display, completed=already_have)
+    def _write_chunks(on_chunk=None):
         mode = "ab" if already_have else "wb"
         with open(part_file, mode) as f:
             for chunk in r.iter_content(65536):
                 f.write(chunk)
-                prog.update(task, advance=len(chunk))
+                if on_chunk is not None:
+                    on_chunk(len(chunk))
+
+    if os.environ.get("LOCALM_PROGRESS_JSON") == "1":
+        # GUI mode: stream JSON progress polled from the .part file on disk - the
+        # same mechanism the HuggingFace path uses (_download_progress). Direct-URL
+        # pulls used to emit only a Rich bar, which the GUI cannot render, so a URL
+        # download looked frozen until it finished (G1). Skip the Rich bar here:
+        # there is no terminal, and its ANSI would only clutter the captured stdout
+        # the GUI parses.
+        def _part_bytes() -> int:
+            try:
+                return part_file.stat().st_size
+            except OSError:
+                return 0
+        with _snapshot_progress(_part_bytes, total_display or 0):
+            _write_chunks()
+    else:
+        with Progress(
+            TextColumn("[bold blue]{task.description}"),
+            BarColumn(),
+            DownloadColumn(),
+            TransferSpeedColumn(),
+            TimeRemainingColumn(),
+            console=console,
+        ) as prog:
+            task = prog.add_task(filename, total=total_display, completed=already_have)
+            _write_chunks(lambda n: prog.update(task, advance=n))
 
     # Atomically rename on successful completion
     part_file.rename(dest)
