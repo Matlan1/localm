@@ -152,7 +152,7 @@ def recommended_install_backend(det: "Detection | None" = None) -> str:
 def recommended_torch_variant(backend: str, det: "Detection | None" = None) -> str:
     """The PyTorch variant the INSTALLER should provision for the HuggingFace /
     transformers backend, given the user's chosen llama.cpp *backend* and the
-    detected hardware. Returns "cuda" | "rocm" | "none". Both setup.bat and
+    detected hardware. Returns "cuda" | "rocm" | "xpu" | "none". Both setup.bat and
     setup.sh call this (via ``python -m localm.hwdetect torch <backend>``) AFTER the
     backend pick, so the GGUF runtime choice and the HF torch choice stay coherent.
 
@@ -163,27 +163,35 @@ def recommended_torch_variant(backend: str, det: "Detection | None" = None) -> s
 
       * ``cuda`` backend           -> cuda   (the user asked for the NVIDIA path)
       * ``amd-rocm`` / ``hip``     -> rocm   (the user asked for the AMD path)
+      * ``sycl`` backend           -> xpu    (explicit Intel GGUF pick -> Intel HF torch)
       * ``cpu`` backend            -> none   (no GPU; HF torch is opt-in, see installer)
-      * ``vulkan`` / ``own`` / other -> cuda when an NVIDIA GPU is present (CUDA torch
-                                       is a clean pip wheel, no toolkit), else none.
-                                       NEVER rocm: a vendor-neutral pick must not drag
-                                       in the ROCm stack.
+      * ``vulkan`` / ``own`` / other -> cuda when an NVIDIA GPU is present, xpu when an
+                                       Intel GPU is present (both clean pip wheels that
+                                       self-provision their runtime; the xpu wheels carry
+                                       the oneAPI runtime), else none. NEVER rocm on a
+                                       vendor-neutral pick.
 
-    "none" means the installer SKIPS the heavy torch stack and tells the user how to
-    add CPU / CUDA / ROCm torch themselves: honest, no surprise download, and no
+    "none" means the installer SKIPS the heavy torch stack and tells the user how to add
+    CPU / CUDA / ROCm / Intel-XPU torch themselves: honest, no surprise download, and no
     wrong-vendor stack installed behind their back."""
     b = (backend or "").strip().lower()
     if b == "cuda":
         return "cuda"
     if b in ("amd-rocm", "rocm", "hip"):
         return "rocm"
+    if b == "sycl":
+        return "xpu"          # explicit Intel GGUF pick -> Intel HF torch (xpu)
     if b == "cpu":
         return "none"
-    # vulkan / own / metal / unknown / empty: vendor-neutral runtime choice. Offer
-    # CUDA torch only when NVIDIA is present (a no-toolkit wheel); never ROCm.
+    # vulkan / own / metal / unknown / empty: vendor-neutral runtime choice. Route the HF
+    # torch by the DETECTED GPU: NVIDIA -> cuda, Intel -> xpu (both clean pip wheels that
+    # self-provision; the xpu wheels carry the oneAPI runtime). Never ROCm on a neutral
+    # pick. No GPU signal -> none.
     d = det or detect()
     if "nvidia" in d.vendors:
         return "cuda"
+    if "intel" in d.vendors:
+        return "xpu"
     return "none"
 
 
