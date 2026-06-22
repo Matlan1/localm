@@ -2,7 +2,9 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- viewport-fit=cover lets env(safe-area-inset-*) report the notch / home-bar
+     insets so the composer and top bar can pad around them on phones. -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>LocaLM</title>
 <link rel="manifest" href="/manifest.webmanifest">
 <meta name="theme-color" content="#0f1115">
@@ -73,6 +75,9 @@
       <button id="nav-toggle" aria-label="Open menu" aria-controls="sidebar"
               aria-expanded="false">&#9776;</button>
       <div class="mtb-title">local<span>m</span></div>
+      <!-- New-chat compose button: on a phone the sidebar (with its + button) is
+           a closed drawer, so surface "new chat" right in the top bar. -->
+      <button id="mtb-new" aria-label="New chat" title="New chat">&#43;</button>
     </div>
 
     <!-- ============ CHAT ============ -->
@@ -108,7 +113,7 @@
           <button class="attach chat-camera" id="chat-camera" title="Take a photo with the camera">&#128247;</button>
           <input type="file" id="chat-file" accept="image/*,.pdf,.docx,.txt,.md,.markdown,.rst,.html,.htm,.ipynb,.json,.jsonl,.yaml,.yml,.toml,.csv,.tsv,.log,.py,.js,.ts,.java,.c,.h,.cpp,.cs,.go,.rs,.rb,.sh,.ps1,.sql,.xml,.css" multiple style="display:none">
           <input type="file" id="chat-camera-file" accept="image/*" capture="environment" style="display:none">
-          <textarea id="chat-input" rows="1" placeholder="Message the model…  (Enter to send · Shift+Enter for a new line)"></textarea>
+          <textarea id="chat-input" rows="1" placeholder="Message the model…" title="Enter to send · Shift+Enter for a new line"></textarea>
           <button class="send" id="chat-send" title="Send">&#10148;</button>
         </div>
         <div class="composer-row">
@@ -194,7 +199,7 @@
         <div class="composer">
           <button class="attach" id="coder-attach" title="Attach text files - their content is added to your message">&#128206;</button>
           <input type="file" id="coder-file" accept=".pdf,.docx,.txt,.md,.markdown,.rst,.html,.htm,.ipynb,.json,.jsonl,.yaml,.yml,.toml,.csv,.tsv,.log,.py,.js,.ts,.java,.c,.h,.cpp,.cs,.go,.rs,.rb,.sh,.ps1,.sql,.xml,.css" multiple style="display:none">
-          <textarea id="coder-input" rows="1" placeholder="Describe a task for the agent…  (Enter to send · Shift+Enter for a new line)"></textarea>
+          <textarea id="coder-input" rows="1" placeholder="Describe a task for the agent…" title="Enter to send · Shift+Enter for a new line"></textarea>
           <button class="send" id="coder-send" title="Send">&#10148;</button>
         </div>
         <div class="composer-row">

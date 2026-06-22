@@ -2954,6 +2954,11 @@ $("compact-conv").onclick = async () => {
   await compactConversation(conv);
 };
 $("new-conv").onclick = () => { newConversation(); showView("chat"); };
+// Mobile top-bar new-chat button mirrors the sidebar +; also closes the drawer
+// if it happened to be open. Guarded for the headless/jsdom DOM.
+if ($("mtb-new")) {
+  $("mtb-new").onclick = () => { newConversation(); showView("chat"); closeNav(); };
+}
 
 /* ================================================================ */
 /*  Coder - multi-session                                            */
