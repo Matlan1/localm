@@ -250,7 +250,18 @@ class HFBackend(BaseBackend):
             # GPU explicitly. device_map="auto" is unreliable on consumer Arc (many
             # parts do not implement the free-memory query accelerate needs), so we
             # place the whole model with .to("xpu") rather than auto-sharding it.
-            self._model = self._model.to("xpu")
+            # A single-device "cpu" map attaches no accelerate hook, so this .to()
+            # moves the whole model (verified vs accelerate dispatch_model + the HF
+            # Intel-Arc guide). PENDING real-Arc verification (dev box is AMD): that
+            # this move, and the model.device-based input placement in chat_stream/
+            # embed, actually run on the Intel GPU end to end.
+            try:
+                self._model = self._model.to("xpu")
+            except Exception as e:
+                raise RuntimeError(
+                    f"loaded the model but could not place it on the Intel GPU (xpu): "
+                    f"{e}. Check the Intel GPU driver and that torch was installed from "
+                    "the xpu wheel index.") from e
 
         self._loaded = True
         mm_note = " (multimodal)" if self._is_multimodal else ""
