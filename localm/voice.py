@@ -70,12 +70,34 @@ def stt_model_cached() -> tuple[bool, str]:
 def transcribe_bytes(data: bytes, language: Optional[str] = None) -> str:
     """Transcribe an audio blob (webm/ogg/wav/mp3 - anything PyAV decodes).
     Loads and caches the Whisper model on first call."""
+    # SRV-1: reject an empty recording up front, before importing or touching the
+    # native stack, so a 0-byte blob (a mic that captured nothing) is a clean
+    # client error rather than feeding nothing into the decoder.
+    if not data:
+        raise VoiceError("Empty recording (no audio was captured).")
+
     try:
         from faster_whisper import WhisperModel
+        from faster_whisper.audio import decode_audio
     except ImportError:
         raise VoiceError(
             "Speech-to-text needs the faster-whisper package. Install it "
             "with: pip install \"localm[voice]\"")
+
+    # SRV-1: decode the container to PCM in Python FIRST, before the native
+    # transcription path. PyAV raises an ordinary Python exception on an empty,
+    # truncated or non-audio blob, whereas handing raw bytes straight to the
+    # model can fault at the C level - a crash no Python except can catch, which
+    # takes the whole server down (the reported "server dead" on a bad/silent
+    # recording). Decoding here converts those into a clean VoiceError and lets
+    # us reject a recording that holds no audio before it reaches the model.
+    try:
+        audio = decode_audio(io.BytesIO(data))
+    except Exception as e:
+        raise VoiceError(
+            f"Could not decode the recording (corrupt or unsupported audio): {e}")
+    if audio is None or len(audio) == 0:
+        raise VoiceError("No audio in the recording (it was empty or zero-length).")
 
     from localm.config import load_config
     cfg = load_config()
@@ -96,8 +118,10 @@ def transcribe_bytes(data: bytes, language: Optional[str] = None) -> str:
                     "or set a different model: localm config voice_stt_model tiny")
         model = _model
 
+    # Pass the already-decoded PCM array (not the raw bytes) so the native path
+    # never re-decodes an untrusted container.
     try:
-        segments, _info = model.transcribe(io.BytesIO(data), language=lang)
+        segments, _info = model.transcribe(audio, language=lang)
         text = " ".join(s.text.strip() for s in segments).strip()
     except Exception as e:
         raise VoiceError(f"Transcription failed: {e}")
