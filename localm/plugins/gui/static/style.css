@@ -1092,9 +1092,14 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
 .key-presets { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0; }
 .key-presets-label { margin-right: 2px; }
 .key-preset-btn { padding: 2px 10px; font-size: 12px; }
+.key-preset-del { margin-left: 6px; font-weight: 700; opacity: 0.55; cursor: pointer; }
+.key-preset-del:hover { opacity: 1; color: var(--danger, #d9534f); }
+.key-preset-save { font-size: 12px; opacity: 0.85; }
+.key-scope-disabled { opacity: 0.45; }
 .key-expiry-row { display: flex; align-items: center; gap: 8px; font-size: 13px; margin: 6px 0; }
 .key-expiry { width: auto; }
 .key-expiry-tag { white-space: nowrap; font-size: 12px; opacity: 0.7; }
+.key-lastused-tag { white-space: nowrap; font-size: 12px; opacity: 0.55; }
 .key-qr { margin-top: 10px; }
 .key-qr-img { width: 200px; max-width: 100%; }
 .key-qr-img svg { width: 100%; height: auto; display: block; background: #fff;

@@ -79,6 +79,20 @@ def test_no_expiry_never_expires(home):
     assert auth.verify(made["key"]) == {"chat"}
 
 
+# --- last-used (device hygiene) --------------------------------------------- #
+
+def test_verify_stamps_last_used_and_throttles(home):
+    from localm import auth
+    made = auth.create_key("phone", ["chat"])
+    by_id = lambda: {k["id"]: k for k in auth.list_keys()}[made["id"]]   # noqa: E731
+    assert by_id()["last_used"] is None              # never used yet
+    auth.verify(made["key"])
+    lu = by_id()["last_used"]
+    assert lu is not None                            # stamped on first use
+    auth.verify(made["key"])                         # within the throttle window
+    assert by_id()["last_used"] == lu                # not rewritten every request
+
+
 # --- presets ---------------------------------------------------------------- #
 
 def test_key_presets_seeded_in_defaults():

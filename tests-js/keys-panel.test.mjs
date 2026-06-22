@@ -100,28 +100,70 @@ test("keys panel: create with no scope checked does not POST", async () => {
   assert.equal(posts, 0);
 });
 
-test("keys panel: presets populate checkboxes; coder vs coder:full are distinct", async () => {
+test("keys panel: presets (from /v1/keys) populate checkboxes; coder vs coder:full distinct", async () => {
   const { window } = loadAppWithPages({
     fetchImpl: router({
-      "GET /v1/keys": () => ({ status: 200, body: { keys: [] } }),
-      "GET /v1/config": () => ({ status: 200, body: { key_presets: [
-        { name: "Companion", scopes: ["chat", "image"] },
-      ] } }),
+      "GET /v1/keys": () => ({ status: 200, body: { keys: [], is_owner: true,
+        presets: [{ name: "Companion", scopes: ["chat", "image"] }] } }),
     }),
   });
   await tick();
   await window.refreshKeysPanel();
-  await tick();                                 // buildKeyPresets is async
+  await tick();
   const cbs = [...window.document.querySelectorAll(".key-scope-cb")].map((c) => c.value);
   assert.ok(cbs.includes("coder") && cbs.includes("coder:full"),
             "coder and coder:full are separate checkboxes");
   const btn = [...window.document.querySelectorAll(".key-preset-btn")]
-    .find((b) => b.textContent === "Companion");
+    .find((b) => b.textContent.startsWith("Companion"));
   assert.ok(btn, "the Companion preset button rendered");
   btn.onclick();
   const checked = [...window.document.querySelectorAll(".key-scope-cb")]
     .filter((c) => c.checked).map((c) => c.value).sort();
   assert.deepEqual(checked, ["chat", "image"]);   // preset set exactly its scopes
+});
+
+test("keys panel: owner-only scopes (coder:full, admin) are disabled for a non-owner", async () => {
+  const { window } = loadAppWithPages({
+    fetchImpl: router({
+      "GET /v1/keys": () => ({ status: 200, body: { keys: [], is_owner: false, presets: [] } }),
+    }),
+  });
+  await tick();
+  await window.refreshKeysPanel();
+  await tick();
+  const byVal = {};
+  for (const c of window.document.querySelectorAll(".key-scope-cb")) byVal[c.value] = c;
+  assert.equal(byVal["coder:full"].disabled, true);
+  assert.equal(byVal["admin"].disabled, true);
+  assert.equal(byVal["coder"].disabled, false);     // plain coder stays available
+  assert.equal(byVal["chat"].disabled, false);
+  assert.equal(window.document.querySelector(".key-preset-save"), null);  // no edit for non-owner
+});
+
+test("keys panel: owner can save and delete a preset (PATCH /v1/config)", async () => {
+  let patched = null;
+  const { window } = loadAppWithPages({
+    fetchImpl: router({
+      "GET /v1/keys": () => ({ status: 200, body: { keys: [], is_owner: true,
+        presets: [{ name: "Old", scopes: ["chat"] }] } }),
+      "PATCH /v1/config": (_p, opts) => { patched = JSON.parse(opts.body); return { status: 200, body: {} }; },
+    }),
+  });
+  await tick();
+  await window.refreshKeysPanel();
+  await tick();
+  window.confirm = () => true;
+  const del = window.document.querySelector(".key-preset-del");
+  assert.ok(del, "owner sees a delete affordance");
+  del.onclick({ stopPropagation() {} });
+  await tick();
+  assert.equal(patched.key_presets.length, 0);      // "Old" removed
+  patched = null;
+  window.prompt = () => "Phone";
+  [...window.document.querySelectorAll(".key-scope-cb")].find((c) => c.value === "chat").checked = true;
+  window.document.querySelector(".key-preset-save").onclick();
+  await tick();
+  assert.ok(patched.key_presets.some((p) => p.name === "Phone" && p.scopes.includes("chat")));
 });
 
 test("keys panel: create threads expires and requests a pairing QR for the new key", async () => {

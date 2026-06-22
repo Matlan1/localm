@@ -199,7 +199,7 @@ def list_keys() -> list:
     return [
         {"id": r.get("id"), "name": r.get("name", ""),
          "scopes": r.get("scopes", []), "created": r.get("created"),
-         "expires": r.get("expires")}
+         "expires": r.get("expires"), "last_used": r.get("last_used")}
         for r in _load_keystore()
     ]
 
@@ -293,6 +293,37 @@ def any_key_configured() -> bool:
     return get_api_key() is not None or _keystore_configured()
 
 
+# Throttle for last-used stamping: verify() runs on EVERY request, so it must not
+# rewrite the keystore each time. Stamp a key's last_used at most once per this many
+# seconds (per process), tracked in memory so the hot path stays lock-free until a
+# write is actually due.
+_LAST_USED_THROTTLE_S = 300
+_last_used_writes: dict = {}
+_LAST_USED_LOCK = threading.Lock()
+
+
+def _touch_last_used(key_hash: str) -> None:
+    """Best-effort: stamp a just-verified key's last_used (throttled). Never raises -
+    a usage timestamp is non-essential and must not break verification."""
+    if not key_hash:
+        return
+    now = time.monotonic()
+    with _LAST_USED_LOCK:
+        if now - _last_used_writes.get(key_hash, 0.0) < _LAST_USED_THROTTLE_S:
+            return
+        _last_used_writes[key_hash] = now
+    try:
+        with _KEYSTORE_LOCK:
+            records = _load_keystore()
+            for r in records:
+                if r.get("hash") == key_hash:
+                    r["last_used"] = time.time()
+                    _save_keystore(records)
+                    break
+    except Exception:
+        pass
+
+
 def verify(presented: Optional[str]) -> Optional[set]:
     """Resolve a presented bearer token to the set of scopes it grants, or None
     if it matches nothing. The owner key grants ADMIN (every scope)."""
@@ -311,5 +342,6 @@ def verify(presented: Optional[str]) -> Optional[set]:
             exp = r.get("expires")
             if exp is not None and time.time() > float(exp):
                 return None       # matched a real key, but it has expired
+            _touch_last_used(presented_hash)
             return set(r.get("scopes", []))
     return None

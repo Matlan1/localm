@@ -284,6 +284,29 @@ def test_keys_endpoint_expires_in_is_server_clock(auth, monkeypatch):
         assert bad.status_code == 400
 
 
+def test_keys_endpoint_returns_owner_flag_and_presets(auth, monkeypatch):
+    """GET /v1/keys carries is_owner (so the GUI hides owner-only scopes from a mere
+    keys:admin device) and key_presets (so presets show even without config:read)."""
+    from fastapi.testclient import TestClient
+
+    from localm import scopes as S
+    from localm.inference.http_server import create_app
+
+    ka = auth.create_key("manager", [S.KEYS_ADMIN], allow_privileged=True)
+    monkeypatch.setenv("LOCALM_API_KEY", "ownersecret")
+    app = create_app(None)
+    with TestClient(app) as client:
+        owner = client.get(
+            "/v1/keys", headers={"Authorization": "Bearer ownersecret"}).json()
+        assert owner["is_owner"] is True
+        assert any(p["name"] == "Companion" for p in owner["presets"])
+        # A non-owner keys:admin key lists keys but is NOT owner; presets still ride.
+        km = client.get(
+            "/v1/keys", headers={"Authorization": f"Bearer {ka['key']}"}).json()
+        assert km["is_owner"] is False
+        assert isinstance(km["presets"], list)
+
+
 def test_model_read_routes_require_models_read_scope(auth, monkeypatch):
     """SECURITY.md promises every /v1 route is auth-gated when a key is set.
     /v1/models and /v1/models/{id} must require models:read; /health stays open."""
