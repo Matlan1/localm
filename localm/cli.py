@@ -173,8 +173,12 @@ def main() -> None:
                    "privacy = nothing saved automatically; "
                    "log = JSONL audit trail to ~/.localm/sessions/; "
                    "full = log + markdown transcript.")
+@click.option("--no-server", is_flag=True,
+              help="Load the model in THIS process instead of attaching to a localm "
+                   "server already serving this directory (default: attach, like the "
+                   "GUI, so you do not load a second copy).")
 def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
-        mmproj, device, images, debug, mode):
+        mmproj, device, images, debug, mode, no_server):
     """Run a model - interactive chat or single prompt.
 
     \b
@@ -216,36 +220,71 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
         console.print(f"[dim]session mode: {session_mode.value} "
                       f"(audit trail in ~/.localm/sessions/)[/dim]")
 
-    info = get_model_info(model)
-    if info is None:
-        console.print(f"[red]Model not found:[/red] {model}")
-        console.print("  [dim]localm list[/dim]              - downloaded models")
-        console.print("  [dim]localm models[/dim]            - GGUF shortcuts")
-        console.print("  [dim]localm pull owner/repo[/dim]   - download HF model")
-        console.print("  [dim]localm pull name[/dim]         - download GGUF shortcut")
-        console.print("  [dim]localm add <path>[/dim]        - register local file/dir")
-        console.print("  [dim]localm run /full/path[/dim]    - use path directly")
-        sys.exit(1)
+    # H3 thin-client: ATTACH to the localm server already serving this directory
+    # (route chat through its /v1 over HTTP) instead of loading a SECOND in-process
+    # copy of the model, mirroring `localm gui`. Default is to attach when a verified
+    # server exists; --no-server forces an in-process load.
+    engine = None
+    if not no_server:
+        from . import instances
+        from .config import home_dir
+        try:
+            target = instances.attach_target(
+                home_dir(), instances.resolve_root_dir())
+        except Exception:
+            target = None
+        if target:
+            from .inference.http_engine import HttpEngine, remote_active_model
+            active = remote_active_model(target["base_url"], target.get("token"))
+            if active and active != model:
+                console.print(
+                    f"[yellow]Note:[/yellow] attaching to the localm server already "
+                    f"running for this directory; it serves [bold]{active}[/bold], so "
+                    f"the requested [bold]{model}[/bold] is not loaded. Use "
+                    f"[bold]--no-server[/bold] to run it in a separate process.")
+            elif active is None:
+                console.print(
+                    "[yellow]Note:[/yellow] a localm server is running for this "
+                    "directory but has no model loaded; load one (its GUI / API) or "
+                    "use [bold]--no-server[/bold] to run in a separate process.")
+            engine = HttpEngine(
+                target["base_url"], token=target.get("token"),
+                model=active or model, display_name=active or model)
+            console.print(
+                f"[dim]connected to the localm server at {target['base_url']} "
+                f"(no second model load)[/dim]")
 
-    model_path, _display_hint = info
+    if engine is None:
+        info = get_model_info(model)
+        if info is None:
+            console.print(f"[red]Model not found:[/red] {model}")
+            console.print("  [dim]localm list[/dim]              - downloaded models")
+            console.print("  [dim]localm models[/dim]            - GGUF shortcuts")
+            console.print("  [dim]localm pull owner/repo[/dim]   - download HF model")
+            console.print("  [dim]localm pull name[/dim]         - download GGUF shortcut")
+            console.print("  [dim]localm add <path>[/dim]        - register local file/dir")
+            console.print("  [dim]localm run /full/path[/dim]    - use path directly")
+            sys.exit(1)
 
-    from .inference.engine import Engine
-    from .model_manager import load_registry as _reg
+        model_path, _display_hint = info
 
-    # Priority: registered alias > Ollama manifest hint > engine auto-derive
-    if model in _reg():
-        display_name = model
-    else:
-        display_name = _display_hint  # None or Ollama suggested name
+        from .inference.engine import Engine
+        from .model_manager import load_registry as _reg
 
-    engine = Engine(
-        str(model_path),
-        mmproj_path=mmproj,
-        n_ctx=ctx,
-        n_gpu_layers=gpu_layers,
-        device=device,
-        display_name=display_name,
-    )
+        # Priority: registered alias > Ollama manifest hint > engine auto-derive
+        if model in _reg():
+            display_name = model
+        else:
+            display_name = _display_hint  # None or Ollama suggested name
+
+        engine = Engine(
+            str(model_path),
+            mmproj_path=mmproj,
+            n_ctx=ctx,
+            n_gpu_layers=gpu_layers,
+            device=device,
+            display_name=display_name,
+        )
 
     cfg = load_config()
     gen_opts = {
@@ -352,6 +391,12 @@ def _stream_once(engine, messages: list, **kwargs) -> str:
         # vision model this install has, or how to get one.
         from localm.model_manager import vision_input_guidance
         console.print(f"\n[yellow]{vision_input_guidance()}[/yellow]")
+        return ""
+    except RuntimeError as e:
+        # An attached server returned an error (no model loaded, unreachable, ...).
+        # Surface it cleanly instead of a traceback (the interactive path already
+        # catches Exception; this is the single-prompt path).
+        console.print(f"\n[red]{e}[/red]")
         return ""
     elapsed = _time.monotonic() - t0
     print()
