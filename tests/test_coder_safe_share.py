@@ -370,3 +370,8 @@ def test_pairing_qr_renders_for_a_scoped_key(tmp_path, monkeypatch):
         r3 = client.post("/api/pairing/qr",
                          headers={"Authorization": "Bearer ownersecret"}, json={})
         assert r3.status_code == 400
+        # A non-existent / garbage key -> 400 (only a real, current key renders).
+        r4 = client.post("/api/pairing/qr",
+                         headers={"Authorization": "Bearer ownersecret"},
+                         json={"key": "not-a-real-localm-key"})
+        assert r4.status_code == 400

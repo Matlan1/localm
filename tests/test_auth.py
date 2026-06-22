@@ -254,6 +254,36 @@ def test_keys_endpoint_blocks_privilege_self_escalation(auth, monkeypatch):
         assert S.ADMIN in owner.json()["scopes"]
 
 
+def test_keys_endpoint_expires_in_is_server_clock(auth, monkeypatch):
+    """POST /v1/keys with expires_in (relative seconds) sets the deadline from the
+    SERVER clock (not the client's), verify() honours it, and a bad expires_in 400s."""
+    import time
+
+    from fastapi.testclient import TestClient
+
+    from localm import scopes as S
+    from localm.inference.http_server import create_app
+
+    monkeypatch.setenv("LOCALM_API_KEY", "ownersecret")
+    app = create_app(None)
+    with TestClient(app) as client:
+        own = {"Authorization": "Bearer ownersecret"}
+        before = time.time()
+        r = client.post(
+            "/v1/keys",
+            json={"name": "phone", "scopes": [S.CHAT], "expires_in": 3600},
+            headers=own)
+        assert r.status_code == 200
+        exp = r.json()["expires"]
+        assert before + 3600 - 5 <= exp <= time.time() + 3600 + 5   # server-anchored
+        assert auth.verify(r.json()["key"]) == {S.CHAT}             # not yet expired
+        bad = client.post(
+            "/v1/keys",
+            json={"name": "x", "scopes": [S.CHAT], "expires_in": "soon"},
+            headers=own)
+        assert bad.status_code == 400
+
+
 def test_model_read_routes_require_models_read_scope(auth, monkeypatch):
     """SECURITY.md promises every /v1 route is auth-gated when a key is set.
     /v1/models and /v1/models/{id} must require models:read; /health stays open."""

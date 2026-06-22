@@ -814,8 +814,17 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
         scope_list = body.get("scopes", [])
         if not isinstance(scope_list, list):
             raise HTTPException(400, "'scopes' must be a list of scope strings")
+        # Prefer a server-computed deadline from a relative TTL (expires_in seconds)
+        # so a key's lifetime never depends on the client's clock; fall back to an
+        # absolute epoch (expires) for raw API clients that want a specific deadline.
         expires = body.get("expires")
-        if expires is not None:
+        expires_in = body.get("expires_in")
+        if expires_in is not None:
+            try:
+                expires = time.time() + float(expires_in)
+            except (TypeError, ValueError):
+                raise HTTPException(400, "'expires_in' must be seconds (a number)")
+        elif expires is not None:
             try:
                 expires = float(expires)
             except (TypeError, ValueError):

@@ -336,6 +336,12 @@ def attach_gui(
         key = (body or {}).get("key")
         if not isinstance(key, str) or not key.strip():
             raise HTTPException(400, "Provide the minted key plaintext as 'key'.")
+        # Only render a QR for a key that actually exists and is current: doing it
+        # for arbitrary input is pointless, and this rejects garbage / an already
+        # expired key (verify() returns None for both).
+        from localm import auth
+        if auth.verify(key.strip()) is None:
+            raise HTTPException(400, "Not a current localm key (mint one first).")
         return Response(content=_pairing_qr_svg(key.strip()),
                         media_type="image/svg+xml",
                         headers={"Cache-Control": "no-store"})

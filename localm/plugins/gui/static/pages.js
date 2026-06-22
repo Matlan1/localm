@@ -1283,7 +1283,7 @@ async function refreshKeysPanel() {
     if (!scopes.length) { toast("Pick at least one capability"); return; }
     const body = { name, scopes };
     const ttl = Number(($("key-expiry") || {}).value || 0);
-    if (ttl > 0) body.expires = Math.floor(Date.now() / 1000) + ttl;
+    if (ttl > 0) body.expires_in = ttl;   // server computes the deadline (its own clock)
     let r;
     try {
       r = await fetch("/v1/keys", {

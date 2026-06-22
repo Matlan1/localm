@@ -150,6 +150,6 @@ test("keys panel: create threads expires and requests a pairing QR for the new k
   await tick();
   assert.equal(posted.name, "phone");
   assert.deepEqual(posted.scopes, ["chat"]);
-  assert.equal(typeof posted.expires, "number");   // expiry threaded into the POST
+  assert.equal(posted.expires_in, 86400);          // relative TTL threaded (server-clock)
   assert.equal(qrKey, "K9");                        // QR requested for the minted key
 });
