@@ -47,6 +47,47 @@ class TestComfyAlive:
             assert comfy._comfy_alive("http://127.0.0.1:8188") is False
 
 
+class TestHistoryExecutionError:
+    """I2: surface a ComfyUI node crash from /history instead of the generic
+    'no output found' that just sends the user to read the ComfyUI console."""
+
+    def test_surfaces_node_crash(self):
+        entry = {
+            "outputs": {},
+            "status": {
+                "status_str": "error",
+                "completed": False,
+                "messages": [
+                    ["execution_start", {}],
+                    ["execution_error", {
+                        "node_type": "SaveAudio",
+                        "exception_message":
+                            "'function' object has no attribute '__func__'",
+                    }],
+                ],
+            },
+        }
+        msg = comfy.history_execution_error(entry)
+        assert msg is not None
+        assert "__func__" in msg
+        assert "SaveAudio" in msg
+
+    def test_status_error_without_detail_still_flags(self):
+        entry = {"outputs": {}, "status": {"status_str": "error", "messages": []}}
+        assert comfy.history_execution_error(entry) is not None
+
+    def test_none_on_success(self):
+        ok_entry = {
+            "outputs": {"9": {"images": [{"filename": "x.png"}]}},
+            "status": {"status_str": "success", "completed": True, "messages": []},
+        }
+        assert comfy.history_execution_error(ok_entry) is None
+
+    def test_none_when_no_status(self):
+        # Older ComfyUI entries without a status block are treated as no-error.
+        assert comfy.history_execution_error({"outputs": {}}) is None
+
+
 class TestFailFastBeforeUnload:
     def test_dead_comfy_errors_without_unloading_llm(self, tmp_path):
         """A dead image server must not cost the user an LLM unload+reload."""

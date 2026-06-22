@@ -181,6 +181,32 @@ def _comfy_alive(api_url: str, timeout: float = 3.0) -> bool:
         return False
 
 
+def history_execution_error(entry: dict) -> Optional[str]:
+    """Return a human-readable ComfyUI execution error from a ``/history`` entry,
+    or None when the job did not error.
+
+    When a node crashes mid-render (a missing model, an ACE-Step/ComfyUI version
+    mismatch, an OOM) ComfyUI still records the prompt in ``/history`` but with
+    ``status.status_str == "error"`` and an ``("execution_error", {...})`` message
+    carrying the node type and exception text. The poll loops otherwise only look
+    for an output artifact and, finding none, blame a generic "no output" - so the
+    real cause was hidden and the user was told to read the ComfyUI console (issue
+    I2). Surfacing it here turns that into the actual reason."""
+    status = entry.get("status") or {}
+    for m in (status.get("messages") or []):
+        if isinstance(m, (list, tuple)) and len(m) >= 2 and m[0] == "execution_error":
+            info = m[1] if isinstance(m[1], dict) else {}
+            node = info.get("node_type") or info.get("node_id")
+            exc = (info.get("exception_message")
+                   or info.get("exception_type") or "").strip()
+            detail = " ".join(p for p in (exc, f"(node {node})" if node else "") if p)
+            if detail:
+                return detail
+    if status.get("status_str") == "error":
+        return "ComfyUI reported an execution error (no detail in /history)."
+    return None
+
+
 def _derive_workdir_from_cmd(launch_cmd: str) -> Optional[str]:
     """The folder of the launcher script, so a .bat / .sh that references paths
     relative to its own location (the ComfyUI + ZLUDA convention, e.g. a copied
@@ -997,6 +1023,9 @@ def generate_image(
 
                 if prompt_id in history:
                     finished = True
+                    err = history_execution_error(history[prompt_id])
+                    if err:
+                        return False, f"ComfyUI execution failed: {err}"
                     for node_output in history[prompt_id].get("outputs", {}).values():
                         if "images" in node_output:
                             img_info = node_output["images"][0]

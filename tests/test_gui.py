@@ -1687,7 +1687,9 @@ class TestCoderHistory:
         app, _ = coder_app
         with TestClient(app) as client:
             data = client.get("/api/coder/history").json()
-        assert data == {"enabled": False, "logs": []}
+        # Owner (open-mode loopback) in privacy mode: recording off, but authorized -
+        # distinct from a non-owner, who gets authorized=False (issue A1).
+        assert data == {"enabled": False, "authorized": True, "logs": []}
 
     def test_history_rejects_bad_names(self, coder_app, tmp_path, monkeypatch):
         import localm.audit as audit_mod
