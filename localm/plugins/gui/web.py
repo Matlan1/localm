@@ -81,13 +81,16 @@ def _set_session_cookies(response, key: str, *, secure: bool) -> None:
     """Set the S2 auth cookies on *response*: the HttpOnly ``localm_session``
     cookie (the API key, unreadable by page JS) plus a readable ``localm_csrf``
     token for double-submit CSRF. Names match http_server's SESSION_COOKIE /
-    CSRF_COOKIE."""
+    CSRF_COOKIE; both carry SESSION_MAX_AGE so the key PERSISTS across a browser/
+    PWA restart (SEAMLESS) instead of being dropped as a session cookie."""
     import secrets as _secrets
-    from localm.inference.http_server import CSRF_COOKIE, SESSION_COOKIE
+    from localm.inference.http_server import (CSRF_COOKIE, SESSION_COOKIE,
+                                              SESSION_MAX_AGE)
     response.set_cookie(SESSION_COOKIE, key, httponly=True, secure=secure,
-                        samesite="strict", path="/")
+                        samesite="strict", path="/", max_age=SESSION_MAX_AGE)
     response.set_cookie(CSRF_COOKIE, _secrets.token_urlsafe(32), httponly=False,
-                        secure=secure, samesite="strict", path="/")
+                        secure=secure, samesite="strict", path="/",
+                        max_age=SESSION_MAX_AGE)
 
 
 # ------------------------------------------------------------------ #

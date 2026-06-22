@@ -76,6 +76,25 @@ def test_login_sets_httponly_session_and_readable_csrf(client):
     assert "samesite=strict" in csrf_sc[0].lower()
 
 
+def test_login_sets_persistent_max_age_on_both_cookies(client):
+    """SEAMLESS: the auth cookies must PERSIST across a browser/PWA restart, so
+    each carries a max-age (not a session cookie dropped on close - which made the
+    key gate, and its 'Install certificate' step, reappear every restart). Both
+    share ONE lifetime so the readable CSRF token never expires before the session
+    and bounces the user mid-use."""
+    from localm.inference.http_server import SESSION_MAX_AGE
+    r = _login(client)
+    assert r.status_code == 200, r.text
+    session_sc = [c for c in _set_cookies(r)
+                  if c.startswith(SESSION_COOKIE + "=")][0].lower()
+    csrf_sc = [c for c in _set_cookies(r)
+               if c.startswith(CSRF_COOKIE + "=")][0].lower()
+    assert f"max-age={SESSION_MAX_AGE}" in session_sc, session_sc
+    assert f"max-age={SESSION_MAX_AGE}" in csrf_sc, csrf_sc
+    # not a pure session cookie
+    assert SESSION_MAX_AGE > 0
+
+
 def test_login_with_bad_key_rejected_no_cookie(client):
     r = client.post("/api/session", json={"key": "wrong-key"})
     assert r.status_code == 401

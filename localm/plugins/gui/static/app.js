@@ -536,22 +536,11 @@ function showKeyGate(message) {
   if (!gate) return;
   if (message) { const m = $("key-gate-msg"); if (m) m.textContent = message; }
   gate.style.display = "flex";
-  // Offer the one-tap "Install certificate" link only over HTTPS - the built-in
-  // TLS network case (NET-1), where trusting the local CA once removes the
-  // browser warning and unlocks PWA install. On a plain-http loopback gate there
-  // is no CA to install, so keep it hidden.
-  const cert = $("key-gate-cert");
-  if (cert) {
-    const onHttps = location.protocol === "https:";
-    cert.style.display = onHttps ? "block" : "none";
-    // Pin the download to an absolute https URL so it never resolves to http on
-    // the TLS port, where portmux answers with a 308 + HTML catch page that an
-    // <a download> would save as the "cert" (J2).
-    if (onHttps) {
-      const certLink = $("key-gate-cert-link");
-      if (certLink) certLink.href = "https://" + location.host + "/localm-ca.crt";
-    }
-  }
+  // Show/hide the one-tap "Install certificate" step (see updateKeyGateCertStep):
+  // only when the local CA is genuinely NOT trusted yet, so a returning trusted
+  // device is never told to "reinstall the certificate" every time the gate
+  // appears (the SEAMLESS fix).
+  updateKeyGateCertStep();
   // Offer "Scan QR code" wherever the browser can open a camera (a secure
   // context). Decoding uses the native BarcodeDetector when present, else the
   // bundled jsQR fallback, so it is not limited to Android Chrome.
@@ -563,6 +552,32 @@ function showKeyGate(message) {
     input.focus();
   }
 }
+
+// Decide whether the key gate should offer "Install certificate". Show it ONLY
+// when the local CA is genuinely NOT trusted yet: over HTTPS where the service
+// worker FAILED to register. A service worker only registers in a real secure
+// context, so a trusted CA is a precondition - and unlike a plain fetch probe,
+// clicking THROUGH the browser's "not secure" warning does not register the SW,
+// so window.__swFailed === true is a reliable "cert not trusted" signal. Once the
+// CA is trusted (__swFailed === false) the step stays hidden, so a returning user
+// is never told to "install a new certificate" again (the SEAMLESS fix). Re-run
+// from index.html's renderInstall when SW registration resolves, since __swFailed
+// is set asynchronously after boot (until then, unknown -> hidden, no false nag).
+function updateKeyGateCertStep() {
+  const cert = $("key-gate-cert");
+  if (!cert) return;
+  const onHttps = location.protocol === "https:";
+  const untrusted = onHttps && window.__swFailed === true;
+  cert.style.display = untrusted ? "block" : "none";
+  if (untrusted) {
+    // Pin the download to an absolute https URL so it never resolves to http on
+    // the TLS port, where portmux answers with a 308 + HTML catch page that an
+    // <a download> would save as the "cert" (J2).
+    const certLink = $("key-gate-cert-link");
+    if (certLink) certLink.href = "https://" + location.host + "/localm-ca.crt";
+  }
+}
+window.updateKeyGateCertStep = updateKeyGateCertStep;
 
 // POST the entered key to /api/session so the server sets the HttpOnly auth
 // cookie (the key never lives in JS), then reload so the boot re-runs
