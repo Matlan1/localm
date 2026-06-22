@@ -134,6 +134,15 @@ SESSION_COOKIE = "localm_session"
 CSRF_COOKIE = "localm_csrf"
 CSRF_HEADER = "X-CSRF-Token"
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
+# SEAMLESS: the auth cookies PERSIST so the user stays signed in across a browser
+# or PWA restart, instead of being session cookies the browser drops on close
+# (which made the key gate - and its "Install certificate" step - reappear every
+# time, the "install a new cert / re-enter the key every restart" report).
+# Browsers clamp cookie lifetime to ~400 days, so we ask for that ceiling; the
+# escape hatch is the existing /api/session/logout (Settings: leave the key blank
+# and Save). Both cookies MUST share this lifetime, or the readable CSRF token
+# would expire before the session and bounce the user mid-use.
+SESSION_MAX_AGE = 400 * 24 * 3600  # ~400 days (the browser cap)
 
 
 def _bearer_token(request) -> Optional[str]:
@@ -527,9 +536,11 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
         secure = request.url.scheme == "https"
         csrf = secrets.token_urlsafe(32)
         response.set_cookie(SESSION_COOKIE, presented, httponly=True,
-                            secure=secure, samesite="strict", path="/")
+                            secure=secure, samesite="strict", path="/",
+                            max_age=SESSION_MAX_AGE)
         response.set_cookie(CSRF_COOKIE, csrf, httponly=False,
-                            secure=secure, samesite="strict", path="/")
+                            secure=secure, samesite="strict", path="/",
+                            max_age=SESSION_MAX_AGE)
         return {"authed": True, "scopes": sorted(held)}
 
     @app.post("/api/session/logout", include_in_schema=False)

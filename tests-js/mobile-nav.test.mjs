@@ -35,3 +35,25 @@ test("drawer: navigating to a view closes it", () => {
   window.showView("models");
   assert.ok(!app.classList.contains("nav-open"), "showView closes the drawer");
 });
+
+// The phone top bar carries its own new-chat button (the sidebar + is behind a
+// closed drawer there). It starts a fresh conversation, lands on chat, and
+// closes the drawer if it was open.
+test("mobile top-bar new-chat: starts a chat, shows it, closes the drawer", () => {
+  const { window } = loadApp({ fetchImpl: allOk });
+  const doc = window.document;
+  const app = doc.getElementById("app");
+  const mtbNew = doc.getElementById("mtb-new");
+  assert.ok(mtbNew, "the mobile top bar has a new-chat button");
+
+  window.showView("models");
+  window.setNavOpen(true);
+  assert.ok(app.classList.contains("nav-open"));
+
+  mtbNew.click();
+
+  assert.ok(doc.getElementById("view-chat").classList.contains("active"),
+    "new-chat lands on the chat view");
+  assert.ok(!app.classList.contains("nav-open"),
+    "new-chat closes the drawer");
+});

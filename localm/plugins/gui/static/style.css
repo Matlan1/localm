@@ -285,6 +285,22 @@ nav button.active { background: var(--accent-soft); color: var(--accent); }
 }
 .msg-row.user .msg-role { color: var(--accent); }
 .msg-row.assistant .msg-role { color: var(--green); }
+
+/* Companion-app layout: the user's turn is a right-aligned chat bubble; the
+   assistant's turn stays full width so code, tables and long markdown have room
+   (the same split ChatGPT / Claude use). The bubble itself reads as "you", so
+   the "You" role label is dropped and the action buttons hug the right edge. */
+.msg-row.user { display: flex; flex-direction: column; align-items: flex-end; }
+.msg-row.user .msg-role { display: none; }
+.msg-row.user .msg-body {
+  background: var(--accent-soft);
+  border: 1px solid var(--border);
+  border-radius: 14px 14px 4px 14px;
+  padding: 9px 14px;
+  max-width: 80%;
+}
+.msg-row.user .msg-meta { justify-content: flex-end; }
+
 /* injected web search/fetch results - visible but visually secondary */
 .msg-row.web-note { opacity: 0.7; }
 .msg-row.web-note .msg-body { font-size: 13px; max-height: 180px; overflow-y: auto; }
@@ -407,6 +423,10 @@ pre:hover .canvas-btn { opacity: 1; }
 .composer:focus-within { border-color: var(--accent); }
 .composer textarea {
   flex: 1;
+  /* min-width:0 lets the textarea shrink inside the flex row. Without it the
+     flex default (min-width:auto) keeps the textarea at its intrinsic column
+     width on a narrow phone and pushes the send button off-screen. */
+  min-width: 0;
   background: none;
   border: none;
   outline: none;
@@ -1292,20 +1312,36 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
   #mobile-topbar {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 6px;
     flex-shrink: 0;
-    padding: 8px 12px;
+    /* pad the top bar under the status-bar / notch inset */
+    padding: max(8px, env(safe-area-inset-top)) 12px 8px;
     background: var(--bg-raised);
     border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 40;
   }
   #nav-toggle {
     background: none; border: none; color: var(--text);
     font-size: 22px; line-height: 1; cursor: pointer;
-    padding: 2px 8px; border-radius: 8px;
+    padding: 6px 10px; border-radius: 8px;
+    /* comfortable touch target */
+    min-width: 44px; min-height: 44px;
+    display: inline-flex; align-items: center; justify-content: center;
   }
   #nav-toggle:hover { background: var(--bg-input); }
-  .mtb-title { font-size: 17px; font-weight: 600; letter-spacing: 0.4px; }
+  /* Title fills the bar so the new-chat button sits at the far right. */
+  .mtb-title { flex: 1; font-size: 17px; font-weight: 600; letter-spacing: 0.4px; }
   .mtb-title span { color: var(--accent); }
+  #mtb-new {
+    background: none; border: none; color: var(--text);
+    font-size: 26px; line-height: 1; cursor: pointer;
+    padding: 6px 10px; border-radius: 8px;
+    min-width: 44px; min-height: 44px;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  #mtb-new:hover { background: var(--bg-input); color: var(--accent); }
 
   /* Sidebar becomes an off-canvas drawer, hidden until the hamburger opens it. */
   #sidebar {
@@ -1313,6 +1349,9 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
     top: 0; left: 0; bottom: 0;
     z-index: 60;
     width: 82vw; max-width: 320px; min-width: 0;
+    /* keep the drawer's own content clear of the notch / home-bar insets */
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
     transform: translateX(-100%);
     transition: transform 0.22s ease;
     box-shadow: 0 0 32px rgba(0, 0, 0, 0.5);
@@ -1328,13 +1367,31 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
   }
   #app.nav-open #sidebar-backdrop { opacity: 1; pointer-events: auto; }
 
-  /* Main takes the full width (the sidebar is out of flow when fixed). */
-  #main { width: 100%; }
+  /* Main takes the full width (the sidebar is out of flow when fixed). A hard
+     cap on horizontal overflow keeps a stray wide child (long code line, table)
+     from making the whole page pan sideways. */
+  #main { width: 100%; overflow-x: hidden; }
 
   /* Tighter gutters so content is not squeezed. */
   .page { padding: 18px 14px 48px; }
-  .msg-row { padding: 0 14px; }
-  .composer-wrap { padding: 10px 12px 14px; }
+  .msg-row { padding: 0 14px; margin-bottom: 14px; }
+  /* Phone bubbles can use a touch more width than the desktop 80%. */
+  .msg-row.user .msg-body { max-width: 88%; }
+
+  /* Composer: pad the bottom under the home-bar inset, and give the input a
+     roomier pill so it reads like a native chat bar. */
+  .composer-wrap {
+    padding: 10px 12px calc(12px + env(safe-area-inset-bottom));
+  }
+  .composer { padding: 6px 6px 6px 10px; border-radius: 22px; gap: 4px; }
+  .composer textarea { font-size: 16px; padding: 8px 4px; }  /* 16px: no iOS zoom-on-focus */
+  /* Comfortable 40px touch targets for the icon + send buttons. */
+  .composer .attach { width: 40px; height: 40px; font-size: 19px; }
+  .composer .send { width: 40px; height: 40px; font-size: 17px; }
+
+  /* The meta toolbar under the composer wraps instead of colliding. */
+  .composer-row { flex-wrap: wrap; gap: 6px 10px; }
+  #chat-usage, #coder-usage { width: 100%; }
 
   /* Stack 2-column form grids into one column. */
   .grid2,
