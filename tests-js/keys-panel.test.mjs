@@ -99,3 +99,57 @@ test("keys panel: create with no scope checked does not POST", async () => {
   await tick();
   assert.equal(posts, 0);
 });
+
+test("keys panel: presets populate checkboxes; coder vs coder:full are distinct", async () => {
+  const { window } = loadAppWithPages({
+    fetchImpl: router({
+      "GET /v1/keys": () => ({ status: 200, body: { keys: [] } }),
+      "GET /v1/config": () => ({ status: 200, body: { key_presets: [
+        { name: "Companion", scopes: ["chat", "image"] },
+      ] } }),
+    }),
+  });
+  await tick();
+  await window.refreshKeysPanel();
+  await tick();                                 // buildKeyPresets is async
+  const cbs = [...window.document.querySelectorAll(".key-scope-cb")].map((c) => c.value);
+  assert.ok(cbs.includes("coder") && cbs.includes("coder:full"),
+            "coder and coder:full are separate checkboxes");
+  const btn = [...window.document.querySelectorAll(".key-preset-btn")]
+    .find((b) => b.textContent === "Companion");
+  assert.ok(btn, "the Companion preset button rendered");
+  btn.onclick();
+  const checked = [...window.document.querySelectorAll(".key-scope-cb")]
+    .filter((c) => c.checked).map((c) => c.value).sort();
+  assert.deepEqual(checked, ["chat", "image"]);   // preset set exactly its scopes
+});
+
+test("keys panel: create threads expires and requests a pairing QR for the new key", async () => {
+  let posted = null, qrKey = null;
+  const { window } = loadAppWithPages({
+    fetchImpl: router({
+      "GET /v1/keys": () => ({ status: 200, body: { keys: [] } }),
+      "POST /v1/keys": (_p, opts) => {
+        posted = JSON.parse(opts.body);
+        return { status: 200,
+                 body: { id: "n", name: posted.name, scopes: posted.scopes, key: "K9" } };
+      },
+      "POST /api/pairing/qr": (_p, opts) => {
+        qrKey = JSON.parse(opts.body).key;
+        return { status: 200, text: '<svg viewBox="0 0 10 10"></svg>' };
+      },
+    }),
+  });
+  await tick();
+  await window.refreshKeysPanel();
+  window.document.getElementById("key-name").value = "phone";
+  [...window.document.querySelectorAll(".key-scope-cb")]
+    .find((c) => c.value === "chat").checked = true;
+  window.document.getElementById("key-expiry").value = "86400";   // in 24 hours
+  await window.document.getElementById("key-create").onclick();
+  await tick();
+  assert.equal(posted.name, "phone");
+  assert.deepEqual(posted.scopes, ["chat"]);
+  assert.equal(typeof posted.expires, "number");   // expiry threaded into the POST
+  assert.equal(qrKey, "K9");                        // QR requested for the minted key
+});
