@@ -87,6 +87,20 @@ DEFAULT_CONFIG: dict = {
     # refuses requests until a key is set (see localm/auth.py); env override:
     # LOCALM_REQUIRE_AUTH. Default false = open in local/dev mode on loopback.
     "require_auth": False,
+    # Quick-select scope bundles for the "Keys & devices" manager (Settings).
+    # Each is {name, scopes}; the GUI offers them as one-tap presets when minting
+    # a key. Re-seeded only when this key is ABSENT (an emptied list stays empty).
+    # coder:full / admin in a preset only take effect when an OWNER mints the key
+    # (privileged scopes stay owner-only regardless of the preset).
+    "key_presets": [
+        {"name": "Minimal", "scopes": ["chat"]},
+        {"name": "Companion", "scopes": ["chat", "image", "music", "video",
+                                         "voice", "rag", "web", "models:read"]},
+        {"name": "Full", "scopes": ["chat", "coder", "image", "music", "video",
+                                    "rag", "web", "voice", "mcp",
+                                    "models:read", "models:write", "config:read"]},
+        {"name": "Admin", "scopes": ["admin"]},
+    ],
     # Command that starts your ComfyUI install (e.g. a launch .bat). When set,
     # the image/music/video generators start ComfyUI automatically if it is
     # not running - from the GUI, the CLI, or the coder's generate_image tool.

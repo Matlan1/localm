@@ -152,7 +152,13 @@ async def create_session(req: CreateSessionRequest, request: Request):
     # run_tests/git-hooks is RCE, so disabling the executing tools - not just
     # confining the cwd - is the real containment.)
     is_owner, principal = _principal_from_request(request)
-    restricted = not is_owner
+    # A key carrying the privileged coder:full scope (owner-only to mint) gets the
+    # UNRESTRICTED coder, same as the owner; a plain coder-scoped key stays
+    # restricted (read + confined edit, no shell).
+    from localm import scopes as _S
+    from localm.inference.http_server import caller_scopes as _caller_scopes
+    held = _caller_scopes(request) or set()
+    restricted = not (is_owner or _S.CODER_FULL in held)
 
     if restricted:
         # Force the session into the instance's project root, ignoring req.cwd, so

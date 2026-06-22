@@ -1140,11 +1140,12 @@ async function refreshPairingQR() {
   }
 }
 
-// Non-privileged scopes offered in the GUI key minter (label per scope). The
-// /v1/keys API refuses privileged scopes (admin/keys:admin/plugins:admin/
-// config:write) for a non-owner anyway; mint those from the CLI if ever needed.
+// Scopes offered in the GUI key minter (label per scope). Privileged scopes
+// (coder:full, admin) are shown but OWNER-ONLY: the /v1/keys API refuses them for
+// a non-owner key, so a keys:admin device cannot hand out shell / admin access.
 const KEY_SCOPES = [
   ["coder", "Coder agent - restricted: read + edit this project (no shell)"],
+  ["coder:full", "Coder agent - FULL: shell + edit (owner-only, dangerous)"],
   ["models:read", "List and inspect models"],
   ["models:write", "Load, download, or remove models"],
   ["rag", "Knowledge (RAG)"],
@@ -1155,7 +1156,69 @@ const KEY_SCOPES = [
   ["voice", "Voice"],
   ["web", "Web access"],
   ["mcp", "MCP"],
+  ["config:read", "Read settings"],
+  ["admin", "Full admin - owner-equivalent (dangerous, owner-only)"],
 ];
+
+// Quick-select preset buttons (read from config key_presets); clicking one sets
+// the scope checkboxes. Presets are seeded defaults the owner can edit in config.
+async function buildKeyPresets() {
+  const box = $("key-presets");
+  if (!box) return;
+  let presets = [];
+  try {
+    const r = await fetch("/v1/config", { headers: authHeaders() });
+    if (r.ok) presets = (await r.json()).key_presets || [];
+  } catch (e) { /* presets are optional; the checkboxes still work without them */ }
+  box.replaceChildren();
+  if (!presets.length) return;
+  box.appendChild(el("span", "sub key-presets-label", "Presets:"));
+  for (const p of presets) {
+    const b = el("button", "btn-quiet key-preset-btn", p.name);
+    b.type = "button";
+    b.onclick = () => applyKeyPreset(p.scopes || []);
+    box.appendChild(b);
+  }
+}
+
+function applyKeyPreset(want) {
+  const set = new Set(want), box = $("key-scopes");
+  if (!box) return;
+  for (const cb of box.querySelectorAll(".key-scope-cb")) cb.checked = set.has(cb.value);
+}
+
+// Server-rendered pairing QR for a freshly-minted SCOPED key: scan it in localm
+// on the other device to pair it with exactly these capabilities (no typing).
+async function renderKeyQR(box, key) {
+  try {
+    const r = await fetch("/api/pairing/qr", {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ key }),
+    });
+    if (!r.ok) return;                        // owner-only / older server: skip the QR
+    const svg = await r.text();
+    const wrap = el("div", "key-qr");
+    wrap.appendChild(el("div", "sub",
+      "Or scan to pair a phone (open localm on the phone, tap Scan QR code):"));
+    const holder = document.createElement("div");
+    holder.className = "key-qr-img";
+    // Same-origin server-rendered SVG; sanitized (SVG profile) exactly like
+    // refreshPairingQR - defense in depth before assigning to innerHTML.
+    holder.innerHTML = DOMPurify.sanitize(svg, { USE_PROFILES: { svg: true, svgFilters: true } });
+    wrap.appendChild(holder);
+    box.appendChild(wrap);
+  } catch (e) { /* QR is best-effort; the copyable secret is the fallback */ }
+}
+
+function keyExpiryLabel(expires) {
+  if (!expires) return "never expires";
+  const ms = expires * 1000 - Date.now();
+  if (ms <= 0) return "expired";
+  const days = Math.floor(ms / 86400000);
+  if (days >= 1) return `expires in ${days}d`;
+  return `expires in ${Math.max(1, Math.floor(ms / 3600000))}h`;
+}
 
 // Settings -> API keys: mint named, scope-limited keys, list them, revoke them.
 // Owner-gated (/v1/keys needs keys:admin); the card hides for a non-owner key.
@@ -1165,13 +1228,15 @@ async function refreshKeysPanel() {
 
   if (!scopesBox.childElementCount) {           // render the checkboxes once
     for (const [scope, label] of KEY_SCOPES) {
-      const lab = el("label", "key-scope");
+      const danger = scope === "admin" || scope.endsWith(":full");
+      const lab = el("label", "key-scope" + (danger ? " key-scope-danger" : ""));
       const cb = document.createElement("input");
       cb.type = "checkbox"; cb.value = scope; cb.className = "key-scope-cb";
       lab.appendChild(cb);
       lab.appendChild(document.createTextNode(" " + label));
       scopesBox.appendChild(lab);
     }
+    buildKeyPresets();
   }
 
   // The keys card is a settings SECTION; hide/show it via a class so the section
@@ -1197,6 +1262,7 @@ async function refreshKeysPanel() {
     const row = el("div", "key-row");
     row.appendChild(el("span", "name", k.name || k.id));
     row.appendChild(el("span", "mono key-scope-tags", (k.scopes || []).join(", ")));
+    row.appendChild(el("span", "sub key-expiry-tag", keyExpiryLabel(k.expires)));
     const rm = el("button", "btn-quiet", "Revoke");
     rm.onclick = async () => {
       if (!confirm(`Revoke key "${k.name || k.id}"?`)) return;
@@ -1215,12 +1281,15 @@ async function refreshKeysPanel() {
     const scopes = [...scopesBox.querySelectorAll(".key-scope-cb")]
       .filter((c) => c.checked).map((c) => c.value);
     if (!scopes.length) { toast("Pick at least one capability"); return; }
+    const body = { name, scopes };
+    const ttl = Number(($("key-expiry") || {}).value || 0);
+    if (ttl > 0) body.expires_in = ttl;   // server computes the deadline (its own clock)
     let r;
     try {
       r = await fetch("/v1/keys", {
         method: "POST",
         headers: { ...authHeaders(), "Content-Type": "application/json" },
-        body: JSON.stringify({ name, scopes }),
+        body: JSON.stringify(body),
       });
     } catch (e) { toast("Create failed"); return; }
     if (!r.ok) {
@@ -1243,6 +1312,7 @@ async function refreshKeysPanel() {
       toast("Copied");
     };
     box.appendChild(copy);
+    await renderKeyQR(box, made.key);
     box.style.display = "";
     $("key-name").value = "";
     scopesBox.querySelectorAll(".key-scope-cb").forEach((c) => { c.checked = false; });
