@@ -41,6 +41,8 @@ def run_job(job: Job, *, engine=None) -> dict:
             output = _run_chat(job, engine=engine)
         elif job.task_kind == "coder":
             output = _run_coder(job, engine=engine)
+        elif job.task_kind == "memory":
+            output = _run_memory(job, engine=engine)
         else:
             raise ValueError(f"unknown task_kind: {job.task_kind!r}")
         return {
@@ -112,6 +114,35 @@ def _load_engine(model: Optional[str]):
     eng = Engine(str(model_path), display_name=(name if model else display_hint))
     eng.load()
     return eng
+
+
+# --------------------------------------------------------------------------- #
+#  memory (A2 auto-synthesis)                                                  #
+# --------------------------------------------------------------------------- #
+
+def _run_memory(job: Job, *, engine=None) -> str:
+    """Distil durable user facts from recent sessions into the assistant memory
+    file, using the model. The privacy gate lives inside synthesize_memory (it
+    skips with a clear status in privacy mode, never a silent success). Returns a
+    human-readable summary saved as the job result."""
+    from localm.plugins.builtin.chat.plug import synthesize_memory
+    eng = engine if engine is not None else _load_engine(job.model)
+    if eng is None:
+        raise RuntimeError(
+            "no inference engine available (pass one, or register a model)")
+
+    def complete(prompt: str) -> str:
+        return "".join(
+            eng.chat_stream([{"role": "user", "content": prompt}])).strip()
+
+    result = synthesize_memory(complete)
+    if result.get("status") == "skipped":
+        return f"memory synthesis skipped ({result.get('reason')})"
+    facts = result.get("facts") or []
+    if not facts:
+        return "memory synthesis: no new durable facts found"
+    return ("memory synthesis: added %d fact(s):\n" % result["added"]) + \
+           "\n".join(f"- {f}" for f in facts)
 
 
 # --------------------------------------------------------------------------- #

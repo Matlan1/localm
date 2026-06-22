@@ -170,6 +170,12 @@ DEFAULT_CONFIG: dict = {
     # The legacy reload_llm_after_imagine flag is a SEPARATE axis: it controls
     # eager-vs-lazy reload AFTER a gen, not this unload-before decision.
     "model_swap_policy": "auto",
+    # Free the loaded model from VRAM after this many seconds with no inference
+    # request, so a localm server left running stops holding the GPU. The next
+    # chat/completion reloads it lazily (a one-time load latency). 0 = disabled
+    # (default): the model stays resident until an explicit unload or a model
+    # swap. Measured from the last request, like Ollama's keep_alive.
+    "idle_unload_seconds": 0,
     # Network policy for model-initiated requests (coder fetch_url/web_search,
     # chat web access). See localm/netpolicy.py and docs/network.md.
     #   off   = all policy-routed network access fails fast

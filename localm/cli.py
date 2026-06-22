@@ -1173,11 +1173,9 @@ def music_cmd(tags, lyrics, duration, out, seed, steps, cfg):
     import time as _time
     from rich.console import Console
     from .audit import SessionMode, effective_mode
-    from .image_gen.comfy import default_api_url
     from .music_gen import generate_music
     console = Console()
 
-    api_url = default_api_url()
     # generate_music() calls ensure_comfy() internally (auto-launch from
     # comfy_launch_cmd/comfy_workdir, or a clear error when unset), so the CLI
     # honours the same config the GUI uses (H1).
@@ -1239,11 +1237,9 @@ def video_cmd(prompt, negative, duration, fps, width, height, input_image,
     import time as _time
     from rich.console import Console
     from .audit import SessionMode, effective_mode
-    from .image_gen.comfy import default_api_url
     from .video_gen import generate_video
     console = Console()
 
-    api_url = default_api_url()
     # generate_video() calls ensure_comfy() internally (auto-launch from
     # comfy_launch_cmd/comfy_workdir, or a clear error when unset), so the CLI
     # honours the same config the GUI uses (H1).
@@ -1658,6 +1654,63 @@ def info():
         if v is None:
             v = "[dim](auto)[/dim]"
         console.print(f"  {k:<22} {v}")
+
+
+@main.command("ps")
+def ps_cmd():
+    """List running localm servers (per-directory instances).
+
+    Each `localm gui`/`localm serve` advertises itself so other launches attach
+    instead of double-loading the model. This shows them: which directory each
+    serves, its address and surface (api = bare OpenAI API, full = API + GUI),
+    and whether it answers a liveness probe."""
+    from rich.table import Table
+
+    from localm import instances
+    from localm.config import home_dir
+    rows = instances.snapshot(home_dir())
+    if not rows:
+        console.print("[dim]No running localm instances.[/dim]")
+        return
+    table = Table(title="localm instances")
+    table.add_column("ID")
+    table.add_column("Status")
+    table.add_column("Surface")
+    table.add_column("Address")
+    table.add_column("PID", justify="right")
+    table.add_column("Directory")
+    for r in rows:
+        alive = r.get("alive")
+        status = "[green]live[/green]" if alive else "[yellow]no answer[/yellow]"
+        scheme = r.get("scheme", "http")
+        addr = f"{scheme}://{r.get('host', '127.0.0.1')}:{r.get('port', '?')}"
+        table.add_row(
+            str(r.get("instance_id", ""))[:8], status, str(r.get("mode", "?")),
+            addr, str(r.get("pid", "?")), str(r.get("root_dir", "")))
+    console.print(table)
+
+
+@main.command("status")
+@click.option("--project", default=None, type=click.Path(file_okay=False),
+              help="Check this directory instead of the current one.")
+def status_cmd(project):
+    """Show the localm server serving this directory, if any."""
+    from localm import instances
+    from localm.config import home_dir
+    root = instances.resolve_root_dir(override=project)
+    entry = instances.find_attachable(home_dir(), root)
+    if entry is None:
+        console.print(f"[dim]No localm server is serving[/dim] {root}")
+        console.print("[dim]Start one with[/dim] localm gui  [dim]or[/dim]"
+                      "  localm serve <model>")
+        return
+    scheme = entry.get("scheme", "http")
+    console.print(f"  [bold]directory[/bold]  {root}")
+    console.print(f"  [bold]address  [/bold]  "
+                  f"{scheme}://{entry.get('host', '127.0.0.1')}:{entry.get('port')}")
+    console.print(f"  [bold]surface  [/bold]  {entry.get('mode')}")
+    console.print(f"  [bold]pid      [/bold]  {entry.get('pid')}")
+    console.print(f"  [bold]version  [/bold]  {entry.get('version')}")
 
 
 @main.command("config")

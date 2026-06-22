@@ -210,6 +210,111 @@ async def memory_append(req: MemoryAppend):
 
 
 # ------------------------------------------------------------------ #
+#  Memory auto-synthesis (A2)                                         #
+# ------------------------------------------------------------------ #
+# Distil durable user facts from finished sessions into chat-memory.md so the
+# model "remembers" across chats without the user typing /remember. Runs on a
+# schedule as a jobs "memory" task (the jobs runner binds `complete` to the
+# model). Privacy: only log/full sessions exist to read, AND writes are gated on
+# _persist_enabled() - in privacy mode this SKIPS and says so (RULE 5: a
+# privacy-blocked write must never report success).
+
+_SYNTH_PREFIX = (
+    "You maintain a long-term memory of durable facts about a user, built from "
+    "their past conversations with an AI assistant. Below are recent exchanges.\n\n"
+    "Extract ONLY durable, reusable facts about the user: their name, role, "
+    "projects, tools, stable preferences, and recurring goals. IGNORE one-off "
+    "questions, transient details, and anything that will not matter next week.\n"
+    "Output one fact per line, each starting with '- '. Output nothing if there "
+    "is nothing worth remembering.\n\n=== recent conversations ===\n"
+)
+_SYNTH_SUFFIX = "\n=== end ===\n\nDurable facts:"
+
+
+def _recent_sessions_text(max_chars: int = 8000) -> str:
+    """User+assistant content from the newest session JSONL logs (written only in
+    log/full mode), newest file first, capped to *max_chars*. Empty when none."""
+    sdir = _home() / "sessions"
+    if not sdir.is_dir():
+        return ""
+    files = sorted(sdir.glob("*.jsonl"),
+                   key=lambda p: p.stat().st_mtime, reverse=True)
+    out: list[str] = []
+    total = 0
+    for f in files:
+        try:
+            raw = f.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in raw.splitlines():
+            try:
+                rec = json.loads(line)
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(rec, dict) or rec.get("type") not in ("user", "llm"):
+                continue
+            data = rec.get("data") or {}
+            content = data.get("content", "") if isinstance(data, dict) else ""
+            if not isinstance(content, str) or not content.strip():
+                continue
+            who = "User" if rec.get("type") == "user" else "Assistant"
+            piece = f"{who}: {content.strip()}"
+            out.append(piece)
+            total += len(piece)
+        if total >= max_chars:
+            break
+    return "\n".join(out)[:max_chars]
+
+
+def _strip_bullet(line: str) -> str:
+    """Strip any leading list markers (a model may emit '- ', '* ', or even a
+    nested '- - ') and surrounding whitespace, leaving the bare fact."""
+    return re.sub(r"^[\s\-*]+", "", line).strip()
+
+
+def _existing_memory_lines() -> set:
+    """Casefolded set of current memory fact lines (for dedupe)."""
+    return {_strip_bullet(ln).casefold()
+            for ln in _read_memory().splitlines() if ln.strip()}
+
+
+def synthesize_memory(complete, *, max_facts: int = 12,
+                      max_chars: int = 8000) -> dict:
+    """Distil durable user facts from recent sessions into chat-memory.md.
+
+    *complete* is an injected ``(prompt: str) -> str`` model call (the jobs runner
+    binds it to the engine; tests pass a fake), so the deterministic logic here is
+    unit-testable without a model.
+
+    Privacy: writes are gated on _persist_enabled(); in privacy mode this returns
+    ``{"status": "skipped", "reason": "privacy", "added": 0}`` - it never reports
+    a success it did not perform.
+    """
+    if not _persist_enabled():
+        return {"status": "skipped", "reason": "privacy", "added": 0}
+    sessions = _recent_sessions_text(max_chars=max_chars)
+    if not sessions.strip():
+        return {"status": "skipped", "reason": "no_sessions", "added": 0}
+    raw = complete(_SYNTH_PREFIX + sessions + _SYNTH_SUFFIX) or ""
+    have = _existing_memory_lines()
+    new_facts: list[str] = []
+    for line in str(raw).splitlines():
+        fact = _strip_bullet(line)
+        if not fact or fact.casefold() in have:
+            continue
+        have.add(fact.casefold())
+        new_facts.append(fact)
+        if len(new_facts) >= max_facts:
+            break
+    if not new_facts:
+        return {"status": "ok", "added": 0, "facts": []}
+    current = _read_memory().strip()
+    block = "\n".join(f"- {f}" for f in new_facts)
+    _write_memory((current + "\n" + block) if current else block)
+    return {"status": "ok", "added": len(new_facts), "facts": new_facts}
+
+
+# ------------------------------------------------------------------ #
 #  Prompt library (personas)                                          #
 # ------------------------------------------------------------------ #
 # Named personas: a system prompt plus sampling defaults. Explicit user assets
