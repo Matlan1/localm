@@ -398,7 +398,7 @@ def attach_gui(
         job = jobs.start_cli("pull", args, extra_env={
             "LOCALM_PROGRESS_JSON": "1",
             "HF_HUB_DISABLE_PROGRESS_BARS": "1",
-        })
+        }, host_label=f"Model pull {spec}")
         return {"job_id": job.id}
 
     @app.post("/api/models/remove", dependencies=[Depends(_require_auth)])
