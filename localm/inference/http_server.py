@@ -814,13 +814,19 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
         scope_list = body.get("scopes", [])
         if not isinstance(scope_list, list):
             raise HTTPException(400, "'scopes' must be a list of scope strings")
+        expires = body.get("expires")
+        if expires is not None:
+            try:
+                expires = float(expires)
+            except (TypeError, ValueError):
+                raise HTTPException(400, "'expires' must be an epoch number or null")
         # Only an owner/ADMIN caller may grant privileged scopes; a key holding
         # merely keys:admin must not be able to mint itself owner-equivalent
         # access. In open mode (caller is None) privileged grants are refused.
         is_owner = caller is not None and scopes.ADMIN in caller
         try:
             created = create_key(body.get("name", ""), scope_list,
-                                 allow_privileged=is_owner)
+                                 allow_privileged=is_owner, expires=expires)
         except PermissionError as e:
             raise HTTPException(403, str(e))
         except ValueError as e:

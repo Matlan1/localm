@@ -189,6 +189,10 @@ CORE_FIELDS: list = [
                  "Per-plugin settings (e.g. media output dirs). Managed by the "
                  "Plugins/Settings pages and plugin backends, not edited here.",
                  group="Plugins"),
+    SettingField("key_presets", Widget.HIDDEN, "Key presets",
+                 "Quick-select scope bundles for the Keys & devices manager. "
+                 "Edited there, not in this form.",
+                 group="Security"),
     # ---- Coder (plugin) ----
     SettingField("coder_confirm_timeout", Widget.NUMBER,
                  "Coder approval timeout (s)",
@@ -338,6 +342,32 @@ def _to_str_list(key: str, val):
     raise ValueError(f"{key}: expected a list of strings, got {val!r}")
 
 
+def _validate_key_presets(val):
+    """Validate the key_presets config: a list of {name, scopes} bundles. Each
+    name is a non-empty string and each scopes is a list of KNOWN scope strings
+    (an unknown/typo'd scope is rejected so a preset can never carry a capability
+    that does not exist). Returns the normalized list."""
+    from localm import scopes as S
+    if not isinstance(val, list):
+        raise ValueError("key_presets: expected a list of {name, scopes} objects")
+    out = []
+    for i, item in enumerate(val):
+        if not isinstance(item, dict):
+            raise ValueError(f"key_presets[{i}]: expected an object")
+        name = str(item.get("name", "")).strip()
+        if not name:
+            raise ValueError(f"key_presets[{i}]: a name is required")
+        raw = item.get("scopes", [])
+        if not isinstance(raw, list):
+            raise ValueError(f"key_presets[{i}].scopes: expected a list")
+        clean = S.normalize(raw)
+        bad = [s for s in clean if not S.is_valid_scope(s)]
+        if bad:
+            raise ValueError(f"key_presets[{i}]: unknown scope(s): {', '.join(bad)}")
+        out.append({"name": name, "scopes": clean})
+    return out
+
+
 def _validate_one(key: str, val, field: "SettingField", default):
     nullable = default is None
     widget = field.widget
@@ -371,6 +401,8 @@ def _validate_one(key: str, val, field: "SettingField", default):
             if s in LOGO_STYLE_IDS:
                 return s
             raise ValueError(f"{key}: {val!r} is not one of {LOGO_STYLE_IDS}")
+        if key == "key_presets":
+            return _validate_key_presets(val)
         # plugins_enabled (list) / plugins (dict): managed by the engine, not the
         # settings form, but accepted with the right container type for the
         # GET->PATCH round-trip the GUI does.

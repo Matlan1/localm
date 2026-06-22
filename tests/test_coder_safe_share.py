@@ -298,3 +298,75 @@ def test_scoped_key_cannot_switch_the_shared_model(tmp_path, monkeypatch):
                         headers={"Authorization": f"Bearer {scoped['key']}"},
                         json={"cwd": str(proj), "model": "some-other-model"})
         assert r.status_code == 403       # switching the shared engine needs the owner
+
+
+# ------------------------------------------------------------------ #
+#  coder:full - the privileged, owner-only "unrestricted coder" scope #
+# ------------------------------------------------------------------ #
+
+def test_coder_full_key_gets_the_unrestricted_coder(tmp_path, monkeypatch):
+    # A key carrying the privileged coder:full scope (owner-only to mint) runs the
+    # FULL coder, same as the owner: any cwd honored, run_shell intact, unrestricted.
+    proj = tmp_path / "proj"; proj.mkdir()
+    work = tmp_path / "work"; work.mkdir()
+    app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+    app.state.root_dir = str(proj)
+    from localm import auth
+    full = auth.create_key("dev-laptop", ["coder:full"], allow_privileged=True)
+
+    with TestClient(app) as client:
+        r = client.post("/api/coder/sessions",
+                        headers={"Authorization": f"Bearer {full['key']}"},
+                        json={"cwd": str(work)})
+        assert r.status_code == 200
+        assert r.json()["cwd"] == str(work.resolve())     # honored, not forced to root
+        sess = app.state.coder_sessions.get(r.json()["id"])
+        assert not sess.agent.disabled_tools              # run_shell intact
+        assert sess.restricted is False
+
+
+def test_plain_coder_key_stays_restricted(tmp_path, monkeypatch):
+    # Regression: a plain coder key (no coder:full) is still restricted.
+    proj = tmp_path / "proj"; proj.mkdir()
+    app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+    app.state.root_dir = str(proj)
+    from localm import auth
+    plain = auth.create_key("phone", ["coder"])
+
+    with TestClient(app) as client:
+        r = client.post("/api/coder/sessions",
+                        headers={"Authorization": f"Bearer {plain['key']}"},
+                        json={"cwd": str(proj)})
+        sess = app.state.coder_sessions.get(r.json()["id"])
+        assert sess.restricted is True
+        assert "run_shell" in sess.agent.disabled_tools
+
+
+# ------------------------------------------------------------------ #
+#  Scoped-key pairing QR (POST /api/pairing/qr {key})                #
+# ------------------------------------------------------------------ #
+
+def test_pairing_qr_renders_for_a_scoped_key(tmp_path, monkeypatch):
+    app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+    from localm import auth
+    scoped = auth.create_key("phone", ["chat"])
+    with TestClient(app) as client:
+        # The owner POSTs the freshly-minted scoped key -> an SVG QR for THAT key.
+        r = client.post("/api/pairing/qr",
+                        headers={"Authorization": "Bearer ownersecret"},
+                        json={"key": scoped["key"]})
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("image/svg+xml")
+        assert r.headers.get("cache-control") == "no-store"
+        body = r.text
+        assert body.startswith("<svg") and "<svg:" not in body   # DOMPurify-safe
+        assert "viewBox" in body
+        # A non-owner (scoped) key cannot render pairing QRs - owner-gated.
+        r2 = client.post("/api/pairing/qr",
+                         headers={"Authorization": f"Bearer {scoped['key']}"},
+                         json={"key": scoped["key"]})
+        assert r2.status_code in (401, 403)
+        # Missing key -> 400.
+        r3 = client.post("/api/pairing/qr",
+                         headers={"Authorization": "Bearer ownersecret"}, json={})
+        assert r3.status_code == 400

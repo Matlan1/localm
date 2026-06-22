@@ -283,26 +283,14 @@ def attach_gui(
         return {"model": name, "model_bytes": model_bytes, **est,
                 "free": free, "total": total, "fits": fits, "approximate": True}
 
-    @app.get("/api/pairing/qr",
-             dependencies=[Depends(require_scope(scopes.ADMIN))])
-    async def pairing_qr():
-        """An SVG QR encoding the API key (as ``localm-key:<key>``) so a phone can
-        scan it on the onboarding screen and SAVE the key - no typing. Owner scope
-        only: it carries the key, so a merely scoped key cannot read it. 404 in
-        open mode (no key configured -> nothing to pair). The key is rendered
-        server-side (the server already holds it); never cached."""
-        from localm import auth
-        key = auth.get_api_key()
-        if not key:
-            raise HTTPException(404, "No API key configured - nothing to pair.")
+    def _pairing_qr_svg(key: str) -> str:
+        """DOMPurify-safe SVG QR encoding ``localm-key:<key>`` for device pairing.
+        Hand-built from the module matrix (one black <path> over a white <rect>
+        with a viewBox): the qrcode lib's SvgImage emits namespace-prefixed
+        <svg:rect> in mm with no viewBox, which DOMPurify strips (blank box) and
+        which never scales into the CSS box anyway. Plain <rect>/<path> with
+        explicit fills survive sanitisation and render black-on-white on any theme."""
         import qrcode
-        # Build the SVG ourselves from the module matrix: one black <path> of the
-        # dark modules over a white <rect>, with a viewBox so it scales crisply to
-        # any CSS size. The qrcode lib's SvgImage factory emits namespace-prefixed
-        # <svg:rect> in mm units with no viewBox - DOMPurify's SVG profile strips
-        # the prefixed tags (leaving a blank white box) and the mm/no-viewBox combo
-        # never scales into the CSS box anyway. Plain <rect>/<path> with explicit
-        # fills survive sanitisation and render black-on-white on any theme.
         qr = qrcode.QRCode(
             error_correction=qrcode.constants.ERROR_CORRECT_M, border=4)
         qr.add_data(f"localm-key:{key}")
@@ -314,14 +302,42 @@ def attach_gui(
             for y, row in enumerate(matrix)
             for x, dark in enumerate(row) if dark
         ]
-        svg = (
+        return (
             f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {n} {n}" '
             f'shape-rendering="crispEdges" role="img" '
             f'aria-label="localm pairing code">'
             f'<rect width="{n}" height="{n}" fill="#ffffff"/>'
             f'<path d="{"".join(segments)}" fill="#000000"/></svg>'
         )
-        return Response(content=svg, media_type="image/svg+xml",
+
+    @app.get("/api/pairing/qr",
+             dependencies=[Depends(require_scope(scopes.ADMIN))])
+    async def pairing_qr():
+        """SVG QR encoding the OWNER API key (``localm-key:<key>``) so a phone can
+        scan it on the onboarding screen and SAVE the key - no typing. Owner scope
+        only: it carries the key. 404 in open mode (no key -> nothing to pair).
+        Rendered server-side; never cached. For a scoped/limited key the Keys &
+        devices manager POSTs the freshly-minted key to the sibling endpoint."""
+        from localm import auth
+        key = auth.get_api_key()
+        if not key:
+            raise HTTPException(404, "No API key configured - nothing to pair.")
+        return Response(content=_pairing_qr_svg(key), media_type="image/svg+xml",
+                        headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/pairing/qr",
+              dependencies=[Depends(require_scope(scopes.ADMIN))])
+    async def pairing_qr_for_key(body: dict):
+        """Render a pairing QR for an ARBITRARY scoped key the owner JUST minted -
+        the plaintext is passed in the BODY so it never lands in a URL / access
+        log. Owner-gated, never persisted or cached: the key is rendered into the
+        SVG and discarded. The phone scans it exactly like the owner-key QR,
+        pairing that device with the LIMITED key instead of full admin."""
+        key = (body or {}).get("key")
+        if not isinstance(key, str) or not key.strip():
+            raise HTTPException(400, "Provide the minted key plaintext as 'key'.")
+        return Response(content=_pairing_qr_svg(key.strip()),
+                        media_type="image/svg+xml",
                         headers={"Cache-Control": "no-store"})
 
     @app.get("/api/fs/dirs", dependencies=[Depends(_require_auth)])
