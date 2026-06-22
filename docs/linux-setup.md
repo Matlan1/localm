@@ -88,7 +88,7 @@ install torch yourself, e.g.:
 
 ```sh
 uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/rocm6.2
-# or .../whl/cu124  (CUDA)  or  .../whl/cpu  (CPU)
+# or .../whl/cu126  (CUDA)  or  .../whl/cpu  (CPU)
 ```
 
 The GGUF (llama.cpp) backend does not need PyTorch at all.

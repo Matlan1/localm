@@ -141,7 +141,7 @@ installer sets PyTorch up to match your GPU; to do it by hand:
 uv pip install -p .venv -e ".[gpu]"
 
 # NVIDIA (CUDA):
-uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu124
+uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu126
 
 # CPU:
 uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cpu
