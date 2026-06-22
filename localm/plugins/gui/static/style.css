@@ -338,6 +338,54 @@ pre .copy-btn {
 }
 pre:hover .copy-btn { opacity: 1; }
 
+/* "Open canvas" button on a renderable (html/svg) code block - sits left of copy */
+.canvas-btn {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 5px;
+  font-size: 11px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+.canvas-btn:hover { color: var(--accent); border-color: var(--accent); }
+pre .canvas-btn {
+  position: absolute;
+  top: 6px;
+  right: 56px;
+  background: var(--bg-raised);
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+pre:hover .canvas-btn { opacity: 1; }
+
+/* Artifacts canvas: a right-side drawer holding the sandboxed render iframe. */
+.artifact-pane {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: min(560px, 92vw);
+  height: 100%;
+  background: var(--bg-raised);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  z-index: 60;
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.35);
+}
+.artifact-pane[hidden] { display: none; }
+.artifact-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.artifact-title { font-weight: 600; font-size: 14px; }
+.artifact-head .spacer { flex: 1; }
+.artifact-body { flex: 1; min-height: 0; }
+.artifact-frame { width: 100%; height: 100%; border: 0; background: #fff; }
+
 /* composer */
 
 .composer-wrap {

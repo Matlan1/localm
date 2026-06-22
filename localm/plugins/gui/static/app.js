@@ -149,10 +149,97 @@ function renderMarkdown(target, text) {
     } catch (e) { /* malformed TeX mid-stream - final render fixes it */ }
   }
   target.querySelectorAll("pre code").forEach((block) => {
+    // Record the source language BEFORE hljs rewrites the class list, so the
+    // artifact detector still knows this block was ```html / ```svg.
+    const m = (block.className || "").match(/language-([\w-]+)/);
+    if (m && block.dataset) block.dataset.lang = m[1];
     try { hljs.highlightElement(block); } catch (e) { /* unknown lang */ }
   });
-  target.querySelectorAll("pre").forEach((pre) => {
-    if (pre.querySelector(".copy-btn")) return;
+  target.querySelectorAll("pre").forEach(enhanceCodeBlock);
+}
+
+/* ---- Artifacts canvas (A3) --------------------------------------------- *
+ * A self-contained HTML/SVG block in a reply can be rendered live in a side
+ * pane. The render is HARD-sandboxed: an <iframe sandbox="allow-scripts">
+ * (NO allow-same-origin, so no access to this app's origin/cookies/storage)
+ * whose srcdoc carries a Content-Security-Policy that blocks ALL network. So
+ * an artifact can be interactive yet cannot phone home or read the app -
+ * consistent with the privacy contract / "do not hide problems".            */
+
+/** The artifact language for a <code> element, or null if it is not a
+ *  renderable self-contained block. Reads the captured data-lang first, then
+ *  sniffs the content (so an unlabelled <svg>/<!doctype html> still works). */
+function artifactLang(codeEl) {
+  if (!codeEl) return null;
+  const cls = (codeEl.className || "").match(/language-([\w-]+)/);
+  const lang = ((codeEl.dataset && codeEl.dataset.lang) || (cls && cls[1]) || "").toLowerCase();
+  const text = codeEl.innerText || codeEl.textContent || "";
+  if (lang === "svg" || /^\s*<svg[\s>]/i.test(text)) return "svg";
+  if (lang === "html" || lang === "xhtml") return "html";
+  if (lang === "xml" && /^\s*<svg[\s>]/i.test(text)) return "svg";
+  if (!lang && /<!doctype\s+html|<html[\s>]/i.test(text)) return "html";
+  return null;
+}
+
+/** Build the iframe srcdoc for an artifact, injecting a strict CSP that blocks
+ *  network access. Inline script/style are allowed (the artifact runs), data:
+ *  images are allowed, everything else is denied. */
+function artifactSrcdoc(code, lang) {
+  const csp = '<meta http-equiv="Content-Security-Policy" content="'
+    + "default-src 'none'; img-src data: blob:; media-src data: blob:; "
+    + "style-src 'unsafe-inline'; script-src 'unsafe-inline'; font-src data:;\">";
+  if (lang === "svg" || /^\s*<svg[\s>]/i.test(code)) {
+    return "<!doctype html><html><head><meta charset=\"utf-8\">" + csp
+      + "<style>html,body{margin:0;height:100%}svg{max-width:100%;height:auto;display:block}</style>"
+      + "</head><body>" + code + "</body></html>";
+  }
+  if (/<!doctype\s+html/i.test(code) || /<html[\s>]/i.test(code)) {
+    // Full document: inject the CSP as early as possible so it governs all loads.
+    if (/<head[\s>]/i.test(code)) return code.replace(/<head([^>]*)>/i, "<head$1>" + csp);
+    if (/<html[^>]*>/i.test(code)) return code.replace(/<html([^>]*)>/i, "<html$1><head>" + csp + "</head>");
+    return csp + code;
+  }
+  // A fragment: wrap it in a minimal document.
+  return "<!doctype html><html><head><meta charset=\"utf-8\">" + csp + "</head><body>"
+    + code + "</body></html>";
+}
+
+/** Open the artifact pane and render *code* in the hard-sandboxed iframe. */
+function openArtifact(code, lang) {
+  const pane = document.getElementById("artifact-pane");
+  if (!pane) return;
+  const body = pane.querySelector(".artifact-body");
+  body.replaceChildren();
+  const frame = document.createElement("iframe");
+  frame.className = "artifact-frame";
+  frame.setAttribute("sandbox", "allow-scripts");   // NO allow-same-origin
+  frame.setAttribute("referrerpolicy", "no-referrer");
+  frame.srcdoc = artifactSrcdoc(code, lang);
+  body.appendChild(frame);
+  const title = pane.querySelector(".artifact-title");
+  if (title) title.textContent = "Artifact (" + lang + ")";
+  pane.hidden = false;
+  // Wire the controls lazily (idempotent): the GUI init does not run under the
+  // test harness, and this keeps them working regardless of load order.
+  const closeBtn = pane.querySelector("#artifact-close");
+  if (closeBtn) closeBtn.onclick = closeArtifact;
+  const refreshBtn = pane.querySelector("#artifact-refresh");
+  if (refreshBtn) refreshBtn.onclick = () => openArtifact(code, lang);
+}
+
+/** Close the artifact pane and tear down the iframe (stops any running script). */
+function closeArtifact() {
+  const pane = document.getElementById("artifact-pane");
+  if (!pane) return;
+  pane.hidden = true;
+  const body = pane.querySelector(".artifact-body");
+  if (body) body.replaceChildren();
+}
+
+/** Add the copy button (and, for a renderable block, an "open canvas" button)
+ *  to a <pre>. Idempotent. */
+function enhanceCodeBlock(pre) {
+  if (!pre.querySelector(".copy-btn")) {
     const btn = document.createElement("button");
     btn.className = "copy-btn";
     btn.textContent = "copy";
@@ -162,7 +249,17 @@ function renderMarkdown(target, text) {
       setTimeout(() => (btn.textContent = "copy"), 1200);
     };
     pre.appendChild(btn);
-  });
+  }
+  const codeEl = pre.querySelector("code");
+  const lang = artifactLang(codeEl);
+  if (lang && !pre.querySelector(".canvas-btn")) {
+    const cbtn = document.createElement("button");
+    cbtn.className = "canvas-btn";
+    cbtn.textContent = "canvas";
+    cbtn.title = "Render this " + lang.toUpperCase() + " in a sandboxed canvas";
+    cbtn.onclick = () => openArtifact(codeEl?.innerText || codeEl?.textContent || "", lang);
+    pre.appendChild(cbtn);
+  }
 }
 
 /** Create an element with class and (safe) text content. */

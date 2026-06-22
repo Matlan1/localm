@@ -515,6 +515,19 @@
 
 <div id="toast"></div>
 
+<!-- Artifacts canvas: renders a self-contained HTML/SVG block from a reply in a
+     hard-sandboxed iframe (no same-origin, CSP blocks all network). Opened by the
+     "canvas" button on a renderable code block (app.js openArtifact). -->
+<div id="artifact-pane" class="artifact-pane" hidden>
+  <div class="artifact-head">
+    <span class="artifact-title">Artifact</span>
+    <span class="spacer"></span>
+    <button class="btn-quiet" id="artifact-refresh" title="Re-render">&#8635;</button>
+    <button class="btn-quiet" id="artifact-close" title="Close">&times;</button>
+  </div>
+  <div class="artifact-body"></div>
+</div>
+
 <div id="modal" class="modal-backdrop" style="display:none">
   <div class="modal">
     <div class="modal-head"><span id="modal-title"></span><button id="modal-close">×</button></div>
