@@ -347,6 +347,7 @@ later rounds but never re-marked here. Verified by grep / reading the GUI source
 - [x] Mobile / PWA layout - shipped (installable PWA + native-feeling mobile chat, #202)
   - [ ] Mobile keyboard handling: the on-screen keyboard can hide the composer on iOS (`100dvh` does not shrink for it); add a `visualViewport`-based inset so the input always floats above the keyboard
   - [ ] Real-device verification of #202 (it was verified by DOM measurement on Android-sized viewports only, never on a phone): notch / home-bar `env(safe-area-inset-*)`, and iOS Safari (16px no-zoom font, `viewport-fit=cover`, Add-to-Home-Screen)
+  - [ ] Real-device verification of #201 auth-cookie persistence: confirm the API key survives a full browser / installed-PWA close+reopen (it is now a ~400-day persistent cookie, not a session cookie). Mobile OSes can still evict cookies under storage pressure / ITP even with `max-age`; QR-pair is the fallback.
   - [ ] Optional companion-app polish: show the conversation title / active model name in the mobile top bar (currently just the "localm" wordmark)
 - [ ] i18n + accessibility pass
 - [ ] Profiles / multi-user accounts (out of scope for home use; scoped API keys already cover per-device sharing)
@@ -397,6 +398,47 @@ criteria matrix and per-tool analysis live in the maintainer's local dev-notes
 - [ ] Apple Metal/MLX and Intel SYCL backends - localm is weakest of the field on Mac / Intel
 - [ ] Docs: document the 3 shipped surfaces (`idle_unload_seconds`, `localm ps`/`status`, `localm job add --memory`) in README + docs/jobs.md
 - Note: CI is disabled (Actions quota), so PRs are verified LOCALLY; a periodic `ruff check .` + full suite sweep is the only regression backstop (3 pre-existing ruff errors had slipped onto master and were cleaned in #203).
+
+## Auth, TLS & media-workflow follow-ups (2026-06-22)
+
+From the seamless auth/cert session (#201) + the reopened I3 Wan-video item.
+`issues/issues.txt` carries the bug-level detail (K1, I3);
+`dev-notes/SESSION-seamless-auth-cert-2026-06-22.md` is the session record.
+
+### Shipped + merged this session (#201)
+
+- [x] Seamless auth - the API key PERSISTS across a browser/PWA restart: both
+  `localm_session` + `localm_csrf` now carry a shared ~400-day `max_age` (replacing
+  the session cookies that were dropped on close); and the key gate stops nagging to
+  reinstall the cert - it only shows "Install certificate" when the CA is genuinely
+  untrusted, signalled by `window.__swFailed`. Closes the deeper root cause behind
+  J1/J2. Logout stays reachable (Settings: leave the key blank and Save).
+
+### Open - to implement
+
+- [ ] I3 - Wan video "model not in list" is a workflow-management gap, not just the
+  user's missing files. Approved scope ("validate models pre-submit"): (a) role-based
+  param injection in `localm/video_gen/comfy.py` - resolve KSampler / positive+negative
+  prompt / latent (width/height/length/start_image) / CreateVideo (fps) nodes by
+  `class_type` + graph connections instead of hardcoded node IDs, so a user's OWN Wan
+  workflow works; (b) pre-submit validation against ComfyUI `/object_info` that names
+  the exact missing model file BEFORE the chat model is unloaded (auto-substitute a
+  close precision-variant where unambiguous); (c) an actionable error pointing to the
+  Workflow panel; then give image (`image_gen/comfy.py`) + music (`music_gen/comfy.py`)
+  the same treatment. Diagnosis done; no code written yet.
+
+### Open - verify / decide
+
+- [ ] `tls.py` SAN-coverage edge: a bind to a specific IP/hostname not in
+  `san_targets()` auto-discovery could leave the browser "not secure" even with the CA
+  trusted. Common case is covered (`cli.py` passes the bind host). Act only on a real
+  repro.
+- [ ] Decision to confirm: the auth-cookie lifetime shipped at ~400 days (the browser
+  cap) to honour "store the key permanently". A shorter TTL (30d, or 7d on a network
+  bind) trades seamlessness for a smaller local-device-theft window - one-line change
+  if the maintainer prefers it.
+- (Real-phone persistence check is tracked under the Mobile / PWA item in "Polish /
+  later".)
 
 ## Future Benchmarking (Under Review)
 
