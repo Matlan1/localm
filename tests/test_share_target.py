@@ -10,7 +10,6 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from localm.plugins.gui import web as gui_web
 from localm.plugins.gui.web import attach_gui
 
 

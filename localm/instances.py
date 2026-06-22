@@ -417,6 +417,28 @@ def attach_target(home: Path, root_dir: str,
     }
 
 
+def snapshot(home: Path, probe: Optional[Callable[[dict], bool]] = None,
+             reap: bool = True) -> list[dict]:
+    """Registry entries for ``localm ps``: each gains an ``alive`` flag from an
+    identity-verified /whoami probe, with the attach ``token`` stripped (a
+    listing must never surface a credential). Process-gone entries are reaped
+    first unless *reap* is False. Sorted by start time (oldest first)."""
+    probe = probe or default_probe
+    if reap:
+        reap_stale(home)
+    rows: list[dict] = []
+    for e in list_entries(home):
+        try:
+            alive = probe(e)
+        except Exception:
+            alive = False
+        row = {k: v for k, v in e.items() if k != "token"}
+        row["alive"] = alive
+        rows.append(row)
+    rows.sort(key=lambda r: r.get("started") or "")
+    return rows
+
+
 # ------------------------------------------------------------------ #
 #  Advertise: the surface-startup context manager                    #
 # ------------------------------------------------------------------ #

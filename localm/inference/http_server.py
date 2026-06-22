@@ -51,6 +51,77 @@ _engine: Engine | None = None
 # Additional requests queue behind this semaphore.
 _inference_sem: asyncio.Semaphore | None = None
 
+# Monotonic timestamp of the last inference request, for the optional idle-unload
+# loop (config "idle_unload_seconds"). Touched at the start of each inference
+# endpoint, like Ollama's keep_alive (measured from the last request).
+_last_activity: float = time.monotonic()
+
+
+def _touch_activity() -> None:
+    """Record that an inference request just arrived (resets the idle timer)."""
+    global _last_activity
+    _last_activity = time.monotonic()
+
+
+def _idle_unload_ttl() -> int:
+    """Configured idle-unload TTL in seconds (0 = disabled), read live so a
+    Settings change applies without a restart. A bad value falls back to 0."""
+    try:
+        from localm.config import load_config
+        return max(0, int(load_config().get("idle_unload_seconds", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+async def _idle_unload_once(ttl: int) -> bool:
+    """One idle check: unload the model if it has been idle for >= ttl seconds.
+    Returns True if it unloaded. Does NO sleeping (the loop owns cadence), so the
+    decision is unit-testable without waiting.
+
+    The unload runs UNDER the inference semaphore so it can never free the native
+    context mid-decode (that crashes the GPU driver), and the idle time is
+    re-checked inside the lock so a request that arrived while we waited for the
+    lock cancels the unload. The next inference reloads the model lazily."""
+    if (ttl <= 0 or _engine is None or not _engine.loaded
+            or _inference_sem is None):
+        return False
+    if (time.monotonic() - _last_activity) < ttl:
+        return False
+    loop = asyncio.get_running_loop()
+    async with _inference_sem:
+        # Re-check under the lock: a request may have touched activity (or the
+        # model may already be gone) while we waited for the semaphore.
+        if not (_engine is not None and _engine.loaded
+                and (time.monotonic() - _last_activity) >= ttl):
+            return False
+        idle_s = int(time.monotonic() - _last_activity)
+        await loop.run_in_executor(None, _engine.unload)
+        from localm.debuglog import logger as _dbg
+        _dbg.info("idle-unload: freed %s after %ds idle (ttl=%ds); it reloads "
+                  "on the next request", _engine.display_name, idle_s, ttl)
+        return True
+
+
+async def _idle_unload_loop() -> None:
+    """Free the model from VRAM after `idle_unload_seconds` of no inference.
+
+    Opt-in (default 0 = disabled). Runs as a lifespan background task; the actual
+    decision lives in `_idle_unload_once`. A transient error is logged (RULE 5:
+    surface, do not swallow) instead of killing the loop."""
+    while True:
+        ttl = _idle_unload_ttl()
+        if ttl <= 0:
+            # Disabled: poll occasionally so enabling it at runtime takes effect.
+            await asyncio.sleep(30)
+            continue
+        # Check within the TTL, but not too hot and not too slow.
+        await asyncio.sleep(max(5, min(ttl, 30)))
+        try:
+            await _idle_unload_once(ttl)
+        except Exception:
+            from localm.debuglog import logger as _dbg
+            _dbg.warning("idle-unload check failed (continuing)", exc_info=True)
+
 # Optional bearer-token auth - enabled when LOCALM_API_KEY is set.
 _bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -273,8 +344,19 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
         global _inference_sem
         # Semaphore created inside the running event loop - Python 3.10+ safe
         _inference_sem = asyncio.Semaphore(1)
-        yield
-        _audit.close()
+        # Optional idle-unload background task (config "idle_unload_seconds"); it
+        # is a cheap no-op while disabled. Cancelled on shutdown so it never
+        # outlives the app.
+        idle_task = asyncio.create_task(_idle_unload_loop())
+        try:
+            yield
+        finally:
+            idle_task.cancel()
+            try:
+                await idle_task
+            except asyncio.CancelledError:
+                pass
+            _audit.close()
 
     app = FastAPI(
         title="localm inference server",
@@ -936,6 +1018,7 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
     async def chat_completions(req: ChatRequest, request: Request):
         if _engine is None:
             raise HTTPException(503, "No model loaded")
+        _touch_activity()
 
         # Convert pydantic Messages to plain dicts for the backend
         messages = _protocol_messages_to_dicts(req.messages)
@@ -1009,6 +1092,7 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
     async def embeddings(req: EmbeddingRequest):
         if _engine is None:
             raise HTTPException(503, "No model loaded")
+        _touch_activity()
 
         # Honor the OpenAI encoding_format contract. "float" returns plain JSON
         # arrays; "base64" returns each vector as a base64-encoded little-endian
@@ -1057,6 +1141,7 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
     async def completions(req: CompletionRequest, request: Request):
         if _engine is None:
             raise HTTPException(503, "No model loaded")
+        _touch_activity()
 
         # Wrap the prompt as a single user message so raw completions flow through
         # the SAME chat-pipeline hooks and audit/transcript as

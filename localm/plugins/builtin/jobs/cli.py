@@ -34,22 +34,29 @@ def _store():
 
 @main.command("add")
 @click.argument("name")
-@click.option("--prompt", required=True, help="The prompt to run on schedule.")
+@click.option("--prompt", default=None, help="The prompt to run on schedule "
+              "(required for chat/coder jobs; omit for --memory).")
 @click.option("--cron", "cron", default=None,
               help='5-field cron schedule, e.g. "0 9 * * 1-5".')
 @click.option("--every", "every", type=int, default=None,
               help="Interval schedule in seconds (mutually exclusive with --cron).")
 @click.option("--coder", "coder", is_flag=True, default=False,
               help="Run a coder agent instead of a chat prompt.")
+@click.option("--memory", "memory", is_flag=True, default=False,
+              help="Synthesise durable facts from recent sessions into the "
+                   "assistant memory (no prompt needed).")
 @click.option("--cwd", default=None, help="Working directory for a coder job.")
 @click.option("--scope", default=None, help="File-access glob for a coder job.")
 @click.option("--model", default=None, help="Model to run the job with.")
 @click.option("--disabled", is_flag=True, default=False,
               help="Create the job disabled (it will not run until enabled).")
-def job_add(name, prompt, cron, every, coder, cwd, scope, model, disabled):
+def job_add(name, prompt, cron, every, coder, memory, cwd, scope, model, disabled):
     """Add a new scheduled job."""
     from localm.plugins.builtin.jobs.store import Job
 
+    if coder and memory:
+        click.echo("Use either --coder or --memory, not both.", err=True)
+        sys.exit(1)
     if cron and every is not None:
         click.echo("Use either --cron or --every, not both.", err=True)
         sys.exit(1)
@@ -62,8 +69,8 @@ def job_add(name, prompt, cron, every, coder, cwd, scope, model, disabled):
     try:
         job = Job(
             name=name,
-            task_kind="coder" if coder else "chat",
-            prompt=prompt,
+            task_kind="memory" if memory else ("coder" if coder else "chat"),
+            prompt=prompt or "",
             schedule_kind=schedule_kind,
             schedule=schedule,
             model=model,

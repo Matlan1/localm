@@ -41,7 +41,7 @@ _STORE_LOCK = threading.RLock()
 
 # Task kinds and schedule kinds the store accepts. Kept here (not in the
 # scheduler) so the store can validate a job def before it is ever persisted.
-TASK_KINDS = ("chat", "coder")
+TASK_KINDS = ("chat", "coder", "memory")
 SCHEDULE_KINDS = ("interval", "cron")
 
 # A job id is a short opaque token; we also accept any string but confine it to
@@ -107,7 +107,8 @@ class Job:
             if not isinstance(self.schedule, str) or not self.schedule.strip():
                 raise ValueError("cron schedule must be a 5-field cron string")
             validate_cron(self.schedule)        # raises ValueError on a bad field
-        if not str(self.prompt).strip():
+        # memory jobs synthesise from session logs and need no user prompt.
+        if self.task_kind != "memory" and not str(self.prompt).strip():
             raise ValueError("prompt is required")
         if self.task_kind == "coder" and not (self.cwd and str(self.cwd).strip()):
             raise ValueError("coder jobs require a cwd")
