@@ -454,17 +454,27 @@
               </div>
             </section>
 
-            <section class="card settings-section" id="keys-card" data-sec-label="API keys">
-              <h3>API keys</h3>
-              <div class="sub">Mint named, scope-limited keys to share localm with
-                another device or person - each key gets only the capabilities you
-                check. A <b>coder</b> key is restricted (it can read and edit this
-                project but cannot run shell commands). The secret is shown once.</div>
-              <input type="text" id="key-name" placeholder="key name (e.g. phone)"
+            <section class="card settings-section" id="keys-card" data-sec-label="Keys &amp; devices">
+              <h3>Keys &amp; devices</h3>
+              <div class="sub">Mint a named, scope-limited key to pair another device
+                or person - each key gets only the capabilities you check, and a QR is
+                shown to scan (no typing). A <b>coder</b> key is restricted (read +
+                edit, no shell); <b>coder (full)</b> and <b>admin</b> are owner-only.
+                The secret is shown once - revoke a key to unpair that device.</div>
+              <input type="text" id="key-name" placeholder="device or person name (e.g. phone)"
                      spellcheck="false" autocomplete="off">
+              <div id="key-presets" class="key-presets"></div>
               <div id="key-scopes" class="key-scopes"></div>
+              <label class="key-expiry-row">Expires
+                <select id="key-expiry" class="key-expiry">
+                  <option value="">never</option>
+                  <option value="86400">in 24 hours</option>
+                  <option value="604800">in 7 days</option>
+                  <option value="2592000">in 30 days</option>
+                </select>
+              </label>
               <div class="actions">
-                <button class="btn-quiet" id="key-create">Create key</button>
+                <button class="btn-quiet" id="key-create">Create &amp; show QR</button>
               </div>
               <div id="key-secret" class="key-secret" style="display:none"></div>
               <div id="keys-list" class="keys-list"></div>

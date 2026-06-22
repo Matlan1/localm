@@ -198,20 +198,26 @@ def list_keys() -> list:
     """Public metadata for every named key (never the hash)."""
     return [
         {"id": r.get("id"), "name": r.get("name", ""),
-         "scopes": r.get("scopes", []), "created": r.get("created")}
+         "scopes": r.get("scopes", []), "created": r.get("created"),
+         "expires": r.get("expires")}
         for r in _load_keystore()
     ]
 
 
-def create_key(name: str, scope_list, *, allow_privileged: bool = False) -> dict:
+def create_key(name: str, scope_list, *, allow_privileged: bool = False,
+               expires: Optional[float] = None) -> dict:
     """Mint a named key with *scope_list*, persist its hash, and return a record
     INCLUDING the plaintext key once - the caller must surface it now, it cannot
     be recovered. Raises ValueError on an unknown scope.
 
-    PRIVILEGED_SCOPES (admin / keys:admin / plugins:admin / config:write) are
-    refused with PermissionError unless *allow_privileged* is True. Callers must
-    only set that for an owner/ADMIN principal, so a merely keys:admin-scoped key
-    cannot mint itself owner-equivalent access (privilege self-escalation)."""
+    PRIVILEGED_SCOPES (admin / keys:admin / plugins:admin / config:write /
+    coder:full) are refused with PermissionError unless *allow_privileged* is
+    True. Callers must only set that for an owner/ADMIN principal, so a merely
+    keys:admin-scoped key cannot mint itself owner-equivalent access (privilege
+    self-escalation).
+
+    *expires* is an optional epoch-seconds deadline after which verify() rejects
+    the key; None (default) never expires."""
     from localm import scopes as S
     clean = S.normalize(scope_list)
     bad = [s for s in clean if not S.is_valid_scope(s)]
@@ -232,13 +238,15 @@ def create_key(name: str, scope_list, *, allow_privileged: bool = False) -> dict
         "hash": _hash_key(key),
         "scopes": clean,
         "created": time.time(),
+        "expires": float(expires) if expires is not None else None,
     }
     with _KEYSTORE_LOCK:
         records = _load_keystore()
         records.append(record)
         _save_keystore(records)
     return {"id": record["id"], "name": record["name"],
-            "scopes": record["scopes"], "key": key}
+            "scopes": record["scopes"], "expires": record["expires"],
+            "key": key}
 
 
 def revoke_key(key_id: str) -> bool:
@@ -300,5 +308,8 @@ def verify(presented: Optional[str]) -> Optional[set]:
     for r in _load_keystore():
         h = r.get("hash", "")
         if h and hmac.compare_digest(h, presented_hash):
+            exp = r.get("expires")
+            if exp is not None and time.time() > float(exp):
+                return None       # matched a real key, but it has expired
             return set(r.get("scopes", []))
     return None

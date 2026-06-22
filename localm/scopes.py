@@ -27,7 +27,8 @@ ADMIN         = "admin"           # wildcard owner scope: implies every scope
 # Third-party plugins declare their own scope (== their name) in the manifest;
 # it is registered at install time via is_valid_scope(..., extra=...).
 CHAT  = "chat"     # the built-in, always-enabled chat plugin
-CODER = "coder"
+CODER = "coder"            # restricted coder: read + confined edit, no shell
+CODER_FULL = "coder:full"  # unrestricted coder (shell exec); PRIVILEGED, owner-only to mint
 IMAGE = "image"
 MUSIC = "music"
 VIDEO = "video"
@@ -50,7 +51,7 @@ KERNEL_SCOPES: dict[str, str] = {
 # First-party plugin scopes shipped in-tree (third-party add their own at install).
 BUILTIN_PLUGIN_SCOPES: dict[str, str] = {
     CHAT:  "Chat (built-in, always enabled)",
-    CODER: "AI coding agent (runs shell commands and edits files)",
+    CODER: "AI coding agent - restricted: read + edit files (no shell)",
     IMAGE: "Image generation",
     MUSIC: "Music generation",
     VIDEO: "Video generation",
@@ -60,13 +61,20 @@ BUILTIN_PLUGIN_SCOPES: dict[str, str] = {
     MCP:   "MCP server interface",
 }
 
+# Capability variants that are not a plugin name of their own.
+EXTRA_SCOPES: dict[str, str] = {
+    CODER_FULL: "AI coding agent - FULL: shell execution + edits (privileged)",
+}
+
 # Scopes that must never be granted implicitly or to an untrusted key.
-PRIVILEGED_SCOPES = frozenset({PLUGINS_ADMIN, KEYS_ADMIN, CONFIG_WRITE, ADMIN})
+# coder:full hands out shell execution, so only the owner may mint a key with it.
+PRIVILEGED_SCOPES = frozenset(
+    {PLUGINS_ADMIN, KEYS_ADMIN, CONFIG_WRITE, ADMIN, CODER_FULL})
 
 
 def all_known_scopes() -> set[str]:
-    """Every scope localm ships with (kernel + first-party plugins)."""
-    return set(KERNEL_SCOPES) | set(BUILTIN_PLUGIN_SCOPES)
+    """Every scope localm ships with (kernel + first-party plugins + variants)."""
+    return set(KERNEL_SCOPES) | set(BUILTIN_PLUGIN_SCOPES) | set(EXTRA_SCOPES)
 
 
 def is_valid_scope(scope: str, *, extra: set[str] | None = None) -> bool:
@@ -83,8 +91,14 @@ def is_valid_scope(scope: str, *, extra: set[str] | None = None) -> bool:
 
 
 def grants(held: set[str], required: str) -> bool:
-    """Does a key holding *held* scopes satisfy *required*? ADMIN implies all."""
-    return ADMIN in held or required in held
+    """Does a key holding *held* scopes satisfy *required*? ADMIN implies all;
+    coder:full implies the base coder capability (it is the unrestricted coder,
+    so a coder:full key must also pass routes gated on the plain coder scope)."""
+    if ADMIN in held or required in held:
+        return True
+    if required == CODER and CODER_FULL in held:
+        return True
+    return False
 
 
 def normalize(scopes) -> list[str]:
