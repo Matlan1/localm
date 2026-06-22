@@ -825,11 +825,16 @@ async function refreshModels() {
       return;
     }
     const data = await r.json();
-    modelCache = data;
+    // Tolerate a malformed or empty payload (an old server or a proxy returning
+    // {}). Without this, iterating an undefined model list throws and the model
+    // dropdown silently breaks - fall back to an empty list instead.
+    modelCache = (data && Array.isArray(data.models))
+      ? data
+      : { models: [], active: (data && data.active) || "" };
     // Don't rebuild the select while the user has it open
     if (document.activeElement !== modelSelect) {
       modelSelect.innerHTML = "";
-      for (const m of data.models) {
+      for (const m of modelCache.models) {
         const opt = document.createElement("option");
         opt.value = m.name;
         const size = m.size_bytes ? ` (${(m.size_bytes / GIB).toFixed(1)} GB)` : "";
@@ -1880,25 +1885,147 @@ function setupPerfCard() {
 const WEB_MAX_ROUNDS = 3;
 
 const WEB_TOOL_PROMPT =
-  "You can access the internet. When the answer genuinely needs current " +
-  "information from the web, reply with ONLY a tool call block:\n" +
+  "You can access the internet through tools. When the answer depends on " +
+  "current, real-time, or external information you cannot be certain of " +
+  "(news, prices, software versions, documentation, anything after your " +
+  "training cutoff), get it from the web instead of guessing. Reply with " +
+  "ONLY a tool call block and nothing else:\n" +
   '<tool_call>{"name": "web_search", "args": {"query": "..."}}</tool_call>\n' +
   "To read a specific page:\n" +
   '<tool_call>{"name": "fetch_url", "args": {"url": "https://..."}}</tool_call>\n' +
-  "The results arrive in the next user message. Then answer normally and " +
-  "name the sources you used. Do not search for things you already know.";
+  "The results arrive in the next message; then answer and cite the source " +
+  "URLs you used.\n" +
+  "HONESTY: never invent search results, URLs, or page contents, and never " +
+  "say you searched or read a page unless you actually emitted a tool call " +
+  "and received its result. If a search fails or finds nothing useful, say " +
+  "so plainly instead of making something up.";
 
-/** First web tool call in a reply, or null. */
-function parseWebCall(text) {
-  const m = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/.exec(stripThink(text));
-  if (!m) return null;
-  try {
-    const call = JSON.parse(m[1]);
-    if (call && (call.name === "web_search" || call.name === "fetch_url")) {
-      return call;
-    }
-  } catch (e) { /* not valid JSON - treat as plain text */ }
+const NO_WEB_PROMPT =
+  "You are offline with NO internet access in this conversation. Do not " +
+  "present guessed or invented information as verified fact: current events, " +
+  "news, prices, live data, software versions, or anything you cannot confirm " +
+  "from this conversation. Never claim you looked something up, searched the " +
+  "web, or read a page, because you cannot. If the user needs current or " +
+  "external information, say plainly that you cannot verify it offline and " +
+  "that they can enable \"Web access\" with the 🌐 toggle in the " +
+  "parameters drawer (⚙). Saying \"I do not know\" is better than " +
+  "stating something false.";
+
+// Used when web results were just injected (the explicit /web command, or a
+// model-initiated search) but the standing toggle is off: the model HAS fresh
+// results in hand, so the offline-denial floor would contradict them. Tell it
+// to use and cite the provided results, and not to fabricate beyond them.
+const WEB_GROUNDED_PROMPT =
+  "Web search results have been provided to you in this conversation. Use them " +
+  "to answer, and cite the source URLs you relied on. Stay within what the " +
+  "results actually support: do not invent facts, URLs, or details beyond them, " +
+  "and if they do not answer the question, say so plainly.";
+
+/** True when the most recent message is freshly injected web grounding (search
+ *  results or fetched page content), as opposed to a repair note or a failure
+ *  note. Used so an explicit /web run is not told it is offline. */
+function lastTurnHasWebResults(conv) {
+  const last = conv.messages[conv.messages.length - 1];
+  if (!last || !last.web) return false;
+  const text = typeof last.content === "string" ? last.content : "";
+  return /Results of web_search|Content of /.test(text);
+}
+
+// Tool-call wrappers a local model may emit. We accept the canonical
+// <tool_call> tags plus the mangled finetune dialects (<|tool_call|>, closing
+// as <tool_call|>) and ```tool_call / ```json / bare ``` fences, mirroring the
+// coder's lenient parser so a slightly-off call still runs instead of being
+// silently dropped (which let the model's un-grounded answer through).
+const _WEB_TOOLS = new Set(["web_search", "fetch_url"]);
+
+/** Lenient JSON parse for the mangles local finetunes produce (single-quoted
+ *  keys, trailing commas). Returns the parsed object, or null. */
+function _lenientJSON(body) {
+  const tries = [
+    (s) => s,
+    (s) => s.replace(/'([^']+)'\s*:/g, '"$1":'),       // single-quoted keys
+    (s) => s.replace(/,(\s*[}\]])/g, "$1"),            // trailing commas
+    (s) => s.replace(/'([^']+)'\s*:/g, '"$1":').replace(/,(\s*[}\]])/g, "$1"),
+  ];
+  for (const fix of tries) {
+    try {
+      const obj = JSON.parse(fix(body));
+      if (obj && typeof obj === "object") return obj;
+    } catch (e) { /* try the next recovery layer */ }
+  }
   return null;
+}
+
+/** Yield every brace-balanced top-level {...} region in text. String literals
+ *  are tracked so braces inside them do not confuse the depth count. */
+function* _topLevelObjects(text) {
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== "{") continue;
+    let depth = 0, inStr = false, esc = false;
+    for (let j = i; j < text.length; j++) {
+      const c = text[j];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (c === "\\") esc = true;
+        else if (c === '"') inStr = false;
+      } else if (c === '"') { inStr = true; }
+      else if (c === "{") { depth++; }
+      else if (c === "}") {
+        depth--;
+        if (depth === 0) { yield text.slice(i, j + 1); i = j; break; }
+      }
+    }
+  }
+}
+
+/** Normalise a parsed object to a {name, args} web call, or null. Accepts the
+ *  OpenAI "arguments" alias for "args". */
+function _asWebCall(obj) {
+  if (!obj || typeof obj.name !== "string" || !_WEB_TOOLS.has(obj.name)) return null;
+  const args = (obj.args && typeof obj.args === "object") ? obj.args
+             : (obj.arguments && typeof obj.arguments === "object") ? obj.arguments
+             : {};
+  return { name: obj.name, args };
+}
+
+/** First web tool call in a reply, or null. Tolerates the wrapper and JSON
+ *  mangles local models emit so a real attempt is not silently dropped. */
+function parseWebCall(text) {
+  const clean = stripThink(text);
+  // Candidate {prefixName, body} pairs, in priority order: explicit wrappers
+  // first (the name may live in a "call:NAME" prefix, Gemma-style), then
+  // fences, then any bare top-level JSON object naming a web tool.
+  const bodies = [];
+  const wrap = /<\|?\/?tool_call\|?>\s*(?:call:(\w+)\s*)?([\s\S]*?)\s*<\|?\/?tool_call\|?>/g;
+  for (const mm of clean.matchAll(wrap)) bodies.push({ name: mm[1], body: mm[2] });
+  const fence = /```[ \t]*[A-Za-z_]*[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*```/g;
+  for (const mm of clean.matchAll(fence)) bodies.push({ name: undefined, body: mm[1] });
+  for (const { name: prefixName, body } of bodies) {
+    const trimmed = body.trim().replace(/<\|"\|>/g, '"');   // Gemma quote tokens
+    const obj = _lenientJSON(trimmed);
+    let call = _asWebCall(obj);
+    // Args-only body with the tool named in the wrapper prefix (Gemma native).
+    if (!call && obj && _WEB_TOOLS.has(prefixName)) {
+      call = { name: prefixName, args: obj };
+    }
+    if (call) return call;
+  }
+  // Last resort: a bare {...} object anywhere in the reply naming a web tool.
+  for (const chunk of _topLevelObjects(clean)) {
+    const call = _asWebCall(_lenientJSON(chunk));
+    if (call) return call;
+  }
+  return null;
+}
+
+/** True when a reply looks like a botched web tool call we could not parse: a
+ *  tool-call wrapper/fence, or a JSON object that mentions a web tool by name.
+ *  Lets the caller ask the model to re-emit it cleanly instead of accepting an
+ *  un-grounded answer. */
+function looksLikeWebToolAttempt(text) {
+  const clean = stripThink(text);
+  if (/<\|?\/?tool_call\|?>/.test(clean) || /```[ \t]*tool_call\b/.test(clean)) return true;
+  return /"name"\s*:/.test(clean) && /web_search|fetch_url/.test(clean);
 }
 
 /** Run a web tool call through the policy-enforced server endpoints. */
@@ -2492,9 +2619,18 @@ async function runCompletion(conv, webDepth = 0) {
       "Long-term memory - things to remember about the user:\n" +
       memory.text.trim();
   }
-  if (webEnabled) {
-    sysText = (sysText ? sysText + "\n\n" : "") + WEB_TOOL_PROMPT;
-  }
+  // Always give the model an honesty floor:
+  //  - web ON  -> teach the tools so it searches instead of guessing.
+  //  - results just injected (explicit /web, toggle off) -> tell it to use and
+  //    cite them; the offline-denial floor would contradict results in hand.
+  //  - web OFF, no results -> tell it plainly it is offline and must not
+  //    fabricate current facts or claim it looked anything up. This is what
+  //    stops the model hallucinating instead of admitting it cannot reach the net.
+  let webFloor;
+  if (webEnabled) webFloor = WEB_TOOL_PROMPT;
+  else if (lastTurnHasWebResults(conv)) webFloor = WEB_GROUNDED_PROMPT;
+  else webFloor = NO_WEB_PROMPT;
+  sysText = (sysText ? sysText + "\n\n" : "") + webFloor;
   if (sysText) messages.push({ role: "system", content: sysText });
   // Server-generated images (/api/ URLs from /generate-image) must not be sent
   // to the model as image parts - replace those messages with a text note.
@@ -2618,10 +2754,26 @@ async function runCompletion(conv, webDepth = 0) {
 
   // Web-access loop: when the model requested a search/page and the toggle
   // is on, run it and let the model continue - bounded rounds per send.
-  const nextCall = (webEnabled && webDepth < WEB_MAX_ROUNDS)
-    ? parseWebCall(full) : null;
+  const canWeb = webEnabled && webDepth < WEB_MAX_ROUNDS;
+  const nextCall = canWeb ? parseWebCall(full) : null;
   if (nextCall) {
     await runWebCall(conv, nextCall);
+    await runCompletion(conv, webDepth + 1);
+  } else if (canWeb && looksLikeWebToolAttempt(full)) {
+    // The model tried to call a web tool but emitted a block we could not
+    // parse. Re-prompt for the exact format instead of letting the un-grounded
+    // reply stand (it would otherwise read as a confident, un-searched answer).
+    conv.messages.push({
+      role: "user", web: true,
+      content:
+        "[tool-call format] That looked like a web tool call, but I could not " +
+        "parse it. Re-emit it EXACTLY like this and nothing else:\n" +
+        '<tool_call>{"name": "web_search", "args": {"query": "..."}}</tool_call>\n' +
+        "If you did not mean to search, answer in plain text and do not claim " +
+        "you accessed the web.",
+    });
+    saveConversations(conv);
+    renderChat();
     await runCompletion(conv, webDepth + 1);
   } else if ($("p-speak").checked && full) {
     speak(full);   // read the finished reply aloud (offline browser voices)
@@ -3159,7 +3311,7 @@ function populateSetupModels() {
   current.value = "";
   current.textContent = "active model (" + (modelCache.active || "?") + ")";
   sel.appendChild(current);
-  for (const m of modelCache.models) {
+  for (const m of modelCache.models || []) {
     if (m.active) continue;
     const opt = document.createElement("option");
     opt.value = m.name;
