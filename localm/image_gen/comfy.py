@@ -364,6 +364,16 @@ def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
             wait_seconds = 300
     wait_seconds = max(30, wait_seconds)
 
+    # MEDIA-2: optionally start ComfyUI headless. Off by default (keep the
+    # current behavior); when comfy_disable_auto_launch is set, append ComfyUI's
+    # --disable-auto-launch so it does not pop open its own web page (localm has
+    # its own GUI). Shared by image/music/video. The stock run_*.bat / comfyui.*
+    # and a bare "python main.py" forward extra args to main.py; a launcher that
+    # drops args simply ignores the flag (no error), so this stays non-breaking.
+    if cfg.get("comfy_disable_auto_launch") and \
+            "--disable-auto-launch" not in launch_cmd:
+        launch_cmd = launch_cmd + " --disable-auto-launch"
+
     _say(f"ComfyUI not running - launching: {launch_cmd}")
     if discovered:
         _say(f"Found a ComfyUI launcher in {workdir}")
