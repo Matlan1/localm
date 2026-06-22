@@ -1160,31 +1160,86 @@ const KEY_SCOPES = [
   ["admin", "Full admin - owner-equivalent (dangerous, owner-only)"],
 ];
 
-// Quick-select preset buttons (read from config key_presets); clicking one sets
-// the scope checkboxes. Presets are seeded defaults the owner can edit in config.
-async function buildKeyPresets() {
+// Quick-select preset buttons. Presets + owner-flag come from the /v1/keys envelope
+// (so a keys:admin device that lacks config:read still sees the bundles). Clicking a
+// preset sets the scope checkboxes; the OWNER can also save the current pick as a
+// preset or delete one (persisted via PATCH /v1/config, which needs config:write).
+function buildKeyPresets(presets, isOwner) {
   const box = $("key-presets");
   if (!box) return;
-  let presets = [];
-  try {
-    const r = await fetch("/v1/config", { headers: authHeaders() });
-    if (r.ok) presets = (await r.json()).key_presets || [];
-  } catch (e) { /* presets are optional; the checkboxes still work without them */ }
   box.replaceChildren();
-  if (!presets.length) return;
-  box.appendChild(el("span", "sub key-presets-label", "Presets:"));
-  for (const p of presets) {
-    const b = el("button", "btn-quiet key-preset-btn", p.name);
-    b.type = "button";
-    b.onclick = () => applyKeyPreset(p.scopes || []);
-    box.appendChild(b);
+  if (presets && presets.length) {
+    box.appendChild(el("span", "sub key-presets-label", "Presets:"));
+    for (const p of presets) {
+      const b = el("button", "btn-quiet key-preset-btn", p.name);
+      b.type = "button";
+      b.onclick = () => applyKeyPreset(p.scopes || []);
+      if (isOwner) {
+        const x = el("span", "key-preset-del", "×");
+        x.title = `Delete preset "${p.name}"`;
+        x.onclick = (ev) => { ev.stopPropagation(); deleteKeyPreset(p.name, presets); };
+        b.appendChild(x);
+      }
+      box.appendChild(b);
+    }
+  }
+  if (isOwner) {
+    const save = el("button", "btn-quiet key-preset-save", "+ Save as preset");
+    save.type = "button";
+    save.onclick = () => saveCurrentAsPreset(presets || []);
+    box.appendChild(save);
   }
 }
 
 function applyKeyPreset(want) {
   const set = new Set(want), box = $("key-scopes");
   if (!box) return;
-  for (const cb of box.querySelectorAll(".key-scope-cb")) cb.checked = set.has(cb.value);
+  for (const cb of box.querySelectorAll(".key-scope-cb")) {
+    cb.checked = !cb.disabled && set.has(cb.value);   // never check a disabled (owner-only) scope
+  }
+}
+
+// Disable + dim the owner-only (privileged) scopes for a non-owner key minter, so a
+// keys:admin device cannot even try to mint a coder:full / admin key (the API would
+// 403 anyway; this avoids the confusing failed-submit round-trip).
+function applyOwnerGate(isOwner) {
+  for (const cb of document.querySelectorAll("#key-scopes .key-scope-cb")) {
+    const ownerOnly = cb.value === "admin" || cb.value.endsWith(":full");
+    cb.disabled = ownerOnly && !isOwner;
+    if (cb.disabled) cb.checked = false;
+    const lab = cb.closest(".key-scope");
+    if (lab) lab.classList.toggle("key-scope-disabled", cb.disabled);
+  }
+}
+
+// Owner-only: persist an edited preset list (PATCH /v1/config needs config:write).
+async function saveKeyPresets(presets) {
+  const r = await fetch("/v1/config", {
+    method: "PATCH",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({ key_presets: presets }),
+  });
+  if (r.ok) { toast("Presets saved"); refreshKeysPanel(); }
+  else {
+    const e = await r.json().catch(() => ({}));
+    toast(e.detail || "Could not save presets", true);
+  }
+}
+
+function saveCurrentAsPreset(presets) {
+  const scopes = [...document.querySelectorAll("#key-scopes .key-scope-cb")]
+    .filter((c) => c.checked).map((c) => c.value);
+  if (!scopes.length) { toast("Check the scopes for the preset first"); return; }
+  const name = (prompt("Preset name:") || "").trim();
+  if (!name) return;
+  const next = presets.filter((p) => p.name !== name);   // replace an existing name
+  next.push({ name, scopes });
+  saveKeyPresets(next);
+}
+
+function deleteKeyPreset(name, presets) {
+  if (!confirm(`Delete preset "${name}"?`)) return;
+  saveKeyPresets(presets.filter((p) => p.name !== name));
 }
 
 // Server-rendered pairing QR for a freshly-minted SCOPED key: scan it in localm
@@ -1220,6 +1275,17 @@ function keyExpiryLabel(expires) {
   return `expires in ${Math.max(1, Math.floor(ms / 3600000))}h`;
 }
 
+function keyLastUsedLabel(ts) {
+  if (!ts) return "unused";
+  const ms = Date.now() - ts * 1000;
+  if (ms < 0) return "used just now";
+  const days = Math.floor(ms / 86400000);
+  if (days >= 1) return `used ${days}d ago`;
+  const hrs = Math.floor(ms / 3600000);
+  if (hrs >= 1) return `used ${hrs}h ago`;
+  return "used recently";
+}
+
 // Settings -> API keys: mint named, scope-limited keys, list them, revoke them.
 // Owner-gated (/v1/keys needs keys:admin); the card hides for a non-owner key.
 async function refreshKeysPanel() {
@@ -1236,7 +1302,6 @@ async function refreshKeysPanel() {
       lab.appendChild(document.createTextNode(" " + label));
       scopesBox.appendChild(lab);
     }
-    buildKeyPresets();
   }
 
   // The keys card is a settings SECTION; hide/show it via a class so the section
@@ -1246,13 +1311,18 @@ async function refreshKeysPanel() {
     card.classList.toggle("sec-hidden", hidden);
     if (typeof buildSettingsNav === "function") buildSettingsNav();
   };
-  let keys = [];
+  let keys = [], isOwner = false, presets = [];
   try {
     const r = await fetch("/v1/keys", { headers: authHeaders() });
-    if (!r.ok) { setHidden(true); return; }   // 401/403 -> not the owner
+    if (!r.ok) { setHidden(true); return; }   // 401/403 -> not a key minter
     setHidden(false);
-    keys = (await r.json()).keys || [];
+    const data = await r.json();
+    keys = data.keys || [];
+    isOwner = !!data.is_owner;
+    presets = data.presets || [];
   } catch (e) { setHidden(true); return; }
+  applyOwnerGate(isOwner);           // hide owner-only scopes from a keys:admin device
+  buildKeyPresets(presets, isOwner);
 
   list.replaceChildren();
   if (!keys.length) {
@@ -1263,6 +1333,7 @@ async function refreshKeysPanel() {
     row.appendChild(el("span", "name", k.name || k.id));
     row.appendChild(el("span", "mono key-scope-tags", (k.scopes || []).join(", ")));
     row.appendChild(el("span", "sub key-expiry-tag", keyExpiryLabel(k.expires)));
+    row.appendChild(el("span", "sub key-lastused-tag", keyLastUsedLabel(k.last_used)));
     const rm = el("button", "btn-quiet", "Revoke");
     rm.onclick = async () => {
       if (!confirm(`Revoke key "${k.name || k.id}"?`)) return;

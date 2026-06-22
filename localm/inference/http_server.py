@@ -804,9 +804,15 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
     # ---------------------------------------------------------------- #
 
     @app.get("/v1/keys", dependencies=[Depends(require_scope(scopes.KEYS_ADMIN))])
-    async def list_keys_ep():
+    async def list_keys_ep(caller: Optional[set] = Depends(caller_scopes)):
         from localm.auth import list_keys
-        return {"keys": list_keys()}
+        from localm.config import load_config
+        # is_owner lets the GUI hide owner-only (privileged) scope choices from a
+        # mere keys:admin device; presets ride along so a keys:admin key WITHOUT
+        # config:read can still see the quick-select bundles.
+        is_owner = caller is not None and scopes.ADMIN in caller
+        presets = load_config().get("key_presets", [])
+        return {"keys": list_keys(), "is_owner": is_owner, "presets": presets}
 
     @app.post("/v1/keys", dependencies=[Depends(require_scope(scopes.KEYS_ADMIN))])
     async def create_key_ep(body: dict, caller: Optional[set] = Depends(caller_scopes)):
