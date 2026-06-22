@@ -853,6 +853,21 @@ def serve(model, host, port, ctx, gpu_layers, mmproj, device, no_tls, tls_cert,
                       "warning; install the CA from /localm-ca.crt to remove it.[/dim]")
     console.print("[dim]Ctrl+C to stop[/dim]\n")
 
+    # SRV-4: closing the console window terminates the process WITHOUT running
+    # the finally below, so the native model context used to be freed during
+    # interpreter teardown - a segfault on exit. Free it (and clear the crash
+    # marker so a clean window-close is not reported as a crash) inside the
+    # Windows console handler instead. Idempotent with the finally on Ctrl+C.
+    from localm import bugreport, winconsole
+
+    def _on_console_close() -> None:
+        try:
+            engine.unload()
+        finally:
+            bugreport.disarm_crash_guard()
+
+    winconsole.register_console_handler(_on_console_close)
+
     try:
         http_serve(engine, host=host, port=port,
                    ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile,
