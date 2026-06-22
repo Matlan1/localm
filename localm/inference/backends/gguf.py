@@ -49,6 +49,19 @@ class GgufBackend(BaseBackend):
         self._llm = None
         self._loaded = False
 
+    @property
+    def can_be_multimodal(self) -> bool:
+        """A vision GGUF needs an mmproj; only then is it worth loading the model
+        to discover whether vision actually works (the HTTP route uses this to load
+        before deciding to reject an image)."""
+        return bool(self.mmproj_path)
+
+    @property
+    def supports_images(self) -> bool:
+        """True once loaded with a working mmproj (mtmd vision, C1)."""
+        return bool(self._loaded and self._llm is not None
+                    and self._llm.supports_images)
+
     # ------------------------------------------------------------------ #
     #  Load / unload                                                       #
     # ------------------------------------------------------------------ #
@@ -227,6 +240,7 @@ class GgufBackend(BaseBackend):
                 n_gpu_layers=self.n_gpu_layers,
                 n_ctx_max=ctx_max,
                 n_ctx_grow=self.n_ctx_grow,
+                mmproj_path=self.mmproj_path,   # C1: in-process vision via mtmd
                 verbose=False,
             )
 
@@ -320,11 +334,12 @@ class GgufBackend(BaseBackend):
         grammar: Optional[str] = None,
         seed: Optional[int] = None,
     ) -> Iterator[str]:
-        # GGUF is text-only here: llama.py keeps only text parts and the
-        # mmproj/image path is unimplemented. Refuse an image outright rather
-        # than drop it and answer about a picture the model never received.
+        # Image input: when an mmproj is loaded (mtmd vision, C1) it flows through
+        # to create_chat_completion's image path. Otherwise the model is text-only,
+        # so refuse the image rather than drop it and answer about a picture the
+        # model never received.
         from .base import IMAGE_UNSUPPORTED_MESSAGE, UnsupportedInputError, messages_contain_image
-        if messages_contain_image(messages):
+        if messages_contain_image(messages) and not self.supports_images:
             raise UnsupportedInputError(IMAGE_UNSUPPORTED_MESSAGE)
 
         # Some native llama.dll builds ship a grammar sampler that faults at

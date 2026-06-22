@@ -417,6 +417,7 @@ class LlamaCpp:
         n_threads: Optional[int] = None,
         n_ctx_max: Optional[int] = None,
         n_ctx_grow: int = 4096,
+        mmproj_path: Optional[str] = None,
         **_ignored,
     ) -> None:
         self._n_ctx       = n_ctx
@@ -431,6 +432,8 @@ class LlamaCpp:
         self._verbose     = verbose
         self._model_ptr   = None   # type: ignore[assignment]
         self._ctx_ptr     = None   # type: ignore[assignment]
+        self._mmproj_path = mmproj_path
+        self._mtmd        = None   # MtmdContext (vision) when an mmproj is loaded
         self._tokenizer   = None   # type: ignore[assignment]
         # Serialize native calls (prefill/decode/free) against unload. Without
         # this, an unload on another thread can llama_free the context between
@@ -490,6 +493,27 @@ class LlamaCpp:
 
         self._tokenizer = _Tokenizer(self._model_ptr, self._ctx_ptr)
 
+        # Optional in-process vision (C1): load the mmproj via mtmd so image
+        # messages can be answered. Best-effort - any failure (no mtmd.dll, an
+        # incompatible mmproj) leaves the model text-only rather than breaking it.
+        if mmproj_path:
+            try:
+                from .mtmd import MtmdContext
+                mt = MtmdContext(mmproj_path, self._model_ptr)
+                if mt.supports_vision:
+                    self._mtmd = mt
+                else:
+                    mt.free()
+            except Exception as exc:
+                from localm.debuglog import logger
+                logger.debug("mmproj load failed (%s); model stays text-only", exc)
+                self._mtmd = None
+
+    @property
+    def supports_images(self) -> bool:
+        """True when an mmproj is loaded and the projector supports vision."""
+        return getattr(self, "_mtmd", None) is not None
+
     # ------------------------------------------------------------------ #
     #  Lifecycle                                                           #
     # ------------------------------------------------------------------ #
@@ -517,6 +541,9 @@ class LlamaCpp:
                 self._free_native()
 
     def _free_native(self) -> None:
+        if getattr(self, "_mtmd", None) is not None:
+            self._mtmd.free()
+            self._mtmd = None
         if self._ctx_ptr:
             api.llama_free(self._ctx_ptr)
             self._ctx_ptr = None
@@ -664,6 +691,107 @@ class LlamaCpp:
     #  Dynamic context window                                              #
     # ------------------------------------------------------------------ #
 
+    @staticmethod
+    def _messages_with_markers(messages: List[Dict], marker: str):
+        """Return (text_messages, images): a copy of *messages* where each image
+        content part is replaced by *marker* in the text, plus the decoded RGB
+        images (``(w, h, rgb_bytes)``) in marker order. The templated text_messages
+        carry the marker so mtmd_tokenize can splice each image in at its place."""
+        from localm.inference.media import decode_image_url
+        out: List[Dict] = []
+        images: List = []
+        for msg in messages:
+            content = msg.get("content")
+            if not isinstance(content, list):
+                out.append(msg)
+                continue
+            parts: List[str] = []
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "image_url":
+                    url = (part.get("image_url") or {}).get("url", "")
+                    pil = decode_image_url(url).convert("RGB")
+                    images.append((pil.width, pil.height, pil.tobytes()))
+                    parts.append(marker)
+                elif part.get("type") == "text":
+                    parts.append(part.get("text", ""))
+            new_msg = dict(msg)
+            new_msg["content"] = "\n".join(p for p in parts if p)
+            out.append(new_msg)
+        return out, images
+
+    def _generate_image(
+        self,
+        messages: List[Dict],
+        max_new_tokens: int,
+        temperature: float,
+        top_k: int,
+        top_p: float,
+        repeat_penalty: float,
+        seed: Optional[int] = None,
+    ) -> Iterator[int]:
+        """Yield generated token ids for a chat whose prompt includes image(s).
+
+        The image+text prompt is evaluated into the KV cache by mtmd (CPU clip);
+        sampling then continues exactly like the text loop. Grammar is not applied
+        on the image path. mtmd fills the KV from scratch, so the text KV-reuse
+        cache is invalidated afterwards."""
+        if not self._model_ptr or getattr(self, "_mtmd", None) is None:
+            raise RuntimeError("vision is not available on this model")
+
+        text_messages, images = self._messages_with_markers(
+            messages, self._mtmd.marker)
+        prompt = _apply_model_template(self._model_ptr, text_messages)
+        bos_markers = ("<bos>", "<s>", "﻿")
+        add_special = not any(prompt.startswith(m) for m in bos_markers)
+
+        _ctx = _quiet_stderr if not self._verbose else contextlib.nullcontext
+        self.last_finish_reason = "stop"
+        with self._gen_lock:
+            if self._stop.is_set() or self._ctx_ptr is None:
+                return
+            with _ctx():
+                # Clear any prior turn's KV so the mtmd prefill from position 0 is
+                # valid on a reused context, then evaluate the image+text prompt.
+                self._reset_kv_for_image()
+                self._mtmd.eval_into(self._ctx_ptr, prompt, images,
+                                     add_special=add_special)
+
+        sampler = _build_sampler(
+            vocab=self._tokenizer._vocab,
+            temperature=temperature, top_k=top_k, top_p=top_p,
+            repeat_penalty=repeat_penalty,
+            seed=self._seed if seed is None else (seed & 0xFFFFFFFF),
+            grammar=None,
+        )
+        try:
+            for _ in range(max_new_tokens):
+                with self._gen_lock:
+                    if self._stop.is_set() or self._ctx_ptr is None:
+                        self.last_finish_reason = "error"
+                        break
+                    token = api.llama_sampler_sample(sampler, self._ctx_ptr, -1)
+                    api.llama_sampler_accept(sampler, token)
+                    eog = self._tokenizer.is_eog(token)
+                if eog:
+                    break
+                yield token
+                with self._gen_lock:
+                    if self._stop.is_set() or self._ctx_ptr is None:
+                        self.last_finish_reason = "error"
+                        break
+                    batch = api.llama_batch_get_one((llama_token * 1)(token), 1)
+                    with _ctx():
+                        ret = api.llama_decode(self._ctx_ptr, batch)
+                    if ret != 0:
+                        self.last_finish_reason = "length"
+                        break
+            else:
+                self.last_finish_reason = "length"
+        finally:
+            api.llama_sampler_free(sampler)
+
     def _fit_generation_budget(self, n_prompt: int, max_new_tokens: int) -> int:
         """
         Clamp the generation budget so prompt + reply fits under n_ctx_max.
@@ -797,6 +925,22 @@ class LlamaCpp:
 
         self._cached_tokens = list(prompt_tokens)
 
+    def _reset_kv_for_image(self) -> None:
+        """Empty the KV cache so a multimodal eval (which prefills from position 0)
+        is valid on a REUSED context. mtmd_helper_eval_chunks does its own prefill
+        at n_past=0, so a prior turn's tokens must be cleared first - otherwise a
+        second image chat evaluates over stale KV and faults. Uses the memory API
+        when present, else recreates an empty context (older builds)."""
+        self._cached_tokens = []
+        if self._memory_api_available():
+            try:
+                mem = api.llama_get_memory(self._ctx_ptr)
+                api.llama_memory_clear(mem, True)
+                return
+            except Exception:
+                pass
+        self._prefill_fresh_context([], self._n_ctx)   # empty fresh context
+
     # ------------------------------------------------------------------ #
     #  Public API compatible with llama-cpp-python                        #
     # ------------------------------------------------------------------ #
@@ -835,16 +979,30 @@ class LlamaCpp:
         add_bos = not any(prompt.startswith(m) for m in bos_markers)
         tokens = self._tokenizer.encode(prompt, add_bos=add_bos)
 
-        gen = self._generate(
-            tokens,
-            max_new_tokens=max_tokens,
-            temperature=temperature,
-            top_k=top_k,
-            top_p=top_p,
-            repeat_penalty=repeat_penalty,
-            grammar=grammar,
-            seed=seed,
-        )
+        from localm.inference.backends.base import messages_contain_image
+        if getattr(self, "_mtmd", None) is not None and messages_contain_image(messages):
+            # Image present + an mmproj is loaded: evaluate the image+text via mtmd
+            # instead of the text-only prefill. The text path below is untouched.
+            gen = self._generate_image(
+                messages,
+                max_new_tokens=max_tokens,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                repeat_penalty=repeat_penalty,
+                seed=seed,
+            )
+        else:
+            gen = self._generate(
+                tokens,
+                max_new_tokens=max_tokens,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                repeat_penalty=repeat_penalty,
+                grammar=grammar,
+                seed=seed,
+            )
 
         if stream:
             return self._stream_chunks(gen)
