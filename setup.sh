@@ -207,7 +207,7 @@ case "$TORCHVAR" in
   cuda)
     say ""
     say "  Installing PyTorch (CUDA) + transformers for HuggingFace models ..."
-    uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu124 \
+    uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu126 \
       || say "  [!] CUDA torch install failed - install a matching torch+cuda manually (see docs/linux-setup.md)."
     uv pip install -p .venv "transformers[kernels]~=5.12" "tokenizers==0.22.2" "accelerate>=1.0" "pillow>=10.0" || true
     ;;
@@ -217,7 +217,7 @@ case "$TORCHVAR" in
     say "  You picked the '$BACKEND' runtime, so no vendor GPU torch was auto-installed."
     say "  For HuggingFace transformers models, add PyTorch later:"
     say "    CPU (any machine): uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cpu"
-    say "    NVIDIA CUDA:       uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu124"
+    say "    NVIDIA CUDA:       uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu126"
     say "    AMD ROCm:          uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/rocm6.2"
     ;;
 esac

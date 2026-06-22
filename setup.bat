@@ -160,14 +160,14 @@ if /i "%TORCHVAR%"=="rocm" (
     uv pip install -p .venv -e ".[gpu,audio]" || echo  [!] ROCm torch stack failed - GGUF chat still works without it.
 ) else if /i "%TORCHVAR%"=="cuda" (
     echo  Installing PyTorch ^(NVIDIA CUDA^) + transformers for HuggingFace models ...
-    uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu124 || echo  [!] CUDA torch failed - GGUF chat still works without it.
+    uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu126 || echo  [!] CUDA torch failed - GGUF chat still works without it.
     uv pip install -p .venv "transformers[kernels]~=5.12" "tokenizers==0.22.2" "accelerate>=1.0" "pillow>=10.0" "soundfile>=0.12" || echo  [!] transformers stack failed - GGUF chat still works.
 ) else (
     echo  Skipping the PyTorch/transformers stack ^(not needed for GGUF chat^).
     echo  You picked the '%BACKEND%' runtime, so no vendor GPU torch was auto-installed.
     echo  To use HuggingFace transformers models, add PyTorch for your setup later:
     echo      CPU ^(any machine^):    uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cpu
-    echo      NVIDIA CUDA:          uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu124
+    echo      NVIDIA CUDA:          uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu126
     echo      AMD ROCm ^(gfx103X^):   uv pip install -p .venv -e ".[gpu]"
 )
 
