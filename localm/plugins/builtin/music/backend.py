@@ -25,6 +25,7 @@ from __future__ import annotations
 import contextlib
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional
 
 from localm import music_gen as _music_gen
@@ -81,24 +82,26 @@ def settings(full_config: dict) -> dict:
     }
 
 
-def ensure_available(s: dict, on_progress=None) -> tuple[bool, str]:
+# --- ComfyUI (ACE-Step) reference implementation (default "comfy" backend) ---
+
+def _comfy_ensure_available(s: dict, on_progress=None) -> tuple[bool, str]:
     return _comfy.ensure_comfy(
         s["api_url"], on_progress=on_progress,
         launch_cmd=s["launch_cmd"] or None, workdir=s["workdir"] or None)
 
 
-def free_vram(s: dict) -> bool:
+def _comfy_free_vram(s: dict) -> bool:
     return _comfy.free_comfy_vram(s["api_url"])
 
 
-def generate(s: dict, tags: str, out_path: Path, *,
-             self_url: str, write_sidecar: bool, on_progress=None,
-             lyrics: Optional[str] = None,
-             duration_seconds: float = 120.0,
-             swap: bool = True,
-             cancel_check=None,
-             delete_outputs: Optional[bool] = None,
-             **kwargs) -> tuple[bool, str]:
+def _comfy_generate(s: dict, tags: str, out_path: Path, *,
+                    self_url: str, write_sidecar: bool, on_progress=None,
+                    lyrics: Optional[str] = None,
+                    duration_seconds: float = 120.0,
+                    swap: bool = True,
+                    cancel_check=None,
+                    delete_outputs: Optional[bool] = None,
+                    **kwargs) -> tuple[bool, str]:
     # delete_outputs lets the caller (plug.py) fold privacy mode into the
     # configured value; default to the resolved per-plugin/global setting when
     # the caller does not pass one, so a direct caller still honours the config.
@@ -122,3 +125,38 @@ def generate(s: dict, tags: str, out_path: Path, *,
             delete_outputs=delete_outputs,
             **kwargs,
         )
+
+
+_COMFY_REF = SimpleNamespace(
+    ensure_available=_comfy_ensure_available,
+    free_vram=_comfy_free_vram,
+    generate=_comfy_generate,
+)
+
+
+# --- backend facade: dispatch to the configured backend (the I1 seam) --------
+
+def _impl(s: dict):
+    """The backend for s['backend']: the inline ComfyUI reference for 'comfy'
+    (the default), else backends/<name>.py loaded by media_config. An unknown or
+    missing backend name falls back to comfy so a typo never hard-crashes a
+    generate."""
+    name = (s.get("backend") or "comfy").strip().lower()
+    if name in ("", "comfy"):
+        return _COMFY_REF
+    try:
+        return media_config.load_backend(__package__, name)
+    except ModuleNotFoundError:
+        return _COMFY_REF
+
+
+def ensure_available(s: dict, *args, **kwargs) -> tuple[bool, str]:
+    return _impl(s).ensure_available(s, *args, **kwargs)
+
+
+def free_vram(s: dict, *args, **kwargs) -> bool:
+    return _impl(s).free_vram(s, *args, **kwargs)
+
+
+def generate(s: dict, *args, **kwargs) -> tuple[bool, str]:
+    return _impl(s).generate(s, *args, **kwargs)
