@@ -344,6 +344,22 @@ nav button.active { background: var(--accent-soft); color: var(--accent); }
 }
 .copy-btn:hover { color: var(--text); border-color: var(--text-dim); }
 
+/* Reveal toggle on the API-key inputs (AUTH-2): a "show/hide" button beside a
+   masked password field so the key the user typed can be verified. */
+.input-reveal { display: flex; gap: 6px; align-items: stretch; }
+.input-reveal input { flex: 1 1 auto; min-width: 0; }
+.reveal-btn {
+  flex: 0 0 auto;
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 6px;
+  padding: 0 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.reveal-btn:hover { color: var(--text); border-color: var(--text-dim); }
+
 pre .copy-btn {
   position: absolute;
   top: 6px;
@@ -1051,6 +1067,42 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
 
 /* message images */
 .msg-body .msg-img { max-width: 280px; border-radius: 8px; border: 1px solid var(--border); display: block; margin: 6px 0; }
+
+/* Full-view image lightbox (VIS-2): click a chat image to view / save / copy. */
+.img-lightbox {
+  position: fixed; inset: 0; z-index: 1000;
+  background: rgba(0, 0, 0, 0.78);
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+}
+.img-lightbox-panel {
+  display: flex; flex-direction: column; gap: 10px;
+  max-width: 92vw; max-height: 92vh; align-items: center;
+}
+.img-lightbox-img {
+  max-width: 92vw; max-height: 80vh; object-fit: contain;
+  border-radius: 8px; border: 1px solid var(--border); background: var(--bg-raised);
+}
+.img-lightbox-bar { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+
+/* Server-unreachable "reconnecting" overlay (AUTH-1b): shown when the server is
+   DOWN, instead of the key gate, so a dead server is not mistaken for a bad key. */
+.reconnect-overlay {
+  position: fixed; inset: 0; z-index: 1100;
+  background: var(--bg);
+  display: flex; align-items: center; justify-content: center;
+}
+.reconnect-panel {
+  display: flex; flex-direction: column; align-items: center; gap: 16px;
+  color: var(--text-dim); text-align: center; padding: 24px; max-width: 380px;
+}
+.reconnect-spinner {
+  width: 32px; height: 32px; border-radius: 50%;
+  border: 3px solid var(--border); border-top-color: var(--accent);
+  animation: reconnect-spin 0.9s linear infinite;
+}
+@keyframes reconnect-spin { to { transform: rotate(360deg); } }
+.reconnect-msg { font-size: 14px; line-height: 1.5; }
 
 /* msg meta action buttons */
 .msg-meta button.action {
