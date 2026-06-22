@@ -146,6 +146,20 @@ def main() -> None:
     bugreport.install_global_handlers()
 
 
+def _attach_fallback_note(no_server: bool, attach_error: Optional[BaseException]) -> Optional[str]:
+    """CLI-1: the note to print when `localm run` is about to load the model in
+    THIS process instead of attaching to a background server, so the fallback is
+    never silent. None when the user opted out with --no-server (stay quiet)."""
+    if no_server:
+        return None
+    if attach_error is not None:
+        return (f"Could not attach to a localm server ({attach_error}); loading "
+                "the model in this process.")
+    return ("No localm server is serving this directory; loading the model in "
+            "this process. Start one with `localm serve` so clients share a "
+            "single load.")
+
+
 # ------------------------------------------------------------------ #
 #  run                                                                 #
 # ------------------------------------------------------------------ #
@@ -225,13 +239,19 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
     # copy of the model, mirroring `localm gui`. Default is to attach when a verified
     # server exists; --no-server forces an in-process load.
     engine = None
+    attach_error: Optional[BaseException] = None
     if not no_server:
         from . import instances
         from .config import home_dir
         try:
             target = instances.attach_target(
                 home_dir(), instances.resolve_root_dir())
-        except Exception:
+        except Exception as e:
+            # CLI-1: do not swallow the reason - log it (debug) and remember it so
+            # the in-process fallback below can say WHY it did not attach.
+            from localm.debuglog import logger as _dbg
+            _dbg.exception("attach_target failed; falling back to in-process load")
+            attach_error = e
             target = None
         if target:
             from .inference.http_engine import HttpEngine, remote_active_model
@@ -255,6 +275,9 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
                 f"(no second model load)[/dim]")
 
     if engine is None:
+        _note = _attach_fallback_note(no_server, attach_error)
+        if _note:
+            console.print(f"[dim]{_note}[/dim]")
         info = get_model_info(model)
         if info is None:
             console.print(f"[red]Model not found:[/red] {model}")
@@ -852,6 +875,21 @@ def serve(model, host, port, ctx, gpu_layers, mmproj, device, no_tls, tls_cert,
                       "First connection from a device shows a one-time trust "
                       "warning; install the CA from /localm-ca.crt to remove it.[/dim]")
     console.print("[dim]Ctrl+C to stop[/dim]\n")
+
+    # SRV-4: closing the console window terminates the process WITHOUT running
+    # the finally below, so the native model context used to be freed during
+    # interpreter teardown - a segfault on exit. Free it (and clear the crash
+    # marker so a clean window-close is not reported as a crash) inside the
+    # Windows console handler instead. Idempotent with the finally on Ctrl+C.
+    from localm import bugreport, winconsole
+
+    def _on_console_close() -> None:
+        try:
+            engine.unload()
+        finally:
+            bugreport.disarm_crash_guard()
+
+    winconsole.register_console_handler(_on_console_close)
 
     try:
         http_serve(engine, host=host, port=port,

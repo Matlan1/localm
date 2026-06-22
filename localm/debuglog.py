@@ -37,6 +37,26 @@ def debug_enabled() -> bool:
     return bool(os.environ.get(_ENV_VAR))
 
 
+def uvicorn_log_level() -> str:
+    """The uvicorn log level for a server launch: verbose ``info`` in debug mode
+    so the console window shows requests / connections / errors live (SRV-5),
+    otherwise the quiet ``warning`` default."""
+    return "info" if debug_enabled() else "warning"
+
+
+def _add_console_handler() -> None:
+    """Mirror debug logs to the server console (stderr), so a --debug run shows
+    activity live in the window instead of only in the log file (SRV-5).
+    Idempotent: a real (non-file) StreamHandler is added at most once. A
+    FileHandler is a StreamHandler subclass, so it is explicitly excluded."""
+    for h in logger.handlers:
+        if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
+            return
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(levelname)-7s %(name)s: %(message)s"))
+    logger.addHandler(handler)
+
+
 def log_file_path() -> Optional[Path]:
     """The active debug log file, or None when debug mode is off."""
     value = os.environ.get(_ENV_VAR, "")
@@ -69,6 +89,7 @@ def enable_debug() -> Path:
         "%(asctime)s %(levelname)-7s %(name)s: %(message)s"))
     logger.addHandler(handler)
     logger.setLevel(logging.DEBUG)
+    _add_console_handler()   # SRV-5: also show debug activity in the console
 
     _install_thread_hook()
     logger.debug("debug mode enabled (pid %d)", os.getpid())
@@ -122,6 +143,7 @@ def attach_child_logging() -> None:
         "%(asctime)s %(levelname)-7s %(name)s: %(message)s"))
     logger.addHandler(handler)
     logger.setLevel(logging.DEBUG)
+    _add_console_handler()   # SRV-5: a managed/child server is verbose too
     _install_thread_hook()
 
 

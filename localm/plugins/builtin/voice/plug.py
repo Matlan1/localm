@@ -41,6 +41,8 @@ async def voice_transcribe(req: TranscribeRequest):
         data = base64.b64decode(req.audio_b64, validate=True)
     except Exception:
         raise HTTPException(400, "audio_b64 is not valid base64")
+    if not data:
+        raise HTTPException(422, "Empty recording (no audio was captured)")
     if len(data) > 25_000_000:
         raise HTTPException(413, "Recording too large (max 25 MB)")
     loop = asyncio.get_running_loop()
