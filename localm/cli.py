@@ -146,6 +146,20 @@ def main() -> None:
     bugreport.install_global_handlers()
 
 
+def _attach_fallback_note(no_server: bool, attach_error: Optional[BaseException]) -> Optional[str]:
+    """CLI-1: the note to print when `localm run` is about to load the model in
+    THIS process instead of attaching to a background server, so the fallback is
+    never silent. None when the user opted out with --no-server (stay quiet)."""
+    if no_server:
+        return None
+    if attach_error is not None:
+        return (f"Could not attach to a localm server ({attach_error}); loading "
+                "the model in this process.")
+    return ("No localm server is serving this directory; loading the model in "
+            "this process. Start one with `localm serve` so clients share a "
+            "single load.")
+
+
 # ------------------------------------------------------------------ #
 #  run                                                                 #
 # ------------------------------------------------------------------ #
@@ -225,13 +239,19 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
     # copy of the model, mirroring `localm gui`. Default is to attach when a verified
     # server exists; --no-server forces an in-process load.
     engine = None
+    attach_error: Optional[BaseException] = None
     if not no_server:
         from . import instances
         from .config import home_dir
         try:
             target = instances.attach_target(
                 home_dir(), instances.resolve_root_dir())
-        except Exception:
+        except Exception as e:
+            # CLI-1: do not swallow the reason - log it (debug) and remember it so
+            # the in-process fallback below can say WHY it did not attach.
+            from localm.debuglog import logger as _dbg
+            _dbg.exception("attach_target failed; falling back to in-process load")
+            attach_error = e
             target = None
         if target:
             from .inference.http_engine import HttpEngine, remote_active_model
@@ -255,6 +275,9 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
                 f"(no second model load)[/dim]")
 
     if engine is None:
+        _note = _attach_fallback_note(no_server, attach_error)
+        if _note:
+            console.print(f"[dim]{_note}[/dim]")
         info = get_model_info(model)
         if info is None:
             console.print(f"[red]Model not found:[/red] {model}")
