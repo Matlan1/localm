@@ -11,6 +11,7 @@
 // completed, so the network-driven init never runs - then drive functions.
 
 import { JSDOM } from "jsdom";
+import { after } from "node:test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -19,6 +20,20 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const STATIC = join(ROOT, "localm", "plugins", "gui", "static");
 
 const read = (p) => readFileSync(join(STATIC, p), "utf-8");
+
+// Every loadApp() builds a jsdom window. With pretendToBeVisual: true jsdom
+// runs an internal requestAnimationFrame timer loop that keeps node's event
+// loop alive AFTER the tests finish, so a bare `node --test` would hang forever
+// (only `npm test`, which passes --test-force-exit, escaped it). Track the
+// windows and close them in a root after-hook so the process exits on its own,
+// whatever command launched it - no footgun for the next person (or agent).
+const _openWindows = new Set();
+after(() => {
+  for (const win of _openWindows) {
+    try { win.close(); } catch (e) { /* already torn down */ }
+  }
+  _openWindows.clear();
+});
 
 // Minimal stubs for the vendored browser libs app.js references at top level
 // (it calls marked.setOptions on load). We do not need their real behaviour for
@@ -59,6 +74,7 @@ export function loadApp({ fetchImpl, url } = {}) {
     pretendToBeVisual: true,
   });
   const win = dom.window;
+  _openWindows.add(win);   // closed in the after-hook so the process can exit
   installStubs(win, { fetchImpl });
 
   // Run app.js as an injected inline script. jsdom executes it in the window
