@@ -1,0 +1,132 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""SETUP-1: the PyTorch variant (for the HuggingFace/transformers backend) must
+follow the user's chosen llama.cpp BACKEND, not just the detected GPU vendor.
+
+The reported bug: an AMD box where the user explicitly picked ``[2] vulkan`` for
+the native runtime STILL got the AMD ROCm torch stack, because both installers
+chose torch from the DETECTED vendor and ignored the backend pick. On Windows the
+ROCm extra hard-pins the gfx103X wheel (pyproject ``[tool.uv.sources]``), so this
+is not merely surprising - it forces a vendor stack the user stepped off.
+
+`recommended_torch_variant(backend, det)` is the single shared policy both
+setup.bat and setup.sh call (via ``python -m localm.hwdetect torch <backend>``)
+so the two installers can never drift. Returns one of "cuda" | "rocm" | "none".
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from localm import hwdetect
+
+AMD = hwdetect.Detection(vendors=["amd"], gpu_names="amd radeon rx 6900 xt")
+NVIDIA = hwdetect.Detection(vendors=["nvidia"], gpu_names="nvidia geforce rtx 4090")
+INTEL = hwdetect.Detection(vendors=["intel"], gpu_names="intel arc a770")
+NOGPU = hwdetect.Detection(vendors=[], gpu_names="")
+MIXED = hwdetect.Detection(vendors=["nvidia", "amd"], gpu_names="rtx 4090 / radeon")
+
+
+def tv(backend, det):
+    return hwdetect.recommended_torch_variant(backend, det)
+
+
+# --------------------------- vendor-specific backend picks ---------------- #
+
+def test_cuda_backend_always_cuda():
+    assert tv("cuda", NVIDIA) == "cuda"
+    assert tv("cuda", NOGPU) == "cuda"          # the user explicitly asked for CUDA
+
+
+def test_rocm_backend_always_rocm():
+    assert tv("amd-rocm", AMD) == "rocm"
+    assert tv("hip", AMD) == "rocm"             # Linux AMD backend name
+    assert tv("amd-rocm", NOGPU) == "rocm"      # explicit ROCm pick is honored
+
+
+# --------------------------- THE BUG FIX --------------------------------- #
+
+def test_vulkan_backend_never_installs_rocm_even_on_amd():
+    # This is the exact reported case: AMD hardware, user picked vulkan.
+    assert tv("vulkan", AMD) == "none"
+    assert tv("vulkan", AMD) != "rocm"
+
+
+def test_cpu_backend_never_installs_a_vendor_torch():
+    assert tv("cpu", AMD) == "none"
+    assert tv("cpu", NVIDIA) == "none"
+
+
+def test_vulkan_on_nvidia_keeps_cuda_torch():
+    # NVIDIA's CUDA torch is a clean pip wheel (no toolkit), so picking the
+    # vendor-neutral runtime should not strip GPU acceleration from HF models.
+    assert tv("vulkan", NVIDIA) == "cuda"
+    assert tv("vulkan", MIXED) == "cuda"        # any NVIDIA present -> cuda
+
+
+def test_vulkan_with_no_or_intel_gpu_is_none():
+    assert tv("vulkan", NOGPU) == "none"
+    assert tv("vulkan", INTEL) == "none"        # no standard Arc pip wheel
+
+
+def test_own_backend_follows_vendor_but_never_forces_rocm():
+    assert tv("own", NVIDIA) == "cuda"
+    assert tv("own", AMD) == "none"             # power user: do not force ROCm
+    assert tv("own", NOGPU) == "none"
+
+
+# --------------------------- the invariant (negative test of the oracle) -- #
+
+@pytest.mark.parametrize("det", [AMD, NVIDIA, INTEL, NOGPU, MIXED])
+@pytest.mark.parametrize("vendor_neutral", ["vulkan", "cpu"])
+def test_vendor_neutral_pick_never_yields_rocm(vendor_neutral, det):
+    """The whole point: a vendor-neutral / no-GPU runtime pick must never drag in
+    the ROCm stack, no matter what hardware is detected."""
+    assert tv(vendor_neutral, det) != "rocm"
+
+
+def test_old_naive_vendor_gate_would_have_been_wrong():
+    """Document why the fix matters: the OLD logic keyed torch on the detected
+    vendor alone, so AMD always meant rocm regardless of the backend pick. The
+    new policy diverges from that for a vulkan pick - which is the bug fix."""
+    naive_vendor_gate = "rocm" if "amd" in AMD.vendors else "none"
+    assert naive_vendor_gate == "rocm"               # the bug
+    assert tv("vulkan", AMD) == "none"               # the fix differs
+
+
+def test_variant_is_always_a_known_token():
+    for backend in ("cuda", "amd-rocm", "hip", "vulkan", "cpu", "own", "metal", ""):
+        for det in (AMD, NVIDIA, INTEL, NOGPU, MIXED):
+            assert hwdetect.recommended_torch_variant(backend, det) in (
+                "cuda", "rocm", "none")
+
+
+# --------------------------- the CLI the shells call --------------------- #
+
+def test_cli_torch_mode_is_deterministic_for_hw_independent_backends(capsys):
+    # cpu/amd-rocm do not depend on the test machine's hardware, so these are
+    # safe to assert exactly regardless of where the suite runs.
+    assert hwdetect.main(["torch", "cpu"]) == 0
+    assert capsys.readouterr().out.strip() == "none"
+    assert hwdetect.main(["torch", "amd-rocm"]) == 0
+    assert capsys.readouterr().out.strip() == "rocm"
+    assert hwdetect.main(["torch", "cuda"]) == 0
+    assert capsys.readouterr().out.strip() == "cuda"
+
+
+def test_cli_torch_mode_emits_one_known_token(capsys):
+    assert hwdetect.main(["torch", "vulkan"]) == 0
+    out = capsys.readouterr().out.strip()
+    assert out in ("cuda", "none")               # depends on this box's GPU vendor
+
+
+def test_cli_default_mode_unchanged(capsys):
+    # The no-arg invocation the installers already use must still print
+    # "<vendor> <install-backend>" (two tokens).
+    assert hwdetect.main() == 0
+    parts = capsys.readouterr().out.strip().split()
+    assert len(parts) == 2
+    assert parts[1] in ("vulkan", "cpu", "metal", "amd-rocm")
+
+
+if __name__ == "__main__":      # pragma: no cover
+    raise SystemExit(pytest.main([__file__, "-q"]))

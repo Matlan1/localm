@@ -149,10 +149,57 @@ def recommended_install_backend(det: "Detection | None" = None) -> str:
     return "vulkan"
 
 
+def recommended_torch_variant(backend: str, det: "Detection | None" = None) -> str:
+    """The PyTorch variant the INSTALLER should provision for the HuggingFace /
+    transformers backend, given the user's chosen llama.cpp *backend* and the
+    detected hardware. Returns "cuda" | "rocm" | "none". Both setup.bat and
+    setup.sh call this (via ``python -m localm.hwdetect torch <backend>``) AFTER the
+    backend pick, so the GGUF runtime choice and the HF torch choice stay coherent.
+
+    Why the BACKEND drives this and not the detected vendor alone (the SETUP-1 bug):
+    a user who explicitly picks the vendor-neutral ``vulkan`` runtime on an AMD box
+    has stepped OFF the ROCm path - which on Windows is the gfx103X-pinned ``.[gpu]``
+    stack - so forcing ROCm torch on them is exactly the reported surprise. Policy:
+
+      * ``cuda`` backend           -> cuda   (the user asked for the NVIDIA path)
+      * ``amd-rocm`` / ``hip``     -> rocm   (the user asked for the AMD path)
+      * ``cpu`` backend            -> none   (no GPU; HF torch is opt-in, see installer)
+      * ``vulkan`` / ``own`` / other -> cuda when an NVIDIA GPU is present (CUDA torch
+                                       is a clean pip wheel, no toolkit), else none.
+                                       NEVER rocm: a vendor-neutral pick must not drag
+                                       in the ROCm stack.
+
+    "none" means the installer SKIPS the heavy torch stack and tells the user how to
+    add CPU / CUDA / ROCm torch themselves: honest, no surprise download, and no
+    wrong-vendor stack installed behind their back."""
+    b = (backend or "").strip().lower()
+    if b == "cuda":
+        return "cuda"
+    if b in ("amd-rocm", "rocm", "hip"):
+        return "rocm"
+    if b == "cpu":
+        return "none"
+    # vulkan / own / metal / unknown / empty: vendor-neutral runtime choice. Offer
+    # CUDA torch only when NVIDIA is present (a no-toolkit wheel); never ROCm.
+    d = det or detect()
+    if "nvidia" in d.vendors:
+        return "cuda"
+    return "none"
+
+
 def main(argv=None) -> int:
     """``python -m localm.hwdetect`` -> prints '<primary-vendor-or-none> <install-backend>'
     on one line, so the shell installers (setup.bat / setup.sh) share this single
-    tested detector + policy instead of each rolling their own."""
+    tested detector + policy instead of each rolling their own.
+
+    ``python -m localm.hwdetect torch <backend>`` -> prints the HF torch variant
+    ("cuda" | "rocm" | "none") for that backend on this machine, so the installers
+    pick a torch stack that matches the user's runtime choice (SETUP-1)."""
+    args = [] if argv is None else list(argv)
+    if args and args[0] == "torch":
+        backend = args[1] if len(args) > 1 else ""
+        print(recommended_torch_variant(backend))
+        return 0
     d = detect()
     vendor = d.vendors[0] if d.vendors else "none"
     print(f"{vendor} {recommended_install_backend(d)}")
@@ -160,4 +207,4 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))
