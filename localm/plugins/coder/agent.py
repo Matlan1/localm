@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Optional
 
 from .backends.base import BaseLLMBackend
-from .indexer import ProjectMap
+from .indexer import ProjectMap, _BUILD_DEADLINE_S
 from .memory import load_memory, remember, forget
 from .parser import (
     ToolCall, looks_like_tool_attempt, parse_tool_calls, split_response,
@@ -227,6 +227,86 @@ def _build_openai_tool_defs() -> list:
 
 
 # ---------------------------------------------------------------------------
+#  Checkpoint location + indexing helpers (module-level so the GUI resume probe
+#  can read a checkpoint without constructing an Agent)
+# ---------------------------------------------------------------------------
+
+def _project_digest(cwd) -> str:
+    """Stable per-project id: sha256 of the case-normalised, resolved cwd, so
+    each project's resume checkpoint gets its own file under HOME (CODER-4)."""
+    import hashlib
+    import os
+    key = os.path.normcase(str(Path(cwd).resolve()))
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+
+
+def _checkpoint_path_for(cwd) -> Path:
+    """A project's resume checkpoint: ``HOME/checkpoints/<digest>.json``.
+
+    Session DATA belongs in HOME, not the project tree (CODER-4) - the checkpoint
+    used to land in ``<cwd>/.localcoder/checkpoint.json``, leaving a stray folder
+    in the user's repo. Project-local config (.localcoder/config.toml), memory
+    (LOCALCODER.md), and full-mode transcripts (.localcoder/sessions/) stay put;
+    only the checkpoint moves. HOME_DIR is imported lazily so tests that
+    monkeypatch ``config.HOME_DIR`` are honoured."""
+    from localm.config import HOME_DIR
+    return HOME_DIR / "checkpoints" / (_project_digest(cwd) + ".json")
+
+
+def _legacy_checkpoint_path_for(cwd) -> Path:
+    """The pre-CODER-4 in-project checkpoint path, still READ for back-compat so
+    a session saved by an older build can still be resumed and cleaned up."""
+    return Path(cwd) / ".localcoder" / "checkpoint.json"
+
+
+def _read_checkpoint(p: Path) -> Optional[dict]:
+    """Parse a checkpoint file, or None if absent / unreadable / wrong shape."""
+    try:
+        if not p.is_file():
+            return None
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if data.get("version") == 1 and isinstance(data.get("messages"), list):
+        return data
+    return None
+
+
+def checkpoint_info(cwd) -> Optional[dict]:
+    """Summary of a saved checkpoint for *cwd* (new HOME location, then legacy),
+    or None - used by the GUI resume probe without building an Agent (CODER-2)."""
+    for p in (_checkpoint_path_for(cwd), _legacy_checkpoint_path_for(cwd)):
+        data = _read_checkpoint(p)
+        if data is not None:
+            return {
+                "interrupted_at": data.get("interrupted_at"),
+                "turns": data.get("turns", len(data["messages"])),
+                "total_tokens": data.get("total_tokens", 0),
+                "messages": len(data["messages"]),
+            }
+    return None
+
+
+def _index_deadline() -> Optional[float]:
+    """Wall-clock cap (seconds) for the startup project scan (CODER-1). Config
+    override ``coder_index_timeout``; a value <= 0 disables it; otherwise the
+    default ``_BUILD_DEADLINE_S``."""
+    raw = None
+    try:
+        from localm.config import load_config
+        raw = load_config().get("coder_index_timeout")
+    except Exception:
+        pass
+    if raw is None:
+        return _BUILD_DEADLINE_S
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return _BUILD_DEADLINE_S
+    return v if v > 0 else None
+
+
+# ---------------------------------------------------------------------------
 #  Agent
 # ---------------------------------------------------------------------------
 
@@ -335,7 +415,7 @@ class Agent:
         self._queue_lock = threading.Lock()
         self._model_name: str = getattr(backend, "model_id", "")
         self._audit: AuditLogT = make_audit_log(mode, label=name)
-        self._project_map: ProjectMap = ProjectMap.build(cwd)
+        self._project_map: ProjectMap = self._build_project_map(cwd)
         self._memory: str = load_memory(cwd)
 
         # MCP: start configured servers and register their tools BEFORE the
@@ -571,9 +651,29 @@ class Agent:
     #  Checkpoint (interruption / resume)
     # ------------------------------------------------------------------ #
 
+    def _build_project_map(self, cwd: Path) -> ProjectMap:
+        """Index the project with a config-driven deadline, and surface a one-line
+        note when a large tree is slow or truncated so a session started on a huge
+        root (e.g. C:\\) shows progress instead of appearing to hang (CODER-1)."""
+        import time
+        t0 = time.monotonic()
+        pm = ProjectMap.build(cwd, deadline_s=_index_deadline())
+        took = time.monotonic() - t0
+        if pm.truncated or took > 2.0:
+            suffix = (" (large project - index truncated; the agent can still "
+                      "list_dir / search_files)" if pm.truncated else "")
+            self._emit("info",
+                       text=f"Indexed {pm.file_count()} files in {took:.1f}s{suffix}")
+        return pm
+
     @property
     def _checkpoint_path(self) -> Path:
-        return self.cwd / ".localcoder" / "checkpoint.json"
+        # Session data lives under HOME, not in the project tree (CODER-4).
+        return _checkpoint_path_for(self.cwd)
+
+    @property
+    def _legacy_checkpoint_path(self) -> Path:
+        return _legacy_checkpoint_path_for(self.cwd)
 
     def save_checkpoint(self) -> None:
         """Persist current conversation state so it can be resumed later.
@@ -597,27 +697,26 @@ class Agent:
             pass  # never let checkpoint failure crash the session
 
     def clear_checkpoint(self) -> None:
-        """Remove any saved checkpoint for this working directory."""
-        try:
-            self._checkpoint_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+        """Remove any saved checkpoint for this working directory (new HOME
+        location and the legacy in-project one)."""
+        for p in (self._checkpoint_path, self._legacy_checkpoint_path):
+            try:
+                p.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     def load_checkpoint(self) -> dict | None:
         """
         Read the checkpoint file if it exists and is valid.
 
+        Checks the new HOME location first, then the legacy in-project path so a
+        checkpoint saved by an older build can still be resumed (CODER-4).
         Returns the parsed dict, or None if no checkpoint is found.
         """
-        p = self._checkpoint_path
-        if not p.is_file():
-            return None
-        try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-            if data.get("version") == 1 and isinstance(data.get("messages"), list):
+        for p in (self._checkpoint_path, self._legacy_checkpoint_path):
+            data = _read_checkpoint(p)
+            if data is not None:
                 return data
-        except Exception:
-            pass
         return None
 
     def resume_checkpoint(self, data: dict) -> None:
@@ -643,7 +742,7 @@ class Agent:
 
     def set_cwd(self, cwd: Path) -> None:
         self.cwd = cwd
-        self._project_map = ProjectMap.build(cwd)
+        self._project_map = self._build_project_map(cwd)
         self._memory = load_memory(cwd)
         self._system_prompt = build_system_prompt(
             cwd,
@@ -657,7 +756,7 @@ class Agent:
 
     def reindex(self) -> int:
         """Rebuild the full project map and regenerate the system prompt."""
-        self._project_map = ProjectMap.build(self.cwd)
+        self._project_map = self._build_project_map(self.cwd)
         self._system_prompt = build_system_prompt(
             self.cwd,
             agent_name=self.name,

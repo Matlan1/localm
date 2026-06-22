@@ -260,6 +260,10 @@ class CoderSession:
             finally:
                 with self._lock:
                     self.busy = False
+                # Save the conversation so it can be resumed later (CODER-2). The
+                # agent clears the checkpoint on a clean finish, so re-persist the
+                # current state here after every task (no-op in privacy mode).
+                self.persist_checkpoint()
                 # A message queued in the task's final moments would otherwise
                 # sit until the user sends again - run it as a follow-up task.
                 leftover = self.agent._drain_queued()
@@ -298,6 +302,53 @@ class CoderSession:
     def session_diff(self, path: Optional[str] = None) -> str:
         """Cumulative diff of the session's changes (all files or one)."""
         return self.agent.session_diff(path)
+
+    def persist_checkpoint(self) -> None:
+        """Save the conversation so it can be resumed later (CODER-2). The agent
+        no-ops in privacy mode and on an empty conversation, so this is safe to
+        call after every task and on close; it never raises."""
+        # Restricted (scoped-key) sessions are ephemeral and cannot be resumed
+        # (resume is owner-only), and they all share the forced project-root cwd -
+        # persisting them would clobber the OWNER's checkpoint for that root. Skip.
+        if self.restricted:
+            return
+        try:
+            if self.agent._messages:
+                self.agent.save_checkpoint()
+        except Exception:
+            pass
+
+    def resume_from_checkpoint(self) -> bool:
+        """Load this cwd's saved conversation back into the agent and replay a
+        readable recap into the feed (CODER-2). The model gets the FULL restored
+        history; the feed rows are a visual summary. True when something was
+        restored. Tool-call markup is stripped from the recap, and tool-result
+        envelopes / steering notes are skipped."""
+        import re
+        try:
+            data = self.agent.load_checkpoint()
+        except Exception:
+            data = None
+        if not data:
+            return False
+        self.agent.resume_checkpoint(data)
+        when = data.get("interrupted_at") or "earlier"
+        self._push({"type": "info",
+                    "text": f"Resumed your last session here (saved {when}, "
+                            f"{data.get('turns', 0)} turns). Continue where you "
+                            "left off."})
+        for m in self.agent._messages:
+            role = m.get("role")
+            content = m.get("content")
+            if role not in ("user", "assistant") or not isinstance(content, str):
+                continue
+            text = re.sub(r"<tool_call>.*?</tool_call>", "", content,
+                          flags=re.DOTALL).strip()
+            if not text or text.startswith("<tool_result") \
+                    or "[user steering note" in text:
+                continue
+            self._push({"type": "history", "role": role, "text": text[:4000]})
+        return True
 
     def info(self) -> dict:
         """Summary dict for the session list endpoint."""
@@ -344,6 +395,9 @@ class CoderSession:
 
     def close(self) -> None:
         """Terminate the session: stop the agent and poison the event queue."""
+        # Save the conversation first so "Continue last session" works after a
+        # graceful close or a server shutdown (CODER-2). Best-effort.
+        self.persist_checkpoint()
         self.closed = True
         self.stop()
         self._push({"type": "closed"})

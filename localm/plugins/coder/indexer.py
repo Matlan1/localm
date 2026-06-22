@@ -19,7 +19,9 @@ that file only (cheap incremental update).
 
 from __future__ import annotations
 
+import os
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -72,6 +74,14 @@ _TEXT_EXTS: frozenset[str] = frozenset({
 _MAX_MAP_CHARS  = 3_000   # soft cap on the whole map string
 _MAX_FILE_COUNT = 300     # stop scanning after this many files
 _MAX_SYMBOLS    = 12      # max symbol names shown per file
+
+# Wall-clock cap (seconds) on the startup scan so a session pointed at a huge
+# root (e.g. C:\) cannot appear to hang. Generous - a pruned, bounded walk of a
+# normal repo finishes in well under a second; only a pathological tree hits
+# this, and when it does the map is marked truncated (surfaced, not hidden).
+# Overridable per call (and via the coder_index_timeout config key); pass
+# deadline_s=None to disable.
+_BUILD_DEADLINE_S = 20.0
 
 
 # ---------------------------------------------------------------------------
@@ -208,28 +218,76 @@ class ProjectMap:
     # ------------------------------------------------------------------
 
     @classmethod
-    def build(cls, root: Path, max_files: int = _MAX_FILE_COUNT) -> "ProjectMap":
+    def build(cls, root: Path, max_files: int = _MAX_FILE_COUNT, *,
+              deadline_s: float | None = _BUILD_DEADLINE_S,
+              on_progress=None) -> "ProjectMap":
+        """Scan *root* and summarise up to *max_files* files.
+
+        Walks with ``os.walk`` and PRUNES uninteresting directories in place
+        (hidden, ``_SKIP_DIRS``, gitignored) so it never descends into
+        ``node_modules`` / ``.git`` or - the bug this fixes (CODER-1) - a huge
+        root like ``C:\\``. Candidates are collected with bounded headroom and
+        ONLY that bounded subset is sorted, so a giant tree cannot make startup
+        hang on a full materialise-and-sort. A wall-clock *deadline_s* (None to
+        disable) caps even a pathological walk; *on_progress*, if given, is
+        called with the running candidate count. Either limit sets
+        ``truncated`` so the map (and the model) shows the index is partial.
+        """
         pm = cls(root=root)
         gi_patterns = _load_gitignore_patterns(root)
-        count = 0
+        start = time.monotonic()
+        # Collect a bounded set of candidate files, then sort only those. Headroom
+        # over max_files because some candidates are dropped below (binary / unreadable).
+        candidate_cap = max(max_files * 4, max_files + 50)
+        candidates: list[Path] = []
+        hit_cap = False
 
-        for abs_path in sorted(root.rglob("*")):
+        for dirpath, dirnames, filenames in os.walk(root):
+            if deadline_s is not None and (time.monotonic() - start) > deadline_s:
+                pm.truncated = True
+                break
+            # Prune in place so os.walk never DESCENDS into these dirs (the real
+            # fix - this is what stops a C:\ scan dead). Sorted for a deterministic
+            # traversal, so the sorted candidate subset is stable.
+            dirnames[:] = sorted(
+                d for d in dirnames
+                if not d.startswith(".")
+                and d not in _SKIP_DIRS
+                and not _is_ignored((Path(dirpath) / d).relative_to(root), gi_patterns)
+            )
+            for name in sorted(filenames):
+                if name.startswith("."):           # skip hidden files
+                    continue
+                abs_path = Path(dirpath) / name
+                try:
+                    rel = abs_path.relative_to(root)
+                except ValueError:
+                    continue
+                if _is_ignored(rel, gi_patterns):
+                    continue
+                candidates.append(abs_path)
+                if len(candidates) >= candidate_cap:
+                    pm.truncated = True
+                    hit_cap = True
+                    break
+            if on_progress is not None:
+                try:
+                    on_progress(len(candidates))
+                except Exception:
+                    pass
+            if hit_cap:
+                break
+
+        count = 0
+        for abs_path in sorted(candidates):
             if count >= max_files:
                 pm.truncated = True
                 break
+            try:
+                rel = abs_path.relative_to(root)
+            except ValueError:
+                continue
             if not abs_path.is_file():
-                continue
-
-            rel = abs_path.relative_to(root)
-
-            # Skip hidden / junk directories
-            if any(part.startswith(".") or part in _SKIP_DIRS for part in rel.parts[:-1]):
-                continue
-            # Skip hidden files
-            if rel.name.startswith("."):
-                continue
-            # Skip gitignored
-            if _is_ignored(rel, gi_patterns):
                 continue
 
             ext  = abs_path.suffix.lower()

@@ -60,6 +60,7 @@ class CreateSessionRequest(BaseModel):
     dry_run: bool = False             # destructive tools report but don't run
     temperature: float | None = None
     max_tokens: int | None = None
+    resume: bool = False              # restore this cwd's saved conversation (CODER-2)
 
 
 class MessageRequest(BaseModel):
@@ -222,7 +223,13 @@ async def create_session(req: CreateSessionRequest, request: Request):
     ))
     session.principal = principal      # who owns this session (None = the owner)
     mgr.create(session)
-    return session.info()
+    # Optional resume (CODER-2): restore this cwd's saved conversation into the
+    # new session. Owner / coder:full only - a restricted scoped session must not
+    # load the owner's prior conversation. The checkpoint read runs off the loop.
+    resumed = False
+    if req.resume and not restricted:
+        resumed = await loop.run_in_executor(None, session.resume_from_checkpoint)
+    return {**session.info(), "resumed": resumed}
 
 
 @_router.get("/api/coder/sessions/{session_id}/events")
@@ -439,6 +446,32 @@ async def coder_history_entries(name: str, request: Request):
         except json.JSONDecodeError:
             continue
     return {"path": str(path), "entries": entries}
+
+
+@_router.get("/api/coder/resumable")
+async def coder_resumable(request: Request, cwd: str = ""):
+    """Is there a saved conversation to resume for *cwd*? (CODER-2)
+
+    Owner-only: resuming restores the OWNER's prior conversation, so a scoped /
+    shared key is never told one exists (and create_session also refuses resume
+    for a restricted session). Returns ``{"resumable": false}`` when there is
+    nothing to resume or the caller is not the owner."""
+    is_owner, _ = _principal_from_request(request)
+    if not is_owner:
+        return {"resumable": False}
+    if not cwd.strip():
+        raise HTTPException(400, "cwd is required")
+    try:
+        p = Path(cwd).expanduser()
+    except (OSError, ValueError, RuntimeError):
+        raise HTTPException(400, "Invalid cwd")
+    if not p.is_dir():
+        return {"resumable": False}
+    from localm.plugins.coder.agent import checkpoint_info
+    info = checkpoint_info(p.resolve())
+    if not info:
+        return {"resumable": False}
+    return {"resumable": True, "cwd": str(p.resolve()), **info}
 
 
 def register(host) -> None:
