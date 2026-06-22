@@ -63,20 +63,40 @@ test("S2: submitting the gate POSTs the trimmed key to /api/session (no localSto
     "the key is NOT written to localStorage (it lives only in the HttpOnly cookie)");
 });
 
-test("NET-1: over HTTPS the gate offers a one-tap Install-certificate link", async () => {
+test("NET-1: over HTTPS an UNTRUSTED CA (SW failed to register) offers the Install-certificate link", async () => {
   const { window } = loadApp({ fetchImpl: keyless401, url: "https://192.168.0.5:8651/" });
   await tick();
   const cert = window.document.getElementById("key-gate-cert");
   const link = window.document.getElementById("key-gate-cert-link");
   assert.ok(cert, "#key-gate-cert exists in the shell");
-  assert.notEqual(cert.style.display, "none", "cert link is shown over HTTPS (built-in TLS)");
+  // Until the service-worker registration resolves, cert trust is unknown -> the
+  // gate does NOT nag (no false "install a cert" before we know it's needed).
+  assert.equal(cert.style.display, "none", "cert step hidden until SW trust status is known");
+  // SW failed to register => the local CA is not trusted yet => offer the install.
+  window.__swFailed = true;
+  window.updateKeyGateCertStep();
+  assert.notEqual(cert.style.display, "none", "cert link shown when the CA is untrusted over HTTPS");
   assert.equal(link.getAttribute("href"), "https://192.168.0.5:8651/localm-ca.crt",
     "links to the CA download over an absolute https URL, never the http port (J2)");
+});
+
+test("SEAMLESS: over HTTPS a TRUSTED CA (SW registered) HIDES the cert step - no reinstall nag", async () => {
+  const { window } = loadApp({ fetchImpl: keyless401, url: "https://192.168.0.5:8651/" });
+  await tick();
+  // The service worker registered, which only happens behind a trusted cert.
+  window.__swFailed = false;
+  window.updateKeyGateCertStep();
+  const cert = window.document.getElementById("key-gate-cert");
+  assert.equal(cert.style.display, "none",
+    "a returning trusted device is NOT told to reinstall the certificate every time");
 });
 
 test("NET-1: over plain HTTP the cert link stays hidden (loopback dev gate)", async () => {
   const { window } = loadApp({ fetchImpl: keyless401, url: "http://localhost:8642/" });
   await tick();
+  // Even if SW registration "failed", there is no CA to install over plain HTTP.
+  window.__swFailed = true;
+  window.updateKeyGateCertStep();
   const cert = window.document.getElementById("key-gate-cert");
   assert.ok(cert, "#key-gate-cert exists");
   assert.equal(cert.style.display, "none", "no CA to install over plain HTTP, so hidden");
