@@ -695,8 +695,17 @@ async function loginWithKey(key) {
 function submitKeyGate() {
   const input = $("key-gate-input");
   const key = (input ? input.value : "").trim();
-  if (key) loginWithKey(key).then(() => location.reload());
-  else location.reload();
+  if (key) {
+    loginWithKey(key).then((ok) => {
+      // Mark a SUCCESSFUL login so a still-401 boot after the reload self-heals a
+      // stale shell instead of looping the gate (AUTH-1b). A failed login (wrong
+      // key / server down) sets nothing, so the gate just shows again.
+      if (ok) { try { sessionStorage.setItem("localm.loginOk", "1"); } catch (e) { /* private mode */ } }
+      location.reload();
+    });
+  } else {
+    location.reload();
+  }
 }
 
 // Add a show/hide reveal toggle to a masked API-key input (AUTH-2), like the
@@ -754,7 +763,10 @@ function handleScannedKey(text) {
   if (typeof text !== "string" || !text.startsWith(prefix)) return false;
   const key = text.slice(prefix.length).trim();
   if (!key) return false;
-  loginWithKey(key).then(() => location.reload());
+  loginWithKey(key).then((ok) => {
+    if (ok) { try { sessionStorage.setItem("localm.loginOk", "1"); } catch (e) { /* private mode */ } }
+    location.reload();
+  });
   return true;
 }
 
@@ -4590,20 +4602,121 @@ function unlockUI() {
   window.__localmLocked = false;
   const gate = $("key-gate");
   if (gate) gate.style.display = "none";
+  hideReconnectOverlay();
   const app = $("app");
   if (app) app.style.display = "";
 }
-(async () => {
-  // Probe auth before loading any app data or revealing the shell.
-  let locked = false;
+
+// Recovery (AUTH-1b): when the auth state is WEDGED - the user logged in
+// successfully but the page still boots 401 - a stale service-worker shell (or a
+// cached navigation that bypassed the loopback cookie re-seed) is the cause, NOT
+// the key. Do automatically what the user otherwise has to do by hand (clear
+// site data): unregister the SW and drop its caches, then reload once. A
+// sessionStorage guard bounds it to a single attempt so it can never loop. We do
+// NOT touch SameSite (the cookie IS sent on same-origin fetch; the rejected
+// misdiagnosis would only open CSRF).
+async function resetServiceWorkerAndCaches() {
+  try {
+    if ("serviceWorker" in navigator) {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map((r) => r.unregister()));
+    }
+  } catch (e) { /* best-effort; the reload still fetches a fresh shell */ }
+  try {
+    if (window.caches) {
+      const keys = await caches.keys();
+      await Promise.all(keys.map((k) => caches.delete(k)));
+    }
+  } catch (e) { /* best-effort */ }
+}
+window.resetServiceWorkerAndCaches = resetServiceWorkerAndCaches;
+
+// Server-unreachable lock (AUTH-1b): the server is DOWN (e.g. it crashed - that
+// is Lane A's territory), NOT an auth failure. Show a distinct "reconnecting"
+// overlay and auto-retry instead of the key gate, so a dead server is not
+// mistaken for a bad key and re-entered in a loop. When the server answers
+// again, reload for a clean boot (which then handles 200 vs 401 freshly).
+let _reconnectTimer = null;
+function showReconnectOverlay() {
+  let ov = $("reconnect-overlay");
+  if (!ov) {
+    ov = el("div", "reconnect-overlay");
+    ov.id = "reconnect-overlay";
+    const panel = el("div", "reconnect-panel");
+    panel.appendChild(el("div", "reconnect-spinner"));
+    panel.appendChild(el("div", "reconnect-msg",
+      "Can't reach the LocaLM server. It may be starting or stopped. Reconnecting..."));
+    ov.appendChild(panel);
+    document.body.appendChild(ov);
+  }
+  ov.style.display = "flex";
+}
+function hideReconnectOverlay() {
+  const ov = $("reconnect-overlay");
+  if (ov) ov.style.display = "none";
+}
+function onServerUnreachable() {
+  window.__localmLocked = true;
+  const app = $("app");
+  if (app) app.style.display = "none";
+  const gate = $("key-gate");
+  if (gate) gate.style.display = "none";   // a connectivity problem, not a key one
+  showReconnectOverlay();
+  if (_reconnectTimer) return;
+  _reconnectTimer = setInterval(async () => {
+    let reachable = false;
+    try { await fetch("/api/models", { headers: authHeaders() }); reachable = true; }
+    catch (e) { reachable = false; }
+    if (!reachable) return;                 // still down - keep waiting
+    clearInterval(_reconnectTimer);
+    _reconnectTimer = null;
+    location.reload();                      // back up -> clean boot handles 200/401
+  }, 3000);
+}
+window.onServerUnreachable = onServerUnreachable;
+
+// Boot auth probe (AUTH-1b refactor). Returns true when authed (the caller then
+// loads the app). status 0 / unreachable -> reconnect overlay (NOT the gate);
+// 401 -> key gate, OR a one-shot stale-shell self-heal if a prior login should
+// already have authed; 200 -> unlock.
+async function bootAuthProbe() {
+  let status;
   try {
     const r = await fetch("/api/models", { headers: authHeaders() });
-    locked = (r.status === 401);
+    status = r.status;
   } catch (e) {
-    locked = true;   // unreachable / blocked -> never render a half-loaded app
+    status = 0;   // unreachable / blocked
   }
-  if (locked) { lockUI(); return; }
+  if (status === 0) { onServerUnreachable(); return false; }
+  if (status === 401) {
+    // A SUCCESSFUL login (marker set by submitKeyGate / the Settings key save)
+    // that still boots 401 means the cached shell, not the key, is wedged ->
+    // reset it once and reload, so the user never has to clear site data.
+    if (sessionStorage.getItem("localm.loginOk") === "1"
+        && sessionStorage.getItem("localm.swReset") !== "1") {
+      sessionStorage.removeItem("localm.loginOk");
+      sessionStorage.setItem("localm.swReset", "1");   // one-shot guard - no loop
+      await resetServiceWorkerAndCaches();
+      location.reload();
+      return false;
+    }
+    lockUI();
+    return false;
+  }
+  // Authed (or open / loopback mode): clear recovery flags and reveal the app.
+  try {
+    sessionStorage.removeItem("localm.loginOk");
+    sessionStorage.removeItem("localm.swReset");
+  } catch (e) { /* sessionStorage may be unavailable in some private modes */ }
   unlockUI();
+  return true;
+}
+window.bootAuthProbe = bootAuthProbe;
+
+(async () => {
+  // Probe auth before loading any app data or revealing the shell.
+  const authed = await bootAuthProbe();
+  if (!authed) return;   // gate / reconnect overlay shown; nothing loads behind it
   // On a phone not yet installed, show the one-time install landing first; the
   // app still loads behind it and is revealed by "Continue". Desktop / installed
   // / returning visits fall straight through.

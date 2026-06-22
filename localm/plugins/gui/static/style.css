@@ -1085,6 +1085,25 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
 }
 .img-lightbox-bar { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
 
+/* Server-unreachable "reconnecting" overlay (AUTH-1b): shown when the server is
+   DOWN, instead of the key gate, so a dead server is not mistaken for a bad key. */
+.reconnect-overlay {
+  position: fixed; inset: 0; z-index: 1100;
+  background: var(--bg);
+  display: flex; align-items: center; justify-content: center;
+}
+.reconnect-panel {
+  display: flex; flex-direction: column; align-items: center; gap: 16px;
+  color: var(--text-dim); text-align: center; padding: 24px; max-width: 380px;
+}
+.reconnect-spinner {
+  width: 32px; height: 32px; border-radius: 50%;
+  border: 3px solid var(--border); border-top-color: var(--accent);
+  animation: reconnect-spin 0.9s linear infinite;
+}
+@keyframes reconnect-spin { to { transform: rotate(360deg); } }
+.reconnect-msg { font-size: 14px; line-height: 1.5; }
+
 /* msg meta action buttons */
 .msg-meta button.action {
   background: none; border: 1px solid var(--border); color: var(--text-dim);

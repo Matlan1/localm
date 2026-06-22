@@ -1760,7 +1760,10 @@ async function uploadWorkflow(media, fileInput) {
 $("gui-key-save").onclick = async () => {
   const key = $("gui-api-key").value.trim();
   if (key) {
-    await loginWithKey(key);   // POST /api/session -> server sets the HttpOnly cookie
+    const ok = await loginWithKey(key);   // POST /api/session -> server sets the HttpOnly cookie
+    // Mark a successful login so a still-401 boot after the reload self-heals a
+    // stale shell instead of looping (AUTH-1b).
+    if (ok) { try { sessionStorage.setItem("localm.loginOk", "1"); } catch (e) { /* private mode */ } }
   } else {
     // Empty -> sign out (clear the session cookie).
     try {
