@@ -18,6 +18,7 @@ import asyncio
 import hmac
 import json
 import secrets
+import sys
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -320,6 +321,39 @@ def mount_gui_surface(app) -> bool:
 #  App factory                                                         #
 # ------------------------------------------------------------------ #
 
+def _do_shutdown() -> None:
+    """SRV-4: the actual stop sequence. Unload the model FIRST so the native
+    context is freed cleanly (a hard exit while it is loaded segfaults during
+    teardown), clear the crash marker so this intentional stop is not reported as
+    a crash, then exit the process so the stop is guaranteed (Ctrl+C sometimes
+    does nothing). Separated from the route so it can be tested without exiting."""
+    try:
+        if _engine is not None:
+            _engine.unload()
+    except Exception:
+        pass
+    try:
+        from localm import bugreport
+        bugreport.disarm_crash_guard()
+    except Exception:
+        pass
+    import os
+    os._exit(0)
+
+
+def _request_shutdown(delay: float = 0.25) -> None:
+    """Run _do_shutdown shortly after returning, so the 200 response flushes to
+    the client before the process exits."""
+    import threading
+    import time as _t
+
+    def _run():
+        _t.sleep(delay)
+        _do_shutdown()
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
     global _engine, _inference_sem
     _engine = engine
@@ -344,6 +378,15 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
         global _inference_sem
         # Semaphore created inside the running event loop - Python 3.10+ safe
         _inference_sem = asyncio.Semaphore(1)
+        # SRV-3: route an uncaught asyncio task exception through the bug reporter
+        # instead of a silent "Task exception was never retrieved". Skipped under
+        # pytest so the test runner keeps its own loop handling.
+        if "pytest" not in sys.modules:
+            try:
+                from localm import bugreport
+                bugreport.install_asyncio_handler(asyncio.get_running_loop())
+            except Exception:
+                pass
         # Optional idle-unload background task (config "idle_unload_seconds"); it
         # is a cheap no-op while disabled. Cancelled on shutdown so it never
         # outlives the app.
@@ -363,6 +406,21 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
     )
+
+    # SRV-2: one backstop so an unexpected error in ANY route returns a
+    # consistent JSON 500 and is logged, instead of leaking a traceback or a
+    # bare body. Starlette already keeps a Python exception from killing the
+    # server; this standardises the response shape and the logging so a single
+    # failing request is a clean 500, never a crash and never an info leak. (A
+    # native fault - a C-extension segfault - cannot be caught in-process; those
+    # are prevented at the source, e.g. voice audio is decoded/validated before
+    # the native path, and surfaced via the crash marker on restart.)
+    @app.exception_handler(Exception)
+    async def _unhandled_error(request, exc):  # noqa: ANN001 - framework signature
+        from localm.debuglog import logger as _dbg
+        _dbg.exception("unhandled error: %s %s", request.method, request.url.path)
+        return JSONResponse(status_code=500,
+                            content={"detail": "Internal server error"})
 
     # Chat-pipeline hooks: plugins register inlet/stream/outlet transforms that
     # run on every /v1/chat/completions turn. Created here so it exists before
@@ -742,6 +800,16 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
             ],
             "errors": discover_errors(),
         }
+
+    @app.post("/v1/server/shutdown",
+              dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
+    async def server_shutdown_ep():
+        """SRV-4: stop this server cleanly (owner / config-write scope). A direct
+        method to shut down so the user is not left force-closing the window
+        (which segfaults) or relying on a Ctrl+C that sometimes does nothing. The
+        model is unloaded before exit. (A Settings button calls this - Lane E.)"""
+        _request_shutdown()
+        return {"stopping": True}
 
     @app.post("/v1/plugins/install", dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
     async def install_plugin_ep(body: dict):
@@ -1659,6 +1727,9 @@ def serve(engine: Engine, host: str = "127.0.0.1", port: int = 8642,
     with instances.advertise(app, home_dir(), host=host, port=port, mode="api",
                              scheme=scheme, project=project, isolated=isolated):
         # On a TLS bind, also catch a plain-http request on the same port with an
-        # https redirect (issue 8); plain binds are a direct uvicorn.run.
-        portmux.run_server(app, host=host, port=port, log_level="warning",
+        # https redirect (issue 8); plain binds are a direct uvicorn.run. SRV-5:
+        # in debug mode uvicorn logs at "info" so the console shows requests.
+        from localm.debuglog import uvicorn_log_level
+        portmux.run_server(app, host=host, port=port,
+                           log_level=uvicorn_log_level(),
                            ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)

@@ -415,3 +415,138 @@ def install_global_handlers(force: bool = False) -> bool:
     threading.excepthook = _handle_thread_exception
     _handlers_installed = True
     return True
+
+
+# --------------------------------------------------------------------------- #
+#  asyncio + native-crash net (SRV-3): "fire the bug reporter no matter what"  #
+#                                                                              #
+#  The excepthooks above cover the main thread and background threads, but two #
+#  failure modes still escaped: (1) an uncaught exception inside an asyncio    #
+#  task (uvicorn's event loop) only logs "Task exception was never retrieved"; #
+#  (2) a NATIVE crash (a C-extension segfault, an OS kill, or a force-closed   #
+#  console window) cannot be caught in-process at all. We close (1) with an    #
+#  asyncio exception handler and (2) with a crash marker: the server arms a    #
+#  marker on start and disarms it on a clean shutdown, so a marker still       #
+#  present on the NEXT start means the previous run died hard - and we file the #
+#  report then, with the native traceback faulthandler captured.               #
+# --------------------------------------------------------------------------- #
+
+_crash_trace_fh = None   # kept alive so faulthandler can write to it
+
+
+def install_asyncio_handler(loop) -> bool:
+    """Route an uncaught asyncio task/loop exception through the bug reporter
+    (saved, never prompted - a server loop has no user at the keyboard). Returns
+    True if installed. Non-exception loop messages fall through to the default."""
+    import asyncio
+    try:
+        def _h(loop, ctx):
+            exc = ctx.get("exception")
+            if isinstance(exc, (KeyboardInterrupt, SystemExit,
+                                asyncio.CancelledError)):
+                return   # normal control flow, not a crash
+            if exc is None:
+                loop.default_exception_handler(ctx)   # message-only: keep default
+                return
+            try:
+                report_failure(
+                    summary="an async task crashed",
+                    reason=ctx.get("message") or str(exc),
+                    error=exc, context={"asyncio": ctx.get("message", "")},
+                    interactive=False)
+            except Exception:
+                loop.default_exception_handler(ctx)
+        loop.set_exception_handler(_h)
+        return True
+    except Exception:
+        return False
+
+
+def _crash_dir(home=None):
+    from pathlib import Path
+    if home is None:
+        from localm.config import HOME_DIR
+        home = HOME_DIR
+    d = Path(home) / "run"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def arm_crash_guard(context: Optional[dict] = None, home=None) -> bool:
+    """Mark that a server run is in progress and enable faulthandler so a native
+    fault leaves a trace. If the process dies hard the marker survives;
+    check_and_report_prior_crash() reports it on the next start. Returns True if
+    armed. Fully guarded - never raises into the caller."""
+    global _crash_trace_fh
+    import faulthandler
+    import json
+    import os
+    try:
+        d = _crash_dir(home)
+        _crash_trace_fh = open(d / "server-crash-trace.txt", "w", encoding="utf-8")
+        try:
+            faulthandler.enable(file=_crash_trace_fh, all_threads=True)
+        except Exception:
+            pass
+        (d / "server-crash.marker").write_text(
+            json.dumps({"pid": os.getpid(), "context": context or {}}),
+            encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
+def disarm_crash_guard(home=None) -> None:
+    """Clean shutdown: drop the marker so the next start does not report a crash."""
+    global _crash_trace_fh
+    import faulthandler
+    try:
+        (_crash_dir(home) / "server-crash.marker").unlink(missing_ok=True)
+    except Exception:
+        pass
+    try:
+        if _crash_trace_fh is not None:
+            faulthandler.disable()
+            _crash_trace_fh.close()
+            _crash_trace_fh = None
+    except Exception:
+        pass
+
+
+def check_and_report_prior_crash(home=None, interactive: bool = False):
+    """If a previous server run left a crash marker (it died without a clean
+    shutdown: a native crash, an OS kill, or a force-closed window), file a bug
+    report so the failure is never lost, then clear the marker. Returns the
+    report path if one was filed, else None. Never raises into the caller."""
+    import json
+    try:
+        marker = _crash_dir(home) / "server-crash.marker"
+        if not marker.exists():
+            return None
+        info = {}
+        try:
+            info = json.loads(marker.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        trace = ""
+        try:
+            tp = _crash_dir(home) / "server-crash-trace.txt"
+            if tp.exists():
+                trace = tp.read_text(encoding="utf-8").strip()
+        except Exception:
+            pass
+        # Clear FIRST so a failure while reporting cannot loop the marker forever.
+        try:
+            marker.unlink(missing_ok=True)
+        except Exception:
+            pass
+        ctx = {"prior_run": info}
+        if trace:
+            ctx["native_trace"] = trace[:4000]
+        return report_failure(
+            summary="localm server crashed (recovered on the next start)",
+            reason=("the previous server run ended without a clean shutdown - a "
+                    "native crash, an OS kill, or a force-closed window"),
+            error=None, context=ctx, interactive=interactive)
+    except Exception:
+        return None
