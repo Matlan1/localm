@@ -324,23 +324,76 @@ mode stays trace-free.
 
 ### Medium
 
-- [ ] Hardware monitor in the GUI status bar (live RAM/VRAM/CPU/GPU)
-- [ ] Sampler presets; per-model saved defaults; chat-template editor
-- [ ] GPU offload / context sliders with live VRAM estimate in Settings (CLI config covers the function, not the feel)
-- [ ] Multi-model side-by-side compare; JIT model load + idle TTL auto-unload (currently `Semaphore(1)` + one engine)
+(Statuses reconciled against the code on 2026-06-22 - several were shipped by
+later rounds but never re-marked here. Verified by grep / reading the GUI source.)
+
+- [x] Hardware monitor in the GUI status bar (live RAM/VRAM/CPU/GPU) - shipped (`#hw-stats` + renderHwStats, #109)
+- [x] GPU offload / context sliders with live VRAM estimate in Settings - shipped (Settings -> Performance: `#sec-performance` sliders + `perf-estimate`, #112)
+- [x] Command palette (Ctrl+K), keyboard shortcuts, drag-and-drop files into chat - shipped (cmdk #111; drag-drop `.drag-over` #110)
+- [x] Idle TTL model auto-unload - shipped (opt-in `idle_unload_seconds`, A5, #203)
+- [x] Artifacts / canvas live HTML/SVG preview - shipped (hard-sandboxed iframe + CSP, A3, #203)
+- [x] Sampler presets - shipped as personas (a saved system prompt + sampling defaults, Round 10)
+- [ ] Per-model saved defaults; chat-template editor (personas cover global presets, not per-model defaults or template editing)
+- [ ] Multi-model side-by-side compare; JIT model load; keep several models resident (A6 - still `Semaphore(1)` + one engine)
 - [ ] Download manager panel: background queue, pause, parallel (CLI already resumes)
-- [ ] Mermaid diagram rendering; artifacts/canvas live HTML/SVG preview; sandboxed code interpreter
-- [ ] Command palette (Ctrl+K), keyboard shortcuts, drag-and-drop files into chat
-- [ ] Flash attention / KV-cache quantization / speculative decoding toggles
+- [ ] Mermaid diagram rendering; sandboxed code interpreter (artifacts/canvas split out above as shipped)
+- [ ] Flash attention / KV-cache quantization / speculative decoding toggles (the llama struct fields exist in the ctypes binding; no user-facing toggle yet)
 
 ### Polish / later
 
-- [ ] First-run wizard: detect hardware, recommend a starter model
-- [ ] Empty-state funnels ("no models yet → pull one" guided flow)
+- [ ] First-run wizard: detect hardware, recommend a starter model (C1; the pieces exist - doctor, fit-badged pull, plugin setup - but not the guided path)
+- [ ] Empty-state funnels - partly shipped (`localm gui --no-model` + `--pull` deep-link, Round 5); a fuller guided "pull one" flow still open
 - [ ] One-file backup / export-import of all user data (chats, prompts, settings)
-- [ ] i18n, accessibility pass, mobile/PWA layout
-- [ ] Profiles / multi-user accounts (likely out of scope for home use)
+- [x] Mobile / PWA layout - shipped (installable PWA + native-feeling mobile chat, #202)
+- [ ] i18n + accessibility pass
+- [ ] Profiles / multi-user accounts (out of scope for home use; scoped API keys already cover per-device sharing)
 - [ ] Native shell, tray, auto-update, installer - tracked above as the Tauri 2 item
+
+---
+
+## Competitive analysis 2026-06-22 (vs LM Studio / Jan / AnythingLLM / llama.cpp + Claude)
+
+Source: two XDA articles (local-LLM tools tested; Jan won) + a Claude
+consumer-feature article + the MCP docs, compared against the code. The full
+criteria matrix and per-tool analysis live in the maintainer's local dev-notes
+(not in git). Statuses below were code-verified on 2026-06-22.
+
+### Shipped + merged this session (#203)
+
+- [x] A5 - idle-unload VRAM TTL (opt-in `idle_unload_seconds`, 0 = off) [LM Studio / Ollama]
+- [x] B4 - `localm ps` / `localm status` (running per-directory instances) [`lms ps`]
+- [x] A3 - Artifacts canvas: html/svg reply blocks in a hard-sandboxed iframe (no same-origin; a CSP blocks all network) [Claude Artifacts]
+- [x] A2 - memory auto-synthesis: `localm job add --memory` distils durable facts from session logs into chat-memory.md, privacy-gated [Claude memory synthesis]
+
+### Open - decision needed
+
+- [ ] A1 - curated, toggleable MCP-server catalog surfaced in chat [Jan]. The catalog/toggle/persist half is straightforward; "execute MCP tools in the GENERAL chat path" is a security design fork (chat does no tool-calling today). DECIDE: (a) reuse the coder tool-loop + per-call approval, (b) a new chat-only mechanism, or (c) ship catalog/toggle only and defer execution.
+
+### Open - to implement
+
+- [ ] B1 - workspaces: bundle a system prompt + a RAG collection + scoped memory, inherited by chats inside it [AnythingLLM workspaces / Claude Projects]
+- [ ] B2 - RAG ingestion connectors: GitHub repo / website / YouTube transcript, netpolicy-gated [AnythingLLM] (next conflict-light pick)
+- [ ] A4 - audio-understanding input (Voxtral / Qwen-ASR via mmproj). NOTE: the GGUF VISION half already shipped (#200); this is the audio half (native + needs an audio model to verify) [Jan / llama.cpp]
+- [ ] A6 - keep several models resident (parallel slots / LRU); unblocks instant routing + side-by-side (also in the Medium list above) [LM Studio / llama.cpp]
+- [ ] A7 - auto model-routing / tiers with a speed/VRAM hint; needs A6 [Claude tiers]
+- [ ] B3 - reasoning-effort selector. CAVEAT: local GGUF has no native effort knob, so this risks being a facade; needs a real design or a drop [Claude effort levels]
+- [ ] C2 - review navigation / information architecture before adding more tabs
+- [ ] C3 - GUI visual-polish pass (keep the zero-build approach) [LM Studio polish]
+- [ ] C4 - one-tap remote attach (extend the QR device-pairing) [LM Studio LM Link]
+- [ ] C5 - a general quantize / convert CLI (abliterate can only `--export-gguf`)
+- [ ] (C1 first-run wizard is tracked under Polish / later above)
+
+### Feature / design ideas (food-for-thought, not committed)
+
+- [ ] Agent-runner "manager view": queue N coder tasks, watch several sessions, review each diff (near coder + jobs + C2) [Antigravity-as-agent-runner]
+- [ ] Transparent hybrid local<->cloud router: pre-classify a query, show "which model will answer", escalate fact-sensitive prompts to an opt-in cloud model (enhances A7). localm already grounds on web access as its local answer to hallucination (#199).
+- [ ] "Research mode": a jobs/agent task that fans out web + RAG into a cited briefing report (enhances B1/B2; the pieces exist)
+
+### Known gaps / follow-ups
+
+- [ ] Apple Metal/MLX and Intel SYCL backends - localm is weakest of the field on Mac / Intel
+- [ ] Docs: document the 3 shipped surfaces (`idle_unload_seconds`, `localm ps`/`status`, `localm job add --memory`) in README + docs/jobs.md
+- Note: CI is disabled (Actions quota), so PRs are verified LOCALLY; a periodic `ruff check .` + full suite sweep is the only regression backstop (3 pre-existing ruff errors had slipped onto master and were cleaned in #203).
 
 ## Future Benchmarking (Under Review)
 
