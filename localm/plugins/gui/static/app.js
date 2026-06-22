@@ -695,9 +695,39 @@ async function loginWithKey(key) {
 function submitKeyGate() {
   const input = $("key-gate-input");
   const key = (input ? input.value : "").trim();
-  if (key) loginWithKey(key).then(() => location.reload());
-  else location.reload();
+  if (key) {
+    loginWithKey(key).then((ok) => {
+      // Mark a SUCCESSFUL login so a still-401 boot after the reload self-heals a
+      // stale shell instead of looping the gate (AUTH-1b). A failed login (wrong
+      // key / server down) sets nothing, so the gate just shows again.
+      if (ok) { try { sessionStorage.setItem("localm.loginOk", "1"); } catch (e) { /* private mode */ } }
+      location.reload();
+    });
+  } else {
+    location.reload();
+  }
 }
+
+// Add a show/hide reveal toggle to a masked API-key input (AUTH-2), like the
+// "show password" eye on a login form, so the user can verify what they typed.
+// Idempotent: wraps the input in a flex row once and appends a small toggle.
+function addRevealToggle(input) {
+  if (!input || input.dataset.revealWired) return;
+  input.dataset.revealWired = "1";
+  const wrap = el("div", "input-reveal");
+  if (input.parentNode) input.parentNode.insertBefore(wrap, input);
+  wrap.appendChild(input);
+  const btn = el("button", "reveal-btn", "show");
+  btn.type = "button";          // never submit a surrounding form
+  btn.setAttribute("aria-label", "Show or hide the key");
+  btn.onclick = () => {
+    const hidden = input.type === "password";
+    input.type = hidden ? "text" : "password";
+    btn.textContent = hidden ? "hide" : "show";
+  };
+  wrap.appendChild(btn);
+}
+window.addRevealToggle = addRevealToggle;
 
 // --- Pairing QR scanner (phone) -------------------------------------------
 // Reads the key QR shown in the computer's Settings (Companion app) with the
@@ -733,7 +763,10 @@ function handleScannedKey(text) {
   if (typeof text !== "string" || !text.startsWith(prefix)) return false;
   const key = text.slice(prefix.length).trim();
   if (!key) return false;
-  loginWithKey(key).then(() => location.reload());
+  loginWithKey(key).then((ok) => {
+    if (ok) { try { sessionStorage.setItem("localm.loginOk", "1"); } catch (e) { /* private mode */ } }
+    location.reload();
+  });
   return true;
 }
 
@@ -1383,6 +1416,78 @@ $("conv-search").addEventListener("input", (e) => {
   renderConvList();
 });
 
+// A sensible download name for a chat image (VIS-2): from the data: URI's mime,
+// or the /api path's basename, falling back to localm-image.png.
+function imageFilename(url) {
+  try {
+    if (url.startsWith("data:")) {
+      const m = url.match(/^data:image\/([a-z0-9.+-]+)/i);
+      return "localm-image." + (m ? m[1].replace("jpeg", "jpg") : "png");
+    }
+    const base = new URL(url, location.origin).pathname.split("/").pop();
+    return base && base.includes(".") ? base : "localm-image.png";
+  } catch (e) { return "localm-image.png"; }
+}
+
+// Copy an image (by its resolved src) to the clipboard. Returns true on success.
+// Not every browser/context can write an image to the clipboard, so the caller
+// surfaces a fallback instead of silently failing (RULE 5).
+async function copyImageSrc(src) {
+  try {
+    if (!window.ClipboardItem || !navigator.clipboard || !navigator.clipboard.write)
+      return false;
+    const blob = await (await fetch(src)).blob();
+    await navigator.clipboard.write([new window.ClipboardItem({ [blob.type]: blob })]);
+    return true;
+  } catch (e) { return false; }
+}
+window.copyImageSrc = copyImageSrc;
+
+// Full-view image lightbox (VIS-2): a click on a chat image opens it large with
+// Save (download to disk) and Copy controls. Closes on the backdrop, the Close
+// button, or Escape.
+function openImageLightbox(src, name) {
+  if (!src) return;
+  const back = el("div", "img-lightbox");
+  const panel = el("div", "img-lightbox-panel");
+  const full = document.createElement("img");
+  full.className = "img-lightbox-img";
+  full.src = src;
+  full.alt = name || "image";
+  const bar = el("div", "img-lightbox-bar");
+  const dismiss = () => {
+    back.remove();
+    document.removeEventListener("keydown", onKey);
+  };
+  function onKey(e) { if (e.key === "Escape") dismiss(); }
+  const save = el("button", "btn-quiet", "Save");
+  save.onclick = () => {
+    const a = document.createElement("a");
+    a.href = src;
+    a.download = name || "localm-image.png";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+  const copy = el("button", "btn-quiet", "Copy image");
+  copy.onclick = async () => {
+    const ok = await copyImageSrc(src);
+    toast(ok ? "Image copied" : "Could not copy the image - use Save instead", !ok);
+  };
+  const close = el("button", "btn-quiet", "Close");
+  close.onclick = dismiss;
+  bar.appendChild(save);
+  bar.appendChild(copy);
+  bar.appendChild(close);
+  panel.appendChild(full);
+  panel.appendChild(bar);
+  back.appendChild(panel);
+  back.addEventListener("click", (e) => { if (e.target === back) dismiss(); });
+  document.addEventListener("keydown", onKey);
+  document.body.appendChild(back);
+}
+window.openImageLightbox = openImageLightbox;
+
 function addMessageRow(container, role, text, opts = {}) {
   const row = el("div", "msg-row " + role + (opts.cls ? " " + opts.cls : ""));
   row.appendChild(el("div", "msg-role",
@@ -1398,6 +1503,12 @@ function addMessageRow(container, role, text, opts = {}) {
     } else {
       img.src = url;   // data: URI from the user's own attachment
     }
+    // Interactable (VIS-2): click to open a full-view lightbox with Save / Copy.
+    // imageFilename uses the ORIGINAL url (a data: URI or /api path) for a sane
+    // download name, while img.src is the resolved displayable source.
+    img.style.cursor = "zoom-in";
+    img.title = "Click to view, save, or copy";
+    img.addEventListener("click", () => openImageLightbox(img.src, imageFilename(url)));
     body.appendChild(img);
   }
   for (const url of opts.audio || []) {
@@ -1419,8 +1530,20 @@ function addMessageRow(container, role, text, opts = {}) {
   row.appendChild(body);
   const meta = el("div", "msg-meta");
   const copy = el("button", "copy-btn", "copy");
-  copy.onclick = () => {
-    navigator.clipboard.writeText(stripThink(text) || text);
+  copy.onclick = async () => {
+    const plain = stripThink(text) || text;
+    const firstImg = body.querySelector(".msg-img");
+    // Image-only message (e.g. a bare attachment): copy the IMAGE, not empty
+    // text - the "copy copied the prompt, not the image" report (VIS-2). For a
+    // text+image message the text copy is kept; the image is in the lightbox.
+    if (!plain && firstImg && firstImg.src) {
+      const ok = await copyImageSrc(firstImg.src);
+      copy.textContent = ok ? "copied" : "copy";
+      if (!ok) toast("Could not copy the image - open it and use Save", true);
+      else setTimeout(() => (copy.textContent = "copy"), 1200);
+      return;
+    }
+    navigator.clipboard.writeText(plain);
     copy.textContent = "copied";
     setTimeout(() => (copy.textContent = "copy"), 1200);
   };
@@ -1995,6 +2118,49 @@ function setupPerfCard() {
 /* ---- web access (model-initiated, via the params-drawer toggle) ---- */
 
 const WEB_MAX_ROUNDS = 3;
+
+// net_mode = ask means the GUI must APPROVE each model-initiated web request
+// before it runs (the settings promise: "ask = approve each request"). Read it
+// fresh from /v1/config so a change in Settings takes effect without a reload;
+// the cost is one small GET per model-initiated round (bounded by
+// WEB_MAX_ROUNDS). Unknown / unreachable -> do not block (the per-conversation
+// toggle is the standing consent; only "off", enforced server-side, blocks).
+async function webModeIsAsk() {
+  try {
+    const r = await fetch("/v1/config", { headers: authHeaders() });
+    if (r.ok) {
+      const cfg = await r.json();
+      return !!(cfg && cfg.net_mode === "ask");
+    }
+  } catch (e) { /* server unreachable - fall through to "do not block" */ }
+  return false;
+}
+window.webModeIsAsk = webModeIsAsk;
+
+// Approval dialog for a model-initiated web request under net_mode=ask. Returns
+// a promise<boolean>. Uses the in-page modal (window.confirm/prompt are
+// suppressed in some PWA/mobile browsers, the NET-1 class of bug). Overridable
+// in tests.
+function confirmWebRequest(call) {
+  return new Promise((resolve) => {
+    const args = (call && call.args) || {};
+    const target = args.query || args.url || "";
+    const verb = call && call.name === "fetch_url" ? "fetch a web page" : "search the web";
+    openModal("Allow web access?", (body) => {
+      body.appendChild(el("p", "", "The model wants to " + verb + " for:"));
+      body.appendChild(el("p", "web-ask-target", target));
+      const row = el("div", "actions");
+      const deny = el("button", "btn-quiet", "Deny");
+      deny.onclick = () => { $("modal").style.display = "none"; resolve(false); };
+      const allow = el("button", "btn-quiet btn-primary", "Allow");
+      allow.onclick = () => { $("modal").style.display = "none"; resolve(true); };
+      row.appendChild(deny);
+      row.appendChild(allow);
+      body.appendChild(row);
+    });
+  });
+}
+window.confirmWebRequest = confirmWebRequest;
 
 const WEB_TOOL_PROMPT =
   "You can access the internet through tools. When the answer depends on " +
@@ -2869,6 +3035,22 @@ async function runCompletion(conv, webDepth = 0) {
   const canWeb = webEnabled && webDepth < WEB_MAX_ROUNDS;
   const nextCall = canWeb ? parseWebCall(full) : null;
   if (nextCall) {
+    // net_mode=ask: approve each MODEL-INITIATED request before it runs (WEB-ask).
+    // The explicit /web command is direct consent and is NOT routed through here.
+    const approved = (await webModeIsAsk()) ? await confirmWebRequest(nextCall) : true;
+    if (!approved) {
+      conv.messages.push({
+        role: "user", web: true,
+        content:
+          "[web access denied] The user declined this web request. Do not claim " +
+          "you searched or browsed; answer from what you already know, or say " +
+          "plainly that you could not look it up.",
+      });
+      saveConversations(conv);
+      renderChat();
+      await runCompletion(conv, WEB_MAX_ROUNDS);   // no further web rounds this send
+      return;
+    }
     await runWebCall(conv, nextCall);
     await runCompletion(conv, webDepth + 1);
   } else if (canWeb && looksLikeWebToolAttempt(full)) {
@@ -4420,20 +4602,121 @@ function unlockUI() {
   window.__localmLocked = false;
   const gate = $("key-gate");
   if (gate) gate.style.display = "none";
+  hideReconnectOverlay();
   const app = $("app");
   if (app) app.style.display = "";
 }
-(async () => {
-  // Probe auth before loading any app data or revealing the shell.
-  let locked = false;
+
+// Recovery (AUTH-1b): when the auth state is WEDGED - the user logged in
+// successfully but the page still boots 401 - a stale service-worker shell (or a
+// cached navigation that bypassed the loopback cookie re-seed) is the cause, NOT
+// the key. Do automatically what the user otherwise has to do by hand (clear
+// site data): unregister the SW and drop its caches, then reload once. A
+// sessionStorage guard bounds it to a single attempt so it can never loop. We do
+// NOT touch SameSite (the cookie IS sent on same-origin fetch; the rejected
+// misdiagnosis would only open CSRF).
+async function resetServiceWorkerAndCaches() {
+  try {
+    if ("serviceWorker" in navigator) {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map((r) => r.unregister()));
+    }
+  } catch (e) { /* best-effort; the reload still fetches a fresh shell */ }
+  try {
+    if (window.caches) {
+      const keys = await caches.keys();
+      await Promise.all(keys.map((k) => caches.delete(k)));
+    }
+  } catch (e) { /* best-effort */ }
+}
+window.resetServiceWorkerAndCaches = resetServiceWorkerAndCaches;
+
+// Server-unreachable lock (AUTH-1b): the server is DOWN (e.g. it crashed - that
+// is Lane A's territory), NOT an auth failure. Show a distinct "reconnecting"
+// overlay and auto-retry instead of the key gate, so a dead server is not
+// mistaken for a bad key and re-entered in a loop. When the server answers
+// again, reload for a clean boot (which then handles 200 vs 401 freshly).
+let _reconnectTimer = null;
+function showReconnectOverlay() {
+  let ov = $("reconnect-overlay");
+  if (!ov) {
+    ov = el("div", "reconnect-overlay");
+    ov.id = "reconnect-overlay";
+    const panel = el("div", "reconnect-panel");
+    panel.appendChild(el("div", "reconnect-spinner"));
+    panel.appendChild(el("div", "reconnect-msg",
+      "Can't reach the LocaLM server. It may be starting or stopped. Reconnecting..."));
+    ov.appendChild(panel);
+    document.body.appendChild(ov);
+  }
+  ov.style.display = "flex";
+}
+function hideReconnectOverlay() {
+  const ov = $("reconnect-overlay");
+  if (ov) ov.style.display = "none";
+}
+function onServerUnreachable() {
+  window.__localmLocked = true;
+  const app = $("app");
+  if (app) app.style.display = "none";
+  const gate = $("key-gate");
+  if (gate) gate.style.display = "none";   // a connectivity problem, not a key one
+  showReconnectOverlay();
+  if (_reconnectTimer) return;
+  _reconnectTimer = setInterval(async () => {
+    let reachable = false;
+    try { await fetch("/api/models", { headers: authHeaders() }); reachable = true; }
+    catch (e) { reachable = false; }
+    if (!reachable) return;                 // still down - keep waiting
+    clearInterval(_reconnectTimer);
+    _reconnectTimer = null;
+    location.reload();                      // back up -> clean boot handles 200/401
+  }, 3000);
+}
+window.onServerUnreachable = onServerUnreachable;
+
+// Boot auth probe (AUTH-1b refactor). Returns true when authed (the caller then
+// loads the app). status 0 / unreachable -> reconnect overlay (NOT the gate);
+// 401 -> key gate, OR a one-shot stale-shell self-heal if a prior login should
+// already have authed; 200 -> unlock.
+async function bootAuthProbe() {
+  let status;
   try {
     const r = await fetch("/api/models", { headers: authHeaders() });
-    locked = (r.status === 401);
+    status = r.status;
   } catch (e) {
-    locked = true;   // unreachable / blocked -> never render a half-loaded app
+    status = 0;   // unreachable / blocked
   }
-  if (locked) { lockUI(); return; }
+  if (status === 0) { onServerUnreachable(); return false; }
+  if (status === 401) {
+    // A SUCCESSFUL login (marker set by submitKeyGate / the Settings key save)
+    // that still boots 401 means the cached shell, not the key, is wedged ->
+    // reset it once and reload, so the user never has to clear site data.
+    if (sessionStorage.getItem("localm.loginOk") === "1"
+        && sessionStorage.getItem("localm.swReset") !== "1") {
+      sessionStorage.removeItem("localm.loginOk");
+      sessionStorage.setItem("localm.swReset", "1");   // one-shot guard - no loop
+      await resetServiceWorkerAndCaches();
+      location.reload();
+      return false;
+    }
+    lockUI();
+    return false;
+  }
+  // Authed (or open / loopback mode): clear recovery flags and reveal the app.
+  try {
+    sessionStorage.removeItem("localm.loginOk");
+    sessionStorage.removeItem("localm.swReset");
+  } catch (e) { /* sessionStorage may be unavailable in some private modes */ }
   unlockUI();
+  return true;
+}
+window.bootAuthProbe = bootAuthProbe;
+
+(async () => {
+  // Probe auth before loading any app data or revealing the shell.
+  const authed = await bootAuthProbe();
+  if (!authed) return;   // gate / reconnect overlay shown; nothing loads behind it
   // On a phone not yet installed, show the one-time install landing first; the
   // app still loads behind it and is revealed by "Continue". Desktop / installed
   // / returning visits fall straight through.
@@ -4444,6 +4727,10 @@ function unlockUI() {
   // Server persistence depends on knowing the privacy state first.
   refreshCtxLimit().then(initServerConversations);
 })();
+// Reveal toggles on the API-key inputs (AUTH-2): the in-page gate and the
+// Settings key field, so the user can confirm the key they typed.
+addRevealToggle($("key-gate-input"));
+addRevealToggle($("gui-api-key"));
 refreshKbSelect();
 refreshPersonas();
 refreshMemory();

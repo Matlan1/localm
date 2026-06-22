@@ -200,3 +200,25 @@ test("S2: authHeaders sends the CSRF token from the cookie and no localStorage b
   assert.equal(h["X-CSRF-Token"], "tok123", "CSRF token echoed from the readable cookie");
   assert.ok(!("Authorization" in h), "no bearer header (cookie auth; no localStorage key)");
 });
+
+test("AUTH-2: both API-key inputs get a show/hide reveal toggle", async () => {
+  const { window } = loadApp({ fetchImpl: allOk });
+  await tick();
+  for (const id of ["key-gate-input", "gui-api-key"]) {
+    const input = window.document.getElementById(id);
+    assert.ok(input, `#${id} exists`);
+    assert.equal(input.type, "password", `${id} starts masked`);
+    const wrap = input.closest(".input-reveal");
+    assert.ok(wrap, `${id} is wrapped for the reveal toggle`);
+    const btn = wrap.querySelector(".reveal-btn");
+    assert.ok(btn, `${id} has a reveal button`);
+    assert.equal(btn.type, "button", "the toggle never submits a form");
+    assert.equal(btn.textContent, "show");
+    btn.click();
+    assert.equal(input.type, "text", `${id} reveals on click`);
+    assert.equal(btn.textContent, "hide");
+    btn.click();
+    assert.equal(input.type, "password", `${id} re-masks on second click`);
+    assert.equal(btn.textContent, "show");
+  }
+});
