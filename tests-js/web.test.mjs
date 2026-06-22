@@ -232,3 +232,81 @@ test("/web with the toggle OFF: real search runs and the answer is grounded, not
   assert.match(sys, /Web search results have been provided/);
   assert.doesNotMatch(sys, /NO internet access/);
 });
+
+// ---------------------------------------------------------------------------
+//  WEB-ask: net_mode=ask must APPROVE each model-initiated web request
+// ---------------------------------------------------------------------------
+
+function askFetch(netMode, webResults = [{ title: "T", url: "https://example.com/", snippet: "S" }]) {
+  const calls = [];
+  const impl = async (url, opts = {}) => {
+    let body = null;
+    try { body = opts.body ? JSON.parse(opts.body) : null; } catch (e) { body = opts.body; }
+    calls.push({ url: String(url), body });
+    if (String(url) === "/v1/config") return jsonResp({ net_mode: netMode });
+    if (String(url) === "/api/web/search") return jsonResp({ query: "q", results: webResults });
+    if (String(url) === "/api/web/fetch")
+      return jsonResp({ url: "https://example.com/", text: "page text", truncated: false });
+    return jsonResp({});
+  };
+  return { impl, calls };
+}
+
+async function runAsk({ netMode, approve, rounds }) {
+  const { impl, calls } = askFetch(netMode);
+  const { window } = loadApp({ fetchImpl: impl });
+  window.maybeCompactConversation = async () => {};
+  const prompts = [];
+  // Auto-answer the approval dialog instead of opening the real modal.
+  window.confirmWebRequest = (call) => { prompts.push(call); return Promise.resolve(approve); };
+  const queue = rounds.slice();
+  window.readSSE = async (_r, onData) => {
+    const deltas = queue.shift() || [{ choices: [{ delta: {}, finish_reason: "stop" }] }];
+    for (const d of deltas) onData(JSON.stringify(d));
+  };
+  const doc = window.document;
+  doc.getElementById("p-speak").checked = false;
+  doc.getElementById("p-memory").checked = false;
+  doc.getElementById("p-web").checked = true;
+  const conv = { id: "c1", title: "t", messages: [{ role: "user", content: "hi" }] };
+  await window.runCompletion(conv);
+  return { window, conv, calls, prompts };
+}
+
+test("WEB-ask: net_mode=ask prompts before a model-initiated search; approve runs it", async () => {
+  const { calls, prompts } = await runAsk({
+    netMode: "ask", approve: true,
+    rounds: [
+      content('<tool_call>{"name": "web_search", "args": {"query": "weather"}}</tool_call>'),
+      content("It is sunny."),
+    ],
+  });
+  assert.equal(prompts.length, 1, "the user was asked to approve the request");
+  assert.equal(calls.filter((c) => c.url === "/api/web/search").length, 1, "approved -> the search ran");
+});
+
+test("WEB-ask: net_mode=ask + deny does NOT search and tells the model", async () => {
+  const { conv, calls, prompts } = await runAsk({
+    netMode: "ask", approve: false,
+    rounds: [
+      content('<tool_call>{"name": "web_search", "args": {"query": "weather"}}</tool_call>'),
+      content("I could not look that up."),
+    ],
+  });
+  assert.equal(prompts.length, 1, "the user was asked");
+  assert.equal(calls.filter((c) => c.url === "/api/web/search").length, 0, "denied -> NO search ran");
+  assert.ok(conv.messages.some((m) => /\[web access denied\]/.test(String(m.content))),
+    "the model was told the request was declined");
+});
+
+test("WEB-ask: net_mode=allow does NOT prompt (current behaviour preserved)", async () => {
+  const { calls, prompts } = await runAsk({
+    netMode: "allow", approve: true,
+    rounds: [
+      content('<tool_call>{"name": "web_search", "args": {"query": "x"}}</tool_call>'),
+      content("done"),
+    ],
+  });
+  assert.equal(prompts.length, 0, "allow mode never prompts");
+  assert.equal(calls.filter((c) => c.url === "/api/web/search").length, 1, "the search ran without a prompt");
+});

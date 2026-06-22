@@ -2107,6 +2107,49 @@ function setupPerfCard() {
 
 const WEB_MAX_ROUNDS = 3;
 
+// net_mode = ask means the GUI must APPROVE each model-initiated web request
+// before it runs (the settings promise: "ask = approve each request"). Read it
+// fresh from /v1/config so a change in Settings takes effect without a reload;
+// the cost is one small GET per model-initiated round (bounded by
+// WEB_MAX_ROUNDS). Unknown / unreachable -> do not block (the per-conversation
+// toggle is the standing consent; only "off", enforced server-side, blocks).
+async function webModeIsAsk() {
+  try {
+    const r = await fetch("/v1/config", { headers: authHeaders() });
+    if (r.ok) {
+      const cfg = await r.json();
+      return !!(cfg && cfg.net_mode === "ask");
+    }
+  } catch (e) { /* server unreachable - fall through to "do not block" */ }
+  return false;
+}
+window.webModeIsAsk = webModeIsAsk;
+
+// Approval dialog for a model-initiated web request under net_mode=ask. Returns
+// a promise<boolean>. Uses the in-page modal (window.confirm/prompt are
+// suppressed in some PWA/mobile browsers, the NET-1 class of bug). Overridable
+// in tests.
+function confirmWebRequest(call) {
+  return new Promise((resolve) => {
+    const args = (call && call.args) || {};
+    const target = args.query || args.url || "";
+    const verb = call && call.name === "fetch_url" ? "fetch a web page" : "search the web";
+    openModal("Allow web access?", (body) => {
+      body.appendChild(el("p", "", "The model wants to " + verb + " for:"));
+      body.appendChild(el("p", "web-ask-target", target));
+      const row = el("div", "actions");
+      const deny = el("button", "btn-quiet", "Deny");
+      deny.onclick = () => { $("modal").style.display = "none"; resolve(false); };
+      const allow = el("button", "btn-quiet btn-primary", "Allow");
+      allow.onclick = () => { $("modal").style.display = "none"; resolve(true); };
+      row.appendChild(deny);
+      row.appendChild(allow);
+      body.appendChild(row);
+    });
+  });
+}
+window.confirmWebRequest = confirmWebRequest;
+
 const WEB_TOOL_PROMPT =
   "You can access the internet through tools. When the answer depends on " +
   "current, real-time, or external information you cannot be certain of " +
@@ -2980,6 +3023,22 @@ async function runCompletion(conv, webDepth = 0) {
   const canWeb = webEnabled && webDepth < WEB_MAX_ROUNDS;
   const nextCall = canWeb ? parseWebCall(full) : null;
   if (nextCall) {
+    // net_mode=ask: approve each MODEL-INITIATED request before it runs (WEB-ask).
+    // The explicit /web command is direct consent and is NOT routed through here.
+    const approved = (await webModeIsAsk()) ? await confirmWebRequest(nextCall) : true;
+    if (!approved) {
+      conv.messages.push({
+        role: "user", web: true,
+        content:
+          "[web access denied] The user declined this web request. Do not claim " +
+          "you searched or browsed; answer from what you already know, or say " +
+          "plainly that you could not look it up.",
+      });
+      saveConversations(conv);
+      renderChat();
+      await runCompletion(conv, WEB_MAX_ROUNDS);   // no further web rounds this send
+      return;
+    }
     await runWebCall(conv, nextCall);
     await runCompletion(conv, webDepth + 1);
   } else if (canWeb && looksLikeWebToolAttempt(full)) {

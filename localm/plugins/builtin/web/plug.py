@@ -6,10 +6,14 @@ Routes (mounted by the engine, auto-scoped to the ``web`` capability):
   POST /api/web/fetch   - fetch a URL and return readable text
 
 Every request is enforced by ``localm.netpolicy`` (net_mode, net_allow/
-net_deny, and the private-address SSRF guard). Callers are the user's explicit
-``/search-web`` command or the per-conversation web-access toggle, both direct
-consent, so "ask" mode does not re-prompt here; only "off" blocks. Domain rules
-and the private-address guard always apply.
+net_deny, and the private-address SSRF guard). "off" blocks; "allow" permits;
+"ask" means each MODEL-INITIATED request must be approved by the user first.
+That per-request approval is interactive, so it lives in the chat front end:
+under net_mode=ask the GUI prompts before it calls these endpoints (WEB-ask).
+A request that reaches here is therefore treated as already-consented (an
+explicit ``/search-web`` command, the per-conversation toggle, or a
+GUI-approved model request); these endpoints do not re-prompt. Domain rules and
+the private-address guard always apply.
 """
 
 from __future__ import annotations
