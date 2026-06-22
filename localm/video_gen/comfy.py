@@ -268,6 +268,10 @@ def generate_video(
             with urllib.request.urlopen(hist_req, timeout=5) as response:
                 history = json.loads(response.read().decode("utf-8"))
             if prompt_id in history:
+                from localm.image_gen.comfy import history_execution_error
+                err = history_execution_error(history[prompt_id])
+                if err:
+                    return False, f"ComfyUI execution failed: {err}"
                 for node_output in history[prompt_id].get("outputs", {}).values():
                     for key in _OUTPUT_KEYS:
                         if node_output.get(key):

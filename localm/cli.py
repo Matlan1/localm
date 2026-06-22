@@ -487,14 +487,15 @@ def _handle_command(
             console.print("[dim]Usage: /generate-image <prompt>[/dim]")
         else:
             from .image_gen.comfy import (
-                _comfy_alive, default_api_url, free_comfy_vram, generate_image)
+                default_api_url, ensure_comfy, free_comfy_vram, generate_image)
             api = default_api_url()
-            if not _comfy_alive(api):
-                console.print(
-                    f"[yellow]ComfyUI is not running at {api}.[/yellow] "
-                    "Start it and retry, or set "
-                    "[bold]localm config comfy_launch_cmd <path>[/bold]."
-                )
+            # Auto-launch ComfyUI from the configured comfy_launch_cmd/comfy_workdir
+            # (the GUI does this; the CLI used to just bail - H1). Only unload the
+            # chat model once ComfyUI is actually available.
+            ok, msg = ensure_comfy(
+                api, on_progress=lambda t: console.print(f"[dim]{t}[/dim]"))
+            if not ok:
+                console.print(f"[yellow]{msg}[/yellow]")
             else:
                 import time as _t
                 out_dir = HOME_DIR / "gui_images"
@@ -1070,16 +1071,13 @@ def image_cmd(prompt, negative, guidance, cfg, seed, input_image, denoise,
     import time as _time
 
     from .audit import SessionMode, effective_mode
-    from .image_gen.comfy import (_comfy_alive, default_api_url,
-                                  free_comfy_vram, generate_image)
+    from .image_gen.comfy import (default_api_url, free_comfy_vram,
+                                  generate_image)
 
     api_url = default_api_url()
-    if not _comfy_alive(api_url):
-        console.print(
-            f"[red]ComfyUI is not running at {api_url}.[/red] Start it and "
-            "retry - or use the GUI's Images page, which can launch it "
-            "automatically when comfy_launch_cmd is set.")
-        sys.exit(1)
+    # generate_image() calls ensure_comfy() internally, which auto-launches ComfyUI
+    # from comfy_launch_cmd/comfy_workdir (or returns a clear error when they are
+    # unset), so the CLI honours the same config the GUI uses (H1).
 
     out_path = Path(out) if out \
         else Path(f"image_{_time.strftime('%Y%m%d_%H%M%S')}.png")
@@ -1130,17 +1128,14 @@ def music_cmd(tags, lyrics, duration, out, seed, steps, cfg):
     import time as _time
     from rich.console import Console
     from .audit import SessionMode, effective_mode
-    from .image_gen.comfy import _comfy_alive, default_api_url
+    from .image_gen.comfy import default_api_url
     from .music_gen import generate_music
     console = Console()
 
     api_url = default_api_url()
-    if not _comfy_alive(api_url):
-        console.print(
-            f"[red]ComfyUI is not running at {api_url}.[/red] Start it and "
-            "retry - or use the GUI's Music page, which can launch it "
-            "automatically when comfy_launch_cmd is set.")
-        sys.exit(1)
+    # generate_music() calls ensure_comfy() internally (auto-launch from
+    # comfy_launch_cmd/comfy_workdir, or a clear error when unset), so the CLI
+    # honours the same config the GUI uses (H1).
 
     out_path = Path(out) if out \
         else Path(f"music_{_time.strftime('%Y%m%d_%H%M%S')}.flac")
@@ -1199,17 +1194,14 @@ def video_cmd(prompt, negative, duration, fps, width, height, input_image,
     import time as _time
     from rich.console import Console
     from .audit import SessionMode, effective_mode
-    from .image_gen.comfy import _comfy_alive, default_api_url
+    from .image_gen.comfy import default_api_url
     from .video_gen import generate_video
     console = Console()
 
     api_url = default_api_url()
-    if not _comfy_alive(api_url):
-        console.print(
-            f"[red]ComfyUI is not running at {api_url}.[/red] Start it and "
-            "retry - or use the GUI's Video page, which can launch it "
-            "automatically when comfy_launch_cmd is set.")
-        sys.exit(1)
+    # generate_video() calls ensure_comfy() internally (auto-launch from
+    # comfy_launch_cmd/comfy_workdir, or a clear error when unset), so the CLI
+    # honours the same config the GUI uses (H1).
 
     out_path = Path(out) if out \
         else Path(f"video_{_time.strftime('%Y%m%d_%H%M%S')}.mp4")

@@ -94,15 +94,20 @@ def _principal_from_request(request: Request) -> tuple[bool, str | None]:
     SHA-256 of the presented bearer, so it identifies the key without storing it."""
     from localm import scopes as S
     from localm.auth import any_key_configured, verify
-    from localm.inference.http_server import _bearer_token
+    from localm.inference.http_server import _request_token
     if not any_key_configured():
         return True, None                       # open mode = loopback owner
-    bearer = _bearer_token(request)
-    held = verify(bearer) if bearer else None
+    # The browser GUI authenticates with the HttpOnly session cookie, not an
+    # Authorization header, so resolve BOTH (header wins, else the cookie) - the
+    # same source the main auth uses. Reading only the header made a cookie-authed
+    # owner (the GUI) look like a non-owner, so it never saw its own coder sessions
+    # (issue A1).
+    token, _src = _request_token(request)
+    held = verify(token) if token else None
     if held is not None and S.ADMIN in held:
         return True, None                       # the owner key
     import hashlib
-    digest = hashlib.sha256((bearer or "").encode("utf-8")).hexdigest()
+    digest = hashlib.sha256((token or "").encode("utf-8")).hexdigest()
     return False, digest
 
 
@@ -390,7 +395,10 @@ async def coder_history(request: Request):
     # none of them - only the owner browses history.
     is_owner, _ = _principal_from_request(request)
     if not is_owner:
-        return {"enabled": False, "logs": []}
+        # "authorized": False lets the GUI say "sign in as the owner" instead of
+        # mislabelling this as privacy mode - the two used to be indistinguishable
+        # (issue A1).
+        return {"enabled": False, "authorized": False, "logs": []}
     from localm import audit as _audit
     from localm.audit import SessionMode, effective_mode
     sessions_dir = _audit._SESSIONS_DIR
@@ -404,7 +412,7 @@ async def coder_history(request: Request):
                 "mtime": p.stat().st_mtime,
             })
     return {"enabled": effective_mode("coder") != SessionMode.PRIVACY,
-            "logs": items}
+            "authorized": True, "logs": items}
 
 
 @_router.get("/api/coder/history/{name}")

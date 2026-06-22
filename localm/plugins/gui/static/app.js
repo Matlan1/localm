@@ -3638,6 +3638,12 @@ async function openSessionHistory() {
   } catch (e) { /* handled below */ }
   if (!data) { toast("Could not load session history", true); return; }
   openModal("Past coder sessions", (body) => {
+    if (data.authorized === false) {
+      body.appendChild(el("div", "sub",
+        "Past coder sessions are private to the server owner. Sign in with the " +
+        "owner API key on this device to view them."));
+      return;
+    }
     if (!data.enabled) {
       body.appendChild(el("div", "sub",
         "New sessions are not being recorded (privacy mode). Anything below " +
