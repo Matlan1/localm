@@ -142,23 +142,33 @@ if "%BSEL%"=="4" set "BACKEND=amd-rocm"
 if "%BSEL%"=="5" set "BACKEND=cpu"
 if "%BSEL%"=="6" set "BACKEND=own"
 
-rem ---- PyTorch + transformers for HuggingFace models (matches the GPU) -------
-rem  Independent of the llama backend above (that path is GGUF and needs no
-rem  torch). Installed to match the DETECTED vendor so torch never mismatches
-rem  the hardware. Skipped on Intel/CPU - GGUF chat works without it.
-if /i "%VENDOR%"=="amd" (
-    echo.
+rem ---- PyTorch + transformers for HuggingFace models (FOLLOWS your backend) --
+rem  PyTorch powers the HuggingFace/transformers backend; GGUF chat needs none of
+rem  it. The variant FOLLOWS the llama.cpp backend you picked above (not just the
+rem  detected vendor), so choosing the vendor-neutral 'vulkan' runtime does NOT
+rem  drag in the AMD ROCm stack (the reported SETUP-1 surprise). One shared policy
+rem  decides it - `hwdetect torch <backend>` prints "cuda" | "rocm" | "none" - so
+rem  setup.bat and setup.sh can never disagree.
+set "TORCHVAR=none"
+.venv\Scripts\python -m localm.hwdetect torch %BACKEND% > "%TEMP%\localm_torch.txt" 2>nul
+if exist "%TEMP%\localm_torch.txt" for /f "usebackq delims=" %%a in ("%TEMP%\localm_torch.txt") do set "TORCHVAR=%%a"
+del "%TEMP%\localm_torch.txt" 2>nul
+if "%TORCHVAR%"=="" set "TORCHVAR=none"
+echo.
+if /i "%TORCHVAR%"=="rocm" (
     echo  Installing PyTorch ^(AMD ROCm^) + transformers for HuggingFace models ...
     uv pip install -p .venv -e ".[gpu,audio]" || echo  [!] ROCm torch stack failed - GGUF chat still works without it.
-) else if /i "%VENDOR%"=="nvidia" (
-    echo.
+) else if /i "%TORCHVAR%"=="cuda" (
     echo  Installing PyTorch ^(NVIDIA CUDA^) + transformers for HuggingFace models ...
     uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu124 || echo  [!] CUDA torch failed - GGUF chat still works without it.
     uv pip install -p .venv "transformers[kernels]~=5.12" "tokenizers==0.22.2" "accelerate>=1.0" "pillow>=10.0" "soundfile>=0.12" || echo  [!] transformers stack failed - GGUF chat still works.
 ) else (
-    echo.
     echo  Skipping the PyTorch/transformers stack ^(not needed for GGUF chat^).
-    echo  Add it later if you want HuggingFace transformers models.
+    echo  You picked the '%BACKEND%' runtime, so no vendor GPU torch was auto-installed.
+    echo  To use HuggingFace transformers models, add PyTorch for your setup later:
+    echo      CPU ^(any machine^):    uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cpu
+    echo      NVIDIA CUDA:          uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu124
+    echo      AMD ROCm ^(gfx103X^):   uv pip install -p .venv -e ".[gpu]"
 )
 
 rem ---- provision the native llama.cpp binaries ------------------------------
@@ -188,8 +198,13 @@ echo    [1] Inside this folder (.\home) - fully portable, isolated per clone
 echo    [2] Shared per-user folder (%USERPROFILE%\.localm) - clones share
 echo        models and settings
 echo    [3] Custom path
-choice /c 123 /n /m "  Pick 1, 2 or 3: "
-set "DATAPICK=%errorlevel%"
+rem  set /p (type a number, then Enter), NOT `choice`: `choice` returns on a single
+rem  keypress, so the user's habitual confirming Enter used to leak into the custom
+rem  path's set /p below and be read as an empty path (SETUP-2). With set /p the
+rem  Enter belongs to THIS prompt, so the path prompt starts clean.
+set "DATAPICK="
+set /p "DATAPICK=  Pick 1, 2 or 3 [1]: "
+if not defined DATAPICK set "DATAPICK=1"
 rem DATADIR + DATACREATED feed the install manifest (DATACREATED=1 only when WE
 rem made the dir, so uninstall --purge-data never removes a pre-existing folder).
 set "DATADIR=%USERPROFILE%\.localm"
@@ -219,19 +234,11 @@ if "%DATAPICK%"=="2" (
         echo  Data directory: %USERPROFILE%\.localm  ^(shared^)
     )
 )
-if "%DATAPICK%"=="3" (
-    set /p CUSTOMHOME="  Enter data directory path: "
-    if "!CUSTOMHOME!"=="" (
-        echo  [!] Empty path - falling back to shared %USERPROFILE%\.localm
-        if exist "localm-home.cfg" del "localm-home.cfg"
-    ) else (
-        > "localm-home.cfg" echo !CUSTOMHOME!
-        if not exist "!CUSTOMHOME!" mkdir "!CUSTOMHOME!"
-        set "DATADIR=!CUSTOMHOME!"
-        set "DATACREATED=1"
-        echo  Data directory: !CUSTOMHOME!  ^(recorded in localm-home.cfg^)
-    )
-)
+rem  Single-line `if ... call` into a goto/label subroutine (defined at the end):
+rem  a `call` plus nested if/else INSIDE this `if (...)` block trips cmd.exe's
+rem  parenthesis parser ("The syntax of the command is incorrect."), so keep the
+rem  custom-path flow out of the block entirely.
+if "%DATAPICK%"=="3" call :do_custom_home
 
 rem ---- optional desktop shortcut ----------------------------------------------
 echo.
@@ -239,8 +246,10 @@ echo  Desktop shortcut - what should it open?
 echo    [1] Launcher (pick mode/model, set an API key)   recommended
 echo    [2] Web GUI directly
 echo    [3] No shortcut
-choice /c 123 /n /m "  Pick 1, 2 or 3: "
-set "SCPICK=%errorlevel%"
+rem  set /p for a consistent "type a number then Enter" across every menu.
+set "SCPICK="
+set /p "SCPICK=  Pick 1, 2 or 3 [1]: "
+if not defined SCPICK set "SCPICK=1"
 set "SCPATH="
 if "%SCPICK%"=="1" set "SCPATH=%USERPROFILE%\Desktop\LocaLM.lnk"
 if "%SCPICK%"=="2" set "SCPATH=%USERPROFILE%\Desktop\LocaLM.lnk"
@@ -338,4 +347,32 @@ if exist ".venv\.localm-venv" (
 echo.
 echo  Done. To reinstall: setup.bat
 pause
+exit /b 0
+
+rem ===========================================================================
+rem  :do_custom_home - prompt for a custom data directory and confirm it.
+rem  goto/label flow (NO parenthesised blocks) so it is robust under cmd.exe, and
+rem  every prompt is set /p: a habitual confirming Enter is consumed by the prompt
+rem  it belongs to instead of leaking into the next one (the SETUP-2 bug, where
+rem  `choice` auto-advanced and the stray Enter became an empty path). Records the
+rem  path (DATADIR/DATACREATED + localm-home.cfg), or falls back to the shared
+rem  default when left blank.
+rem ===========================================================================
+:do_custom_home
+set "CUSTOMHOME="
+set /p "CUSTOMHOME=  Enter the data directory path, or leave blank for the shared default: "
+if not defined CUSTOMHOME goto custom_home_blank
+set "OKHOME="
+set /p "OKHOME=  Use '!CUSTOMHOME!'? [Y/n]: "
+if not defined OKHOME set "OKHOME=Y"
+if /i "!OKHOME:~0,1!"=="N" goto do_custom_home
+> "localm-home.cfg" echo !CUSTOMHOME!
+if not exist "!CUSTOMHOME!" mkdir "!CUSTOMHOME!"
+set "DATADIR=!CUSTOMHOME!"
+set "DATACREATED=1"
+echo  Data directory: !CUSTOMHOME!  ^(recorded in localm-home.cfg^)
+exit /b 0
+:custom_home_blank
+echo  [!] No path given - falling back to shared %USERPROFILE%\.localm
+if exist "localm-home.cfg" del "localm-home.cfg"
 exit /b 0
