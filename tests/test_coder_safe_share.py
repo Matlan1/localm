@@ -179,6 +179,33 @@ def test_owner_key_keeps_the_full_coder(tmp_path, monkeypatch):
         assert sess.restricted is False
 
 
+def test_cookie_authed_owner_is_recognised_for_history(tmp_path, monkeypatch):
+    # The browser GUI authenticates with the HttpOnly localm_session cookie, not an
+    # Authorization header. The coder owner-gate must accept that cookie, else the
+    # GUI (the owner) is treated as a non-owner and never sees its own past coder
+    # sessions, with the page mislabelling it as privacy mode (issue A1).
+    app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+    app.state.root_dir = str(tmp_path)
+    with TestClient(app) as client:
+        # Owner via Authorization header: authorized.
+        h = client.get("/api/coder/history",
+                       headers={"Authorization": "Bearer ownersecret"}).json()
+        assert h["authorized"] is True
+        # Owner via the session COOKIE (the GUI path): must ALSO be authorized.
+        c = client.get("/api/coder/history",
+                       headers={"Cookie": "localm_session=ownersecret"}).json()
+        assert c["authorized"] is True
+        # A scoped, non-owner key is NOT authorized and sees no logs - and the
+        # response is distinguishable from privacy mode by the authorized flag.
+        from localm import auth
+        scoped = auth.create_key("phone", ["coder"])
+        s = client.get(
+            "/api/coder/history",
+            headers={"Cookie": f"localm_session={scoped['key']}"}).json()
+        assert s["authorized"] is False
+        assert s["logs"] == []
+
+
 def test_scoped_key_cannot_steer_the_owners_session(tmp_path, monkeypatch):
     # THE critical one: a scoped key must not be able to send a message to the
     # OWNER's full session (which keeps run_shell) - that would be RCE by proxy.
