@@ -364,6 +364,21 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
         lifespan=lifespan,
     )
 
+    # SRV-2: one backstop so an unexpected error in ANY route returns a
+    # consistent JSON 500 and is logged, instead of leaking a traceback or a
+    # bare body. Starlette already keeps a Python exception from killing the
+    # server; this standardises the response shape and the logging so a single
+    # failing request is a clean 500, never a crash and never an info leak. (A
+    # native fault - a C-extension segfault - cannot be caught in-process; those
+    # are prevented at the source, e.g. voice audio is decoded/validated before
+    # the native path, and surfaced via the crash marker on restart.)
+    @app.exception_handler(Exception)
+    async def _unhandled_error(request, exc):  # noqa: ANN001 - framework signature
+        from localm.debuglog import logger as _dbg
+        _dbg.exception("unhandled error: %s %s", request.method, request.url.path)
+        return JSONResponse(status_code=500,
+                            content={"detail": "Internal server error"})
+
     # Chat-pipeline hooks: plugins register inlet/stream/outlet transforms that
     # run on every /v1/chat/completions turn. Created here so it exists before
     # plugins load (attach_engine, below) and stays reachable as
