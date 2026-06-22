@@ -446,7 +446,8 @@
               <label>Logo style</label>
               <div class="sub">How the wordmark is drawn in the sidebar. Saved in this browser only.</div>
               <div id="logo-style-picker" class="logo-style-picker"></div>
-              <label>API key (sent as Bearer token; stored in this browser only)</label>
+              <label>API key - saved on this device (a secure cookie) so you stay
+                signed in. Leave blank and Save to sign out.</label>
               <input type="password" id="gui-api-key" placeholder="only needed when LOCALM_API_KEY is set">
               <div class="actions">
                 <button class="btn-quiet" id="gui-key-save">Save key</button>
@@ -558,7 +559,7 @@
       <!-- Enter the API key -->
       <div class="onboard-step">
         <div class="onboard-step-title">Enter your API key</div>
-        <label for="key-gate-input">Sent as a Bearer token; stored in this browser only.</label>
+        <label for="key-gate-input">Saved on this device (a secure cookie) so you stay signed in.</label>
         <input type="password" id="key-gate-input" autocomplete="off" spellcheck="false"
                placeholder="LOCALM_API_KEY">
         <div class="actions">
@@ -656,6 +657,11 @@
     window.applyInstallUI({ standalone: sa, ios: !sa && ios(),
                             canPrompt: canPrompt, certNeeded: certNeeded });
     if (window.refreshInstallGateIfOpen) window.refreshInstallGateIfOpen();
+    // Keep the key gate's "Install certificate" step in sync with cert trust:
+    // __swFailed is only known after SW registration resolves (async, after
+    // boot), so re-evaluate the gate here so a genuinely untrusted CA surfaces
+    // the step, and a trusted one keeps it hidden.
+    if (window.updateKeyGateCertStep) window.updateKeyGateCertStep();
   }
   if ("serviceWorker" in navigator) {
     // Reload once when a NEW service worker takes control, so an updated app

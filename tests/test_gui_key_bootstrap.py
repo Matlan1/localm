@@ -79,6 +79,9 @@ class TestShellRoute:
         assert "httponly" in cookies.lower()
         assert "samesite=strict" in cookies.lower()
         assert "localm_csrf=" in cookies
+        # SEAMLESS: the auto-seeded cookie PERSISTS (max-age) so the loopback user
+        # stays signed in across a browser restart, matching the /api/session path.
+        assert "max-age=" in cookies.lower()
 
     def test_loopback_open_mode_seeds_shell_token_global(self, monkeypatch):
         # Open mode + loopback: the per-process shell token is injected as a JS
