@@ -120,3 +120,33 @@ def resolve_config(name: str, cfg: dict,
     resolved = _own_block(src, cfg)
     resolved["use_config_from"] = src      # keep the marker so the UI can show it
     return resolved, None
+
+
+# --------------------------------------------------------------------------- #
+#  Backend seam (I1): select a media backend implementation by name            #
+# --------------------------------------------------------------------------- #
+#
+# A media backend is a MODULE under ``<plugin>/backends/<name>.py`` exposing
+# three callables - the template a non-ComfyUI generator (a remote API, a local
+# diffusers/A1111 server, ...) adapts to:
+#
+#     def ensure_available(s: dict, on_progress=None) -> tuple[bool, str]: ...
+#     def free_vram(s: dict) -> bool: ...
+#     def generate(s: dict, *args, **kwargs) -> tuple[bool, str]: ...
+#
+# ``s`` is the dict the plugin's ``backend.settings(config)`` resolved; a backend
+# reads what it needs from it. Select a backend per plugin via the ``backend``
+# config key (default ``"comfy"``, the reference ComfyUI implementation, which
+# each plugin keeps inline). To add one, drop ``backends/<name>.py`` next to the
+# plugin and set ``config["plugins"][<plugin>]["backend"] = "<name>"``.
+
+def load_backend(package: str, name: Optional[str]):
+    """Import the media backend module *name* from ``<package>.backends``.
+
+    e.g. ``load_backend("localm.plugins.builtin.image", "a1111")`` imports
+    ``localm.plugins.builtin.image.backends.a1111``. Raises ``ModuleNotFoundError``
+    when no such module exists, so the caller falls back to its built-in ``comfy``
+    reference rather than hard-crashing on a typo or an uninstalled backend."""
+    import importlib
+    nm = (name or "comfy").strip().lower() or "comfy"
+    return importlib.import_module(f"{package}.backends.{nm}")
