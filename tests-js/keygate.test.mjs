@@ -70,7 +70,8 @@ test("NET-1: over HTTPS the gate offers a one-tap Install-certificate link", asy
   const link = window.document.getElementById("key-gate-cert-link");
   assert.ok(cert, "#key-gate-cert exists in the shell");
   assert.notEqual(cert.style.display, "none", "cert link is shown over HTTPS (built-in TLS)");
-  assert.equal(link.getAttribute("href"), "/localm-ca.crt", "links to the CA download");
+  assert.equal(link.getAttribute("href"), "https://192.168.0.5:8651/localm-ca.crt",
+    "links to the CA download over an absolute https URL, never the http port (J2)");
 });
 
 test("NET-1: over plain HTTP the cert link stays hidden (loopback dev gate)", async () => {
