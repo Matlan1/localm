@@ -345,6 +345,9 @@ later rounds but never re-marked here. Verified by grep / reading the GUI source
 - [ ] Empty-state funnels - partly shipped (`localm gui --no-model` + `--pull` deep-link, Round 5); a fuller guided "pull one" flow still open
 - [ ] One-file backup / export-import of all user data (chats, prompts, settings)
 - [x] Mobile / PWA layout - shipped (installable PWA + native-feeling mobile chat, #202)
+  - [ ] Mobile keyboard handling: the on-screen keyboard can hide the composer on iOS (`100dvh` does not shrink for it); add a `visualViewport`-based inset so the input always floats above the keyboard
+  - [ ] Real-device verification of #202 (it was verified by DOM measurement on Android-sized viewports only, never on a phone): notch / home-bar `env(safe-area-inset-*)`, and iOS Safari (16px no-zoom font, `viewport-fit=cover`, Add-to-Home-Screen)
+  - [ ] Optional companion-app polish: show the conversation title / active model name in the mobile top bar (currently just the "localm" wordmark)
 - [ ] i18n + accessibility pass
 - [ ] Profiles / multi-user accounts (out of scope for home use; scoped API keys already cover per-device sharing)
 - [ ] Native shell, tray, auto-update, installer - tracked above as the Tauri 2 item
