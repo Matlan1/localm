@@ -1684,6 +1684,9 @@ def serve(engine: Engine, host: str = "127.0.0.1", port: int = 8642,
     with instances.advertise(app, home_dir(), host=host, port=port, mode="api",
                              scheme=scheme, project=project, isolated=isolated):
         # On a TLS bind, also catch a plain-http request on the same port with an
-        # https redirect (issue 8); plain binds are a direct uvicorn.run.
-        portmux.run_server(app, host=host, port=port, log_level="warning",
+        # https redirect (issue 8); plain binds are a direct uvicorn.run. SRV-5:
+        # in debug mode uvicorn logs at "info" so the console shows requests.
+        from localm.debuglog import uvicorn_log_level
+        portmux.run_server(app, host=host, port=port,
+                           log_level=uvicorn_log_level(),
                            ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
