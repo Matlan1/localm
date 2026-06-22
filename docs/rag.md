@@ -70,7 +70,7 @@ to get vectors.
 
 - Retrieval quality is bounded by BM25 unless your backend embeds - exact
   words matter more than synonyms in lexical mode.
-- Chunks are capped (4 × ~900 chars injected per question) to fit small
+- Chunks are capped (4 × ~1200 chars injected per question) to fit small
   context windows; the dynamic context growth and auto-compaction handle the
   rest.
 - One indexing job per collection at a time is the supported pattern; the

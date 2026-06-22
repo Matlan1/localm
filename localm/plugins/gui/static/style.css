@@ -1189,6 +1189,12 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
 .onboard-help ul { margin: 8px 0 0; padding-left: 18px; line-height: 1.5; }
 .onboard-help li { margin-bottom: 4px; }
 
+/* Companion reachable address(es): the LAN / Tailscale URL a phone opens. */
+.companion-addrs { list-style: none; margin: 8px 0 0; padding: 0; }
+.companion-addr { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
+.companion-addr-url { font-family: var(--mono, monospace); word-break: break-all; }
+.companion-addr-kind { white-space: nowrap; }
+
 /* Companion pairing QR (Settings) */
 .pairing { margin-top: 10px; }
 .pairing-qr { margin-top: 8px; width: 216px; }

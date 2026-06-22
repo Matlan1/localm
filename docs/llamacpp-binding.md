@@ -10,6 +10,7 @@
 | `_structs.py` | ctypes Structure definitions (sizes probed from the DLL) |
 | `_api.py` | Low-level C API bindings (one Python function per C function) |
 | `llama.py` | `LlamaCpp` public class + helpers |
+| `mtmd.py` | Multimodal (vision) support: binds the bundled `mtmd.dll` for GGUF mmproj |
 | `__init__.py` | Exports `LlamaCpp` |
 
 ## DLL Loading (`_loader.py`)
@@ -260,7 +261,7 @@ Many models signal end-of-turn with multi-token sequences (e.g. `<|im_end|>` →
 - When a complete stop string appears anywhere in the buffer, yields the text before it and returns
 - Flushes the remaining buffer at end-of-stream
 
-Stop strings checked: `<|im_end|>`, `<end_of_turn>`, `<|eot_id|>`, `</s>`, `<|endoftext|>`, `[/INST]`, `<|end|>`.
+Stop strings checked: `<|im_end|>`, `<end_of_turn>`, `<turn|>`, `<|eot_id|>`, `</s>`, `<|endoftext|>`, `[/INST]`, `<|end|>`.
 
 ### Sampler chain
 

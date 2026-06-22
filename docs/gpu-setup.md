@@ -18,7 +18,7 @@ localm setup-llama --from <build dir>   # your own llama.cpp build (any backend)
 |---|---|---|
 | `vulkan` | any AMD / NVIDIA / Intel GPU | universal default - only the normal display driver, no CUDA/ROCm/oneAPI toolkit |
 | `cuda` | NVIDIA | peak performance; on Windows setup fetches the CUDA runtime for you (no Toolkit), then load-tests and falls back to vulkan/cpu if it cannot load |
-| `amd-rocm` | AMD RX 6000 (gfx103X) | self-contained ROCm build (bundles its runtime) |
+| `amd-rocm` | AMD RX 6000 (gfx103X / RDNA2) | self-contained ROCm build (bundles its runtime); gfx103X-only - other AMD GPUs use `vulkan` or `hip` |
 | `hip` | AMD (any gfx) | upstream ROCm build; needs the ROCm/HIP runtime |
 | `sycl` | Intel Arc | needs the oneAPI runtime |
 | `cpu` | no GPU | always works |
@@ -66,6 +66,11 @@ cmake --build build --config Release -j8
 ```
 
 Output: `build\bin\Release\llama.dll` and sibling `ggml*.dll` files.
+
+> `-DAMDGPU_TARGETS=gfx1030` targets RX 6000 (RDNA2). For another AMD GPU set it to
+> your card's gfx arch (e.g. `gfx1100` for RX 7000 / RDNA3, `gfx1010` for RX 5000 /
+> RDNA1). On Linux, `localm setup-llama --backend hip` builds against the installed
+> ROCm/HIP runtime instead of bundling one.
 
 ### Verify GPU is being used
 

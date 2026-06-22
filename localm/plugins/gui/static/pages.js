@@ -1140,6 +1140,62 @@ async function refreshPairingQR() {
   }
 }
 
+// Decide what the Companion-app card shows from the server's address info
+// (/api/companion) and the current page location. Returns
+// { urls: [{kind, url}], hint }:
+//   - urls : phone-reachable address(es) - LAN, then Tailscale - each built from
+//            THIS page's own scheme + port (the server listens on one port for
+//            every interface), so the card never shows the loopback address
+//            (127.0.0.1 on a phone is the phone itself).
+//   - hint : a one-line note when there is no reachable address to show - on the
+//            default loopback bind, how to bind to the network instead.
+// Pure + exported so the branches are unit-tested without a live server.
+function companionView(info, loc) {
+  info = info || {};
+  loc = loc || {};
+  const proto = loc.protocol || "https:";
+  const port = loc.port ? ":" + loc.port : "";
+  const mk = (ip, kind) => ({ kind, url: proto + "//" + ip + port + "/" });
+  const urls = [];
+  if (info.network_bind) {
+    if (info.lan) urls.push(mk(info.lan, "Wi-Fi / LAN"));
+    if (info.tailscale) urls.push(mk(info.tailscale, "Tailscale"));
+  }
+  let hint = "";
+  if (!urls.length) {
+    hint = info.network_bind
+      ? "Could not detect this machine's network address - open its LAN or Tailscale address (with this port) on the phone."
+      : "Reachable only on this computer right now. To use it from a phone, restart bound to your network: localm gui -H 0.0.0.0 (set an API key first). See docs/phone.md.";
+  }
+  return { urls, hint };
+}
+
+// Fill the Companion-app card with the phone-reachable address(es) from
+// /api/companion, or a hint when there is none yet. Best-effort: a failed fetch
+// falls through to companionView's loopback-bind hint.
+async function refreshCompanion() {
+  const list = $("companion-addrs"), hintEl = $("companion-hint");
+  if (!list || !hintEl) return;
+  let info = {};
+  try {
+    const r = await fetch("/api/companion", { headers: authHeaders() });
+    if (r.ok) info = await r.json();
+  } catch (e) { /* offline / no endpoint - show the generic hint */ }
+  const view = companionView(info, window.location);
+  list.replaceChildren();
+  for (const u of view.urls) {
+    const li = el("li", "companion-addr");
+    const a = el("a", "companion-addr-url", u.url);
+    a.href = u.url; a.target = "_blank"; a.rel = "noopener";
+    li.appendChild(a);
+    li.appendChild(el("span", "sub companion-addr-kind", u.kind));
+    list.appendChild(li);
+  }
+  list.style.display = view.urls.length ? "block" : "none";
+  hintEl.textContent = view.hint;
+  hintEl.style.display = view.hint ? "block" : "none";
+}
+
 // Scopes offered in the GUI key minter (label per scope). Privileged scopes
 // (coder:full, admin) are shown but OWNER-ONLY: the /v1/keys API refuses them for
 // a non-owner key, so a keys:admin device cannot hand out shell / admin access.
@@ -1552,6 +1608,7 @@ async function refreshSettingsPage() {
   // refresh: each may rebuild the nav, but they preserve the active section.
   buildSettingsNav();
   refreshPairingQR();
+  refreshCompanion();
   refreshKeysPanel();
 }
 

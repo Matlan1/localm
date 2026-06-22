@@ -7,7 +7,8 @@ over a pluggable inference backend, and everything above bare chat is a
 plugin. The core design rule: the CLI knows nothing about inference;
 inference knows nothing about CLI. They communicate through `Engine`. CHAT
 is the protected, preinstalled plugin (#0); coder, image, music, video, rag,
-web, voice (Whisper STT), tts (Kokoro in-browser TTS), and mcp are all
+web, voice (Whisper STT), tts (Kokoro in-browser TTS), jobs (scheduled tasks),
+and mcp are all
 plugins layered on top.
 
 ```

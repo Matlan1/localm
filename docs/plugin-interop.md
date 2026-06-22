@@ -175,7 +175,7 @@ string-modifier extensions (translators, prompt templaters, memory injectors).
 ### Anatomy
 
 A folder with a `SKILL.md` (YAML frontmatter: `name`, `description`, optional
-`license`, `allowed-tools`, `metadata`) plus a markdown instruction body and
+`allowed-tools`) plus a markdown instruction body and
 bundled scripts/resources. Loaded by **progressive disclosure**: the agent sees
 `name` + `description` first, loads the body when relevant, then reads bundled
 files on demand.
