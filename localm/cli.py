@@ -1173,11 +1173,9 @@ def music_cmd(tags, lyrics, duration, out, seed, steps, cfg):
     import time as _time
     from rich.console import Console
     from .audit import SessionMode, effective_mode
-    from .image_gen.comfy import default_api_url
     from .music_gen import generate_music
     console = Console()
 
-    api_url = default_api_url()
     # generate_music() calls ensure_comfy() internally (auto-launch from
     # comfy_launch_cmd/comfy_workdir, or a clear error when unset), so the CLI
     # honours the same config the GUI uses (H1).
@@ -1239,11 +1237,9 @@ def video_cmd(prompt, negative, duration, fps, width, height, input_image,
     import time as _time
     from rich.console import Console
     from .audit import SessionMode, effective_mode
-    from .image_gen.comfy import default_api_url
     from .video_gen import generate_video
     console = Console()
 
-    api_url = default_api_url()
     # generate_video() calls ensure_comfy() internally (auto-launch from
     # comfy_launch_cmd/comfy_workdir, or a clear error when unset), so the CLI
     # honours the same config the GUI uses (H1).
