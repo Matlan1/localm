@@ -192,35 +192,28 @@ fi
 # PyTorch powers the HuggingFace/transformers backend; GGUF chat needs none of it.
 # The variant FOLLOWS the llama.cpp BACKEND picked above (not just the detected
 # GPU), so choosing the vendor-neutral 'vulkan' runtime does not drag in the ROCm
-# stack (the SETUP-1 surprise). Same shared policy the Windows installer uses:
-# `python -m localm.hwdetect torch <backend>` -> "cuda" | "rocm" | "none".
-TORCHVAR="$(.venv/bin/python -m localm.hwdetect torch "$BACKEND" 2>/dev/null | awk '{print $1}')"
-case "$TORCHVAR" in cuda|rocm|none) ;; *) TORCHVAR=none ;; esac
-case "$TORCHVAR" in
-  rocm)
-    say ""
-    say "  Installing PyTorch (ROCm) + transformers for HuggingFace models ..."
-    uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/rocm6.2 \
-      || say "  [!] ROCm torch install failed - install a matching torch+rocm manually (see docs/linux-setup.md)."
-    uv pip install -p .venv "transformers[kernels]~=5.12" "tokenizers==0.22.2" "accelerate>=1.0" "pillow>=10.0" || true
-    ;;
-  cuda)
-    say ""
-    say "  Installing PyTorch (CUDA) + transformers for HuggingFace models ..."
-    uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu126 \
-      || say "  [!] CUDA torch install failed - install a matching torch+cuda manually (see docs/linux-setup.md)."
-    uv pip install -p .venv "transformers[kernels]~=5.12" "tokenizers==0.22.2" "accelerate>=1.0" "pillow>=10.0" || true
-    ;;
-  *)
-    say ""
-    say "  Skipping the PyTorch/transformers stack (not needed for GGUF chat)."
-    say "  You picked the '$BACKEND' runtime, so no vendor GPU torch was auto-installed."
-    say "  For HuggingFace transformers models, add PyTorch later:"
-    say "    CPU (any machine): uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cpu"
-    say "    NVIDIA CUDA:       uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu126"
-    say "    AMD ROCm:          uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/rocm6.2"
-    ;;
-esac
+# stack (the SETUP-1 surprise). `hwdetect torch-args <backend>` resolves the exact
+# wheel SOURCE for this hardware+OS (cuda/rocm/xpu/none), so setup.sh and setup.bat
+# never drift and every card gets the correct packages.
+TORCHSPEC="$(.venv/bin/python -m localm.hwdetect torch-args "$BACKEND" 2>/dev/null)"
+if [ -n "$TORCHSPEC" ]; then
+  say ""
+  say "  Installing PyTorch + transformers for HuggingFace models ..."
+  # TORCHSPEC is a multi-token pip arg list (e.g. "torch torchvision --index-url ...");
+  # it is intentionally left unquoted so the words split into separate arguments.
+  # shellcheck disable=SC2086
+  uv pip install -p .venv $TORCHSPEC \
+    || say "  [!] torch install failed - install a matching torch manually (see docs/gpu-setup.md)."
+  uv pip install -p .venv "transformers[kernels]~=5.12" "tokenizers==0.22.2" "accelerate>=1.0" "pillow>=10.0" "soundfile>=0.12" || true
+else
+  say ""
+  say "  Skipping the PyTorch/transformers stack (not needed for GGUF chat)."
+  say "  You picked the '$BACKEND' runtime, so no vendor GPU torch was auto-installed."
+  say "  For HuggingFace transformers models, add PyTorch later (see docs/gpu-setup.md):"
+  say "    CPU (any machine): uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cpu"
+  say "    NVIDIA CUDA:       uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu126"
+  say "    AMD ROCm (Linux):  uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/rocm6.2"
+fi
 
 # ---- data directory ---------------------------------------------------------
 say ""
