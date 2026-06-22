@@ -9,7 +9,7 @@
 // Bump this whenever the cached shell assets (style.css, app.js, pages.js,
 // index.html, icons) change, so an installed PWA drops the old cache on activate
 // and re-precaches the new files instead of serving stale cache-first assets.
-const CACHE = "localm-shell-v6";
+const CACHE = "localm-shell-v7";
 const SHELL = [
   "/", "/index.html", "/style.css", "/app.js", "/pages.js",
   "/icon.svg", "/icon-192.png", "/icon-512.png", "/icon-maskable-512.png",
@@ -45,8 +45,12 @@ self.addEventListener("fetch", (e) => {
   if (req.method !== "GET") return;                       // never touch writes
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;        // only our own origin
-  // API / model / plugin traffic is ALWAYS live - never served from cache.
-  if (/^\/(api|v1|plugins)(\/|$)/.test(url.pathname)) return;
+  // API / model / plugin traffic, and the CA cert, are ALWAYS live - never
+  // served from cache. /localm-ca.crt must come straight from the network: if the
+  // SW handled it, a navigate-mode download could fall back to the cached
+  // index.html (HTML) instead of the cert, so the "Install certificate" link
+  // would save an .html file (J2).
+  if (/^\/(api|v1|plugins|localm-ca\.crt)(\/|$)/.test(url.pathname)) return;
 
   // Navigations: network-first so the app updates; fall back to the cached
   // shell when offline so the installed app still opens.

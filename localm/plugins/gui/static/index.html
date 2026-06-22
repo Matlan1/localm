@@ -648,9 +648,24 @@
     if (window.refreshInstallGateIfOpen) window.refreshInstallGateIfOpen();
   }
   if ("serviceWorker" in navigator) {
+    // Reload once when a NEW service worker takes control, so an updated app
+    // shell (app.js / index.html / style.css) is picked up automatically instead
+    // of serving the stale cache-first copy until a manual hard reload - the J1
+    // "new key won't let me in until Shift+R; mobile never recovers" bug. Guard
+    // on a pre-existing controller so a first install does not reload.
+    var swHadController = !!navigator.serviceWorker.controller;
+    var swRefreshing = false;
+    navigator.serviceWorker.addEventListener("controllerchange", function () {
+      if (swRefreshing || !swHadController) return;
+      swRefreshing = true;
+      window.location.reload();
+    });
     window.addEventListener("load", function () {
       navigator.serviceWorker.register("/sw.js")
-        .then(function () { window.__swFailed = false; renderInstall(); })
+        .then(function (reg) {
+          try { reg.update(); } catch (e) { /* best-effort update check */ }
+          window.__swFailed = false; renderInstall();
+        })
         .catch(function () { window.__swFailed = true; renderInstall(); });
     });
   }

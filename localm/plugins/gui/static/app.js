@@ -541,8 +541,17 @@ function showKeyGate(message) {
   // browser warning and unlocks PWA install. On a plain-http loopback gate there
   // is no CA to install, so keep it hidden.
   const cert = $("key-gate-cert");
-  if (cert) cert.style.display =
-    (location.protocol === "https:") ? "block" : "none";
+  if (cert) {
+    const onHttps = location.protocol === "https:";
+    cert.style.display = onHttps ? "block" : "none";
+    // Pin the download to an absolute https URL so it never resolves to http on
+    // the TLS port, where portmux answers with a 308 + HTML catch page that an
+    // <a download> would save as the "cert" (J2).
+    if (onHttps) {
+      const certLink = $("key-gate-cert-link");
+      if (certLink) certLink.href = "https://" + location.host + "/localm-ca.crt";
+    }
+  }
   // Offer "Scan QR code" wherever the browser can open a camera (a secure
   // context). Decoding uses the native BarcodeDetector when present, else the
   // bundled jsQR fallback, so it is not limited to Android Chrome.
