@@ -699,6 +699,27 @@ function submitKeyGate() {
   else location.reload();
 }
 
+// Add a show/hide reveal toggle to a masked API-key input (AUTH-2), like the
+// "show password" eye on a login form, so the user can verify what they typed.
+// Idempotent: wraps the input in a flex row once and appends a small toggle.
+function addRevealToggle(input) {
+  if (!input || input.dataset.revealWired) return;
+  input.dataset.revealWired = "1";
+  const wrap = el("div", "input-reveal");
+  if (input.parentNode) input.parentNode.insertBefore(wrap, input);
+  wrap.appendChild(input);
+  const btn = el("button", "reveal-btn", "show");
+  btn.type = "button";          // never submit a surrounding form
+  btn.setAttribute("aria-label", "Show or hide the key");
+  btn.onclick = () => {
+    const hidden = input.type === "password";
+    input.type = hidden ? "text" : "password";
+    btn.textContent = hidden ? "hide" : "show";
+  };
+  wrap.appendChild(btn);
+}
+window.addRevealToggle = addRevealToggle;
+
 // --- Pairing QR scanner (phone) -------------------------------------------
 // Reads the key QR shown in the computer's Settings (Companion app) with the
 // camera and saves the key without typing. Decoding prefers the native
@@ -4444,6 +4465,10 @@ function unlockUI() {
   // Server persistence depends on knowing the privacy state first.
   refreshCtxLimit().then(initServerConversations);
 })();
+// Reveal toggles on the API-key inputs (AUTH-2): the in-page gate and the
+// Settings key field, so the user can confirm the key they typed.
+addRevealToggle($("key-gate-input"));
+addRevealToggle($("gui-api-key"));
 refreshKbSelect();
 refreshPersonas();
 refreshMemory();

@@ -344,6 +344,22 @@ nav button.active { background: var(--accent-soft); color: var(--accent); }
 }
 .copy-btn:hover { color: var(--text); border-color: var(--text-dim); }
 
+/* Reveal toggle on the API-key inputs (AUTH-2): a "show/hide" button beside a
+   masked password field so the key the user typed can be verified. */
+.input-reveal { display: flex; gap: 6px; align-items: stretch; }
+.input-reveal input { flex: 1 1 auto; min-width: 0; }
+.reveal-btn {
+  flex: 0 0 auto;
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 6px;
+  padding: 0 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.reveal-btn:hover { color: var(--text); border-color: var(--text-dim); }
+
 pre .copy-btn {
   position: absolute;
   top: 6px;
