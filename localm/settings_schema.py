@@ -107,6 +107,11 @@ CORE_FIELDS: list = [
                  "Model layers to run on the GPU. 99 puts the whole model on the "
                  "GPU; lower it if you run out of VRAM.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=0, max=1000),
+    SettingField("idle_unload_seconds", Widget.NUMBER, "Idle model unload (s)",
+                 "Free the model's VRAM after this many seconds with no request "
+                 "(0 = never; the model stays resident). The next message reloads "
+                 "it automatically.",
+                 group="Engine", min=0, step=30),
     SettingField("import_max_depth", Widget.NUMBER, "Folder import depth",
                  "Subfolder levels `localm add <dir>` scans for models.",
                  group="Models", min=1, max=10, step=1),
