@@ -316,12 +316,16 @@ def _touch_last_used(key_hash: str) -> None:
         with _KEYSTORE_LOCK:
             records = _load_keystore()
             for r in records:
+                # Plain == is fine here (not constant-time): the key is ALREADY
+                # verified; this only locates its row to stamp, not authenticating.
                 if r.get("hash") == key_hash:
                     r["last_used"] = time.time()
                     _save_keystore(records)
                     break
-    except Exception:
-        pass
+    except Exception as e:
+        # Best-effort: a usage stamp must never break auth. Surface the reason at
+        # debug level (RULE 5: do not mute silently) rather than a bare pass.
+        logger.debug("last_used stamp failed (non-fatal): %s", e)
 
 
 def verify(presented: Optional[str]) -> Optional[set]:
