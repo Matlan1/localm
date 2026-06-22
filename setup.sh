@@ -143,30 +143,9 @@ fi
 say "  Installing localm into .venv ..."
 uv pip install -p .venv -e ".[coder,voice,monitor]"
 
-# ---- GPU stack (PyTorch + transformers for the HF backend) ------------------
-case "$GPU" in
-  rocm)
-    say "  Installing PyTorch (ROCm) + transformers ..."
-    uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/rocm6.2 \
-      || say "  [!] ROCm torch install failed - install a matching torch+rocm manually (see docs/linux-setup.md)."
-    uv pip install -p .venv "transformers[kernels]~=5.12" "tokenizers==0.22.2" "accelerate>=1.0" "pillow>=10.0" || true
-    ;;
-  cuda)
-    say "  Installing PyTorch (CUDA) + transformers ..."
-    uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu124 \
-      || say "  [!] CUDA torch install failed - install a matching torch+cuda manually (see docs/linux-setup.md)."
-    uv pip install -p .venv "transformers[kernels]~=5.12" "tokenizers==0.22.2" "accelerate>=1.0" "pillow>=10.0" || true
-    ;;
-  intel)
-    say "  Intel Arc detected - skipping the PyTorch/transformers stack (no standard"
-    say "  pip GPU wheel for Arc); GGUF chat runs on the Vulkan backend without torch."
-    ;;
-  cpu)
-    say "  CPU mode - skipping the GPU/torch stack (GGUF inference needs no torch)."
-    ;;
-esac
-
 # ---- native llama.cpp runtime wheel (loader imports it) ---------------------
+# (The PyTorch/transformers stack is installed further down, AFTER the backend
+# pick, so the HF torch variant can FOLLOW the chosen runtime - see SETUP-1.)
 uv pip install -p .venv -e ./runtime >/dev/null 2>&1 || true
 
 # ---- provision the native library (official llama.cpp prebuilt) -------------
@@ -209,16 +188,73 @@ else
     || say "  [!] setup-llama failed - run later:  .venv/bin/localm setup-llama --backend $BACKEND"
 fi
 
+# ---- PyTorch + transformers for the HuggingFace backend (FOLLOWS the backend) -
+# PyTorch powers the HuggingFace/transformers backend; GGUF chat needs none of it.
+# The variant FOLLOWS the llama.cpp BACKEND picked above (not just the detected
+# GPU), so choosing the vendor-neutral 'vulkan' runtime does not drag in the ROCm
+# stack (the SETUP-1 surprise). Same shared policy the Windows installer uses:
+# `python -m localm.hwdetect torch <backend>` -> "cuda" | "rocm" | "none".
+TORCHVAR="$(.venv/bin/python -m localm.hwdetect torch "$BACKEND" 2>/dev/null | awk '{print $1}')"
+case "$TORCHVAR" in cuda|rocm|none) ;; *) TORCHVAR=none ;; esac
+case "$TORCHVAR" in
+  rocm)
+    say ""
+    say "  Installing PyTorch (ROCm) + transformers for HuggingFace models ..."
+    uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/rocm6.2 \
+      || say "  [!] ROCm torch install failed - install a matching torch+rocm manually (see docs/linux-setup.md)."
+    uv pip install -p .venv "transformers[kernels]~=5.12" "tokenizers==0.22.2" "accelerate>=1.0" "pillow>=10.0" || true
+    ;;
+  cuda)
+    say ""
+    say "  Installing PyTorch (CUDA) + transformers for HuggingFace models ..."
+    uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu124 \
+      || say "  [!] CUDA torch install failed - install a matching torch+cuda manually (see docs/linux-setup.md)."
+    uv pip install -p .venv "transformers[kernels]~=5.12" "tokenizers==0.22.2" "accelerate>=1.0" "pillow>=10.0" || true
+    ;;
+  *)
+    say ""
+    say "  Skipping the PyTorch/transformers stack (not needed for GGUF chat)."
+    say "  You picked the '$BACKEND' runtime, so no vendor GPU torch was auto-installed."
+    say "  For HuggingFace transformers models, add PyTorch later:"
+    say "    CPU (any machine): uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cpu"
+    say "    NVIDIA CUDA:       uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu124"
+    say "    AMD ROCm:          uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/rocm6.2"
+    ;;
+esac
+
 # ---- data directory ---------------------------------------------------------
 say ""
 say "  Where should localm keep its data (models, config, logs, images)?"
 say "    [1] Inside this folder (./home) - portable, isolated per clone"
 say "    [2] Shared per-user (~/.localm) - clones share models and settings"
-dpick="$(ask "  Pick 1 or 2 [2]: " 2)"
+say "    [3] Custom path"
+dpick="$(ask "  Pick 1, 2 or 3 [2]: " 2)"
 if [ "$dpick" = 1 ]; then
   mkdir -p home; rm -f localm-home.cfg
   DATA_DIR="$(pwd)/home"; DATA_CREATED=1        # we created ./home
   say "  Data directory: $DATA_DIR"
+elif [ "$dpick" = 3 ]; then
+  # Custom path: ask, then confirm (re-ask until confirmed). In --yes mode there
+  # is no prompt, so an unconfirmed path is never recorded - fall back to shared.
+  CUSTOMHOME=""
+  if [ "$YES" != 1 ]; then
+    while : ; do
+      CUSTOMHOME="$(ask "  Enter the data directory path (blank = shared default): " "")"
+      if [ -z "$CUSTOMHOME" ]; then break; fi
+      ok="$(ask "  Use '$CUSTOMHOME'? [Y/n]: " Y)"
+      case "$ok" in [Nn]*) continue ;; *) break ;; esac
+    done
+  fi
+  if [ -z "$CUSTOMHOME" ]; then
+    say "  No path given - using the shared default ~/.localm"
+    rm -f localm-home.cfg
+    DATA_DIR="$HOME/.localm"; DATA_CREATED=0
+  else
+    printf '%s\n' "$CUSTOMHOME" > localm-home.cfg
+    mkdir -p "$CUSTOMHOME"
+    DATA_DIR="$CUSTOMHOME"; DATA_CREATED=1
+    say "  Data directory: $CUSTOMHOME (recorded in localm-home.cfg)"
+  fi
 else
   rm -f localm-home.cfg
   [ -d home ] && rmdir home 2>/dev/null || true
