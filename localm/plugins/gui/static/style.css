@@ -1068,6 +1068,23 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
 /* message images */
 .msg-body .msg-img { max-width: 280px; border-radius: 8px; border: 1px solid var(--border); display: block; margin: 6px 0; }
 
+/* Full-view image lightbox (VIS-2): click a chat image to view / save / copy. */
+.img-lightbox {
+  position: fixed; inset: 0; z-index: 1000;
+  background: rgba(0, 0, 0, 0.78);
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+}
+.img-lightbox-panel {
+  display: flex; flex-direction: column; gap: 10px;
+  max-width: 92vw; max-height: 92vh; align-items: center;
+}
+.img-lightbox-img {
+  max-width: 92vw; max-height: 80vh; object-fit: contain;
+  border-radius: 8px; border: 1px solid var(--border); background: var(--bg-raised);
+}
+.img-lightbox-bar { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+
 /* msg meta action buttons */
 .msg-meta button.action {
   background: none; border: 1px solid var(--border); color: var(--text-dim);

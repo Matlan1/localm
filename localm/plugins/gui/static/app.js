@@ -1404,6 +1404,78 @@ $("conv-search").addEventListener("input", (e) => {
   renderConvList();
 });
 
+// A sensible download name for a chat image (VIS-2): from the data: URI's mime,
+// or the /api path's basename, falling back to localm-image.png.
+function imageFilename(url) {
+  try {
+    if (url.startsWith("data:")) {
+      const m = url.match(/^data:image\/([a-z0-9.+-]+)/i);
+      return "localm-image." + (m ? m[1].replace("jpeg", "jpg") : "png");
+    }
+    const base = new URL(url, location.origin).pathname.split("/").pop();
+    return base && base.includes(".") ? base : "localm-image.png";
+  } catch (e) { return "localm-image.png"; }
+}
+
+// Copy an image (by its resolved src) to the clipboard. Returns true on success.
+// Not every browser/context can write an image to the clipboard, so the caller
+// surfaces a fallback instead of silently failing (RULE 5).
+async function copyImageSrc(src) {
+  try {
+    if (!window.ClipboardItem || !navigator.clipboard || !navigator.clipboard.write)
+      return false;
+    const blob = await (await fetch(src)).blob();
+    await navigator.clipboard.write([new window.ClipboardItem({ [blob.type]: blob })]);
+    return true;
+  } catch (e) { return false; }
+}
+window.copyImageSrc = copyImageSrc;
+
+// Full-view image lightbox (VIS-2): a click on a chat image opens it large with
+// Save (download to disk) and Copy controls. Closes on the backdrop, the Close
+// button, or Escape.
+function openImageLightbox(src, name) {
+  if (!src) return;
+  const back = el("div", "img-lightbox");
+  const panel = el("div", "img-lightbox-panel");
+  const full = document.createElement("img");
+  full.className = "img-lightbox-img";
+  full.src = src;
+  full.alt = name || "image";
+  const bar = el("div", "img-lightbox-bar");
+  const dismiss = () => {
+    back.remove();
+    document.removeEventListener("keydown", onKey);
+  };
+  function onKey(e) { if (e.key === "Escape") dismiss(); }
+  const save = el("button", "btn-quiet", "Save");
+  save.onclick = () => {
+    const a = document.createElement("a");
+    a.href = src;
+    a.download = name || "localm-image.png";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+  const copy = el("button", "btn-quiet", "Copy image");
+  copy.onclick = async () => {
+    const ok = await copyImageSrc(src);
+    toast(ok ? "Image copied" : "Could not copy the image - use Save instead", !ok);
+  };
+  const close = el("button", "btn-quiet", "Close");
+  close.onclick = dismiss;
+  bar.appendChild(save);
+  bar.appendChild(copy);
+  bar.appendChild(close);
+  panel.appendChild(full);
+  panel.appendChild(bar);
+  back.appendChild(panel);
+  back.addEventListener("click", (e) => { if (e.target === back) dismiss(); });
+  document.addEventListener("keydown", onKey);
+  document.body.appendChild(back);
+}
+window.openImageLightbox = openImageLightbox;
+
 function addMessageRow(container, role, text, opts = {}) {
   const row = el("div", "msg-row " + role + (opts.cls ? " " + opts.cls : ""));
   row.appendChild(el("div", "msg-role",
@@ -1419,6 +1491,12 @@ function addMessageRow(container, role, text, opts = {}) {
     } else {
       img.src = url;   // data: URI from the user's own attachment
     }
+    // Interactable (VIS-2): click to open a full-view lightbox with Save / Copy.
+    // imageFilename uses the ORIGINAL url (a data: URI or /api path) for a sane
+    // download name, while img.src is the resolved displayable source.
+    img.style.cursor = "zoom-in";
+    img.title = "Click to view, save, or copy";
+    img.addEventListener("click", () => openImageLightbox(img.src, imageFilename(url)));
     body.appendChild(img);
   }
   for (const url of opts.audio || []) {
@@ -1440,8 +1518,20 @@ function addMessageRow(container, role, text, opts = {}) {
   row.appendChild(body);
   const meta = el("div", "msg-meta");
   const copy = el("button", "copy-btn", "copy");
-  copy.onclick = () => {
-    navigator.clipboard.writeText(stripThink(text) || text);
+  copy.onclick = async () => {
+    const plain = stripThink(text) || text;
+    const firstImg = body.querySelector(".msg-img");
+    // Image-only message (e.g. a bare attachment): copy the IMAGE, not empty
+    // text - the "copy copied the prompt, not the image" report (VIS-2). For a
+    // text+image message the text copy is kept; the image is in the lightbox.
+    if (!plain && firstImg && firstImg.src) {
+      const ok = await copyImageSrc(firstImg.src);
+      copy.textContent = ok ? "copied" : "copy";
+      if (!ok) toast("Could not copy the image - open it and use Save", true);
+      else setTimeout(() => (copy.textContent = "copy"), 1200);
+      return;
+    }
+    navigator.clipboard.writeText(plain);
     copy.textContent = "copied";
     setTimeout(() => (copy.textContent = "copy"), 1200);
   };
