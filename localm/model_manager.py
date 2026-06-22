@@ -314,16 +314,28 @@ def vision_capable_models() -> List[str]:
     return sorted(out)
 
 
-def vision_input_guidance() -> str:
+def vision_input_guidance(mmproj_loaded: bool = False) -> str:
     """Capability-aware, install-specific message for when an image is attached
     to a model that cannot see it. Instead of a flat dead-end, point the user at
     a path that EXISTS on THIS install: a vision model already in their library,
     or how to obtain one. Setup-agnostic - it inspects the registry and the
     installed stack, never assuming a particular GPU or runtime. Begins with the
-    legacy 'cannot accept image input' phrase so existing callers stay valid."""
+    legacy 'cannot accept image input' phrase so existing callers stay valid.
+
+    *mmproj_loaded* is True when the active GGUF model was given an mmproj (vision
+    projector): the user explicitly set up vision, so a flat 'it is text-only' is
+    confusing. Be honest about WHY it still fails - the built-in GGUF backend does
+    not yet wire the mmproj up (C1) - rather than pretending no vision intent
+    exists."""
     import importlib.util
-    head = ("This model cannot accept image input (it is text-only), so the "
-            "attached image would be ignored.")
+    if mmproj_loaded:
+        head = ("This model cannot accept image input: an mmproj (vision projector) "
+                "is loaded, but the built-in GGUF backend does not yet wire it up "
+                "(GGUF vision is not implemented), so the attached image would be "
+                "ignored.")
+    else:
+        head = ("This model cannot accept image input (it is text-only), so the "
+                "attached image would be ignored.")
     vlms = vision_capable_models()
     if vlms:
         return (f"{head} A vision-capable model is already in your library: "
