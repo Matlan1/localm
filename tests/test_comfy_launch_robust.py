@@ -110,6 +110,44 @@ def test_ensure_comfy_discovers_launcher_in_workdir(tmp_path):
     assert "comfyui" in str(spawned["argv"])
 
 
+def _spawn_with_cfg(tmp_path, cfg):
+    """Run ensure_comfy with a discoverable launcher in tmp_path and capture the
+    spawned argv. Returns the argv (str on Windows, list on POSIX)."""
+    launcher = tmp_path / f"comfyui.{_ext()}"
+    launcher.write_text("echo hi\n", encoding="utf-8")
+    cfg = {"comfy_launch_cmd": None, "comfy_workdir": str(tmp_path),
+           "comfy_launch_timeout": 30, **cfg}
+    alive = iter([False, True])
+    spawned = {}
+
+    def fake_popen(argv, cwd=None, **kw):
+        spawned["argv"] = argv
+        return MagicMock()
+
+    with patch("localm.config.load_config", return_value=cfg), \
+         patch.object(comfy, "_comfy_alive", side_effect=lambda *a, **k: next(alive)), \
+         patch("subprocess.Popen", side_effect=fake_popen):
+        ok, msg = comfy.ensure_comfy("http://127.0.0.1:8188")
+    assert ok is True, msg
+    return spawned["argv"]
+
+
+def test_disable_auto_launch_appended_when_enabled(tmp_path):
+    # MEDIA-2: comfy_disable_auto_launch=True -> launch command gets the flag so
+    # ComfyUI starts headless instead of opening its own web page.
+    argv = _spawn_with_cfg(tmp_path, {"comfy_disable_auto_launch": True})
+    assert "--disable-auto-launch" in str(argv)
+
+
+def test_disable_auto_launch_absent_by_default(tmp_path):
+    # NEGATIVE case: unset (and explicit False) keep the current behavior, so the
+    # flag must NOT be appended. This is what guards against changing the default.
+    argv_unset = _spawn_with_cfg(tmp_path, {})
+    assert "--disable-auto-launch" not in str(argv_unset)
+    argv_false = _spawn_with_cfg(tmp_path, {"comfy_disable_auto_launch": False})
+    assert "--disable-auto-launch" not in str(argv_false)
+
+
 def test_ensure_comfy_error_points_at_the_folder():
     cfg = {"comfy_launch_cmd": None, "comfy_workdir": None,
            "comfy_launch_timeout": 30}
