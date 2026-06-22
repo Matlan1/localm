@@ -48,6 +48,22 @@ def _require_transformers():
         raise
 
 
+def _auto_device(torch, override: Optional[str] = None) -> str:
+    """Pick the HF inference device: an explicit *override*, else the best available
+    GPU, else CPU. CUDA (which also covers AMD ROCm via PyTorch) is preferred, then
+    Intel XPU (torch.xpu) so an Intel Arc/Xe GPU is used instead of silently falling
+    back to CPU. torch.xpu is absent on older PyTorch, hence the getattr guard.
+    Pure + torch-injected so it is testable without a GPU."""
+    if override:
+        return override
+    if torch.cuda.is_available():
+        return "cuda"
+    xpu = getattr(torch, "xpu", None)
+    if xpu is not None and xpu.is_available():
+        return "xpu"
+    return "cpu"
+
+
 class _SafeGrammarProcessor:
     """Wrap an xgrammar HF LogitsProcessor so a RUNTIME failure during generation
     (for example xgrammar needing Triton, which is not available on Windows)
@@ -153,12 +169,17 @@ class HFBackend(BaseBackend):
         torch = _require_torch()
         tr = _require_transformers()
 
-        device = self._device or ("cuda" if torch.cuda.is_available() else "cpu")
-        dtype = torch.bfloat16 if device == "cuda" else torch.float32
+        device = _auto_device(torch, self._device)
+        dtype = torch.bfloat16 if device in ("cuda", "xpu") else torch.float32
 
         console.print(f"[dim]  device   : {device}[/dim]")
         if device == "cuda":
             console.print(f"[dim]  gpu      : {torch.cuda.get_device_name(0)}[/dim]")
+        elif device == "xpu":
+            try:
+                console.print(f"[dim]  gpu      : {torch.xpu.get_device_name(0)}[/dim]")
+            except Exception:
+                pass
         console.print(f"[dim]  dtype    : {dtype}[/dim]")
 
         # --- Processor / tokenizer ---
@@ -224,6 +245,13 @@ class HFBackend(BaseBackend):
             detail = "; tried: " + "; ".join(errors) if errors else ""
             raise RuntimeError(f"Could not load model from {self.model_path}{detail}")
 
+        if device == "xpu":
+            # The model loaded on CPU (device_map "cpu" above); move it to the Intel
+            # GPU explicitly. device_map="auto" is unreliable on consumer Arc (many
+            # parts do not implement the free-memory query accelerate needs), so we
+            # place the whole model with .to("xpu") rather than auto-sharding it.
+            self._model = self._model.to("xpu")
+
         self._loaded = True
         mm_note = " (multimodal)" if self._is_multimodal else ""
 
@@ -241,6 +269,17 @@ class HFBackend(BaseBackend):
                 # VRAM readout is cosmetic; a failure here must not fail the
                 # load, but surface it under --debug so a broken stat is visible.
                 logger.debug("could not read VRAM after load (%s)", type(e).__name__)
+        elif device == "xpu":
+            try:
+                allocated = torch.xpu.memory_allocated() / 1024**3
+                reserved  = torch.xpu.memory_reserved()  / 1024**3
+                console.print(
+                    f"[dim]  vram     : {allocated:.2f} GB allocated / "
+                    f"{reserved:.2f} GB reserved (xpu)[/dim]"
+                )
+            except Exception as e:
+                # Some consumer Arc parts do not implement the memory query; cosmetic.
+                logger.debug("could not read XPU VRAM after load (%s)", type(e).__name__)
 
         console.print(f"[green]✓[/green] Model loaded{mm_note}")
 
@@ -258,6 +297,13 @@ class HFBackend(BaseBackend):
             # Best-effort cache release; log under --debug so a failed reclaim
             # (cache may not be cleared) is discoverable without failing unload.
             logger.debug("empty_cache failed (%s); cache may not be cleared", type(e).__name__)
+        try:
+            import torch
+            xpu = getattr(torch, "xpu", None)
+            if xpu is not None and xpu.is_available():
+                xpu.empty_cache()
+        except Exception as e:
+            logger.debug("xpu empty_cache failed (%s); cache may not be cleared", type(e).__name__)
 
     @property
     def loaded(self) -> bool:
