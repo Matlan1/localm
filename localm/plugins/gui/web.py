@@ -286,6 +286,24 @@ def attach_gui(
         return {"model": name, "model_bytes": model_bytes, **est,
                 "free": free, "total": total, "fits": fits, "approximate": True}
 
+    @app.get("/api/companion", dependencies=[Depends(_require_auth)])
+    async def gui_companion():
+        """LAN / Tailscale address a phone should open to reach THIS server, for
+        the Companion-app card. The card builds full URLs from these plus the
+        browser's own scheme + port (the server listens on one port across every
+        interface), so it never shows the meaningless loopback address. On the
+        default loopback bind (``localm gui``) no phone can connect yet, so
+        ``network_bind`` is False and the card explains how to bind to the
+        network instead."""
+        from localm import tls
+        bind_host = getattr(app.state, "bind_host", "127.0.0.1")
+        addrs = tls.companion_addresses()
+        return {
+            "network_bind": not _is_loopback_host(bind_host),
+            "lan": addrs.get("lan") or "",
+            "tailscale": addrs.get("tailscale") or "",
+        }
+
     def _pairing_qr_svg(key: str) -> str:
         """DOMPurify-safe SVG QR encoding ``localm-key:<key>`` for device pairing.
         Hand-built from the module matrix (one black <path> over a white <rect>

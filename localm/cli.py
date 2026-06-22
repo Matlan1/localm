@@ -866,10 +866,28 @@ def serve(model, host, port, ctx, gpu_layers, mmproj, device, no_tls, tls_cert,
     )
 
     engine.load()
-    console.print(
-        f"[green]✓[/green] Serving at "
-        f"[bold]{scheme}://{host}:{port}/v1/chat/completions[/bold]"
-    )
+    # 0.0.0.0 / :: are bind wildcards, not connectable addresses - print the
+    # addresses a client can actually reach (loopback here, plus the LAN /
+    # Tailscale IP for other devices) instead of a dead 0.0.0.0 URL.
+    if host in ("0.0.0.0", "::"):
+        console.print(
+            f"[green]✓[/green] Serving at "
+            f"[bold]{scheme}://127.0.0.1:{port}/v1/chat/completions[/bold]"
+        )
+        from localm import tls as _tls
+        _addrs = _tls.companion_addresses()
+        for _label, _ip in (("on this network", _addrs.get("lan")),
+                            ("via Tailscale", _addrs.get("tailscale"))):
+            if _ip:
+                console.print(
+                    f"[dim]  {_label}:[/dim] "
+                    f"[bold]{scheme}://{_ip}:{port}/v1/chat/completions[/bold]"
+                )
+    else:
+        console.print(
+            f"[green]✓[/green] Serving at "
+            f"[bold]{scheme}://{host}:{port}/v1/chat/completions[/bold]"
+        )
     if scheme == "https":
         console.print("[dim]Built-in TLS (self-signed via localm's local CA). "
                       "First connection from a device shows a one-time trust "

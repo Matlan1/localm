@@ -488,9 +488,11 @@
 
             <section class="card settings-section" id="sec-companion" data-sec-label="Companion app">
               <h3>Companion app</h3>
-              <div class="sub">Connected to <code id="conn-origin">this server</code>. This app talks
-              only to the server that served it - to use it from your phone, open that address on the
-              phone (over your LAN, or a private network like Tailscale) and install it from there.</div>
+              <div class="sub">This app talks only to the server that served it. To use LocaLM on your
+              phone, open one of these addresses on the phone (on the same Wi-Fi, or over a private
+              network like Tailscale), trust the certificate once, and install it from there.</div>
+              <ul id="companion-addrs" class="companion-addrs" style="display:none"></ul>
+              <div id="companion-hint" class="sub" style="display:none"></div>
               <div id="pairing" class="pairing" style="display:none">
                 <div class="sub">Pair a phone: open LocaLM on the phone, tap <b>Scan QR code</b> on the
                 onboarding screen, and point it at this code to copy the API key over - no typing.</div>
@@ -703,9 +705,6 @@
         .catch(function () { window.__swFailed = true; renderInstall(); });
     });
   }
-  var originEl = document.getElementById("conn-origin");
-  if (originEl) originEl.textContent = location.origin;
-
   // applyInstallUI / detection live in app.js (loaded just above). In the real
   // browser app.js has executed by now; under jsdom the inline script runs at
   // parse before app.js is injected, so guard and let the unit tests drive

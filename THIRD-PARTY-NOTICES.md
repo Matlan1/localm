@@ -15,7 +15,7 @@ CDN. Each keeps its own license:
 | marked | Markdown rendering | MIT | (c) 2011-2024 Christopher Jeffrey and contributors |
 | DOMPurify (`purify`) | HTML sanitizing | Apache-2.0 OR MPL-2.0 | (c) Cure53 and contributors |
 | highlight.js (`highlight` + `github-dark` theme) | Code highlighting | BSD-3-Clause | (c) 2006 Ivan Sagalaev and contributors |
-| KaTeX (`katex`, `auto-render`, `KaTeX_*` fonts) | Math rendering | MIT | (c) 2013-2020 Khan Academy and contributors |
+| KaTeX (`katex`, `auto-render`, `KaTeX_*` fonts) | Math rendering | MIT | (c) 2013-2024 Khan Academy and contributors |
 
 The TTS plugin vendors a separate browser bundle. Its components and licenses are
 documented in

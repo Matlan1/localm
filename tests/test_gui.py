@@ -441,6 +441,37 @@ class TestVramEstimate:
         assert r.json()["fits"] is None        # can't claim fit without a reading
 
 
+class TestCompanionEndpoint:
+    """The Companion-app card's phone-reachable address feed (LAN / Tailscale).
+    Showing the loopback origin was wrong - a phone cannot reach 127.0.0.1."""
+
+    def test_loopback_bind_reports_not_network(self, gui_app):
+        app, _ = gui_app
+        # gui_app does not set bind_host, so the route defaults to 127.0.0.1.
+        with patch("localm.tls.companion_addresses",
+                   return_value={"lan": "192.168.1.50", "tailscale": ""}):
+            with TestClient(app) as client:
+                r = client.get("/api/companion")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["network_bind"] is False
+        assert set(data) == {"network_bind", "lan", "tailscale"}
+
+    def test_network_bind_passes_through_addresses(self, gui_app):
+        app, _ = gui_app
+        app.state.bind_host = "0.0.0.0"
+        with patch("localm.tls.companion_addresses",
+                   return_value={"lan": "192.168.1.50",
+                                 "tailscale": "100.101.102.103"}):
+            with TestClient(app) as client:
+                r = client.get("/api/companion")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["network_bind"] is True
+        assert data["lan"] == "192.168.1.50"
+        assert data["tailscale"] == "100.101.102.103"
+
+
 class TestModelEndpoints:
     def test_models_lists_registry(self, gui_app):
         app, _ = gui_app
