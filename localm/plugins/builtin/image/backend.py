@@ -15,6 +15,7 @@ values, so existing setups keep working with no migration step.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional
 
 from localm.image_gen import comfy as _comfy
@@ -50,26 +51,28 @@ def settings(full_config: dict) -> dict:
     }
 
 
-def ensure_available(s: dict, on_progress=None) -> tuple[bool, str]:
+# --- ComfyUI reference implementation (the default "comfy" backend, I1) ------
+
+def _comfy_ensure_available(s: dict, on_progress=None) -> tuple[bool, str]:
     return _comfy.ensure_comfy(
         s["api_url"], on_progress=on_progress,
         launch_cmd=s["launch_cmd"] or None, workdir=s["workdir"] or None)
 
 
-def free_vram(s: dict) -> bool:
+def _comfy_free_vram(s: dict) -> bool:
     return _comfy.free_comfy_vram(s["api_url"])
 
 
-def generate(s: dict, prompt: str, out_path: Path, *,
-             self_url: str, write_sidecar: bool,
-             guidance: Optional[float] = None,
-             negative_prompt: Optional[str] = None,
-             seed: Optional[int] = None,
-             input_image: Optional[Path] = None,
-             denoise: Optional[float] = None,
-             swap: bool = True,
-             delete_outputs: Optional[bool] = None,
-             cancel_check=None) -> tuple[bool, str]:
+def _comfy_generate(s: dict, prompt: str, out_path: Path, *,
+                    self_url: str, write_sidecar: bool,
+                    guidance: Optional[float] = None,
+                    negative_prompt: Optional[str] = None,
+                    seed: Optional[int] = None,
+                    input_image: Optional[Path] = None,
+                    denoise: Optional[float] = None,
+                    swap: bool = True,
+                    delete_outputs: Optional[bool] = None,
+                    cancel_check=None) -> tuple[bool, str]:
     if delete_outputs is None:
         delete_outputs = bool(s.get("delete_outputs", False))
     return _comfy.generate_image(
@@ -90,3 +93,38 @@ def generate(s: dict, prompt: str, out_path: Path, *,
         delete_outputs=delete_outputs,
         cancel_check=cancel_check,
     )
+
+
+_COMFY_REF = SimpleNamespace(
+    ensure_available=_comfy_ensure_available,
+    free_vram=_comfy_free_vram,
+    generate=_comfy_generate,
+)
+
+
+# --- backend facade: dispatch to the configured backend (the I1 seam) --------
+
+def _impl(s: dict):
+    """The backend for s['backend']: the inline ComfyUI reference for 'comfy'
+    (the default), else backends/<name>.py loaded by media_config. An unknown or
+    missing backend name falls back to comfy so a typo never hard-crashes a
+    generate (the settings 'warning' already carries config notes)."""
+    name = (s.get("backend") or "comfy").strip().lower()
+    if name in ("", "comfy"):
+        return _COMFY_REF
+    try:
+        return media_config.load_backend(__package__, name)
+    except ModuleNotFoundError:
+        return _COMFY_REF
+
+
+def ensure_available(s: dict, *args, **kwargs) -> tuple[bool, str]:
+    return _impl(s).ensure_available(s, *args, **kwargs)
+
+
+def free_vram(s: dict, *args, **kwargs) -> bool:
+    return _impl(s).free_vram(s, *args, **kwargs)
+
+
+def generate(s: dict, *args, **kwargs) -> tuple[bool, str]:
+    return _impl(s).generate(s, *args, **kwargs)
