@@ -18,6 +18,7 @@ import asyncio
 import hmac
 import json
 import secrets
+import sys
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -344,6 +345,15 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
         global _inference_sem
         # Semaphore created inside the running event loop - Python 3.10+ safe
         _inference_sem = asyncio.Semaphore(1)
+        # SRV-3: route an uncaught asyncio task exception through the bug reporter
+        # instead of a silent "Task exception was never retrieved". Skipped under
+        # pytest so the test runner keeps its own loop handling.
+        if "pytest" not in sys.modules:
+            try:
+                from localm import bugreport
+                bugreport.install_asyncio_handler(asyncio.get_running_loop())
+            except Exception:
+                pass
         # Optional idle-unload background task (config "idle_unload_seconds"); it
         # is a cheap no-op while disabled. Cancelled on shutdown so it never
         # outlives the app.

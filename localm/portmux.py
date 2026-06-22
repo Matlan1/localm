@@ -67,22 +67,34 @@ def run_server(
     """
     import uvicorn
 
-    if not ssl_certfile:
-        uvicorn.run(app, host=host, port=port, log_level=log_level)
-        return
-
+    from localm import bugreport
+    # SRV-3: report a prior HARD crash (the last run died without a clean
+    # shutdown - native fault / OS kill / force-closed window) now, then arm the
+    # crash guard so THIS run is caught the same way if it dies hard. Disarmed in
+    # the finally on a clean exit so a normal stop is never reported as a crash.
+    bugreport.check_and_report_prior_crash()
+    bugreport.arm_crash_guard(context={"host": host, "port": port,
+                                        "tls": bool(ssl_certfile)})
     try:
-        asyncio.run(_serve_async(app, host, port, ssl_certfile, ssl_keyfile, log_level))
-    except KeyboardInterrupt:
-        pass
-    except Exception:   # pragma: no cover - defensive fallback
-        # Never leave the user without a server because the convenience layer
-        # failed: fall back to a direct TLS bind. The http-typo case then just
-        # is not caught, which is no worse than before this module existed.
-        import traceback
-        traceback.print_exc()
-        uvicorn.run(app, host=host, port=port, log_level=log_level,
-                    ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
+        if not ssl_certfile:
+            uvicorn.run(app, host=host, port=port, log_level=log_level)
+            return
+
+        try:
+            asyncio.run(_serve_async(app, host, port, ssl_certfile, ssl_keyfile,
+                                     log_level))
+        except KeyboardInterrupt:
+            pass
+        except Exception:   # pragma: no cover - defensive fallback
+            # Never leave the user without a server because the convenience layer
+            # failed: fall back to a direct TLS bind. The http-typo case then just
+            # is not caught, which is no worse than before this module existed.
+            import traceback
+            traceback.print_exc()
+            uvicorn.run(app, host=host, port=port, log_level=log_level,
+                        ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
+    finally:
+        bugreport.disarm_crash_guard()
 
 
 async def _serve_async(app, host, port, ssl_certfile, ssl_keyfile, log_level) -> None:
