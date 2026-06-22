@@ -19,7 +19,10 @@ export async function register(ctx) {
   try {
     const r = await fetch("/api/tts/config", { headers: ctx.authHeaders() });
     cfg = r.ok ? await r.json() : {};
-  } catch {
+  } catch (e) {
+    // Config endpoint unreachable: fall back to built-in defaults (benign), but
+    // log at debug so a persistent failure is still discoverable (RULE 5).
+    console.debug("[tts] /api/tts/config unavailable, using defaults:", e);
     cfg = {};
   }
   const model = cfg.model || "onnx-community/Kokoro-82M-v1.0-ONNX";
@@ -73,6 +76,9 @@ export async function register(ctx) {
       return await mod.KokoroTTS.from_pretrained(model, { dtype: pickDtype(device), device });
     } catch (e) {
       if (device === "webgpu") {                 // GPU path unavailable: fall back
+        // Surface the WebGPU failure (it is the common cause of "kokoro fails to
+        // load") even though we recover on WASM, so the reason is diagnosable.
+        console.warn("[tts] Kokoro WebGPU load failed, retrying on WASM:", e);
         device = "wasm";
         return await mod.KokoroTTS.from_pretrained(model, { dtype: pickDtype(device), device });
       }
@@ -87,7 +93,18 @@ export async function register(ctx) {
         (k) => (kokoro = k),
         (e) => {
           loadPromise = null;                    // allow a later retry
-          ctx.toast("Kokoro voice failed to load; using the browser voice", true);
+          // RULE 5: surface the REAL reason (network / CORS / ONNX runtime /
+          // WebGPU+WASM both unavailable) to the console, not just a generic
+          // toast, so a kokoro load failure is actually diagnosable. This is the
+          // single source of truth for load failures; the speak() catch below
+          // intentionally stays quiet because the cause is already logged here.
+          console.error("[tts] Kokoro voice model failed to load:", e);
+          const reason = (e && (e.message || e.name)) ? ` (${e.message || e.name})` : "";
+          ctx.toast(
+            "Kokoro voice failed to load" + reason +
+              "; using the browser voice (see console for details)",
+            true,
+          );
           ctx.registerTTS(null);                 // revert to the built-in fallback
           throw e;
         },
@@ -134,7 +151,12 @@ export async function register(ctx) {
     let k;
     try {
       k = await ensureLoaded();
-    } catch { speaking = false; return; }
+    } catch {
+      // The load failure was already surfaced (console.error + toast) inside
+      // ensureLoaded's handler; just abandon this utterance (RULE 5: not hidden).
+      speaking = false;
+      return;
+    }
     if (myToken !== token) return;                // superseded while loading
     try {
       // stream() splits into sentences and yields audio per sentence, so the
@@ -147,6 +169,9 @@ export async function register(ctx) {
         if (wasIdle) playNext(myToken);
       }
     } catch (e) {
+      // Surface the synthesis failure too (RULE 5): a generic toast alone hides
+      // whether it was an OOM, a bad voice id, or a model-runtime fault.
+      console.error("[tts] Kokoro synthesis failed:", e);
       if (myToken === token) ctx.toast("Voice synthesis failed", true);
       speaking = false;
     }

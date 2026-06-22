@@ -133,6 +133,16 @@ DEFAULT_CONFIG: dict = {
     # card - the ~36 s/it vs ~6-7 s/it gap. True (default) auto-corrects it; set
     # False to submit your workflow's dequant choice verbatim.
     "comfy_fast_dequant": True,
+    # Suppress ComfyUI opening its own web page when localm auto-launches it.
+    # Off by default (keep the current behavior: ComfyUI opens its tab). When
+    # True, localm appends ComfyUI's --disable-auto-launch to the launch command
+    # so it starts headless (localm has its own GUI, so the ComfyUI tab is just
+    # noise for most localm users). The stock run_*.bat / comfyui.* launchers and
+    # a bare "python main.py" forward the flag through to main.py; a custom
+    # launcher that drops extra args simply ignores it (no error), so this is
+    # non-breaking. Applies to the image, music, and video plugins (they share
+    # one ensure_comfy()).
+    "comfy_disable_auto_launch": False,
     # Session persistence mode for ALL surfaces (chat, server, GUI, coder):
     #   privacy = no traces written automatically (default)
     #   log     = JSONL audit trail in ~/.localm/sessions/

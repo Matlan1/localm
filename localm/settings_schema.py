@@ -243,6 +243,14 @@ CORE_FIELDS: list = [
                  "Rewrite a slow float32 Flux GGUF dequant to fp16/bf16 on submit. "
                  "float32 is the usual cause of very slow gen on smaller cards.",
                  group="Media", owner="image"),
+    SettingField("comfy_disable_auto_launch", Widget.TOGGLE,
+                 "Suppress ComfyUI's web page on launch",
+                 "When localm starts ComfyUI for you, keep it headless instead of "
+                 "letting it open its own browser tab (appends "
+                 "--disable-auto-launch). Off by default. Needs a launcher that "
+                 "forwards args to main.py (the stock run_*.bat and 'python "
+                 "main.py' do); a launcher that drops args just ignores it.",
+                 group="Media", owner="image"),
     SettingField("reload_llm_after_imagine", Widget.TOGGLE,
                  "Reload chat model after generating",
                  "Free the media model's VRAM and reload the chat model after a "
