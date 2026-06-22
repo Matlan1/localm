@@ -69,6 +69,60 @@ class Job:
             proc.terminate()
 
 
+class _HostAnnouncer:
+    """Mirror a background job's lifecycle to the HOST - the person running
+    ``localm gui`` - not only to the requesting client (G2).
+
+    A model pull started from a phone/PWA ran silently as far as the host was
+    concerned: its output went only to the per-job event queue the browser reads.
+    Now the host also sees a start line, throttled progress (10% steps so it does
+    not spam), and the end status. Output is ephemeral (host stdout + the debug
+    log), never a privacy-mode disk trace - the model spec is operational, not
+    session content. ``line()`` is pure so the throttling is unit-testable."""
+
+    def __init__(self, label: str) -> None:
+        self.label = label
+        self._last_bucket = -1
+
+    def line(self, event: dict) -> Optional[str]:
+        """The host message for a job event, or None to stay quiet (non-progress
+        lines, or a progress tick still inside the last 10% bucket)."""
+        et = event.get("type")
+        if et == "progress":
+            pct = event.get("pct")
+            if not isinstance(pct, (int, float)):
+                return None
+            bucket = int(pct // 10) * 10
+            if bucket <= self._last_bucket:
+                return None
+            self._last_bucket = bucket
+            return f"{self.label}: {bucket}%"
+        if et == "end":
+            return f"{self.label} {event.get('status', 'finished')}"
+        return None
+
+    def _say(self, msg: str) -> None:
+        try:
+            from localm.debuglog import logger
+            logger.info(msg)
+        except Exception:
+            pass
+        try:
+            # The GUI server's stdout is the host terminal, so a plain print is the
+            # one channel guaranteed to surface this to the host.
+            print(msg, flush=True)
+        except Exception:
+            pass
+
+    def announce_start(self) -> None:
+        self._say(f"{self.label} started (requested from a connected client)")
+
+    def emit(self, event: dict) -> None:
+        msg = self.line(event)
+        if msg is not None:
+            self._say(msg)
+
+
 class JobManager:
     """Registry of background jobs. Finished jobs stay queryable for an hour."""
 
@@ -80,13 +134,16 @@ class JobManager:
 
     def start_cli(self, kind: str, cli_args: list, *,
                   result_path: str | None = None,
-                  extra_env: dict | None = None) -> Job:
+                  extra_env: dict | None = None,
+                  host_label: str | None = None) -> Job:
         """
         Run ``python -m localm <cli_args>`` as a job.
 
         result_path, when given, is stored on the job as the expected output
         artifact (e.g. the image file an imagine job writes). extra_env adds
         environment variables for the subprocess (e.g. progress reporting).
+        host_label, when given, mirrors the job's start/progress/end to the host
+        console + debug log (G2) so a client-initiated pull is visible there.
         """
         job = Job(
             id=uuid.uuid4().hex[:12],
@@ -99,6 +156,9 @@ class JobManager:
             self._jobs[job.id] = job
 
         def _run():
+            announcer = _HostAnnouncer(host_label) if host_label else None
+            if announcer:
+                announcer.announce_start()
             try:
                 env = None
                 if extra_env:
@@ -127,6 +187,8 @@ class JobManager:
                         except ValueError:
                             continue
                         job.push({"type": "progress", **data})
+                        if announcer:
+                            announcer.emit({"type": "progress", **data})
                         continue
                     job.push({"type": "line", "text": line})
                 job._proc.wait()
@@ -137,6 +199,8 @@ class JobManager:
                 job.status = "failed"
                 job.push({"type": "line", "text": f"job error: {e}"})
             finally:
+                if announcer:
+                    announcer.emit({"type": "end", "status": job.status})
                 job.push({
                     "type": "end",
                     "status": job.status,
