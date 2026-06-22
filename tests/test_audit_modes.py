@@ -226,15 +226,25 @@ class TestCheckpointPrivacyGate:
         agent._messages = [{"role": "user", "content": "secret stuff"}]
         return agent
 
-    def test_privacy_mode_writes_no_checkpoint(self, tmp_path):
+    def test_privacy_mode_writes_no_checkpoint(self, tmp_path, monkeypatch):
+        import localm.config as cfg
+        monkeypatch.setattr(cfg, "HOME_DIR", tmp_path / "home")
         agent = self._agent(tmp_path, SessionMode.PRIVACY)
         agent.save_checkpoint()
+        # Nothing in the project tree, nothing under HOME (CODER-4).
         assert not (tmp_path / ".localcoder" / "checkpoint.json").exists()
+        assert not (tmp_path / "home" / "checkpoints").exists()
 
-    def test_log_mode_writes_checkpoint(self, tmp_path):
+    def test_log_mode_writes_checkpoint_under_home(self, tmp_path, monkeypatch):
+        # CODER-4: the checkpoint is session DATA - it lives under HOME, not in
+        # the project tree (which used to gain a stray .localcoder/ folder).
+        import localm.config as cfg
+        monkeypatch.setattr(cfg, "HOME_DIR", tmp_path / "home")
         agent = self._agent(tmp_path, SessionMode.LOG)
         agent.save_checkpoint()
-        path = tmp_path / ".localcoder" / "checkpoint.json"
+        assert not (tmp_path / ".localcoder").exists()       # nothing in the repo
+        path = agent._checkpoint_path
+        assert (tmp_path / "home") in path.parents           # under HOME/checkpoints
         assert path.is_file()
         assert "secret stuff" in path.read_text(encoding="utf-8")
 

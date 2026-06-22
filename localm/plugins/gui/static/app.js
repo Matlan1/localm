@@ -3116,6 +3116,7 @@ function showCoderUI(hasSession) {
     $("coder-state").textContent = "";
     $("coder-usage").textContent = "";
     renderSessionSelect();
+    refreshResumable();   // reveal "Continue last session" if the cwd has one (CODER-2)
   }
   $("setup-cancel").style.display =
     !hasSession && coder.sessions.size > 0 ? "" : "none";
@@ -3363,6 +3364,14 @@ function handleCoderEvent(s, ev) {
       feedAppend(s, el("div", "feed-info", ev.text));
       break;
     }
+    case "history": {
+      // A recap row replayed when a past session is resumed (CODER-2): plain,
+      // role-styled text, no streaming.
+      flushAssistantBlock(s);
+      addMessageRow(s.feedEl, ev.role === "assistant" ? "assistant" : "user",
+                    ev.text || "");
+      break;
+    }
     case "replay_done": {
       flushAssistantBlock(s);
       s.feedEl.scrollTop = s.feedEl.scrollHeight;
@@ -3437,7 +3446,8 @@ function populateSetupModels() {
   }
 }
 
-async function startCoderSession() {
+async function startCoderSession(opts = {}) {
+  const resume = !!opts.resume;
   const cwd = $("setup-cwd").value.trim();
   if (!cwd) { toast("Enter a project directory", true); return; }
   $("setup-start").disabled = true;
@@ -3448,6 +3458,7 @@ async function startCoderSession() {
       dry_run: $("setup-dry").checked,
       mode: $("setup-mode").value,
       max_turns: Number($("setup-max-turns").value) || 40,
+      resume,
     };
     const model = $("setup-model").value;
     if (model) body.model = model;
@@ -3464,14 +3475,52 @@ async function startCoderSession() {
     if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
     const info = await r.json();
     if (!chat.privacy) localStorage.setItem("localm.coderCwd", cwd);
-    registerSession(info, { replay: false });
+    // A resumed session replays its restored recap from the server; a fresh one
+    // has no history to replay (CODER-2).
+    registerSession(info, { replay: !!info.resumed });
     activateSession(info.id);
+    if (info.resumed) toast("Resumed your last session in this folder");
+    else if (resume) toast("No saved session to resume - started fresh");
     refreshModels();
   } catch (e) {
     toast("Failed to start session: " + e.message, true);
   } finally {
     $("setup-start").disabled = false;
   }
+}
+
+/* Resume (CODER-2): a dynamically-created "Continue last session" button in the
+ * setup panel, revealed when the chosen directory has a saved conversation. Built
+ * in JS so it needs no index.html change. */
+let _coderContinueBtn = null;
+function coderContinueButton() {
+  if (_coderContinueBtn) return _coderContinueBtn;
+  const btn = el("button", "btn-quiet coder-continue", "Continue last session");
+  btn.style.display = "none";
+  btn.onclick = () => startCoderSession({ resume: true });
+  const start = $("setup-start");
+  if (start && start.parentNode) start.parentNode.insertBefore(btn, start.nextSibling);
+  _coderContinueBtn = btn;
+  return btn;
+}
+
+async function refreshResumable() {
+  const btn = coderContinueButton();
+  const cwd = ($("setup-cwd")?.value || "").trim();
+  if (!cwd) { btn.style.display = "none"; return; }
+  try {
+    const r = await fetch("/api/coder/resumable?cwd=" + encodeURIComponent(cwd),
+                          { headers: authHeaders() });
+    const d = await r.json();
+    if (r.ok && d.resumable) {
+      const when = d.interrupted_at
+        ? new Date(d.interrupted_at).toLocaleString() : "earlier";
+      btn.textContent = `Continue last session (${d.turns} turns, ${when})`;
+      btn.style.display = "";
+    } else {
+      btn.style.display = "none";
+    }
+  } catch { btn.style.display = "none"; }
 }
 
 async function reattachSessions() {
@@ -3487,6 +3536,13 @@ async function reattachSessions() {
     if (!coder.activeId && data.sessions.length) {
       activateSession(data.sessions[data.sessions.length - 1].id);
       toast("Reattached to a running coder session");
+    } else {
+      // Sessions may exist without one being activated (e.g. the host did not
+      // auto-open a session). Still surface them in the selector + bar so the
+      // host sees the same session list the mobile view does, without having to
+      // enter a session first (CODER-3).
+      renderSessionSelect();
+      if (coder.sessions.size > 0) $("coder-bar").classList.add("open");
     }
   } catch (e) { /* server unreachable; startup poller will retry models anyway */ }
 }
@@ -3607,7 +3663,15 @@ $("session-new").onclick = () => {
   showCoderUI(false);
   $("coder-bar").classList.add("open");   // keep the bar so sessions stay reachable
 };
-$("setup-start").onclick = startCoderSession;
+// Arrow wrapper: a bare `.onclick = startCoderSession` would pass the click
+// Event as opts, making opts.resume truthy and always resuming (CODER-2).
+$("setup-start").onclick = () => startCoderSession();
+// Probe for a resumable checkpoint as the directory changes (debounced).
+let _resumeProbeTimer = null;
+$("setup-cwd").addEventListener("input", () => {
+  clearTimeout(_resumeProbeTimer);
+  _resumeProbeTimer = setTimeout(refreshResumable, 350);
+});
 $("setup-cancel").onclick = () => {
   // Return to the session we left (or any remaining one) without starting
   const id = coder.sessions.has(coder.lastActiveId)
@@ -3697,6 +3761,7 @@ $("setup-browse").onclick = async () => {
   if (dir) {
     $("setup-cwd").value = dir;
     localStorage.setItem("localm.coderCwd", dir);
+    refreshResumable();   // setting .value does not fire 'input' (CODER-2)
   }
 };
 $("coder-send").onclick = sendCoderTask;
