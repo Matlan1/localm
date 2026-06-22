@@ -933,9 +933,13 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
                     await loop.run_in_executor(None, _engine.load)
             if not _engine.supports_images:
                 # Capability-aware, install-specific guidance: route to a vision
-                # model this install actually has, instead of a flat dead-end.
+                # model this install actually has, instead of a flat dead-end. If an
+                # mmproj is loaded (the user set up GGUF vision), say plainly that the
+                # GGUF backend does not wire it up yet rather than "it is text-only".
                 from localm.model_manager import vision_input_guidance
-                raise HTTPException(400, vision_input_guidance())
+                mmproj_loaded = bool(
+                    getattr(getattr(_engine, "_backend", None), "mmproj_path", None))
+                raise HTTPException(400, vision_input_guidance(mmproj_loaded=mmproj_loaded))
 
         gen_kwargs = dict(
             max_tokens=req.max_tokens,
