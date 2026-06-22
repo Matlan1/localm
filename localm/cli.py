@@ -1656,6 +1656,63 @@ def info():
         console.print(f"  {k:<22} {v}")
 
 
+@main.command("ps")
+def ps_cmd():
+    """List running localm servers (per-directory instances).
+
+    Each `localm gui`/`localm serve` advertises itself so other launches attach
+    instead of double-loading the model. This shows them: which directory each
+    serves, its address and surface (api = bare OpenAI API, full = API + GUI),
+    and whether it answers a liveness probe."""
+    from rich.table import Table
+
+    from localm import instances
+    from localm.config import home_dir
+    rows = instances.snapshot(home_dir())
+    if not rows:
+        console.print("[dim]No running localm instances.[/dim]")
+        return
+    table = Table(title="localm instances")
+    table.add_column("ID")
+    table.add_column("Status")
+    table.add_column("Surface")
+    table.add_column("Address")
+    table.add_column("PID", justify="right")
+    table.add_column("Directory")
+    for r in rows:
+        alive = r.get("alive")
+        status = "[green]live[/green]" if alive else "[yellow]no answer[/yellow]"
+        scheme = r.get("scheme", "http")
+        addr = f"{scheme}://{r.get('host', '127.0.0.1')}:{r.get('port', '?')}"
+        table.add_row(
+            str(r.get("instance_id", ""))[:8], status, str(r.get("mode", "?")),
+            addr, str(r.get("pid", "?")), str(r.get("root_dir", "")))
+    console.print(table)
+
+
+@main.command("status")
+@click.option("--project", default=None, type=click.Path(file_okay=False),
+              help="Check this directory instead of the current one.")
+def status_cmd(project):
+    """Show the localm server serving this directory, if any."""
+    from localm import instances
+    from localm.config import home_dir
+    root = instances.resolve_root_dir(override=project)
+    entry = instances.find_attachable(home_dir(), root)
+    if entry is None:
+        console.print(f"[dim]No localm server is serving[/dim] {root}")
+        console.print("[dim]Start one with[/dim] localm gui  [dim]or[/dim]"
+                      "  localm serve <model>")
+        return
+    scheme = entry.get("scheme", "http")
+    console.print(f"  [bold]directory[/bold]  {root}")
+    console.print(f"  [bold]address  [/bold]  "
+                  f"{scheme}://{entry.get('host', '127.0.0.1')}:{entry.get('port')}")
+    console.print(f"  [bold]surface  [/bold]  {entry.get('mode')}")
+    console.print(f"  [bold]pid      [/bold]  {entry.get('pid')}")
+    console.print(f"  [bold]version  [/bold]  {entry.get('version')}")
+
+
 @main.command("config")
 @click.argument("key")
 @click.argument("value")
