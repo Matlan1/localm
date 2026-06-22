@@ -321,6 +321,39 @@ def mount_gui_surface(app) -> bool:
 #  App factory                                                         #
 # ------------------------------------------------------------------ #
 
+def _do_shutdown() -> None:
+    """SRV-4: the actual stop sequence. Unload the model FIRST so the native
+    context is freed cleanly (a hard exit while it is loaded segfaults during
+    teardown), clear the crash marker so this intentional stop is not reported as
+    a crash, then exit the process so the stop is guaranteed (Ctrl+C sometimes
+    does nothing). Separated from the route so it can be tested without exiting."""
+    try:
+        if _engine is not None:
+            _engine.unload()
+    except Exception:
+        pass
+    try:
+        from localm import bugreport
+        bugreport.disarm_crash_guard()
+    except Exception:
+        pass
+    import os
+    os._exit(0)
+
+
+def _request_shutdown(delay: float = 0.25) -> None:
+    """Run _do_shutdown shortly after returning, so the 200 response flushes to
+    the client before the process exits."""
+    import threading
+    import time as _t
+
+    def _run():
+        _t.sleep(delay)
+        _do_shutdown()
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
     global _engine, _inference_sem
     _engine = engine
@@ -767,6 +800,16 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
             ],
             "errors": discover_errors(),
         }
+
+    @app.post("/v1/server/shutdown",
+              dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
+    async def server_shutdown_ep():
+        """SRV-4: stop this server cleanly (owner / config-write scope). A direct
+        method to shut down so the user is not left force-closing the window
+        (which segfaults) or relying on a Ctrl+C that sometimes does nothing. The
+        model is unloaded before exit. (A Settings button calls this - Lane E.)"""
+        _request_shutdown()
+        return {"stopping": True}
 
     @app.post("/v1/plugins/install", dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
     async def install_plugin_ep(body: dict):
