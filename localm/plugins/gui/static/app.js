@@ -3578,6 +3578,26 @@ function renderSessionSelect() {
     if (id === coder.activeId) opt.selected = true;
     sel.appendChild(opt);
   }
+  renderCoderSessionList();   // R17: keep the right-side rail in lockstep with the dropdown
+}
+
+// R17: the coder's right-side open-sessions rail (mirrors the chat conversation
+// list). The #session-select dropdown stays as the mobile fallback.
+function renderCoderSessionList() {
+  const list = $("coder-session-list");
+  if (!list) return;
+  list.replaceChildren();
+  if (!coder.sessions.size) {
+    list.appendChild(el("div", "coder-session-empty", "No open sessions"));
+    return;
+  }
+  for (const [id, s] of coder.sessions) {
+    const item = el("div", "coder-session-item" + (id === coder.activeId ? " active" : ""));
+    item.appendChild(el("span", "title", sessionLabel(s.info)));
+    if (s.busy) item.appendChild(el("span", "badge", "⏳"));
+    item.onclick = () => activateSession(id);
+    list.appendChild(item);
+  }
 }
 
 function showCoderUI(hasSession) {
@@ -4145,6 +4165,9 @@ $("session-new").onclick = () => {
   showCoderUI(false);
   $("coder-bar").classList.add("open");   // keep the bar so sessions stay reachable
 };
+// R17: the open-sessions rail's "+" mirrors the bar's "+ new".
+if ($("coder-new-session")) $("coder-new-session").onclick = () => $("session-new").click();
+renderCoderSessionList();   // R17: show the empty-state rail on first load
 // Arrow wrapper: a bare `.onclick = startCoderSession` would pass the click
 // Event as opts, making opts.resume truthy and always resuming (CODER-2).
 $("setup-start").onclick = () => startCoderSession();
