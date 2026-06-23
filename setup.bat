@@ -130,8 +130,9 @@ echo    [3] cuda       - NVIDIA, peak performance (fetches the CUDA runtime for 
 echo    [4] amd-rocm   - AMD RX 6000 (gfx103X), self-contained
 echo    [5] cpu        - no GPU
 echo    [6] I will build / provide my own (skip the download)
-echo    (the chosen backend is verified after install; if it cannot load here,
-echo     setup falls back to vulkan, then cpu, so you are never left broken)
+echo    (your pick is load-tested here; if it cannot load on this machine,
+echo     setup explains why and offers the universal Vulkan build instead -
+echo     your choice is never changed silently)
 set "BSEL="
 set /p "BSEL=  Pick 1-6 [1]: "
 if not defined BSEL set "BSEL=1"
@@ -276,9 +277,11 @@ if "%SCPICK%"=="2" (
 )
 if "%SCPICK%"=="3" echo  No shortcut created.
 
-rem ---- choose which plugins to enable (chat is always on) -------------------
+rem ---- choose which plugins to enable ---------------------------------------
+rem  `localm plugin setup` prints its own header (it states chat is always on),
+rem  so this is just a section divider - do not repeat that line here.
 echo.
-echo  Which optional features (plugins) do you want? chat is always on.
+echo  Optional features (plugins):
 .venv\Scripts\localm plugin setup
 
 rem ---- record what we installed (uninstall removes ONLY what we created) -----

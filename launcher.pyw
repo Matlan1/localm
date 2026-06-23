@@ -454,9 +454,9 @@ class Launcher(tk.Tk):
         self.key_entry = ttk.Entry(auth_card, textvariable=self.api_key,
                                    width=40, show="•")
         self.key_entry.grid(row=2, column=0, sticky="we", pady=(2, 0))
-        ttk.Button(auth_card, text="Generate", style="Quiet.TButton",
-                   command=self._gen_key).grid(row=2, column=1, padx=(8, 0),
-                                               pady=(2, 0))
+        self.gen_btn = ttk.Button(auth_card, text="Generate", style="Quiet.TButton",
+                                  command=self._gen_key)
+        self.gen_btn.grid(row=2, column=1, padx=(8, 0), pady=(2, 0))
         ttk.Button(auth_card, text="Clear", style="Quiet.TButton",
                    command=lambda: self.api_key.set("")).grid(
             row=2, column=2, padx=(8, 0), pady=(2, 0))
@@ -482,8 +482,9 @@ class Launcher(tk.Tk):
                                font=("Segoe UI", 9), width=_STATUS_MAX_CHARS,
                                anchor="w")
         self.status.pack(side="left", padx=12)
-        ttk.Button(footer, text="Launch", style="Launch.TButton",
-                   command=self._launch).pack(side="right")
+        self.launch_btn = ttk.Button(footer, text="Launch", style="Launch.TButton",
+                                     command=self._launch)
+        self.launch_btn.pack(side="right")
 
         # Populate the model list last - on a fresh install with an empty
         # registry this shows a hint in the status label built just above.
@@ -505,9 +506,17 @@ class Launcher(tk.Tk):
 
     # ------------------------- model import ----------------------- #
 
-    def _set_import_enabled(self, enabled: bool) -> None:
-        for b in self.import_btns:
-            b.configure(state="normal" if enabled else "disabled")
+    def _set_busy(self, busy: bool) -> None:
+        """Disable the controls that must not run mid-import: a multi-GB hash can
+        take many seconds, and Launching (R48) or generating a key (R49) during it
+        would race the registry write or stomp the 'hashing' status text. Re-enabled
+        when the import finishes."""
+        state = "disabled" if busy else "normal"
+        for b in (*self.import_btns, self.launch_btn, self.gen_btn):
+            try:
+                b.configure(state=state)
+            except Exception:
+                pass
 
     def _import_from_file(self) -> None:
         path = filedialog.askopenfilename(
@@ -526,7 +535,7 @@ class Launcher(tk.Tk):
         """Register a local file/dir via `localm add` off the UI thread.
         SHA256 hashing of a multi-GB file can take a few seconds."""
         before = set(load_models())
-        self._set_import_enabled(False)
+        self._set_busy(True)
         self.status_msg("Importing… (hashing may take a moment)")
 
         def work():
@@ -547,7 +556,7 @@ class Launcher(tk.Tk):
         threading.Thread(target=work, daemon=True).start()
 
     def _register_done(self, ok: bool, msg: str, before: set) -> None:
-        self._set_import_enabled(True)
+        self._set_busy(False)
         self._refresh_models()
         new = sorted(set(load_models()) - before)
         if ok and new:

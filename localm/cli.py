@@ -173,8 +173,9 @@ def _attach_fallback_note(no_server: bool, attach_error: Optional[BaseException]
 @click.option("-c", "--ctx",          default=None,  type=int,   help="Context window (GGUF only).")
 @click.option("-g", "--gpu-layers",   default=None,  type=click.IntRange(0, 1000),   help="GPU layers (GGUF only, 99=all).")
 @click.option("--mmproj",             default=None,
-              help="Multimodal projection GGUF path (reserved; GGUF vision is "
-                   "not yet implemented - the backend is text-only).")
+              help="Path to a multimodal projector (mmproj) GGUF, enabling vision "
+                   "on a vision-capable GGUF model. Pair with --image to attach "
+                   "pictures.")
 @click.option("--device",             default=None,  help="HF device override (cuda / cpu).")
 @click.option("--image", "images",   multiple=True, type=click.Path(exists=True),
               help="Local image file to include (repeat for multiple). Use with -p.")
@@ -2346,8 +2347,10 @@ def _installed_plugin_names(mgr) -> set:
 
 
 def _parse_plugin_selection(raw, available):
-    """Parse an interactive selection (comma list of 1-based numbers or names,
-    or 'all') into a list of plugin names."""
+    """Parse an interactive selection into a list of plugin names. Accepts a
+    comma list of 1-based numbers, names, numeric ranges like ``2-5``, or
+    ``all``. Unknown/out-of-range tokens are flagged and skipped; the result is
+    de-duplicated while preserving order."""
     if not raw.strip():
         return []
     if raw.strip().lower() == "all":
@@ -2363,9 +2366,17 @@ def _parse_plugin_selection(raw, available):
             out.append(by_idx[t])
         elif t in names:
             out.append(t)
+        elif t.count("-") == 1 and all(p.strip().isdigit() for p in t.split("-")):
+            # A numeric range like "2-5": expand to the valid indices it covers.
+            lo, hi = (int(p) for p in t.split("-"))
+            matched = [by_idx[str(n)] for n in range(lo, hi + 1) if str(n) in by_idx]
+            if matched:
+                out.extend(matched)
+            else:
+                console.print(f"[yellow]Ignoring out-of-range selection: {t}[/yellow]")
         else:
             console.print(f"[yellow]Ignoring unknown selection: {t}[/yellow]")
-    return out
+    return list(dict.fromkeys(out))
 
 
 @plugin.command("setup")
@@ -2407,9 +2418,23 @@ def plugin_setup(plugins_csv, install_all, install_defaults):
             extra = f" [dim](pip extra: localm[{e.extra}])[/dim]" if e.extra else ""
             console.print(f"  [bold]{i:>2}.[/bold] {e.name:<7} {e.description}{mark}{extra}")
         console.print(
-            "\nEnter numbers or names (comma-separated), 'all', or blank to skip.")
-        raw = click.prompt("Install", default="", show_default=False)
-        chosen = _parse_plugin_selection(raw, available)
+            "\nEnter numbers or names (comma-separated), a range like 1-5, "
+            "'all', or blank to skip.")
+        console.print(
+            "[dim]This ADDS the features you pick; anything already installed "
+            "stays. Remove one later with: localm plugin uninstall <name>.[/dim]")
+        # Re-ask on an entry that matched nothing (e.g. junk like "ewew"), so we
+        # never silently leave zero plugins after the user clearly tried to pick
+        # something. A blank entry is a deliberate "skip" and breaks the loop.
+        while True:
+            raw = click.prompt("Install", default="", show_default=False)
+            chosen = _parse_plugin_selection(raw, available)
+            if raw.strip() and not chosen:
+                console.print("[yellow]Nothing recognised in that entry. Use the "
+                              "numbers/names listed above, a range like 1-5, or "
+                              "leave blank to skip.[/yellow]")
+                continue
+            break
 
     if not chosen:
         console.print("[dim]No plugins selected.[/dim]")

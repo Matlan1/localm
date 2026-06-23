@@ -234,6 +234,45 @@ def test_selfcontained_provisioned_but_unloadable_is_reportable(monkeypatch, tmp
     assert "did not load" in ei.value.summary
 
 
+# --------------- inform + offer on load failure (never silent) ------------- #
+# R20 / never-override-user-selection: a chosen backend that does not load is    #
+# NOT swapped silently. Interactive -> OFFER (accept falls back, decline stops); #
+# non-interactive -> fall back BUT warn loudly and say how to retry the pick.    #
+
+def test_fallback_offer_accepted_provisions_vulkan(monkeypatch, tmp_path):
+    _stub_provision(monkeypatch)
+    seq = iter([(False, "cuda failed"), (True, "")])
+    monkeypatch.setattr(sl, "_native_loads_ok", lambda: next(seq))
+    monkeypatch.setattr(sl.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sl.click, "confirm", lambda *a, **k: True)
+    assert sl._provision_with_fallback("cuda", tmp_path, None, True) == "vulkan"
+
+
+def test_fallback_offer_declined_exits_nonzero(monkeypatch, tmp_path):
+    """Declining the offer stops (exit non-zero) rather than swapping the pick."""
+    _stub_provision(monkeypatch)
+    monkeypatch.setattr(sl, "_native_loads_ok", lambda: (False, "cuda failed"))
+    monkeypatch.setattr(sl.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sl.click, "confirm", lambda *a, **k: False)
+    with pytest.raises(SystemExit):
+        sl._provision_with_fallback("cuda", tmp_path, None, True)
+
+
+def test_fallback_noninteractive_warns_and_falls_back(monkeypatch, tmp_path, capsys):
+    """assume_yes: no prompt, falls back, but warns loudly (never silent) and
+    names how to retry the chosen backend with --force."""
+    _stub_provision(monkeypatch)
+    seq = iter([(False, "cuda failed"), (True, "")])
+    monkeypatch.setattr(sl, "_native_loads_ok", lambda: next(seq))
+    monkeypatch.setattr(sl.click, "confirm",
+                        lambda *a, **k: pytest.fail("must not prompt with assume_yes"))
+    out = sl._provision_with_fallback("cuda", tmp_path, None, True, assume_yes=True)
+    assert out == "vulkan"
+    printed = capsys.readouterr().out
+    assert "Non-interactive" in printed
+    assert "--force" in printed
+
+
 # --------------------------- _native_loads_ok ----------------------------- #
 
 def test_native_loads_ok_handles_subprocess_error(monkeypatch):
