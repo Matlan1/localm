@@ -126,6 +126,37 @@ def _lib_name() -> str:
     return "libllama.so"
 
 
+# A tiny marker file recording WHICH backend currently occupies the runtime lib
+# dir. It exists so the "already provisioned" guard can be backend-aware: a later
+# `setup-llama --backend cuda` on a box that already has a vulkan/cpu build must
+# still fetch CUDA (R23), instead of short-circuiting on the mere presence of a
+# library. A dotfile, like the venv's .localm-venv marker; never loaded as code.
+_BACKEND_MARKER = ".localm-backend"
+
+
+def _record_provisioned_backend(target: Path, backend: str) -> None:
+    """Record *backend* as the one now provisioned in *target*. Best-effort: the
+    marker only optimises the guard, so a write failure is non-fatal (the guard
+    then conservatively re-provisions an explicit pick rather than skipping it).
+    Written AFTER provisioning because _clear_target wipes the dir's files."""
+    try:
+        (target / _BACKEND_MARKER).write_text((backend or "").strip() + "\n",
+                                              encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _provisioned_backend(target: Path) -> "Optional[str]":
+    """The backend last provisioned into *target*, or None if unknown (no marker
+    - e.g. an install predating the marker, or a hand-placed build). 'Unknown'
+    is treated conservatively by the guard: an explicit pick is re-provisioned."""
+    try:
+        val = (target / _BACKEND_MARKER).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return val or None
+
+
 def _is_wanted(f: Path) -> bool:
     """Whether to copy *f*: the loadable library, its ggml deps, and the runtime
     libraries - matched by platform-appropriate naming (incl. versioned .so.N)."""
@@ -730,10 +761,13 @@ def _cuda_setup_dialogue(info: NvidiaInfo, assume_yes: bool) -> tuple:
 
 
 def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
-                             with_cudart: bool) -> str:
-    """Provision *chosen*, prove it loads, and on failure fall back vulkan ->
-    cpu so setup never ends in a broken state. Returns the backend that ended up
-    working. Exits non-zero only if NOTHING loads (a genuine environment fault).
+                             with_cudart: bool, assume_yes: bool = False) -> str:
+    """Provision *chosen* and prove it loads. If it does not load, NEVER swap the
+    user's pick silently (the never-override rule): inform WHY, then OFFER the
+    universal Vulkan build when interactive (or fall back with a LOUD warning when
+    *assume_yes* / no tty), and always say how to retry the chosen backend with
+    --force. Returns the backend that ended up working. Exits non-zero if the user
+    declines the fallback, or if NOTHING loads (a genuine environment fault).
 
     vulkan and cpu are self-contained and treated as terminal: if the user
     explicitly chose one and it does not load, that is an environment problem we
@@ -799,9 +833,29 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
                     "dependency. See docs/gpu-setup.md."),
             context={"operation": "setup-llama", "backend": chosen})
 
-    # chosen needs a runtime and did not load: fall back to something that does.
-    console.print(f"[yellow]{chosen} did not load on this machine[/yellow] "
-                  f"[dim]({detail})[/dim] - falling back to a self-contained backend.")
+    # chosen needs a runtime and did not load HERE. Honour the user's pick: never
+    # swap it silently. INFORM why, then OFFER the universal build (interactive)
+    # or fall back with a LOUD warning (non-interactive), and always say how to
+    # retry the real pick once the cause is fixed (R20 / never-override-user-selection).
+    console.print(f"[yellow]Your chosen '{chosen}' backend was provisioned but does "
+                  f"not load on this machine[/yellow] [dim]({detail})[/dim].")
+    console.print("[dim]Once the cause is fixed, restore it with: "
+                  f"localm setup-llama --backend {chosen} --force[/dim]")
+    interactive = (not assume_yes) and sys.stdin.isatty()
+    if interactive:
+        if not click.confirm(
+                f"  Install the universal Vulkan build now so you have a working "
+                f"setup? (your '{chosen}' pick is kept, not changed; decline to stop "
+                f"and fix it yourself)", default=True):
+            console.print(f"[yellow]Keeping your '{chosen}' choice and stopping.[/yellow] "
+                          "It does not load here yet. Fix the cause, then re-run: "
+                          f"localm setup-llama --backend {chosen} --force")
+            sys.exit(1)
+    else:
+        console.print("[yellow][!] Non-interactive install: provisioning the universal "
+                      f"Vulkan build so this is not left broken. This is NOT your chosen "
+                      f"'{chosen}' backend - re-run 'localm setup-llama --backend {chosen} "
+                      "--force' once the cause is fixed.[/yellow]")
     for fb in ("vulkan", "cpu"):
         console.print(f"[yellow]Trying {fb}...[/yellow]")
         try:
@@ -849,10 +903,11 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
          sha256: Optional[str], force: bool, assume_yes: bool) -> None:
     """Download or copy the native llama.cpp binaries into localm's own venv.
 
-    The chosen backend is load-tested after provisioning; if it cannot load on
-    this machine (e.g. CUDA without a new-enough driver) setup automatically
-    falls back to a self-contained backend (vulkan, then cpu) so it never ends
-    in a broken state.
+    The chosen backend is load-tested after provisioning. If it cannot load on
+    this machine (e.g. CUDA without a new-enough driver) your pick is NOT changed
+    silently: setup explains why and (interactively) offers the universal Vulkan
+    build instead, or - in a non-interactive install - falls back with a loud
+    warning and tells you how to retry your backend once the cause is fixed.
 
     \b
       localm setup-llama                        # auto-detect GPU, fetch the right prebuilt
@@ -870,10 +925,28 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
 
     already = (target / lib_name).exists()
     if already and not force:
-        console.print(f"[green]Already provisioned[/green] at {target}")
-        console.print("[dim]Use --force to re-download/replace.[/dim]")
-        _ensure_importable()
-        return
+        # Backend-aware guard (R23): 'auto' means "give me something that works",
+        # and something already does, so do not re-download. An EXPLICIT backend
+        # is honoured - short-circuit only when we can confirm THAT backend is the
+        # one on disk; otherwise (a different recorded backend, or none recorded)
+        # fall through and provision what the user asked for. This is what lets
+        # `setup-llama --backend cuda` on a box that already has a vulkan/cpu build
+        # actually fetch CUDA, instead of keeping the old runtime silently.
+        want = backend.lower()
+        have = _provisioned_backend(target)
+        if want == "auto" or (have is not None and have == want):
+            label = f" ({have})" if have else ""
+            console.print(f"[green]Already provisioned[/green]{label} at {target}")
+            console.print("[dim]Use --force to re-download/replace.[/dim]")
+            _ensure_importable()
+            return
+        if have:
+            console.print(f"[yellow]A {have} build is already provisioned, but you "
+                          f"asked for {want}[/yellow] - provisioning {want} now.")
+        else:
+            console.print("[yellow]A build is already provisioned but its backend is "
+                          f"unrecorded[/yellow] - provisioning the requested {want} "
+                          "to honour your choice.")
 
     if from_dir:
         src = Path(from_dir)
@@ -889,6 +962,7 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
         loaded, detail = _native_loads_ok()
         if loaded:
             console.print("[green]OK - the provided build loads on this machine.[/green]")
+            _record_provisioned_backend(target, "custom")
         else:
             # The user pinned this build, so we do NOT fall back - but we must not
             # report success on a library that will not load. Exit non-zero with a
@@ -919,6 +993,7 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
         loaded, detail = _native_loads_ok()
         if loaded:
             console.print("[green]OK - the fetched build loads on this machine.[/green]")
+            _record_provisioned_backend(target, "custom")
         else:
             # A user-pinned --url: do not fall back, but do not claim success on a
             # library that will not load. Exit non-zero with a clear reason.
@@ -937,7 +1012,9 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
         with_cudart = False
         if chosen == "cuda" and sys.platform == "win32":
             chosen, with_cudart = _cuda_setup_dialogue(nvidia_preflight(), assume_yes)
-        _provision_with_fallback(chosen, target, sha256, with_cudart)
+        result = _provision_with_fallback(chosen, target, sha256, with_cudart,
+                                          assume_yes)
+        _record_provisioned_backend(target, result)
 
     _verify()
 
