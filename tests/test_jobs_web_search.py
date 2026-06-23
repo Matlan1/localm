@@ -1,0 +1,194 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""Scheduled chat jobs get the web-search tool (U-3).
+
+Before, a chat job ran its prompt with no tools and answered "I have no real-time
+access". These pin the server-side tool loop in webtool: the protocol parser, the
+net_mode gating (web only when not "off"), the search round-trip, and the loop cap.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from localm.plugins.builtin.jobs import webtool
+
+
+# --------------------------------------------------------------------------- #
+#  Fixtures                                                                    #
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def home(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
+    import localm.config as cfg
+    monkeypatch.setattr(cfg, "HOME_DIR", tmp_path)
+    monkeypatch.setattr(cfg, "CONFIG_FILE", tmp_path / "config.json")
+    return tmp_path
+
+
+class ScriptedEngine:
+    """Yields scripted replies in order and records the messages it was given."""
+
+    def __init__(self, replies):
+        self.replies = list(replies)
+        self.seen = []        # each entry is the messages list for that call
+        self.unloaded = 0
+
+    def chat_stream(self, messages, **kw):
+        self.seen.append([dict(m) for m in messages])
+        reply = self.replies.pop(0) if self.replies else ""
+        for ch in reply:
+            yield ch
+
+    def unload(self):
+        self.unloaded += 1
+
+
+_TOOL_CALL = '<tool_call>{"name": "web_search", "args": {"query": "weather in Paris"}}</tool_call>'
+_ANSWER = "It is sunny in Paris (source: https://example.com/paris)."
+
+
+# --------------------------------------------------------------------------- #
+#  parse_web_call                                                              #
+# --------------------------------------------------------------------------- #
+
+class TestParseWebCall:
+    def test_canonical_tool_call(self):
+        call = webtool.parse_web_call(_TOOL_CALL)
+        assert call == {"name": "web_search", "args": {"query": "weather in Paris"}}
+
+    def test_fetch_url(self):
+        call = webtool.parse_web_call(
+            '<tool_call>{"name": "fetch_url", "args": {"url": "https://x.com"}}</tool_call>')
+        assert call["name"] == "fetch_url" and call["args"]["url"] == "https://x.com"
+
+    def test_bare_json_object(self):
+        call = webtool.parse_web_call('Sure: {"name": "web_search", "args": {"query": "q"}}')
+        assert call == {"name": "web_search", "args": {"query": "q"}}
+
+    def test_fenced_json(self):
+        text = '```json\n{"name": "web_search", "args": {"query": "cats"}}\n```'
+        assert webtool.parse_web_call(text)["args"]["query"] == "cats"
+
+    def test_lenient_single_quoted_keys(self):
+        # The mangle local finetunes emit: single-quoted KEYS (the GUI parser fixes
+        # these), with normal double-quoted values.
+        text = '<tool_call>{\'name\': "web_search", \'args\': {\'query\': "q"}}</tool_call>'
+        assert webtool.parse_web_call(text)["name"] == "web_search"
+
+    def test_lenient_trailing_comma(self):
+        text = '<tool_call>{"name": "web_search", "args": {"query": "q"},}</tool_call>'
+        assert webtool.parse_web_call(text)["args"]["query"] == "q"
+
+    def test_openai_arguments_alias(self):
+        text = '{"name": "web_search", "arguments": {"query": "q"}}'
+        assert webtool.parse_web_call(text)["args"]["query"] == "q"
+
+    def test_plain_text_is_not_a_call(self):
+        assert webtool.parse_web_call("The capital of France is Paris.") is None
+
+    def test_strips_think_block(self):
+        text = ("<think>maybe I should search {\"name\": \"web_search\"}</think>"
+                "The answer is 4.")
+        assert webtool.parse_web_call(text) is None
+
+
+# --------------------------------------------------------------------------- #
+#  run_chat_with_web                                                           #
+# --------------------------------------------------------------------------- #
+
+class TestRunChatWithWeb:
+    def test_web_lookup_round_trip(self, home, monkeypatch):
+        monkeypatch.setenv("LOCALM_NET_MODE", "allow")
+        calls = []
+
+        def fake_search(query, max_results=5):
+            calls.append(query)
+            return [{"title": "Paris weather", "url": "https://example.com/paris",
+                     "snippet": "Sunny, 24C"}]
+
+        monkeypatch.setattr("localm.netpolicy.web_search", fake_search)
+        eng = ScriptedEngine([_TOOL_CALL, _ANSWER])
+
+        out = webtool.run_chat_with_web(eng, "What's the weather in Paris?")
+
+        assert out == _ANSWER
+        assert calls == ["weather in Paris"]
+        # The web-tool system prompt was injected, and the search result was fed back.
+        assert eng.seen[0][0]["role"] == "system"
+        assert "tool call" in eng.seen[0][0]["content"]
+        injected = eng.seen[1][-1]["content"]
+        assert "Results of web_search" in injected and "example.com/paris" in injected
+
+    def test_offline_uses_honesty_floor_and_no_search(self, home, monkeypatch):
+        monkeypatch.setenv("LOCALM_NET_MODE", "off")
+
+        def boom(*a, **k):       # must never be called when web is off
+            raise AssertionError("web_search called while net_mode=off")
+
+        monkeypatch.setattr("localm.netpolicy.web_search", boom)
+        eng = ScriptedEngine(["I cannot verify that offline."])
+
+        out = webtool.run_chat_with_web(eng, "weather?")
+
+        assert out == "I cannot verify that offline."
+        assert eng.seen[0][0]["content"] == webtool.OFFLINE_SYSTEM
+        assert len(eng.seen) == 1            # single pass, no tool loop
+
+    def test_plain_answer_passes_through(self, home, monkeypatch):
+        monkeypatch.setenv("LOCALM_NET_MODE", "allow")
+        eng = ScriptedEngine(["2 + 2 = 4."])
+        out = webtool.run_chat_with_web(eng, "what is 2+2?")
+        assert out == "2 + 2 = 4."
+
+    def test_round_cap_stops_the_loop(self, home, monkeypatch):
+        monkeypatch.setenv("LOCALM_NET_MODE", "allow")
+        calls = []
+        monkeypatch.setattr(
+            "localm.netpolicy.web_search",
+            lambda q, max_results=5: calls.append(q) or [
+                {"title": "t", "url": "https://x", "snippet": "s"}])
+        # The model never stops calling the tool.
+        eng = ScriptedEngine([_TOOL_CALL] * 10)
+
+        out = webtool.run_chat_with_web(eng, "loop forever", max_rounds=2)
+
+        assert len(calls) == 2               # exactly max_rounds searches, then stop
+        assert "Could not complete" in out
+
+    def test_search_failure_is_surfaced_not_swallowed(self, home, monkeypatch):
+        monkeypatch.setenv("LOCALM_NET_MODE", "allow")
+
+        def fail(q, max_results=5):
+            raise RuntimeError("backend rate-limited")
+
+        monkeypatch.setattr("localm.netpolicy.web_search", fail)
+        # First reply searches; second reply (after the failure note) answers.
+        eng = ScriptedEngine([_TOOL_CALL, "Web access did not work; I cannot verify."])
+        out = webtool.run_chat_with_web(eng, "weather?")
+        assert "did not work" in out
+        injected = eng.seen[1][-1]["content"]
+        assert "failed" in injected and "rate-limited" in injected
+
+
+# --------------------------------------------------------------------------- #
+#  End-to-end through run_job                                                  #
+# --------------------------------------------------------------------------- #
+
+def test_run_job_chat_uses_web_tool(home, monkeypatch):
+    from localm.plugins.builtin.jobs.runner import run_job
+    from localm.plugins.builtin.jobs.store import Job
+
+    monkeypatch.setenv("LOCALM_NET_MODE", "allow")
+    monkeypatch.setattr(
+        "localm.netpolicy.web_search",
+        lambda q, max_results=5: [{"title": "t", "url": "https://x", "snippet": "s"}])
+    eng = ScriptedEngine([_TOOL_CALL, _ANSWER])
+
+    job = Job(name="weather", task_kind="chat", prompt="weather in Paris?",
+              schedule_kind="interval", schedule=3600)
+    result = run_job(job, engine=eng)
+
+    assert result["status"] == "ok"
+    assert result["output"] == _ANSWER
+    assert eng.unloaded == 0          # a passed-in (host) engine is never unloaded

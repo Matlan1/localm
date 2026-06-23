@@ -209,29 +209,46 @@ class JobScheduler:
         """Run every enabled + due job once. Pure-ish: side effects are limited
         to running each due job and recording its result. Returns the list of
         job ids that ran this tick. Never raises out (a per-job error is caught
-        and recorded)."""
+        and recorded).
+
+        Overlap guard (U-4): if a previous run (this scheduler or a GUI "run now")
+        is still in flight, the tick SKIPS its due jobs rather than starting runs
+        that would stack a second model load and OOM the GPU. Skipped jobs are due
+        again next tick - an interval job runs as soon as the slow run finishes, a
+        cron job is not marked fired so its minute is not consumed."""
         if now is None:
             now = time.time()
-        ran = []
+        due_jobs = [j for j in self.store.list()
+                    if j.enabled and self.due(j, now)]
+        if not due_jobs:
+            return []
+
+        from localm.plugins.builtin.jobs.runguard import run_slot
+
+        ran: list = []
         run_job = self._resolve_run()
         engine = self._engine() if callable(self._engine) else self._engine
-        for job in self.store.list():
-            if not job.enabled:
-                continue
-            if not self.due(job, now):
-                continue
-            if job.schedule_kind == "cron":
-                self._cron_fired[job.id] = int(now // 60) * 60
-            try:
-                result = run_job(job, engine=engine)
-            except Exception as e:        # the runner shouldn't raise, but guard
-                result = {"status": "error", "output": "", "error": str(e),
-                          "started": now, "finished": time.time()}
-            try:
-                self.store.record_result(job.id, result)
-            except Exception:
-                pass        # recording must never crash the scheduler loop
-            ran.append(job.id)
+        with run_slot() as got_slot:
+            if not got_slot:
+                from localm.debuglog import logger
+                logger.info(
+                    "jobs: skipping %d due job(s) this tick - a previous job run is "
+                    "still in progress (avoids stacking model loads / VRAM OOM)",
+                    len(due_jobs))
+                return ran
+            for job in due_jobs:
+                if job.schedule_kind == "cron":
+                    self._cron_fired[job.id] = int(now // 60) * 60
+                try:
+                    result = run_job(job, engine=engine)
+                except Exception as e:    # the runner shouldn't raise, but guard
+                    result = {"status": "error", "output": "", "error": str(e),
+                              "started": now, "finished": time.time()}
+                try:
+                    self.store.record_result(job.id, result)
+                except Exception:
+                    pass    # recording must never crash the scheduler loop
+                ran.append(job.id)
         return ran
 
     # ---- async loop --------------------------------------------------------

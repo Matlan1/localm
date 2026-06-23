@@ -156,7 +156,21 @@ async def run_now(job_id: str):
         raise HTTPException(404, f"No such job: {job_id}")
     engine = _engine_resolver()
     loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(None, lambda: _run_job(job, engine=engine))
+
+    # Overlap guard (U-4): if a scheduled tick or another run-now is still in flight,
+    # do NOT load a second model on top of it (that stacks VRAM and OOMs the GPU) -
+    # tell the caller it is busy. Acquired and released inside the worker thread.
+    def _run_guarded():
+        from localm.plugins.builtin.jobs.runguard import run_slot
+        with run_slot() as got_slot:
+            if not got_slot:
+                return None
+            return _run_job(job, engine=engine)
+
+    result = await loop.run_in_executor(None, _run_guarded)
+    if result is None:
+        raise HTTPException(
+            409, "A job run is already in progress; try again once it finishes.")
     result_id = store.record_result(job_id, result)
     return {"result_id": result_id, **result}
 
