@@ -13,7 +13,10 @@ export function pickDevice(cfg, hasGPU) {
 }
 export function pickDtype(cfg, device) {
   if (cfg.dtype && cfg.dtype !== "auto") return cfg.dtype;
-  return device === "webgpu" ? "fp32" : "fp32";   // R06: fp32 on WASM too (was q8)
+  // R06: fp32 on both paths. The WASM path used q8 (audible cracks/pings); fp32
+  // matches the clean WebGPU path. `device` is accepted for symmetry with
+  // pickDevice and a possible future per-device default.
+  return "fp32";
 }
 
 // R07: turn a model-load failure into an actionable message. A blocked or
@@ -27,7 +30,9 @@ export function classifyLoadError(err, { cached = false, online = true } = {}) {
   const m = raw.toLowerCase();
   const networkish =
     err instanceof TypeError ||                       // fetch() rejects with TypeError
-    /failed to fetch|networkerror|network error|load failed|err_|net::|fetch|blocked|forbidden|\b403\b|cors/.test(m);
+    // Specific network signatures only. NOT a bare "fetch" - that would mislabel
+    // a genuine runtime error mentioning "prefetch"/"fetching shard" as blocked.
+    /failed to fetch|networkerror|network error|load failed|err_|net::|blocked|forbidden|\b403\b|cors/.test(m);
   if (!cached && (networkish || !online)) {
     return {
       blocked: true,

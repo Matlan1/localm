@@ -77,9 +77,10 @@ export async function register(ctx) {
     }
     if (!announced) {
       announced = true;
-      // R08: ask the browser to keep the cached model (resists eviction under
-      // storage pressure, a likely cause of a model that "re-downloads"), and
-      // show a cache-aware, honest toast.
+      // R08: best-effort request to keep the cached model (resists eviction
+      // under storage pressure; the browser may deny it without a user gesture,
+      // and it is auto-granted for an installed PWA). The model is actually
+      // persisted by the transformers.js Cache API; this only hardens it.
       try {
         if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
       } catch { /* storage manager unavailable: best effort */ }
@@ -89,10 +90,13 @@ export async function register(ctx) {
       }));
     }
     const device = pickDevice(cfg, !!navigator.gpu);
-    // R35: run the ONNX download/compile/inference in onnxruntime's proxy worker
-    // so model load no longer freezes the page ("a script is slowing down").
-    // Fall back to the main-thread path if the bundle cannot start the proxy
-    // worker, so this never regresses TTS.
+    // R35: on the WASM path, run the heavy ONNX model compile + inference in
+    // onnxruntime's proxy worker so the load no longer freezes the page ("a
+    // script is slowing down" - the Firefox / no-WebGPU case in the report).
+    // Verified: the main thread stays responsive through a real proxy-worker
+    // load. The WebGPU path keeps its (light, largely async) compile on the main
+    // thread. If the bundle cannot start the proxy worker the load throws and we
+    // retry on the main thread, so this never regresses TTS.
     function build(dev, useProxy) {
       if (onnx && onnx.wasm) onnx.wasm.proxy = !!(useProxy && dev === "wasm");
       return mod.KokoroTTS.from_pretrained(model, { dtype: pickDtype(cfg, dev), device: dev });

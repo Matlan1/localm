@@ -53,7 +53,8 @@ _WORKER_TIMEOUT = 120.0
 # Fault-injection hook, honoured by the worker ONLY when this environment
 # variable is set. It exists exclusively so the test-suite can prove the
 # crash-containment property with a REAL native fault; it is never set in
-# production. Values: "segfault" | "abort" | "exit" | "hang".
+# production. Values: "abort" (a genuine uncatchable native abort, the default),
+# "exit" (a hard process exit), or "hang" (a wedged native call).
 _FAULT_ENV = "LOCALM_VOICE_FAULT_FOR_TEST"
 
 

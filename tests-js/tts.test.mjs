@@ -69,6 +69,13 @@ test("R07: a non-network fault while online+uncached is NOT mislabelled as block
   assert.match(r.message, /opset/i);
 });
 
+test("R07: a runtime error merely mentioning 'prefetch'/'fetching' is NOT blocked", () => {
+  for (const msg of ["error prefetching shard 2", "failed while fetching tensor data"]) {
+    const r = classifyLoadError(new Error(msg), { cached: false, online: true });
+    assert.equal(r.blocked, false, `should not be blocked: ${msg}`);
+  }
+});
+
 // ---- R08: honest, cache-aware load toast ------------------------------- //
 test("R08: an uncached secure context promises a one-time download", () => {
   const t = loadToast({ cached: false, secureContext: true });
