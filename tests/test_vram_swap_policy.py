@@ -5,6 +5,7 @@ The decision: before a media generation, do we unload the chat LLM to free VRAM,
 or does the media model fit alongside it (big card) so we keep chat hot?
 """
 import importlib
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -228,17 +229,23 @@ class TestMediaTransportSwapGate:
         monkeypatch.setattr(mod, "ensure_comfy", lambda *a, **k: (True, "ok"))
         monkeypatch.setattr(mod, "_localm_unload",
                             lambda *a, **k: unload_calls.append(1))
-        # Make the step right after the unload (workflow load) fail fast so the
-        # transport returns without needing a live ComfyUI.
-        monkeypatch.setattr(mod, "_workflow_path",
-                            lambda: Path("____no_such_workflow____.json"))
+        # The unload now runs AFTER the workflow is built and the model preflight
+        # passes (so a bad model fails BEFORE the costly unload - I3). Make preflight
+        # a no-op and the queue submit fail fast, so the transport reaches the unload
+        # (when swap=True) and then returns without needing a live ComfyUI.
+        monkeypatch.setattr(mod, "preflight_models", lambda *a, **k: (True, ""))
+
+        def _no_comfy(*a, **k):
+            raise urllib.error.URLError("no comfy")
+
+        monkeypatch.setattr(mod.urllib.request, "urlopen", _no_comfy)
 
     def test_swap_true_unloads(self, monkeypatch, modpath, func, first_arg):
         mod = importlib.import_module(modpath)
         calls = []
         self._arm(monkeypatch, mod, calls)
         ok, _msg = getattr(mod, func)(first_arg, Path("out.bin"), swap=True)
-        assert ok is False        # bailed at the (missing) workflow load
+        assert ok is False        # bailed at the (unreachable) queue submit
         assert calls == [1]       # but the unload DID run first
 
     def test_swap_false_skips_unload(self, monkeypatch, modpath, func, first_arg):

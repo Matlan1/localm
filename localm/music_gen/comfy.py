@@ -32,6 +32,10 @@ from localm.image_gen.comfy import (
     contain_comfy_artifacts,
     default_api_url,
     ensure_comfy,
+    find_node_by_class,
+    preflight_models,
+    resolve_sampler_roles,
+    set_seed_on_all,
 )
 
 # ace_workflow.json is the committed generic template (public ACE-Step
@@ -136,10 +140,9 @@ def generate_music(
     if not ok:
         return False, msg
 
-    # Unload the chat LLM to free VRAM, unless the caller decided the media model
-    # fits alongside it (swap=False) so the chat model stays hot.
-    if swap:
-        _localm_unload(localm_url)
+    # The LLM unload (the expensive VRAM handoff) is deferred to AFTER the workflow
+    # is built and the model preflight passes, so a missing checkpoint fails before
+    # it costs the user a pointless unload + reload.
 
     try:
         workflow = json.loads(_workflow_path().read_text(encoding="utf-8"))
@@ -149,15 +152,53 @@ def generate_music(
     seed = seed if seed is not None else random.randint(1, 10 ** 12)
     lyrics_text = (lyrics or "").strip() or _INSTRUMENTAL
 
-    workflow["2"]["inputs"]["seconds"] = float(duration_seconds)
-    workflow["3"]["inputs"]["tags"] = tags
-    workflow["3"]["inputs"]["lyrics"] = lyrics_text
-    workflow["3"]["inputs"]["lyrics_strength"] = lyrics_strength
-    workflow["6"]["inputs"]["seed"] = seed
-    workflow["6"]["inputs"]["steps"] = steps
-    workflow["6"]["inputs"]["cfg"] = cfg
+    # Resolve the nodes we drive by ROLE (sampler by class_type, then the ACE-Step
+    # prompt and latent by following its graph edges) instead of hardcoded ids, so
+    # a user's own exported ACE-Step graph works without renumbering (MEDIA-1).
+    roles = resolve_sampler_roles(workflow)
+    _, sampler = roles["sampler"]
+    _, positive = roles["positive"]
+    _, latent = roles["latent"]
+    if sampler is None or positive is None or latent is None:
+        return False, (
+            "The music workflow has no sampler / prompt / latent node localm can "
+            "drive. Export an ACE-Step workflow from ComfyUI (Save -> API format) "
+            "and select it on the Workflow panel (Settings -> Media -> Music).")
+
+    # ACE-Step latent length (seconds), then the prompt node's tags / lyrics.
+    if "seconds" in latent.get("inputs", {}):
+        latent["inputs"]["seconds"] = float(duration_seconds)
+    pin = positive.get("inputs", {})
+    if "tags" in pin:
+        pin["tags"] = tags
+    if "lyrics" in pin:
+        pin["lyrics"] = lyrics_text
+    if "lyrics_strength" in pin:
+        pin["lyrics_strength"] = lyrics_strength
+    # Sampler knobs: the seed goes on EVERY sampler (set_seed_on_all), steps/cfg on
+    # the primary sampler driving this latent.
+    set_seed_on_all(workflow, seed)
+    if "steps" in sampler.get("inputs", {}):
+        sampler["inputs"]["steps"] = steps
+    if "cfg" in sampler.get("inputs", {}):
+        sampler["inputs"]["cfg"] = cfg
+    # Optional checkpoint override, found by class_type.
     if ckpt_name:
-        workflow["1"]["inputs"]["ckpt_name"] = ckpt_name
+        _, ckpt_loader = find_node_by_class(
+            workflow, "CheckpointLoaderSimple", "CheckpointLoader")
+        if ckpt_loader is not None and "ckpt_name" in ckpt_loader.get("inputs", {}):
+            ckpt_loader["inputs"]["ckpt_name"] = ckpt_name
+
+    # Pre-submit model validation: confirm the ACE-Step checkpoint exists
+    # (substituting an unambiguous precision variant), failing EARLY with the exact
+    # missing file BEFORE the LLM unload. Best-effort when /object_info is unreachable.
+    pf_ok, pf_msg = preflight_models(workflow, api_url, on_progress=_say)
+    if not pf_ok:
+        return False, pf_msg
+
+    # Now free VRAM (the workflow is valid). swap=False keeps the chat model hot.
+    if swap:
+        _localm_unload(localm_url)
 
     # Queue
     try:

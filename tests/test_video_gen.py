@@ -200,14 +200,22 @@ class TestGenerateVideo:
         assert ok
         up.assert_called_once()
         wf = captured["workflow"]
-        assert wf["20"]["class_type"] == "LoadImage"
-        assert wf["20"]["inputs"]["image"] == "uploaded.png"
-        assert wf["6"]["inputs"]["start_image"] == ["20", 0]
+        # The LoadImage node is injected with a fresh (role-resolved) id, not a
+        # hardcoded one - locate it by class and confirm the latent's start_image
+        # points at it.
+        load_nodes = [(nid, n) for nid, n in wf.items()
+                      if n.get("class_type") == "LoadImage"]
+        assert len(load_nodes) == 1
+        load_id, load_node = load_nodes[0]
+        assert load_node["inputs"]["image"] == "uploaded.png"
+        assert wf["6"]["inputs"]["start_image"] == [load_id, 0]
 
 
 class TestWorkflowTemplate:
     def test_committed_template_has_expected_nodes(self):
-        """The injection contract: a local override must keep these ids."""
+        """Sanity-check the committed template is well-formed. Injection is now by
+        ROLE (resolve_sampler_roles + find_node_by_class), so a local override no
+        longer has to preserve these ids - but the shipped template still should."""
         wf = json.loads(
             (comfy._WORKFLOW_PATH).read_text(encoding="utf-8"))
         assert wf["4"]["class_type"] == "CLIPTextEncode"      # positive

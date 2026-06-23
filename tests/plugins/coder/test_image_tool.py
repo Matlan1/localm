@@ -22,9 +22,12 @@ class TestFluxImageTool(unittest.TestCase):
         if self.abs_output_path.exists():
             self.abs_output_path.unlink()
 
+    # Preflight queries /object_info; stub it out so this test's strict positional
+    # urlopen sequence (system_stats -> prompt -> history -> view) is unaffected.
+    @patch("localm.image_gen.comfy.comfy_object_info", return_value=None)
     @patch("urllib.request.urlopen")
     @patch("urllib.request.Request")
-    def test_generate_image_success(self, mock_request_cls, mock_urlopen):
+    def test_generate_image_success(self, mock_request_cls, mock_urlopen, mock_obj_info):
         # 1. Setup the mock responses
         # First call: /prompt endpoint -> return prompt_id
         mock_prompt_response = MagicMock()
