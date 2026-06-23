@@ -270,14 +270,20 @@ def mount_gui_surface(app) -> bool:
     async def switch_model(name: str) -> None:
         global _engine
         from localm.config import load_registry
-        from localm.model_manager import get_model_info
+        from localm.model_manager import get_model_info, get_model_mmproj
         info = get_model_info(name)
         if info is None:
             raise ValueError(f"Model not found: {name}")
         m_path, m_hint = info
+        # VIS-1: a GUI/registry switch must not drop vision. Carry the model's
+        # mmproj (a registry-recorded one, else a sibling projector auto-detected
+        # next to the GGUF) into the new Engine, the same way the CLI --mmproj flag
+        # does - otherwise switching models silently loses image support.
+        mmproj = get_model_mmproj(name)
         new_engine = Engine(
             str(m_path),
             display_name=name if name in load_registry() else m_hint,
+            mmproj_path=mmproj,
         )
         loop = asyncio.get_running_loop()
         async with _inference_sem:

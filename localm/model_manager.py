@@ -268,6 +268,53 @@ def get_model_info(name: str):
     return None
 
 
+def find_sibling_mmproj(model_path) -> Optional[Path]:
+    """Auto-detect a vision projector (mmproj) GGUF sitting next to a GGUF model.
+
+    Vision GGUFs ship a separate 'mmproj' projector file in the same folder
+    (e.g. 'gemma-3-4b-it-Q8_0.gguf' + 'mmproj-gemma-3-4b-it-f16.gguf'), so picking
+    it up lets a GUI/registry load get vision without a CLI --mmproj flag (VIS-1).
+    Only a GGUF model qualifies and the model file itself is excluded. Returns the
+    single candidate, or None when there are none, or the choice is ambiguous
+    (>1 with no clear stem match) - we never silently load the wrong projector."""
+    p = Path(model_path)
+    if p.suffix.lower() != ".gguf" or not p.parent.is_dir():
+        return None
+    cands = [f for f in p.parent.glob("*.gguf")
+             if f.name != p.name and "mmproj" in f.name.lower()]
+    if not cands:
+        return None
+    if len(cands) == 1:
+        return cands[0]
+    # Ambiguous: prefer a projector whose name shares the model's leading token.
+    stem = p.stem.lower().replace("mmproj", "").split("-")[0].split(".")[0]
+    matches = [f for f in cands if stem and stem in f.name.lower()]
+    return matches[0] if len(matches) == 1 else None
+
+
+def get_model_mmproj(name: str) -> Optional[str]:
+    """The mmproj (vision projector) path for a model, if one is known.
+
+    Priority: an explicit 'mmproj' recorded in the registry entry, else a sibling
+    mmproj GGUF auto-detected next to the model file. Returns an absolute path
+    string, or None when no projector is associated. This is what lets a GGUF keep
+    vision after a GUI/registry model switch (VIS-1), the same way the CLI --mmproj
+    flag does on a direct run."""
+    reg = load_registry()
+    entry = reg.get(name) if isinstance(reg, dict) else None
+    if isinstance(entry, dict) and entry.get("mmproj"):
+        mmp = Path(entry["mmproj"])
+        if mmp.exists():
+            return str(mmp)
+        # Recorded but gone: fall through to auto-detect rather than handing the
+        # backend a dead path that would just fail the mtmd load.
+    info = get_model_info(name)
+    if info is None:
+        return None
+    sib = find_sibling_mmproj(info[0])
+    return str(sib) if sib else None
+
+
 # ------------------------------------------------------------------ #
 #  Vision-input capability (kernel-level, setup-agnostic)              #
 # ------------------------------------------------------------------ #
