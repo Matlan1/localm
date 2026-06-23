@@ -35,7 +35,7 @@ from localm.image_gen.comfy import (
     find_node_by_class,
     preflight_models,
     resolve_sampler_roles,
-    set_seed_on,
+    set_seed_on_all,
 )
 
 # ace_workflow.json is the committed generic template (public ACE-Step
@@ -175,8 +175,9 @@ def generate_music(
         pin["lyrics"] = lyrics_text
     if "lyrics_strength" in pin:
         pin["lyrics_strength"] = lyrics_strength
-    # Sampler knobs.
-    set_seed_on(sampler, seed)
+    # Sampler knobs: the seed goes on EVERY sampler (set_seed_on_all), steps/cfg on
+    # the primary sampler driving this latent.
+    set_seed_on_all(workflow, seed)
     if "steps" in sampler.get("inputs", {}):
         sampler["inputs"]["steps"] = steps
     if "cfg" in sampler.get("inputs", {}):

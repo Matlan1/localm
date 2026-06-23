@@ -241,6 +241,6 @@ def run_chat_with_web(engine, prompt: str, *, max_rounds: int = _MAX_ROUNDS) -> 
     if parse_web_call(final) is not None:
         # The model kept trying to call a tool instead of answering - don't return a
         # raw tool-call block as the job's "answer".
-        return ("(Could not complete the web lookup within the round limit; the "
-                "search results gathered are above in the run log.)")
+        return ("(Could not complete the web lookup within the "
+                f"{max_rounds}-round limit.)")
     return final

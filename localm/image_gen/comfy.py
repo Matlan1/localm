@@ -154,6 +154,25 @@ def set_seed_on(node: dict, seed: int) -> None:
         inputs["noise_seed"] = seed
 
 
+def set_seed_on_all(workflow: dict, seed: int) -> int:
+    """Set the seed on EVERY sampler/noise node in the graph and return how many were
+    set. A multi-sampler graph (a two-stage Wan high/low-noise split, an SDXL refiner)
+    must get the seed on each stage, or a later stage stays on the template's fixed
+    seed - making "random" output partially deterministic. Only touches nodes that
+    actually declare a seed field (set_seed_on is a no-op otherwise)."""
+    n = 0
+    for node in workflow.values():
+        if not isinstance(node, dict):
+            continue
+        if node.get("class_type") in _SAMPLER_CLASSES or \
+                node.get("class_type") == "RandomNoise":
+            inputs = node.get("inputs")
+            if isinstance(inputs, dict) and ("seed" in inputs or "noise_seed" in inputs):
+                set_seed_on(node, seed)
+                n += 1
+    return n
+
+
 def next_node_id(workflow: dict) -> str:
     """A node id not already used by *workflow* (max numeric id + 1, else a stable
     name). Injected helper nodes (e.g. a LoadImage for img2img/img2video) use this
@@ -232,8 +251,15 @@ def _looks_like_model_files(options: list) -> bool:
 def _normalize_model_base(name: str) -> str:
     """A precision/quant-insensitive key for a model filename, so e.g.
     ``wan_5B_fp16.safetensors`` and ``wan_5B_fp8_scaled.safetensors`` share a base
-    and one can stand in for the other. Drops the extension and known precision /
-    quant tokens, keeping the descriptive tokens."""
+    and one can stand in for the other. Drops the extension and ONLY unambiguous
+    precision / quant markers (fp16/fp8/bf16/e4m3fn/scaled/qN...), keeping everything
+    else.
+
+    Crucially it does NOT drop bare digits or lone single letters: those are version
+    / variant discriminators (``wan2.1`` vs ``wan2.2``, ``model_s`` vs ``model_m``,
+    ``vae_1`` vs ``vae_2``) and collapsing them would merge genuinely different models
+    into one base and trigger a WRONG auto-substitution - the opposite of "a single
+    unambiguous precision variant"."""
     import re as _re
     n = name.lower().rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
     for ext in _MODEL_FILE_EXTS:
@@ -241,8 +267,7 @@ def _normalize_model_base(name: str) -> str:
             n = n[: -len(ext)]
             break
     drop = _re.compile(
-        r"^(fp8|fp16|fp32|bf16|f16|f32|e4m3fn|e5m2|scaled|default|"
-        r"q\d[0-9ksm_]*|k|m|s|[0-9])$")
+        r"^(fp8|fp16|fp32|f8|f16|f32|bf16|e\dm\d[a-z0-9]*|scaled|default|q\d+)$")
     kept = [t for t in _re.split(r"[^a-z0-9]+", n) if t and not drop.match(t)]
     return "".join(kept)
 
@@ -1215,12 +1240,7 @@ def generate_image(
     # 9. Set seed (use provided value or randomise) - on every noise/sampler
     # node, so workflows with more than one of them stay reproducible
     seed = seed if seed is not None else random.randint(1, 10 ** 12)
-    for node in workflow.values():
-        cls = node.get("class_type", "")
-        if cls in ("KSampler", "KSamplerAdvanced"):
-            node["inputs"]["seed"] = seed
-        elif cls == "RandomNoise":
-            node["inputs"]["noise_seed"] = seed
+    set_seed_on_all(workflow, seed)
 
     # 9a. Pre-submit model validation against ComfyUI /object_info. Confirms each
     # loader's model file exists (auto-substituting an unambiguous precision variant)

@@ -90,6 +90,22 @@ class TestResolver:
         assert shared._is_link("text") is False
         assert shared._is_link([1, 2, 3]) is False
 
+    def test_set_seed_on_all_covers_every_sampler(self):
+        # A two-stage graph (Wan high/low-noise, SDXL refiner): the seed must land on
+        # BOTH samplers, not just the first, or later stages stay deterministic.
+        wf = {
+            "a": {"class_type": "KSampler", "inputs": {"seed": 0}},
+            "b": {"class_type": "KSamplerAdvanced", "inputs": {"noise_seed": 0}},
+            "c": {"class_type": "RandomNoise", "inputs": {"noise_seed": 0}},
+            "d": {"class_type": "VAELoader", "inputs": {"vae_name": "x"}},
+        }
+        n = shared.set_seed_on_all(wf, 77)
+        assert n == 3
+        assert wf["a"]["inputs"]["seed"] == 77
+        assert wf["b"]["inputs"]["noise_seed"] == 77
+        assert wf["c"]["inputs"]["noise_seed"] == 77
+        assert "seed" not in wf["d"]["inputs"]          # non-sampler untouched
+
 
 class TestEndToEndRenumberedGraph:
     """generate_video drives a renumbered Wan graph correctly via role resolution."""
@@ -140,3 +156,78 @@ class TestEndToEndRenumberedGraph:
         assert wf["ks"]["inputs"]["cfg"] == 4.0
         assert wf["lat"]["inputs"]["length"] == 121
         assert wf["cv"]["inputs"]["fps"] == 24
+
+
+def _fake_video_urlopen(captured):
+    outputs = {"save": {"images": [
+        {"filename": "clip.mp4", "subfolder": "", "type": "output"}], "animated": [True]}}
+
+    def fake_urlopen(req, timeout=None):
+        url = req if isinstance(req, str) else req.full_url
+        m = MagicMock()
+        m.__enter__ = lambda s=m: s
+        m.__exit__ = MagicMock(return_value=False)
+        if "/object_info" in url:
+            m.read.return_value = b"{}"
+        elif "/prompt" in url:
+            captured["workflow"] = json.loads(req.data.decode())["prompt"]
+            m.read.return_value = b'{"prompt_id": "p1"}'
+        elif "/history/" in url:
+            m.read.return_value = json.dumps({"p1": {"outputs": outputs}}).encode()
+        elif "/view" in url:
+            m.read.return_value = b"FAKE-MP4"
+        else:
+            m.read.return_value = b"{}"
+        return m
+    return fake_urlopen
+
+
+class TestVideoRobustness:
+    def test_two_sampler_graph_seeds_every_stage(self, tmp_path):
+        """A two-stage graph must get the seed on BOTH samplers (regression: a fixed
+        template seed on the second stage made 'random' output partly deterministic)."""
+        from localm.video_gen import comfy as vcomfy
+        graph = dict(RENUMBERED_WAN)
+        # A second sampling stage that refines the first stage's latent.
+        graph["ks2"] = {"inputs": {"seed": 0, "steps": 30, "cfg": 5.0,
+                                   "sampler_name": "uni_pc", "scheduler": "simple",
+                                   "denoise": 0.5, "model": ["msd", 0],
+                                   "positive": ["pos", 0], "negative": ["neg", 0],
+                                   "latent_image": ["ks", 0]},
+                        "class_type": "KSampler"}
+        wf_file = tmp_path / "two_sampler.json"
+        wf_file.write_text(json.dumps(graph), encoding="utf-8")
+        captured = {}
+        with patch.object(vcomfy, "_workflow_path", return_value=wf_file), \
+             patch.object(vcomfy, "ensure_comfy", return_value=(True, "up")), \
+             patch.object(vcomfy, "_localm_unload"), \
+             patch.object(vcomfy.urllib.request, "urlopen", _fake_video_urlopen(captured)), \
+             patch.object(vcomfy.time, "sleep"):
+            ok, msg = vcomfy.generate_video("a fox", tmp_path / "out.mp4", seed=99)
+        assert ok, msg
+        wf = captured["workflow"]
+        assert wf["ks"]["inputs"]["seed"] == 99
+        assert wf["ks2"]["inputs"]["seed"] == 99      # the second stage too
+
+    def test_malformed_latent_node_returns_clean_error_not_crash(self, tmp_path):
+        """A user graph whose latent node has no inputs dict must return a clean
+        (False, msg), not raise KeyError - and must not unload the chat model."""
+        from localm.video_gen import comfy as vcomfy
+        bad = {
+            "lat": {"class_type": "Wan22ImageToVideoLatent"},   # no "inputs" key
+            "pos": {"class_type": "CLIPTextEncode", "inputs": {"text": ""}},
+            "neg": {"class_type": "CLIPTextEncode", "inputs": {"text": ""}},
+            "ks": {"class_type": "KSampler",
+                   "inputs": {"seed": 0, "positive": ["pos", 0],
+                              "negative": ["neg", 0], "latent_image": ["lat", 0]}},
+        }
+        wf_file = tmp_path / "bad.json"
+        wf_file.write_text(json.dumps(bad), encoding="utf-8")
+        unload = MagicMock()
+        with patch.object(vcomfy, "_workflow_path", return_value=wf_file), \
+             patch.object(vcomfy, "ensure_comfy", return_value=(True, "up")), \
+             patch.object(vcomfy, "_localm_unload", unload):
+            ok, msg = vcomfy.generate_video("a fox", tmp_path / "out.mp4")
+        assert ok is False
+        assert "inputs" in msg.lower()
+        unload.assert_not_called()

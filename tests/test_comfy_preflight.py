@@ -61,6 +61,27 @@ class TestComboHelpers:
         b = comfy._normalize_model_base("sd3.5_large.safetensors")
         assert a != b
 
+    def test_normalize_keeps_version_discriminators(self):
+        # Bare digits / lone letters are version/variant markers, NOT precision -
+        # they must keep genuinely different models apart (regression: these used to
+        # collapse and trigger a wrong cross-version substitution).
+        assert (comfy._normalize_model_base("wan2.1_ti2v_5B_fp16.safetensors")
+                != comfy._normalize_model_base("wan2.2_ti2v_5B_fp16.safetensors"))
+        assert (comfy._normalize_model_base("model_s.safetensors")
+                != comfy._normalize_model_base("model_m.safetensors"))
+        assert (comfy._normalize_model_base("vae_1.safetensors")
+                != comfy._normalize_model_base("vae_2.safetensors"))
+
+    def test_no_cross_version_substitution(self):
+        # Workflow wants Wan 2.2; only Wan 2.1 is installed -> NOT a precision variant,
+        # so it must be reported missing, never silently swapped to the other version.
+        wf = _wan_unet_workflow("wan2.2_ti2v_5B_fp16.safetensors")
+        info = _object_info(["wan2.1_ti2v_5B_fp16.safetensors"])
+        with patch.object(comfy, "comfy_object_info", return_value=info):
+            ok, msg = comfy.preflight_models(wf, "http://x")
+        assert not ok
+        assert wf["1"]["inputs"]["unet_name"] == "wan2.2_ti2v_5B_fp16.safetensors"
+
 
 class TestPreflight:
     def test_present_model_passes_unchanged(self):

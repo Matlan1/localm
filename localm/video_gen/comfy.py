@@ -44,7 +44,7 @@ from localm.image_gen.comfy import (
     next_node_id,
     preflight_models,
     resolve_sampler_roles,
-    set_seed_on,
+    set_seed_on_all,
 )
 
 # wan_workflow.json is the committed generic template (public Wan 2.2 5B
@@ -199,11 +199,15 @@ def generate_video(
     _, positive = roles["positive"]
     _, negative = roles["negative"]
     _, latent = roles["latent"]
-    if sampler is None or positive is None or latent is None:
+    sampler_inputs = sampler.get("inputs") if sampler else None
+    latent_inputs = latent.get("inputs") if latent else None
+    if (sampler is None or positive is None or latent is None
+            or not isinstance(sampler_inputs, dict)
+            or not isinstance(latent_inputs, dict)):
         return False, (
-            "The video workflow has no sampler / prompt / latent node localm can "
-            "drive. Export a Wan 2.2 workflow from ComfyUI (Save -> API format) and "
-            "select it on the Workflow panel (Settings -> Media -> Video).")
+            "The video workflow has no sampler / prompt / latent node (with inputs) "
+            "localm can drive. Export a Wan 2.2 workflow from ComfyUI (Save -> API "
+            "format) and select it on the Workflow panel (Settings -> Media -> Video).")
 
     # Positive prompt (the conditioning node feeding the sampler's positive input).
     if "text" in positive.get("inputs", {}):
@@ -214,17 +218,18 @@ def generate_video(
             and "text" in negative.get("inputs", {})):
         negative["inputs"]["text"] = negative_prompt
     # Video latent: frame count, then optional resolution.
-    latent["inputs"]["length"] = frames
+    latent_inputs["length"] = frames
     if width is not None:
-        latent["inputs"]["width"] = width
+        latent_inputs["width"] = width
     if height is not None:
-        latent["inputs"]["height"] = height
-    # Sampler knobs.
-    set_seed_on(sampler, seed)
+        latent_inputs["height"] = height
+    # Sampler knobs: the seed goes on EVERY sampler (a two-stage Wan high/low-noise
+    # graph has two), steps/cfg on the primary sampler driving this latent.
+    set_seed_on_all(workflow, seed)
     if steps is not None:
-        sampler["inputs"]["steps"] = steps
+        sampler_inputs["steps"] = steps
     if cfg is not None:
-        sampler["inputs"]["cfg"] = cfg
+        sampler_inputs["cfg"] = cfg
     # Output frame rate on the CreateVideo node, wherever it sits in the graph.
     _, create_video = find_node_by_class(workflow, "CreateVideo")
     if create_video is not None and "fps" in create_video.get("inputs", {}):
@@ -245,7 +250,7 @@ def generate_video(
             "inputs": {"image": uploaded_name, "upload": "image"},
             "class_type": "LoadImage",
         }
-        latent["inputs"]["start_image"] = [load_id, 0]
+        latent_inputs["start_image"] = [load_id, 0]
 
     # Pre-submit model validation: confirm the Wan model files exist (substituting
     # an unambiguous precision variant), failing EARLY with the exact missing file
