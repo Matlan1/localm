@@ -1123,6 +1123,9 @@ async function refreshCtxLimit() {
         localStorage.removeItem("localm.musicMoveDest");
         localStorage.removeItem("localm.videoMoveDest");
         localStorage.removeItem("localm.onboarded");
+        localStorage.removeItem("localm.webAccess");   // R34: no trace in privacy
+        localStorage.removeItem("localm.speakAloud");
+        webAskSession = null;                          // R27: forget the session choice
         const h = document.querySelector("#conversations h3");
         if (h && !document.getElementById("privacy-hint")) {
           const hint = document.createElement("div");
@@ -1134,9 +1137,27 @@ async function refreshCtxLimit() {
           h.after(hint);
         }
       }
+      hydrateChatToggles(cfg);   // R34: reflect saved choice / global net policy
     }
   } catch (e) { /* keep default */ }
 }
+
+// R34: the per-chat Web-access and Speak-aloud toggles used to reset to OFF on
+// every load, so the user had to re-enable them in every session. Reflect the
+// user's saved choice; for web, when there is no saved choice fall back to the
+// global net policy (net_mode=allow auto-enables web; ask/off leave it off so
+// consent still applies). Writes are gated on privacy mode (no traces there).
+function hydrateChatToggles(cfg) {
+  const webEl = $("p-web"), speakEl = $("p-speak");
+  if (!webEl || !speakEl) return;
+  const lsGet = (k) => { try { return localStorage.getItem(k); } catch (e) { return null; } };
+  const savedSpeak = chat.privacy ? null : lsGet("localm.speakAloud");
+  if (savedSpeak !== null) speakEl.checked = savedSpeak === "1";
+  const savedWeb = chat.privacy ? null : lsGet("localm.webAccess");
+  if (savedWeb !== null) webEl.checked = savedWeb === "1";
+  else if (cfg && cfg.net_mode === "allow") webEl.checked = true;
+}
+window.hydrateChatToggles = hydrateChatToggles;
 
 function saveConversations(changed) {
   if (chat.privacy) return;   // privacy mode: no traces, not even localStorage
@@ -2145,6 +2166,11 @@ function setupPerfCard() {
 
 const WEB_MAX_ROUNDS = 3;
 
+// R27: a remembered "don't ask again this session" choice. null = ask each time;
+// true = allow all this session; false = deny all this session. In-memory only
+// (so it resets on reload = a new session) and leaves no persisted trace.
+let webAskSession = null;
+
 // net_mode = ask means the GUI must APPROVE each model-initiated web request
 // before it runs (the settings promise: "ask = approve each request"). Read it
 // fresh from /v1/config so a change in Settings takes effect without a reload;
@@ -2168,6 +2194,8 @@ window.webModeIsAsk = webModeIsAsk;
 // suppressed in some PWA/mobile browsers, the NET-1 class of bug). Overridable
 // in tests.
 function confirmWebRequest(call) {
+  // R27: a remembered choice short-circuits the modal for the rest of the session.
+  if (webAskSession !== null) return Promise.resolve(webAskSession);
   return new Promise((resolve) => {
     const args = (call && call.args) || {};
     const target = args.query || args.url || "";
@@ -2175,11 +2203,27 @@ function confirmWebRequest(call) {
     openModal("Allow web access?", (body) => {
       body.appendChild(el("p", "", "The model wants to " + verb + " for:"));
       body.appendChild(el("p", "web-ask-target", target));
+      // R27: "don't ask again this session" - remember Allow/Deny so the popup
+      // does not fire on every model-initiated request for the rest of the session.
+      const remember = el("label", "web-ask-remember");
+      const cb = el("input");
+      cb.type = "checkbox";
+      remember.appendChild(cb);
+      remember.appendChild(document.createTextNode(" Don't ask again this session"));
+      body.appendChild(remember);
       const row = el("div", "actions");
       const deny = el("button", "btn-quiet", "Deny");
-      deny.onclick = () => { $("modal").style.display = "none"; resolve(false); };
+      deny.onclick = () => {
+        if (cb.checked) webAskSession = false;
+        $("modal").style.display = "none";
+        resolve(false);
+      };
       const allow = el("button", "btn-quiet btn-primary", "Allow");
-      allow.onclick = () => { $("modal").style.display = "none"; resolve(true); };
+      allow.onclick = () => {
+        if (cb.checked) webAskSession = true;
+        $("modal").style.display = "none";
+        resolve(true);
+      };
       row.appendChild(deny);
       row.appendChild(allow);
       body.appendChild(row);
@@ -3337,6 +3381,14 @@ $("chat-input").addEventListener("input", (e) => autoGrow(e.target));
 // and so keeps it armed, so this never fights itself.
 $("chat-messages").addEventListener("scroll", () => {
   chat.stick = nearBottom($("chat-messages"));
+});
+// R34: persist the Web-access and Speak-aloud toggles so they survive a reload
+// (privacy mode leaves no trace). hydrateChatToggles restores them on boot.
+$("p-web").addEventListener("change", () => {
+  if (!chat.privacy) { try { localStorage.setItem("localm.webAccess", $("p-web").checked ? "1" : "0"); } catch (e) { /* storage full/blocked */ } }
+});
+$("p-speak").addEventListener("change", () => {
+  if (!chat.privacy) { try { localStorage.setItem("localm.speakAloud", $("p-speak").checked ? "1" : "0"); } catch (e) { /* storage full/blocked */ } }
 });
 $("toggle-params").onclick = () => $("params").classList.toggle("open");
 $("export-conv").onclick = exportConversation;
