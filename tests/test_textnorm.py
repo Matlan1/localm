@@ -79,6 +79,40 @@ class TestSplitThink:
         assert r == ""
 
 
+class TestNativeReasoningTags:
+    """CHAT-2: native reasoning tags emitted WITHOUT a channel wrapper
+    (<reasoning>, <thinking>, <thought>, <reflection>) must normalise to canonical
+    <think> so the reasoning/content split routes them instead of leaking."""
+
+    def test_bare_reasoning_becomes_think(self):
+        assert scrub_text("<reasoning>why</reasoning>The answer.") == \
+            "<think>why</think>The answer."
+
+    def test_routed_into_reasoning_not_content(self):
+        c, r = split_think(scrub_text("<reasoning>secret</reasoning>Hello."))
+        assert c.strip() == "Hello."
+        assert r.strip() == "secret"
+
+    def test_all_aliases(self):
+        for tag in ("thinking", "thought", "reflection"):
+            assert scrub_text(f"<{tag}>r</{tag}>A") == "<think>r</think>A", tag
+
+    def test_case_insensitive(self):
+        assert scrub_text("<Reasoning>r</REASONING>A") == "<think>r</think>A"
+
+    def test_canonical_think_and_other_tags_untouched(self):
+        assert scrub_text("<think>r</think>A") == "<think>r</think>A"
+        assert scrub_text("<random>x</random>A") == "<random>x</random>A"
+
+    def test_streaming_split_tag_normalised(self):
+        # The bare tag fragmented across stream pieces still normalises + routes.
+        out = _scrub(["pre <reaso", "ning>why</reason", "ing> post"])
+        c, r = split_think(out)
+        assert r.strip() == "why"
+        assert "reaso" not in c and "reason" not in c
+        assert "pre" in c and "post" in c
+
+
 class TestSharedScrub:
     def test_gemma_channel_pair_becomes_think(self):
         text = "<|channel>thought\nhmm<channel|>Good morning!"

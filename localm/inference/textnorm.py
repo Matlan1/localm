@@ -35,6 +35,17 @@ _THINK_CLOSE_RE = re.compile(
     r"|<\|?\s*channel\s*\|?>final\n?(<\|?\s*message\s*\|?>)?"  # harmony final-channel switch
 )
 
+# Native reasoning tags some finetunes emit WITHOUT the harmony/Gemma channel
+# wrapper (e.g. a bare <reasoning>...</reasoning>, <thinking>, <thought>,
+# <reflection>). Without normalising these to canonical <think>...</think> they
+# escape the reasoning/content split and leak into the visible answer (CHAT-2).
+# "think" alone is excluded so the already-canonical <think>/</think> tags pass
+# through untouched (and stay idempotent).
+_THINK_BARE_OPEN_RE = re.compile(
+    r"<\s*(?:reasoning|thinking|thought|reflection)\s*>", re.IGNORECASE)
+_THINK_BARE_CLOSE_RE = re.compile(
+    r"<\s*/\s*(?:reasoning|thinking|thought|reflection)\s*>", re.IGNORECASE)
+
 _MARKER_RE = re.compile(
     r"<\|?\s*channel\s*\|?>"                                  # leftover channel tag
     r"|<\s*channel\s*\|>"                                     # leftover gemma4 close
@@ -59,6 +70,8 @@ def scrub_text(text: str) -> str:
     text = text.replace('<|"|>', '"')          # Gemma 4 quote token
     text = _THINK_OPEN_RE.sub("<think>\n", text)
     text = _THINK_CLOSE_RE.sub("\n</think>\n", text)
+    text = _THINK_BARE_OPEN_RE.sub("<think>", text)    # native <reasoning> etc.
+    text = _THINK_BARE_CLOSE_RE.sub("</think>", text)
     return _MARKER_RE.sub("", text)
 
 
