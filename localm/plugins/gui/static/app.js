@@ -1251,6 +1251,28 @@ function msgImages(m) {
     .map((p) => p.image_url?.url).filter(Boolean);
 }
 
+/** VIS-1: replace every user-attached image (a data: URI) in the conversation
+ *  with a short text note, so a model that rejected the image is never asked for
+ *  it again. Re-sending a rejected image 400s on every turn and wedges the chat
+ *  in endless empty assistant replies; dropping it keeps the chat usable.
+ *  Server-generated /api/ images are display-only (already mapped to text before
+ *  sending), so they are left alone. Returns the number of images dropped. */
+function stripUserImages(conv) {
+  let dropped = 0;
+  for (const m of conv.messages) {
+    if (m.role !== "user" || !Array.isArray(m.content)) continue;
+    const imgs = m.content.filter(
+      (p) => p.type === "image_url" && !p.image_url?.url?.startsWith("/api/"));
+    if (!imgs.length) continue;
+    dropped += imgs.length;
+    const text = m.content.filter((p) => p.type === "text")
+      .map((p) => p.text).join("");
+    m.content = (text ? text + "\n" : "") +
+      "[Image removed: this model cannot read images.]";
+  }
+  return dropped;
+}
+
 /* ---- conversation list: search, pin, folders ---- */
 
 const convUI = {
@@ -2954,11 +2976,17 @@ async function runCompletion(conv, webDepth = 0) {
   sendBtn.textContent = "■";
   chat.abort = new AbortController();
 
+  // VIS-1: did this request carry a user-attached image? If a text-only model
+  // rejects it (400), we must drop the image so the chat is not wedged.
+  const sentImage = messages.some((m) => Array.isArray(m.content) &&
+    m.content.some((p) => p.type === "image_url"));
+
   let full = "";
   let reasoning = "";   // H4: <think> reasoning now streams in delta.reasoning_content
   let usage = null;
   let finishReason = null;
   let aborted = false;
+  let visionRejected = false;
   try {
     const r = await fetch("/v1/chat/completions", {
       method: "POST",
@@ -2968,7 +2996,9 @@ async function runCompletion(conv, webDepth = 0) {
     });
     if (!r.ok) {
       const detail = await r.text();
-      throw new Error(`${r.status}: ${detail.slice(0, 300)}`);
+      const err = new Error(`${r.status}: ${detail.slice(0, 300)}`);
+      err.status = r.status;   // so the catch can recover an image-reject 400
+      throw err;
     }
     await readSSE(r, (payload) => {
       if (payload === "[DONE]") return;
@@ -2994,6 +3024,17 @@ async function runCompletion(conv, webDepth = 0) {
   } catch (e) {
     if (e.name === "AbortError") {
       aborted = true;
+    } else if (sentImage && e.status === 400 && !full.trim()) {
+      // VIS-1: a text-only model rejected the image. Drop it from history so the
+      // next turn is text-only and the chat stays usable, instead of re-sending
+      // the image every turn (which 400s forever -> all-blank assistant replies).
+      visionRejected = true;
+      const n = stripUserImages(conv);
+      saveConversations(conv);
+      toast(n
+        ? "This model cannot read images - removed the image. You can keep " +
+          "chatting (text only)."
+        : "Chat request failed: " + e.message, true);
     } else {
       renderMarkdown(liveBody, full + "\n\n*[error: " + e.message + "]*");
       toast("Chat request failed: " + e.message, true);
@@ -3007,6 +3048,15 @@ async function runCompletion(conv, webDepth = 0) {
   // User pressed Stop: leave the partial text on screen but do NOT persist it,
   // read it aloud, or fire the web loop / recurse on a partial reply (BUG-13).
   if (aborted) return;
+
+  // VIS-1: a vision reject (or any failure that streamed nothing) must NOT
+  // persist an empty assistant turn - a blank reply saved every send is the
+  // "every turn after the image is empty" wedge. Re-render from real history
+  // (which now has the image stripped) and stop here so the chat recovers.
+  if (visionRejected || (!full.trim() && !reasoning.trim())) {
+    renderChat();
+    return;
+  }
 
   // Persist content with <think> rebuilt (same shape as before this change), so
   // reload + splitThink re-render the collapsible block and TTS/visibleText are
