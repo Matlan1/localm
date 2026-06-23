@@ -178,6 +178,10 @@ def _stub_provision(monkeypatch):
         (target / lib).write_bytes(b"x")
     monkeypatch.setattr(sl, "_provision_backend", fake_provision)
     monkeypatch.setattr(sl, "_install_runtime_wheel", lambda pkg: True)
+    # Default to NON-interactive so the auto-fallback path is exercised
+    # deterministically regardless of the test host's stdin (the inform+offer
+    # tests below override this to True to drive the interactive prompt).
+    monkeypatch.setattr(sl.sys.stdin, "isatty", lambda: False)
 
 
 def test_fallback_chosen_loads_returns_chosen(monkeypatch, tmp_path):

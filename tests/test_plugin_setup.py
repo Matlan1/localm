@@ -107,6 +107,15 @@ def test_parse_plugin_selection_junk_yields_empty():
     assert _parse_plugin_selection("5-2", avail) == []   # reversed = empty
 
 
+def test_parse_plugin_selection_exotic_unicode_digit_no_crash():
+    """A pasted exotic 'digit' (str.isdigit() True but int() rejects, e.g. the
+    superscripts in 'b2-3') must be flagged and skipped, not crash the range
+    branch. Guards the isdecimal (not isdigit) gate."""
+    from localm.cli import _parse_plugin_selection
+    avail = _available()
+    assert _parse_plugin_selection("²-³", avail) == []   # superscript 2-3
+
+
 def test_interactive_reprompts_on_junk_then_installs(home_env, monkeypatch):
     """SETUP-3: typing 'ewew' must NOT silently leave zero plugins - the prompt
     re-asks, and a valid follow-up entry installs. Driven by calling the command

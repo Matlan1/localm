@@ -2366,8 +2366,10 @@ def _parse_plugin_selection(raw, available):
             out.append(by_idx[t])
         elif t in names:
             out.append(t)
-        elif t.count("-") == 1 and all(p.strip().isdigit() for p in t.split("-")):
+        elif t.count("-") == 1 and all(p.strip().isdecimal() for p in t.split("-")):
             # A numeric range like "2-5": expand to the valid indices it covers.
+            # isdecimal (not isdigit) so an exotic Unicode digit that int() would
+            # reject never slips through and raises here.
             lo, hi = (int(p) for p in t.split("-"))
             matched = [by_idx[str(n)] for n in range(lo, hi + 1) if str(n) in by_idx]
             if matched:
