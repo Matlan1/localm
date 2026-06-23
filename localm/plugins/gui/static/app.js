@@ -1030,6 +1030,7 @@ const chat = {
   ctxMax: 16384,     // context ceiling - refreshed from /v1/config
   privacy: false,    // server in privacy mode → conversations not persisted
   persist: false,    // non-privacy: conversations sync to the server store
+  stick: true,       // R31: follow the stream to the bottom until the user scrolls up
 };
 
 // Conversation compaction mirrors localm/inference/compact.py:
@@ -1657,7 +1658,10 @@ function renderChat() {
       label: tag ? NOTE_LABELS[tag] : undefined,
     });
   });
-  box.scrollTop = box.scrollHeight;
+  // R31: only re-pin to the bottom when the user has not scrolled up. This tail
+  // runs on every re-render (incl mid-stream web/finalize), so an unconditional
+  // scroll here used to yank a reader back down while a reply was still streaming.
+  if (chat.stick) box.scrollTop = box.scrollHeight;
 }
 
 /* ---- message branching ----
@@ -2969,6 +2973,7 @@ async function runCompletion(conv, webDepth = 0) {
 
   const box = $("chat-messages");
   const { body: liveBody } = addMessageRow(box, "assistant", "");
+  chat.stick = true;   // R31: a fresh send re-arms autoscroll (follow the reply)
   box.scrollTop = box.scrollHeight;
 
   const sendBtn = $("chat-send");
@@ -3012,13 +3017,15 @@ async function runCompletion(conv, webDepth = 0) {
       if (cDelta || rDelta) {
         full += cDelta;
         reasoning += rDelta;
-        const stick = nearBottom(box);
         // Rebuild <think> from the reasoning stream so splitThink renders the
         // collapsible block exactly as before. Back-compat: an older server that
         // still inlines <think> in content also renders (reasoning stays empty).
         renderMarkdown(liveBody,
           reasoning ? "<think>\n" + reasoning + "\n</think>\n" + full : full);
-        if (stick) box.scrollTop = box.scrollHeight;
+        // R31: follow the stream ONLY while the user is at the bottom. chat.stick
+        // is latched by the scroll listener, so scrolling up reliably pauses
+        // autoscroll (recomputing nearBottom per token fought the user instead).
+        if (chat.stick) box.scrollTop = box.scrollHeight;
       }
     });
   } catch (e) {
@@ -3271,6 +3278,13 @@ function composerEnterToSend(e, send) {
 
 $("chat-input").addEventListener("keydown", (e) => composerEnterToSend(e, sendChat));
 $("chat-input").addEventListener("input", (e) => autoGrow(e.target));
+// R31: latch autoscroll on the user's actual scroll position. Scrolling up sets
+// chat.stick=false (the streaming loop then leaves the viewport alone); returning
+// to the bottom re-arms it. A programmatic scroll-to-bottom lands near the bottom
+// and so keeps it armed, so this never fights itself.
+$("chat-messages").addEventListener("scroll", () => {
+  chat.stick = nearBottom($("chat-messages"));
+});
 $("toggle-params").onclick = () => $("params").classList.toggle("open");
 $("export-conv").onclick = exportConversation;
 $("compact-conv").onclick = async () => {
