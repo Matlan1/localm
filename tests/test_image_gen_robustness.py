@@ -140,6 +140,9 @@ class TestSidecarContent:
 
         responses = {
             "/system_stats": b"{}",
+            # Preflight fetches /object_info; an empty map makes it a graceful
+            # no-op (nothing to validate), so the happy path is unaffected.
+            "/object_info": b"{}",
             "/prompt": b'{"prompt_id": "p1"}',
             "/history/p1": json.dumps({
                 "p1": {"outputs": {"9": {"images": [

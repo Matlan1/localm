@@ -34,15 +34,25 @@ from localm.plugins.builtin.jobs.store import Job
 
 def run_job(job: Job, *, engine=None) -> dict:
     """Run *job* and return a result record. Dispatches on task_kind and never
-    raises."""
+    raises.
+
+    When no *engine* is passed for a chat/memory job, the runner loads one itself and
+    UNLOADS it again afterwards, so a sequence of headless runs (a scheduler tick with
+    no host model, or a CLI run) does not stack model loads in VRAM (U-4). An engine
+    passed in by the live server (the host's shared model) is never unloaded here."""
     started = time.time()
+    owned_engine = None
     try:
+        eng = engine
+        if job.task_kind in ("chat", "memory") and eng is None:
+            eng = _load_engine(job.model)   # may raise (model not found) -> caught below
+            owned_engine = eng              # we loaded it, so we unload it after the run
         if job.task_kind == "chat":
-            output = _run_chat(job, engine=engine)
+            output = _run_chat(job, engine=eng)
         elif job.task_kind == "coder":
             output = _run_coder(job, engine=engine)
         elif job.task_kind == "memory":
-            output = _run_memory(job, engine=engine)
+            output = _run_memory(job, engine=eng)
         else:
             raise ValueError(f"unknown task_kind: {job.task_kind!r}")
         return {
@@ -66,6 +76,22 @@ def run_job(job: Job, *, engine=None) -> dict:
             "started": started,
             "finished": time.time(),
         }
+    finally:
+        if owned_engine is not None:
+            _unload_engine(owned_engine)
+
+
+def _unload_engine(eng) -> None:
+    """Release a model the runner loaded itself, freeing VRAM for the next run.
+    Best-effort, but a failure is surfaced (not silenced): a leaked model would
+    accumulate across scheduled runs while the job still reported success."""
+    unload = getattr(eng, "unload", None)
+    if not callable(unload):
+        return
+    try:
+        unload()
+    except Exception as e:
+        logger.warning("jobs: failed to unload the run's own engine: %s", e)
 
 
 # --------------------------------------------------------------------------- #
@@ -75,18 +101,18 @@ def run_job(job: Job, *, engine=None) -> dict:
 def _run_chat(job: Job, *, engine=None) -> str:
     """Run the prompt through the inference engine and return the reply text.
 
-    The chat path leaves no session trace of its own (no audit/transcript
-    writes here), so it is privacy-safe regardless of mode; the explicit result
-    is saved by the store like any other generated artifact."""
-    eng = engine if engine is not None else _load_engine(job.model)
+    Scheduled chat jobs get the same web-search tool the interactive chat has, so a
+    web-lookup job no longer answers "I have no real-time access" (U-3); the bounded
+    tool loop and the net_mode gating live in :mod:`webtool`. The chat path leaves no
+    session trace of its own (no audit/transcript writes here), so it is privacy-safe
+    regardless of mode; the explicit result is saved by the store like any other
+    generated artifact."""
+    eng = engine
     if eng is None:
         raise RuntimeError(
             "no inference engine available (pass one, or register a model)")
-    messages = [{"role": "user", "content": job.prompt}]
-    pieces = []
-    for tok in eng.chat_stream(messages):
-        pieces.append(tok)
-    return "".join(pieces).strip()
+    from localm.plugins.builtin.jobs import webtool
+    return webtool.run_chat_with_web(eng, job.prompt)
 
 
 def _load_engine(model: Optional[str]):
@@ -126,7 +152,7 @@ def _run_memory(job: Job, *, engine=None) -> str:
     skips with a clear status in privacy mode, never a silent success). Returns a
     human-readable summary saved as the job result."""
     from localm.plugins.builtin.chat.plug import synthesize_memory
-    eng = engine if engine is not None else _load_engine(job.model)
+    eng = engine
     if eng is None:
         raise RuntimeError(
             "no inference engine available (pass one, or register a model)")
