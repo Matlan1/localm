@@ -1431,12 +1431,14 @@ async def _stream_sse(
             for token in engine.chat_stream(messages, **gen_kwargs):
                 loop.call_soon_threadsafe(token_queue.put_nowait, token)
         except Exception as e:
-            # Log it (debug log included) and surface it to the client -
-            # a silent thread death looks like an empty reply.
+            # Log it (with full traceback, to the debug log) and surface it to the
+            # client - a silent thread death looks like an empty reply. We deliberately
+            # do NOT traceback.print_exc() here: _dbg.exception already records the
+            # trace, and an expected condition (e.g. the conversation outgrew n_ctx_max)
+            # should reach the user as a clean message, not a raw console traceback.
+            # Printing it was also the historical WinError-6 crash source on Windows.
             from localm.debuglog import logger as _dbg
             _dbg.exception("generation thread failed")
-            import traceback
-            traceback.print_exc()
             loop.call_soon_threadsafe(
                 token_queue.put_nowait, RuntimeError(str(e)))
         finally:
@@ -1529,12 +1531,20 @@ async def _stream_sse_completion(
     prompt_tokens = engine.count_tokens(_messages_prompt_text(messages))
 
     loop = asyncio.get_running_loop()
-    token_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    token_queue: asyncio.Queue = asyncio.Queue()
 
     def _generate():
         try:
             for token in engine.chat_stream(messages, **gen_kwargs):
                 loop.call_soon_threadsafe(token_queue.put_nowait, token)
+        except Exception as e:
+            # Surface an inference failure to the client instead of letting this
+            # daemon thread die - an uncaught thread death fires a crash report and
+            # looks to the user like an empty reply. _dbg.exception logs the full
+            # trace to the debug log (same contract as the chat-completions path).
+            from localm.debuglog import logger as _dbg
+            _dbg.exception("completion generation thread failed")
+            loop.call_soon_threadsafe(token_queue.put_nowait, RuntimeError(str(e)))
         finally:
             loop.call_soon_threadsafe(token_queue.put_nowait, None)
 
@@ -1547,10 +1557,14 @@ async def _stream_sse_completion(
         t.start()
 
         completion_parts: list[str] = []
+        gen_error: Exception | None = None
         while True:
             token = await token_queue.get()
             if token is None:
                 break
+            if isinstance(token, Exception):
+                gen_error = token
+                continue
             if first_token_at is None:
                 first_token_at = time.perf_counter()
             # Stream hook transforms each piece before it is recorded and sent,
@@ -1567,6 +1581,15 @@ async def _stream_sse_completion(
 
         t.join()
         gen_elapsed = time.perf_counter() - gen_start
+
+    if gen_error is not None:
+        err = {
+            "id": chunk_id, "object": "text_completion.chunk",
+            "created": ts, "model": model_id,
+            "choices": [{"text": f"\n[inference error: {gen_error}]",
+                         "index": 0, "finish_reason": None}],
+        }
+        yield f"data: {json.dumps(err)}\n\n"
 
     streamed = "".join(completion_parts)
     # Outlet shapes only the recorded reply (the live stream already went out);
