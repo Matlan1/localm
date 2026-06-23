@@ -22,8 +22,10 @@ log file path so every process in the tree appends to the same file.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Optional
@@ -44,15 +46,71 @@ def uvicorn_log_level() -> str:
     return "info" if debug_enabled() else "warning"
 
 
+def _stable_console_stream():
+    """A private duplicate of the current stderr, taken once, so the console
+    mirror is immune to the OS-level fd-2 redirection the llama.cpp backend uses
+    to silence native model output (``_quiet_stderr`` / ``_capture_stderr`` in
+    inference/backends/llamacpp/llama.py dup2 a file over fd 2 around every model
+    load and every generation).
+
+    The mirror writes through stderr. Without this isolation it writes through
+    fd 2 *while that fd is being juggled*, which on Windows raises
+    "OSError: [WinError 6] The handle is invalid" on nearly every log line during
+    those windows (LOG-1) - flooding the console and burying real errors.
+    Duplicating the fd once keeps the mirror pointed at the original console no
+    matter what later happens to fd 2.
+
+    This only changes WHERE the mirror writes; it never drops a record. Every
+    record is ALSO written by the file handler unconditionally, so no log line,
+    and in particular no error, is silenced by this path. Returns None when
+    stderr has no duplicable fd (e.g. a fully detached process); the caller then
+    falls back to the live stream rather than losing the mirror.
+    """
+    stream = sys.stderr
+    try:
+        fd = stream.fileno()
+    except (AttributeError, OSError, ValueError):
+        return None
+    try:
+        dup_fd = os.dup(fd)
+    except OSError:
+        return None
+    try:
+        return os.fdopen(
+            dup_fd, "w", buffering=1,
+            encoding=getattr(stream, "encoding", None) or "utf-8",
+            errors="backslashreplace", closefd=True)
+    except OSError:
+        # Cleanup of OUR OWN just-created descriptor on a construction failure -
+        # this suppresses nothing of the application's; it only avoids leaking
+        # the dup when fdopen itself fails. The caller falls back to live stderr.
+        with contextlib.suppress(OSError):
+            os.close(dup_fd)
+        return None
+
+
 def _add_console_handler() -> None:
     """Mirror debug logs to the server console (stderr), so a --debug run shows
     activity live in the window instead of only in the log file (SRV-5).
     Idempotent: a real (non-file) StreamHandler is added at most once. A
-    FileHandler is a StreamHandler subclass, so it is explicitly excluded."""
+    FileHandler is a StreamHandler subclass, so it is explicitly excluded.
+
+    The stream is a private duplicate of stderr (see ``_stable_console_stream``)
+    so the mirror is NOT disrupted by the fd-2 redirection that silences native
+    llama.cpp output - the cause of the LOG-1 "[WinError 6] The handle is
+    invalid" log flood. The mirror never swallows a record either way: the file
+    handler always carries every line, so nothing is hidden if a console write
+    ever does fail (logging then reports that failure loudly, as before)."""
     for h in logger.handlers:
         if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
             return
-    handler = logging.StreamHandler()
+    stream = _stable_console_stream()
+    if stream is None:
+        # No duplicable stderr fd (e.g. a detached process): fall back to the
+        # live stream. No worse than before, and the file handler still carries
+        # every record - this fallback never silences anything.
+        stream = sys.stderr
+    handler = logging.StreamHandler(stream)
     handler.setFormatter(logging.Formatter("%(levelname)-7s %(name)s: %(message)s"))
     logger.addHandler(handler)
 

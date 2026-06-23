@@ -3,6 +3,10 @@
 stderr and raise uvicorn's log level - not just write to a file."""
 
 import logging
+import os
+import sys
+
+import pytest
 
 from localm import debuglog
 
@@ -31,3 +35,42 @@ def test_console_handler_added_once():
         assert len(_console_handlers()) == 1   # idempotent, not stacked
     finally:
         debuglog.logger.handlers = saved
+
+
+def test_console_stream_is_a_private_stderr_dup():
+    """LOG-1: the console mirror must write through a PRIVATE duplicate of
+    stderr, not fd 2 itself. Sharing fd 2 is what makes the native-stderr
+    redirection (_quiet_stderr/_capture_stderr dup2 over fd 2) raise
+    '[WinError 6] The handle is invalid' on Windows and flood the console.
+    A distinct fileno() proves the isolation."""
+    stream = debuglog._stable_console_stream()
+    if stream is None:
+        pytest.skip("stderr has no duplicable fd in this environment")
+    try:
+        assert stream.fileno() != sys.stderr.fileno()
+    finally:
+        stream.close()
+
+
+def test_console_stream_survives_fd_redirect(tmp_path, monkeypatch):
+    """LOG-1 regression: the mirror must keep writing WHILE its underlying fd is
+    redirected elsewhere (what _quiet_stderr/_capture_stderr do to fd 2 around a
+    model load / generation). Run against a stand-in stderr so the test never
+    touches the real fd 2 or pytest's own capture."""
+    standin = open(tmp_path / "stderr.txt", "w", encoding="utf-8")
+    monkeypatch.setattr(sys, "stderr", standin)
+    stream = debuglog._stable_console_stream()
+    assert stream is not None
+    assert stream.fileno() != standin.fileno()        # a genuine private dup
+    saved = os.dup(standin.fileno())
+    other = open(tmp_path / "other.txt", "w", encoding="utf-8")
+    try:
+        os.dup2(other.fileno(), standin.fileno())     # redirect the fd, as the backend does
+        stream.write("mirror-still-alive\n")          # must NOT raise (private dup)
+        stream.flush()
+    finally:
+        os.dup2(saved, standin.fileno())
+        os.close(saved)
+        other.close()
+        stream.close()
+        standin.close()
