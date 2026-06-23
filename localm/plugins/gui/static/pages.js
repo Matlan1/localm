@@ -1134,6 +1134,16 @@ function buildSettingControl(field) {
   // above does not fire these events, so building a control stays clean).
   input.addEventListener("input", () => markSettingDirty(input));
   input.addEventListener("change", () => markSettingDirty(input));
+  // R11: set this control's value (used by the media "Copy from" prefill). Mirrors
+  // each widget's read() format, drops the greyed auto-detect look, and fires
+  // change so the dirty tracker (R10) and the per-field save diff both see it.
+  const write = (v) => {
+    if (input.type === "checkbox") input.checked = !!v;
+    else if (Array.isArray(v)) input.value = v.join(", ");
+    else input.value = v == null ? "" : String(v);
+    input.classList.remove("auto-detected");
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  };
   // FOLDER / PATH fields get a "Browse..." button wired to the existing
   // directory picker, so the user does not have to type a path by hand (U10).
   if (field.widget === "folder" || field.widget === "path") {
@@ -1153,7 +1163,7 @@ function buildSettingControl(field) {
     wrap.appendChild(input);
   }
   if (field.help) wrap.appendChild(el("div", "sub", field.help));
-  return { field, node: wrap, read };
+  return { field, node: wrap, read, write };
 }
 
 // Fetch the server-rendered key QR (owner-scope) and show the "Pair a phone"
@@ -1696,38 +1706,102 @@ async function buildMediaSection(form) {
     "ComfyUI settings for image, music, and video, each configured "
     + "independently. A blank field uses the shared default."));
 
+  // R11/R12: register every subsection's node + label first (empty), so that when
+  // we render each, its "Copy from <other>" buttons can see the other subsections,
+  // and a later single-subsection re-render (R12) can find its node.
+  _mediaSubs = {};
+  _mediaControls = {};
   for (const name of MEDIA_PLUGIN_ORDER) {
     const p = byName[name];
     if (!p) continue;
     const sub = el("div", "media-subsection");
-    sub.appendChild(el("h4", "media-sub-head", p.label));
-    const grid = el("div", "settings-fields");
-    const controls = [];
-    for (const f of (p.fields || [])) {
-      const ctrl = buildSettingControl({
-        key: f.key, widget: f.widget, label: f.label, help: f.help,
-        default: f.value, options: f.options,
-      });
-      if (!ctrl) continue;
-      ctrl.orig = f.value;
-      if (!f.is_override) ctrl.node.classList.add("media-inherited");
-      controls.push(ctrl);
-      grid.appendChild(ctrl.node);
-    }
-    sub.appendChild(grid);
-    const actions = el("div", "actions");
-    const save = el("button", "btn-primary", "Save " + p.label);
-    save.onclick = () => saveMediaPlugin(p.plugin, controls);
-    actions.appendChild(save);
-    sub.appendChild(actions);
+    sub.dataset.plugin = name;
+    _mediaSubs[name] = { sub, label: p.label, fields: p.fields || [] };
     panel.appendChild(sub);
+  }
+  for (const name of MEDIA_PLUGIN_ORDER) {
+    if (_mediaSubs[name]) renderMediaSubsection(name);
   }
   form.appendChild(panel);
 }
 
+// R11/R12: live media subsection registry, so we can re-render just the saved one
+// (R12) and prefill fields between subsections client-side (R11).
+let _mediaSubs = {};        // name -> { sub: <div.media-subsection>, label, fields }
+let _mediaControls = {};    // name -> controls[] (each {field,node,read,write,orig})
+
+/** (Re)build one media subsection's body in place (head + grid + Copy-from + Save)
+ *  from its registered fields. Used for the initial build and the R12 single-
+ *  subsection re-render after a save. */
+function renderMediaSubsection(name) {
+  const entry = _mediaSubs[name];
+  if (!entry) return;
+  const { sub, label, fields } = entry;
+  sub.replaceChildren();
+  sub.appendChild(el("h4", "media-sub-head", label));
+  const grid = el("div", "settings-fields");
+  const controls = [];
+  for (const f of (fields || [])) {
+    const ctrl = buildSettingControl({
+      key: f.key, widget: f.widget, label: f.label, help: f.help,
+      default: f.value, options: f.options,
+    });
+    if (!ctrl) continue;
+    ctrl.orig = f.value;
+    if (!f.is_override) ctrl.node.classList.add("media-inherited");
+    controls.push(ctrl);
+    grid.appendChild(ctrl.node);
+  }
+  _mediaControls[name] = controls;
+  sub.appendChild(grid);
+
+  const actions = el("div", "actions");
+  // R11/R13: client-side "Copy from <other>" - prefills this subsection's shared
+  // fields from another subsection's CURRENT in-DOM values. It is a one-shot
+  // SNAPSHOT copy (reads the source once on click, writes here), with NO live
+  // binding between subsections, so an A->B then B->A sequence cannot loop. Never
+  // shown on the subsection's own row (no self-copy).
+  for (const other of MEDIA_PLUGIN_ORDER) {
+    if (other === name || !_mediaSubs[other]) continue;
+    const copy = el("button", "btn-secondary media-copy-from",
+                    "Copy from " + _mediaSubs[other].label);
+    copy.type = "button";
+    copy.dataset.from = other;
+    copy.onclick = () => copyMediaFields(other, name);
+    actions.appendChild(copy);
+  }
+  const save = el("button", "btn-primary media-save", "Save " + label);
+  save.onclick = () => saveMediaPlugin(name);
+  actions.appendChild(save);
+  sub.appendChild(actions);
+}
+
+/** R11: prefill the *to* subsection's shared fields from the *from* subsection's
+ *  current in-DOM values. Prefill only (no server call); the user still presses
+ *  Save. Only fields present in BOTH subsections are copied. */
+function copyMediaFields(from, to) {
+  const src = _mediaControls[from] || [];
+  const dst = _mediaControls[to] || [];
+  const byKey = {};
+  for (const c of src) byKey[c.field.key] = c;
+  let n = 0;
+  for (const c of dst) {
+    const s = byKey[c.field.key];
+    if (!s || !c.write) continue;     // only fields both subsections have
+    c.write(s.read());
+    c.node.classList.remove("media-inherited");
+    n += 1;
+  }
+  const label = (_mediaSubs[from] || {}).label || from;
+  toast(n ? `Copied ${n} field${n > 1 ? "s" : ""} from ${label} - review, then Save`
+          : "No shared fields to copy", !n);
+}
+
 /** Save one media plugin's block: POST only the fields the user changed (so an
- *  untouched inherited field is not pinned), then re-render. */
-async function saveMediaPlugin(name, controls) {
+ *  untouched inherited field is not pinned), then re-render JUST this subsection
+ *  (R12) so unsaved edits in the other subsections are preserved. */
+async function saveMediaPlugin(name) {
+  const controls = _mediaControls[name] || [];
   const updates = {};
   for (const c of controls) {
     const cur = c.read();
@@ -1740,7 +1814,14 @@ async function saveMediaPlugin(name, controls) {
   const data = await r.json().catch(() => ({}));
   if (r.ok) {
     toast("Saved");
-    refreshSettingsPage();
+    // R12: re-render ONLY this subsection from the server's normalised fields. A
+    // full refreshSettingsPage() here wiped unsaved edits in the other two.
+    if (data && Array.isArray(data.fields) && _mediaSubs[name]) {
+      _mediaSubs[name].fields = data.fields;
+      renderMediaSubsection(name);
+    } else {
+      refreshSettingsPage();   // fallback if the response shape is unexpected
+    }
   } else {
     toast(data.detail || "Save failed", true);
   }
