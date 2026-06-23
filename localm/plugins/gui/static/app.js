@@ -525,11 +525,24 @@ function _applyActiveClasses(name) {
   }
 }
 
+/** R09/R10: is the Settings view currently the active one? */
+function isSettingsView() {
+  const v = document.querySelector(".view.active");
+  return !!v && v.id === "view-settings";
+}
+window.isSettingsView = isSettingsView;
+
 function showView(name) {
   // Fall back to chat for an unknown name OR a view whose section is gone
   // (e.g. a remembered tab whose plugin was since uninstalled). Tolerating a
   // missing nav/view element is what lets the nav rail be rebuilt at runtime.
   if (!$("view-" + name)) name = "chat";
+  // R10: leaving Settings with unsaved edits warns first (returning to Settings
+  // re-renders the form from server state, so the edits would be silently lost).
+  if (name !== "settings" && isSettingsView() &&
+      window.settingsDirty && window.settingsDirty()) {
+    if (!confirm("You have unsaved settings changes. Leave without saving?")) return;
+  }
   _applyActiveClasses(name);
   // Remembered across reloads - but never in privacy mode (no traces).
   if (!chat.privacy) localStorage.setItem("localm.activeView", name);
@@ -2120,6 +2133,15 @@ document.addEventListener("keydown", (e) => {
     cmdkIsOpen() ? closeCommandPalette() : openCommandPalette();
     return;
   }
+  // R09: Ctrl/Cmd+S saves the active Settings section. Only on the Settings page,
+  // so every other view keeps the browser's native "Save page".
+  if ((e.ctrlKey || e.metaKey) && (e.key === "s" || e.key === "S")) {
+    if (isSettingsView()) {
+      e.preventDefault();
+      if (window.saveActiveSettingsSection) window.saveActiveSettingsSection();
+    }
+    return;
+  }
   if (!cmdkIsOpen()) return;
   if (e.key === "Escape") { e.preventDefault(); closeCommandPalette(); }
   else if (e.key === "ArrowDown") {
@@ -2130,6 +2152,16 @@ document.addEventListener("keydown", (e) => {
     renderCmdk($("cmdk-input").value);
   } else if (e.key === "Enter") {
     e.preventDefault(); runCmdk(_cmdkSel);
+  }
+});
+
+// R10: the browser's native unsaved-changes prompt on tab close / reload while
+// Settings has unsaved edits. An empty returnValue is what triggers it; browsers
+// ignore any custom message, so we set none.
+window.addEventListener("beforeunload", (e) => {
+  if (window.settingsDirty && window.settingsDirty()) {
+    e.preventDefault();
+    e.returnValue = "";
   }
 });
 

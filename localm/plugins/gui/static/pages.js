@@ -1007,6 +1007,35 @@ let _settingsRenderToken = 0;
 // re-renders so saving a section keeps you on it. Null = use the default tab.
 let _activeSettingsSection = null;
 
+// R10: track which setting inputs the user edited so we can warn before leaving
+// with unsaved changes. A control that is re-rendered (full settings refresh, or
+// the per-subsection media re-render in R12) disconnects its old node from the
+// DOM; the isConnected check below makes those stop counting, so the signal stays
+// honest without any per-save bookkeeping.
+const _dirtySettings = new Set();
+function markSettingDirty(input) { _dirtySettings.add(input); }
+function settingsDirty() {
+  for (const n of _dirtySettings) if (n.isConnected) return true;
+  return false;
+}
+window.settingsDirty = settingsDirty;
+
+/** R09: Ctrl+S on the Settings page saves the active section. Clicks the core
+ *  section's Save button, or (Media section) the first subsection's Save - reusing
+ *  all the existing save/validation logic. Returns true when it triggered a save. */
+function saveActiveSettingsSection() {
+  const content = $("settings-content");
+  if (!content) return false;
+  const active = content.querySelector(".settings-section.active:not(.sec-hidden)");
+  if (!active) return false;
+  const save = active.querySelector(".settings-section-save") ||
+               active.querySelector(".actions .btn-primary");
+  if (!save) return false;
+  save.click();
+  return true;
+}
+window.saveActiveSettingsSection = saveActiveSettingsSection;
+
 /** Build one labelled control for a schema field. Returns { field, read } or
  *  null for HIDDEN fields (never rendered). */
 function buildSettingControl(field) {
@@ -1101,6 +1130,10 @@ function buildSettingControl(field) {
     }
   }
   input.dataset.key = field.key;
+  // R10: editing any control marks the page dirty (programmatic value-setting
+  // above does not fire these events, so building a control stays clean).
+  input.addEventListener("input", () => markSettingDirty(input));
+  input.addEventListener("change", () => markSettingDirty(input));
   // FOLDER / PATH fields get a "Browse..." button wired to the existing
   // directory picker, so the user does not have to type a path by hand (U10).
   if (field.widget === "folder" || field.widget === "path") {
@@ -1541,6 +1574,7 @@ async function saveSettingsSection(secId) {
 
 async function refreshSettingsPage() {
   const myToken = ++_settingsRenderToken;
+  _dirtySettings.clear();   // R10: a fresh render is a clean baseline
   $("gui-api-key").value = "";   // HttpOnly key is unreadable; field is for entry only
   const form = $("config-form");
   let fields;
