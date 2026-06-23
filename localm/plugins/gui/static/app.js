@@ -1033,26 +1033,63 @@ const chat = {
   stick: true,       // R31: follow the stream to the bottom until the user scrolls up
 };
 
-// Conversation compaction mirrors localm/inference/compact.py:
-// summarise older turns at 70% of the ceiling, keep the last 4 verbatim,
-// hard-trim with a visible note when summarisation fails. Never blocks chat.
+// Conversation compaction mirrors localm/inference/compact.py: once the estimate
+// passes 70% of the ceiling, summarise the OLDEST turns and keep the recent ones
+// verbatim. R44: keep recent turns by token budget (not a flat last-4), feed the
+// summariser whole messages truncated at word boundaries with reasoning stripped,
+// and sanitise the returned summary so half-words / <think> never re-enter
+// context. Never blocks chat.
 const COMPACT_RATIO = 0.7;
-const COMPACT_KEEP = 4;
+const COMPACT_KEEP = 4;            // floor: always keep at least this many recent turns
+const COMPACT_TARGET = 0.5;        // R44: keep recent turns verbatim up to ~50% of the ceiling
+
+/** R44: rough token estimate - ~4 chars/token plus a small per-message overhead
+ *  for the role and delimiters. Coarse, but less skewed than a bare length/4. */
+function estimateTokens(text) {
+  return Math.ceil((text || "").length / 4) + 4;
+}
 
 function estimateConvTokens(conv) {
-  let total = Math.ceil(($("p-system").value || "").length / 4);
+  let total = estimateTokens($("p-system").value || "");
   for (const m of conv.messages) {
-    total += Math.ceil(msgText(m).length / 4) + msgImages(m).length * 750;
+    total += estimateTokens(msgText(m)) + msgImages(m).length * 750;
   }
   return total;
 }
 
+/** R44: truncate at a word boundary with an explicit marker, instead of a raw
+ *  mid-word slice that fed half-words (e.g. "REA") into the summariser. */
+function truncateAtWord(text, max) {
+  if (!text || text.length <= max) return text || "";
+  const cut = text.slice(0, max);
+  const sp = cut.lastIndexOf(" ");
+  return (sp > max * 0.6 ? cut.slice(0, sp) : cut).trimEnd() + " ...[truncated]";
+}
+
 async function compactConversation(conv) {
   if (conv.messages.length <= COMPACT_KEEP) return false;
-  const older = conv.messages.slice(0, -COMPACT_KEEP);
-  const recent = conv.messages.slice(-COMPACT_KEEP);
+  // R44: keep as many of the most-recent turns verbatim as fit in COMPACT_TARGET
+  // of the ceiling (at least COMPACT_KEEP), summarising only what is older -
+  // instead of always discarding everything but the last 4 turns.
+  const budget = (chat.ctxMax && chat.ctxMax > 0) ? COMPACT_TARGET * chat.ctxMax : 0;
+  let keepCount = 0, used = 0;
+  for (let i = conv.messages.length - 1; i >= 0; i--) {
+    const t = estimateTokens(msgText(conv.messages[i])) +
+              msgImages(conv.messages[i]).length * 750;
+    const overBudget = budget > 0 ? (used + t > budget) : true;
+    if (keepCount >= COMPACT_KEEP && overBudget) break;
+    used += t;
+    keepCount++;
+  }
+  keepCount = Math.max(COMPACT_KEEP, Math.min(keepCount, conv.messages.length - 1));
+  const older = conv.messages.slice(0, -keepCount);
+  const recent = conv.messages.slice(-keepCount);
+  if (!older.length) return false;
+
+  // R44: feed whole messages truncated at a word boundary, with reasoning blocks
+  // stripped, so the summariser never sees half-words or display-only <think>.
   const excerpt = older.map((m) =>
-    `${m.role.toUpperCase()}: ${msgText(m).slice(0, 600)}`).join("\n\n");
+    `${m.role.toUpperCase()}: ${truncateAtWord(stripThink(msgText(m)), 1200)}`).join("\n\n");
 
   let summary = "";
   try {
@@ -1076,13 +1113,16 @@ async function compactConversation(conv) {
       const data = await r.json();
       summary = (data.choices?.[0]?.message?.content || "").trim();
     }
-  } catch (e) { /* summarisation unavailable - hard trim below */ }
+  } catch (e) { /* summarisation unavailable - fall back to a note below */ }
+  // R44: sanitise the summary so leaked <think>/markers never re-enter context.
+  summary = stripThink(scrubMarkers(summary)).trim();
 
   const bridge = summary
     ? [{ role: "user", content: "[Conversation summary]\n" + summary },
        { role: "assistant", content: "Understood. Continuing from this summary." }]
     : [{ role: "user", content:
-         "[Earlier conversation was removed to fit the context window.]" },
+         "[Earlier conversation was trimmed to fit the context window; " +
+         "the recent messages below are intact.]" },
        { role: "assistant", content: "Understood." }];
 
   conv.messages = [...bridge, ...recent];
