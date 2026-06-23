@@ -73,3 +73,59 @@ def test_setup_unknown_name_is_skipped_not_fatal(home_env):
     inst = _installed()
     assert "web" in inst
     assert "bogusplugin" not in inst
+
+
+# --------------------------------------------------------------------------- #
+# R21 / SETUP-3: the interactive prompt parses ranges, de-dups, and re-asks on  #
+# an all-junk entry (never silently leaves zero plugins). Blank still skips.    #
+# --------------------------------------------------------------------------- #
+
+def _available():
+    from localm.plugins import catalog
+    return [e for e in catalog.CATALOG if not e.preinstalled]
+
+
+def test_parse_plugin_selection_expands_range_and_dedups():
+    from localm.cli import _parse_plugin_selection
+    avail = _available()
+    names = [e.name for e in avail]
+    assert _parse_plugin_selection("1-3", avail) == names[:3]
+    # an explicit number overlapping a range is de-duplicated, order preserved
+    assert _parse_plugin_selection("1,1-2", avail) == names[:2]
+    # mixed names + range
+    assert _parse_plugin_selection(f"{names[0]},2-3", avail) == names[:3]
+
+
+def test_parse_plugin_selection_junk_yields_empty():
+    """Pure junk (e.g. 'ewew') and an out-of-range range both parse to nothing,
+    which is what makes the interactive caller re-prompt instead of installing
+    zero plugins."""
+    from localm.cli import _parse_plugin_selection
+    avail = _available()
+    assert _parse_plugin_selection("ewew", avail) == []
+    assert _parse_plugin_selection("99-100", avail) == []
+    assert _parse_plugin_selection("5-2", avail) == []   # reversed = empty
+
+
+def test_interactive_reprompts_on_junk_then_installs(home_env, monkeypatch):
+    """SETUP-3: typing 'ewew' must NOT silently leave zero plugins - the prompt
+    re-asks, and a valid follow-up entry installs. Driven by calling the command
+    callback directly with a forced-tty + scripted prompt answers."""
+    from localm import cli
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    answers = iter(["ewew", "1"])   # junk, then the first plugin by index
+    monkeypatch.setattr(cli.click, "prompt", lambda *a, **k: next(answers))
+    cli.plugin_setup.callback(None, False, False)
+    first = _available()[0].name
+    assert first in _installed()
+
+
+def test_interactive_blank_skips_without_reprompt(home_env, monkeypatch):
+    """A blank entry is a deliberate skip: it must NOT re-prompt and must install
+    nothing (only one prompt is consumed)."""
+    from localm import cli
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    answers = iter([""])            # a single blank; a re-prompt would StopIteration
+    monkeypatch.setattr(cli.click, "prompt", lambda *a, **k: next(answers))
+    cli.plugin_setup.callback(None, False, False)
+    assert _installed() in (set(), {"chat"})
