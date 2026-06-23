@@ -43,7 +43,7 @@ jobs:
       # GUI is vanilla JS (localm/plugins/gui/static); the jsdom harness under
       # tests-js/ loads app.js and exercises it. node:test, no build step.
       - name: Setup Node (GUI JS tests)
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "22"
 
