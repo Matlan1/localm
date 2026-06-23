@@ -144,34 +144,74 @@ def collect_diagnostics(context: Optional[dict] = None) -> dict:
     return diag
 
 
-def _format_error(error: Optional[BaseException]) -> str:
-    if error is None:
-        return ""
-    tb = "".join(traceback.format_exception(type(error), error, error.__traceback__))
-    # Drop the home directory (which contains the username) from frame paths so a
-    # tester's report does not leak their account name; the file/line structure
-    # that matters for debugging is kept.
-    # Guard ONLY the home lookup: if Path.home() raises or is empty we must NOT
-    # ship the raw traceback as if scrubbed (privacy fail), so fail safe and strip
-    # the username with a fallback regex over common home-path prefixes.
+def _scrub_home(text: str) -> str:
+    """Drop the home directory (which contains the username) from any paths so a
+    tester's report does not leak their account name; the file/line structure that
+    matters for debugging is kept. Guard ONLY the home lookup: if Path.home() raises
+    or is empty we must NOT ship the raw text as if scrubbed (privacy fail), so fail
+    safe and strip the username with a fallback regex over common home-path roots."""
+    if not text:
+        return text
     home = ""
     try:
         home = str(Path.home())
     except Exception:
         home = ""
     if home:
-        tb = tb.replace(home, "~")  # cannot fail once home is a non-empty string
-    else:
-        # Home lookup failed: redact the username segment in known home roots so
-        # the account name still does not leak (e.g. C:\Users\<name>, /home/<name>).
-        tb = re.sub(r"([Cc]:\\Users\\|/home/|/Users/)[^\\/\r\n]+",
-                    r"\1<redacted>", tb)
+        return text.replace(home, "~")  # cannot fail once home is a non-empty string
+    # Home lookup failed: redact the username segment in known home roots so the
+    # account name still does not leak (e.g. C:\Users\<name>, /home/<name>).
+    return re.sub(r"([Cc]:\\Users\\|/home/|/Users/)[^\\/\r\n]+", r"\1<redacted>", text)
+
+
+def _format_error(error: Optional[BaseException]) -> str:
+    if error is None:
+        return ""
+    tb = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    tb = _scrub_home(tb)
     # Keep the tail - the last frames are the useful ones, and a shorter report
     # is more likely to be read and sent.
     lines = tb.strip().splitlines()
     if len(lines) > 25:
         lines = ["... (earlier frames trimmed) ..."] + lines[-24:]
     return "\n".join(lines)
+
+
+def _recent_log_tail(home=None, pid=None, max_lines: int = 120,
+                     max_chars: int = 4000) -> str:
+    """Tail of the crashed run's OWN log, matched by the pid embedded in the log
+    filename (localm_<date>_<time>_<pid>.log). This gives a recovered-crash report
+    the activity leading up to the death even when no native trace was captured -
+    a window-close or OS-kill does not trigger faulthandler, so the trace file is
+    empty (BUG-1). Home paths are scrubbed. Never raises."""
+    try:
+        from pathlib import Path as _P
+        if home is None:
+            from localm.debuglog import logs_dir
+            d = logs_dir()
+        else:
+            d = _P(home) / "logs"
+        if not d.is_dir():
+            return ""
+        logs = sorted(d.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
+        chosen = None
+        if pid is not None:
+            for p in logs:
+                if p.stem.endswith(f"_{pid}"):
+                    chosen = p
+                    break
+        if chosen is None:
+            # No pid match (older marker): fall back to the most recent log that is
+            # NOT this current run's, so we do not just echo the recovering start.
+            import os as _os
+            cur = f"_{_os.getpid()}.log"
+            chosen = next((p for p in logs if not p.name.endswith(cur)), None)
+        if chosen is None:
+            return ""
+        lines = chosen.read_text(encoding="utf-8", errors="replace").splitlines()
+        return _scrub_home("\n".join(lines[-max_lines:]).strip())[-max_chars:]
+    except Exception:
+        return ""
 
 
 def build_report(summary: str, reason: str = "",
@@ -214,6 +254,18 @@ def build_report(summary: str, reason: str = "",
     ]
     if err:
         parts += ["", "## Error detail", "```", err, "```"]
+    # Crash diagnostics passed via context (e.g. recovered-crash reports, which have
+    # no Python error object). Without these the report is contentless (BUG-1): a
+    # faulthandler native trace when one was captured, and the crashed run's own log
+    # tail (the actionable bit when a window-close/OS-kill left no trace). Both are
+    # already home-scrubbed at their source.
+    ctx = context or {}
+    native = ctx.get("native_trace")
+    if native:
+        parts += ["", "## Native fault trace", "```", _scrub_home(str(native))[:4000], "```"]
+    tail = ctx.get("recent_log_tail")
+    if tail:
+        parts += ["", "## Recent log (tail)", "```", _scrub_home(str(tail))[:4000], "```"]
     parts += [
         "",
         "---",
@@ -543,6 +595,11 @@ def check_and_report_prior_crash(home=None, interactive: bool = False):
         ctx = {"prior_run": info}
         if trace:
             ctx["native_trace"] = trace[:4000]
+        # Attach the crashed run's own log tail (matched by pid) so the report is
+        # actionable even with no native trace (window-close / OS-kill leave none).
+        tail = _recent_log_tail(home, pid=info.get("pid"))
+        if tail:
+            ctx["recent_log_tail"] = tail
         return report_failure(
             summary="localm server crashed (recovered on the next start)",
             reason=("the previous server run ended without a clean shutdown - a "
