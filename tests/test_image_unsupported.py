@@ -166,16 +166,18 @@ class TestVisionGuidance:
         assert "cannot accept image" in msg               # legacy phrase preserved
         assert ("localm pull" in msg) or ("pip install" in msg)  # install-specific remedy
 
-    def test_mmproj_loaded_message_is_honest_about_gguf(self, monkeypatch):
-        # The user loaded a GGUF model WITH an mmproj expecting vision; a flat
-        # "it is text-only" is confusing. Be honest: GGUF vision is not wired (C1).
+    def test_mmproj_failed_message_is_honest_about_gguf(self, monkeypatch):
+        # The user loaded a GGUF model WITH an mmproj expecting vision but the
+        # projector did not load. GGUF vision IS implemented (#200), so the message
+        # must blame the failed projector, NOT claim vision is unimplemented.
         import localm.model_manager as mm
         monkeypatch.setattr(mm, "load_registry", lambda: {})
-        msg = mm.vision_input_guidance(mmproj_loaded=True)
+        msg = mm.vision_input_guidance(mmproj_failed=True)
         assert "cannot accept image" in msg               # legacy phrase still present
         assert "mmproj" in msg
-        assert "not implemented" in msg or "does not yet" in msg
-        # The default (no mmproj) message must NOT mention mmproj.
+        assert "failed to load" in msg
+        assert "not implemented" not in msg               # the old stale claim is gone
+        # The default (text-only) message must NOT mention mmproj.
         assert "mmproj" not in mm.vision_input_guidance()
 
     def test_registered_vlm_is_named_and_routed(self, tmp_path, monkeypatch):

@@ -143,7 +143,7 @@ class GgufBackend(BaseBackend):
     _AUTO_CTX_MAX = 65536
     _AUTO_CTX_FALLBACK = 16384   # no GPU visibility - match common practice
 
-    def _auto_ctx_max(self) -> int:
+    def _auto_ctx_max(self, capped: bool = True) -> int:
         """
         Derive a context ceiling from available resources.
 
@@ -152,6 +152,12 @@ class GgufBackend(BaseBackend):
         more layers and wider KV heads; sliding-window models need less, so
         the estimate is deliberately conservative). The result is clamped to
         a sane range and rounded to whole KiB of tokens.
+
+        ``capped`` applies the _AUTO_CTX_MAX safety clamp on top of the crude
+        KV estimate. It is lifted only when the user explicitly asked for an
+        unlimited ceiling (n_ctx_max=0): then "auto" means the full VRAM-derived
+        budget, honoring their "grow until VRAM" choice. The _AUTO_CTX_MIN floor
+        always applies.
         """
         free = self._free_vram_bytes()
         if free is None:
@@ -165,15 +171,25 @@ class GgufBackend(BaseBackend):
         bytes_per_token = min(max(model // 100_000, 16_000), 512_000)
         auto = budget // bytes_per_token
         auto = (auto // 1024) * 1024
-        return int(max(self._AUTO_CTX_MIN, min(self._AUTO_CTX_MAX, auto)))
+        hi = auto if not capped else min(self._AUTO_CTX_MAX, auto)
+        return int(max(self._AUTO_CTX_MIN, hi))
 
     def _effective_ctx_max(self) -> Optional[int]:
-        """The context ceiling to use for this load (auto or configured)."""
+        """The context ceiling to use for this load (auto or configured).
+
+        ctx_auto sizes the ceiling from free VRAM. n_ctx_max==0 means the user
+        asked for NO fixed ceiling ("grow until VRAM"); combined with ctx_auto we
+        honor that by lifting the conservative _AUTO_CTX_MAX safety clamp so the
+        window can use the full VRAM-derived budget (never silently override an
+        explicit user choice). When ctx_auto is off, n_ctx_max is used verbatim
+        (0/None already mean unlimited downstream)."""
         if self.ctx_auto:
-            auto = self._auto_ctx_max()
+            unlimited = (self.n_ctx_max == 0)
+            auto = self._auto_ctx_max(capped=not unlimited)
+            extra = "; no max (n_ctx_max=0)" if unlimited else ""
             console.print(
                 f"[dim]  ctx auto : window may grow to {auto:,} tokens "
-                f"(from free VRAM)[/dim]"
+                f"(from free VRAM{extra})[/dim]"
             )
             return auto
         return self.n_ctx_max

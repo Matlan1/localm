@@ -135,3 +135,43 @@ class TestAutoCtxMax:
                 b = self._backend(free_vram=free, model_bytes=model)
                 v = b._auto_ctx_max()
                 assert 4096 <= v <= 65536
+
+
+class TestUnlimitedCtxMax:
+    """R04: n_ctx_max=0 ('unlimited') must lift the _AUTO_CTX_MAX safety clamp when
+    ctx_auto is on, so the window grows to the full VRAM-derived budget instead of being
+    capped at 65536. The maintainer set n_ctx_max=0 expecting 'grow until VRAM' and the
+    chat instead crashed at the 65536 cap."""
+
+    def _backend(self, free_vram, model_bytes, *, n_ctx_max, ctx_auto, n_ctx=4096):
+        from localm.inference.backends.gguf import GgufBackend
+        b = GgufBackend.__new__(GgufBackend)
+        b.n_ctx = n_ctx
+        b.n_ctx_max = n_ctx_max
+        b.ctx_auto = ctx_auto
+        b._free_vram_bytes = lambda: free_vram
+        b._model_bytes = lambda: model_bytes
+        return b
+
+    def test_unlimited_lifts_the_clamp(self):
+        # 80GB free, 2GB model: the capped auto would be 65536, but n_ctx_max=0 with
+        # ctx_auto must return the full VRAM-derived budget (well above the clamp).
+        b = self._backend(int(80e9), int(2e9), n_ctx_max=0, ctx_auto=True)
+        eff = b._effective_ctx_max()
+        assert eff > b._AUTO_CTX_MAX
+        assert eff == b._auto_ctx_max(capped=False)
+
+    def test_auto_with_positive_max_still_capped(self):
+        # No regression for the shipped default (ctx_auto on + a positive max): the
+        # 65536 safety clamp still applies.
+        b = self._backend(int(80e9), int(2e9), n_ctx_max=16384, ctx_auto=True)
+        assert b._effective_ctx_max() == b._AUTO_CTX_MAX
+
+    def test_unlimited_without_auto_passes_through(self):
+        # ctx_auto off: n_ctx_max is used verbatim; 0 means unlimited downstream.
+        b = self._backend(int(80e9), int(2e9), n_ctx_max=0, ctx_auto=False)
+        assert b._effective_ctx_max() == 0
+
+    def test_positive_max_without_auto_passes_through(self):
+        b = self._backend(int(80e9), int(2e9), n_ctx_max=16384, ctx_auto=False)
+        assert b._effective_ctx_max() == 16384

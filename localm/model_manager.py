@@ -268,6 +268,53 @@ def get_model_info(name: str):
     return None
 
 
+def find_sibling_mmproj(model_path) -> Optional[Path]:
+    """Auto-detect a vision projector (mmproj) GGUF sitting next to a GGUF model.
+
+    Vision GGUFs ship a separate 'mmproj' projector file in the same folder
+    (e.g. 'gemma-3-4b-it-Q8_0.gguf' + 'mmproj-gemma-3-4b-it-f16.gguf'), so picking
+    it up lets a GUI/registry load get vision without a CLI --mmproj flag (VIS-1).
+    Only a GGUF model qualifies and the model file itself is excluded. Returns the
+    single candidate, or None when there are none, or the choice is ambiguous
+    (>1 with no clear stem match) - we never silently load the wrong projector."""
+    p = Path(model_path)
+    if p.suffix.lower() != ".gguf" or not p.parent.is_dir():
+        return None
+    cands = [f for f in p.parent.glob("*.gguf")
+             if f.name != p.name and "mmproj" in f.name.lower()]
+    if not cands:
+        return None
+    if len(cands) == 1:
+        return cands[0]
+    # Ambiguous: prefer a projector whose name shares the model's leading token.
+    stem = p.stem.lower().replace("mmproj", "").split("-")[0].split(".")[0]
+    matches = [f for f in cands if stem and stem in f.name.lower()]
+    return matches[0] if len(matches) == 1 else None
+
+
+def get_model_mmproj(name: str) -> Optional[str]:
+    """The mmproj (vision projector) path for a model, if one is known.
+
+    Priority: an explicit 'mmproj' recorded in the registry entry, else a sibling
+    mmproj GGUF auto-detected next to the model file. Returns an absolute path
+    string, or None when no projector is associated. This is what lets a GGUF keep
+    vision after a GUI/registry model switch (VIS-1), the same way the CLI --mmproj
+    flag does on a direct run."""
+    reg = load_registry()
+    entry = reg.get(name) if isinstance(reg, dict) else None
+    if isinstance(entry, dict) and entry.get("mmproj"):
+        mmp = Path(entry["mmproj"])
+        if mmp.exists():
+            return str(mmp)
+        # Recorded but gone: fall through to auto-detect rather than handing the
+        # backend a dead path that would just fail the mtmd load.
+    info = get_model_info(name)
+    if info is None:
+        return None
+    sib = find_sibling_mmproj(info[0])
+    return str(sib) if sib else None
+
+
 # ------------------------------------------------------------------ #
 #  Vision-input capability (kernel-level, setup-agnostic)              #
 # ------------------------------------------------------------------ #
@@ -299,10 +346,11 @@ def _hf_is_vision(model_dir: Path) -> bool:
 def vision_capable_models() -> List[str]:
     """Registered model names that can accept image INPUT on THIS install.
 
-    Only HuggingFace-format directories with vision metadata qualify: the
-    built-in GGUF backend is text-only today (no mmproj/vision path wired), so
-    GGUF entries never count. Used to ROUTE an image to a capable model instead
-    of dead-ending on a text-only one."""
+    Only HuggingFace-format directories with vision metadata qualify here. GGUF
+    entries are not auto-listed: a GGUF gains vision only when a matching mmproj
+    (vision projector) is loaded with it at run time (the built-in mtmd path),
+    which the on-disk registry metadata cannot confirm. Used to ROUTE an image to
+    a model already known to be vision-capable instead of dead-ending."""
     out: List[str] = []
     for name, info in load_registry().items():
         try:
@@ -314,7 +362,7 @@ def vision_capable_models() -> List[str]:
     return sorted(out)
 
 
-def vision_input_guidance(mmproj_loaded: bool = False) -> str:
+def vision_input_guidance(mmproj_failed: bool = False) -> str:
     """Capability-aware, install-specific message for when an image is attached
     to a model that cannot see it. Instead of a flat dead-end, point the user at
     a path that EXISTS on THIS install: a vision model already in their library,
@@ -322,17 +370,17 @@ def vision_input_guidance(mmproj_loaded: bool = False) -> str:
     installed stack, never assuming a particular GPU or runtime. Begins with the
     legacy 'cannot accept image input' phrase so existing callers stay valid.
 
-    *mmproj_loaded* is True when the active GGUF model was given an mmproj (vision
-    projector): the user explicitly set up vision, so a flat 'it is text-only' is
-    confusing. Be honest about WHY it still fails - the built-in GGUF backend does
-    not yet wire the mmproj up (C1) - rather than pretending no vision intent
-    exists."""
+    *mmproj_failed* is True when the active GGUF model WAS given a vision projector
+    (mmproj) but it did not load (supports_images is still False). GGUF vision IS
+    implemented (the built-in mtmd path), so do NOT claim it is unimplemented: the
+    honest cause is that this particular projector failed to load - likely
+    incompatible with the model, or the mtmd vision runtime is unavailable."""
     import importlib.util
-    if mmproj_loaded:
-        head = ("This model cannot accept image input: an mmproj (vision projector) "
-                "is loaded, but the built-in GGUF backend does not yet wire it up "
-                "(GGUF vision is not implemented), so the attached image would be "
-                "ignored.")
+    if mmproj_failed:
+        head = ("This model cannot accept image input: a vision projector (mmproj) "
+                "was provided but failed to load - it may be incompatible with this "
+                "model, or the mtmd vision runtime is unavailable (see the server "
+                "log for the mtmd error).")
     else:
         head = ("This model cannot accept image input (it is text-only), so the "
                 "attached image would be ignored.")
