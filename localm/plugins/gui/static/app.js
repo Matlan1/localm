@@ -2912,7 +2912,12 @@ $("persona-delete").onclick = async () => {
 
 /* sending */
 
-async function runCompletion(conv, webDepth = 0) {
+async function runCompletion(conv, webDepth = 0, web = null) {
+  // R36: per-send web state. `seen` dedupes already-issued queries so the model
+  // cannot loop on the same search; `ask` caches the net policy so a transient
+  // /v1/config blip mid-loop cannot silently flip approval off; `forced` ensures
+  // we only inject the "limit reached, answer now" nudge once per send.
+  if (!web) web = { seen: new Set(), ask: null, forced: false };
   await maybeCompactConversation(conv);
   const params = chatParams();
   const webEnabled = $("p-web").checked;
@@ -3100,9 +3105,30 @@ async function runCompletion(conv, webDepth = 0) {
   const canWeb = webEnabled && webDepth < WEB_MAX_ROUNDS;
   const nextCall = canWeb ? parseWebCall(full) : null;
   if (nextCall) {
+    // R36: dedupe - the model re-issuing a search it already ran this send is the
+    // loop. Do not repeat it; tell the model the results are already in hand and
+    // to answer from them, and end the web rounds for this send.
+    const key = nextCall.name + ":" + String(
+      (nextCall.args && (nextCall.args.query || nextCall.args.url)) || "")
+      .trim().toLowerCase();
+    if (web.seen.has(key)) {
+      conv.messages.push({
+        role: "user", web: true,
+        content:
+          "[duplicate web request] You already ran that exact search this turn; " +
+          "its results are above. Do not search again - answer now from those " +
+          "results and cite the sources, or say plainly if they are insufficient.",
+      });
+      saveConversations(conv);
+      renderChat();
+      await runCompletion(conv, WEB_MAX_ROUNDS, web);   // stop web; force an answer
+      return;
+    }
     // net_mode=ask: approve each MODEL-INITIATED request before it runs (WEB-ask).
     // The explicit /web command is direct consent and is NOT routed through here.
-    const approved = (await webModeIsAsk()) ? await confirmWebRequest(nextCall) : true;
+    // Cache the policy for this send so a mid-loop /v1/config blip cannot flip it.
+    if (web.ask === null) web.ask = await webModeIsAsk();
+    const approved = web.ask ? await confirmWebRequest(nextCall) : true;
     if (!approved) {
       conv.messages.push({
         role: "user", web: true,
@@ -3113,11 +3139,12 @@ async function runCompletion(conv, webDepth = 0) {
       });
       saveConversations(conv);
       renderChat();
-      await runCompletion(conv, WEB_MAX_ROUNDS);   // no further web rounds this send
+      await runCompletion(conv, WEB_MAX_ROUNDS, web);   // no further web rounds this send
       return;
     }
+    web.seen.add(key);
     await runWebCall(conv, nextCall);
-    await runCompletion(conv, webDepth + 1);
+    await runCompletion(conv, webDepth + 1, web);
   } else if (canWeb && looksLikeWebToolAttempt(full)) {
     // The model tried to call a web tool but emitted a block we could not
     // parse. Re-prompt for the exact format instead of letting the un-grounded
@@ -3133,7 +3160,25 @@ async function runCompletion(conv, webDepth = 0) {
     });
     saveConversations(conv);
     renderChat();
-    await runCompletion(conv, webDepth + 1);
+    await runCompletion(conv, webDepth + 1, web);
+  } else if (webEnabled && webDepth === WEB_MAX_ROUNDS && !web.forced &&
+             (parseWebCall(full) || looksLikeWebToolAttempt(full))) {
+    // R36: web rounds are used up but the model is STILL trying to search instead
+    // of answering (the "never synthesizes an answer" symptom). Force exactly one
+    // synthesizing turn from the results already gathered, then accept its answer.
+    web.forced = true;
+    conv.messages.push({
+      role: "user", web: true,
+      content:
+        "[web search limit reached] You have used the maximum web lookups for " +
+        "this turn. Stop searching and answer the question now using the results " +
+        "already provided above, citing the sources; if they are insufficient, " +
+        "say so plainly.",
+    });
+    saveConversations(conv);
+    renderChat();
+    await runCompletion(conv, WEB_MAX_ROUNDS + 1, web);
+    return;
   } else if ($("p-speak").checked && full) {
     speak(full);   // read the finished reply aloud (offline browser voices)
   }
