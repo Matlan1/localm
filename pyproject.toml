@@ -40,7 +40,7 @@ dependencies = [
     "cryptography>=42",
     # QR codes: the companion pairing flow renders a key QR server-side and the
     # GUI/CLI print LAN-URL QRs. Core so phone pairing works out of the box.
-    "qrcode>=8.0",
+    "qrcode>=8.2",
 ]
 
 [project.optional-dependencies]
@@ -119,7 +119,7 @@ cpu = []
 # proof-of-concept; pure-Python, no Pillow needed for the terminal QR.
 # Install with:  pip install "localm[qr]"
 qr = [
-    "qrcode>=8.0",
+    "qrcode>=8.2",
 ]
 # Abliterate models with Heretic. No new dependencies - the plugin only shells
 # out to Heretic (a separate AGPL program; not bundled) and uses git + uv, which
