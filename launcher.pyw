@@ -515,7 +515,10 @@ class Launcher(tk.Tk):
         for b in (*self.import_btns, self.launch_btn, self.gen_btn):
             try:
                 b.configure(state=state)
-            except Exception:
+            except tk.TclError:
+                # The only realistic failure is configuring a widget that is being
+                # destroyed during teardown (e.g. the window closed mid-import) -
+                # harmless. We deliberately do NOT swallow other exceptions.
                 pass
 
     def _import_from_file(self) -> None:
