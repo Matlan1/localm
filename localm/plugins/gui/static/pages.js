@@ -910,6 +910,9 @@ async function pluginCatalogAction(action, name) {
   // Re-derive from one place: the catalog table and the slash-hint cache.
   renderCatalogPlugins();
   refreshPluginCommands();
+  // R50: tell other open tabs (which may be parked on this plugin's page) so they
+  // re-sync and leave a now-disabled view instead of erroring on its dead routes.
+  if (window.bumpPluginsRev) window.bumpPluginsRev();
 }
 
 async function refreshPluginsPage() {

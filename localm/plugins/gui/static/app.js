@@ -2721,6 +2721,16 @@ async function loadClientPlugins() {
 // unreachable. `suggest` mirrors the suggest_plugins config toggle.
 const pluginCommands = { map: {}, suggest: true };
 
+// R50: signal other same-origin tabs that the installed/enabled plugin set
+// changed (a new value is required for the storage event to fire, so use the
+// clock). The writing tab refreshes itself directly; other tabs react to the
+// storage event wired near the focus listener.
+function bumpPluginsRev() {
+  try { localStorage.setItem("localm.pluginsRev", String(Date.now())); }
+  catch (e) { /* storage blocked / full - cross-tab sync degrades to focus only */ }
+}
+window.bumpPluginsRev = bumpPluginsRev;
+
 async function refreshPluginCommands() {
   try {
     const r = await fetch("/api/plugins", { headers: authHeaders() });
@@ -5016,6 +5026,18 @@ refreshPluginCommands();
 // toggled in another terminal/tab while sitting on the chat view is reflected
 // without a reload (the view-switch path in pages.js covers navigation).
 window.addEventListener("focus", refreshPluginCommands);
+// R50: when a plugin is enabled/disabled in ANOTHER tab, that tab bumps a shared
+// localStorage rev; the storage event fires in every OTHER same-origin tab, so we
+// re-sync the nav/commands promptly. A tab parked on the now-disabled plugin's
+// (static) page is then redirected to chat by reconcileActiveView instead of
+// erroring on the plugin's unmounted routes. visibilitychange covers the case
+// where the tab becomes visible without a focus event firing.
+window.addEventListener("storage", (e) => {
+  if (e.key === "localm.pluginsRev") refreshPluginCommands();
+});
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) refreshPluginCommands();
+});
 setInterval(refreshModels, 30000);
 startHwStats();   // live CPU/RAM/VRAM/GPU readout in the status bar
 setupPerfCard();  // Settings: GPU-layers/context sliders + live VRAM estimate
