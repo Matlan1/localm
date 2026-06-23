@@ -270,14 +270,20 @@ def mount_gui_surface(app) -> bool:
     async def switch_model(name: str) -> None:
         global _engine
         from localm.config import load_registry
-        from localm.model_manager import get_model_info
+        from localm.model_manager import get_model_info, get_model_mmproj
         info = get_model_info(name)
         if info is None:
             raise ValueError(f"Model not found: {name}")
         m_path, m_hint = info
+        # VIS-1: a GUI/registry switch must not drop vision. Carry the model's
+        # mmproj (a registry-recorded one, else a sibling projector auto-detected
+        # next to the GGUF) into the new Engine, the same way the CLI --mmproj flag
+        # does - otherwise switching models silently loses image support.
+        mmproj = get_model_mmproj(name)
         new_engine = Engine(
             str(m_path),
             display_name=name if name in load_registry() else m_hint,
+            mmproj_path=mmproj,
         )
         loop = asyncio.get_running_loop()
         async with _inference_sem:
@@ -1116,13 +1122,15 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
                     await loop.run_in_executor(None, _engine.load)
             if not _engine.supports_images:
                 # Capability-aware, install-specific guidance: route to a vision
-                # model this install actually has, instead of a flat dead-end. If an
-                # mmproj is loaded (the user set up GGUF vision), say plainly that the
-                # GGUF backend does not wire it up yet rather than "it is text-only".
+                # model this install actually has, instead of a flat dead-end.
+                # supports_images is False here, so if an mmproj_path is set on the
+                # backend the projector FAILED to load (a working one would have made
+                # supports_images True) - report that honest cause, not "text-only"
+                # and not the stale "GGUF vision is not implemented".
                 from localm.model_manager import vision_input_guidance
-                mmproj_loaded = bool(
+                mmproj_failed = bool(
                     getattr(getattr(_engine, "_backend", None), "mmproj_path", None))
-                raise HTTPException(400, vision_input_guidance(mmproj_loaded=mmproj_loaded))
+                raise HTTPException(400, vision_input_guidance(mmproj_failed=mmproj_failed))
 
         gen_kwargs = dict(
             max_tokens=req.max_tokens,
@@ -1431,12 +1439,14 @@ async def _stream_sse(
             for token in engine.chat_stream(messages, **gen_kwargs):
                 loop.call_soon_threadsafe(token_queue.put_nowait, token)
         except Exception as e:
-            # Log it (debug log included) and surface it to the client -
-            # a silent thread death looks like an empty reply.
+            # Log it (with full traceback, to the debug log) and surface it to the
+            # client - a silent thread death looks like an empty reply. We deliberately
+            # do NOT traceback.print_exc() here: _dbg.exception already records the
+            # trace, and an expected condition (e.g. the conversation outgrew n_ctx_max)
+            # should reach the user as a clean message, not a raw console traceback.
+            # Printing it was also the historical WinError-6 crash source on Windows.
             from localm.debuglog import logger as _dbg
             _dbg.exception("generation thread failed")
-            import traceback
-            traceback.print_exc()
             loop.call_soon_threadsafe(
                 token_queue.put_nowait, RuntimeError(str(e)))
         finally:
@@ -1529,12 +1539,20 @@ async def _stream_sse_completion(
     prompt_tokens = engine.count_tokens(_messages_prompt_text(messages))
 
     loop = asyncio.get_running_loop()
-    token_queue: asyncio.Queue[str | None] = asyncio.Queue()
+    token_queue: asyncio.Queue = asyncio.Queue()
 
     def _generate():
         try:
             for token in engine.chat_stream(messages, **gen_kwargs):
                 loop.call_soon_threadsafe(token_queue.put_nowait, token)
+        except Exception as e:
+            # Surface an inference failure to the client instead of letting this
+            # daemon thread die - an uncaught thread death fires a crash report and
+            # looks to the user like an empty reply. _dbg.exception logs the full
+            # trace to the debug log (same contract as the chat-completions path).
+            from localm.debuglog import logger as _dbg
+            _dbg.exception("completion generation thread failed")
+            loop.call_soon_threadsafe(token_queue.put_nowait, RuntimeError(str(e)))
         finally:
             loop.call_soon_threadsafe(token_queue.put_nowait, None)
 
@@ -1547,10 +1565,14 @@ async def _stream_sse_completion(
         t.start()
 
         completion_parts: list[str] = []
+        gen_error: Exception | None = None
         while True:
             token = await token_queue.get()
             if token is None:
                 break
+            if isinstance(token, Exception):
+                gen_error = token
+                continue
             if first_token_at is None:
                 first_token_at = time.perf_counter()
             # Stream hook transforms each piece before it is recorded and sent,
@@ -1567,6 +1589,15 @@ async def _stream_sse_completion(
 
         t.join()
         gen_elapsed = time.perf_counter() - gen_start
+
+    if gen_error is not None:
+        err = {
+            "id": chunk_id, "object": "text_completion.chunk",
+            "created": ts, "model": model_id,
+            "choices": [{"text": f"\n[inference error: {gen_error}]",
+                         "index": 0, "finish_reason": None}],
+        }
+        yield f"data: {json.dumps(err)}\n\n"
 
     streamed = "".join(completion_parts)
     # Outlet shapes only the recorded reply (the live stream already went out);
