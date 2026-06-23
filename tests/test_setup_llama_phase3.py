@@ -281,3 +281,77 @@ def test_url_load_failure_exits_nonzero(wired, monkeypatch):
     result = _run(["--url", "https://example.test/llama.zip"])
     assert result.exit_code != 0
     assert "did not load" in result.output
+
+
+# --------------------------------------------------------------------------- #
+# R23: the "already provisioned" guard is backend-AWARE. A library being present #
+# is not enough: an EXPLICIT backend that differs from what is recorded on disk  #
+# must re-provision (so `--backend cuda` on a vulkan/cpu box actually gets cuda). #
+# --------------------------------------------------------------------------- #
+
+
+def test_guard_auto_short_circuits_when_present(wired, monkeypatch):
+    """Plain `setup-llama` (auto) with a library already present does nothing -
+    something works, so there is no re-download."""
+    target, trace = wired
+    (target / "llama.dll").write_bytes(b"present")
+    setup_llama._record_provisioned_backend(target, "vulkan")
+    result = _run([])
+    assert result.exit_code == 0, result.output
+    assert "Already provisioned" in result.output
+    assert not trace.extracted
+
+
+def test_guard_same_explicit_backend_short_circuits(wired):
+    """An explicit backend that matches the recorded one short-circuits."""
+    target, trace = wired
+    (target / "llama.dll").write_bytes(b"present")
+    setup_llama._record_provisioned_backend(target, "vulkan")
+    result = _run(["--backend", "vulkan"])
+    assert result.exit_code == 0, result.output
+    assert "Already provisioned" in result.output
+    assert not trace.extracted
+
+
+def test_guard_different_explicit_backend_reprovisions(wired, monkeypatch):
+    """The R23 bug: a cuda pick on a box that already has a vulkan build must
+    actually FETCH cuda, not short-circuit on the present library."""
+    target, trace = wired
+    (target / "llama.dll").write_bytes(b"present")
+    setup_llama._record_provisioned_backend(target, "vulkan")
+    _stub_download(monkeypatch, _make_zip())
+    # The fixture pins platform=win32, so a cuda pick enters the cuda dialogue;
+    # stub it to keep cuda (no cudart) and skip nvidia-smi.
+    monkeypatch.setattr(setup_llama, "nvidia_preflight",
+                        lambda: setup_llama.NvidiaInfo(present=False))
+    monkeypatch.setattr(setup_llama, "_cuda_setup_dialogue",
+                        lambda info, yes: ("cuda", False))
+    result = _run(["--backend", "cuda"])
+    assert result.exit_code == 0, result.output
+    # Collapse whitespace: rich word-wraps the console at ~80 cols, so the phrase
+    # may straddle a newline ("provisioning\ncuda now.").
+    flat = " ".join(result.output.lower().split())
+    assert "provisioning cuda" in flat
+    assert "already provisioned, but you asked for cuda" in flat
+    assert trace.extracted                                   # cuda WAS fetched
+    assert setup_llama._provisioned_backend(target) == "cuda"
+
+
+def test_guard_unrecorded_backend_reprovisions_explicit_pick(wired, monkeypatch):
+    """No marker (an older install or a hand-placed build): an explicit pick is
+    re-provisioned to honour the choice rather than skipped on the bare library."""
+    target, trace = wired
+    (target / "llama.dll").write_bytes(b"present")           # no marker written
+    _stub_download(monkeypatch, _make_zip())
+    result = _run(["--backend", "vulkan"])
+    assert result.exit_code == 0, result.output
+    assert "unrecorded" in result.output.lower()
+    assert trace.extracted
+    assert setup_llama._provisioned_backend(target) == "vulkan"
+
+
+def test_provisioned_backend_marker_roundtrip(tmp_path):
+    """The marker reads back what was written, and is None when absent."""
+    assert setup_llama._provisioned_backend(tmp_path) is None
+    setup_llama._record_provisioned_backend(tmp_path, "cuda")
+    assert setup_llama._provisioned_backend(tmp_path) == "cuda"

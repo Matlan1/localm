@@ -256,3 +256,38 @@ def test_launch_handler_uses_helper_on_posix(launcher_mod, monkeypatch):
     assert "creationflags" not in spy.last_kwargs
     # No error status was set (no swallowed AttributeError).
     assert not any(err for _t, err in fake.messages), fake.messages
+
+
+# --------------------------------------------------------------------------- #
+# R48 / R49: while a model import (a multi-GB hash) runs, the Launch button and  #
+# the Generate-key button must be disabled, so neither races the registry write  #
+# (R48) nor stomps the "hashing" status text (R49). Tested headless via a fake.  #
+# --------------------------------------------------------------------------- #
+
+
+def test_set_busy_disables_launch_and_generate(launcher_mod):
+    class _Btn:
+        def __init__(self):
+            self.state = "normal"
+
+        def configure(self, **kw):
+            if "state" in kw:
+                self.state = kw["state"]
+
+    class _Fake:
+        pass
+
+    fake = _Fake()
+    fake.import_btns = [_Btn(), _Btn()]
+    fake.launch_btn = _Btn()
+    fake.gen_btn = _Btn()
+
+    launcher_mod.Launcher._set_busy(fake, True)
+    assert all(b.state == "disabled" for b in fake.import_btns)
+    assert fake.launch_btn.state == "disabled"      # R48
+    assert fake.gen_btn.state == "disabled"         # R49
+
+    launcher_mod.Launcher._set_busy(fake, False)
+    assert all(b.state == "normal" for b in fake.import_btns)
+    assert fake.launch_btn.state == "normal"
+    assert fake.gen_btn.state == "normal"

@@ -168,8 +168,9 @@ say "    [3] cuda     - NVIDIA, peak performance (needs the CUDA runtime)"
 say "    [4] hip      - AMD ROCm, peak performance (needs the ROCm runtime)"
 say "    [5] cpu      - no GPU"
 say "    [6] I will build / provide my own (skip the download)"
-say "    (the chosen backend is verified after install; if it cannot load here,"
-say "     setup falls back to vulkan, then cpu, so you are never left broken)"
+say "    (your pick is load-tested here; if it cannot load on this machine, setup"
+say "     explains why and offers the universal Vulkan build instead - your"
+say "     choice is never changed silently)"
 bpick="$(ask "  Pick 1-6 [1]: " 1)"
 case "$bpick" in
   2) BACKEND=vulkan ;; 3) BACKEND=cuda ;; 4) BACKEND=hip ;; 5) BACKEND=cpu ;;
@@ -300,7 +301,9 @@ EOF
 esac
 
 say ""
-say "  Which optional features (plugins) do you want? chat is always on."
+# `localm plugin setup` prints its own header (it states chat is always on), so
+# this is just a section divider - do not repeat that line here.
+say "  Optional features (plugins):"
 .venv/bin/localm plugin setup \
   || say "  [!] Skipped - choose later with:  .venv/bin/localm plugin setup"
 

@@ -10,7 +10,7 @@ if exist ".venv\Scripts\pythonw.exe" (
     exit /b 0
 )
 
-where pythonw >/dev/null 2>/dev/null
+where pythonw >nul 2>nul
 if not errorlevel 1 (
     start "" pythonw "launcher.pyw"
     exit /b 0
