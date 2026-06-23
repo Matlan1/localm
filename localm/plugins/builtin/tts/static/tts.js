@@ -12,6 +12,8 @@
  * machine and nothing is written to the server, so privacy mode stays intact.
  */
 
+import { classifyLoadError, loadToast, pickDevice, pickDtype } from "./tts-util.js";
+
 const VENDOR_VOICES = new URL("vendor/voices.json", import.meta.url);
 
 export async function register(ctx) {
@@ -52,35 +54,68 @@ export async function register(ctx) {
   let loadPromise = null;
   let announced = false;
 
-  function pickDevice() {
-    if (cfg.device && cfg.device !== "auto") return cfg.device;
-    return navigator.gpu ? "webgpu" : "wasm";
-  }
-  function pickDtype(device) {
-    if (cfg.dtype && cfg.dtype !== "auto") return cfg.dtype;
-    return device === "webgpu" ? "fp32" : "q8";
+  // R08: is this Kokoro model already in the transformers.js browser cache?
+  // Used to avoid a misleading "first run downloads" toast on a hard reload, and
+  // to tell when the Cache API is unavailable (an insecure / plain-HTTP context)
+  // so we can explain why the model will not persist.
+  async function modelCached() {
+    if (typeof caches === "undefined") return false;   // insecure context: no Cache API
+    try {
+      const c = await caches.open("transformers-cache");
+      const keys = await c.keys();
+      return keys.some((req) => req.url && req.url.includes(model));
+    } catch {
+      return false;
+    }
   }
 
   async function load() {
     const mod = await import(libraryURL);
-    if (cfg.wasm_paths && mod.env && mod.env.backends && mod.env.backends.onnx) {
-      mod.env.backends.onnx.wasm.wasmPaths =
-        new URL(cfg.wasm_paths, import.meta.url).href;
+    const onnx = mod.env && mod.env.backends && mod.env.backends.onnx;
+    if (cfg.wasm_paths && onnx) {
+      onnx.wasm.wasmPaths = new URL(cfg.wasm_paths, import.meta.url).href;
     }
     if (!announced) {
       announced = true;
-      ctx.toast("Loading Kokoro voice (first run downloads ~90 MB, then cached)");
+      // R08: best-effort request to keep the cached model (resists eviction
+      // under storage pressure; the browser may deny it without a user gesture,
+      // and it is auto-granted for an installed PWA). The model is actually
+      // persisted by the transformers.js Cache API; this only hardens it.
+      try {
+        if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
+      } catch { /* storage manager unavailable: best effort */ }
+      ctx.toast(loadToast({
+        cached: await modelCached(),
+        secureContext: typeof caches !== "undefined",
+      }));
     }
-    let device = pickDevice();
+    const device = pickDevice(cfg, !!navigator.gpu);
+    // R35: on the WASM path, run the heavy ONNX model compile + inference in
+    // onnxruntime's proxy worker so the load no longer freezes the page ("a
+    // script is slowing down" - the Firefox / no-WebGPU case in the report).
+    // Verified: the main thread stays responsive through a real proxy-worker
+    // load. The WebGPU path keeps its (light, largely async) compile on the main
+    // thread. If the bundle cannot start the proxy worker the load throws and we
+    // retry on the main thread, so this never regresses TTS.
+    function build(dev, useProxy) {
+      if (onnx && onnx.wasm) onnx.wasm.proxy = !!(useProxy && dev === "wasm");
+      return mod.KokoroTTS.from_pretrained(model, { dtype: pickDtype(cfg, dev), device: dev });
+    }
     try {
-      return await mod.KokoroTTS.from_pretrained(model, { dtype: pickDtype(device), device });
+      return await build(device, true);
     } catch (e) {
-      if (device === "webgpu") {                 // GPU path unavailable: fall back
-        // Surface the WebGPU failure (it is the common cause of "kokoro fails to
-        // load") even though we recover on WASM, so the reason is diagnosable.
+      if (device === "wasm" && onnx && onnx.wasm && onnx.wasm.proxy) {
+        console.warn("[tts] Kokoro proxy-worker load failed, retrying on the main thread:", e);
+        return await build("wasm", false);
+      }
+      if (device === "webgpu") {                 // GPU path unavailable: fall back to WASM
         console.warn("[tts] Kokoro WebGPU load failed, retrying on WASM:", e);
-        device = "wasm";
-        return await mod.KokoroTTS.from_pretrained(model, { dtype: pickDtype(device), device });
+        try {
+          return await build("wasm", true);
+        } catch (e2) {
+          console.warn("[tts] Kokoro WASM proxy load failed, retrying on the main thread:", e2);
+          return await build("wasm", false);
+        }
       }
       throw e;
     }
@@ -91,20 +126,19 @@ export async function register(ctx) {
     if (!loadPromise) {
       loadPromise = load().then(
         (k) => (kokoro = k),
-        (e) => {
+        async (e) => {
           loadPromise = null;                    // allow a later retry
-          // RULE 5: surface the REAL reason (network / CORS / ONNX runtime /
-          // WebGPU+WASM both unavailable) to the console, not just a generic
-          // toast, so a kokoro load failure is actually diagnosable. This is the
-          // single source of truth for load failures; the speak() catch below
-          // intentionally stays quiet because the cause is already logged here.
+          // RULE 5 + R07: surface the REAL reason. A blocked huggingface.co
+          // download gets an actionable "allow huggingface.co" message; any
+          // other fault keeps its true error. This is the single source of truth
+          // for load failures; the speak() catch below stays quiet because the
+          // cause is already logged + toasted here.
           console.error("[tts] Kokoro voice model failed to load:", e);
-          const reason = (e && (e.message || e.name)) ? ` (${e.message || e.name})` : "";
-          ctx.toast(
-            "Kokoro voice failed to load" + reason +
-              "; using the browser voice (see console for details)",
-            true,
-          );
+          let cached = false;
+          try { cached = await modelCached(); } catch { /* probe best effort */ }
+          const online = (typeof navigator === "undefined") || navigator.onLine !== false;
+          const { message } = classifyLoadError(e, { cached, online });
+          ctx.toast(message + "; using the browser voice (see console for details)", true);
           ctx.registerTTS(null);                 // revert to the built-in fallback
           throw e;
         },
