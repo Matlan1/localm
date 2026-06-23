@@ -1214,12 +1214,16 @@ window.hydrateChatToggles = hydrateChatToggles;
 
 function saveConversations(changed) {
   if (chat.privacy) return;   // privacy mode: no traces, not even localStorage
+  // R40: do NOT cache server index-only rows (_meta) - they carry no messages, so
+  // caching them would shadow a real local copy and show empty conversations
+  // offline. Only full conversations are cached locally.
+  const cacheable = chat.conversations.filter((c) => !c._meta);
   try {
     localStorage.setItem("localm.conversations",
-      JSON.stringify(chat.conversations.slice(0, 50)));
+      JSON.stringify(cacheable.slice(0, 50)));
   } catch (e) {
     // Quota: drop image-heavy older conversations and retry once
-    const slim = chat.conversations.slice(0, 10);
+    const slim = cacheable.slice(0, 10);
     try { localStorage.setItem("localm.conversations", JSON.stringify(slim)); } catch {}
   }
   if (changed) pushConversation(changed);
@@ -1262,20 +1266,52 @@ function deleteConversationRemote(convId) {
   }).catch(() => {});
 }
 
-/** Load the server store and merge with the localStorage cache: the newer
- *  copy of each conversation wins; local-only ones are uploaded. */
+/** R40: fetch a full conversation's body on demand and replace its index-only
+ *  ("_meta") placeholder in chat.conversations. Returns true on success. */
+async function hydrateConversation(conv) {
+  if (!conv || !conv._meta) return true;
+  try {
+    const r = await fetch("/api/conversations/" + encodeURIComponent(conv.id),
+                          { headers: authHeaders() });
+    if (!r.ok) return false;
+    const data = await r.json();
+    conv.messages = data.messages || [];
+    conv.branches = data.branches || [];
+    if (data.title != null) conv.title = data.title;
+    conv.pinned = !!data.pinned;
+    conv.folder = data.folder || null;
+    delete conv._meta;
+    saveConversations();   // cache the now-full conversation locally
+    return true;
+  } catch (e) {
+    return false;   // offline - keep the placeholder; renderChat shows the hint
+  }
+}
+window.hydrateConversation = hydrateConversation;
+
+/** Load the server store and merge with the localStorage cache: the newer copy
+ *  of each conversation wins; local-only ones are uploaded. R40: the server
+ *  list is a lightweight index (no message bodies); each conversation's messages
+ *  load lazily on open via hydrateConversation. */
 async function initServerConversations() {
   if (chat.privacy) return;
   try {
-    const r = await fetch("/api/conversations", { headers: authHeaders() });
+    // R40: lightweight, paginated index - no message bodies or data-URI images.
+    const r = await fetch("/api/conversations?meta=true&limit=200&offset=0",
+                          { headers: authHeaders() });
     if (!r.ok) return;
     const data = await r.json();
     if (!data.enabled) return;
     chat.persist = true;
-    const byId = new Map(data.conversations.map((c) => [c.id, c]));
+    // Remote rows are index-only placeholders until opened.
+    const byId = new Map((data.conversations || []).map(
+      (c) => [c.id, { ...c, _meta: true, messages: [] }]));
     for (const local of chat.conversations) {
       const remote = byId.get(local.id);
-      if (!remote || (local.updated_at || 0) > (remote.updated_at || 0)) {
+      // Keep the local FULL copy unless the server has a strictly newer version
+      // (>= keeps it on a tie, so an already-cached conversation is not demoted to
+      // an index-only placeholder that would need a needless re-fetch / break offline).
+      if (!remote || (local.updated_at || 0) >= (remote.updated_at || 0)) {
         byId.set(local.id, local);
         pushConversation(local);
       }
@@ -1285,6 +1321,7 @@ async function initServerConversations() {
     if (!chat.activeId && chat.conversations.length) {
       chat.activeId = chat.conversations[0].id;
     }
+    await hydrateConversation(currentConv());   // load the active conversation's body
     saveConversations();
     renderConvList();
     renderChat();
@@ -1437,9 +1474,10 @@ function buildConvItem(conv, snippet) {
   };
   item.appendChild(del);
 
-  item.onclick = () => {
+  item.onclick = async () => {
     chat.activeId = conv.id;
     renderConvList();
+    if (conv._meta) await hydrateConversation(conv);   // R40: load the body on open
     renderChat();
     showView("chat");
   };
@@ -1689,6 +1727,17 @@ function renderChat() {
   const box = $("chat-messages");
   box.innerHTML = "";
   const conv = currentConv();
+  // R40: a not-yet-loaded conversation (server index row) hydrates its body on
+  // first render, then re-renders. Try once per row (a failed/offline load sets
+  // _hydrateFailed so we never spin).
+  if (conv && conv._meta && !conv._hydrating && !conv._hydrateFailed) {
+    conv._hydrating = true;
+    hydrateConversation(conv).then((ok) => {
+      conv._hydrating = false;
+      if (ok) renderChat();
+      else conv._hydrateFailed = true;
+    });
+  }
   if (!conv || conv.messages.length === 0) {
     box.appendChild(buildEmptyHint());
     return;
