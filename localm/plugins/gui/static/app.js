@@ -3054,7 +3054,15 @@ async function runCompletion(conv, webDepth = 0) {
 
   // User pressed Stop: leave the partial text on screen but do NOT persist it,
   // read it aloud, or fire the web loop / recurse on a partial reply (BUG-13).
-  if (aborted) return;
+  // U-STOP: make the stop unmistakable - mark the partial as stopped and halt any
+  // speech already playing - so a stopped reply is never silently treated as live.
+  if (aborted) {
+    renderMarkdown(liveBody,
+      (reasoning ? "<think>\n" + reasoning + "\n</think>\n" + full : full) +
+      (full || reasoning ? "\n\n" : "") + "*[stopped]*");
+    try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (e) { /* no TTS */ }
+    return;
+  }
 
   // VIS-1: a vision reject (or any failure that streamed nothing) must NOT
   // persist an empty assistant turn - a blank reply saved every send is the

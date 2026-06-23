@@ -52,3 +52,27 @@ test("BUG-13: Stop does not fire the web loop / recurse", async () => {
   const chatCalls = fetchCalls.filter((u) => u.includes("/v1/chat/completions"));
   assert.equal(chatCalls.length, 1, "exactly one chat call; no recursion after abort");
 });
+
+// U-STOP: a stop must be unmistakable - the partial is marked [stopped] on screen
+// and any speech already playing is halted (so a stopped reply is never silently
+// left looking live or kept being read aloud).
+test("U-STOP: Stop marks the partial [stopped] and cancels speech", async () => {
+  const okResponse = { ok: true, status: 200, text: async () => "", json: async () => ({}) };
+  const { window } = loadApp({ fetchImpl: () => Promise.resolve(okResponse) });
+  window.maybeCompactConversation = async () => {};
+  let cancelled = 0;
+  window.speechSynthesis.cancel = () => { cancelled += 1; };
+  window.readSSE = async (_r, onData) => {
+    onData(JSON.stringify({ choices: [{ delta: { content: "partial answer" } }] }));
+    throw Object.assign(new Error("aborted"), { name: "AbortError" });
+  };
+  window.document.getElementById("p-speak").checked = false;
+  window.document.getElementById("p-web").checked = false;
+  const conv = { id: "c1", title: "t", messages: [{ role: "user", content: "hi" }] };
+  await window.runCompletion(conv);
+
+  assert.match(window.document.getElementById("chat-messages").textContent, /\[stopped\]/,
+    "the partial reply is visibly marked as stopped");
+  assert.equal(cancelled, 1, "any in-flight speech is cancelled on stop");
+  assert.equal(conv.messages.length, 1, "still no assistant reply persisted");
+});
