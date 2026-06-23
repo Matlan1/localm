@@ -4896,6 +4896,33 @@ function hideReconnectOverlay() {
   const ov = $("reconnect-overlay");
   if (ov) ov.style.display = "none";
 }
+
+// R25: first-load progress. Shown immediately at boot so the cold-start wait (the
+// first /api/models can block for many seconds while the model loads) shows that
+// load is in progress instead of a blank / half-rendered shell. Distinct in copy
+// from the reconnect overlay, which means the server is DOWN. Hidden once the
+// model list resolves (or fails), so it never stacks over the gate or the app.
+function showStartupOverlay() {
+  let ov = $("startup-overlay");
+  if (!ov) {
+    ov = el("div", "reconnect-overlay startup-overlay");
+    ov.id = "startup-overlay";
+    const panel = el("div", "reconnect-panel");
+    panel.appendChild(el("div", "reconnect-spinner"));
+    panel.appendChild(el("div", "reconnect-msg",
+      "Starting LocaLM... loading the model. The first run can take a moment."));
+    ov.appendChild(panel);
+    document.body.appendChild(ov);
+  }
+  ov.style.display = "flex";
+}
+function hideStartupOverlay() {
+  const ov = $("startup-overlay");
+  if (ov) ov.style.display = "none";
+}
+window.showStartupOverlay = showStartupOverlay;
+window.hideStartupOverlay = hideStartupOverlay;
+
 function onServerUnreachable() {
   window.__localmLocked = true;
   const app = $("app");
@@ -4955,16 +4982,19 @@ async function bootAuthProbe() {
 window.bootAuthProbe = bootAuthProbe;
 
 (async () => {
+  showStartupOverlay();   // R25: immediate first-load feedback (cold start is slow)
   // Probe auth before loading any app data or revealing the shell.
   const authed = await bootAuthProbe();
-  if (!authed) return;   // gate / reconnect overlay shown; nothing loads behind it
+  if (!authed) { hideStartupOverlay(); return; }   // gate / reconnect overlay takes over
   // On a phone not yet installed, show the one-time install landing first; the
   // app still loads behind it and is revealed by "Continue". Desktop / installed
   // / returning visits fall straight through.
   if (shouldShowInstallGate()) showInstallGate();
   // Authenticated (or open/loopback mode): load the app.
   syncLogoStyleFromConfig();   // reconcile the wordmark with the shared config
-  refreshModels().then(() => populateSetupModels());
+  // R25: hide the startup overlay once the model list resolves (the app is usable)
+  // or fails - never leave it stuck over the shell.
+  refreshModels().then(() => populateSetupModels()).finally(hideStartupOverlay);
   // Server persistence depends on knowing the privacy state first.
   refreshCtxLimit().then(initServerConversations);
 })();
