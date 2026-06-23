@@ -69,6 +69,259 @@ def apply_fast_dequant(workflow: dict) -> int:
 
 
 # ---------------------------------------------------------------------------
+#  Role-based node resolution (resolve nodes by class_type + graph edges)
+# ---------------------------------------------------------------------------
+#
+#  A ComfyUI workflow is a dict of {node_id: {"class_type": str, "inputs": {...}}}.
+#  An input value is either a literal or a LINK [source_node_id, output_index].
+#  Hardcoding node ids (workflow["8"]["inputs"]["seed"]) breaks the moment a user
+#  exports their own graph from ComfyUI, because the ids are arbitrary. Resolving
+#  by ROLE - find the sampler by class_type, then follow its positive / negative /
+#  latent edges to their source nodes - works on any graph that wires those roles,
+#  so a local override no longer has to preserve the template's exact ids (I3).
+
+# Sampler node classes that carry the seed / steps / cfg knobs and the
+# positive / negative / latent_image edges we trace the other roles from.
+_SAMPLER_CLASSES = (
+    "KSampler", "KSamplerAdvanced", "SamplerCustom", "SamplerCustomAdvanced",
+)
+
+
+def _is_link(value) -> bool:
+    """True when an input value is a ComfyUI link: ``[source_node_id, output_index]``."""
+    return (isinstance(value, list) and len(value) == 2
+            and isinstance(value[0], (str, int)) and not isinstance(value[0], bool)
+            and isinstance(value[1], int) and not isinstance(value[1], bool))
+
+
+def _link_source_id(node: dict, input_name: str) -> Optional[str]:
+    """The source node id an input is wired to, or None when it is a literal."""
+    if not isinstance(node, dict):
+        return None
+    value = node.get("inputs", {}).get(input_name)
+    return str(value[0]) if _is_link(value) else None
+
+
+def find_node_by_class(workflow: dict, *class_types: str):
+    """First ``(id, node)`` whose class_type is one of *class_types*, else
+    ``(None, None)``. Dict insertion order is preserved, so the first matching node
+    in the graph wins."""
+    for nid, node in workflow.items():
+        if isinstance(node, dict) and node.get("class_type") in class_types:
+            return str(nid), node
+    return None, None
+
+
+def find_nodes_by_class(workflow: dict, *class_types: str) -> list:
+    """All ``(id, node)`` pairs whose class_type is one of *class_types*."""
+    return [(str(nid), node) for nid, node in workflow.items()
+            if isinstance(node, dict) and node.get("class_type") in class_types]
+
+
+def resolve_sampler_roles(workflow: dict) -> dict:
+    """Resolve ``{sampler, positive, negative, latent}`` to ``(node_id, node)`` by
+    following the sampler's input edges, so node ids can be anything.
+
+    A role is ``(None, None)`` when the sampler or that edge is absent. ``positive``
+    / ``negative`` point at whatever conditioning node feeds them (a CLIPTextEncode,
+    a TextEncodeAceStepAudio, a ConditioningZeroOut, ...); the caller injects the
+    field that node actually has rather than assuming a text box."""
+    roles = {"sampler": (None, None), "positive": (None, None),
+             "negative": (None, None), "latent": (None, None)}
+    sid, sampler = find_node_by_class(workflow, *_SAMPLER_CLASSES)
+    if sampler is None:
+        return roles
+    roles["sampler"] = (sid, sampler)
+    for role, input_name in (("positive", "positive"),
+                             ("negative", "negative"),
+                             ("latent", "latent_image")):
+        src = _link_source_id(sampler, input_name)
+        if src is not None and src in workflow:
+            roles[role] = (src, workflow[src])
+    return roles
+
+
+def set_seed_on(node: dict, seed: int) -> None:
+    """Set whichever seed field a sampler node actually has (KSampler uses ``seed``;
+    a RandomNoise / KSamplerAdvanced uses ``noise_seed``). Never invents a field the
+    node does not declare, which ComfyUI would reject."""
+    inputs = node.get("inputs")
+    if not isinstance(inputs, dict):
+        return
+    if "seed" in inputs:
+        inputs["seed"] = seed
+    elif "noise_seed" in inputs:
+        inputs["noise_seed"] = seed
+
+
+def next_node_id(workflow: dict) -> str:
+    """A node id not already used by *workflow* (max numeric id + 1, else a stable
+    name). Injected helper nodes (e.g. a LoadImage for img2img/img2video) use this
+    instead of a hardcoded id, which could clobber a node in a user's own graph."""
+    numeric = [int(k) for k in workflow if str(k).isdigit()]
+    if numeric:
+        return str(max(numeric) + 1)
+    base, i = "localm_node_", 0
+    while f"{base}{i}" in workflow:
+        i += 1
+    return f"{base}{i}"
+
+
+# ---------------------------------------------------------------------------
+#  Pre-submit model validation (/object_info) - fail BEFORE the LLM unload
+# ---------------------------------------------------------------------------
+#
+#  Before unloading the chat model (an expensive VRAM handoff) we ask ComfyUI which
+#  model files each loader can actually see (GET /object_info) and confirm the
+#  workflow's filenames exist. A missing file is named EXACTLY, and where the user
+#  has the same model in a different precision/quant we auto-substitute the single
+#  unambiguous variant. This turns a late "rejected (HTTP 400) after the unload"
+#  into an early, specific error pointing at the Workflow panel (I3 / MEDIA-1).
+#
+#  Best-effort by design: when /object_info cannot be read it does NOT block - the
+#  submit-time validation still applies. We never escalate a best-effort early
+#  check into a hard failure that breaks an otherwise-working setup (AGENTS rule 5).
+
+# Extensions that mark a combo's options as model files (so a value not in the list
+# is a missing-model error we can name/fix), as opposed to an enum like sampler_name.
+_MODEL_FILE_EXTS = (".safetensors", ".ckpt", ".gguf", ".pt", ".pth", ".bin",
+                    ".sft", ".onnx", ".pte")
+
+
+def comfy_object_info(api_url: str, timeout: float = 10.0) -> Optional[dict]:
+    """ComfyUI's full ``/object_info`` map ``{class_type: spec}``, or None when it
+    cannot be fetched or parsed (so the caller treats preflight as best-effort)."""
+    try:
+        with urllib.request.urlopen(f"{api_url}/object_info", timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _combo_options(spec: dict, input_name: str) -> Optional[list]:
+    """The list of literal choices for a combo input of an /object_info node spec,
+    or None when the input is not a combo.
+
+    Shape: ``spec["input"]["required"|"optional"][name] == [choices, meta?]`` where
+    ``choices`` is a list of strings for a dropdown. A non-combo input's first element
+    is a type-name string ("INT", "MODEL", ...), not a list."""
+    if not isinstance(spec, dict):
+        return None
+    io = spec.get("input")
+    if not isinstance(io, dict):
+        return None
+    for section in ("required", "optional"):
+        sec = io.get(section)
+        if isinstance(sec, dict) and input_name in sec:
+            entry = sec[input_name]
+            if isinstance(entry, list) and entry and isinstance(entry[0], list):
+                return [o for o in entry[0] if isinstance(o, str)]
+    return None
+
+
+def _looks_like_model_files(options: list) -> bool:
+    """True when a combo's options look like model files (a mismatch is then a
+    missing-model error we can name), not an enum like sampler_name / scheduler."""
+    if not options:
+        return False
+    hits = sum(1 for o in options if o.lower().endswith(_MODEL_FILE_EXTS))
+    return hits >= max(1, len(options) // 2)
+
+
+def _normalize_model_base(name: str) -> str:
+    """A precision/quant-insensitive key for a model filename, so e.g.
+    ``wan_5B_fp16.safetensors`` and ``wan_5B_fp8_scaled.safetensors`` share a base
+    and one can stand in for the other. Drops the extension and known precision /
+    quant tokens, keeping the descriptive tokens."""
+    import re as _re
+    n = name.lower().rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    for ext in _MODEL_FILE_EXTS:
+        if n.endswith(ext):
+            n = n[: -len(ext)]
+            break
+    drop = _re.compile(
+        r"^(fp8|fp16|fp32|bf16|f16|f32|e4m3fn|e5m2|scaled|default|"
+        r"q\d[0-9ksm_]*|k|m|s|[0-9])$")
+    kept = [t for t in _re.split(r"[^a-z0-9]+", n) if t and not drop.match(t)]
+    return "".join(kept)
+
+
+def _pick_variant(missing_name: str, options: list) -> Optional[str]:
+    """The single unambiguous precision/quant variant of *missing_name* among
+    *options*, or None when there are zero or more than one candidates (we never
+    guess between several)."""
+    base = _normalize_model_base(missing_name)
+    if not base:
+        return None
+    cands = [o for o in options
+             if o != missing_name and _normalize_model_base(o) == base]
+    return cands[0] if len(cands) == 1 else None
+
+
+def _format_missing(missing: list) -> str:
+    lines = ["ComfyUI is missing model files this workflow needs:"]
+    for cls, field, name, options in missing:
+        shown = ", ".join(options[:8]) + (", ..." if len(options) > 8 else "")
+        avail = f" Available {field}: {shown}." if options else ""
+        lines.append(
+            f"  - '{name}' (the {field} for the {cls} node) is not installed.{avail}")
+    lines.append(
+        "Install the file(s) into ComfyUI's models folder, or pick a workflow whose "
+        "models you have on the Workflow panel (Settings -> Media). The chat model was "
+        "NOT unloaded - fix this and run again.")
+    return "\n".join(lines)
+
+
+def preflight_models(workflow: dict, api_url: str, *, on_progress=None) -> tuple[bool, str]:
+    """Validate every loader's model file against ComfyUI ``/object_info`` BEFORE the
+    caller unloads the chat model.
+
+    Mutates *workflow* in place to substitute the single unambiguous precision/quant
+    variant for a missing file. Returns ``(ok, message)``: ``ok=False`` with a
+    specific, Workflow-panel-pointing error when a required model is missing and no
+    one variant fits; ``ok=True`` (empty message) otherwise. Best-effort: returns
+    ``(True, "")`` when /object_info is unavailable (defer to submit-time validation)."""
+    info = comfy_object_info(api_url)
+    if not info:
+        return True, ""        # cannot validate -> defer to submit-time validation
+    missing: list = []
+    subs: list = []
+    for node in workflow.values():
+        if not isinstance(node, dict):
+            continue
+        spec = info.get(node.get("class_type"))
+        inputs = node.get("inputs")
+        if not isinstance(spec, dict) or not isinstance(inputs, dict):
+            continue           # unknown class / no inputs here -> can't validate; skip
+        for input_name, value in list(inputs.items()):
+            if not isinstance(value, str):
+                continue       # links and numbers are not model-file names
+            options = _combo_options(spec, input_name)
+            if options is None or not _looks_like_model_files(options):
+                continue
+            if value in options:
+                continue       # the file is present - good
+            variant = _pick_variant(value, options)
+            if variant is not None:
+                inputs[input_name] = variant
+                subs.append((node.get("class_type"), input_name, value, variant))
+            else:
+                missing.append((node.get("class_type"), input_name, value, options))
+    if on_progress:
+        for cls, field, old, new in subs:
+            try:
+                on_progress(
+                    f"Model '{old}' is not installed; substituting '{new}' "
+                    f"(same model, different precision) for the {cls} node.")
+            except Exception:
+                pass
+    if missing:
+        return False, _format_missing(missing)
+    return True, ""
+
+
+# ---------------------------------------------------------------------------
 #  VRAM management
 # ---------------------------------------------------------------------------
 
@@ -789,11 +1042,9 @@ def generate_image(
     if not ok:
         return False, msg
 
-    # 1. Unload LLM to free VRAM before FLUX loads. Skipped when the caller
-    # decided the media model fits alongside the chat model (swap=False), so the
-    # chat model stays hot.
-    if swap:
-        _localm_unload(localm_url)
+    # The LLM unload (the expensive VRAM handoff) is deferred to AFTER the
+    # workflow is built and the model preflight passes, so a missing model file
+    # fails before it costs the user a pointless unload + reload (see step 9b).
 
     # 2. Load workflow template (personal flux_workflow.json if present,
     # else the committed example)
@@ -844,18 +1095,22 @@ def generate_image(
 
         w, h = _image_dimensions(input_image)
 
-        # LoadImage node - ComfyUI loads from its own input/ dir by filename
-        workflow["40"] = {
+        # LoadImage node - ComfyUI loads from its own input/ dir by filename.
+        # Allocate fresh ids (not a hardcoded "40"/"41") so the injected nodes can
+        # never clobber a node a user's own exported graph already uses.
+        load_id = next_node_id(workflow)
+        workflow[load_id] = {
             "inputs": {"image": uploaded_name, "upload": "image"},
             "class_type": "LoadImage",
         }
         # VAEEncode - encode the loaded image into latent space
-        workflow["41"] = {
-            "inputs": {"pixels": ["40", 0], "vae": ["10", 0]},
+        enc_id = next_node_id(workflow)
+        workflow[enc_id] = {
+            "inputs": {"pixels": [load_id, 0], "vae": ["10", 0]},
             "class_type": "VAEEncode",
         }
         # Redirect SamplerCustomAdvanced latent input from EmptyLatentImage to encoded image
-        workflow["13"]["inputs"]["latent_image"] = ["41", 0]
+        workflow["13"]["inputs"]["latent_image"] = [enc_id, 0]
 
         # Update ModelSamplingFlux dimensions so RoPE embeddings match the image
         workflow["28"]["inputs"]["width"]  = w
@@ -892,9 +1147,11 @@ def generate_image(
                     node["inputs"]["guidance"] = guidance
                     break
 
-    # 7. Inject LoRA
+    # 7. Inject LoRA (fresh id so it cannot collide with a user's own graph)
+    lora_id: Optional[str] = None
     if lora_name:
-        workflow["100"] = {
+        lora_id = next_node_id(workflow)
+        workflow[lora_id] = {
             "inputs": {
                 "model": ["30", 0],
                 "clip": ["31", 0],
@@ -905,9 +1162,9 @@ def generate_image(
             "class_type": "LoraLoader",
         }
         if "28" in workflow:
-            workflow["28"]["inputs"]["model"] = ["100", 0]
+            workflow["28"]["inputs"]["model"] = [lora_id, 0]
         if "6" in workflow:
-            workflow["6"]["inputs"]["clip"] = ["100", 1]
+            workflow["6"]["inputs"]["clip"] = [lora_id, 1]
 
     # 8. Inject negative prompt via real classifier-free guidance.
     #    A negative prompt only works if the model sees a SEPARATE negative
@@ -924,28 +1181,26 @@ def generate_image(
         neg_cfg = cfg if cfg is not None else 3.5
         guide_scale = guidance if guidance is not None else 3.5
         # Use the LoRA-patched CLIP if a LoRA was injected, otherwise raw DualCLIPLoader
-        clip_source = ["100", 1] if lora_name else ["31", 0]
+        clip_source = [lora_id, 1] if lora_id else ["31", 0]
 
         # Encode the negative prompt on its own branch and give it the same
         # FLUX guidance embedding as the positive side, so both live in the
-        # same conditioned space when the sampler compares them.
-        workflow["50"] = {
+        # same conditioned space when the sampler compares them. Fresh ids again.
+        neg_text_id = next_node_id(workflow)
+        workflow[neg_text_id] = {
             "inputs": {"text": negative_prompt, "clip": clip_source},
             "class_type": "CLIPTextEncode",
         }
-        workflow["52"] = {
-            "inputs": {"guidance": guide_scale, "conditioning": ["50", 0]},
+        neg_guid_id = next_node_id(workflow)
+        workflow[neg_guid_id] = {
+            "inputs": {"guidance": guide_scale, "conditioning": [neg_text_id, 0]},
             "class_type": "FluxGuidance",
         }
 
         # Convert the guider into a CFGGuider wired to both branches.
-        guider_id = None
-        for nid, node in workflow.items():
-            if node.get("class_type") in ("BasicGuider", "CFGGuider"):
-                guider_id = nid
-                break
-        if guider_id is not None:
-            g = workflow[guider_id]
+        guider_id, guider = find_node_by_class(workflow, "BasicGuider", "CFGGuider")
+        if guider is not None:
+            g = guider
             # BasicGuider's positive lives under "conditioning"; a CFGGuider
             # we built on a previous override carries it under "positive".
             positive = g["inputs"].get("positive") or g["inputs"].get("conditioning", ["26", 0])
@@ -953,7 +1208,7 @@ def generate_image(
             g["inputs"] = {
                 "model": g["inputs"]["model"],
                 "positive": positive,
-                "negative": ["52", 0],
+                "negative": [neg_guid_id, 0],
                 "cfg": neg_cfg,
             }
 
@@ -966,6 +1221,22 @@ def generate_image(
             node["inputs"]["seed"] = seed
         elif cls == "RandomNoise":
             node["inputs"]["noise_seed"] = seed
+
+    # 9a. Pre-submit model validation against ComfyUI /object_info. Confirms each
+    # loader's model file exists (auto-substituting an unambiguous precision variant)
+    # and fails EARLY with the exact missing filename - BEFORE the LLM unload below -
+    # rather than after a pointless unload + a late HTTP 400. Best-effort (a no-op
+    # when /object_info is unreachable).
+    pf_ok, pf_msg = preflight_models(
+        workflow, api_url, on_progress=lambda t: _con.print(f"[dim]{t}[/dim]"))
+    if not pf_ok:
+        return False, pf_msg
+
+    # 9b. Unload the chat LLM to free VRAM for FLUX, now that the workflow is valid.
+    # Skipped when the caller decided the media model fits alongside the chat model
+    # (swap=False), so the chat model stays hot.
+    if swap:
+        _localm_unload(localm_url)
 
     # 9. Queue the prompt in ComfyUI
     try:

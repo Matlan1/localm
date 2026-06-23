@@ -40,13 +40,20 @@ from localm.image_gen.comfy import (
     contain_comfy_artifacts,
     default_api_url,
     ensure_comfy,
+    find_node_by_class,
+    next_node_id,
+    preflight_models,
+    resolve_sampler_roles,
+    set_seed_on,
 )
 
 # wan_workflow.json is the committed generic template (public Wan 2.2 5B
 # stack).  Drop a wan_workflow_local.json next to it (gitignored) to use
-# your own checkpoint/graph without publishing which models you run.  A
-# local graph must keep the template's node ids (4 = positive prompt,
-# 5 = negative, 6 = video latent, 8 = sampler, 10 = CreateVideo).
+# your own checkpoint/graph without publishing which models you run.  The
+# parameters are injected by ROLE (the sampler is found by class_type and the
+# positive / negative / latent / CreateVideo nodes by following its graph
+# edges), so a local graph no longer has to preserve any particular node ids -
+# it only has to wire a KSampler with positive/negative/latent_image inputs.
 _WORKFLOW_PATH = Path(__file__).parent / "wan_workflow.json"
 _WORKFLOW_LOCAL_PATH = Path(__file__).parent / "wan_workflow_local.json"
 
@@ -172,10 +179,9 @@ def generate_video(
     if not ok:
         return False, msg
 
-    # Unload the chat LLM to free VRAM, unless the caller decided the media model
-    # fits alongside it (swap=False) so the chat model stays hot.
-    if swap:
-        _localm_unload(localm_url)
+    # The LLM unload (the expensive VRAM handoff) is deferred to AFTER the workflow
+    # is built and the model preflight passes, so a missing model file fails before
+    # it costs the user a pointless unload + reload.
 
     try:
         workflow = json.loads(_workflow_path().read_text(encoding="utf-8"))
@@ -185,23 +191,47 @@ def generate_video(
     seed = seed if seed is not None else random.randint(1, 10 ** 12)
     frames = _snap_frames(seconds, fps)
 
-    workflow["4"]["inputs"]["text"] = prompt
-    if negative_prompt is not None:
-        workflow["5"]["inputs"]["text"] = negative_prompt
-    workflow["6"]["inputs"]["length"] = frames
-    if width is not None:
-        workflow["6"]["inputs"]["width"] = width
-    if height is not None:
-        workflow["6"]["inputs"]["height"] = height
-    workflow["8"]["inputs"]["seed"] = seed
-    if steps is not None:
-        workflow["8"]["inputs"]["steps"] = steps
-    if cfg is not None:
-        workflow["8"]["inputs"]["cfg"] = cfg
-    if "10" in workflow and "fps" in workflow["10"].get("inputs", {}):
-        workflow["10"]["inputs"]["fps"] = fps
+    # Resolve the nodes we drive by ROLE (sampler by class_type, then positive /
+    # negative / latent by following its graph edges) instead of hardcoded ids, so
+    # a user's own exported Wan graph works without renumbering (I3).
+    roles = resolve_sampler_roles(workflow)
+    _, sampler = roles["sampler"]
+    _, positive = roles["positive"]
+    _, negative = roles["negative"]
+    _, latent = roles["latent"]
+    if sampler is None or positive is None or latent is None:
+        return False, (
+            "The video workflow has no sampler / prompt / latent node localm can "
+            "drive. Export a Wan 2.2 workflow from ComfyUI (Save -> API format) and "
+            "select it on the Workflow panel (Settings -> Media -> Video).")
 
-    # Image-to-video: upload the picture and feed it as the start frame
+    # Positive prompt (the conditioning node feeding the sampler's positive input).
+    if "text" in positive.get("inputs", {}):
+        positive["inputs"]["text"] = prompt
+    # Negative prompt - only when the negative branch is actually a text-encode
+    # node (Wan wires a CLIPTextEncode; a graph that zeroes the negative has no text).
+    if (negative_prompt is not None and negative is not None
+            and "text" in negative.get("inputs", {})):
+        negative["inputs"]["text"] = negative_prompt
+    # Video latent: frame count, then optional resolution.
+    latent["inputs"]["length"] = frames
+    if width is not None:
+        latent["inputs"]["width"] = width
+    if height is not None:
+        latent["inputs"]["height"] = height
+    # Sampler knobs.
+    set_seed_on(sampler, seed)
+    if steps is not None:
+        sampler["inputs"]["steps"] = steps
+    if cfg is not None:
+        sampler["inputs"]["cfg"] = cfg
+    # Output frame rate on the CreateVideo node, wherever it sits in the graph.
+    _, create_video = find_node_by_class(workflow, "CreateVideo")
+    if create_video is not None and "fps" in create_video.get("inputs", {}):
+        create_video["inputs"]["fps"] = fps
+
+    # Image-to-video: upload the picture and feed it as the latent's start frame.
+    # A fresh node id (not a hardcoded "20") avoids clobbering a user's own node.
     uploaded_name: Optional[str] = None
     if input_image is not None:
         if not input_image.is_file():
@@ -210,11 +240,23 @@ def generate_video(
             uploaded_name = _upload_image(input_image, api_url)
         except Exception as e:
             return False, f"Failed to upload input image to ComfyUI: {e}"
-        workflow["20"] = {
+        load_id = next_node_id(workflow)
+        workflow[load_id] = {
             "inputs": {"image": uploaded_name, "upload": "image"},
             "class_type": "LoadImage",
         }
-        workflow["6"]["inputs"]["start_image"] = ["20", 0]
+        latent["inputs"]["start_image"] = [load_id, 0]
+
+    # Pre-submit model validation: confirm the Wan model files exist (substituting
+    # an unambiguous precision variant), failing EARLY with the exact missing file
+    # BEFORE the LLM unload. Best-effort when /object_info is unreachable.
+    pf_ok, pf_msg = preflight_models(workflow, api_url, on_progress=_say)
+    if not pf_ok:
+        return False, pf_msg
+
+    # Now free VRAM (the workflow is valid). swap=False keeps the chat model hot.
+    if swap:
+        _localm_unload(localm_url)
 
     # Queue
     try:
