@@ -1662,11 +1662,26 @@ ws     ::= [ \t\n\r]*
                 not self.auto_approve or call.name in self.always_confirm
             )
         )
-        if needs_confirm and (interactive or self.confirm_handler is not None):
+        if needs_confirm:
             if self.confirm_handler is not None:
                 approved = self.confirm_handler(call)
-            else:
+            elif interactive:
                 approved = self._confirm_tool(call)
+            else:
+                # Fail CLOSED: this tool requires confirmation, but there is no way
+                # to obtain it (non-interactive run, no approval handler). Deny it
+                # rather than silently executing - so a configured always_confirm or
+                # auto_approve=off is honoured, and an unattended run can never be
+                # steered into an unconfirmed destructive/network action. (RULE 5: a
+                # safety gate that cannot run must not be treated as passed. The safe
+                # default for an unattended coder is the restricted, no-shell agent.)
+                result = ToolResult.error(
+                    f"{call.name} requires confirmation, but this run is "
+                    "non-interactive with no approval handler - denied. Run "
+                    "interactively, or use the restricted coder for unattended runs.")
+                self._emit("tool_result", tool=call.name, ok=False,
+                           summary="denied: confirmation required, none available")
+                return result
             if not approved:
                 result = ToolResult.error("Rejected by user.")
                 if interactive:

@@ -111,6 +111,43 @@ def test_without_disabling_the_gate_does_not_block_run_shell(tmp_path):
 
 
 # ------------------------------------------------------------------ #
+#  Fail-closed: confirm required but unobtainable -> deny, not exec  #
+# ------------------------------------------------------------------ #
+
+def test_confirm_required_without_handler_is_denied_not_executed(tmp_path):
+    # always_confirm forces run_shell to need approval even under auto_approve.
+    # Non-interactive with no confirm_handler must FAIL CLOSED (deny), never
+    # silently execute - otherwise a configured always_confirm is bypassed on an
+    # unattended run. If this regressed to the old fall-through, the echo would run
+    # and res.output would be the command output, not the confirmation refusal.
+    agent = Agent(_StubBackend(), cwd=tmp_path, always_confirm={"run_shell"})
+    res = agent._execute_tool(_shell_call(), interactive=False)
+    assert not res.ok
+    assert "confirmation" in (res.output or "").lower()
+
+
+def test_confirm_handler_approval_lets_it_proceed(tmp_path):
+    # With an approval handler that says yes, the tool is NOT denied: it proceeds
+    # past the gate (blank command, so nothing actually executes).
+    agent = Agent(_StubBackend(), cwd=tmp_path, always_confirm={"run_shell"},
+                  confirm_handler=lambda call: True)
+    res = agent._execute_tool(
+        ToolCall(name="run_shell", args={"command": ""}, raw="", start=0, end=0),
+        interactive=False)
+    assert "denied" not in (res.output or "").lower()
+    assert "requires confirmation" not in (res.output or "").lower()
+
+
+def test_confirm_handler_rejection_is_reported(tmp_path):
+    # A handler that says no yields the normal user-rejection result (unchanged).
+    agent = Agent(_StubBackend(), cwd=tmp_path, always_confirm={"run_shell"},
+                  confirm_handler=lambda call: False)
+    res = agent._execute_tool(_shell_call(), interactive=False)
+    assert not res.ok
+    assert "rejected by user" in (res.output or "").lower()
+
+
+# ------------------------------------------------------------------ #
 #  create_session policy: owner full vs scoped restricted           #
 # ------------------------------------------------------------------ #
 
