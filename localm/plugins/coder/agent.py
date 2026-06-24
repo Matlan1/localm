@@ -829,6 +829,18 @@ class Agent:
         self._add_user(self._with_episodes(task))
         return self._loop(interactive=False)
 
+    def continue_task(self, message: str) -> str:
+        """
+        Continue the current session with another non-interactive instruction,
+        preserving history.
+
+        Unlike :meth:`run_task` it does not re-inject episodic recall (already
+        injected on the first task). Used by the CLI goal loop to feed a
+        verification failure back to the agent for another fix attempt.
+        """
+        self._add_user(message)
+        return self._loop(interactive=False)
+
     def chat(self, user_input: str) -> str:
         """
         Send one user message in an ongoing interactive session.
