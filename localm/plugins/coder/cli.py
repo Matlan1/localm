@@ -434,6 +434,7 @@ def main(
                 out.write_text(patch_content, encoding="utf-8")
                 print_info(f"Patch written to {out}")
 
+        _warn_sensitive_changes(agent)
         md_path = agent.close()
         if md_path:
             print_info(f"Session transcript saved → {md_path}")
@@ -519,6 +520,19 @@ def _run_goal_loop(agent: Agent, task: str, until_cmd: str, max_iters: int,
             f"({attempt}/{max_iters})...")
         response = agent.continue_task(_goal_feedback(until_cmd, code, output))
     return False, response
+
+
+def _warn_sensitive_changes(agent: Agent) -> None:
+    """Surface test / CI-config edits so a green check over rewritten tests is
+    reviewed, not trusted (R19, agentic code review). Best-effort: never let this
+    advisory break the session."""
+    try:
+        from .review_guard import classify_sensitive_changes, render_warning
+        message = render_warning(classify_sensitive_changes(agent.changed_files()))
+        if message:
+            print_warning(message)
+    except Exception:                                       # noqa: BLE001
+        pass
 
 
 # ---------------------------------------------------------------------------
