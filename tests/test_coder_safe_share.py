@@ -206,6 +206,35 @@ def test_cookie_authed_owner_is_recognised_for_history(tmp_path, monkeypatch):
         assert s["logs"] == []
 
 
+def test_coder_history_lists_only_coder_sessions(tmp_path, monkeypatch):
+    # coder-history-chat: regular chat (HTTP server -> "_server.jsonl", CLI REPL
+    # -> "_chat.jsonl") and coder agent ("_localcoder.jsonl") logs all share the
+    # sessions dir, distinguished only by the filename label. Coder history must
+    # list ONLY the coder logs, not the chat sessions.
+    app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
+    app.state.root_dir = str(tmp_path)
+    import localm.audit as _audit
+    sdir = tmp_path / "sess"; sdir.mkdir()
+    started = '{"type":"system","data":{"msg":"session started"}}\n'
+    (sdir / "2026-01-01_000000_1_localcoder.jsonl").write_text(started, encoding="utf-8")
+    (sdir / "2026-01-01_000001_2_server.jsonl").write_text(started, encoding="utf-8")
+    (sdir / "2026-01-01_000002_3_chat.jsonl").write_text(started, encoding="utf-8")
+    monkeypatch.setattr(_audit, "_SESSIONS_DIR", sdir)
+
+    with TestClient(app) as client:
+        h = {"Authorization": "Bearer ownersecret"}
+        logs = client.get("/api/coder/history", headers=h).json()["logs"]
+        assert {x["name"] for x in logs} == {"2026-01-01_000000_1_localcoder.jsonl"}
+        # The reader accepts a coder log...
+        assert client.get(
+            "/api/coder/history/2026-01-01_000000_1_localcoder.jsonl",
+            headers=h).status_code == 200
+        # ...and rejects a chat/server log name routed to the coder endpoint.
+        assert client.get(
+            "/api/coder/history/2026-01-01_000001_2_server.jsonl",
+            headers=h).status_code == 400
+
+
 def test_scoped_key_cannot_steer_the_owners_session(tmp_path, monkeypatch):
     # THE critical one: a scoped key must not be able to send a message to the
     # OWNER's full session (which keeps run_shell) - that would be RCE by proxy.
