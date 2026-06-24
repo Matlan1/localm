@@ -902,8 +902,17 @@ class LlamaCpp:
         if prefix == len(prompt_tokens):
             prefix -= 1
 
-        if prefix < len(self._cached_tokens):
-            # Drop cached tokens past the common prefix
+        # Drop cached tokens past the common prefix. The empty-bookkeeping case
+        # (``not self._cached_tokens``) is NOT redundant with ``prefix <
+        # len(...)``: an image turn (_generate_image never appends its generated
+        # tokens) and a mid-generate decode failure both leave the NATIVE KV
+        # cache populated while self._cached_tokens is []. Without this branch the
+        # guard is 0 < 0 (False), the wipe is skipped, and the new prompt is
+        # decoded onto that stale KV at shifted positions - so the model attends
+        # to the previous turn's context (U-1: "sees earlier text out of order").
+        # When the bookkeeping is empty prefix is 0, so seq_rm(0, 0, -1) drops the
+        # whole residual cache and the suffix decodes cleanly from position 0.
+        if prefix < len(self._cached_tokens) or not self._cached_tokens:
             if not api.llama_memory_seq_rm(mem, 0, prefix, -1):
                 # Partial removal unsupported (e.g. SWA cache) - start over
                 api.llama_memory_clear(mem, True)

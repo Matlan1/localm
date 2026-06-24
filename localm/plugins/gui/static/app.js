@@ -1743,7 +1743,16 @@ function renderChat() {
     return;
   }
   const NOTE_LABELS = { web: "Web", doc: "Doc", kb: "Sources" };
+  // NEW-1 model-switch-indication: track the model of the previous assistant turn
+  // so a small divider marks where the active model changed mid-conversation.
+  let lastAssistantModel = null;
   conv.messages.forEach((m, i) => {
+    if (m.role === "assistant" && m.model) {
+      if (lastAssistantModel && m.model !== lastAssistantModel) {
+        box.appendChild(el("div", "model-switch", "switched to " + m.model));
+      }
+      lastAssistantModel = m.model;
+    }
     const tag = m.tag || (m.web ? "web" : null);
     const actions = [];
     if (m.role === "user" && !tag && !chat.abort) {
@@ -3259,6 +3268,9 @@ async function runCompletion(conv, webDepth = 0, web = null) {
   const reply = {
     role: "assistant",
     content: reasoning ? "<think>\n" + reasoning + "\n</think>\n" + full : full,
+    // NEW-1: record which model produced this turn so the transcript can show a
+    // divider when the active model changes between turns (model-switch-indication).
+    model: modelSelect.value || undefined,
   };
   if (finishReason === "length") {
     // The reply was cut by the max-tokens budget, not finished by the model.
