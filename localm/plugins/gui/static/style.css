@@ -1525,4 +1525,18 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
   #conversations { flex: 1 1 auto; min-height: 45vh; }
   .conv-item { min-height: 44px; padding: 10px 12px; font-size: 14px; }
   #conv-search { padding: 9px 11px; font-size: 16px; }  /* 16px: no iOS zoom-on-focus */
+
+  /* U7-PLUGIN-TABLE-MOBILE: a 4-column data table (plugin catalog, key list)
+     overflows the narrow viewport. Stack each row as a card so the description
+     wraps and the action buttons drop below instead of forcing horizontal pan. */
+  .data-table, .data-table tbody, .data-table tr, .data-table td { display: block; width: 100%; }
+  .data-table thead { display: none; }
+  .data-table tr {
+    border: 1px solid var(--border); border-radius: 8px;
+    margin-bottom: 10px; padding: 6px 4px;
+  }
+  .data-table td { border-bottom: none; padding: 4px 10px; }
+  .data-table td:empty { display: none; }
+  .data-table .name { font-size: 15px; }
+  .data-table button { margin-left: 0; margin-top: 6px; min-height: 36px; }
 }
