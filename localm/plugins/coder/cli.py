@@ -150,11 +150,20 @@ def _complete_model(ctx, param, incomplete):
               help="List the episodic-memory lessons stored for this project and exit.")
 @click.option("--forget-episodes", "forget_episodes", is_flag=True, default=False,
               help="Delete all stored episodic-memory lessons for this project and exit.")
+@click.option("--until", "until_cmd", default=None, metavar="COMMAND",
+              help="Goal mode: iterate on the TASK until this command exits 0 "
+                   "(e.g. --until 'pytest -x'). Success is judged by the command, "
+                   "not the model, so it cannot declare premature success. "
+                   "Requires a TASK; exits non-zero if the goal is not met.")
+@click.option("--goal-max-iters", "goal_max_iters", default=5,
+              type=click.IntRange(1, 50),
+              help="Max fix iterations for --until before giving up [default: 5].")
 def main(
     task, model, url, api_key, port, cwd,
     no_server, force_new, max_turns, temperature, max_tokens,
     verbose, yes, interactive_confirm, dry_run, estimate, patch_mode, ci, output_format,
     native_tools, provider, mode, scope, show_episodes, forget_episodes,
+    until_cmd, goal_max_iters,
 ):
     """
     Offline AI coding agent powered by local LLMs.
@@ -205,6 +214,11 @@ def main(
         for e in eps:
             click.echo(f"  - [{e.outcome}] {e.lesson or e.summary}")
         return
+
+    # Goal mode needs a task to work on; fail fast before any server/model setup.
+    if until_cmd and not task:
+        print_error("--until requires a TASK to work on.")
+        sys.exit(2 if ci else 1)
 
     # ------------------------------------------------------------------ #
     #  CI mode setup
@@ -365,9 +379,13 @@ def main(
             return
 
         if task:
-            # Non-interactive single-task mode
-            response = agent.run_task(task)
-            success  = agent.last_run_ok
+            # Non-interactive single-task mode (optionally a verify-until-pass loop)
+            if until_cmd:
+                success, response = _run_goal_loop(
+                    agent, task, until_cmd, goal_max_iters, work_dir)
+            else:
+                response = agent.run_task(task)
+                success  = agent.last_run_ok
 
             if output_format == "json":
                 import json as _json
@@ -379,7 +397,9 @@ def main(
                 }
                 sys.stdout.write(_json.dumps(result, indent=2) + "\n")
 
-            if ci and not success:
+            # Goal mode: a failed verification is a real non-zero exit (the whole
+            # point is a pass/fail oracle), not only under --ci.
+            if (until_cmd or ci) and not success:
                 sys.exit(1)
         else:
             # Interactive REPL
@@ -421,6 +441,84 @@ def main(
             clear_shell_history_traces()
         if server_ctx:
             server_ctx.stop()
+
+
+# ---------------------------------------------------------------------------
+#  Goal mode: iterate the task until a verification command exits 0
+# ---------------------------------------------------------------------------
+
+def _run_verify(command: str, work_dir: Path, timeout: int = 600) -> "tuple[int, str]":
+    """Run the verification *command* in *work_dir*; return (exit_code, output).
+
+    The command is run through the platform shell wrapper (the same list form the
+    run_shell tool uses), so a compound command like 'pytest -x && ruff check'
+    works. The harness - not the model - runs it, so its exit code is an
+    un-gameable judge of success."""
+    import subprocess
+    if sys.platform == "win32":
+        argv = ["cmd", "/C", command]
+    else:
+        argv = ["/bin/sh", "-c", command]
+    try:
+        proc = subprocess.run(
+            argv, cwd=str(work_dir), capture_output=True, text=True,
+            timeout=timeout, encoding="utf-8", errors="replace")
+        return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+    except subprocess.TimeoutExpired:
+        return 124, "verification command timed out after %ds" % timeout
+    except Exception as e:                                  # noqa: BLE001
+        return 125, "failed to run verification command: %s" % e
+
+
+def _goal_task_wrap(task: str, until_cmd: str) -> str:
+    return (
+        f"{task}\n\n"
+        f"This task is verified by running `{until_cmd}`, which must exit 0. "
+        "Fix the underlying code until it passes. Do NOT modify the verification "
+        "target itself (the tests or the check) to force a pass - that defeats the "
+        "purpose. After you finish, the command is run for you and any failure is "
+        "reported back for another attempt."
+    )
+
+
+def _goal_feedback(until_cmd: str, code: int, output: str) -> str:
+    tail = (output or "").strip()[-4000:] or "(no output)"
+    return (
+        f"The verification command `{until_cmd}` failed with exit code {code}. "
+        f"Output:\n{tail}\n\n"
+        "Diagnose the real cause and fix it. Do not modify the check itself."
+    )
+
+
+def _run_goal_loop(agent: Agent, task: str, until_cmd: str, max_iters: int,
+                   work_dir: Path) -> "tuple[bool, str]":
+    """Iterate: run the task, run the verify command, feed failures back, until it
+    exits 0 or the iteration cap is hit. Returns (success, last_response).
+
+    Success is judged solely by the command's exit code, so the model cannot
+    declare a premature success; on exhaustion it reports failure honestly rather
+    than papering over it."""
+    print_info(
+        f"Goal mode: iterating on the task until `{until_cmd}` exits 0 "
+        f"(max {max_iters} iteration(s)).")
+    response = agent.run_task(_goal_task_wrap(task, until_cmd))
+    for attempt in range(1, max_iters + 1):
+        code, output = _run_verify(until_cmd, work_dir)
+        if code == 0:
+            print_success(
+                f"Goal met: `{until_cmd}` exited 0 after {attempt} iteration(s).")
+            return True, response
+        if attempt == max_iters:
+            print_error(
+                f"Goal NOT met: `{until_cmd}` still failing (exit {code}) after "
+                f"{max_iters} iteration(s). Reporting failure rather than a false "
+                "success.")
+            return False, response
+        print_warning(
+            f"Verification failed (exit {code}); fixing and retrying "
+            f"({attempt}/{max_iters})...")
+        response = agent.continue_task(_goal_feedback(until_cmd, code, output))
+    return False, response
 
 
 # ---------------------------------------------------------------------------
