@@ -3674,6 +3674,13 @@ function startAssistantBlock(s) {
 }
 
 function flushAssistantBlock(s) {
+  // CODER-EMPTY-MODEL: when the assistant turn produced no VISIBLE text (it emitted
+  // only a tool call, or its text scrubbed to nothing), drop the empty "Model" row
+  // instead of leaving a blank bubble stacked above the tool card.
+  if (s.liveBody && !s.liveBody.textContent.trim()) {
+    const row = s.liveBody.closest(".msg-row");
+    if (row) row.remove();
+  }
   s.liveBody = null;
   s.liveText = "";
 }
