@@ -168,6 +168,18 @@ DEFAULT_CONFIG: dict = {
     # (indirect prompt injection). Defense in depth - it blocks nothing, only
     # labels. Leave ON unless you have a specific reason to drop the framing.
     "coder_untrusted_provenance": True,
+    # Pre-done self-review: before the coder declares a task done, a reviewer model
+    # reads the diff and feeds blocking issues back for one more fix pass. Off by
+    # default (it adds a model round-trip per task that changed files).
+    "coder_review": False,
+    # Reviewer target: "" = the agent's own model (local, private); "openai" /
+    # "anthropic" = a cloud model; an http(s) URL = a 2nd OpenAI-compatible endpoint
+    # (e.g. a second local server). A NETWORK reviewer is skipped in privacy mode and
+    # for shared keys (it would send the diff off-machine) - those use the local model.
+    "coder_reviewer": "",
+    # Model name for a heterogeneous (cloud / URL) reviewer; blank uses a sensible
+    # provider default or the agent's own model name.
+    "coder_reviewer_model": "",
     # EXPERIMENTAL + dormant: constrain coder tool-call output with a GBNF grammar
     # (localm.inference.gbnf.TOOL_CALLS_ONLY) so the model cannot emit malformed
     # tool JSON. OFF by default because (a) it only takes effect on a grammar-capable

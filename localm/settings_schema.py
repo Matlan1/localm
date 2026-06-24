@@ -227,6 +227,25 @@ CORE_FIELDS: list = [
                  "the agent (indirect prompt injection). Defense in depth - it "
                  "blocks nothing. Leave ON unless you have a specific reason.",
                  group="Coder", owner="coder", applies=Applies.NEXT_LOAD),
+    SettingField("coder_review", Widget.TOGGLE,
+                 "Review changes before finishing",
+                 "Before the coder declares a task done, a reviewer model reads the "
+                 "diff and feeds blocking issues back for one more fix pass. Adds a "
+                 "model round-trip per task that changed files. Off by default.",
+                 group="Coder", owner="coder", applies=Applies.NEXT_LOAD),
+    SettingField("coder_reviewer", Widget.TEXT,
+                 "Reviewer model target",
+                 "Who reviews: blank = the agent's own model (local, private); "
+                 "'openai' or 'anthropic' = a cloud model; an http(s) URL = a second "
+                 "OpenAI-compatible endpoint (e.g. a 2nd local server). A network "
+                 "reviewer is skipped in privacy mode and for shared keys (it would "
+                 "send the diff off-machine) - those review with the local model.",
+                 group="Coder", owner="coder", applies=Applies.NEXT_LOAD),
+    SettingField("coder_reviewer_model", Widget.TEXT,
+                 "Reviewer model name",
+                 "Model name for a cloud/URL reviewer. Blank uses a sensible provider "
+                 "default or the agent's own model name.",
+                 group="Coder", owner="coder", applies=Applies.NEXT_LOAD),
     # ---- Media (ComfyUI: image / music / video plugins) ----
     SettingField("comfy_workdir", Widget.FOLDER, "ComfyUI folder",
                  "Your ComfyUI install folder. localm runs it from here and "
