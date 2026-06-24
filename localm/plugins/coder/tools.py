@@ -865,8 +865,16 @@ def tool_spawn_agent(
     result_text = child.run_task(full_task)
     turns_used  = child.turns
 
+    # A sub-agent may have fetched untrusted web / MCP content and quoted it
+    # verbatim in its summary; that text re-enters the PARENT loop as a (trusted)
+    # spawn_agent result. Defang frame markers + chat-template control tokens in
+    # it so the child cannot - knowingly or not - forge a role/frame boundary in
+    # the parent. This is the structural-forgery half of provenance hardening; we
+    # do not wrap it in the untrusted fence, so the parent can still act on a
+    # legitimate delegated result (the child runs its own fence internally).
+    from .provenance import neutralise
     return ToolResult.success(
-        result_text,
+        neutralise(result_text),
         summary=f"sub-agent '{name}' finished in {turns_used} turn(s)",
     )
 
@@ -1395,6 +1403,11 @@ class ToolDef:
     description: str
     params:      dict
     destructive: bool = False
+    # Opt-in marker for a tool whose output is external, attacker-influenceable
+    # content (read by provenance.is_untrusted_tool). The built-in network tools
+    # and MCP tools are detected by name, so this is the seam for a future plugin
+    # tool that returns fetched content to flag itself as untrusted.
+    untrusted_output: bool = False
 
 
 # The ONLY tools a RESTRICTED (shareable, non-owner) coder session may use: an

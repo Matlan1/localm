@@ -30,6 +30,7 @@ import threading
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from .provenance import neutralise
 from .tools import TOOL_REGISTRY, ToolDef, ToolResult
 
 PROTOCOL_VERSION = "2025-03-26"
@@ -224,9 +225,13 @@ def _schema_to_params(schema: dict) -> dict:
     required = set(schema.get("required", []) or [])
     params = {}
     for pname, meta in props.items():
-        params[pname] = {
+        # Param names and descriptions are server-controlled and land in the
+        # system prompt; neutralise() them so a hostile server cannot smuggle a
+        # chat-template control token into the model's highest-trust context.
+        # (membership in *required* is checked on the original name.)
+        params[neutralise(str(pname))] = {
             "type": _JSON_TO_PARAM_TYPE.get(meta.get("type", "string"), "string"),
-            "description": meta.get("description", ""),
+            "description": neutralise(str(meta.get("description", ""))),
             "required": pname in required,
         }
     return params
@@ -294,14 +299,21 @@ def register_mcp_tools(cwd: Path) -> tuple[List[str], List[str]]:
             tool_name = tool.get("name", "")
             if not tool_name:
                 continue
-            reg_name = f"mcp_{name}_{tool_name}"
+            # The server fully controls its tool names and descriptions; both end
+            # up in the system prompt (the model's highest-trust context). Defang
+            # any chat-template control token / frame marker in them so a hostile
+            # or compromised server cannot forge a role boundary at the top of
+            # context. The registered name uses the neutralised form (a no-op for
+            # ordinary names); the ACTUAL call keeps the original tool_name via
+            # the closure, so legitimate servers are unaffected.
+            reg_name = f"mcp_{name}_{neutralise(tool_name)}"
             if reg_name in TOOL_REGISTRY:
                 warnings.append(f"MCP tool name clash, skipped: {reg_name}")
                 continue
             TOOL_REGISTRY[reg_name] = ToolDef(
                 name=reg_name,
                 fn=_make_tool_fn(server, tool_name),
-                description=(
+                description=neutralise(
                     f"[MCP:{name}] {tool.get('description', '')}".strip()
                 ),
                 params=_schema_to_params(tool.get("inputSchema", {})),

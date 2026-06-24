@@ -162,6 +162,12 @@ DEFAULT_CONFIG: dict = {
     # privacy mode and for restricted (shareable-key) sessions, and stored under
     # the localm home dir, never the project tree. Set False to disable both halves.
     "coder_episodic_memory": True,
+    # Provenance tagging: re-frame coder tool results from untrusted (network /
+    # MCP) tools as data-not-instructions and harden their boundary, so a fetched
+    # page or external server cannot inject instructions into the model loop
+    # (indirect prompt injection). Defense in depth - it blocks nothing, only
+    # labels. Leave ON unless you have a specific reason to drop the framing.
+    "coder_untrusted_provenance": True,
     # EXPERIMENTAL + dormant: constrain coder tool-call output with a GBNF grammar
     # (localm.inference.gbnf.TOOL_CALLS_ONLY) so the model cannot emit malformed
     # tool JSON. OFF by default because (a) it only takes effect on a grammar-capable

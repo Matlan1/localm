@@ -219,6 +219,14 @@ CORE_FIELDS: list = [
                  "mode and for shared keys; stored under the localm data dir, not "
                  "your project. Manage with: localcoder --episodes / --forget-episodes.",
                  group="Coder", owner="coder", applies=Applies.NEXT_LOAD),
+    SettingField("coder_untrusted_provenance", Widget.TOGGLE,
+                 "Tag untrusted external content",
+                 "Mark coder tool results from the web, web search, and external "
+                 "MCP servers as untrusted DATA (not instructions) and harden the "
+                 "result boundary, so a fetched page cannot inject commands into "
+                 "the agent (indirect prompt injection). Defense in depth - it "
+                 "blocks nothing. Leave ON unless you have a specific reason.",
+                 group="Coder", owner="coder", applies=Applies.NEXT_LOAD),
     # ---- Media (ComfyUI: image / music / video plugins) ----
     SettingField("comfy_workdir", Widget.FOLDER, "ComfyUI folder",
                  "Your ComfyUI install folder. localm runs it from here and "
