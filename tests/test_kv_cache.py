@@ -192,6 +192,39 @@ class TestPrefillWithReuse:
         assert args[1] == 3
         assert llm._cached_tokens == [1, 2, 3]
 
+    def test_empty_cache_clears_stale_native_kv_before_reuse(self):
+        """U-1: an image turn (_generate_image never appends its tokens) and a
+        mid-generate decode failure empty _cached_tokens but leave the NATIVE KV
+        populated. Reusing the context must drop that residual KV first (prefix=0,
+        so seq_rm(0, 0, -1)), else the new prompt decodes onto stale KV at shifted
+        positions and the model attends to the previous turn's context."""
+        llm = _bare_llama()
+        llm._cached_tokens = []                 # bookkeeping says empty...
+        ctx, mock_api = self._patch_api()       # ...native KV still holds a prior turn
+        with ctx:
+            llm._prefill_with_reuse([1, 2, 3])
+
+        mock_api.llama_memory_seq_rm.assert_called_once_with(333, 0, 0, -1)
+        # Full prompt decoded from position 0 after the wipe.
+        args = mock_api.llama_batch_get_one.call_args[0]
+        assert args[1] == 3
+        assert llm._cached_tokens == [1, 2, 3]
+
+    def test_empty_cache_seq_rm_failure_falls_back_to_clear(self):
+        """Same empty-bookkeeping case, but partial removal is unsupported: fall
+        back to a full clear so the stale native KV is still wiped."""
+        llm = _bare_llama()
+        llm._cached_tokens = []
+        ctx, mock_api = self._patch_api(
+            llama_memory_seq_rm=MagicMock(return_value=False))
+        with ctx:
+            llm._prefill_with_reuse([1, 2, 3])
+
+        mock_api.llama_memory_clear.assert_called_once()
+        args = mock_api.llama_batch_get_one.call_args[0]
+        assert args[1] == 3
+        assert llm._cached_tokens == [1, 2, 3]
+
     def test_decode_failure_wipes_cache_state(self):
         llm = _bare_llama()
         llm._cached_tokens = [1, 2]
