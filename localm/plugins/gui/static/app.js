@@ -4982,6 +4982,25 @@ async function resetServiceWorkerAndCaches() {
 }
 window.resetServiceWorkerAndCaches = resetServiceWorkerAndCaches;
 
+// Manual escape hatch (offered on the reconnect overlay): wipe EVERY client-side
+// artifact that could wedge boot/auth, then reload to a clean state (the key
+// gate). Each step is independently guarded so one failure never blocks the rest.
+// (The HttpOnly localm_session cookie cannot be cleared from JS, but it never
+// wedges the client - a stale one simply yields a 401 -> the key gate.)
+async function resetClientState() {
+  try {
+    document.cookie.split(";").forEach((c) => {
+      const n = c.split("=")[0].trim();
+      if (n) document.cookie = n + "=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/";
+    });
+  } catch (e) { /* ignore */ }
+  try { localStorage.clear(); } catch (e) { /* ignore */ }
+  try { sessionStorage.clear(); } catch (e) { /* ignore */ }
+  try { await resetServiceWorkerAndCaches(); } catch (e) { /* ignore */ }
+  location.reload();
+}
+window.resetClientState = resetClientState;
+
 // Server-unreachable lock (AUTH-1b): the server is DOWN (e.g. it crashed - that
 // is Lane A's territory), NOT an auth failure. Show a distinct "reconnecting"
 // overlay and auto-retry instead of the key gate, so a dead server is not
@@ -4997,6 +5016,13 @@ function showReconnectOverlay() {
     panel.appendChild(el("div", "reconnect-spinner"));
     panel.appendChild(el("div", "reconnect-msg",
       "Can't reach the LocaLM server. It may be starting or stopped. Reconnecting..."));
+    // Escape hatch: a client must always have a manual way out, so no local
+    // artifact (a bad cookie, a wedged shell) can ever trap the user with no
+    // recovery. Reset clears all client-side state and reloads to the key gate.
+    const reset = el("button", "reconnect-reset", "Reset and re-enter key");
+    reset.type = "button";
+    reset.onclick = resetClientState;
+    panel.appendChild(reset);
     ov.appendChild(panel);
     document.body.appendChild(ov);
   }
@@ -5033,6 +5059,21 @@ function hideStartupOverlay() {
 window.showStartupOverlay = showStartupOverlay;
 window.hideStartupOverlay = hideStartupOverlay;
 
+// Reachability probe that carries NO auth headers, so it can NEVER fail for a
+// client-side reason (a bad cookie/header that makes authHeaders throw). ANY HTTP
+// response - even 401 - proves the server is reachable; only a thrown fetch (no
+// response at all) means it is genuinely down. This is what makes the
+// "server unreachable" verdict actually mean unreachable, never a client problem.
+async function serverReachable() {
+  try {
+    await fetch("/api/models", { cache: "no-store" });
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+window.serverReachable = serverReachable;
+
 function onServerUnreachable() {
   window.__localmLocked = true;
   const app = $("app");
@@ -5042,13 +5083,10 @@ function onServerUnreachable() {
   showReconnectOverlay();
   if (_reconnectTimer) return;
   _reconnectTimer = setInterval(async () => {
-    let reachable = false;
-    try { await fetch("/api/models", { headers: authHeaders() }); reachable = true; }
-    catch (e) { reachable = false; }
-    if (!reachable) return;                 // still down - keep waiting
+    if (!(await serverReachable())) return;   // still down - keep waiting
     clearInterval(_reconnectTimer);
     _reconnectTimer = null;
-    location.reload();                      // back up -> clean boot handles 200/401
+    location.reload();                         // back up -> clean boot handles 200/401
   }, 3000);
 }
 window.onServerUnreachable = onServerUnreachable;
@@ -5063,7 +5101,11 @@ async function bootAuthProbe() {
     const r = await fetch("/api/models", { headers: authHeaders() });
     status = r.status;
   } catch (e) {
-    status = 0;   // unreachable / blocked
+    // The authed request could not complete. Before declaring the server
+    // unreachable (a dead-end overlay with no recovery), confirm with a header-free
+    // probe: if the server answers at all it is UP and the failure was client-side,
+    // so treat it as "needs auth" (the recoverable key gate), NOT a dead server.
+    status = (await serverReachable()) ? 401 : 0;
   }
   if (status === 0) { onServerUnreachable(); return false; }
   if (status === 401) {
