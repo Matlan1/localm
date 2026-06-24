@@ -55,3 +55,40 @@ def test_files_a_report_with_shell_token(monkeypatch):
     assert p.is_file() and p.suffix == ".md"
     body = p.read_text(encoding="utf-8")
     assert "video generation froze" in body
+
+
+def test_gui_button_description_payload(monkeypatch):
+    """The GUI "Report a bug" button posts ``description`` (+ optional
+    ``include_log``); the response carries the filename + maintainer the GUI
+    shows. ``description`` and ``message`` are interchangeable aliases."""
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    app = create_app(_engine())
+    with TestClient(app) as c:
+        r = c.post(
+            "/api/bug-report",
+            json={"description": "The mic does nothing.", "include_log": False},
+            headers={"Authorization": f"Bearer {app.state.shell_token}"},
+        )
+    assert r.status_code == 200
+    data = r.json()
+    assert data["saved"] is True
+    assert data["filename"].startswith("bug-") and data["filename"].endswith(".md")
+    assert data["maintainer"]
+    p = Path(data["path"])
+    assert p.is_file()
+    assert "The mic does nothing." in p.read_text(encoding="utf-8")
+
+
+def test_blank_description_rejected(monkeypatch):
+    """A blank report (no description/message) must be refused, not filed empty."""
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    app = create_app(_engine())
+    with TestClient(app) as c:
+        r = c.post(
+            "/api/bug-report",
+            json={"description": "   "},
+            headers={"Authorization": f"Bearer {app.state.shell_token}"},
+        )
+    assert r.status_code == 400

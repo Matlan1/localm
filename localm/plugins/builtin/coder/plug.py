@@ -417,7 +417,12 @@ async def coder_history(request: Request):
     sessions_dir = _audit._SESSIONS_DIR
     items = []
     if sessions_dir.is_dir():
-        for p in sorted(sessions_dir.glob("*.jsonl"),
+        # Coder sessions are the ONLY ones labelled "localcoder"
+        # (AuditLog filename = <ts>_<pid>_<label>.jsonl). Regular GUI chat goes
+        # through the HTTP server as "_server.jsonl" and the CLI chat REPL as
+        # "_chat.jsonl", and all three share this directory - so glob the coder
+        # label only, or coder history lists chat sessions too (coder-history-chat).
+        for p in sorted(sessions_dir.glob("*_localcoder.jsonl"),
                         key=lambda f: f.stat().st_mtime, reverse=True)[:100]:
             items.append({
                 "name": p.name,
@@ -436,7 +441,10 @@ async def coder_history_entries(name: str, request: Request):
     if not is_owner:
         raise HTTPException(404, "No such log")
     from localm import audit as _audit
-    if not name.endswith(".jsonl"):
+    # Only coder logs are listed by coder_history; reading a chat/server log
+    # ("_server.jsonl"/"_chat.jsonl") through the coder endpoint makes no sense
+    # (coder-history-chat). Path traversal is still blocked by _confined_file.
+    if not name.endswith("_localcoder.jsonl"):
         raise HTTPException(400, "Invalid log name")
     path = _confined_file(_audit._SESSIONS_DIR, name, "session log")
     entries = []

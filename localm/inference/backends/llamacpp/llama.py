@@ -12,6 +12,7 @@ Implements only the subset used by GgufBackend:
 
 from __future__ import annotations
 
+import codecs
 import contextlib
 import ctypes
 import os
@@ -142,13 +143,24 @@ class _Tokenizer:
 
     # -- decode ----------------------------------------------------------------
 
-    def token_to_piece(self, token: int) -> str:
+    def token_to_piece_bytes(self, token: int) -> bytes:
+        """Raw UTF-8 bytes of a single token, UNDECODED. A multibyte character
+        can straddle two tokens, so callers that stream or join multiple tokens
+        must accumulate bytes and decode the run as a whole (see ``detokenize``
+        and ``_utf8_pieces``); decoding each token's bytes in isolation produces
+        U+FFFD replacement characters at the split (R46)."""
         buf = ctypes.create_string_buffer(256)
         n = api.llama_token_to_piece(self._vocab, token, buf, 256, 0, True)
         if n < 0:
             buf = ctypes.create_string_buffer(-n + 4)
             n = api.llama_token_to_piece(self._vocab, token, buf, len(buf), 0, True)
-        return buf.raw[:n].decode("utf-8", errors="replace")
+        return buf.raw[:n]
+
+    def token_to_piece(self, token: int) -> str:
+        """Single token decoded to text. Safe for whole tokens; for multi-token
+        runs use ``detokenize``/``_utf8_pieces`` so a character split across a
+        token boundary is not mangled."""
+        return self.token_to_piece_bytes(token).decode("utf-8", errors="replace")
 
     def is_eog(self, token: int) -> bool:
         return api.llama_vocab_is_eog(self._vocab, token)
@@ -240,6 +252,33 @@ def _apply_model_template(model_ptr: int, messages: List[Dict]) -> str:
             return _format_chatml(messages)
 
     return buf.raw[:needed].decode("utf-8", errors="replace")
+
+
+# ---------------------------------------------------------------------------
+#  UTF-8-safe token-bytes -> text stream (R46)
+#
+#  A single multibyte character (accented letters, CJK, emoji, the bullet/arrow
+#  glyphs models love) is frequently emitted as two or more vocabulary tokens,
+#  so its UTF-8 bytes straddle a token boundary. Decoding each token's bytes in
+#  isolation turns the split halves into U+FFFD replacement characters - the
+#  mojibake the user saw mid-word. An incremental decoder buffers an incomplete
+#  trailing sequence until the next token's bytes complete it.
+# ---------------------------------------------------------------------------
+
+def _utf8_pieces(token_bytes: Iterator[bytes]) -> Iterator[str]:
+    """Decode a stream of per-token byte pieces into text, never splitting a
+    multibyte UTF-8 character across a token boundary. A character whose bytes
+    are not yet complete is held back until the following token supplies the
+    rest; a genuinely truncated tail at end-of-stream surfaces as U+FFFD via the
+    final flush rather than being silently dropped."""
+    dec = codecs.getincrementaldecoder("utf-8")("replace")
+    for b in token_bytes:
+        out = dec.decode(b)
+        if out:
+            yield out
+    tail = dec.decode(b"", final=True)
+    if tail:
+        yield tail
 
 
 # ---------------------------------------------------------------------------
@@ -565,7 +604,11 @@ class LlamaCpp:
         return self._tokenizer.encode(text, add_bos=add_bos)
 
     def detokenize(self, tokens: Iterable[int]) -> str:
-        return "".join(self._tokenizer.token_to_piece(t) for t in tokens)
+        # Join the raw token bytes first, then decode once, so a multibyte
+        # character that straddles a token boundary is not split into U+FFFD
+        # (R46). Per-token decode would mangle exactly those boundaries.
+        raw = b"".join(self._tokenizer.token_to_piece_bytes(t) for t in tokens)
+        return raw.decode("utf-8", errors="replace")
 
     # ------------------------------------------------------------------ #
     #  Core generation loop                                               #
@@ -1026,7 +1069,9 @@ class LlamaCpp:
         scrub.  Chat output is always scrubbed; in debug mode the raw
         pre-scrub text is additionally written to the debug log."""
         from localm.debuglog import debug_enabled, logger
-        raw = (self._tokenizer.token_to_piece(t) for t in gen)
+        # Decode token BYTES through one UTF-8-safe stream so a character split
+        # across a token boundary is reassembled, not turned into U+FFFD (R46).
+        raw = _utf8_pieces(self._tokenizer.token_to_piece_bytes(t) for t in gen)
         if debug_enabled():
             captured: list = []
 

@@ -855,17 +855,26 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
     async def file_bug_report_ep(body: dict):
         """R47: file a bug report from the GUI. The CLI has `localm bug-report`, but
         the GUI had no manual trigger. Saves an editable markdown report (a safe
-        environment snapshot plus the user's note - never keys/config/chat data) and
+        environment snapshot plus the user's note - never keys/config/chat data;
+        with ``include_log`` the home-scrubbed tail of the current run's log) and
         returns its path so the GUI can point the user at the file to edit/send.
         Owner / config-write scoped and same-origin gated like the other management
         routes (a report can carry local diagnostics)."""
-        note = (body.get("message") or "").strip()
         from localm import bugreport
-        path = bugreport.report_failure(
-            summary=note or "user-reported issue",
-            context={"operation": "bug-report", "source": "gui"},
-            as_failure=False, interactive=False)
-        return {"saved": bool(path), "path": str(path) if path else None}
+        # The GUI "Report a bug" button sends ``description``; ``message`` is
+        # accepted as an alias so the documented payload and CLI-shaped callers
+        # both work. Single canonical endpoint (the GUI router does not duplicate
+        # it - that would shadow this one and drop the user's text + log flag).
+        description = (body.get("description") or body.get("message") or "").strip()
+        if not description:
+            raise HTTPException(400, "Please describe the problem before sending.")
+        path = bugreport.save_user_report(
+            description, include_log=bool(body.get("include_log")))
+        if path is None:
+            # A failed save must not report success (we do not hide problems).
+            raise HTTPException(500, "Could not save the bug report to disk.")
+        return {"saved": True, "filename": path.name, "path": str(path),
+                "maintainer": bugreport.MAINTAINER_EMAIL}
 
     @app.post("/v1/plugins/install", dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
     async def install_plugin_ep(body: dict):

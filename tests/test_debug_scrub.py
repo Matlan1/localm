@@ -7,11 +7,65 @@ import os
 import pytest
 
 from localm import debuglog
-from localm.inference.backends.llamacpp.llama import _scrub_stream
+from localm.inference.backends.llamacpp.llama import (
+    _filtered_stream,
+    _scrub_stream,
+    _utf8_pieces,
+)
 
 
 def _scrub(pieces):
     return "".join(_scrub_stream(iter(pieces)))
+
+
+class TestUtf8PieceReassembly:
+    """R46: a multibyte character whose UTF-8 bytes straddle two tokens must be
+    reassembled, not decoded into U+FFFD replacement characters mid-word."""
+
+    def test_two_byte_char_split_across_tokens(self):
+        # 'cafe<acute>' -> b'caf\xc3\xa9'; the e-acute is split between tokens.
+        out = "".join(_utf8_pieces(iter([b"caf\xc3", b"\xa9", b"!"])))
+        assert out == "café!"
+        assert "�" not in out
+
+    def test_three_byte_cjk_split_every_boundary(self):
+        # '<CJK zhong>' = b'\xe4\xb8\xad' fed one byte per token.
+        out = "".join(_utf8_pieces(iter([b"\xe4", b"\xb8", b"\xad"])))
+        assert out == "中"
+        assert "�" not in out
+
+    def test_four_byte_emoji_split_every_boundary(self):
+        # grinning-face emoji = b'\xf0\x9f\x98\x80' across four tokens.
+        out = "".join(_utf8_pieces(iter([b"\xf0", b"\x9f", b"\x98", b"\x80"])))
+        assert out == "\U0001f600"
+        assert "�" not in out
+
+    def test_truncated_tail_surfaces_as_replacement(self):
+        # A genuinely incomplete trailing sequence (output cut off) must surface
+        # as U+FFFD on the final flush, not be silently dropped.
+        out = "".join(_utf8_pieces(iter([b"hi", b"\xe4\xb8"])))
+        assert out == "hi�"
+
+    def test_ascii_passes_through_unchanged(self):
+        out = "".join(_utf8_pieces(iter([b"Hello, ", b"world", b"!"])))
+        assert out == "Hello, world!"
+
+    def test_old_per_token_decode_would_have_mangled_this(self):
+        # Documents the bug: decoding each token's bytes in isolation (the old
+        # token_to_piece path) produced replacement chars at the split.
+        per_token = "".join(b.decode("utf-8", errors="replace")
+                            for b in [b"caf\xc3", b"\xa9"])
+        assert "�" in per_token                  # the old, broken result
+        fixed = "".join(_utf8_pieces(iter([b"caf\xc3", b"\xa9"])))
+        assert "�" not in fixed and fixed == "café"
+
+    def test_feeds_cleanly_into_scrub_and_stop_filter(self):
+        # The reassembled text stream still flows through the stop-string filter
+        # and marker scrub (which operate on str) without corruption.
+        pieces = _utf8_pieces(iter([b"caf\xc3", b"\xa9 <unused2> ", b"\xe4\xb8\xad"]))
+        out = "".join(_scrub_stream(_filtered_stream(pieces)))
+        assert out == "café  中"
+        assert "�" not in out
 
 
 class TestMarkerScrub:
@@ -116,8 +170,10 @@ class TestDebugLog:
 
         llm = LlamaCpp.__new__(LlamaCpp)
         llm._tokenizer = MagicMock()
-        llm._tokenizer.token_to_piece.side_effect = \
-            lambda t: {1: "<|channel|>", 2: "thought", 3: " hi"}[t]
+        # _decode_stream now decodes raw token BYTES through one UTF-8-safe
+        # stream (R46), so the tokenizer mock yields bytes, not str.
+        llm._tokenizer.token_to_piece_bytes.side_effect = \
+            lambda t: {1: b"<|channel|>", 2: b"thought", 3: b" hi"}[t]
         try:
             normal = "".join(llm._decode_stream(iter([1, 2, 3])))
             assert normal == "<think>\n hi"        # normalised in normal mode

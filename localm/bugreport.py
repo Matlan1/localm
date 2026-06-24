@@ -303,6 +303,35 @@ def save_report(text: str, when: Optional[str] = None) -> Optional[Path]:
         return None
 
 
+def save_user_report(description: str, *, summary: str = "",
+                     include_log: bool = False) -> Optional[Path]:
+    """Build and save a USER-initiated bug report and return its path (R47).
+
+    The shared backend for the GUI "Report a bug" control and the
+    ``localm bug-report`` CLI: the user's *description* fills the "What I was
+    doing" section, the safe environment snapshot is collected as usual, and with
+    *include_log* the current run's log tail is attached (home-scrubbed at
+    source - never the API key, config, or chat data). Returns None on a write
+    failure (the caller surfaces that rather than reporting a false success)."""
+    description = (description or "").strip()
+    if not summary:
+        summary = description.splitlines()[0] if description else ""
+    summary = summary.strip()[:120] or "user-reported issue"
+    context: dict = {"operation": "gui-bug-report"}
+    if include_log:
+        import os
+        tail = _recent_log_tail(pid=os.getpid())
+        if tail:
+            context["recent_log_tail"] = tail
+    text = build_report(summary, context=context)
+    if description:
+        # Drop the user's own words into the otherwise-empty "What I was doing".
+        text = text.replace(
+            "<!-- Please describe what you ran and what you expected. -->",
+            description)
+    return save_report(text)
+
+
 def _truncate_body(body: str) -> str:
     if len(body) <= _MAX_PREFILL_BODY:
         return body

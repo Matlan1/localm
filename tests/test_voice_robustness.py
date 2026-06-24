@@ -62,10 +62,14 @@ def test_empty_audio_raises_clean_voiceerror():
 def test_status_checks_do_not_load_native_stack():
     # The server process must never import faster-whisper/ctranslate2 just to
     # answer a status probe: that stack initialises OpenMP and can abort the
-    # whole process (the very crash VOICE-1 is about). Run in a clean subprocess
-    # (so other tests that imported the stack do not pollute the check) and load
-    # this worktree's voice.py by file path (so an editable install of localm
-    # cannot shadow it with a different copy).
+    # whole process (the very crash VOICE-1 is about). It must ALSO not import
+    # huggingface_hub (R24): that heavy transitive import (requests, fsspec,
+    # filelock, tqdm, ...) can take tens of seconds on a cold start and, because
+    # /api/voice/status is an ``async def``, froze the event loop and stalled the
+    # whole first /api/* batch. Run in a clean subprocess (so other tests that
+    # imported the stack do not pollute the check) and load this worktree's
+    # voice.py by file path (so an editable install of localm cannot shadow it
+    # with a different copy).
     from pathlib import Path
     worktree = Path(__file__).resolve().parents[1].as_posix()
     vpath = (Path(__file__).resolve().parents[1] / "localm" / "voice.py").as_posix()
@@ -75,14 +79,51 @@ def test_status_checks_do_not_load_native_stack():
         f"spec = iu.spec_from_file_location('lvoice', {vpath!r})\n"
         "m = iu.module_from_spec(spec); spec.loader.exec_module(m)\n"
         "m.stt_available(); m.stt_model_cached()\n"
-        "bad = [x for x in ('faster_whisper', 'ctranslate2') if x in sys.modules]\n"
+        "bad = [x for x in ('faster_whisper', 'ctranslate2', 'huggingface_hub')"
+        " if x in sys.modules]\n"
         "print('BAD=' + ','.join(bad))\n"
     )
     proc = subprocess.run([sys.executable, "-c", code],
                           capture_output=True, text=True, timeout=60)
     line = next((ln for ln in proc.stdout.splitlines() if ln.startswith("BAD=")), None)
     assert line is not None, f"probe did not run:\n{proc.stdout}\n{proc.stderr[-600:]}"
-    assert line == "BAD=", f"status checks loaded the native STT stack: {line}"
+    assert line == "BAD=", f"status probe loaded a heavy/native module: {line}"
+
+
+def test_stt_model_cached_resolves_hub_path_without_import(monkeypatch, tmp_path):
+    # R24: stt_model_cached reads the documented hub-cache layout directly. Point
+    # the cache at a tmp dir and lay down the snapshot file the resolver expects;
+    # it must report cached=True without importing huggingface_hub, and False
+    # when the snapshot is absent.
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path))
+    monkeypatch.delenv("HF_HOME", raising=False)
+    import localm.config as _cfg
+    monkeypatch.setattr(_cfg, "load_config", lambda: {"voice_stt_model": "base"})
+
+    cached, name = voice.stt_model_cached()
+    assert (cached, name) == (False, "base")     # empty cache -> not cached
+
+    snap = tmp_path / "models--Systran--faster-whisper-base" / "snapshots" / "abc123"
+    snap.mkdir(parents=True)
+    (snap / "model.bin").write_bytes(b"\x00")
+    cached, name = voice.stt_model_cached()
+    assert (cached, name) == (True, "base")      # snapshot present -> cached
+
+
+def test_hf_hub_cache_dir_precedence(monkeypatch):
+    # R24: match huggingface_hub's own precedence so the probe is correct on
+    # every box (Linux XDG, legacy env), not just the dev machine.
+    from pathlib import Path
+    for k in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_HOME", "XDG_CACHE_HOME"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("XDG_CACHE_HOME", "/xdg")
+    assert voice._hf_hub_cache_dir() == Path("/xdg") / "huggingface" / "hub"
+    monkeypatch.setenv("HF_HOME", "/hfhome")
+    assert voice._hf_hub_cache_dir() == Path("/hfhome") / "hub"       # HF_HOME > XDG
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", "/legacy")
+    assert voice._hf_hub_cache_dir() == Path("/legacy")              # legacy > HF_HOME
+    monkeypatch.setenv("HF_HUB_CACHE", "/direct")
+    assert voice._hf_hub_cache_dir() == Path("/direct")             # HF_HUB_CACHE wins
 
 
 @pytest.mark.skipif(not _has_faster_whisper(), reason="faster-whisper native lib unavailable")
