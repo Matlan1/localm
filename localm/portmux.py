@@ -30,8 +30,14 @@ from __future__ import annotations
 
 import asyncio
 import html
+import logging
 import re
+import sys
 from typing import Optional
+
+# Child of the "localm" logger so records flow through its handlers (the debug
+# file handler + the fd-2-stable console handler from debuglog #220).
+_log = logging.getLogger("localm.portmux")
 
 # A TLS record (and therefore the ClientHello that opens any HTTPS connection)
 # begins with the handshake content-type byte 0x16. A plaintext HTTP request
@@ -77,7 +83,25 @@ def run_server(
                                         "tls": bool(ssl_certfile)})
     try:
         if not ssl_certfile:
-            uvicorn.run(app, host=host, port=port, log_level=log_level)
+            # Plain-HTTP bind (the loopback default, or a network bind without
+            # TLS). Front it with the SAME first-byte peek the TLS path uses, so a
+            # client that wrongly opens a TLS/HTTPS connection on this HTTP port -
+            # a browser that cached an HTTPS upgrade for this address (HSTS, a
+            # service worker, or HTTPS-First/Only mode) - is handled at the socket
+            # layer (closed cleanly, surfaced once) instead of feeding a TLS
+            # ClientHello into uvicorn's HTTP parser, which rejects every such
+            # connection as an "Invalid HTTP request" (the R45 console flood).
+            try:
+                asyncio.run(_serve_async_plain(app, host, port, log_level))
+            except KeyboardInterrupt:
+                pass
+            except Exception:   # pragma: no cover - defensive fallback
+                # Never leave the user without a server because the peek layer
+                # failed: fall back to a direct uvicorn.run (the flood would then
+                # recur, which is no worse than before this layer existed).
+                import traceback
+                traceback.print_exc()
+                uvicorn.run(app, host=host, port=port, log_level=log_level)
             return
 
         try:
@@ -116,6 +140,7 @@ async def _serve_async(app, host, port, ssl_certfile, ssl_keyfile, log_level) ->
         serve_task.result()   # re-raise uvicorn's startup error
         return
     internal_port = server.servers[0].sockets[0].getsockname()[1]
+    _harden_uvicorn_logging()
 
     async def _on_conn(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         await _handle_conn(reader, writer, internal_port, port)
@@ -132,6 +157,101 @@ async def _serve_async(app, host, port, ssl_certfile, ssl_keyfile, log_level) ->
         server.should_exit = True
 
 
+async def _serve_async_plain(app, host, port, log_level) -> None:
+    """Serve plain HTTP behind the same first-byte peek as the TLS path: real HTTP
+    is relayed to an internal uvicorn; a TLS handshake on this HTTP port (a client
+    that wrongly tried HTTPS) is closed cleanly and surfaced once, so uvicorn's
+    HTTP parser never sees the TLS bytes and the 'Invalid HTTP request' flood
+    cannot happen at the source."""
+    import uvicorn
+
+    config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level=log_level)
+    server = uvicorn.Server(config)
+    serve_task = asyncio.ensure_future(server.serve())
+
+    while not server.started and not serve_task.done():
+        await asyncio.sleep(0.02)
+    if serve_task.done():
+        serve_task.result()   # re-raise uvicorn's startup error
+        return
+    internal_port = server.servers[0].sockets[0].getsockname()[1]
+    _harden_uvicorn_logging()
+
+    state = {"warned": False, "count": 0}
+
+    async def _on_conn(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        await _handle_conn_plain(reader, writer, internal_port, port, state)
+
+    demux = await asyncio.start_server(_on_conn, host=host, port=port)
+    try:
+        await serve_task          # runs until Ctrl+C / should_exit
+    finally:
+        demux.close()
+        try:
+            await demux.wait_closed()
+        except Exception:         # pragma: no cover
+            pass
+        server.should_exit = True
+
+
+async def _handle_conn_plain(reader, writer, internal_port, public_port, state) -> None:
+    """Peek the first byte: a TLS ClientHello (wrong scheme on the HTTP port) is
+    closed cleanly and noted; anything else is a real HTTP connection and is
+    relayed to the internal uvicorn unchanged."""
+    try:
+        first = await reader.readexactly(1)
+    except (asyncio.IncompleteReadError, ConnectionError, OSError):
+        _safe_close(writer)
+        return
+
+    try:
+        if first[0] == _TLS_FIRST_BYTE:
+            # We cannot complete a TLS handshake on a plain-HTTP port, so just
+            # close: an HTTPS-First browser then falls back to http://. The cause
+            # is surfaced once (not muted) without a per-connection flood.
+            _note_tls_on_http(public_port, state)
+        else:
+            await _relay(first, reader, writer, internal_port)
+    except (ConnectionError, OSError, asyncio.IncompleteReadError):
+        pass
+    finally:
+        _safe_close(writer)
+
+
+def _note_tls_on_http(public_port, state) -> None:
+    """Surface a wrong-scheme (HTTPS-on-the-HTTP-port) connection honestly without
+    flooding: one prominent notice with the cause + fix, the rest counted at debug
+    level. The first notice is written to a STABLE stderr duplicate so it is immune
+    to the model-load fd-2 redirect (writing through the live stderr during that
+    window is exactly what turns a benign reject into the WinError-6 cascade we are
+    eliminating)."""
+    state["count"] += 1
+    if state["warned"]:
+        # Already surfaced once this run; keep counting in the debug log only so a
+        # persistent browser does not flood the console (the file handler, when in
+        # debug mode, still records every occurrence - nothing is hidden).
+        try:
+            _log.debug("TLS handshake on the plain-HTTP port %d again (count=%d)",
+                       public_port, state["count"])
+        except Exception:
+            pass
+        return
+    state["warned"] = True
+    msg = (
+        "A client tried to use HTTPS on the plain-HTTP port %d. This is almost "
+        "always a browser that cached an HTTPS upgrade for this address (HSTS, a "
+        "service worker, or HTTPS-First/Only mode): it keeps opening TLS "
+        "connections that this HTTP port cannot answer. Open http://127.0.0.1:%d "
+        "explicitly, or clear this site's data. (Further occurrences this run are "
+        "logged at debug level.)" % (public_port, public_port)
+    )
+    _safe_notice(msg)               # one-time, fd-2-safe console line
+    try:
+        _log.debug("%s", msg)        # also recorded in the debug log file
+    except Exception:
+        pass
+
+
 async def _handle_conn(reader, writer, internal_port, public_port) -> None:
     """Peek the first byte and route: TLS -> relay to uvicorn, else -> redirect."""
     try:
@@ -142,7 +262,7 @@ async def _handle_conn(reader, writer, internal_port, public_port) -> None:
 
     try:
         if first[0] == _TLS_FIRST_BYTE:
-            await _relay_tls(first, reader, writer, internal_port)
+            await _relay(first, reader, writer, internal_port)
         else:
             await _redirect_to_https(first, reader, writer, public_port)
     except (ConnectionError, OSError, asyncio.IncompleteReadError):
@@ -151,9 +271,11 @@ async def _handle_conn(reader, writer, internal_port, public_port) -> None:
         _safe_close(writer)
 
 
-async def _relay_tls(first, c_reader, c_writer, internal_port) -> None:
-    """Transparently pipe a TLS connection to the internal uvicorn. The already
-    consumed first byte is written through first so the handshake is intact."""
+async def _relay(first, c_reader, c_writer, internal_port) -> None:
+    """Transparently pipe a connection to the internal uvicorn. The already
+    consumed first byte is written through first so the stream is intact. Generic
+    over scheme: the TLS path relays the ClientHello onward; the plain path relays
+    the HTTP request line onward."""
     try:
         u_reader, u_writer = await asyncio.open_connection("127.0.0.1", internal_port)
     except OSError:
@@ -273,3 +395,66 @@ def _safe_close(writer: Optional[asyncio.StreamWriter]) -> None:
         writer.close()
     except (OSError, RuntimeError):
         pass
+
+
+_stable_stream = None
+_stable_resolved = False
+
+
+def _get_stable_stream():
+    """A duplicate of stderr taken ONCE (cached) so it is immune to the model-load
+    fd-2 juggling that the llama.cpp backend uses to silence native output (the
+    same mechanism debuglog #220 uses for the console mirror). MUST be resolved
+    early, while fd 2 is the real console - resolving it lazily during a redirect
+    window would duplicate the redirected fd and lose the output. Returns None
+    when stderr has no duplicable fd (a detached process); callers fall back."""
+    global _stable_stream, _stable_resolved
+    if not _stable_resolved:
+        _stable_resolved = True
+        try:
+            from localm.debuglog import _stable_console_stream
+            _stable_stream = _stable_console_stream()
+        except Exception:
+            _stable_stream = None
+    return _stable_stream
+
+
+def _safe_notice(msg: str) -> None:
+    """Write a one-time operational notice through the stable stderr duplicate.
+
+    Writing a log line through the LIVE stderr during the model-load fd-2 redirect
+    window raises OSError [WinError 6] on Windows, and Python's logging then prints
+    a multi-line '--- Logging error ---' traceback per line - the exact cascade we
+    are removing. A failure to emit the courtesy hint must never take down the
+    server, so the write is best-effort - the connection itself is already handled
+    correctly by the caller."""
+    try:
+        stream = _get_stable_stream() or sys.stderr
+        stream.write("WARNING " + msg + "\n")
+        stream.flush()
+    except Exception:
+        pass
+
+
+def _harden_uvicorn_logging() -> None:
+    """Point uvicorn's console log handlers at the same stable stderr duplicate.
+
+    uvicorn configures its own loggers (uvicorn / uvicorn.error / uvicorn.access)
+    with StreamHandlers on the LIVE sys.stderr. During the model-load fd-2 redirect
+    window those writes raise WinError 6 and cascade into '--- Logging error ---'
+    tracebacks (R45). Redirecting the handlers to a stable fd-2 duplicate makes
+    uvicorn's own warnings/errors survive that window instead of crashing the
+    logger - the records are still emitted (this fixes WHERE they are written, it
+    never drops one). Resolves the stable stream early (fd 2 still clean here, at
+    server startup). Best-effort and idempotent."""
+    stable = _get_stable_stream()
+    if stable is None:
+        return
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "uvicorn.asgi"):
+        for h in logging.getLogger(name).handlers:
+            if (isinstance(h, logging.StreamHandler)
+                    and not isinstance(h, logging.FileHandler)):
+                try:
+                    h.setStream(stable)
+                except Exception:
+                    pass
