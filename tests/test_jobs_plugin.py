@@ -685,3 +685,160 @@ def test_localm_job_wired_into_top_level_cli(home):
     assert "job" in main.commands
     r = CliRunner().invoke(main, ["job", "list"])
     assert r.exit_code == 0, r.output
+
+
+# --------------------------------------------------------------------------- #
+#  Security: scheduled coder jobs run restricted unless opted into shell       #
+#  (closes the unattended indirect-injection -> run_shell AutoJack analogue    #
+#   and the jobs-scope -> shell privilege escalation)                          #
+# --------------------------------------------------------------------------- #
+
+def _req(headers=None):
+    """A minimal Starlette Request for the auth-gate helpers (header/cookie read)."""
+    from starlette.requests import Request
+    raw = [(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()]
+    return Request({"type": "http", "method": "POST", "path": "/api/jobs",
+                    "query_string": b"", "headers": raw})
+
+
+def test_job_allow_shell_round_trips_and_defaults_false(home):
+    from localm.plugins.builtin.jobs.store import Job
+    j = Job(name="c", task_kind="coder", prompt="p", cwd=".")
+    j.allow_shell = True
+    d = j.to_dict()
+    assert d["allow_shell"] is True
+    assert Job.from_dict(d).allow_shell is True
+    # An old jobs.json record without the field loads as the SAFE default (False).
+    old = {k: v for k, v in d.items() if k != "allow_shell"}
+    assert Job.from_dict(old).allow_shell is False
+    # A brand-new coder job is restricted (no shell) unless explicitly opted in.
+    assert Job(name="d", task_kind="coder", prompt="p", cwd=".").allow_shell is False
+
+
+def _fake_agent_capture(monkeypatch):
+    """Patch the runner's backend + Agent and capture the Agent kwargs."""
+    from localm.plugins.builtin.jobs import runner
+    captured: dict = {}
+
+    class _FakeAgent:
+        def __init__(self, backend, cwd, **kw):
+            captured.update(kw)
+
+        def run_task(self, prompt):
+            return "ran"
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(runner, "_coder_backend", lambda job: object())
+    import localm.plugins.coder.agent as agent_mod
+    monkeypatch.setattr(agent_mod, "Agent", _FakeAgent)
+    return runner, captured
+
+
+def test_runner_coder_is_restricted_by_default(home, tmp_path, monkeypatch):
+    """A scheduled coder job with no opt-in must build a RESTRICTED Agent (no
+    run_shell/network). Negative-testable: pre-fix the runner never set
+    restricted, so this assertion failed."""
+    work = tmp_path / "proj"; work.mkdir()
+    runner, captured = _fake_agent_capture(monkeypatch)
+    job = _make_job(task_kind="coder", prompt="x", cwd=str(work), schedule=60)
+    result = runner.run_job(job, engine=None)
+    assert result["status"] == "ok"
+    assert captured["restricted"] is True
+
+
+def test_runner_coder_allow_shell_runs_unrestricted(home, tmp_path, monkeypatch):
+    """The explicit owner opt-in restores the full, shell-capable coder."""
+    work = tmp_path / "proj"; work.mkdir()
+    runner, captured = _fake_agent_capture(monkeypatch)
+    job = _make_job(task_kind="coder", prompt="x", cwd=str(work), schedule=60)
+    job.allow_shell = True
+    result = runner.run_job(job, engine=None)
+    assert result["status"] == "ok"
+    assert captured["restricted"] is False
+
+
+def test_caller_can_allow_shell_open_mode_is_owner(monkeypatch):
+    from localm.plugins.builtin.jobs import plug
+    import localm.auth as auth
+    monkeypatch.setattr(auth, "any_key_configured", lambda: False)
+    assert plug._caller_can_allow_shell(_req()) is True
+
+
+def test_caller_can_allow_shell_owner_or_coder_full(monkeypatch):
+    from localm.plugins.builtin.jobs import plug
+    import localm.auth as auth
+    import localm.inference.http_server as hs
+    monkeypatch.setattr(auth, "any_key_configured", lambda: True)
+    monkeypatch.setattr(hs, "_request_token", lambda request: ("tok", "header"))
+    monkeypatch.setattr(auth, "verify", lambda t: {"admin"})
+    assert plug._caller_can_allow_shell(_req()) is True
+    monkeypatch.setattr(auth, "verify", lambda t: {"coder:full"})
+    assert plug._caller_can_allow_shell(_req()) is True
+
+
+def test_caller_cannot_allow_shell_when_not_owner(monkeypatch):
+    from localm.plugins.builtin.jobs import plug
+    import localm.auth as auth
+    import localm.inference.http_server as hs
+    monkeypatch.setattr(auth, "any_key_configured", lambda: True)
+    monkeypatch.setattr(hs, "_request_token", lambda request: ("tok", "header"))
+    # A plain jobs/coder key (no admin, no coder:full) cannot opt into shell.
+    monkeypatch.setattr(auth, "verify", lambda t: {"jobs", "coder"})
+    assert plug._caller_can_allow_shell(_req()) is False
+    # No presented token at all -> denied.
+    monkeypatch.setattr(hs, "_request_token", lambda request: (None, None))
+    assert plug._caller_can_allow_shell(_req()) is False
+
+
+def test_create_job_route_rejects_unauthorized_allow_shell(home, monkeypatch):
+    import asyncio
+    from fastapi import HTTPException
+    from localm.plugins.builtin.jobs import plug
+    monkeypatch.setattr(plug, "_caller_can_allow_shell", lambda request: False)
+    req = plug.JobCreate(name="x", task_kind="coder", prompt="p", cwd=str(home))
+    req.allow_shell = True
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(plug.create_job(req, _req()))
+    assert ei.value.status_code == 403
+    # And nothing was persisted.
+    from localm.plugins.builtin.jobs.store import JobStore
+    assert JobStore().list() == []
+
+
+def test_create_job_route_allows_authorized_allow_shell(home, monkeypatch):
+    import asyncio
+    from localm.plugins.builtin.jobs import plug
+    monkeypatch.setattr(plug, "_caller_can_allow_shell", lambda request: True)
+    req = plug.JobCreate(name="x", task_kind="coder", prompt="p", cwd=str(home))
+    req.allow_shell = True
+    out = asyncio.run(plug.create_job(req, _req()))
+    assert out["allow_shell"] is True
+    # A default coder job (no opt-in) is stored restricted.
+    out2 = asyncio.run(plug.create_job(
+        plug.JobCreate(name="y", task_kind="coder", prompt="p", cwd=str(home)),
+        _req()))
+    assert out2["allow_shell"] is False
+
+
+def test_cli_allow_shell_flag_sets_it(home):
+    from click.testing import CliRunner
+    from localm.plugins.builtin.jobs.cli import main
+    from localm.plugins.builtin.jobs.store import JobStore
+    r = CliRunner().invoke(main, ["add", "shelljob", "--coder", "--prompt", "p",
+                                  "--cwd", str(home), "--allow-shell", "--every", "60"])
+    assert r.exit_code == 0, r.output
+    job = JobStore().list()[0]
+    assert job.task_kind == "coder"
+    assert job.allow_shell is True
+
+
+def test_cli_coder_job_defaults_to_no_shell(home):
+    from click.testing import CliRunner
+    from localm.plugins.builtin.jobs.cli import main
+    from localm.plugins.builtin.jobs.store import JobStore
+    r = CliRunner().invoke(main, ["add", "safejob", "--coder", "--prompt", "p",
+                                  "--cwd", str(home), "--every", "60"])
+    assert r.exit_code == 0, r.output
+    assert JobStore().list()[0].allow_shell is False
