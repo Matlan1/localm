@@ -1156,6 +1156,14 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
 }
 @keyframes reconnect-spin { to { transform: rotate(360deg); } }
 .reconnect-msg { font-size: 14px; line-height: 1.5; }
+/* Escape hatch: always-available manual recovery on the reconnect overlay. Muted
+   so it does not compete with the auto-retry, but always reachable. */
+.reconnect-reset {
+  margin-top: 4px; padding: 7px 14px; font-size: 13px; cursor: pointer;
+  color: var(--text-dim); background: transparent;
+  border: 1px solid var(--border); border-radius: 8px;
+}
+.reconnect-reset:hover { color: var(--text); border-color: var(--accent); }
 
 /* msg meta action buttons */
 .msg-meta button.action {
