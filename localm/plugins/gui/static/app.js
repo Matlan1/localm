@@ -672,21 +672,22 @@ function showKeyGate(message) {
   }
 }
 
-// Decide whether the key gate should offer "Install certificate". Show it ONLY
-// when the local CA is genuinely NOT trusted yet: over HTTPS where the service
-// worker FAILED to register. A service worker only registers in a real secure
-// context, so a trusted CA is a precondition - and unlike a plain fetch probe,
-// clicking THROUGH the browser's "not secure" warning does not register the SW,
-// so window.__swFailed === true is a reliable "cert not trusted" signal. Once the
-// CA is trusted (__swFailed === false) the step stays hidden, so a returning user
-// is never told to "install a new certificate" again (the SEAMLESS fix). Re-run
-// from index.html's renderInstall when SW registration resolves, since __swFailed
-// is set asynchronously after boot (until then, unknown -> hidden, no false nag).
+// Decide whether the key gate should offer "Install certificate". Over HTTPS,
+// offer it UNLESS the local CA is CONFIRMED trusted. The trust signal: a service
+// worker registers only in a real secure context, so once SW registration
+// succeeds (__swFailed === false) the CA is trusted and the step stays hidden - a
+// returning trusted user is never told to "reinstall the certificate" (the
+// SEAMLESS goal). But when trust is UNKNOWN - __swFailed still undefined, e.g.
+// Firefox on a phone, or a clicked-through self-signed cert where SW registration
+// never cleanly resolved - we MUST still offer it: gating on `=== true` (#201) hid
+// the cert from exactly those mobile users, leaving them on a self-signed cert
+// with no way to download it. So the test is `!== false` (show unless proven
+// trusted). Re-run from index.html's renderInstall when SW registration resolves.
 function updateKeyGateCertStep() {
   const cert = $("key-gate-cert");
   if (!cert) return;
   const onHttps = location.protocol === "https:";
-  const untrusted = onHttps && window.__swFailed === true;
+  const untrusted = onHttps && window.__swFailed !== false;
   cert.style.display = untrusted ? "block" : "none";
   if (untrusted) {
     // Pin the download to an absolute https URL so it never resolves to http on

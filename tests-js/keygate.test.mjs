@@ -69,9 +69,12 @@ test("NET-1: over HTTPS an UNTRUSTED CA (SW failed to register) offers the Insta
   const cert = window.document.getElementById("key-gate-cert");
   const link = window.document.getElementById("key-gate-cert-link");
   assert.ok(cert, "#key-gate-cert exists in the shell");
-  // Until the service-worker registration resolves, cert trust is unknown -> the
-  // gate does NOT nag (no false "install a cert" before we know it's needed).
-  assert.equal(cert.style.display, "none", "cert step hidden until SW trust status is known");
+  // Trust is unknown until SW registration resolves; we now OFFER the cert in that
+  // state too. On a phone (Firefox, a clicked-through cert) the heuristic often
+  // stays unknown, and hiding it there stranded the user on a self-signed cert
+  // with no way to download it. Only a CONFIRMED-trusted CA hides the step.
+  assert.notEqual(cert.style.display, "none",
+    "unknown trust over HTTPS still offers the certificate (mobile must not be stranded)");
   // SW failed to register => the local CA is not trusted yet => offer the install.
   window.__swFailed = true;
   window.updateKeyGateCertStep();
