@@ -192,6 +192,16 @@ def _run_coder(job: Job, *, engine=None) -> str:
     backend = _coder_backend(job)
     mode = effective_mode("coder")
 
+    # Safe-by-default: an unattended scheduled run has nobody to approve a
+    # destructive tool, so it runs RESTRICTED (read + confined edit, no run_shell,
+    # no network, no sub-agents) unless the owner explicitly opted this job into
+    # the full shell-capable coder. Restricted hard-refuses run_shell/fetch_url at
+    # dispatch (agent.py), which closes both the indirect-injection -> run_shell
+    # vector (the AutoJack analogue) and the jobs-scope -> shell privilege
+    # escalation. The allow_shell opt-in is gated to owner / coder:full at the
+    # creation route; the runner trusts the stored flag.
+    restricted = not getattr(job, "allow_shell", False)
+
     from localm.plugins.coder.agent import Agent
     agent = Agent(
         backend,
@@ -199,6 +209,7 @@ def _run_coder(job: Job, *, engine=None) -> str:
         auto_approve=True,        # unattended scheduled run: no interactive prompts
         mode=mode,
         scope=job.scope,
+        restricted=restricted,
     )
     try:
         return (agent.run_task(job.prompt) or "").strip()

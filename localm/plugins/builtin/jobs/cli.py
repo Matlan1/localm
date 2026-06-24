@@ -3,7 +3,7 @@
 
 Subcommands:
   localm job add NAME --prompt "..." [--cron "..." | --every SECONDS]
-                                     [--coder --cwd DIR --scope GLOB]
+                                     [--coder --cwd DIR --scope GLOB --allow-shell]
                                      [--model M] [--disabled]
   localm job list
   localm job run JOB_ID              run a job once now (records a result)
@@ -47,10 +47,16 @@ def _store():
                    "assistant memory (no prompt needed).")
 @click.option("--cwd", default=None, help="Working directory for a coder job.")
 @click.option("--scope", default=None, help="File-access glob for a coder job.")
+@click.option("--allow-shell", "allow_shell", is_flag=True, default=False,
+              help="Coder jobs only: allow full shell execution. Off by default, a "
+                   "scheduled coder job runs restricted (read + confined edit, no "
+                   "shell/network) so an unattended run cannot be steered into "
+                   "run_shell by hostile content.")
 @click.option("--model", default=None, help="Model to run the job with.")
 @click.option("--disabled", is_flag=True, default=False,
               help="Create the job disabled (it will not run until enabled).")
-def job_add(name, prompt, cron, every, coder, memory, cwd, scope, model, disabled):
+def job_add(name, prompt, cron, every, coder, memory, cwd, scope, allow_shell,
+            model, disabled):
     """Add a new scheduled job."""
     from localm.plugins.builtin.jobs.store import Job
 
@@ -76,6 +82,7 @@ def job_add(name, prompt, cron, every, coder, memory, cwd, scope, model, disable
             model=model,
             cwd=cwd,
             scope=scope,
+            allow_shell=allow_shell,
             enabled=not disabled,
         )
         _store().add(job)
