@@ -1744,7 +1744,10 @@ class TestRagEndpoints:
 
 class TestCoderHistory:
     @staticmethod
-    def _fake_log(sessions_dir, name="2026-01-01_000000_1_coder.jsonl"):
+    def _fake_log(sessions_dir, name="2026-01-01_000000_1_localcoder.jsonl"):
+        # The coder agent always labels its audit log "localcoder" (Agent
+        # name default); chat logs ("_server"/"_chat") share the dir but are
+        # filtered out of coder history (coder-history-chat).
         sessions_dir.mkdir(parents=True, exist_ok=True)
         log = sessions_dir / name
         entry = {"t": 1, "turn": 0, "type": "user", "data": {"content": "hi"}}
