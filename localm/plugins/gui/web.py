@@ -119,11 +119,6 @@ class ShareClearRequest(BaseModel):
     ids: list[str] = []
 
 
-class BugReportRequest(BaseModel):
-    description: str = ""
-    include_log: bool = False
-
-
 class LogExportRequest(BaseModel):
     dest: str = ""
 
@@ -313,23 +308,10 @@ def attach_gui(
             "tailscale": addrs.get("tailscale") or "",
         }
 
-    @app.post("/api/bug-report", dependencies=[Depends(_require_auth)])
-    async def gui_bug_report(req: BugReportRequest):
-        """R47: file a bug report from the GUI. Saves an editable markdown report
-        to ``<home>/bug-reports/bug-*.md`` (the same place the auto-crash reporter
-        and ``localm bug-report`` write) with a safe environment snapshot and,
-        optionally, this run's log tail - never the API key, config, or chat
-        data. The user can then edit and send it to the maintainer."""
-        from localm import bugreport
-        if not (req.description or "").strip():
-            raise HTTPException(400, "Please describe the problem before sending.")
-        path = bugreport.save_user_report(
-            req.description, include_log=req.include_log)
-        if path is None:
-            # A failed save must not report success (we do not hide problems).
-            raise HTTPException(500, "Could not save the bug report to disk.")
-        return {"saved": True, "filename": path.name, "path": str(path),
-                "maintainer": bugreport.MAINTAINER_EMAIL}
+    # R47: the "/api/bug-report" POST lives on the core server (http_server.py) so
+    # it works in headless `localm serve` too; the GUI button targets that single
+    # canonical route. Duplicating it here would shadow it (first route registered
+    # wins) and silently drop the user's description + include_log flag.
 
     @app.post("/api/logs/export", dependencies=[Depends(_require_auth)])
     async def export_logs(req: LogExportRequest):
