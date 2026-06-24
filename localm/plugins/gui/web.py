@@ -39,6 +39,26 @@ STATIC_DIR = Path(__file__).parent / "static"
 _KEEPALIVE_S = 15
 
 
+class _RevalidatingStatic(StaticFiles):
+    """Serve the GUI assets with ``Cache-Control: no-cache`` so the browser
+    REVALIDATES every load instead of silently serving a stale copy.
+
+    SEAMLESS UPDATES: Starlette's StaticFiles sends an ``ETag`` but no
+    ``Cache-Control``, so browsers fall back to HEURISTIC caching and can keep an
+    old ``app.js`` / ``sw.js`` / ``style.css`` for a while - the user (or a tester)
+    then has to clear the cache by hand to pick up new code. ``no-cache`` does NOT
+    disable caching: the browser still caches and revalidates with the ETag, so an
+    unchanged file is a cheap ``304`` and a changed one is fetched fresh. It also
+    lets a phone's ``serviceWorker.register(...).update()`` actually see a new
+    ``sw.js`` (the browser HTTP-caching sw.js is a known update-stickiness cause).
+    The server, not the user, is now responsible for delivering current code."""
+
+    async def get_response(self, path, scope):
+        resp = await super().get_response(path, scope)
+        resp.headers.setdefault("Cache-Control", "no-cache")
+        return resp
+
+
 def _is_loopback_host(host: str) -> bool:
     """True for a loopback bind/client host (127.0.0.0/8, ::1, localhost)."""
     if not host:
@@ -729,10 +749,14 @@ def attach_gui(
         loopback = _is_loopback_host(
             getattr(request.app.state, "bind_host", "127.0.0.1"))
         key = auth.get_api_key() or ""
+        # The shell must never be served stale: it carries the per-request shell
+        # token and references the current assets, so always revalidate (a new
+        # app.js / index.html is then picked up without the user clearing caches).
+        headers = {"Cache-Control": "no-cache"}
         if key and loopback:
             # Protected mode on loopback: establish the HttpOnly session cookie
             # directly so the key never touches page JS / localStorage (S2).
-            resp = HTMLResponse(_index_html_with_shell_token(""))
+            resp = HTMLResponse(_index_html_with_shell_token(""), headers=headers)
             _set_session_cookies(resp, key, secure=request.url.scheme == "https")
             return resp
         if not key and loopback:
@@ -741,10 +765,10 @@ def attach_gui(
             # as a bearer HEADER (the open-mode gate is header-based); it is
             # never persisted.
             token = getattr(request.app.state, "shell_token", "") or ""
-            return HTMLResponse(_index_html_with_shell_token(token))
-        return HTMLResponse(_index_html_with_shell_token(""))
+            return HTMLResponse(_index_html_with_shell_token(token), headers=headers)
+        return HTMLResponse(_index_html_with_shell_token(""), headers=headers)
 
-    app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="gui")
+    app.mount("/", _RevalidatingStatic(directory=str(STATIC_DIR), html=True), name="gui")
 
     # Single source of truth that the GUI surface is mounted on this app, so the
     # on-demand mount (phase 5 mount_gui_surface) is idempotent whether the GUI
