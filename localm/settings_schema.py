@@ -210,6 +210,15 @@ CORE_FIELDS: list = [
                  "backend only). Experimental: forces tool-only output, so leave "
                  "off unless you want that.",
                  group="Coder", owner="coder", applies=Applies.NEXT_LOAD),
+    SettingField("coder_episodic_memory", Widget.TOGGLE,
+                 "Coder episodic memory",
+                 "Recall lessons from past sessions on a project (what worked / "
+                 "what failed) and, at session close, distil the finished session "
+                 "into a new lesson. Recall is free; the reflection is one extra "
+                 "model call per session that changed files. Skipped in privacy "
+                 "mode and for shared keys; stored under the localm data dir, not "
+                 "your project. Manage with: localcoder --episodes / --forget-episodes.",
+                 group="Coder", owner="coder", applies=Applies.NEXT_LOAD),
     # ---- Media (ComfyUI: image / music / video plugins) ----
     SettingField("comfy_workdir", Widget.FOLDER, "ComfyUI folder",
                  "Your ComfyUI install folder. localm runs it from here and "
