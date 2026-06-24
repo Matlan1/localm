@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from localm.plugins.builtin.jobs import runner as _runner
@@ -59,6 +59,7 @@ class JobCreate(BaseModel):
     model: "str | None" = None
     cwd: "str | None" = None
     scope: "str | None" = None
+    allow_shell: bool = False           # coder jobs: opt in to full shell exec
     enabled: bool = True
 
 
@@ -71,7 +72,28 @@ class JobUpdate(BaseModel):
     model: "str | None" = None
     cwd: "str | None" = None
     scope: "str | None" = None
+    allow_shell: "bool | None" = None
     enabled: "bool | None" = None
+
+
+def _caller_can_allow_shell(request: Request) -> bool:
+    """True if the caller may opt a coder job into the full, shell-capable coder.
+
+    Only the OWNER (open-mode loopback, or an ADMIN key) or a key holding the
+    privileged ``coder:full`` scope qualifies. ``coder:full`` is owner-only to
+    mint, so a plain ``jobs`` or ``coder`` key can never schedule an
+    unrestricted-shell job: it gets the safe restricted coder. Mirrors the
+    coder route's ``restricted = not (is_owner or coder:full)`` policy."""
+    from localm import scopes as S
+    from localm.auth import any_key_configured, verify
+    from localm.inference.http_server import _request_token
+    if not any_key_configured():
+        return True                              # open mode = loopback owner
+    token, _src = _request_token(request)
+    held = verify(token) if token else None
+    if not held:
+        return False
+    return S.ADMIN in held or S.CODER_FULL in held
 
 
 def _store() -> JobStore:
@@ -102,7 +124,13 @@ async def list_jobs():
 
 
 @_router.post("/api/jobs")
-async def create_job(req: JobCreate):
+async def create_job(req: JobCreate, request: Request):
+    # Opting a job into shell execution is privileged: owner / coder:full only.
+    # Reject (do not silently downgrade) so the caller knows the opt-in was denied.
+    if req.allow_shell and not _caller_can_allow_shell(request):
+        raise HTTPException(
+            403, "allow_shell needs the owner key or a coder:full key; a scheduled "
+            "coder job otherwise runs restricted (read + confined edit, no shell).")
     try:
         job = Job(
             name=req.name.strip(),
@@ -113,6 +141,7 @@ async def create_job(req: JobCreate):
             model=req.model,
             cwd=req.cwd,
             scope=req.scope,
+            allow_shell=req.allow_shell,
             enabled=req.enabled,
         )
     except ValueError as e:
@@ -130,8 +159,13 @@ async def get_job(job_id: str):
 
 
 @_router.put("/api/jobs/{job_id}")
-async def update_job(job_id: str, req: JobUpdate):
+async def update_job(job_id: str, req: JobUpdate, request: Request):
     changes = {k: v for k, v in req.model_dump().items() if v is not None}
+    # Escalating an existing job to shell execution is privileged (same gate as
+    # create); de-escalating (allow_shell -> False) is always allowed.
+    if changes.get("allow_shell") and not _caller_can_allow_shell(request):
+        raise HTTPException(
+            403, "allow_shell needs the owner key or a coder:full key.")
     try:
         job = _store().update(job_id, **changes)
     except KeyError:

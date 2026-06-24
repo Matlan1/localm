@@ -68,6 +68,12 @@ class Job:
     model: Optional[str] = None
     cwd: Optional[str] = None
     scope: Optional[str] = None        # coder file-access glob, optional
+    # Coder jobs run RESTRICTED by default (read + confined edit, no shell, no
+    # network, no sub-agents) so an unattended run that ingests hostile content
+    # cannot be steered into run_shell (indirect prompt-injection -> RCE). The
+    # owner opts a specific job into the full, shell-capable coder by setting
+    # allow_shell; the API route gates that opt-in to owner / coder:full callers.
+    allow_shell: bool = False
     enabled: bool = True
     id: str = ""
     created: Optional[float] = None
