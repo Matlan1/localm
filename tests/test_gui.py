@@ -388,6 +388,36 @@ class TestBugReportEndpoint:
         assert r.status_code == 400
 
 
+class TestLogExportEndpoint:
+    """R30: copy every instance log into a user-chosen folder."""
+
+    def test_export_copies_logs_into_timestamped_subfolder(self, gui_app, tmp_path, monkeypatch):
+        app, _ = gui_app
+        home = tmp_path / "home"; (home / "logs").mkdir(parents=True)
+        (home / "logs" / "localm_a.log").write_text("a", encoding="utf-8")
+        (home / "logs" / "localm_b.log").write_text("b", encoding="utf-8")
+        (home / "comfy-launch.log").write_text("c", encoding="utf-8")   # stray in home root
+        monkeypatch.setattr("localm.debuglog.logs_dir", lambda: home / "logs")
+        monkeypatch.setattr("localm.config.home_dir", lambda: home)
+        dest = tmp_path / "dest"; dest.mkdir()
+        with TestClient(app) as client:
+            r = client.post("/api/logs/export", json={"dest": str(dest)})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["copied"] == 3                       # 2 in logs/ + 1 stray
+        out = Path(body["dest"])
+        assert out.parent == dest and out.name.startswith("localm-logs-")
+        assert {p.name for p in out.glob("*.log")} == \
+            {"localm_a.log", "localm_b.log", "comfy-launch.log"}
+
+    def test_export_rejects_blank_and_missing_dest(self, gui_app):
+        app, _ = gui_app
+        with TestClient(app) as client:
+            assert client.post("/api/logs/export", json={"dest": ""}).status_code == 400
+            assert client.post("/api/logs/export",
+                               json={"dest": "C:/nonexistent-xyz-123"}).status_code == 400
+
+
 class TestStatsEndpoint:
     """The hardware-monitor stats feed."""
 

@@ -315,6 +315,38 @@ if ($("bug-send")) {
   };
 }
 
+// R30: export all logs of this instance to a folder the user picks (reuses the
+// shared directory-picker modal), then POSTs the chosen path to /api/logs/export.
+if ($("logs-export")) {
+  $("logs-export").onclick = async () => {
+    const dest = await pickDirectory("Choose a folder for the exported logs");
+    if (!dest) return;                       // dismissed
+    const btn = $("logs-export");
+    btn.disabled = true;
+    try {
+      const r = await fetch("/api/logs/export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ dest }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.detail || r.statusText);
+      const out = $("logs-result");
+      if (out) {
+        out.hidden = false;
+        out.textContent = data.copied
+          ? `Exported ${data.copied} log file(s) to: ${data.dest}`
+          : (data.message || "No logs found to export.");
+      }
+      toast(data.copied ? `Exported ${data.copied} log file(s)` : "No logs to export", !data.copied);
+    } catch (e) {
+      toast("Could not export logs: " + e.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  };
+}
+
 $("pull-start").onclick = async () => {
   const spec = $("pull-spec").value.trim();
   if (!spec) { toast("Enter a model spec", true); return; }
