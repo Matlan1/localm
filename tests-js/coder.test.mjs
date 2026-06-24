@@ -79,3 +79,26 @@ test("CODER-2: a resumed session's history events render as message rows", () =>
   assert.match(feedEl.textContent, /build a calc/);
   assert.match(feedEl.textContent, /here is the plan/);
 });
+
+test("CODER-EMPTY-MODEL: a tool-only assistant turn leaves no empty Model row", () => {
+  const { window } = loadApp({ fetchImpl: okFetch() });
+  const feedEl = window.document.createElement("div");
+  const s = { info: { id: "x" }, feedEl, liveBody: null, liveText: "", pendingCards: [] };
+  // The model streams only whitespace (its visible text scrubs to nothing), then a tool call.
+  window.handleCoderEvent(s, { type: "token", text: "   " });
+  assert.ok(feedEl.querySelector(".msg-row.assistant"), "the token started a Model row");
+  window.handleCoderEvent(s, { type: "tool_call", tool: "grep", args: { pattern: "x" } });
+  const emptyRows = [...feedEl.querySelectorAll(".msg-row.assistant")]
+    .filter((r) => !(r.querySelector(".msg-body")?.textContent || "").trim());
+  assert.equal(emptyRows.length, 0, "the empty Model row is dropped (no blank bubble above the tool card)");
+  assert.ok(feedEl.querySelector(".tool-card"), "the tool call still renders its card");
+});
+
+test("CODER-EMPTY-MODEL: an assistant turn WITH text keeps its Model row", () => {
+  const { window } = loadApp({ fetchImpl: okFetch() });
+  const feedEl = window.document.createElement("div");
+  const s = { info: { id: "y" }, feedEl, liveBody: null, liveText: "", pendingCards: [] };
+  window.handleCoderEvent(s, { type: "token", text: "Here is my analysis." });
+  window.handleCoderEvent(s, { type: "tool_call", tool: "grep", args: { pattern: "x" } });
+  assert.match(feedEl.textContent, /Here is my analysis/, "a real text turn is preserved");
+});
