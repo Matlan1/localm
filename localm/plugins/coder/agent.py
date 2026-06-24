@@ -418,6 +418,28 @@ class Agent:
         self._project_map: ProjectMap = self._build_project_map(cwd)
         self._memory: str = load_memory(cwd)
 
+        # Episodic memory: recall lessons from past sessions on this project, and
+        # (at session close) distil this session into a new lesson. Disabled for
+        # restricted, shareable-key sessions - they must neither read the owner's
+        # lessons nor write a trace - and the write half is additionally gated on
+        # the privacy contract at close time. The store path resolves under the
+        # localm home dir, never the project tree.
+        self._episode_task: str = ""
+        self._episode_store = None
+        try:
+            from localm.config import load_config
+            _episodic_cfg = bool(load_config().get("coder_episodic_memory", True))
+        except Exception:
+            _episodic_cfg = True
+        self._episodic: bool = _episodic_cfg and not self.restricted
+        if self._episodic:
+            try:
+                from .episodes import EpisodeStore
+                self._episode_store = EpisodeStore(cwd)
+            except Exception:
+                self._episode_store = None
+                self._episodic = False
+
         # MCP: start configured servers and register their tools BEFORE the
         # system prompt is built so the model learns about them. Failures
         # warn and continue - external servers must never break the agent.
@@ -802,7 +824,9 @@ class Agent:
         Returns the agent's final text response.
         Used by spawn_agent and the CLI `run` command.
         """
-        self._add_user(task)
+        if self._episodic and not self._episode_task:
+            self._episode_task = task
+        self._add_user(self._with_episodes(task))
         return self._loop(interactive=False)
 
     def chat(self, user_input: str) -> str:
@@ -812,8 +836,27 @@ class Agent:
         History is preserved between calls.
         Returns the agent's final text response for this turn.
         """
+        # Recall relevant past lessons on the first turn of a session (the turn
+        # that sets the session's task); later turns keep the same context.
+        if self._episodic and not self._episode_task:
+            self._episode_task = user_input
+            user_input = self._with_episodes(user_input)
         self._add_user(user_input)
         return self._loop(interactive=True)
+
+    def _with_episodes(self, task: str) -> str:
+        """Prepend relevant past lessons (episodic memory) to *task*, if any.
+        Best-effort: a retrieval failure just returns the task unchanged."""
+        if not self._episodic or self._episode_store is None:
+            return task
+        try:
+            from .episodes import render_for_prompt
+            block = render_for_prompt(self._episode_store.search(task))
+        except Exception:
+            return task
+        if not block:
+            return task
+        return block + "\n\n## Task\n" + task
 
     # ------------------------------------------------------------------ #
     #  Core loop
@@ -1949,10 +1992,58 @@ ws     ::= [ \t\n\r]*
         Returns the path of the Markdown file, or None.
         Called automatically by the CLI's ``finally`` block.
         """
+        self._maybe_store_episode()
         self._audit.close()
         if self.mode == SessionMode.FULL:
             return self._write_session_markdown()
         return None
+
+    def _maybe_store_episode(self) -> None:
+        """Distil this finished session into one episodic-memory record.
+
+        Gated on the privacy contract: skipped in privacy mode and for restricted
+        sessions, so no trace is written that the mode forbids. Only fires when the
+        session actually changed files, so a read-only or no-op session adds
+        nothing. GUI/web sessions (which have an event sink and a still-running
+        server) run the reflection in a background thread so the model call never
+        blocks the close path / event loop; CLI runs reflect synchronously because
+        the process is about to exit and a daemon thread might not finish.
+        """
+        if not self._episodic or self._episode_store is None:
+            return
+        if self.mode == SessionMode.PRIVACY or self.restricted:
+            return
+        changed = self.changed_files()
+        if not changed:
+            return
+        if self.on_event is not None:
+            threading.Thread(target=self._reflect_into_episode,
+                             args=(changed,), daemon=True).start()
+        else:
+            self._reflect_into_episode(changed)
+
+    def _reflect_into_episode(self, changed: list) -> None:
+        """Build and store one episode for this session (best-effort)."""
+        try:
+            import time as _time
+
+            from .episodes import reflect_and_store
+            files = [c.get("path") for c in changed if c.get("path")]
+            task = self._episode_task or next(
+                (m.get("content", "") for m in self._messages
+                 if m.get("role") == "user"), "")
+            outcome = "ok" if self._last_run_ok else "incomplete"
+
+            def _complete(prompt: str) -> str:
+                return self.backend.chat(
+                    [{"role": "user", "content": prompt}], max_tokens=400) or ""
+
+            reflect_and_store(
+                self._episode_store, task=task, diff=self.session_diff(),
+                outcome=outcome, files=files, turns=self.turns,
+                complete=_complete, ts=_time.time())
+        except Exception as e:
+            print_warning("episodic memory: reflection skipped (%s)" % e)
 
     def _write_session_markdown(self) -> Path:
         """

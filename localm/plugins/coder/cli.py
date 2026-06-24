@@ -146,11 +146,15 @@ def _complete_model(ctx, param, incomplete):
                   "e.g. 'src/**/*.py'.  Requests touching files outside the "
                   "scope are rejected."
               ))
+@click.option("--episodes", "show_episodes", is_flag=True, default=False,
+              help="List the episodic-memory lessons stored for this project and exit.")
+@click.option("--forget-episodes", "forget_episodes", is_flag=True, default=False,
+              help="Delete all stored episodic-memory lessons for this project and exit.")
 def main(
     task, model, url, api_key, port, cwd,
     no_server, force_new, max_turns, temperature, max_tokens,
     verbose, yes, interactive_confirm, dry_run, estimate, patch_mode, ci, output_format,
-    native_tools, provider, mode, scope,
+    native_tools, provider, mode, scope, show_episodes, forget_episodes,
 ):
     """
     Offline AI coding agent powered by local LLMs.
@@ -182,6 +186,25 @@ def main(
         raise SystemExit(1)
 
     work_dir = Path(cwd).resolve() if cwd else Path.cwd()
+
+    # Episodic-memory management: list or clear the lessons stored for this
+    # project, then exit (no model/server needed). Transparency: the user can
+    # always see and wipe what the coder remembers about a project.
+    if show_episodes or forget_episodes:
+        from localm.plugins.coder.episodes import EpisodeStore
+        store = EpisodeStore(work_dir)
+        if forget_episodes:
+            store.clear()
+            click.echo(f"Cleared episodic memory for {work_dir}.")
+            return
+        eps = store.all()
+        if not eps:
+            click.echo("No episodic-memory lessons stored for this project yet.")
+            return
+        click.echo(f"{len(eps)} episode(s) for {work_dir}:")
+        for e in eps:
+            click.echo(f"  - [{e.outcome}] {e.lesson or e.summary}")
+        return
 
     # ------------------------------------------------------------------ #
     #  CI mode setup
