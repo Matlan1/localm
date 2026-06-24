@@ -260,6 +260,27 @@ if ($("pull-browse")) {
   };
 }
 
+// R18: shut the server down cleanly from Settings (the backend unloads the model
+// before exit) instead of force-closing the window. A true in-app RESTART needs a
+// server re-exec endpoint that does not exist yet - restart from the launcher.
+if ($("server-shutdown")) {
+  $("server-shutdown").onclick = () => {
+    confirmDanger("Shut down the server?",
+      "This stops the LocaLM server (the model is unloaded first). You will need to " +
+      "start it again from your launcher or terminal.",
+      "Shut down", async () => {
+        try {
+          const r = await fetch("/v1/server/shutdown",
+                                { method: "POST", headers: authHeaders() });
+          if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+          toast("Server shutting down…");
+          // The server is going away; show the reconnect overlay rather than a dead app.
+          if (window.onServerUnreachable) setTimeout(() => onServerUnreachable(), 800);
+        } catch (e) { toast("Could not shut down: " + e.message, true); }
+      });
+  };
+}
+
 $("pull-start").onclick = async () => {
   const spec = $("pull-spec").value.trim();
   if (!spec) { toast("Enter a model spec", true); return; }
