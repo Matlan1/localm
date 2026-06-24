@@ -349,6 +349,15 @@ nav button.active { background: var(--accent-soft); color: var(--accent); }
 .msg-row.web-note { opacity: 0.7; }
 .msg-row.web-note .msg-body { font-size: 13px; max-height: 180px; overflow-y: auto; }
 .msg-row.web-note .msg-role { color: var(--yellow); }
+/* NEW-1: inline marker where the active model changed between turns */
+.model-switch {
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted, #8b94a5);
+  margin: 10px 0;
+  opacity: 0.8;
+}
+.model-switch::before { content: "\21c4\00a0"; }
 .msg-body { line-height: 1.6; word-wrap: break-word; }
 .msg-body p { margin: 0 0 10px; }
 .msg-body p:last-child { margin-bottom: 0; }
