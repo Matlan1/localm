@@ -714,7 +714,10 @@
     if (typeof window.applyInstallUI !== "function") return;
     var sa = standalone();
     var canPrompt = !!window.__deferredInstall;
-    var certNeeded = location.protocol === "https:" && window.__swFailed === true
+    // Offer the cert step unless trust is CONFIRMED (__swFailed === false); an
+    // unknown state (undefined - e.g. Firefox mobile) must still surface it, so a
+    // self-signed cert is never undownloadable. Mirrors updateKeyGateCertStep.
+    var certNeeded = location.protocol === "https:" && window.__swFailed !== false
       && !sa && !canPrompt && !(!sa && ios());
     window.applyInstallUI({ standalone: sa, ios: !sa && ios(),
                             canPrompt: canPrompt, certNeeded: certNeeded });
