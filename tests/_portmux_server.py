@@ -2,7 +2,8 @@
 """Helper subprocess for test_portmux: run a localm.portmux server with a tiny
 ASGI app. NOT a test module (underscore prefix -> pytest does not collect it).
 
-Usage: python _portmux_server.py <port> <certfile> <keyfile>
+Usage: python _portmux_server.py <port> [<certfile> <keyfile>]
+       (omit cert/key, or pass "-" "-", to run a PLAIN-HTTP bind.)
 """
 import sys
 from pathlib import Path
@@ -30,6 +31,6 @@ async def _app(scope, receive, send):
 if __name__ == "__main__":
     from localm import portmux
     _port = int(sys.argv[1])
-    _cert = sys.argv[2]
-    _key = sys.argv[3]
+    _cert = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] != "-" else None
+    _key = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] != "-" else None
     portmux.run_server(_app, "127.0.0.1", _port, _cert, _key, "warning")

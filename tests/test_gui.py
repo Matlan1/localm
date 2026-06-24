@@ -1002,7 +1002,13 @@ class TestGuiNoModel:
             lambda name: (_ for _ in ()).throw(AssertionError("auto-selected a model")))
         monkeypatch.setattr("localm.winconsole.disable_quickedit", lambda: None)
         ran = {}
-        monkeypatch.setattr("uvicorn.run", lambda app, **kw: ran.setdefault("ok", True))
+        # Mock localm's serving seam (portmux.run_server), NOT uvicorn.run: the
+        # latter is only an implementation detail of the plain-HTTP path, which now
+        # fronts uvicorn with a first-byte peek (R45) and calls uvicorn.Server.serve
+        # directly. A uvicorn.run mock would not stop a real server from starting,
+        # and the test would hang serving forever.
+        monkeypatch.setattr("localm.portmux.run_server",
+                            lambda *a, **kw: ran.setdefault("ok", True))
 
         result = CliRunner().invoke(guicli.main, ["--no-model", "--no-browser"])
         assert result.exit_code == 0, result.output
