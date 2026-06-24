@@ -395,7 +395,12 @@ class HFBackend(BaseBackend):
             text = self._processor.apply_chat_template(
                 template_messages, tokenize=False, add_generation_prompt=True
             )
-            process_kwargs = {"text": text, "return_tensors": "pt"}
+            # add_special_tokens=False: the template already emitted the model's
+            # BOS, so re-tokenizing with the default would prepend a SECOND one
+            # (see the text-path note below). Standard processors forward this to
+            # their tokenizer.
+            process_kwargs = {"text": text, "return_tensors": "pt",
+                              "add_special_tokens": False}
             if images:
                 process_kwargs["images"] = images
             if audios:
@@ -406,7 +411,16 @@ class HFBackend(BaseBackend):
             text = tokenizer.apply_chat_template(
                 template_messages, tokenize=False, add_generation_prompt=True
             )
-            inputs = tokenizer(text, return_tensors="pt").to(model.device)
+            # add_special_tokens=False: the chat template already emits the
+            # model's BOS (Gemma <bos>, Llama-3 <|begin_of_text|>, Mistral <s>),
+            # so re-tokenizing with the tokenizer default would prepend a SECOND
+            # BOS and degrade coherence. This matches what apply_chat_template(
+            # tokenize=True) does internally; templates that emit no BOS
+            # (ChatML/Qwen) are for models that take no standalone BOS, so
+            # suppressing it here is correct for them too.
+            inputs = tokenizer(
+                text, return_tensors="pt", add_special_tokens=False
+            ).to(model.device)
 
         # --- Streaming generation ---
         streamer = TextIteratorStreamer(
