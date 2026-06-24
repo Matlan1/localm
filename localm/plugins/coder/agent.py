@@ -414,6 +414,12 @@ class Agent:
         self._queued_messages: list[str] = []
         self._queue_lock = threading.Lock()
         self._model_name: str = getattr(backend, "model_id", "")
+        # Per-model harness profile: fill gen-kwarg defaults the caller did not set
+        # (e.g. a steadier temperature for a small model). Explicit caller values
+        # always win. max_tokens is handled in the CLI, not here (see
+        # harness_profiles for why).
+        from .harness_profiles import agent_gen_overrides
+        self.gen_kwargs = {**agent_gen_overrides(self._model_name), **self.gen_kwargs}
         self._audit: AuditLogT = make_audit_log(mode, label=name)
         self._project_map: ProjectMap = self._build_project_map(cwd)
         self._memory: str = load_memory(cwd)
