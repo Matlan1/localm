@@ -155,6 +155,13 @@ DEFAULT_CONFIG: dict = {
     # Seconds a GUI coder approval card may sit unanswered before it is
     # auto-rejected and the agent moves on.
     "coder_confirm_timeout": 600,
+    # Episodic memory: the coder recalls lessons from past sessions on a project
+    # (what worked / what failed) and, at session close, distils the finished
+    # session into a new lesson. Recall is free (BM25); the reflection is one
+    # extra model call per session that changed files. Writes are skipped in
+    # privacy mode and for restricted (shareable-key) sessions, and stored under
+    # the localm home dir, never the project tree. Set False to disable both halves.
+    "coder_episodic_memory": True,
     # EXPERIMENTAL + dormant: constrain coder tool-call output with a GBNF grammar
     # (localm.inference.gbnf.TOOL_CALLS_ONLY) so the model cannot emit malformed
     # tool JSON. OFF by default because (a) it only takes effect on a grammar-capable
