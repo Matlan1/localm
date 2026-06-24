@@ -62,6 +62,69 @@ def tls_server(tmp_path):
             proc.kill()
 
 
+@pytest.fixture
+def plain_server():
+    """A PLAIN-HTTP portmux bind (no cert) - the loopback default. R45: it must
+    front uvicorn with the first-byte peek so a TLS-on-the-HTTP-port connection is
+    handled at the socket layer instead of flooding uvicorn's HTTP parser."""
+    port = _free_port()
+    proc = subprocess.Popen(
+        [sys.executable, str(WORKER), str(port)],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    )
+    try:
+        _wait_listening(port)
+        yield port
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def test_plain_http_request_is_served(plain_server):
+    """A normal HTTP request on the plain bind is relayed to the internal uvicorn
+    and answered (the peek layer is transparent to real HTTP)."""
+    port = plain_server
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=15)
+    conn.request("GET", "/")
+    resp = conn.getresponse()
+    body = resp.read().decode("utf-8", "replace")
+    conn.close()
+    assert resp.status == 200
+    assert body == "hello-localm"
+
+
+def test_tls_on_plain_port_is_handled_and_server_survives(plain_server):
+    """R45 root cause: a client that opens TLS/HTTPS on the plain-HTTP port (a
+    browser with HSTS / HTTPS-First) must be handled at the socket layer, NOT fed
+    into uvicorn's HTTP parser. The handshake fails cleanly (the port speaks HTTP)
+    and - crucially - a normal request right after still works, proving the server
+    neither crashed nor wedged and there was no 'Invalid HTTP request' to log."""
+    port = plain_server
+    raw = socket.create_connection(("127.0.0.1", port), timeout=15)
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    with pytest.raises((ssl.SSLError, OSError, ConnectionError)):
+        tls_sock = ctx.wrap_socket(raw, server_hostname="127.0.0.1")
+        tls_sock.do_handshake()
+    try:
+        raw.close()
+    except OSError:
+        pass
+
+    # The server is unharmed: a normal HTTP request still succeeds.
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=15)
+    conn.request("GET", "/after-tls")
+    resp = conn.getresponse()
+    body = resp.read().decode("utf-8", "replace")
+    conn.close()
+    assert resp.status == 200
+    assert body == "hello-localm"
+
+
 def test_plain_http_gets_308_to_https(tls_server):
     port, _ca = tls_server
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=15)
