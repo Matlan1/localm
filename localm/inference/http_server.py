@@ -554,6 +554,39 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
                     )
         return await call_next(request)
 
+    # Security response headers (R41 defense-in-depth). The user-content render
+    # path is already XSS-safe via DOMPurify (see dev-notes/SECURITY-xss-render-
+    # review-2026-06-23.md); the one gap that review found was the absence of a
+    # Content-Security-Policy backstop on the GUI shell. nosniff is enforced
+    # everywhere (stops a response being MIME-sniffed into executable HTML). The
+    # CSP ships in REPORT-ONLY mode: it never blocks, so it cannot break the GUI
+    # (the inline shell-token script, the TTS CDN/HF fetches, the sandboxed
+    # artifact iframe, workers), but it documents the intended policy and surfaces
+    # any violation for the maintainer to resolve before a later coordinated flip
+    # to an enforcing policy (which needs a nonce on the inline shell script).
+    _CSP_REPORT_ONLY = (
+        "default-src 'self'; "
+        "script-src 'self'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: blob:; "
+        "font-src 'self' data:; "
+        "connect-src 'self' https://huggingface.co https://*.hf.co "
+        "https://cdn.jsdelivr.net; "
+        "worker-src 'self' blob:; "
+        "frame-src 'self'; "
+        "object-src 'none'; "
+        "base-uri 'none'; "
+        "frame-ancestors 'none'"
+    )
+
+    @app.middleware("http")
+    async def _security_headers(request, call_next):
+        resp = await call_next(request)
+        resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+        resp.headers.setdefault(
+            "Content-Security-Policy-Report-Only", _CSP_REPORT_ONLY)
+        return resp
+
     # ---------------------------------------------------------------- #
     #  Health                                                            #
     # ---------------------------------------------------------------- #
@@ -816,6 +849,23 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
         model is unloaded before exit. (A Settings button calls this - Lane E.)"""
         _request_shutdown()
         return {"stopping": True}
+
+    @app.post("/api/bug-report",
+              dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
+    async def file_bug_report_ep(body: dict):
+        """R47: file a bug report from the GUI. The CLI has `localm bug-report`, but
+        the GUI had no manual trigger. Saves an editable markdown report (a safe
+        environment snapshot plus the user's note - never keys/config/chat data) and
+        returns its path so the GUI can point the user at the file to edit/send.
+        Owner / config-write scoped and same-origin gated like the other management
+        routes (a report can carry local diagnostics)."""
+        note = (body.get("message") or "").strip()
+        from localm import bugreport
+        path = bugreport.report_failure(
+            summary=note or "user-reported issue",
+            context={"operation": "bug-report", "source": "gui"},
+            as_failure=False, interactive=False)
+        return {"saved": bool(path), "path": str(path) if path else None}
 
     @app.post("/v1/plugins/install", dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
     async def install_plugin_ep(body: dict):

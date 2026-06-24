@@ -306,6 +306,27 @@ Backend scaffold is in place; the user-facing parts are still to do.
 
 ---
 
+## Release readiness, security & QA (standing items)
+
+PERMANENT, recurring gates - never "done"; re-run and refreshed each release cycle.
+
+- [ ] **Security pentesting** - run a full pen-test before any public/external handoff and
+  refresh it each release. Latest: the user-content XSS render path was reviewed 2026-06-23
+  (dev-notes/SECURITY-xss-render-review-2026-06-23.md) - SAFE (DOMPurify-gated), 0 exploitable;
+  the one gap (no CSP backstop) now has a report-only CSP shipped server-side, to be flipped to
+  enforcing after the GUI inline-script nonce work. Top probes next time: (1) DOMPurify
+  default-config mXSS bypass (the keystone), (2) artifact-iframe sandbox + CSP-injection regex,
+  (3) any new innerHTML / HTML-injection sink reachable by model/server strings.
+- [ ] **Live QA** - keep the by-hand QA campaign continuing and refreshed (the gitignored `qa/`
+  feature matrix): deep, adversarial real-use of every feature in GUI and CLI each cycle, not a
+  one-time pass.
+- [ ] **ZIP-handoff readiness (META-1)** - define and maintain a concrete "external tester is
+  handed the repo as a ZIP" checklist (cold install succeeds on a clean box; every plugin works;
+  no machine-specific assumptions; docs honest about the AMD-only-tested caveat) and diff the
+  project against it before handoff. See dev-notes/GO-PUBLIC-READINESS-2026-06-22.md.
+
+---
+
 ## Suite parity roadmap
 
 Gap analysis vs the polished consumer suites (LM Studio, Msty, Jan, Open
