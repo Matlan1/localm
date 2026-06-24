@@ -96,7 +96,7 @@ test("media config renders one independent subsection per plugin", async () => {
     "music has no fast_dequant control");
 
   // Each subsection has its own Save, and the Media section is in the nav.
-  assert.ok(imageSub.querySelector(".actions button"), "image subsection has a Save");
+  assert.ok(imageSub.querySelector(".media-save"), "image subsection has a Save");
   const navLabels = [...doc.querySelectorAll("#settings-nav .settings-nav-link")]
     .map((l) => l.textContent);
   assert.ok(navLabels.includes("Media"), "Media appears in the settings nav");
@@ -116,11 +116,80 @@ test("saving a media plugin POSTs only the changed fields", async () => {
   imageSub.querySelector('input[data-key="workdir"]').value = "/img/own";
   imageSub.querySelector('input[data-key="delete_outputs"]').checked = true;
 
-  imageSub.querySelector(".actions button").click();
+  imageSub.querySelector(".media-save").click();
   for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 0));
 
   assert.equal(posts.length, 1, "one POST to the image media config");
   assert.equal(posts[0].name, "image");
-  assert.deepEqual(posts[0].body, { workdir: "/img/own", delete_outputs: true },
+  // Compare by value (jsdom realm): only the changed fields are sent.
+  assert.equal(JSON.stringify(posts[0].body),
+    JSON.stringify({ workdir: "/img/own", delete_outputs: true }),
     "only the changed fields are sent (inherited untouched fields are not pinned)");
+});
+
+test("R12: saving one media subsection preserves unsaved edits in the others", async () => {
+  // Each plugin's POST echoes ITS OWN fields back (so the R12 re-render is correct).
+  const posts = [];
+  const fetchImpl = async (url, opts = {}) => {
+    const method = opts.method || "GET";
+    if (url === "/v1/config/schema") {
+      return { ok: true, status: 200, json: async () => SCHEMA, text: async () => "" };
+    }
+    if (url === "/v1/media/config" && method === "GET") {
+      return { ok: true, status: 200, json: async () => MEDIA, text: async () => "" };
+    }
+    if (url.startsWith("/v1/media/config/") && method === "POST") {
+      const name = url.split("/").pop();
+      posts.push({ name, body: JSON.parse(opts.body) });
+      const p = MEDIA.plugins.find((x) => x.plugin === name);
+      return { ok: true, status: 200, text: async () => "",
+               json: async () => ({ plugin: name, fields: p.fields }) };
+    }
+    return { ok: true, status: 200, text: async () => "",
+             json: async () => ({ models: [], active: "", conversations: [], plugins: [] }) };
+  };
+  const { window: win } = loadAppWithPages({ fetchImpl });
+  await render(win);
+  const doc = win.document;
+  const sub = (name) => [...doc.querySelectorAll(".media-subsection")]
+    .find((s) => s.dataset.plugin === name);
+
+  // Edit the MUSIC subsection (unsaved), then SAVE the IMAGE subsection.
+  sub("music").querySelector('input[data-key="workdir"]').value = "/music/edited";
+  sub("image").querySelector('input[data-key="workdir"]').value = "/image/own";
+  sub("image").querySelector(".media-save").click();
+  for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 0));
+
+  assert.equal(posts.length, 1, "only the image subsection was saved");
+  assert.equal(posts[0].name, "image");
+  // The music subsection's unsaved edit is still in the DOM (not wiped by a refresh).
+  assert.equal(sub("music").querySelector('input[data-key="workdir"]').value,
+    "/music/edited", "the other subsection's unsaved edit survives the save");
+});
+
+test("R14: in each media subsection the dropdown renders before the checkboxes", async () => {
+  // Mirror the post-R14 server field order (folders/text, then SELECT, then toggles).
+  const ORDERED = { plugins: [{ plugin: "image", label: "Image", fields: [
+    { key: "workdir", widget: "folder", label: "Folder", help: "", value: "", is_override: false },
+    { key: "swap_policy", widget: "select", label: "Swap", help: "", value: "auto",
+      is_override: false, options: ["auto", "always", "never"] },
+    { key: "delete_outputs", widget: "toggle", label: "Remove", help: "", value: false, is_override: false },
+    { key: "reload_after", widget: "toggle", label: "Reload", help: "", value: false, is_override: false },
+  ] }] };
+  const fetchImpl = async (url, opts = {}) => {
+    if (url === "/v1/config/schema") return { ok: true, status: 200, json: async () => SCHEMA, text: async () => "" };
+    if (url === "/v1/media/config" && (opts.method || "GET") === "GET")
+      return { ok: true, status: 200, json: async () => ORDERED, text: async () => "" };
+    return { ok: true, status: 200, text: async () => "",
+             json: async () => ({ models: [], active: "", conversations: [], plugins: [] }) };
+  };
+  const { window: win } = loadAppWithPages({ fetchImpl });
+  await render(win);
+  const imageSub = [...win.document.querySelectorAll(".media-subsection")]
+    .find((s) => s.dataset.plugin === "image");
+  const controls = [...imageSub.querySelectorAll(".settings-fields [data-key]")];
+  const selIdx = controls.findIndex((c) => c.tagName === "SELECT");
+  const firstToggle = controls.findIndex((c) => c.type === "checkbox");
+  assert.ok(selIdx !== -1 && firstToggle !== -1, "both a dropdown and a checkbox render");
+  assert.ok(selIdx < firstToggle, "the dropdown renders before any checkbox");
 });

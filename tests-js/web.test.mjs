@@ -234,6 +234,48 @@ test("/web with the toggle OFF: real search runs and the answer is grounded, not
 });
 
 // ---------------------------------------------------------------------------
+//  R36: the web loop must not spin - dedupe repeats, force a final answer
+// ---------------------------------------------------------------------------
+
+const searchCall = (q) =>
+  content(`<tool_call>{"name": "web_search", "args": {"query": "${q}"}}</tool_call>`);
+
+test("R36: a repeated identical search is not re-run; the model is told to answer", async () => {
+  const { conv, calls, completions } = await runChat({
+    web: true,
+    rounds: [
+      searchCall("weather today"),
+      searchCall("weather today"),   // the loop: same query again
+      content("It is sunny. Source: https://example.com/"),
+    ],
+  });
+  assert.equal(calls.filter((c) => c.url === "/api/web/search").length, 1,
+    "the duplicate search was NOT re-issued");
+  assert.ok(conv.messages.some((m) => /\[duplicate web request\]/.test(String(m.content))),
+    "the model was told it already searched and to answer from the results");
+  assert.ok(conv.messages.some((m) => m.role === "assistant" && /sunny/i.test(String(m.content))),
+    "the model produced a final answer");
+});
+
+test("R36: when web rounds run out the model is forced to answer, not left mid-search", async () => {
+  const { conv, calls } = await runChat({
+    web: true,
+    rounds: [
+      searchCall("q1"), searchCall("q2"), searchCall("q3"),
+      searchCall("q4"),                       // a 4th attempt past the cap
+      content("Final synthesized answer. Source: https://example.com/"),
+    ],
+  });
+  assert.equal(calls.filter((c) => c.url === "/api/web/search").length, 3,
+    "exactly WEB_MAX_ROUNDS searches ran, no more");
+  assert.ok(conv.messages.some((m) => /\[web search limit reached\]/.test(String(m.content))),
+    "the model was told to stop searching and answer");
+  assert.ok(conv.messages.some((m) => m.role === "assistant" &&
+    /Final synthesized answer/.test(String(m.content))),
+    "the conversation ends on a synthesized answer, not a tool call");
+});
+
+// ---------------------------------------------------------------------------
 //  WEB-ask: net_mode=ask must APPROVE each model-initiated web request
 // ---------------------------------------------------------------------------
 
@@ -309,4 +351,31 @@ test("WEB-ask: net_mode=allow does NOT prompt (current behaviour preserved)", as
   });
   assert.equal(prompts.length, 0, "allow mode never prompts");
   assert.equal(calls.filter((c) => c.url === "/api/web/search").length, 1, "the search ran without a prompt");
+});
+
+// ---------------------------------------------------------------------------
+//  R27: "don't ask again this session" on the web-access popup
+// ---------------------------------------------------------------------------
+
+test("R27: ticking 'don't ask again' stops the approval popup re-firing", async () => {
+  const { window } = loadApp();
+  const doc = window.document;
+  const modal = doc.getElementById("modal");
+
+  // First request opens the real modal; tick remember, then Allow.
+  const p1 = window.confirmWebRequest({ name: "web_search", args: { query: "x" } });
+  assert.notEqual(modal.style.display, "none", "the approval modal opened");
+  const cb = modal.querySelector(".web-ask-remember input[type=checkbox]");
+  assert.ok(cb, "the remember checkbox is present");
+  cb.checked = true;
+  const allow = [...modal.querySelectorAll("button")].find((b) => b.textContent === "Allow");
+  allow.click();
+  assert.equal(await p1, true, "Allow resolves true");
+  assert.equal(modal.style.display, "none", "the modal closed");
+
+  // A later request in the same session is auto-approved WITHOUT reopening.
+  modal.style.display = "none";
+  const p2 = window.confirmWebRequest({ name: "web_search", args: { query: "y" } });
+  assert.equal(modal.style.display, "none", "the modal did not reopen");
+  assert.equal(await p2, true, "the remembered choice auto-approved");
 });

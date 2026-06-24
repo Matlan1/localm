@@ -525,11 +525,24 @@ function _applyActiveClasses(name) {
   }
 }
 
+/** R09/R10: is the Settings view currently the active one? */
+function isSettingsView() {
+  const v = document.querySelector(".view.active");
+  return !!v && v.id === "view-settings";
+}
+window.isSettingsView = isSettingsView;
+
 function showView(name) {
   // Fall back to chat for an unknown name OR a view whose section is gone
   // (e.g. a remembered tab whose plugin was since uninstalled). Tolerating a
   // missing nav/view element is what lets the nav rail be rebuilt at runtime.
   if (!$("view-" + name)) name = "chat";
+  // R10: leaving Settings with unsaved edits warns first (returning to Settings
+  // re-renders the form from server state, so the edits would be silently lost).
+  if (name !== "settings" && isSettingsView() &&
+      window.settingsDirty && window.settingsDirty()) {
+    if (!confirm("You have unsaved settings changes. Leave without saving?")) return;
+  }
   _applyActiveClasses(name);
   // Remembered across reloads - but never in privacy mode (no traces).
   if (!chat.privacy) localStorage.setItem("localm.activeView", name);
@@ -1030,28 +1043,66 @@ const chat = {
   ctxMax: 16384,     // context ceiling - refreshed from /v1/config
   privacy: false,    // server in privacy mode → conversations not persisted
   persist: false,    // non-privacy: conversations sync to the server store
+  stick: true,       // R31: follow the stream to the bottom until the user scrolls up
 };
 
-// Conversation compaction mirrors localm/inference/compact.py:
-// summarise older turns at 70% of the ceiling, keep the last 4 verbatim,
-// hard-trim with a visible note when summarisation fails. Never blocks chat.
+// Conversation compaction mirrors localm/inference/compact.py: once the estimate
+// passes 70% of the ceiling, summarise the OLDEST turns and keep the recent ones
+// verbatim. R44: keep recent turns by token budget (not a flat last-4), feed the
+// summariser whole messages truncated at word boundaries with reasoning stripped,
+// and sanitise the returned summary so half-words / <think> never re-enter
+// context. Never blocks chat.
 const COMPACT_RATIO = 0.7;
-const COMPACT_KEEP = 4;
+const COMPACT_KEEP = 4;            // floor: always keep at least this many recent turns
+const COMPACT_TARGET = 0.5;        // R44: keep recent turns verbatim up to ~50% of the ceiling
+
+/** R44: rough token estimate - ~4 chars/token plus a small per-message overhead
+ *  for the role and delimiters. Coarse, but less skewed than a bare length/4. */
+function estimateTokens(text) {
+  return Math.ceil((text || "").length / 4) + 4;
+}
 
 function estimateConvTokens(conv) {
-  let total = Math.ceil(($("p-system").value || "").length / 4);
+  let total = estimateTokens($("p-system").value || "");
   for (const m of conv.messages) {
-    total += Math.ceil(msgText(m).length / 4) + msgImages(m).length * 750;
+    total += estimateTokens(msgText(m)) + msgImages(m).length * 750;
   }
   return total;
 }
 
+/** R44: truncate at a word boundary with an explicit marker, instead of a raw
+ *  mid-word slice that fed half-words (e.g. "REA") into the summariser. */
+function truncateAtWord(text, max) {
+  if (!text || text.length <= max) return text || "";
+  const cut = text.slice(0, max);
+  const sp = cut.lastIndexOf(" ");
+  return (sp > max * 0.6 ? cut.slice(0, sp) : cut).trimEnd() + " ...[truncated]";
+}
+
 async function compactConversation(conv) {
   if (conv.messages.length <= COMPACT_KEEP) return false;
-  const older = conv.messages.slice(0, -COMPACT_KEEP);
-  const recent = conv.messages.slice(-COMPACT_KEEP);
+  // R44: keep as many of the most-recent turns verbatim as fit in COMPACT_TARGET
+  // of the ceiling (at least COMPACT_KEEP), summarising only what is older -
+  // instead of always discarding everything but the last 4 turns.
+  const budget = (chat.ctxMax && chat.ctxMax > 0) ? COMPACT_TARGET * chat.ctxMax : 0;
+  let keepCount = 0, used = 0;
+  for (let i = conv.messages.length - 1; i >= 0; i--) {
+    const t = estimateTokens(msgText(conv.messages[i])) +
+              msgImages(conv.messages[i]).length * 750;
+    const overBudget = budget > 0 ? (used + t > budget) : true;
+    if (keepCount >= COMPACT_KEEP && overBudget) break;
+    used += t;
+    keepCount++;
+  }
+  keepCount = Math.max(COMPACT_KEEP, Math.min(keepCount, conv.messages.length - 1));
+  const older = conv.messages.slice(0, -keepCount);
+  const recent = conv.messages.slice(-keepCount);
+  if (!older.length) return false;
+
+  // R44: feed whole messages truncated at a word boundary, with reasoning blocks
+  // stripped, so the summariser never sees half-words or display-only <think>.
   const excerpt = older.map((m) =>
-    `${m.role.toUpperCase()}: ${msgText(m).slice(0, 600)}`).join("\n\n");
+    `${m.role.toUpperCase()}: ${truncateAtWord(stripThink(msgText(m)), 1200)}`).join("\n\n");
 
   let summary = "";
   try {
@@ -1075,13 +1126,16 @@ async function compactConversation(conv) {
       const data = await r.json();
       summary = (data.choices?.[0]?.message?.content || "").trim();
     }
-  } catch (e) { /* summarisation unavailable - hard trim below */ }
+  } catch (e) { /* summarisation unavailable - fall back to a note below */ }
+  // R44: sanitise the summary so leaked <think>/markers never re-enter context.
+  summary = stripThink(scrubMarkers(summary)).trim();
 
   const bridge = summary
     ? [{ role: "user", content: "[Conversation summary]\n" + summary },
        { role: "assistant", content: "Understood. Continuing from this summary." }]
     : [{ role: "user", content:
-         "[Earlier conversation was removed to fit the context window.]" },
+         "[Earlier conversation was trimmed to fit the context window; " +
+         "the recent messages below are intact.]" },
        { role: "assistant", content: "Understood." }];
 
   conv.messages = [...bridge, ...recent];
@@ -1122,6 +1176,9 @@ async function refreshCtxLimit() {
         localStorage.removeItem("localm.musicMoveDest");
         localStorage.removeItem("localm.videoMoveDest");
         localStorage.removeItem("localm.onboarded");
+        localStorage.removeItem("localm.webAccess");   // R34: no trace in privacy
+        localStorage.removeItem("localm.speakAloud");
+        webAskSession = null;                          // R27: forget the session choice
         const h = document.querySelector("#conversations h3");
         if (h && !document.getElementById("privacy-hint")) {
           const hint = document.createElement("div");
@@ -1133,18 +1190,40 @@ async function refreshCtxLimit() {
           h.after(hint);
         }
       }
+      hydrateChatToggles(cfg);   // R34: reflect saved choice / global net policy
     }
   } catch (e) { /* keep default */ }
 }
 
+// R34: the per-chat Web-access and Speak-aloud toggles used to reset to OFF on
+// every load, so the user had to re-enable them in every session. Reflect the
+// user's saved choice; for web, when there is no saved choice fall back to the
+// global net policy (net_mode=allow auto-enables web; ask/off leave it off so
+// consent still applies). Writes are gated on privacy mode (no traces there).
+function hydrateChatToggles(cfg) {
+  const webEl = $("p-web"), speakEl = $("p-speak");
+  if (!webEl || !speakEl) return;
+  const lsGet = (k) => { try { return localStorage.getItem(k); } catch (e) { return null; } };
+  const savedSpeak = chat.privacy ? null : lsGet("localm.speakAloud");
+  if (savedSpeak !== null) speakEl.checked = savedSpeak === "1";
+  const savedWeb = chat.privacy ? null : lsGet("localm.webAccess");
+  if (savedWeb !== null) webEl.checked = savedWeb === "1";
+  else if (cfg && cfg.net_mode === "allow") webEl.checked = true;
+}
+window.hydrateChatToggles = hydrateChatToggles;
+
 function saveConversations(changed) {
   if (chat.privacy) return;   // privacy mode: no traces, not even localStorage
+  // R40: do NOT cache server index-only rows (_meta) - they carry no messages, so
+  // caching them would shadow a real local copy and show empty conversations
+  // offline. Only full conversations are cached locally.
+  const cacheable = chat.conversations.filter((c) => !c._meta);
   try {
     localStorage.setItem("localm.conversations",
-      JSON.stringify(chat.conversations.slice(0, 50)));
+      JSON.stringify(cacheable.slice(0, 50)));
   } catch (e) {
     // Quota: drop image-heavy older conversations and retry once
-    const slim = chat.conversations.slice(0, 10);
+    const slim = cacheable.slice(0, 10);
     try { localStorage.setItem("localm.conversations", JSON.stringify(slim)); } catch {}
   }
   if (changed) pushConversation(changed);
@@ -1187,20 +1266,52 @@ function deleteConversationRemote(convId) {
   }).catch(() => {});
 }
 
-/** Load the server store and merge with the localStorage cache: the newer
- *  copy of each conversation wins; local-only ones are uploaded. */
+/** R40: fetch a full conversation's body on demand and replace its index-only
+ *  ("_meta") placeholder in chat.conversations. Returns true on success. */
+async function hydrateConversation(conv) {
+  if (!conv || !conv._meta) return true;
+  try {
+    const r = await fetch("/api/conversations/" + encodeURIComponent(conv.id),
+                          { headers: authHeaders() });
+    if (!r.ok) return false;
+    const data = await r.json();
+    conv.messages = data.messages || [];
+    conv.branches = data.branches || [];
+    if (data.title != null) conv.title = data.title;
+    conv.pinned = !!data.pinned;
+    conv.folder = data.folder || null;
+    delete conv._meta;
+    saveConversations();   // cache the now-full conversation locally
+    return true;
+  } catch (e) {
+    return false;   // offline - keep the placeholder; renderChat shows the hint
+  }
+}
+window.hydrateConversation = hydrateConversation;
+
+/** Load the server store and merge with the localStorage cache: the newer copy
+ *  of each conversation wins; local-only ones are uploaded. R40: the server
+ *  list is a lightweight index (no message bodies); each conversation's messages
+ *  load lazily on open via hydrateConversation. */
 async function initServerConversations() {
   if (chat.privacy) return;
   try {
-    const r = await fetch("/api/conversations", { headers: authHeaders() });
+    // R40: lightweight, paginated index - no message bodies or data-URI images.
+    const r = await fetch("/api/conversations?meta=true&limit=200&offset=0",
+                          { headers: authHeaders() });
     if (!r.ok) return;
     const data = await r.json();
     if (!data.enabled) return;
     chat.persist = true;
-    const byId = new Map(data.conversations.map((c) => [c.id, c]));
+    // Remote rows are index-only placeholders until opened.
+    const byId = new Map((data.conversations || []).map(
+      (c) => [c.id, { ...c, _meta: true, messages: [] }]));
     for (const local of chat.conversations) {
       const remote = byId.get(local.id);
-      if (!remote || (local.updated_at || 0) > (remote.updated_at || 0)) {
+      // Keep the local FULL copy unless the server has a strictly newer version
+      // (>= keeps it on a tie, so an already-cached conversation is not demoted to
+      // an index-only placeholder that would need a needless re-fetch / break offline).
+      if (!remote || (local.updated_at || 0) >= (remote.updated_at || 0)) {
         byId.set(local.id, local);
         pushConversation(local);
       }
@@ -1210,6 +1321,7 @@ async function initServerConversations() {
     if (!chat.activeId && chat.conversations.length) {
       chat.activeId = chat.conversations[0].id;
     }
+    await hydrateConversation(currentConv());   // load the active conversation's body
     saveConversations();
     renderConvList();
     renderChat();
@@ -1249,6 +1361,28 @@ function msgImages(m) {
   if (typeof m.content === "string") return [];
   return (m.content || []).filter((p) => p.type === "image_url")
     .map((p) => p.image_url?.url).filter(Boolean);
+}
+
+/** VIS-1: replace every user-attached image (a data: URI) in the conversation
+ *  with a short text note, so a model that rejected the image is never asked for
+ *  it again. Re-sending a rejected image 400s on every turn and wedges the chat
+ *  in endless empty assistant replies; dropping it keeps the chat usable.
+ *  Server-generated /api/ images are display-only (already mapped to text before
+ *  sending), so they are left alone. Returns the number of images dropped. */
+function stripUserImages(conv) {
+  let dropped = 0;
+  for (const m of conv.messages) {
+    if (m.role !== "user" || !Array.isArray(m.content)) continue;
+    const imgs = m.content.filter(
+      (p) => p.type === "image_url" && !p.image_url?.url?.startsWith("/api/"));
+    if (!imgs.length) continue;
+    dropped += imgs.length;
+    const text = m.content.filter((p) => p.type === "text")
+      .map((p) => p.text).join("");
+    m.content = (text ? text + "\n" : "") +
+      "[Image removed: this model cannot read images.]";
+  }
+  return dropped;
 }
 
 /* ---- conversation list: search, pin, folders ---- */
@@ -1340,9 +1474,10 @@ function buildConvItem(conv, snippet) {
   };
   item.appendChild(del);
 
-  item.onclick = () => {
+  item.onclick = async () => {
     chat.activeId = conv.id;
     renderConvList();
+    if (conv._meta) await hydrateConversation(conv);   // R40: load the body on open
     renderChat();
     showView("chat");
   };
@@ -1592,6 +1727,17 @@ function renderChat() {
   const box = $("chat-messages");
   box.innerHTML = "";
   const conv = currentConv();
+  // R40: a not-yet-loaded conversation (server index row) hydrates its body on
+  // first render, then re-renders. Try once per row (a failed/offline load sets
+  // _hydrateFailed so we never spin).
+  if (conv && conv._meta && !conv._hydrating && !conv._hydrateFailed) {
+    conv._hydrating = true;
+    hydrateConversation(conv).then((ok) => {
+      conv._hydrating = false;
+      if (ok) renderChat();
+      else conv._hydrateFailed = true;
+    });
+  }
   if (!conv || conv.messages.length === 0) {
     box.appendChild(buildEmptyHint());
     return;
@@ -1635,7 +1781,10 @@ function renderChat() {
       label: tag ? NOTE_LABELS[tag] : undefined,
     });
   });
-  box.scrollTop = box.scrollHeight;
+  // R31: only re-pin to the bottom when the user has not scrolled up. This tail
+  // runs on every re-render (incl mid-stream web/finalize), so an unconditional
+  // scroll here used to yank a reader back down while a reply was still streaming.
+  if (chat.stick) box.scrollTop = box.scrollHeight;
 }
 
 /* ---- message branching ----
@@ -2033,6 +2182,15 @@ document.addEventListener("keydown", (e) => {
     cmdkIsOpen() ? closeCommandPalette() : openCommandPalette();
     return;
   }
+  // R09: Ctrl/Cmd+S saves the active Settings section. Only on the Settings page,
+  // so every other view keeps the browser's native "Save page".
+  if ((e.ctrlKey || e.metaKey) && (e.key === "s" || e.key === "S")) {
+    if (isSettingsView()) {
+      e.preventDefault();
+      if (window.saveActiveSettingsSection) window.saveActiveSettingsSection();
+    }
+    return;
+  }
   if (!cmdkIsOpen()) return;
   if (e.key === "Escape") { e.preventDefault(); closeCommandPalette(); }
   else if (e.key === "ArrowDown") {
@@ -2043,6 +2201,16 @@ document.addEventListener("keydown", (e) => {
     renderCmdk($("cmdk-input").value);
   } else if (e.key === "Enter") {
     e.preventDefault(); runCmdk(_cmdkSel);
+  }
+});
+
+// R10: the browser's native unsaved-changes prompt on tab close / reload while
+// Settings has unsaved edits. An empty returnValue is what triggers it; browsers
+// ignore any custom message, so we set none.
+window.addEventListener("beforeunload", (e) => {
+  if (window.settingsDirty && window.settingsDirty()) {
+    e.preventDefault();
+    e.returnValue = "";
   }
 });
 
@@ -2119,6 +2287,11 @@ function setupPerfCard() {
 
 const WEB_MAX_ROUNDS = 3;
 
+// R27: a remembered "don't ask again this session" choice. null = ask each time;
+// true = allow all this session; false = deny all this session. In-memory only
+// (so it resets on reload = a new session) and leaves no persisted trace.
+let webAskSession = null;
+
 // net_mode = ask means the GUI must APPROVE each model-initiated web request
 // before it runs (the settings promise: "ask = approve each request"). Read it
 // fresh from /v1/config so a change in Settings takes effect without a reload;
@@ -2142,6 +2315,8 @@ window.webModeIsAsk = webModeIsAsk;
 // suppressed in some PWA/mobile browsers, the NET-1 class of bug). Overridable
 // in tests.
 function confirmWebRequest(call) {
+  // R27: a remembered choice short-circuits the modal for the rest of the session.
+  if (webAskSession !== null) return Promise.resolve(webAskSession);
   return new Promise((resolve) => {
     const args = (call && call.args) || {};
     const target = args.query || args.url || "";
@@ -2149,11 +2324,27 @@ function confirmWebRequest(call) {
     openModal("Allow web access?", (body) => {
       body.appendChild(el("p", "", "The model wants to " + verb + " for:"));
       body.appendChild(el("p", "web-ask-target", target));
+      // R27: "don't ask again this session" - remember Allow/Deny so the popup
+      // does not fire on every model-initiated request for the rest of the session.
+      const remember = el("label", "web-ask-remember");
+      const cb = el("input");
+      cb.type = "checkbox";
+      remember.appendChild(cb);
+      remember.appendChild(document.createTextNode(" Don't ask again this session"));
+      body.appendChild(remember);
       const row = el("div", "actions");
       const deny = el("button", "btn-quiet", "Deny");
-      deny.onclick = () => { $("modal").style.display = "none"; resolve(false); };
+      deny.onclick = () => {
+        if (cb.checked) webAskSession = false;
+        $("modal").style.display = "none";
+        resolve(false);
+      };
       const allow = el("button", "btn-quiet btn-primary", "Allow");
-      allow.onclick = () => { $("modal").style.display = "none"; resolve(true); };
+      allow.onclick = () => {
+        if (cb.checked) webAskSession = true;
+        $("modal").style.display = "none";
+        resolve(true);
+      };
       row.appendChild(deny);
       row.appendChild(allow);
       body.appendChild(row);
@@ -2579,6 +2770,16 @@ async function loadClientPlugins() {
 // unreachable. `suggest` mirrors the suggest_plugins config toggle.
 const pluginCommands = { map: {}, suggest: true };
 
+// R50: signal other same-origin tabs that the installed/enabled plugin set
+// changed (a new value is required for the storage event to fire, so use the
+// clock). The writing tab refreshes itself directly; other tabs react to the
+// storage event wired near the focus listener.
+function bumpPluginsRev() {
+  try { localStorage.setItem("localm.pluginsRev", String(Date.now())); }
+  catch (e) { /* storage blocked / full - cross-tab sync degrades to focus only */ }
+}
+window.bumpPluginsRev = bumpPluginsRev;
+
 async function refreshPluginCommands() {
   try {
     const r = await fetch("/api/plugins", { headers: authHeaders() });
@@ -2886,7 +3087,12 @@ $("persona-delete").onclick = async () => {
 
 /* sending */
 
-async function runCompletion(conv, webDepth = 0) {
+async function runCompletion(conv, webDepth = 0, web = null) {
+  // R36: per-send web state. `seen` dedupes already-issued queries so the model
+  // cannot loop on the same search; `ask` caches the net policy so a transient
+  // /v1/config blip mid-loop cannot silently flip approval off; `forced` ensures
+  // we only inject the "limit reached, answer now" nudge once per send.
+  if (!web) web = { seen: new Set(), ask: null, forced: false };
   await maybeCompactConversation(conv);
   const params = chatParams();
   const webEnabled = $("p-web").checked;
@@ -2947,6 +3153,7 @@ async function runCompletion(conv, webDepth = 0) {
 
   const box = $("chat-messages");
   const { body: liveBody } = addMessageRow(box, "assistant", "");
+  chat.stick = true;   // R31: a fresh send re-arms autoscroll (follow the reply)
   box.scrollTop = box.scrollHeight;
 
   const sendBtn = $("chat-send");
@@ -2954,11 +3161,17 @@ async function runCompletion(conv, webDepth = 0) {
   sendBtn.textContent = "■";
   chat.abort = new AbortController();
 
+  // VIS-1: did this request carry a user-attached image? If a text-only model
+  // rejects it (400), we must drop the image so the chat is not wedged.
+  const sentImage = messages.some((m) => Array.isArray(m.content) &&
+    m.content.some((p) => p.type === "image_url"));
+
   let full = "";
   let reasoning = "";   // H4: <think> reasoning now streams in delta.reasoning_content
   let usage = null;
   let finishReason = null;
   let aborted = false;
+  let visionRejected = false;
   try {
     const r = await fetch("/v1/chat/completions", {
       method: "POST",
@@ -2968,7 +3181,9 @@ async function runCompletion(conv, webDepth = 0) {
     });
     if (!r.ok) {
       const detail = await r.text();
-      throw new Error(`${r.status}: ${detail.slice(0, 300)}`);
+      const err = new Error(`${r.status}: ${detail.slice(0, 300)}`);
+      err.status = r.status;   // so the catch can recover an image-reject 400
+      throw err;
     }
     await readSSE(r, (payload) => {
       if (payload === "[DONE]") return;
@@ -2982,18 +3197,31 @@ async function runCompletion(conv, webDepth = 0) {
       if (cDelta || rDelta) {
         full += cDelta;
         reasoning += rDelta;
-        const stick = nearBottom(box);
         // Rebuild <think> from the reasoning stream so splitThink renders the
         // collapsible block exactly as before. Back-compat: an older server that
         // still inlines <think> in content also renders (reasoning stays empty).
         renderMarkdown(liveBody,
           reasoning ? "<think>\n" + reasoning + "\n</think>\n" + full : full);
-        if (stick) box.scrollTop = box.scrollHeight;
+        // R31: follow the stream ONLY while the user is at the bottom. chat.stick
+        // is latched by the scroll listener, so scrolling up reliably pauses
+        // autoscroll (recomputing nearBottom per token fought the user instead).
+        if (chat.stick) box.scrollTop = box.scrollHeight;
       }
     });
   } catch (e) {
     if (e.name === "AbortError") {
       aborted = true;
+    } else if (sentImage && e.status === 400 && !full.trim()) {
+      // VIS-1: a text-only model rejected the image. Drop it from history so the
+      // next turn is text-only and the chat stays usable, instead of re-sending
+      // the image every turn (which 400s forever -> all-blank assistant replies).
+      visionRejected = true;
+      const n = stripUserImages(conv);
+      saveConversations(conv);
+      toast(n
+        ? "This model cannot read images - removed the image. You can keep " +
+          "chatting (text only)."
+        : "Chat request failed: " + e.message, true);
     } else {
       renderMarkdown(liveBody, full + "\n\n*[error: " + e.message + "]*");
       toast("Chat request failed: " + e.message, true);
@@ -3006,7 +3234,24 @@ async function runCompletion(conv, webDepth = 0) {
 
   // User pressed Stop: leave the partial text on screen but do NOT persist it,
   // read it aloud, or fire the web loop / recurse on a partial reply (BUG-13).
-  if (aborted) return;
+  // U-STOP: make the stop unmistakable - mark the partial as stopped and halt any
+  // speech already playing - so a stopped reply is never silently treated as live.
+  if (aborted) {
+    renderMarkdown(liveBody,
+      (reasoning ? "<think>\n" + reasoning + "\n</think>\n" + full : full) +
+      (full || reasoning ? "\n\n" : "") + "*[stopped]*");
+    try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (e) { /* no TTS */ }
+    return;
+  }
+
+  // VIS-1: a vision reject (or any failure that streamed nothing) must NOT
+  // persist an empty assistant turn - a blank reply saved every send is the
+  // "every turn after the image is empty" wedge. Re-render from real history
+  // (which now has the image stripped) and stop here so the chat recovers.
+  if (visionRejected || (!full.trim() && !reasoning.trim())) {
+    renderChat();
+    return;
+  }
 
   // Persist content with <think> rebuilt (same shape as before this change), so
   // reload + splitThink re-render the collapsible block and TTS/visibleText are
@@ -3035,9 +3280,30 @@ async function runCompletion(conv, webDepth = 0) {
   const canWeb = webEnabled && webDepth < WEB_MAX_ROUNDS;
   const nextCall = canWeb ? parseWebCall(full) : null;
   if (nextCall) {
+    // R36: dedupe - the model re-issuing a search it already ran this send is the
+    // loop. Do not repeat it; tell the model the results are already in hand and
+    // to answer from them, and end the web rounds for this send.
+    const key = nextCall.name + ":" + String(
+      (nextCall.args && (nextCall.args.query || nextCall.args.url)) || "")
+      .trim().toLowerCase();
+    if (web.seen.has(key)) {
+      conv.messages.push({
+        role: "user", web: true,
+        content:
+          "[duplicate web request] You already ran that exact search this turn; " +
+          "its results are above. Do not search again - answer now from those " +
+          "results and cite the sources, or say plainly if they are insufficient.",
+      });
+      saveConversations(conv);
+      renderChat();
+      await runCompletion(conv, WEB_MAX_ROUNDS, web);   // stop web; force an answer
+      return;
+    }
     // net_mode=ask: approve each MODEL-INITIATED request before it runs (WEB-ask).
     // The explicit /web command is direct consent and is NOT routed through here.
-    const approved = (await webModeIsAsk()) ? await confirmWebRequest(nextCall) : true;
+    // Cache the policy for this send so a mid-loop /v1/config blip cannot flip it.
+    if (web.ask === null) web.ask = await webModeIsAsk();
+    const approved = web.ask ? await confirmWebRequest(nextCall) : true;
     if (!approved) {
       conv.messages.push({
         role: "user", web: true,
@@ -3048,11 +3314,12 @@ async function runCompletion(conv, webDepth = 0) {
       });
       saveConversations(conv);
       renderChat();
-      await runCompletion(conv, WEB_MAX_ROUNDS);   // no further web rounds this send
+      await runCompletion(conv, WEB_MAX_ROUNDS, web);   // no further web rounds this send
       return;
     }
+    web.seen.add(key);
     await runWebCall(conv, nextCall);
-    await runCompletion(conv, webDepth + 1);
+    await runCompletion(conv, webDepth + 1, web);
   } else if (canWeb && looksLikeWebToolAttempt(full)) {
     // The model tried to call a web tool but emitted a block we could not
     // parse. Re-prompt for the exact format instead of letting the un-grounded
@@ -3068,7 +3335,25 @@ async function runCompletion(conv, webDepth = 0) {
     });
     saveConversations(conv);
     renderChat();
-    await runCompletion(conv, webDepth + 1);
+    await runCompletion(conv, webDepth + 1, web);
+  } else if (webEnabled && webDepth === WEB_MAX_ROUNDS && !web.forced &&
+             (parseWebCall(full) || looksLikeWebToolAttempt(full))) {
+    // R36: web rounds are used up but the model is STILL trying to search instead
+    // of answering (the "never synthesizes an answer" symptom). Force exactly one
+    // synthesizing turn from the results already gathered, then accept its answer.
+    web.forced = true;
+    conv.messages.push({
+      role: "user", web: true,
+      content:
+        "[web search limit reached] You have used the maximum web lookups for " +
+        "this turn. Stop searching and answer the question now using the results " +
+        "already provided above, citing the sources; if they are insufficient, " +
+        "say so plainly.",
+    });
+    saveConversations(conv);
+    renderChat();
+    await runCompletion(conv, WEB_MAX_ROUNDS + 1, web);
+    return;
   } else if ($("p-speak").checked && full) {
     speak(full);   // read the finished reply aloud (offline browser voices)
   }
@@ -3221,6 +3506,21 @@ function composerEnterToSend(e, send) {
 
 $("chat-input").addEventListener("keydown", (e) => composerEnterToSend(e, sendChat));
 $("chat-input").addEventListener("input", (e) => autoGrow(e.target));
+// R31: latch autoscroll on the user's actual scroll position. Scrolling up sets
+// chat.stick=false (the streaming loop then leaves the viewport alone); returning
+// to the bottom re-arms it. A programmatic scroll-to-bottom lands near the bottom
+// and so keeps it armed, so this never fights itself.
+$("chat-messages").addEventListener("scroll", () => {
+  chat.stick = nearBottom($("chat-messages"));
+});
+// R34: persist the Web-access and Speak-aloud toggles so they survive a reload
+// (privacy mode leaves no trace). hydrateChatToggles restores them on boot.
+$("p-web").addEventListener("change", () => {
+  if (!chat.privacy) { try { localStorage.setItem("localm.webAccess", $("p-web").checked ? "1" : "0"); } catch (e) { /* storage full/blocked */ } }
+});
+$("p-speak").addEventListener("change", () => {
+  if (!chat.privacy) { try { localStorage.setItem("localm.speakAloud", $("p-speak").checked ? "1" : "0"); } catch (e) { /* storage full/blocked */ } }
+});
 $("toggle-params").onclick = () => $("params").classList.toggle("open");
 $("export-conv").onclick = exportConversation;
 $("compact-conv").onclick = async () => {
@@ -3277,6 +3577,26 @@ function renderSessionSelect() {
     opt.textContent = sessionLabel(s.info) + (s.busy ? " ⏳" : "");
     if (id === coder.activeId) opt.selected = true;
     sel.appendChild(opt);
+  }
+  renderCoderSessionList();   // R17: keep the right-side rail in lockstep with the dropdown
+}
+
+// R17: the coder's right-side open-sessions rail (mirrors the chat conversation
+// list). The #session-select dropdown stays as the mobile fallback.
+function renderCoderSessionList() {
+  const list = $("coder-session-list");
+  if (!list) return;
+  list.replaceChildren();
+  if (!coder.sessions.size) {
+    list.appendChild(el("div", "coder-session-empty", "No open sessions"));
+    return;
+  }
+  for (const [id, s] of coder.sessions) {
+    const item = el("div", "coder-session-item" + (id === coder.activeId ? " active" : ""));
+    item.appendChild(el("span", "title", sessionLabel(s.info)));
+    if (s.busy) item.appendChild(el("span", "badge", "⏳"));
+    item.onclick = () => activateSession(id);
+    list.appendChild(item);
   }
 }
 
@@ -3845,6 +4165,9 @@ $("session-new").onclick = () => {
   showCoderUI(false);
   $("coder-bar").classList.add("open");   // keep the bar so sessions stay reachable
 };
+// R17: the open-sessions rail's "+" mirrors the bar's "+ new".
+if ($("coder-new-session")) $("coder-new-session").onclick = () => $("session-new").click();
+renderCoderSessionList();   // R17: show the empty-state rail on first load
 // Arrow wrapper: a bare `.onclick = startCoderSession` would pass the click
 // Event as opts, making opts.resume truthy and always resuming (CODER-2).
 $("setup-start").onclick = () => startCoderSession();
@@ -4655,6 +4978,33 @@ function hideReconnectOverlay() {
   const ov = $("reconnect-overlay");
   if (ov) ov.style.display = "none";
 }
+
+// R25: first-load progress. Shown immediately at boot so the cold-start wait (the
+// first /api/models can block for many seconds while the model loads) shows that
+// load is in progress instead of a blank / half-rendered shell. Distinct in copy
+// from the reconnect overlay, which means the server is DOWN. Hidden once the
+// model list resolves (or fails), so it never stacks over the gate or the app.
+function showStartupOverlay() {
+  let ov = $("startup-overlay");
+  if (!ov) {
+    ov = el("div", "reconnect-overlay startup-overlay");
+    ov.id = "startup-overlay";
+    const panel = el("div", "reconnect-panel");
+    panel.appendChild(el("div", "reconnect-spinner"));
+    panel.appendChild(el("div", "reconnect-msg",
+      "Starting LocaLM... loading the model. The first run can take a moment."));
+    ov.appendChild(panel);
+    document.body.appendChild(ov);
+  }
+  ov.style.display = "flex";
+}
+function hideStartupOverlay() {
+  const ov = $("startup-overlay");
+  if (ov) ov.style.display = "none";
+}
+window.showStartupOverlay = showStartupOverlay;
+window.hideStartupOverlay = hideStartupOverlay;
+
 function onServerUnreachable() {
   window.__localmLocked = true;
   const app = $("app");
@@ -4714,16 +5064,19 @@ async function bootAuthProbe() {
 window.bootAuthProbe = bootAuthProbe;
 
 (async () => {
+  showStartupOverlay();   // R25: immediate first-load feedback (cold start is slow)
   // Probe auth before loading any app data or revealing the shell.
   const authed = await bootAuthProbe();
-  if (!authed) return;   // gate / reconnect overlay shown; nothing loads behind it
+  if (!authed) { hideStartupOverlay(); return; }   // gate / reconnect overlay takes over
   // On a phone not yet installed, show the one-time install landing first; the
   // app still loads behind it and is revealed by "Continue". Desktop / installed
   // / returning visits fall straight through.
   if (shouldShowInstallGate()) showInstallGate();
   // Authenticated (or open/loopback mode): load the app.
   syncLogoStyleFromConfig();   // reconcile the wordmark with the shared config
-  refreshModels().then(() => populateSetupModels());
+  // R25: hide the startup overlay once the model list resolves (the app is usable)
+  // or fails - never leave it stuck over the shell.
+  refreshModels().then(() => populateSetupModels()).finally(hideStartupOverlay);
   // Server persistence depends on knowing the privacy state first.
   refreshCtxLimit().then(initServerConversations);
 })();
@@ -4745,6 +5098,18 @@ refreshPluginCommands();
 // toggled in another terminal/tab while sitting on the chat view is reflected
 // without a reload (the view-switch path in pages.js covers navigation).
 window.addEventListener("focus", refreshPluginCommands);
+// R50: when a plugin is enabled/disabled in ANOTHER tab, that tab bumps a shared
+// localStorage rev; the storage event fires in every OTHER same-origin tab, so we
+// re-sync the nav/commands promptly. A tab parked on the now-disabled plugin's
+// (static) page is then redirected to chat by reconcileActiveView instead of
+// erroring on the plugin's unmounted routes. visibilitychange covers the case
+// where the tab becomes visible without a focus event firing.
+window.addEventListener("storage", (e) => {
+  if (e.key === "localm.pluginsRev") refreshPluginCommands();
+});
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) refreshPluginCommands();
+});
 setInterval(refreshModels, 30000);
 startHwStats();   // live CPU/RAM/VRAM/GPU readout in the status bar
 setupPerfCard();  // Settings: GPU-layers/context sliders + live VRAM estimate
