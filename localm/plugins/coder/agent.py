@@ -457,6 +457,17 @@ class Agent:
         except Exception:
             self._untrusted_provenance = True
 
+        # Pre-done self-review: an optional reviewer model reads the diff before the
+        # agent declares done and feeds blocking issues back. Off by default; a
+        # network reviewer is gated off privacy/restricted (see reviewer_for_agent).
+        self._review_task: str = ""
+        try:
+            from .reviewer import reviewer_for_agent
+            self._reviewer = reviewer_for_agent(
+                self.backend, self.mode, self.restricted)
+        except Exception:
+            self._reviewer = None
+
         # MCP: start configured servers and register their tools BEFORE the
         # system prompt is built so the model learns about them. Failures
         # warn and continue - external servers must never break the agent.
@@ -772,6 +783,7 @@ class Agent:
         self._abort_no_progress = False
         self._last_run_ok = True
         self._unverified_writes.clear()
+        self._review_task = ""
 
     def _rebuild_system_prompt(self) -> None:
         """Single source of truth for (re)building the system prompt.
@@ -835,6 +847,8 @@ class Agent:
         """
         if self._episodic and not self._episode_task:
             self._episode_task = task
+        if not self._review_task:
+            self._review_task = task   # remembered for the pre-done diff review
         self._add_user(self._with_episodes(task))
         return self._loop(interactive=False)
 
@@ -862,6 +876,8 @@ class Agent:
         if self._episodic and not self._episode_task:
             self._episode_task = user_input
             user_input = self._with_episodes(user_input)
+        if not self._review_task:
+            self._review_task = user_input
         self._add_user(user_input)
         return self._loop(interactive=True)
 
@@ -892,6 +908,7 @@ class Agent:
         self._stop_requested = False       # a stale stop must not kill a new task
         start_turns = self._turns          # turns used by *this* task only
         verify_nudged = False              # self-verification fires at most once per task
+        review_done = False                # pre-done diff review fires at most once per loop
         budget_escalated = False           # uncertainty escalation fires at most once per task
         repair_count = 0                   # tool-call reformat re-prompts (capped)
 
@@ -1063,6 +1080,33 @@ class Agent:
                         final_response = notice
                         self._add_assistant(response)
                         break
+
+                    # Pre-done review: before accepting the final answer, let a
+                    # reviewer model check the cumulative diff and feed any blocking
+                    # issues back for one more fix pass. Fires at most once per loop,
+                    # only when there is a real diff and turns remain. Fail-open: a
+                    # reviewer error never blocks the answer (review_feedback="").
+                    if (
+                        self._reviewer is not None
+                        and not review_done
+                        and self._turns < self.max_turns
+                    ):
+                        review_done = True
+                        diff = self.session_diff()
+                        if diff.strip():
+                            feedback = self._reviewer.review_feedback(
+                                diff, self._review_task)
+                            if feedback:
+                                self._add_assistant(response)
+                                self._add_user(feedback)
+                                self._emit("info", text=(
+                                    "self-review: the reviewer flagged issues - "
+                                    "asking the agent to address them"))
+                                if interactive:
+                                    print_info(
+                                        "(self-review: reviewer flagged issues - "
+                                        "feeding them back)")
+                                continue
 
                     # No tool calls → this is the final answer
                     if not interactive and self.on_event is None:
