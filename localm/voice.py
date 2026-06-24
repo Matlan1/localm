@@ -80,15 +80,20 @@ def stt_available() -> tuple[bool, str]:
 
 def _hf_hub_cache_dir():
     """The HuggingFace hub cache directory, resolved WITHOUT importing
-    ``huggingface_hub`` (see ``stt_model_cached``). Honours HF_HUB_CACHE, then
-    HF_HOME/hub, then the documented default ~/.cache/huggingface/hub."""
+    ``huggingface_hub`` (see ``stt_model_cached``). Mirrors the library's own
+    precedence so the probe matches on every box, not just the dev machine:
+    HF_HUB_CACHE > HUGGINGFACE_HUB_CACHE (legacy) > HF_HOME/hub >
+    XDG_CACHE_HOME/huggingface/hub (the Linux default) > ~/.cache/huggingface/hub."""
     from pathlib import Path
-    env = os.environ.get("HF_HUB_CACHE")
-    if env:
-        return Path(env)
+    direct = os.environ.get("HF_HUB_CACHE") or os.environ.get("HUGGINGFACE_HUB_CACHE")
+    if direct:
+        return Path(direct)
     home = os.environ.get("HF_HOME")
     if home:
         return Path(home) / "hub"
+    xdg = os.environ.get("XDG_CACHE_HOME")
+    if xdg:
+        return Path(xdg) / "huggingface" / "hub"
     return Path.home() / ".cache" / "huggingface" / "hub"
 
 

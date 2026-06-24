@@ -359,6 +359,7 @@ def attach_gui(
         copied = 0
         try:
             out.mkdir(parents=True, exist_ok=True)
+            used: set = set()
             for src in sources:
                 if not src or not src.is_dir():
                     continue
@@ -366,8 +367,16 @@ def attach_gui(
                     if p.resolve() in seen:
                         continue
                     seen.add(p.resolve())
+                    # Two logs can share a basename across home/ and home/logs/;
+                    # disambiguate so the second does not clobber the first.
+                    target = p.name
+                    n = 1
+                    while target in used:
+                        target = f"{p.stem}-{n}{p.suffix}"
+                        n += 1
+                    used.add(target)
                     try:
-                        shutil.copy2(p, out / p.name)
+                        shutil.copy2(p, out / target)
                         copied += 1
                     except OSError:
                         pass

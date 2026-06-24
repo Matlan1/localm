@@ -110,6 +110,22 @@ def test_stt_model_cached_resolves_hub_path_without_import(monkeypatch, tmp_path
     assert (cached, name) == (True, "base")      # snapshot present -> cached
 
 
+def test_hf_hub_cache_dir_precedence(monkeypatch):
+    # R24: match huggingface_hub's own precedence so the probe is correct on
+    # every box (Linux XDG, legacy env), not just the dev machine.
+    from pathlib import Path
+    for k in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_HOME", "XDG_CACHE_HOME"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("XDG_CACHE_HOME", "/xdg")
+    assert voice._hf_hub_cache_dir() == Path("/xdg") / "huggingface" / "hub"
+    monkeypatch.setenv("HF_HOME", "/hfhome")
+    assert voice._hf_hub_cache_dir() == Path("/hfhome") / "hub"       # HF_HOME > XDG
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", "/legacy")
+    assert voice._hf_hub_cache_dir() == Path("/legacy")              # legacy > HF_HOME
+    monkeypatch.setenv("HF_HUB_CACHE", "/direct")
+    assert voice._hf_hub_cache_dir() == Path("/direct")             # HF_HUB_CACHE wins
+
+
 @pytest.mark.skipif(not _has_faster_whisper(), reason="faster-whisper native lib unavailable")
 def test_garbage_audio_raises_voiceerror_not_crash():
     # Undecodable bytes reach the worker, fail to decode there, and come back as

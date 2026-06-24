@@ -410,6 +410,25 @@ class TestLogExportEndpoint:
         assert {p.name for p in out.glob("*.log")} == \
             {"localm_a.log", "localm_b.log", "comfy-launch.log"}
 
+    def test_export_disambiguates_same_basename_logs(self, gui_app, tmp_path, monkeypatch):
+        # A log in home/ and one in home/logs/ can share a basename; the second
+        # must not clobber the first in the export folder.
+        app, _ = gui_app
+        home = tmp_path / "home"; (home / "logs").mkdir(parents=True)
+        (home / "logs" / "app.log").write_text("from-logs", encoding="utf-8")
+        (home / "app.log").write_text("from-root", encoding="utf-8")
+        monkeypatch.setattr("localm.debuglog.logs_dir", lambda: home / "logs")
+        monkeypatch.setattr("localm.config.home_dir", lambda: home)
+        dest = tmp_path / "dest"; dest.mkdir()
+        with TestClient(app) as client:
+            body = client.post("/api/logs/export", json={"dest": str(dest)}).json()
+        assert body["copied"] == 2
+        out = Path(body["dest"])
+        names = sorted(p.name for p in out.glob("*.log"))
+        assert names == ["app-1.log", "app.log"]          # both kept, disambiguated
+        contents = {(out / n).read_text(encoding="utf-8") for n in names}
+        assert contents == {"from-logs", "from-root"}     # neither clobbered
+
     def test_export_rejects_blank_and_missing_dest(self, gui_app):
         app, _ = gui_app
         with TestClient(app) as client:
