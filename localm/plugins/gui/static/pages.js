@@ -248,6 +248,18 @@ $("disc-query").addEventListener("keydown", (e) => {
   if (e.key === "Enter") discoverSearch();
 });
 
+// add-models-disk: make adding a model already on disk discoverable - pick a
+// folder on this machine and drop its path into the spec field (the /api/models/
+// pull endpoint already accepts a local folder/file path). The user no longer has
+// to guess that pasting a path works.
+if ($("pull-browse")) {
+  $("pull-browse").onclick = async () => {
+    const dir = await pickDirectory("Pick a folder that holds the model(s)",
+                                    $("pull-spec").value.trim());
+    if (dir) $("pull-spec").value = dir;
+  };
+}
+
 $("pull-start").onclick = async () => {
   const spec = $("pull-spec").value.trim();
   if (!spec) { toast("Enter a model spec", true); return; }
