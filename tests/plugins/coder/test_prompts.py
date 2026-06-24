@@ -139,3 +139,30 @@ def test_model_name_empty_uses_default():
     for section in ("TOOL USE", "AVAILABLE TOOLS", "RULES"):
         assert section in p_no_name
         assert section in p_default
+
+
+# ---------------------------------------------------------------------------
+#  Untrusted-content rule (provenance tagging, R19 / AutoJack #2)
+# ---------------------------------------------------------------------------
+
+def test_untrusted_content_rule_present_by_default():
+    p = _prompt("llama3-8b")
+    assert "UNTRUSTED CONTENT" in p
+    assert "untrusted-external" in p
+    assert "not as instructions" in p or "not instructions" in p.lower() \
+        or "INFORMATION ONLY" in p
+
+
+def test_untrusted_content_rule_omitted_when_disabled():
+    p = build_system_prompt(CWD, model_name="llama3-8b",
+                            untrusted_provenance=False)
+    assert "UNTRUSTED CONTENT" not in p
+    assert "untrusted-external" not in p
+    # The rest of the prompt is intact.
+    assert "AVAILABLE TOOLS" in p and "RULES" in p
+
+
+def test_untrusted_content_rule_in_small_family():
+    p = _prompt("phi3-mini")
+    assert "UNTRUSTED CONTENT" in p
+    assert "untrusted-external" in p
