@@ -229,11 +229,13 @@
           <div id="disc-results"></div>
         </div>
         <div class="card">
-          <h3>Pull a model</h3>
+          <h3>Add a model</h3>
+          <div class="sub">From HuggingFace (owner/repo[:file.gguf]) or an https URL, or add one already on disk - paste a folder/file path, or use Browse to pick a folder.</div>
           <div class="row">
-            <input type="text" id="pull-spec" placeholder="owner/repo:file.gguf  ·  owner/repo  ·  https://…" spellcheck="false">
+            <input type="text" id="pull-spec" placeholder="owner/repo:file.gguf  ·  https://…  ·  a local folder or .gguf path" spellcheck="false">
             <input type="text" id="pull-name" placeholder="name (optional)" spellcheck="false" style="max-width:180px">
-            <button class="btn-primary" id="pull-start">Pull</button>
+            <button class="btn-quiet" id="pull-browse" title="Pick a folder on this machine that holds the model(s)">Browse…</button>
+            <button class="btn-primary" id="pull-start">Add</button>
           </div>
           <div id="pull-progress" class="dl-progress" style="display:none">
             <div class="dl-bar"><div class="dl-fill" id="pull-bar"></div></div>
