@@ -1284,6 +1284,24 @@ def _unique_registry_name(reg: dict, base: str) -> str:
     return f"{base}-{i}"
 
 
+def _has_gguf_magic(path: Path) -> bool:
+    """True when *path* begins with the GGUF magic ``b"GGUF"``.
+
+    Auto-registration (sync_models_dir) keys on the ``.gguf`` extension alone, so
+    a foreign file renamed ``.gguf``, a 0-byte placeholder, or a partial copy that
+    never received its header would otherwise be registered and then crash a later
+    load - in the worst case wedging the app if it became the active model (R45,
+    "copying a file into models/ broke the whole app"). A real GGUF always starts
+    with this 4-byte magic; an unreadable file is treated as not-a-GGUF and
+    skipped. (This cannot catch a mid-copy of a *valid* GGUF, whose header is
+    written first - that stays a best-effort gap.)"""
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(4) == b"GGUF"
+    except OSError:
+        return False
+
+
 class ModelSyncResult(NamedTuple):
     """Outcome of :func:`sync_models_dir`."""
 
@@ -1367,6 +1385,14 @@ def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
                     continue
                 resolved = str(child.resolve())
                 if resolved in known:
+                    continue
+                # Skip a file that is not actually a GGUF (foreign file renamed
+                # .gguf, an empty/partial copy): registering it would pollute the
+                # model list and could crash a later load (R45). Note it so a
+                # genuinely-broken file is not silently invisible.
+                if not _has_gguf_magic(child):
+                    logger.debug("skipping %s: not a GGUF (bad/missing magic)",
+                                 child.name)
                     continue
                 _register(_unique_registry_name(reg, child.stem), child)
                 reg = load_registry()

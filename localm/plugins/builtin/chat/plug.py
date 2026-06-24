@@ -441,8 +441,46 @@ async def prompt_delete(name: str):
     return {"status": "deleted", "name": name}
 
 
+# ------------------------------------------------------------------ #
+#  CHAT-2b: thinking-model <think> nudge for regular chat             #
+# ------------------------------------------------------------------ #
+
+_THINK_INSTRUCTION = (
+    "If reasoning helps, think step by step inside <think> and </think> tags "
+    "before your final answer. Everything inside <think>...</think> is your "
+    "private scratchpad and is not shown to the user."
+)
+
+
+def _thinking_inlet(messages, ctx):
+    """Nudge a thinking/reasoning model to emit <think> markers in regular chat.
+
+    Coder sessions already carry this instruction in their system prompt, but
+    plain chat never did (CHAT-2b), so a model that needs the explicit nudge
+    produced no reasoning channel. Inject only for thinking-family models, and
+    never twice: skip when a system message already steers <think> (the coder
+    case, or a persona that already does it). Appends to the first system
+    message - chat templates commonly honour only the first - otherwise inserts
+    one. The kernel pipeline isolates any exception this raises."""
+    from localm.inference.model_family import is_thinking_model
+
+    if not is_thinking_model(getattr(ctx, "model_id", "") or ""):
+        return None
+    for m in messages:
+        if m.get("role") == "system" and isinstance(m.get("content"), str) \
+                and "<think>" in m["content"]:
+            return None                          # already instructed; don't double up
+    for m in messages:
+        if m.get("role") == "system" and isinstance(m.get("content"), str):
+            m["content"] = m["content"].rstrip() + "\n\n" + _THINK_INSTRUCTION
+            return messages
+    messages.insert(0, {"role": "system", "content": _THINK_INSTRUCTION})
+    return messages
+
+
 def register(host) -> None:
     host.mount_router(_router)
+    host.register_chat_hook("inlet", _thinking_inlet)
 
 
 def unregister() -> None:

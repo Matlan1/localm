@@ -58,6 +58,61 @@ def test_priority_then_registration_order():
     assert order == ["a", "b", "c"]
 
 
+# --------------------------------------------------------------------------- #
+#  CHAT-2b: thinking-model <think> nudge in regular chat                       #
+# --------------------------------------------------------------------------- #
+
+def _think_ctx(model_id):
+    return ChatHookContext(model_id=model_id, stream=False, request_id="r")
+
+
+def test_is_thinking_model_detection():
+    from localm.inference.model_family import is_thinking_model
+    for name in ("deepseek-r1-7b", "qwq-32b", "qwen3-8b", "magistral-small",
+                 "Llama-3.3-8B-Instruct-Thinking-High-Reasoning"):
+        assert is_thinking_model(name), name
+    for name in ("llama3.1-8b", "mistral-7b", "gemma3", "phi-4-mini", ""):
+        assert not is_thinking_model(name), name
+
+
+def test_thinking_inlet_inserts_system_when_absent():
+    from localm.plugins.builtin.chat.plug import _thinking_inlet, _THINK_INSTRUCTION
+    msgs = [{"role": "user", "content": "hi"}]
+    out = _thinking_inlet(msgs, _think_ctx("deepseek-r1-7b"))
+    assert out is msgs and msgs[0]["role"] == "system"
+    assert _THINK_INSTRUCTION in msgs[0]["content"]
+    assert msgs[1] == {"role": "user", "content": "hi"}
+
+
+def test_thinking_inlet_appends_to_existing_system():
+    from localm.plugins.builtin.chat.plug import _thinking_inlet, _THINK_INSTRUCTION
+    msgs = [{"role": "system", "content": "You are a poet."},
+            {"role": "user", "content": "hi"}]
+    out = _thinking_inlet(msgs, _think_ctx("qwen3-8b"))
+    assert out is msgs and len(msgs) == 2          # no new message inserted
+    assert msgs[0]["content"].startswith("You are a poet.")
+    assert _THINK_INSTRUCTION in msgs[0]["content"]
+
+
+def test_thinking_inlet_skips_when_already_instructed():
+    # The coder case: a system prompt that already steers <think> must not be
+    # doubled up.
+    from localm.plugins.builtin.chat.plug import _thinking_inlet
+    msgs = [{"role": "system", "content": "Reason inside <think>...</think> first."},
+            {"role": "user", "content": "hi"}]
+    before = [dict(m) for m in msgs]
+    assert _thinking_inlet(msgs, _think_ctx("qwq-32b")) is None
+    assert msgs == before                          # untouched
+
+
+def test_thinking_inlet_noop_for_non_thinking_model():
+    from localm.plugins.builtin.chat.plug import _thinking_inlet
+    msgs = [{"role": "user", "content": "hi"}]
+    before = [dict(m) for m in msgs]
+    assert _thinking_inlet(msgs, _think_ctx("llama3.1-8b")) is None
+    assert msgs == before
+
+
 def test_failure_isolation_keeps_going_and_preserves_value():
     p = ChatPipeline()
     p.add_hook("inlet", lambda m, c: m + ["one"], priority=0, plugin="ok1")

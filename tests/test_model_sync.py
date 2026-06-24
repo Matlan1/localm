@@ -54,10 +54,25 @@ def _managed_entry(models_dir, name, exists=True):
 class TestRegisterLooseFiles:
     def test_loose_gguf_is_registered(self, fake_registry):
         store, models_dir, _ = fake_registry
-        (models_dir / "fresh.gguf").write_bytes(b"weights")
+        (models_dir / "fresh.gguf").write_bytes(b"GGUF\x03\x00\x00\x00weights")
         result = mm.sync_models_dir(prune=False)
         assert result.added == 1
         assert any(e["path"].endswith("fresh.gguf") for e in store.values())
+
+    def test_foreign_or_partial_gguf_is_not_registered(self, fake_registry):
+        # R45: a non-GGUF file renamed .gguf (or a 0-byte / partial copy with no
+        # header) must NOT be auto-registered - it would pollute the model list
+        # and could crash a later load. Only real GGUFs (magic b"GGUF") register.
+        store, models_dir, _ = fake_registry
+        (models_dir / "foreign.gguf").write_bytes(b"this is not a model")
+        (models_dir / "empty.gguf").write_bytes(b"")
+        (models_dir / "real.gguf").write_bytes(b"GGUF\x03\x00\x00\x00data")
+        result = mm.sync_models_dir(prune=False)
+        assert result.added == 1                              # only real.gguf
+        names = [e["path"] for e in store.values()]
+        assert any(p.endswith("real.gguf") for p in names)
+        assert not any(p.endswith("foreign.gguf") or p.endswith("empty.gguf")
+                       for p in names)
 
 
 class TestMissingFlagging:

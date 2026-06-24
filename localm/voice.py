@@ -78,14 +78,37 @@ def stt_available() -> tuple[bool, str]:
         "with: pip install \"localm[voice]\"  (then restart the server)")
 
 
+def _hf_hub_cache_dir():
+    """The HuggingFace hub cache directory, resolved WITHOUT importing
+    ``huggingface_hub`` (see ``stt_model_cached``). Mirrors the library's own
+    precedence so the probe matches on every box, not just the dev machine:
+    HF_HUB_CACHE > HUGGINGFACE_HUB_CACHE (legacy) > HF_HOME/hub >
+    XDG_CACHE_HOME/huggingface/hub (the Linux default) > ~/.cache/huggingface/hub."""
+    from pathlib import Path
+    direct = os.environ.get("HF_HUB_CACHE") or os.environ.get("HUGGINGFACE_HUB_CACHE")
+    if direct:
+        return Path(direct)
+    home = os.environ.get("HF_HOME")
+    if home:
+        return Path(home) / "hub"
+    xdg = os.environ.get("XDG_CACHE_HOME")
+    if xdg:
+        return Path(xdg) / "huggingface" / "hub"
+    return Path.home() / ".cache" / "huggingface" / "hub"
+
+
 def stt_model_cached() -> tuple[bool, str]:
     """(cached, model_name) - is the configured Whisper model already in the
     local HuggingFace cache? First use otherwise downloads it; the GUI asks
     for consent before triggering that one network access.
 
-    Resolved WITHOUT importing faster-whisper (only ``huggingface_hub``, which
-    is pure Python), so the server process never loads the native STT stack on a
-    status check - see ``stt_available``."""
+    Resolved WITHOUT importing huggingface_hub (or faster-whisper): we read the
+    documented hub-cache layout directly. The earlier version imported
+    ``huggingface_hub`` here, whose heavy transitive import chain (requests,
+    fsspec, filelock, tqdm, ...) could take tens of seconds on a cold start and,
+    because this runs inside the ``async def`` /api/voice/status handler, froze
+    the event loop and stalled the whole first /api/* batch (R24). A direct path
+    probe keeps it genuinely instant, matching ``stt_available``."""
     from pathlib import Path
 
     from localm.config import load_config
@@ -98,10 +121,15 @@ def stt_model_cached() -> tuple[bool, str]:
     # harmless extra consent prompt, never a crash. The worker is the source of
     # truth for whether the model actually loads.
     repo = name if "/" in name else f"Systran/faster-whisper-{name}"
+    # Hub cache layout: <cache>/models--<org>--<repo>/snapshots/<rev>/model.bin
+    # (the snapshot entry is a symlink or, in no-symlink mode, a real file -
+    # glob matches both). A false negative only costs one harmless consent
+    # prompt; the worker downloads on demand regardless.
     try:
-        from huggingface_hub import try_to_load_from_cache
-        hit = try_to_load_from_cache(repo, "model.bin")
-        return isinstance(hit, str), name
+        repo_dir = _hf_hub_cache_dir() / ("models--" + repo.replace("/", "--"))
+        snaps = repo_dir / "snapshots"
+        cached = snaps.is_dir() and any(snaps.glob("*/model.bin"))
+        return bool(cached), name
     except Exception:
         return False, name
 

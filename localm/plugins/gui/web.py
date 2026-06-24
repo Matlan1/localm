@@ -119,6 +119,10 @@ class ShareClearRequest(BaseModel):
     ids: list[str] = []
 
 
+class LogExportRequest(BaseModel):
+    dest: str = ""
+
+
 # Image types accepted from a phone share-sheet into the chat composer.
 _SHARE_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".heic", ".heif"}
 
@@ -303,6 +307,68 @@ def attach_gui(
             "lan": addrs.get("lan") or "",
             "tailscale": addrs.get("tailscale") or "",
         }
+
+    # R47: the "/api/bug-report" POST lives on the core server (http_server.py) so
+    # it works in headless `localm serve` too; the GUI button targets that single
+    # canonical route. Duplicating it here would shadow it (first route registered
+    # wins) and silently drop the user's description + include_log flag.
+
+    @app.post("/api/logs/export", dependencies=[Depends(_require_auth)])
+    async def export_logs(req: LogExportRequest):
+        """R30: copy every log of this running instance into a user-chosen folder
+        (picked via the GUI's /api/fs/dirs browser). Writes a timestamped
+        subfolder so repeated exports never clobber each other. Logs live under
+        <home>/logs; a few (e.g. comfy-launch.log) sit in the home root, so we
+        sweep both. Returns the counts and the destination path."""
+        import shutil
+        import time as _time
+        from localm.config import home_dir
+        from localm.debuglog import logs_dir
+        dest = (req.dest or "").strip()
+        if not dest:
+            raise HTTPException(400, "Choose a destination folder first.")
+        dest_dir = Path(dest).expanduser()
+        if not dest_dir.is_dir():
+            raise HTTPException(400, "That folder does not exist.")
+        sources = []
+        try:
+            sources.append(logs_dir())
+            sources.append(home_dir())               # home root for stray *.log
+        except Exception:
+            pass
+        out = dest_dir / f"localm-logs-{_time.strftime('%Y%m%d-%H%M%S')}"
+        seen: set = set()
+        copied = 0
+        try:
+            out.mkdir(parents=True, exist_ok=True)
+            used: set = set()
+            for src in sources:
+                if not src or not src.is_dir():
+                    continue
+                for p in src.glob("*.log"):
+                    if p.resolve() in seen:
+                        continue
+                    seen.add(p.resolve())
+                    # Two logs can share a basename across home/ and home/logs/;
+                    # disambiguate so the second does not clobber the first.
+                    target = p.name
+                    n = 1
+                    while target in used:
+                        target = f"{p.stem}-{n}{p.suffix}"
+                        n += 1
+                    used.add(target)
+                    try:
+                        shutil.copy2(p, out / target)
+                        copied += 1
+                    except OSError:
+                        pass
+        except OSError as e:
+            raise HTTPException(500, f"Could not write to that folder: {e}")
+        if copied == 0:
+            # Be honest: nothing was exported (no logs, or all copies failed).
+            return {"copied": 0, "dest": str(out),
+                    "message": "No log files were found to export."}
+        return {"copied": copied, "dest": str(out)}
 
     def _pairing_qr_svg(key: str) -> str:
         """DOMPurify-safe SVG QR encoding ``localm-key:<key>`` for device pairing.

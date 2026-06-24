@@ -364,6 +364,61 @@ _FAKE_REGISTRY = {
 }
 
 
+# R47 (the GUI "Report a bug" control) posts to the single canonical
+# /api/bug-report route on the core server (create_app); its tests live in
+# tests/test_bug_report_endpoint.py. The GUI router (attach_gui) deliberately does
+# not register a second one - a duplicate would shadow the canonical route.
+
+
+class TestLogExportEndpoint:
+    """R30: copy every instance log into a user-chosen folder."""
+
+    def test_export_copies_logs_into_timestamped_subfolder(self, gui_app, tmp_path, monkeypatch):
+        app, _ = gui_app
+        home = tmp_path / "home"; (home / "logs").mkdir(parents=True)
+        (home / "logs" / "localm_a.log").write_text("a", encoding="utf-8")
+        (home / "logs" / "localm_b.log").write_text("b", encoding="utf-8")
+        (home / "comfy-launch.log").write_text("c", encoding="utf-8")   # stray in home root
+        monkeypatch.setattr("localm.debuglog.logs_dir", lambda: home / "logs")
+        monkeypatch.setattr("localm.config.home_dir", lambda: home)
+        dest = tmp_path / "dest"; dest.mkdir()
+        with TestClient(app) as client:
+            r = client.post("/api/logs/export", json={"dest": str(dest)})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["copied"] == 3                       # 2 in logs/ + 1 stray
+        out = Path(body["dest"])
+        assert out.parent == dest and out.name.startswith("localm-logs-")
+        assert {p.name for p in out.glob("*.log")} == \
+            {"localm_a.log", "localm_b.log", "comfy-launch.log"}
+
+    def test_export_disambiguates_same_basename_logs(self, gui_app, tmp_path, monkeypatch):
+        # A log in home/ and one in home/logs/ can share a basename; the second
+        # must not clobber the first in the export folder.
+        app, _ = gui_app
+        home = tmp_path / "home"; (home / "logs").mkdir(parents=True)
+        (home / "logs" / "app.log").write_text("from-logs", encoding="utf-8")
+        (home / "app.log").write_text("from-root", encoding="utf-8")
+        monkeypatch.setattr("localm.debuglog.logs_dir", lambda: home / "logs")
+        monkeypatch.setattr("localm.config.home_dir", lambda: home)
+        dest = tmp_path / "dest"; dest.mkdir()
+        with TestClient(app) as client:
+            body = client.post("/api/logs/export", json={"dest": str(dest)}).json()
+        assert body["copied"] == 2
+        out = Path(body["dest"])
+        names = sorted(p.name for p in out.glob("*.log"))
+        assert names == ["app-1.log", "app.log"]          # both kept, disambiguated
+        contents = {(out / n).read_text(encoding="utf-8") for n in names}
+        assert contents == {"from-logs", "from-root"}     # neither clobbered
+
+    def test_export_rejects_blank_and_missing_dest(self, gui_app):
+        app, _ = gui_app
+        with TestClient(app) as client:
+            assert client.post("/api/logs/export", json={"dest": ""}).status_code == 400
+            assert client.post("/api/logs/export",
+                               json={"dest": "C:/nonexistent-xyz-123"}).status_code == 400
+
+
 class TestStatsEndpoint:
     """The hardware-monitor stats feed."""
 
@@ -1690,7 +1745,10 @@ class TestRagEndpoints:
 
 class TestCoderHistory:
     @staticmethod
-    def _fake_log(sessions_dir, name="2026-01-01_000000_1_coder.jsonl"):
+    def _fake_log(sessions_dir, name="2026-01-01_000000_1_localcoder.jsonl"):
+        # The coder agent always labels its audit log "localcoder" (Agent
+        # name default); chat logs ("_server"/"_chat") share the dir but are
+        # filtered out of coder history (coder-history-chat).
         sessions_dir.mkdir(parents=True, exist_ok=True)
         log = sessions_dir / name
         entry = {"t": 1, "turn": 0, "type": "user", "data": {"content": "hi"}}

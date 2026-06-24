@@ -44,6 +44,7 @@ localm-home.cfg
 
 # Throwaway LOCALM_HOME used for hermetic test runs from a worktree
 .localm-test-home/
+.test-home*/
 
 # Install provenance ledger (what setup placed on disk; used by uninstall)
 .localm-install.json
