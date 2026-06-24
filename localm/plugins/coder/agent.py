@@ -521,18 +521,11 @@ class Agent:
             self.disabled_tools = self.disabled_tools | (
                 frozenset(TOOL_REGISTRY) - SAFE_RESTRICTED_TOOLS)
 
-        self._system_prompt: str = build_system_prompt(
-            cwd,
-            agent_name=name,
-            project_map=self._project_map,
-            memory=self._memory,
-            model_name=self._model_name,
-            extra_tool_docs="\n\n".join(
-                d for d in (self._mcp_docs, self._plugin_docs, self._skill_docs) if d
-            ),
-            disabled_tools=self.disabled_tools,
-            untrusted_provenance=self._untrusted_provenance,
-        )
+        # Single source of truth for the system prompt (see _rebuild_system_prompt);
+        # every later rebuild goes through the same helper so the kwargs - notably
+        # the COMBINED mcp+plugin+skill tool docs - cannot drift.
+        self._system_prompt: str = ""
+        self._rebuild_system_prompt()
 
         # Register OpenAI-format tool definitions when the backend supports it
         # (excluding any tool disabled for this session).
@@ -774,49 +767,44 @@ class Agent:
         self._last_run_ok = True
         self._unverified_writes.clear()
 
-    def set_cwd(self, cwd: Path) -> None:
-        self.cwd = cwd
-        self._project_map = self._build_project_map(cwd)
-        self._memory = load_memory(cwd)
-        self._system_prompt = build_system_prompt(
-            cwd,
-            agent_name=self.name,
-            project_map=self._project_map,
-            memory=self._memory,
-            model_name=self._model_name,
-            extra_tool_docs=self._mcp_docs,
-            disabled_tools=self.disabled_tools,
-            untrusted_provenance=self._untrusted_provenance,
-        )
+    def _rebuild_system_prompt(self) -> None:
+        """Single source of truth for (re)building the system prompt.
 
-    def reindex(self) -> int:
-        """Rebuild the full project map and regenerate the system prompt."""
-        self._project_map = self._build_project_map(self.cwd)
+        Every build and rebuild site goes through here so the kwargs cannot drift -
+        notably the COMBINED external tool docs (mcp + plugin + skill) and the
+        provenance flag. A prior bug rebuilt with only ``_mcp_docs``, so plugin
+        tools and agent skills silently vanished from the prompt after a reindex /
+        memory reload / per-write map refresh, and the model "forgot" they existed.
+        """
         self._system_prompt = build_system_prompt(
             self.cwd,
             agent_name=self.name,
             project_map=self._project_map,
             memory=self._memory,
             model_name=self._model_name,
-            extra_tool_docs=self._mcp_docs,
+            extra_tool_docs="\n\n".join(
+                d for d in (self._mcp_docs, self._plugin_docs, self._skill_docs) if d
+            ),
             disabled_tools=self.disabled_tools,
             untrusted_provenance=self._untrusted_provenance,
         )
+
+    def set_cwd(self, cwd: Path) -> None:
+        self.cwd = cwd
+        self._project_map = self._build_project_map(cwd)
+        self._memory = load_memory(cwd)
+        self._rebuild_system_prompt()
+
+    def reindex(self) -> int:
+        """Rebuild the full project map and regenerate the system prompt."""
+        self._project_map = self._build_project_map(self.cwd)
+        self._rebuild_system_prompt()
         return self._project_map.file_count()
 
     def reload_memory(self) -> str:
         """Re-read the memory file from disk and rebuild the system prompt."""
         self._memory = load_memory(self.cwd)
-        self._system_prompt = build_system_prompt(
-            self.cwd,
-            agent_name=self.name,
-            project_map=self._project_map,
-            memory=self._memory,
-            model_name=self._model_name,
-            extra_tool_docs=self._mcp_docs,
-            disabled_tools=self.disabled_tools,
-            untrusted_provenance=self._untrusted_provenance,
-        )
+        self._rebuild_system_prompt()
         return self._memory
 
     def remember(self, text: str) -> Path:
@@ -1989,16 +1977,9 @@ ws     ::= [ \t\n\r]*
         if path_arg:
             abs_path = (self.cwd / path_arg).resolve()
             self._project_map.refresh_file(abs_path)
-            # Regenerate system prompt with updated map
-            self._system_prompt = build_system_prompt(
-                self.cwd,
-                agent_name=self.name,
-                project_map=self._project_map,
-                memory=self._memory,
-                model_name=self._model_name,
-                disabled_tools=self.disabled_tools,
-                untrusted_provenance=self._untrusted_provenance,
-            )
+            # Regenerate the system prompt with the updated map (combined mcp+
+            # plugin+skill tool docs preserved - see _rebuild_system_prompt).
+            self._rebuild_system_prompt()
 
     # ------------------------------------------------------------------ #
     #  Message management
