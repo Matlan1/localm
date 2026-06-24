@@ -241,7 +241,14 @@ def main(
     if max_turns is None:
         max_turns = int(proj_cfg.get("max_turns", 40))
     if max_tokens is None:
-        max_tokens = int(proj_cfg.get("max_tokens", 2048))
+        _cfg_max_tokens = proj_cfg.get("max_tokens")
+        if _cfg_max_tokens is not None:
+            max_tokens = int(_cfg_max_tokens)
+        else:
+            # No explicit value: a per-model default (e.g. more room for a
+            # thinking model's <think> + answer), else the baseline cap.
+            from localm.plugins.coder.harness_profiles import cli_max_tokens
+            max_tokens = cli_max_tokens(model)
     if temperature is None and "temperature" in proj_cfg:
         temperature = float(proj_cfg["temperature"])
     # auto_approve: config applies only when --yes flag was NOT passed
