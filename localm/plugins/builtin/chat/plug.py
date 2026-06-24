@@ -91,22 +91,84 @@ def _conv_path(conv_id: str) -> Path:
     return _home() / "chats" / f"{conv_id}.json"
 
 
+# R40: cache the projected index row per file keyed by (mtime, size), so the
+# sidebar listing does not re-parse every chat JSON (with its embedded data-URI
+# images) on every request. A changed file re-parses; the cache is bounded by the
+# number of chat files. It only ever holds the lightweight meta row, never bodies.
+_META_CACHE: dict = {}
+
+
+def _conv_meta(p: Path) -> dict:
+    """Lightweight index row for one chat file (no message bodies / images)."""
+    st = p.stat()
+    key = (st.st_mtime, st.st_size)
+    cached = _META_CACHE.get(str(p))
+    if cached and cached[0] == key:
+        return dict(cached[1])
+    data = json.loads(p.read_text(encoding="utf-8"))
+    meta = {
+        "id": p.stem,
+        "title": data.get("title", "Untitled"),
+        "updated_at": data.get("updated_at", 0),
+        "pinned": bool(data.get("pinned", False)),
+        "folder": data.get("folder"),
+        "n_messages": len(data.get("messages") or []),
+    }
+    _META_CACHE[str(p)] = (key, meta)
+    return dict(meta)
+
+
 @_router.get("/api/conversations")
-async def conversations_list():
+async def conversations_list(meta: bool = False, limit: int = 0, offset: int = 0):
+    """List conversations newest-first.
+
+    R40: pass ``meta=true`` for a lightweight index (id/title/updated_at/pinned/
+    folder/n_messages) without the heavy message bodies and data-URI images - the
+    GUI sidebar uses this and lazy-loads each conversation's messages on open via
+    ``GET /api/conversations/{id}``. ``limit``/``offset`` paginate. Default (no
+    params) keeps the historical full-payload, 200-item behaviour for back-compat.
+    """
     if not _persist_enabled():
         return {"enabled": False, "conversations": []}
     chats_dir = _home() / "chats"
-    items = []
+    rows = []
     if chats_dir.is_dir():
         for p in chats_dir.glob("*.json"):
             try:
-                data = json.loads(p.read_text(encoding="utf-8"))
-                data["id"] = p.stem
-                items.append(data)
+                if meta:
+                    rows.append(_conv_meta(p))
+                else:
+                    data = json.loads(p.read_text(encoding="utf-8"))
+                    data["id"] = p.stem
+                    rows.append(data)
             except Exception:
                 continue   # corrupt file - skip, never block the list
-    items.sort(key=lambda c: c.get("updated_at", 0), reverse=True)
-    return {"enabled": True, "conversations": items[:200]}
+    rows.sort(key=lambda c: c.get("updated_at", 0), reverse=True)
+    total = len(rows)
+    if limit and limit > 0:
+        rows = rows[offset:offset + limit]
+    elif offset:
+        rows = rows[offset:]
+    else:
+        rows = rows[:200]   # historical default cap when unpaginated
+    return {"enabled": True, "conversations": rows, "total": total}
+
+
+@_router.get("/api/conversations/{conv_id}")
+async def conversation_get(conv_id: str):
+    """The full body of one conversation (R40 lazy load). Path validated by
+    _conv_path; 404 when absent so the client can fall back to its local copy."""
+    if not _persist_enabled():
+        raise HTTPException(403, "Chat persistence is off (privacy mode)")
+    path = _conv_path(conv_id)
+    if not path.is_file():
+        raise HTTPException(404, "No such conversation")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise HTTPException(500, "Conversation file is unreadable")
+    data["id"] = conv_id
+    return data
 
 
 @_router.put("/api/conversations/{conv_id}")

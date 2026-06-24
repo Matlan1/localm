@@ -544,6 +544,12 @@ MEDIA_PLUGIN_FIELDS: list = [
     MediaField("output_dir", ("comfy", "output_dir"), "comfy_output_dir", Widget.FOLDER,
                "ComfyUI output folder",
                "Only needed if 'Remove ComfyUI's copy' is on; blank derives it."),
+    # R14: dropdowns before checkboxes - the swap_policy SELECT sits ahead of the
+    # toggle fields so all dropdowns render before all checkboxes in each subsection.
+    MediaField("swap_policy", ("model_swap_policy",), "model_swap_policy",
+               Widget.SELECT, "Media VRAM swap",
+               "auto = keep chat if it fits; always = unload chat; never = keep chat hot.",
+               options=["auto", "always", "never"]),
     MediaField("delete_outputs", ("comfy", "delete_outputs"), "comfy_delete_outputs",
                Widget.TOGGLE, "Remove ComfyUI's copy after generating",
                "Delete ComfyUI's own copy once localm saved its own. Off = keep; "
@@ -555,10 +561,6 @@ MEDIA_PLUGIN_FIELDS: list = [
     MediaField("reload_after", ("reload_llm_after_generate",), "reload_llm_after_imagine",
                Widget.TOGGLE, "Reload chat model after generating",
                "Free this backend's VRAM and reload the chat model after a gen."),
-    MediaField("swap_policy", ("model_swap_policy",), "model_swap_policy",
-               Widget.SELECT, "Media VRAM swap",
-               "auto = keep chat if it fits; always = unload chat; never = keep chat hot.",
-               options=["auto", "always", "never"]),
 ]
 
 
