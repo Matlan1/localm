@@ -108,6 +108,27 @@ def test_save_report_writes_editable_file(tmp_path, monkeypatch):
     assert path.parent.name == "bug-reports"
 
 
+def test_save_user_report_puts_description_in_body(tmp_path, monkeypatch):
+    # R47: the GUI "Report a bug" backend - the user's words land in the report,
+    # the summary is derived from the first line, and the env snapshot is present.
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
+    path = bugreport.save_user_report(
+        "Mic button does nothing.\nClicked it five times, no recording.")
+    assert path is not None and path.exists()
+    text = path.read_text(encoding="utf-8")
+    assert "Mic button does nothing." in text                  # first line = summary
+    assert "Clicked it five times" in text                     # full description in body
+    assert "## Environment" in text
+    assert "<!-- Please describe" not in text                   # placeholder replaced
+
+
+def test_save_user_report_blank_description_still_saves(tmp_path, monkeypatch):
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
+    path = bugreport.save_user_report("")
+    assert path is not None and path.exists()
+    assert "user-reported issue" in path.read_text(encoding="utf-8")
+
+
 # --------------------------- the interactive offer ------------------------ #
 
 def test_report_failure_noninteractive_saves_without_prompt(tmp_path, monkeypatch, capsys):

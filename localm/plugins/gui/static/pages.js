@@ -281,6 +281,40 @@ if ($("server-shutdown")) {
   };
 }
 
+// R47: file a bug report from Settings. Saves an editable markdown report to the
+// data folder (safe env snapshot, optional log tail - never secrets/chat) that
+// the user can then send to the maintainer.
+if ($("bug-send")) {
+  $("bug-send").onclick = async () => {
+    const desc = ($("bug-desc").value || "").trim();
+    if (!desc) { toast("Describe the problem first", true); return; }
+    const includeLog = !!($("bug-include-log") && $("bug-include-log").checked);
+    const btn = $("bug-send");
+    btn.disabled = true;
+    try {
+      const r = await fetch("/api/bug-report", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ description: desc, include_log: includeLog }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.detail || r.statusText);
+      const out = $("bug-result");
+      if (out) {
+        out.hidden = false;
+        out.textContent = "Saved: " + (data.path || data.filename || "report") +
+          (data.maintainer ? "  -  send it to " + data.maintainer : "");
+      }
+      $("bug-desc").value = "";
+      toast("Bug report saved");
+    } catch (e) {
+      toast("Could not save report: " + e.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  };
+}
+
 $("pull-start").onclick = async () => {
   const spec = $("pull-spec").value.trim();
   if (!spec) { toast("Enter a model spec", true); return; }

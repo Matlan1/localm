@@ -119,6 +119,11 @@ class ShareClearRequest(BaseModel):
     ids: list[str] = []
 
 
+class BugReportRequest(BaseModel):
+    description: str = ""
+    include_log: bool = False
+
+
 # Image types accepted from a phone share-sheet into the chat composer.
 _SHARE_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".heic", ".heif"}
 
@@ -303,6 +308,24 @@ def attach_gui(
             "lan": addrs.get("lan") or "",
             "tailscale": addrs.get("tailscale") or "",
         }
+
+    @app.post("/api/bug-report", dependencies=[Depends(_require_auth)])
+    async def gui_bug_report(req: BugReportRequest):
+        """R47: file a bug report from the GUI. Saves an editable markdown report
+        to ``<home>/bug-reports/bug-*.md`` (the same place the auto-crash reporter
+        and ``localm bug-report`` write) with a safe environment snapshot and,
+        optionally, this run's log tail - never the API key, config, or chat
+        data. The user can then edit and send it to the maintainer."""
+        from localm import bugreport
+        if not (req.description or "").strip():
+            raise HTTPException(400, "Please describe the problem before sending.")
+        path = bugreport.save_user_report(
+            req.description, include_log=req.include_log)
+        if path is None:
+            # A failed save must not report success (we do not hide problems).
+            raise HTTPException(500, "Could not save the bug report to disk.")
+        return {"saved": True, "filename": path.name, "path": str(path),
+                "maintainer": bugreport.MAINTAINER_EMAIL}
 
     def _pairing_qr_svg(key: str) -> str:
         """DOMPurify-safe SVG QR encoding ``localm-key:<key>`` for device pairing.

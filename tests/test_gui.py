@@ -364,6 +364,30 @@ _FAKE_REGISTRY = {
 }
 
 
+class TestBugReportEndpoint:
+    """R47: the GUI 'Report a bug' control writes an editable report file."""
+
+    def test_bug_report_saves_file(self, gui_app, tmp_path, monkeypatch):
+        app, _ = gui_app
+        monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
+        with TestClient(app) as client:
+            r = client.post("/api/bug-report",
+                            json={"description": "The mic does nothing.",
+                                  "include_log": False})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["saved"] is True and body["filename"].startswith("bug-")
+        saved = tmp_path / "bug-reports" / body["filename"]
+        assert saved.exists()
+        assert "The mic does nothing." in saved.read_text(encoding="utf-8")
+
+    def test_bug_report_rejects_blank_description(self, gui_app):
+        app, _ = gui_app
+        with TestClient(app) as client:
+            r = client.post("/api/bug-report", json={"description": "   "})
+        assert r.status_code == 400
+
+
 class TestStatsEndpoint:
     """The hardware-monitor stats feed."""
 
