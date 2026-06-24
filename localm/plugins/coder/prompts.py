@@ -28,6 +28,8 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from localm.inference.model_family import is_thinking_model
+
 if TYPE_CHECKING:
     from .indexer import ProjectMap
 
@@ -47,16 +49,10 @@ def detect_model_family(model_name: str) -> str:
     if n.startswith("gemma"):
         return "gemma"
 
-    # Thinking / reasoning models (chain-of-thought fine-tunes). Match the explicit
-    # reasoning families AND the common naming substrings so a descriptively-named
-    # reasoning fine-tune (e.g. "Llama-3.3-...-Thinking-...-High-Reasoning") also gets
-    # the <think> tuning instead of the default prompt. NOTE: detection keys on the
-    # model NAME we are given; an opaque registry alias ("m8") still resolves to
-    # "default" - threading the model's true id/metadata here is a separate follow-up.
-    if any(p in n for p in (
-        "deepseek-r1", "deepseek_r1", "qwq", "qwen3",
-        "thinking", "reasoning", "-r1", "_r1", "cot", "magistral",
-    )):
+    # Thinking / reasoning models (chain-of-thought fine-tunes). The marker set
+    # lives in localm.inference.model_family so this tuning and regular chat's
+    # <think> instruction (CHAT-2b) share one source of truth and cannot drift.
+    if is_thinking_model(model_name):
         return "thinking"
 
     # Small / resource-constrained models
