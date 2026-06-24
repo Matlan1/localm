@@ -35,7 +35,27 @@ from __future__ import annotations
 
 from typing import List, Tuple
 
+from .provenance import neutralise
 from .tools import TOOL_REGISTRY, ToolDef, ToolResult
+
+
+def _neutralise_params(params: dict) -> dict:
+    """Defang control tokens / frame markers in param names and descriptions, so a
+    plugin's param metadata (which lands in the system prompt and the native tool
+    schema) cannot forge a role boundary. Parity with mcp._schema_to_params; a
+    no-op for ordinary param names. (Plugin code is local/author-controlled, so
+    this is defense-in-depth, not a remote-attacker surface.)"""
+    out: dict = {}
+    for pname, meta in params.items():
+        key = neutralise(str(pname))
+        if isinstance(meta, dict):
+            m = dict(meta)
+            if "description" in m:
+                m["description"] = neutralise(str(m["description"]))
+            out[key] = m
+        else:
+            out[key] = meta
+    return out
 
 
 def _coerce_result(out) -> ToolResult:
@@ -119,12 +139,17 @@ def register_plugin_tools() -> Tuple[List[str], List[str]]:
             params = getattr(fn, "tool_params", {})
             if not isinstance(params, dict):
                 params = {}
+            params = _neutralise_params(params)
             destructive = bool(getattr(fn, "tool_destructive", True))
 
             TOOL_REGISTRY[reg_name] = ToolDef(
                 name=reg_name,
                 fn=_make_plugin_tool_fn(fn, reg_name),
-                description=f"[plugin:{manifest.name}] {description}".strip(),
+                # A plugin tool's description lands in the system prompt; defang
+                # control tokens / frame markers in it so an installed plugin (or
+                # one whose description is sourced non-locally) cannot forge a role
+                # boundary. A no-op for ordinary descriptions.
+                description=neutralise(f"[plugin:{manifest.name}] {description}".strip()),
                 params=params,
                 destructive=destructive,
             )
