@@ -20,7 +20,16 @@ const SHELL_TOKEN = window.__LOCALM_SHELL_TOKEN__ || "";
 
 function readCookie(name) {
   const m = document.cookie.match(new RegExp("(?:^|; )" + name + "=([^;]*)"));
-  return m ? decodeURIComponent(m[1]) : "";
+  if (!m) return "";
+  // A cookie value is untrusted input. decodeURIComponent throws a URIError on a
+  // malformed percent-encoding; letting that propagate makes authHeaders() throw,
+  // so EVERY `fetch(url, {headers: authHeaders()})` rejects before the request is
+  // even sent - and bootAuthProbe then reports a perfectly reachable server as
+  // "unreachable" and shows the reconnect overlay with no way out. A bad cookie
+  // must never brick the client, so decode best-effort and fall back to the raw
+  // value (what the server stored) on failure.
+  try { return decodeURIComponent(m[1]); }
+  catch (e) { return m[1]; }
 }
 
 function authHeaders(extra = {}) {
