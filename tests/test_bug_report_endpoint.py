@@ -92,3 +92,34 @@ def test_blank_description_rejected(monkeypatch):
             headers={"Authorization": f"Bearer {app.state.shell_token}"},
         )
     assert r.status_code == 400
+
+
+def test_browser_client_context_lands_in_report(monkeypatch):
+    """The GUI attaches a ``client`` block (user agent, page, viewport, recent JS
+    console errors). It is rendered into the report; unknown fields are dropped by
+    the server-side sanitizer and never reach the file."""
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    app = create_app(_engine())
+    with TestClient(app) as c:
+        r = c.post(
+            "/api/bug-report",
+            json={
+                "description": "the page went blank after generating an image",
+                "client": {
+                    "userAgent": "Mozilla/5.0 TestBrowser",
+                    "page": "#studio",
+                    "viewport": "1280x720",
+                    "console": ["TypeError: render is not a function",
+                                "x" * 5000],
+                    "evilField": "must be dropped",
+                },
+            },
+            headers={"Authorization": f"Bearer {app.state.shell_token}"},
+        )
+    assert r.status_code == 200
+    body = Path(r.json()["path"]).read_text(encoding="utf-8")
+    assert "## Browser / client" in body
+    assert "TestBrowser" in body and "1280x720" in body
+    assert "TypeError: render is not a function" in body
+    assert "must be dropped" not in body   # sanitizer drops unknown fields

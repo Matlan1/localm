@@ -16,10 +16,24 @@ Channels, in the order that actually works for a tester:
 The maintainer's contact email is intentionally published here for bug reports
 (the maintainer opted in); see scripts/check_hygiene.py.
 
-Diagnostics are deliberately conservative: OS / GPU / driver / backend / the
-error, and the *names* of provisioned libraries - never environment variables
-(which can hold an API key), config contents, or chat data. The user reviews and
-edits the report before sending regardless.
+Diagnostics aim to be *actually useful* - the data a maintainer needs to act on a
+report - while staying safe:
+  * OS / arch / Python, GPU vendor + NVIDIA driver / CUDA capability, the chosen
+    and recommended backend, and the *names* of provisioned native libraries.
+  * App state: the loaded model, effective backend, context ceiling, session
+    (privacy) mode, debug flag, and enabled plugins.
+  * An ALLOWLISTED, scrubbed subset of config (context sizing, ports, media URLs,
+    privacy mode) - never the whole config, so a future secret-bearing key cannot
+    leak; path values are home-scrubbed and URL values credential-scrubbed.
+  * Versions of the dependencies that shape a failure (native runtime, HF + server
+    stacks).
+  * The in-memory recent-activity log (INFO+ breadcrumbs; the raw model output is
+    DEBUG-level, so chat content never enters it) and, for a GUI report, the
+    browser context + recent JS console errors.
+
+What is NEVER collected: the API key, environment variables (which can hold one),
+config secrets, the raw chat/transcript content, or anything written only at DEBUG
+level. The user also reviews and edits the report before sending, regardless.
 """
 
 from __future__ import annotations
@@ -141,6 +155,15 @@ def collect_diagnostics(context: Optional[dict] = None) -> dict:
     for k in ("operation", "backend", "requested_backend", "with_cudart"):
         if k in context:
             diag[k] = context[k]
+
+    # App / runtime state - the "what was the app actually doing" half of a useful
+    # report. Each collector is independently guarded and returns empty on failure,
+    # so a missing piece never costs the rest of the report.
+    diag["loaded_model"] = _loaded_model_info()
+    diag.update(_runtime_state())          # session_mode, debug_mode
+    diag["enabled_plugins"] = _enabled_plugins()
+    diag["config_subset"] = _safe_config_subset()
+    diag["dependencies"] = _dependency_versions()
     return diag
 
 
@@ -162,6 +185,126 @@ def _scrub_home(text: str) -> str:
     # Home lookup failed: redact the username segment in known home roots so the
     # account name still does not leak (e.g. C:\Users\<name>, /home/<name>).
     return re.sub(r"([Cc]:\\Users\\|/home/|/Users/)[^\\/\r\n]+", r"\1<redacted>", text)
+
+
+def _scrub_url_creds(text: str) -> str:
+    """Strip ``user:pass@`` credentials from any URL-ish value before it goes in a
+    report (a SearXNG / ComfyUI / reviewer URL can carry an inline secret)."""
+    if not text:
+        return text
+    return re.sub(r"(://)[^/@\s]+@", r"\1<redacted>@", text)
+
+
+# Config keys SAFE to echo into a report and useful for debugging a setup. An
+# allowlist (never the whole config) so a future secret-bearing key cannot be
+# auto-leaked; path-like values are home-scrubbed and URL-like values
+# credential-scrubbed before they are rendered. The API key lives in auth.key,
+# never config.json - we stay conservative regardless.
+_SAFE_CONFIG_KEYS = (
+    "binary_dir", "n_ctx", "n_ctx_max", "ctx_auto", "n_gpu_layers", "max_tokens",
+    "model_swap_policy", "idle_unload_seconds", "reload_llm_after_imagine",
+    "port", "require_auth", "cors_origins", "mode", "chat_mode", "coder_mode",
+    "net_mode", "comfy_launch_cmd", "comfy_workdir", "comfy_api_url",
+    "net_search_url", "coder_reviewer", "coder_review", "voice_stt_model",
+)
+
+# Distributions whose versions actually shape a localm failure. Optional / absent
+# packages are simply skipped, so this stays correct across install profiles.
+_REPORTED_DISTS = (
+    "localm", "localm-llama-runtime", "llama-cpp-python", "torch", "transformers",
+    "huggingface-hub", "fastapi", "uvicorn", "ctranslate2", "faster-whisper",
+)
+
+
+def _loaded_model_info() -> dict:
+    """Snapshot of the in-process inference engine (model, backend, loaded?, ctx).
+
+    Empty when no server engine is loaded in THIS process (e.g. a CLI
+    ``bug-report``) or it cannot be read. Never raises."""
+    try:
+        from localm.inference import http_server as hs
+        eng = getattr(hs, "_engine", None)
+        if eng is None:
+            return {}
+        info: dict = {
+            "model": getattr(eng, "display_name", "") or "(unnamed)",
+            "loaded": bool(getattr(eng, "loaded", False)),
+        }
+        backend = getattr(eng, "_backend", None)
+        if backend is not None:
+            info["backend"] = type(backend).__name__
+        ctx = getattr(eng, "effective_ctx_max", None)
+        if ctx:
+            info["effective_ctx_max"] = ctx
+        return info
+    except Exception:
+        return {}
+
+
+def _runtime_state() -> dict:
+    """Session mode + debug flag. These explain WHY a report may carry little
+    history (privacy mode writes nothing; a non-debug run keeps no log file), so
+    they are diagnostic in their own right. Never raises."""
+    state: dict = {}
+    try:
+        from localm.audit import effective_mode
+        state["session_mode"] = effective_mode("server").value
+    except Exception:
+        pass
+    try:
+        from localm.debuglog import debug_enabled
+        state["debug_mode"] = bool(debug_enabled())
+    except Exception:
+        pass
+    return state
+
+
+def _enabled_plugins() -> list:
+    """Names of enabled engine plugins, from config. Never raises."""
+    try:
+        from localm.config import load_config
+        pl = load_config().get("plugins_enabled", [])
+        return [str(p) for p in pl] if isinstance(pl, list) else []
+    except Exception:
+        return []
+
+
+def _safe_config_subset() -> dict:
+    """An allowlisted, scrubbed slice of the user config: enough to debug a setup
+    problem (context sizing, ports, media URLs, privacy mode) without any secret.
+    Never raises."""
+    try:
+        from localm.config import load_config
+        cfg = load_config()
+    except Exception:
+        return {}
+    out: dict = {}
+    for key in _SAFE_CONFIG_KEYS:
+        if key not in cfg:
+            continue
+        val = cfg[key]
+        if isinstance(val, str) and val:
+            val = _scrub_url_creds(_scrub_home(val))
+        out[key] = val
+    return out
+
+
+def _dependency_versions() -> dict:
+    """Versions of the packages that shape a localm failure (native runtime, HF
+    stack, server stack). Absent packages are omitted. Never raises."""
+    out: dict = {}
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+    except Exception:
+        return out
+    for dist in _REPORTED_DISTS:
+        try:
+            out[dist] = version(dist)
+        except PackageNotFoundError:
+            continue
+        except Exception:
+            continue
+    return out
 
 
 def _format_error(error: Optional[BaseException]) -> str:
@@ -214,6 +357,43 @@ def _recent_log_tail(home=None, pid=None, max_lines: int = 120,
         return ""
 
 
+def _kv_lines(d: dict) -> list:
+    """Render a flat dict as ``- key: value`` markdown lines (stable order)."""
+    lines = []
+    for k, v in d.items():
+        if isinstance(v, list):
+            v = ", ".join(str(x) for x in v) if v else "(none)"
+        elif isinstance(v, bool):
+            v = "yes" if v else "no"
+        lines.append(f"- {k}: {v}")
+    return lines
+
+
+def _app_state_lines(diag: dict) -> list:
+    """The "what the app was doing" half of the report: loaded model, effective
+    backend, session mode, debug state, and enabled plugins."""
+    lines = []
+    lm = diag.get("loaded_model") or {}
+    if lm:
+        loaded = "loaded" if lm.get("loaded") else "NOT loaded"
+        line = f"- Model: {lm.get('model', '(unnamed)')} ({loaded})"
+        if lm.get("backend"):
+            line += f", backend {lm['backend']}"
+        if lm.get("effective_ctx_max"):
+            line += f", ctx<={lm['effective_ctx_max']}"
+        lines.append(line)
+    else:
+        lines.append("- Model: (no engine loaded in this process)")
+    if "session_mode" in diag:
+        lines.append(f"- Session mode: {diag['session_mode']}")
+    if "debug_mode" in diag:
+        lines.append(f"- Debug logging: {'on' if diag['debug_mode'] else 'off'}")
+    plugins = diag.get("enabled_plugins")
+    if plugins is not None:
+        lines.append(f"- Enabled plugins: {', '.join(plugins) if plugins else '(none)'}")
+    return lines
+
+
 def build_report(summary: str, reason: str = "",
                  error: Optional[BaseException] = None,
                  context: Optional[dict] = None) -> str:
@@ -249,9 +429,20 @@ def build_report(summary: str, reason: str = "",
         "## What happened",
         summary + ((f"\n\nReason: {reason}") if reason else ""),
         "",
+        "## App state",
+        "\n".join(_app_state_lines(diag)),
+        "",
         "## Environment",
         "\n".join(env_lines) if env_lines else "(could not collect environment)",
     ]
+
+    config_subset = diag.get("config_subset") or {}
+    if config_subset:
+        parts += ["", "## Configuration (safe subset)", "\n".join(_kv_lines(config_subset))]
+    deps = diag.get("dependencies") or {}
+    if deps:
+        parts += ["", "## Dependencies", "\n".join(_kv_lines(deps))]
+
     if err:
         parts += ["", "## Error detail", "```", err, "```"]
     # Crash diagnostics passed via context (e.g. recovered-crash reports, which have
@@ -266,6 +457,21 @@ def build_report(summary: str, reason: str = "",
     tail = ctx.get("recent_log_tail")
     if tail:
         parts += ["", "## Recent log (tail)", "```", _scrub_home(str(tail))[:4000], "```"]
+
+    # Always-on in-memory breadcrumbs (INFO+; no chat content) so even a non-debug
+    # report shows what the app was doing right before the problem.
+    ring = _ring_activity()
+    if ring:
+        parts += ["", "## Recent activity (in-memory log)", "```",
+                  _scrub_home("\n".join(ring[-80:]))[-4000:], "```"]
+
+    # Browser/client context for a GUI-filed report (user agent, page, viewport,
+    # and recent JS console errors). Already a plain dict from the GUI; scrubbed
+    # for home paths defensively.
+    client = ctx.get("client")
+    if isinstance(client, dict) and client:
+        parts += ["", "## Browser / client"] + _client_lines(client)
+
     parts += [
         "",
         "---",
@@ -274,6 +480,31 @@ def build_report(summary: str, reason: str = "",
         "",
     ]
     return "\n".join(parts)
+
+
+def _ring_activity() -> list:
+    """The in-memory recent-activity buffer, or [] if unavailable. Never raises."""
+    try:
+        from localm.debuglog import recent_activity
+        return recent_activity()
+    except Exception:
+        return []
+
+
+def _client_lines(client: dict) -> list:
+    """Render the GUI-supplied browser context (user agent, page, viewport, recent
+    console errors) for the report. All values are treated as untrusted text."""
+    lines = []
+    for field, label_ in (("userAgent", "User agent"), ("page", "Page"),
+                          ("viewport", "Viewport"), ("appVersion", "GUI build")):
+        val = client.get(field)
+        if val:
+            lines.append(f"- {label_}: {_scrub_home(str(val))[:300]}")
+    console_errs = client.get("console")
+    if isinstance(console_errs, list) and console_errs:
+        rendered = "\n".join(_scrub_home(str(e)) for e in console_errs[-40:])
+        lines += ["", "Recent browser console errors:", "```", rendered[-3000:], "```"]
+    return lines
 
 
 def save_report(text: str, when: Optional[str] = None) -> Optional[Path]:
@@ -304,15 +535,20 @@ def save_report(text: str, when: Optional[str] = None) -> Optional[Path]:
 
 
 def save_user_report(description: str, *, summary: str = "",
-                     include_log: bool = False) -> Optional[Path]:
+                     include_log: bool = False,
+                     client: Optional[dict] = None) -> Optional[Path]:
     """Build and save a USER-initiated bug report and return its path (R47).
 
     The shared backend for the GUI "Report a bug" control and the
     ``localm bug-report`` CLI: the user's *description* fills the "What I was
-    doing" section, the safe environment snapshot is collected as usual, and with
-    *include_log* the current run's log tail is attached (home-scrubbed at
-    source - never the API key, config, or chat data). Returns None on a write
-    failure (the caller surfaces that rather than reporting a false success)."""
+    doing" section, the safe environment snapshot is collected as usual (now incl.
+    loaded model, effective backend, session mode, a safe config subset, key
+    dependency versions, and the in-memory recent-activity log), and with
+    *include_log* the current run's on-disk debug log tail is attached
+    (home-scrubbed at source - never the API key, config secrets, or chat data).
+    *client* is an optional GUI-supplied browser context (user agent, page,
+    viewport, recent JS console errors). Returns None on a write failure (the
+    caller surfaces that rather than reporting a false success)."""
     description = (description or "").strip()
     if not summary:
         summary = description.splitlines()[0] if description else ""
@@ -323,6 +559,8 @@ def save_user_report(description: str, *, summary: str = "",
         tail = _recent_log_tail(pid=os.getpid())
         if tail:
             context["recent_log_tail"] = tail
+    if isinstance(client, dict) and client:
+        context["client"] = client
     text = build_report(summary, context=context)
     if description:
         # Drop the user's own words into the otherwise-empty "What I was doing".

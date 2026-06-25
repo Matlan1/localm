@@ -538,10 +538,12 @@
             <section class="card settings-section" id="sec-bugreport" data-sec-label="Report a bug">
               <h3>Report a bug</h3>
               <div class="sub">Describe what went wrong. We save an editable report to your
-              data folder with a safe environment snapshot (OS, GPU, backend) - never your
-              API key, config, or chat content. You can review and send it to the maintainer.</div>
+              data folder with a safe diagnostic snapshot (OS, GPU, backend, loaded model,
+              settings subset, dependency versions, recent activity, and any browser console
+              errors) - never your API key, config secrets, or chat content. You can review
+              and send it to the maintainer.</div>
               <textarea id="bug-desc" rows="4" placeholder="What did you do, and what happened?"></textarea>
-              <label class="check"><input type="checkbox" id="bug-include-log"> Attach this session's recent log tail</label>
+              <label class="check"><input type="checkbox" id="bug-include-log"> Also attach this session's full debug log tail (debug mode only)</label>
               <div class="actions">
                 <button class="btn" id="bug-send">Save report</button>
               </div>

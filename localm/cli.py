@@ -143,6 +143,11 @@ def main() -> None:
     # The _GracefulGroup above still handles per-command errors with nicer
     # context; this covers everything the group does not wrap.
     from localm import bugreport
+    from localm.debuglog import install_ring_buffer
+    # Always-on, in-memory recent-activity buffer so a bug report carries what the
+    # app was doing before it broke - even without --debug (a tester has no log
+    # file). INFO+ only, so chat content (logged at DEBUG) never enters it.
+    install_ring_buffer()
     bugreport.install_global_handlers()
 
 
@@ -2231,9 +2236,11 @@ main.add_command(_setup_llama_main, name="setup-llama")
 def bug_report_cmd(message: str) -> None:
     """Generate an editable bug report and offer to send it to the maintainer.
 
-    Collects a safe environment snapshot (OS, GPU, driver, backend - never your
-    API key, config, or chat data), saves an editable markdown file, and offers
-    to email it, open a GitHub issue, or hand it off yourself."""
+    Collects a useful, safe diagnostic snapshot (OS, GPU, driver, backend, the
+    loaded model, an allowlisted config subset, key dependency versions, and the
+    in-memory recent-activity log - never your API key, config secrets, or chat
+    content), saves an editable markdown file, and offers to email it, open a
+    GitHub issue, or hand it off yourself."""
     from localm import bugreport
     bugreport.report_failure(
         summary=message or "user-reported issue",
