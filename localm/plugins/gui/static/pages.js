@@ -1661,6 +1661,16 @@ function showSettingsSection(secId) {
   }
 }
 
+/** Jump to a specific settings section and REMEMBER it, so an async panel rebuild
+ *  (e.g. the owner-only keys card resolving) cannot bounce the selection back to a
+ *  default. Used by the command palette to reach "Keys & devices" directly instead
+ *  of hunting the settings sub-nav. */
+function gotoSettingsSection(secId) {
+  _activeSettingsSection = secId;
+  showSettingsSection(secId);
+}
+window.gotoSettingsSection = gotoSettingsSection;
+
 /** (Re)build the left nav from every section currently in the content area,
  *  skipping any hidden by their own gating (e.g. the owner-only API keys card).
  *  The active tab is the user's explicit choice if still present, else the first
