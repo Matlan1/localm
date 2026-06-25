@@ -2147,6 +2147,16 @@ function cmdkCommands() {
   cmds.push({ label: "New chat", run: () => { newConversation(); showView("chat"); } });
   cmds.push({ label: "Toggle light/dark theme", run: () => $("theme-toggle").click() });
   cmds.push({ label: "Export conversation", run: () => exportConversation() });
+  // Direct jump to the owner-only Keys & devices manager (it lives in a Settings
+  // sub-section that is otherwise easy to miss). Offered only when this key may
+  // actually manage keys - i.e. the panel is not gated-hidden for it.
+  const keysCard = $("keys-card");
+  if (keysCard && !keysCard.classList.contains("sec-hidden")) {
+    cmds.push({ label: "Manage keys & devices", run: () => {
+      showView("settings");
+      if (typeof gotoSettingsSection === "function") gotoSettingsSection("keys-card");
+    } });
+  }
   return cmds;
 }
 
