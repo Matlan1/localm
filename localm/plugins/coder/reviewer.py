@@ -190,14 +190,16 @@ def reviewer_for_agent(agent_backend, mode, restricted: bool):
     Config (global config.py):
       - ``coder_review`` (bool, default False): master switch.
       - ``coder_reviewer`` (str): "" = the agent's own model (local, private);
-        "openai"/"anthropic" = a cloud model; an http(s) URL = a 2nd
-        OpenAI-compatible endpoint (e.g. a second local server).
-      - ``coder_reviewer_model`` (str): model name for a heterogeneous reviewer.
+        "local" = a different small model loaded on CPU in this process
+        (heterogeneous AND private); "openai"/"anthropic" = a cloud model; an
+        http(s) URL = a 2nd OpenAI-compatible endpoint (e.g. a second local server).
+      - ``coder_reviewer_model`` (str): model name/path for a heterogeneous reviewer.
 
     A NETWORK reviewer (cloud, or a non-loopback URL) sends the diff off the
     agent's own model, so it is NOT used in privacy mode or for a restricted
     (shareable, non-owner) session - those fall back to the local same-model
-    reviewer with a warning, never silently leaking the diff.
+    reviewer with a warning, never silently leaking the diff. The "local" CPU
+    reviewer stays on-machine, so it is allowed in privacy mode.
     """
     from .display import print_warning
     try:
@@ -224,6 +226,27 @@ def reviewer_for_agent(agent_backend, mode, restricted: bool):
 
     low = target.lower()
     try:
+        if low == "local":
+            # In-process CPU reviewer: a small local model in the coder's OWN
+            # process (separate from the server's GPU model). Fully local - no
+            # network - so it is allowed even in privacy mode.
+            if not rmodel:
+                print_warning(
+                    "coder_reviewer='local' needs coder_reviewer_model (a model "
+                    "name or path); reviewing with the agent's own model instead.")
+                return _local_same_model()
+            from localm.model_manager import get_model_path
+            mp = get_model_path(rmodel)
+            if mp is None:
+                print_warning(
+                    f"reviewer model '{rmodel}' not found; reviewing with the "
+                    "agent's own model instead.")
+                return _local_same_model()
+            from .backends.local_engine import LocalEngineBackend
+            return Reviewer(
+                LocalEngineBackend(str(mp), device="cpu", n_gpu_layers=0),
+                heterogeneous=True)
+
         if low in ("openai", "anthropic"):
             if privacy:
                 print_warning(

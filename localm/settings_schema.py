@@ -236,7 +236,9 @@ CORE_FIELDS: list = [
     SettingField("coder_reviewer", Widget.TEXT,
                  "Reviewer model target",
                  "Who reviews: blank = the agent's own model (local, private); "
-                 "'openai' or 'anthropic' = a cloud model; an http(s) URL = a second "
+                 "'local' = a different small model on CPU in the coder's own process "
+                 "(heterogeneous + private; set the model below; adds CPU latency); "
+                 "'openai'/'anthropic' = a cloud model; an http(s) URL = a second "
                  "OpenAI-compatible endpoint (e.g. a 2nd local server). A network "
                  "reviewer is skipped in privacy mode and for shared keys (it would "
                  "send the diff off-machine) - those review with the local model.",
