@@ -54,3 +54,23 @@ test("R47: a blank description does not POST", async () => {
   await flush();
   assert.equal(posts.length, 0, "no POST for an empty description");
 });
+
+test("R47: the POST carries a browser client context (UA, page, viewport, console errors)", async () => {
+  const posts = [];
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch(posts) });
+  const doc = window.document;
+  // A JS error captured by app.js's always-on client error ring buffer.
+  window.__localmClientLog.push("12:00:00  TypeError: render is not a function");
+  doc.getElementById("bug-desc").value = "studio page went blank";
+  doc.getElementById("bug-send").click();
+  await flush();
+  assert.equal(posts.length, 1, "one bug-report POST");
+  const client = posts[0].client;
+  assert.ok(client, "a client context block is attached");
+  assert.equal(typeof client.userAgent, "string");
+  assert.ok("page" in client && "viewport" in client, "page + viewport present");
+  assert.ok(Array.isArray(client.console), "console errors sent as a list");
+  assert.ok(
+    client.console.some((l) => /TypeError: render is not a function/.test(l)),
+    "the captured console error is included");
+});

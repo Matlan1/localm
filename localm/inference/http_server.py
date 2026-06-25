@@ -64,6 +64,25 @@ def _touch_activity() -> None:
     _last_activity = time.monotonic()
 
 
+def _sanitize_client_context(raw) -> dict:
+    """Reduce an untrusted GUI ``client`` payload to a safe, bounded dict for a bug
+    report: only known string fields (capped) plus a capped list of console-error
+    strings. Anything else is dropped. Returns {} for non-dict / empty input."""
+    if not isinstance(raw, dict):
+        return {}
+    out: dict = {}
+    for field in ("userAgent", "page", "viewport", "appVersion"):
+        val = raw.get(field)
+        if isinstance(val, (str, int, float)) and str(val).strip():
+            out[field] = str(val)[:500]
+    console = raw.get("console")
+    if isinstance(console, list):
+        errs = [str(e)[:1000] for e in console if isinstance(e, (str, int, float))]
+        if errs:
+            out["console"] = errs[-40:]
+    return out
+
+
 def _idle_unload_ttl() -> int:
     """Configured idle-unload TTL in seconds (0 = disabled), read live so a
     Settings change applies without a restart. A bad value falls back to 0."""
@@ -949,8 +968,14 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
         description = (body.get("description") or body.get("message") or "").strip()
         if not description:
             raise HTTPException(400, "Please describe the problem before sending.")
+        # Optional browser context the GUI attaches (user agent, page, viewport,
+        # recent JS console errors). Untrusted client input: take only known
+        # fields, coerce to strings, and cap sizes so a crafted payload cannot
+        # bloat the report. It is rendered as plain text (markdown code fence),
+        # never executed.
+        client = _sanitize_client_context(body.get("client"))
         path = bugreport.save_user_report(
-            description, include_log=bool(body.get("include_log")))
+            description, include_log=bool(body.get("include_log")), client=client)
         if path is None:
             # A failed save must not report success (we do not hide problems).
             raise HTTPException(500, "Could not save the bug report to disk.")

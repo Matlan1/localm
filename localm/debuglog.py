@@ -22,6 +22,7 @@ log file path so every process in the tree appends to the same file.
 
 from __future__ import annotations
 
+import collections
 import contextlib
 import logging
 import os
@@ -44,6 +45,79 @@ def uvicorn_log_level() -> str:
     so the console window shows requests / connections / errors live (SRV-5),
     otherwise the quiet ``warning`` default."""
     return "info" if debug_enabled() else "warning"
+
+
+# --------------------------------------------------------------------------- #
+#  Always-on in-memory recent-activity buffer                                  #
+#                                                                              #
+#  A bug report is only useful if it carries what the app was DOING before it  #
+#  broke. The on-disk debug log only exists under --debug, which a tester will #
+#  not have enabled, so a normal report had no activity trail at all. This     #
+#  bounded, in-memory ring buffer captures recent INFO+ log records ALWAYS, so #
+#  the bug reporter can show the last breadcrumbs (model loads, backend pick,  #
+#  swaps, warnings, errors) regardless of debug mode.                          #
+#                                                                              #
+#  Privacy: INFO and above ONLY. The raw, pre-scrub model output (chat content)#
+#  is logged at DEBUG (inference/backends/llamacpp/llama.py), so it never lands #
+#  in this buffer even when --debug is on. Nothing here is written to disk on   #
+#  its own; it only leaves the machine if the user files AND sends a report,    #
+#  which they review and edit first.                                           #
+# --------------------------------------------------------------------------- #
+
+_RING_CAPACITY = 400
+
+
+class _RingBufferHandler(logging.Handler):
+    """A logging handler that keeps the last N rendered records in memory."""
+
+    def __init__(self, capacity: int = _RING_CAPACITY) -> None:
+        super().__init__(level=logging.INFO)
+        self._buf: "collections.deque[str]" = collections.deque(maxlen=capacity)
+        self.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)-7s %(name)s: %(message)s"))
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            render = self.format          # bound logging.Handler renderer
+            self._buf.append(render(record))
+        except Exception:
+            # A logging handler must never raise into the code that logged.
+            self.handleError(record)
+
+    def snapshot(self) -> list:
+        return list(self._buf)
+
+
+_ring_handler: Optional[_RingBufferHandler] = None
+
+
+def install_ring_buffer(capacity: int = _RING_CAPACITY) -> bool:
+    """Attach the always-on in-memory recent-activity buffer to the localm logger.
+
+    Idempotent. Captures INFO and above (never DEBUG, so no raw model output /
+    chat content) into a bounded ring the bug reporter can dump. Returns True if
+    it installed on this call.
+    """
+    global _ring_handler
+    if _ring_handler is not None:
+        return False
+    handler = _RingBufferHandler(capacity)
+    logger.addHandler(handler)
+    # The localm logger otherwise inherits the root's WARNING threshold, which
+    # would drop the INFO breadcrumbs we want. Lower it to INFO. This adds NO
+    # console output: a non-debug run has no stream handler on this logger, and
+    # INFO is below the root's WARNING lastResort, so nothing new is printed.
+    # A later enable_debug() drops the level further to DEBUG; the handler's own
+    # INFO level still keeps DEBUG (chat content) out of the buffer.
+    if logger.level == logging.NOTSET or logger.level > logging.INFO:
+        logger.setLevel(logging.INFO)
+    _ring_handler = handler
+    return True
+
+
+def recent_activity() -> list:
+    """The buffered recent log lines (oldest first), or [] when not installed."""
+    return _ring_handler.snapshot() if _ring_handler is not None else []
 
 
 def _stable_console_stream():
@@ -148,6 +222,7 @@ def enable_debug() -> Path:
     logger.addHandler(handler)
     logger.setLevel(logging.DEBUG)
     _add_console_handler()   # SRV-5: also show debug activity in the console
+    install_ring_buffer()    # keep the in-memory breadcrumb buffer for reports
 
     _install_thread_hook()
     logger.debug("debug mode enabled (pid %d)", os.getpid())
@@ -202,6 +277,7 @@ def attach_child_logging() -> None:
     logger.addHandler(handler)
     logger.setLevel(logging.DEBUG)
     _add_console_handler()   # SRV-5: a managed/child server is verbose too
+    install_ring_buffer()    # buffer breadcrumbs for a bug report in this child too
     _install_thread_hook()
 
 
