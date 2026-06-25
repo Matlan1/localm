@@ -22,7 +22,7 @@ window.onViewShown = (name) => {
   if (name === "video") { refreshVideoHistory(); refreshWorkflowPanel("video"); }
   if (name === "knowledge") refreshKnowledgePage();
   if (name === "plugins") { renderCatalogPlugins(); refreshPluginsPage(); }
-  if (name === "settings") refreshSettingsPage();
+  if (name === "settings") { refreshSettingsPage(); refreshUploadsList(); }
 };
 
 /** Pre-select the configured coder session mode in the setup form. */
@@ -362,6 +362,85 @@ if ($("logs-export")) {
       toast(data.copied ? `Exported ${data.copied} log file(s)` : "No logs to export", !data.copied);
     } catch (e) {
       toast("Could not export logs: " + e.message, true);
+    } finally {
+      btn.disabled = false;
+    }
+  };
+}
+
+// R37: upload files from this device or a phone into <home>/uploads/ so models and
+// tools can read them (beyond transient chat attachments). The POST is multipart;
+// we strip the JSON Content-Type so the browser sets multipart/form-data with its
+// own boundary, but keep the auth + CSRF headers. CONFIG_WRITE-gated server-side.
+// The list is built with safe DOM nodes (textContent), never innerHTML, so a
+// crafted file name cannot inject markup.
+async function refreshUploadsList() {
+  const list = $("upload-list");
+  if (!list) return;
+  try {
+    const r = await fetch("/api/uploads", { headers: authHeaders() });
+    if (!r.ok) { list.replaceChildren(); return; }   // e.g. a read-only key: hide
+    const data = await r.json().catch(() => ({ items: [] }));
+    list.replaceChildren();
+    for (const it of (data.items || [])) {
+      const li = document.createElement("li");
+      const span = document.createElement("span");
+      span.className = "upload-name";
+      span.textContent = `${it.name}  ·  ${fmtBytes(it.bytes)}`;
+      const del = document.createElement("button");
+      del.className = "btn-quiet upload-del";
+      del.textContent = "Remove";
+      del.onclick = () => deleteUpload(it.name);
+      li.appendChild(span);
+      li.appendChild(del);
+      list.appendChild(li);
+    }
+  } catch (e) { /* leave the list as-is on a transient error */ }
+}
+window.refreshUploadsList = refreshUploadsList;
+
+async function deleteUpload(name) {
+  try {
+    const r = await fetch("/api/uploads/" + encodeURIComponent(name),
+      { method: "DELETE", headers: authHeaders() });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      throw new Error(d.detail || r.statusText);
+    }
+    toast("Removed " + name);
+    refreshUploadsList();
+  } catch (e) {
+    toast("Could not remove: " + e.message, true);
+  }
+}
+window.deleteUpload = deleteUpload;
+
+if ($("upload-send")) {
+  $("upload-send").onclick = async () => {
+    const input = $("upload-input");
+    const files = input && input.files ? Array.from(input.files) : [];
+    if (!files.length) { toast("Choose a file to upload first", true); return; }
+    const fd = new FormData();
+    for (const f of files) fd.append("file", f, f.name);
+    const headers = authHeaders();
+    delete headers["Content-Type"];   // let the browser set the multipart boundary
+    const btn = $("upload-send");
+    btn.disabled = true;
+    try {
+      const r = await fetch("/api/upload", { method: "POST", headers, body: fd });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.detail || r.statusText);
+      const n = (data.uploaded || []).length;
+      const out = $("upload-result");
+      if (out) {
+        out.hidden = false;
+        out.textContent = `Uploaded ${n} file(s) to: ${data.dir || "uploads"}`;
+      }
+      input.value = "";
+      toast(`Uploaded ${n} file(s)`);
+      refreshUploadsList();
+    } catch (e) {
+      toast("Upload failed: " + e.message, true);
     } finally {
       btn.disabled = false;
     }

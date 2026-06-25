@@ -557,6 +557,20 @@
               </div>
               <div id="logs-result" class="sub" hidden></div>
             </section>
+
+            <section class="card settings-section" id="sec-uploads" data-sec-label="Upload files">
+              <h3>Upload files</h3>
+              <div class="sub">Send files from this device or your phone into localm's
+              <code>uploads</code> folder, so models and tools can read them. They are stored
+              on the host, separate from chat attachments. Large model weights use the model
+              downloader instead.</div>
+              <div class="actions">
+                <input type="file" id="upload-input" multiple>
+                <button class="btn" id="upload-send">Upload</button>
+              </div>
+              <div id="upload-result" class="sub" hidden></div>
+              <ul id="upload-list" class="upload-list"></ul>
+            </section>
           </div>
         </div>
       </div>
