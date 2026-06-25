@@ -11,8 +11,21 @@ from typing import Tuple
 import numpy as np
 
 
+# A vision image can be several MB; cap the network fetch generously but
+# bounded (the previous raw requests.get read the whole body with no limit).
+_IMAGE_MAX_BYTES = 25_000_000
+
+
 def decode_image_url(url: str):
-    """Return a PIL.Image.Image from a data-URI or http(s) URL."""
+    """Return a PIL.Image.Image from a data-URI or http(s) URL.
+
+    A remote (http/https) URL is fetched through localm.netpolicy so a chat
+    'image_url' content part cannot turn the server into an SSRF proxy: the
+    private-address guard, net_mode, and net_allow/net_deny all apply, every
+    redirect hop is re-validated, and the body is size-capped. (Chat is the
+    baseline capability - any key can send an image_url - so this fetch must be
+    policy-checked like every other model-triggered request.)
+    """
     from PIL import Image
 
     if url.startswith("data:"):
@@ -23,10 +36,10 @@ def decode_image_url(url: str):
         raw = base64.b64decode(match.group(1))
         return Image.open(io.BytesIO(raw)).convert("RGB")
 
-    import requests
-    resp = requests.get(url, timeout=30)
-    resp.raise_for_status()
-    return Image.open(io.BytesIO(resp.content)).convert("RGB")
+    from localm.netpolicy import safe_fetch_bytes
+    _final_url, _content_type, raw = safe_fetch_bytes(
+        url, max_bytes=_IMAGE_MAX_BYTES)
+    return Image.open(io.BytesIO(raw)).convert("RGB")
 
 
 def decode_audio(b64: str, fmt: str) -> Tuple[np.ndarray, int]:
