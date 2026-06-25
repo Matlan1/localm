@@ -172,13 +172,17 @@ DEFAULT_CONFIG: dict = {
     # reads the diff and feeds blocking issues back for one more fix pass. Off by
     # default (it adds a model round-trip per task that changed files).
     "coder_review": False,
-    # Reviewer target: "" = the agent's own model (local, private); "openai" /
-    # "anthropic" = a cloud model; an http(s) URL = a 2nd OpenAI-compatible endpoint
-    # (e.g. a second local server). A NETWORK reviewer is skipped in privacy mode and
-    # for shared keys (it would send the diff off-machine) - those use the local model.
+    # Reviewer target: "" = the agent's own model (local, private); "local" = a
+    # different small model loaded ON CPU in the coder's own process (heterogeneous
+    # AND private - set coder_reviewer_model to the model name/path; adds CPU
+    # load+inference latency); "openai"/"anthropic" = a cloud model; an http(s) URL =
+    # a 2nd OpenAI-compatible endpoint (e.g. a second local server). A NETWORK
+    # reviewer (cloud / non-loopback URL) is skipped in privacy mode and for shared
+    # keys (it would send the diff off-machine) - those use the local model. The
+    # "local" CPU reviewer stays on-machine, so it is allowed in privacy mode.
     "coder_reviewer": "",
-    # Model name for a heterogeneous (cloud / URL) reviewer; blank uses a sensible
-    # provider default or the agent's own model name.
+    # Model name (or path) for a heterogeneous reviewer ("local"/cloud/URL); blank
+    # uses a sensible provider default or the agent's own model name.
     "coder_reviewer_model": "",
     # EXPERIMENTAL + dormant: constrain coder tool-call output with a GBNF grammar
     # (localm.inference.gbnf.TOOL_CALLS_ONLY) so the model cannot emit malformed
