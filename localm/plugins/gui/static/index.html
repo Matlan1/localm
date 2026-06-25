@@ -524,10 +524,12 @@
 
             <section class="card settings-section" id="sec-server" data-sec-label="Server">
               <h3>Server</h3>
-              <div class="sub">Stop this LocaLM server cleanly from here instead of
-              force-closing the window (which can crash without a clean unload). The model is
-              unloaded before exit; start it again from your launcher or terminal.</div>
+              <div class="sub">Control this LocaLM server from here instead of force-closing
+              the window (which can crash without a clean unload). The model is unloaded first
+              either way. Restart brings the server back automatically; Shut down stops it (start
+              it again from your launcher or terminal).</div>
               <div class="actions">
+                <button class="btn-quiet" id="server-restart">Restart server</button>
                 <button class="btn-quiet" id="server-shutdown">Shut down server</button>
               </div>
             </section>

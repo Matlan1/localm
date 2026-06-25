@@ -260,9 +260,30 @@ if ($("pull-browse")) {
   };
 }
 
+// R18: restart the server in place from Settings - the backend unloads the model,
+// then re-execs the same process, so it comes back on the same port. The reconnect
+// overlay polls and auto-reconnects once the fresh process is up.
+if ($("server-restart")) {
+  $("server-restart").onclick = () => {
+    confirmDanger("Restart the server?",
+      "This restarts the LocaLM server (the model is unloaded first, then reloaded). " +
+      "It will be briefly unavailable, then reconnect automatically.",
+      "Restart", async () => {
+        try {
+          const r = await fetch("/v1/server/restart",
+                                { method: "POST", headers: authHeaders() });
+          if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+          toast("Server restarting…");
+          // The server briefly goes away and comes back; the reconnect overlay
+          // polls and reconnects automatically once the new process is up.
+          if (window.onServerUnreachable) setTimeout(() => onServerUnreachable(), 800);
+        } catch (e) { toast("Could not restart: " + e.message, true); }
+      });
+  };
+}
+
 // R18: shut the server down cleanly from Settings (the backend unloads the model
-// before exit) instead of force-closing the window. A true in-app RESTART needs a
-// server re-exec endpoint that does not exist yet - restart from the launcher.
+// before exit) instead of force-closing the window. Start it again from the launcher.
 if ($("server-shutdown")) {
   $("server-shutdown").onclick = () => {
     confirmDanger("Shut down the server?",
