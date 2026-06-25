@@ -120,3 +120,42 @@ test("pull progress text includes the smoothed speed and ETA", async () => {
   assert.match(text, /5\.0 MB\/s/, "shows the smoothed speed");
   assert.match(text, /ETA 1m 30s/, "shows the ETA");
 });
+
+// --------------------------------------------------------------------------- //
+//  R06: a multi-file (split GGUF) download shows "file N of M: <name>"          //
+// --------------------------------------------------------------------------- //
+
+test("pull progress shows the current file for a multi-file download", async () => {
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch() });
+  runScript(win, `
+    streamJob = async (jobId, onLine, onProgress) => {
+      onProgress({ pct: 40, total: 1000, downloaded: 400,
+                   name: "model-00002-of-00003.gguf", index: 2, count: 3 });
+      const el = document.getElementById("pull-file");
+      globalThis.__file = { hidden: el.hidden, text: el.textContent };
+      return { status: "done" };
+    };
+  `);
+  win.document.getElementById("pull-spec").value = "owner/repo:m.gguf";
+  win.document.getElementById("pull-start").click();
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(win.__file.hidden, false, "the file line is shown for a multi-file pull");
+  assert.match(win.__file.text, /file 2 of 3: model-00002-of-00003\.gguf/);
+});
+
+test("pull progress hides the file line for a single-file download", async () => {
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch() });
+  runScript(win, `
+    streamJob = async (jobId, onLine, onProgress) => {
+      onProgress({ pct: 70, total: 1000, downloaded: 700 });   // no count/name
+      globalThis.__hidden = document.getElementById("pull-file").hidden;
+      return { status: "done" };
+    };
+  `);
+  win.document.getElementById("pull-spec").value = "owner/repo:m.gguf";
+  win.document.getElementById("pull-start").click();
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(win.__hidden, true, "single-file pull keeps the file line hidden");
+});
