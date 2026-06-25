@@ -111,16 +111,35 @@ def _engine_resolver():
 
 
 def _job_dict(job: Job) -> dict:
-    return job.to_dict()
+    d = job.to_dict()
+    d.pop("owner", None)        # internal principal binding; never sent to the client
+    return d
 
 
 # ------------------------------------------------------------------ #
 #  Routes                                                             #
 # ------------------------------------------------------------------ #
 
+def _owned_job_or_404(store: JobStore, job_id: str, request: Request) -> Job:
+    """Fetch a job and enforce per-principal ownership: only the creating key (or
+    an admin/owner) may touch it. A mismatch returns the SAME 404 as a missing id
+    so a foreign jobs-scoped key cannot even confirm another principal's job
+    exists. owner=None (a tokenless / open-mode creation) stays unrestricted."""
+    from localm.inference.http_server import job_owner_ok
+    job = store.get(job_id)
+    if job is None or not job_owner_ok(request, getattr(job, "owner", None)):
+        raise HTTPException(404, f"No such job: {job_id}")
+    return job
+
+
 @_router.get("/api/jobs")
-async def list_jobs():
-    return {"jobs": [_job_dict(j) for j in _store().list()]}
+async def list_jobs(request: Request):
+    # Only the caller's OWN jobs (an admin/owner sees all; unowned legacy jobs are
+    # visible, matching job_owner_ok), so one jobs key cannot enumerate another
+    # principal's scheduled jobs.
+    from localm.inference.http_server import job_owner_ok
+    return {"jobs": [_job_dict(j) for j in _store().list()
+                     if job_owner_ok(request, getattr(j, "owner", None))]}
 
 
 @_router.post("/api/jobs")
@@ -131,6 +150,7 @@ async def create_job(req: JobCreate, request: Request):
         raise HTTPException(
             403, "allow_shell needs the owner key or a coder:full key; a scheduled "
             "coder job otherwise runs restricted (read + confined edit, no shell).")
+    from localm.inference.http_server import principal_id
     try:
         job = Job(
             name=req.name.strip(),
@@ -143,6 +163,7 @@ async def create_job(req: JobCreate, request: Request):
             scope=req.scope,
             allow_shell=req.allow_shell,
             enabled=req.enabled,
+            owner=principal_id(request),    # bind the job to its creator
         )
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -151,23 +172,31 @@ async def create_job(req: JobCreate, request: Request):
 
 
 @_router.get("/api/jobs/{job_id}")
-async def get_job(job_id: str):
-    job = _store().get(job_id)
-    if job is None:
-        raise HTTPException(404, f"No such job: {job_id}")
-    return _job_dict(job)
+async def get_job(job_id: str, request: Request):
+    return _job_dict(_owned_job_or_404(_store(), job_id, request))
 
 
 @_router.put("/api/jobs/{job_id}")
 async def update_job(job_id: str, req: JobUpdate, request: Request):
+    store = _store()
+    job = _owned_job_or_404(store, job_id, request)   # ownership gate before any change
     changes = {k: v for k, v in req.model_dump().items() if v is not None}
+    can_shell = _caller_can_allow_shell(request)
     # Escalating an existing job to shell execution is privileged (same gate as
     # create); de-escalating (allow_shell -> False) is always allowed.
-    if changes.get("allow_shell") and not _caller_can_allow_shell(request):
+    if changes.get("allow_shell") and not can_shell:
         raise HTTPException(
             403, "allow_shell needs the owner key or a coder:full key.")
+    # EDITING an ALREADY shell-enabled job is privileged too. Without this a
+    # non-privileged caller could poison the prompt/cwd of an unowned (legacy/CLI/
+    # open-mode, owner=None) allow_shell job - which the run_now re-check protects,
+    # but the AUTONOMOUS SCHEDULER would then run with full shell on its next tick.
+    # Gate the edit itself so the scheduler can only ever run an owner-authored prompt.
+    if getattr(job, "allow_shell", False) and not can_shell:
+        raise HTTPException(
+            403, "editing a shell-enabled job needs the owner key or a coder:full key.")
     try:
-        job = _store().update(job_id, **changes)
+        job = store.update(job_id, **changes)
     except KeyError:
         raise HTTPException(404, f"No such job: {job_id}")
     except ValueError as e:
@@ -176,18 +205,26 @@ async def update_job(job_id: str, req: JobUpdate, request: Request):
 
 
 @_router.delete("/api/jobs/{job_id}")
-async def delete_job(job_id: str):
-    if not _store().remove(job_id):
+async def delete_job(job_id: str, request: Request):
+    store = _store()
+    _owned_job_or_404(store, job_id, request)     # only the owner may delete
+    if not store.remove(job_id):
         raise HTTPException(404, f"No such job: {job_id}")
     return {"status": "deleted", "id": job_id}
 
 
 @_router.post("/api/jobs/{job_id}/run")
-async def run_now(job_id: str):
+async def run_now(job_id: str, request: Request):
     store = _store()
-    job = store.get(job_id)
-    if job is None:
-        raise HTTPException(404, f"No such job: {job_id}")
+    job = _owned_job_or_404(store, job_id, request)
+    # Defense in depth (crown-jewel invariant): an on-demand run of a SHELL-enabled
+    # job must re-check the CALLER, not just the stored flag - so an unowned/legacy
+    # allow_shell job (owner=None) can never be triggered into run_shell by a plain
+    # jobs key. The autonomous SCHEDULER path is unaffected (the owner set the flag).
+    if getattr(job, "allow_shell", False) and not _caller_can_allow_shell(request):
+        raise HTTPException(
+            403, "running a shell-enabled job on demand needs the owner key or a "
+            "coder:full key.")
     engine = _engine_resolver()
     loop = asyncio.get_running_loop()
 
@@ -210,10 +247,9 @@ async def run_now(job_id: str):
 
 
 @_router.get("/api/jobs/{job_id}/results")
-async def job_results(job_id: str):
+async def job_results(job_id: str, request: Request):
     store = _store()
-    if store.get(job_id) is None:
-        raise HTTPException(404, f"No such job: {job_id}")
+    _owned_job_or_404(store, job_id, request)     # only the owner sees a job's results
     return {"id": job_id, "results": store.list_results(job_id)}
 
 
