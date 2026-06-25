@@ -173,7 +173,8 @@ async def rag_add(name: str, req: RagAddRequest, request: Request):
                       "text": f"  failed: {f['path']}: {f['error']}"})
         return True
 
-    job = jobs.start_fn("rag-index", _index)
+    from localm.inference.http_server import principal_id
+    job = jobs.start_fn("rag-index", _index, owner=principal_id(request))
     return {"job_id": job.id}
 
 
