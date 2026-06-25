@@ -344,6 +344,10 @@ nav button.active { background: var(--accent-soft); color: var(--accent); }
   max-width: 80%;
 }
 .msg-row.user .msg-meta { justify-content: flex-end; }
+/* CHAT-1: a user's own message is shown verbatim (set via textContent), so preserve
+   its line breaks and wrap long unbroken strings (pasted URLs/code) instead of
+   collapsing whitespace the way rendered markdown would. */
+.msg-body.msg-literal { white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* injected web search/fetch results - visible but visually secondary */
 .msg-row.web-note { opacity: 0.7; }

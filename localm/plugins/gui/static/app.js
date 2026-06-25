@@ -1638,7 +1638,16 @@ function addMessageRow(container, role, text, opts = {}) {
   row.appendChild(el("div", "msg-role",
     opts.label || (role === "user" ? "You" : "Model")));
   const body = el("div", "msg-body");
-  renderMarkdown(body, text);
+  if (role === "user") {
+    // CHAT-1: a user's OWN message renders LITERALLY (exactly as typed). Markdown is
+    // the model's output format, not the user's input - so typed *asterisks*, # hashes,
+    // or pasted code/URLs are never silently reformatted. pre-wrap (.msg-literal)
+    // preserves their line breaks; content is set via textContent so it is inert.
+    body.classList.add("msg-literal");
+    body.textContent = text;
+  } else {
+    renderMarkdown(body, text);
+  }
   for (const url of opts.images || []) {
     const img = document.createElement("img");
     img.className = "msg-img";
