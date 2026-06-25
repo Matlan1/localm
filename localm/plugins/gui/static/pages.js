@@ -470,6 +470,7 @@ $("pull-start").onclick = async () => {
   bar.classList.add("indeterminate");
   bar.style.width = "35%";
   pct.textContent = "starting…";
+  if ($("pull-file")) { $("pull-file").hidden = true; $("pull-file").textContent = ""; }
   const samples = [];   // rolling {t, downloaded} window for speed/ETA (U4)
   try {
     const r = await fetch("/api/models/pull", {
@@ -482,6 +483,18 @@ $("pull-start").onclick = async () => {
       log.textContent += line + "\n";
       log.scrollTop = log.scrollHeight;
     }, (ev) => {
+      // R06: for a multi-file (split GGUF) download, show which file is in flight.
+      const fileLine = $("pull-file");
+      if (fileLine) {
+        if (ev.count > 1) {
+          fileLine.hidden = false;
+          fileLine.textContent = ev.name
+            ? `file ${ev.index} of ${ev.count}: ${ev.name}`
+            : `file ${ev.index} of ${ev.count}`;
+        } else {
+          fileLine.hidden = true;
+        }
+      }
       if (ev.pct != null && ev.total) {
         bar.classList.remove("indeterminate");
         bar.style.width = ev.pct + "%";

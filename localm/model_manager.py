@@ -41,15 +41,33 @@ console = Console()
 PROGRESS_SENTINEL = "\x1flocalm-progress\x1f"
 
 
-def _emit_progress(downloaded: int, total: int, *, phase: str = "download") -> None:
+def _emit_progress(downloaded: int, total: int, *, phase: str = "download",
+                   name: "str | None" = None, index: int = 0, count: int = 0) -> None:
     pct = round(downloaded * 100 / total, 1) if total else None
-    sys.stdout.write(
-        PROGRESS_SENTINEL
-        + json.dumps({"phase": phase, "downloaded": downloaded,
-                      "total": total, "pct": pct})
-        + "\n"
-    )
+    payload = {"phase": phase, "downloaded": downloaded, "total": total, "pct": pct}
+    # R06: for a multi-file download (a split GGUF), tell the GUI which file is in
+    # flight so it can show "file 2 of 3: <name>". Omitted for a single file so the
+    # single-file progress UX is unchanged.
+    if count > 1:
+        payload["count"] = count
+        payload["index"] = index
+        if name:
+            payload["name"] = name
+    sys.stdout.write(PROGRESS_SENTINEL + json.dumps(payload) + "\n")
     sys.stdout.flush()
+
+
+def _progress_file_info(target_parts: List[Path]) -> "tuple[str | None, int, int]":
+    """(current-file name, 1-based index, count) for a multi-part download, derived
+    from which parts have already landed at their final path - the first one not yet
+    present is the file currently downloading. Cheap existence checks only. Returns
+    (None, 0, 0) for a single-file download (nothing to disambiguate)."""
+    n = len(target_parts)
+    if n <= 1:
+        return (None, 0, 0)
+    done = sum(1 for p in target_parts if p.exists())
+    cur = next((p for p in target_parts if not p.exists()), target_parts[-1])
+    return (cur.name, min(done + 1, n), n)
 
 
 @contextlib.contextmanager
@@ -93,18 +111,21 @@ def _download_progress(target_parts: List[Path], total_size: int):
             dl = _downloaded_bytes()
             if dl != last:
                 last = dl
-                _emit_progress(dl, total_size)
+                fn, fi, fc = _progress_file_info(target_parts)
+                _emit_progress(dl, total_size, name=fn, index=fi, count=fc)
             stop.wait(0.7)
 
     t = threading.Thread(target=_poll, daemon=True)
     t.start()
-    _emit_progress(0, total_size)
+    fn0, fi0, fc0 = _progress_file_info(target_parts)
+    _emit_progress(0, total_size, name=fn0, index=fi0, count=fc0)
     try:
         yield
     finally:
         stop.set()
         t.join(timeout=2)
-        _emit_progress(total_size, total_size)
+        fn1, fi1, fc1 = _progress_file_info(target_parts)
+        _emit_progress(total_size, total_size, name=fn1, index=fi1, count=fc1)
 
 
 @contextlib.contextmanager
