@@ -1350,7 +1350,7 @@ const KEY_SCOPES = [
   ["models:read", "List and inspect models"],
   ["models:write", "Load, download, or remove models"],
   ["rag", "Knowledge (RAG)"],
-  ["chat", "Chat history"],
+  ["chat", "Chat history & memory (saved conversations, personas) - NOT needed to chat"],
   ["image", "Image generation"],
   ["music", "Music generation"],
   ["video", "Video generation"],
@@ -1503,6 +1503,15 @@ async function refreshKeysPanel() {
       lab.appendChild(document.createTextNode(" " + label));
       scopesBox.appendChild(lab);
     }
+    // Chat is the baseline: a key needs NO scope to chat (the "chat" scope above
+    // only gates server-saved history/personas). Scopes add EXTRA capabilities.
+    if (!$("key-scope-note")) {
+      const note = el("div", "sub");
+      note.id = "key-scope-note";
+      note.textContent = "Chatting needs no scope - any key can chat. These add "
+        + "capabilities; leave all unchecked for a chat-only key.";
+      scopesBox.insertAdjacentElement("afterend", note);
+    }
   }
 
   // The keys card is a settings SECTION; hide/show it via a class so the section
@@ -1552,7 +1561,10 @@ async function refreshKeysPanel() {
     if (!name) { toast("Enter a key name"); return; }
     const scopes = [...scopesBox.querySelectorAll(".key-scope-cb")]
       .filter((c) => c.checked).map((c) => c.value);
-    if (!scopes.length) { toast("Pick at least one capability"); return; }
+    // A zero-scope key is valid: it can still chat (chat is baseline). Confirm so
+    // an empty pick is intentional rather than a forgotten checkbox.
+    if (!scopes.length
+        && !confirm("Create a chat-only key (no extra capabilities)?")) return;
     const body = { name, scopes };
     const ttl = Number(($("key-expiry") || {}).value || 0);
     if (ttl > 0) body.expires_in = ttl;   // server computes the deadline (its own clock)

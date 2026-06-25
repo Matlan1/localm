@@ -2762,7 +2762,9 @@ function onVoicePick() {
 async function loadClientPlugins() {
   let plugins = [];
   try {
-    const r = await fetch("/api/plugins", { headers: authHeaders() });
+    // /api/capabilities (not /api/plugins) so client-entry modules load for a
+    // scoped key too, and ONLY the plugins this key's scopes grant are imported.
+    const r = await fetch("/api/capabilities", { headers: authHeaders() });
     if (r.ok) plugins = (await r.json()).plugins || [];
   } catch {
     return; // server unreachable; the built-in browser voice still works
@@ -2801,7 +2803,10 @@ window.bumpPluginsRev = bumpPluginsRev;
 
 async function refreshPluginCommands() {
   try {
-    const r = await fetch("/api/plugins", { headers: authHeaders() });
+    // /api/capabilities returns ONLY what THIS key may use (scope-filtered) and
+    // the core-tab flags, so the nav shows just the usable tabs without needing
+    // plugins:read. The Plugins management page still uses /api/plugins.
+    const r = await fetch("/api/capabilities", { headers: authHeaders() });
     if (!r.ok) return;
     const data = await r.json();
     const map = {};
@@ -2813,6 +2818,7 @@ async function refreshPluginCommands() {
     pluginCommands.map = map;
     pluginCommands.suggest = data.suggest_plugins !== false;
     pluginState = data.plugins || [];
+    if (data.core) applyCoreTabVisibility(data.core);
     renderNav();
   } catch { /* server unreachable; fall back to plain unknown-command */ }
 }
@@ -2846,6 +2852,28 @@ function _navButton(id, icon, label, onClick, cls) {
 
 /** Rebuild the plugin portion of the nav rail from the active-with-a-tab
  *  plugins, then re-derive VIEWS and re-assert the active tab. */
+/* Show only the core tabs the current key's scopes grant. chat is the baseline
+ * anchor and is NEVER hidden (chatting needs no scope); models/plugins/settings
+ * render only when the key holds models:read / plugins:read / config:read. A tab
+ * the key lacks is not shown at all (no show-then-"no access"). Driven by
+ * /api/capabilities .core. If the active view becomes hidden (e.g. a remembered
+ * Settings tab on a key without config:read), fall back to chat so the user is
+ * never parked on an inaccessible view. */
+function applyCoreTabVisibility(core) {
+  if (!core) return;
+  const activeView = (document.querySelector(".view.active") || {}).id;
+  let activeHidden = false;
+  for (const view of ["models", "plugins", "settings"]) {
+    const nav = $("nav-" + view);
+    if (!nav) continue;
+    const show = core[view] !== false;        // default to showing if unknown
+    nav.style.display = show ? "" : "none";
+    if (!show && activeView === "view-" + view) activeHidden = true;
+  }
+  if (activeHidden) showView("chat");
+}
+window.applyCoreTabVisibility = applyCoreTabVisibility;
+
 function renderNav() {
   const slot = $("nav-plugin-slot");
   if (!slot) return;
