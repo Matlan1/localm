@@ -376,7 +376,17 @@ class _ThinkPrinter:
     """Stream a reply to stdout, dimming the model's ``<think>`` reasoning so it
     reads as an aside rather than raw ``<think>`` tags inline with the answer
     (H4). The full raw text (tags included) is still returned by the caller for
-    the audit/transcript, which separate it themselves."""
+    the audit/transcript, which separate it themselves.
+
+    R31 (CLI half): streaming here is APPEND-ONLY plain ``print`` plus SGR styling
+    (dim/colour) - no alternate screen, no cursor repositioning, no spinner/Live
+    region. So the terminal emulator owns scrolling: a user who scrolls up to
+    re-read mid-stream is left alone (output keeps appending below), which is the
+    CLI's native equivalent of the GUI's ``chat.stick`` autoscroll latch. The GUI
+    needed that latch only because its JS re-pinned the viewport to the bottom on
+    every token; we deliberately never do the terminal analogue of that here.
+    Guarded by tests/test_cli_stream_scroll.py - do not wrap streaming in a Live
+    region / alt-screen / ``\\r``-redraw, which would fight the user's scroll."""
 
     def __init__(self) -> None:
         import sys as _sys
