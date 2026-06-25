@@ -80,6 +80,12 @@ class Job:
     last_run: Optional[float] = None
     last_status: Optional[str] = None      # "ok" | "error" | None (never run)
     last_result_id: Optional[str] = None   # iso-ts stem of the last result file
+    # Principal id (keystore hash of the creating key, or None for a tokenless /
+    # open-mode creation) that OWNS this job. Per-job routes accept only the owner
+    # or an admin/owner key, so one jobs-scoped key cannot read/edit/delete/run
+    # another principal's scheduled jobs (mirrors the kernel JobManager, #248).
+    # Persisted so it survives a restart; stripped from the API response.
+    owner: Optional[str] = None
 
     def __post_init__(self) -> None:
         if not self.id:
