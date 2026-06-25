@@ -115,12 +115,29 @@ def check_url(url: str) -> None:
     Validate one URL against the policy. Raises NetworkPolicyError with an
     actionable message when refused; returns silently when allowed.
 
-    Checks, in order: mode, scheme, deny list, allow list, resolved-IP class.
+    Checks, in order: mode, malformed-authority, scheme, deny list, allow list,
+    resolved-IP class.
     """
     if network_mode() == "off":
         raise NetworkPolicyError(
             "Network access is disabled (net_mode=off). Enable it with: "
             "localm config net_mode ask")
+
+    # Parser-differential SSRF guard. urllib.parse and the HTTP client
+    # (requests/urllib3) disagree on backslashes and raw control characters in
+    # the authority: 'http://127.0.0.1\\@public/' parses HERE as host 'public'
+    # (so it clears every gate below) but requests terminates the userinfo at the
+    # backslash and connects to 127.0.0.1 - defeating both this guard AND the
+    # net_allow allowlist. A conformant http(s) URL percent-encodes a backslash
+    # or control char, so we refuse any raw one rather than trust the host
+    # urllib.parse extracts. This is deliberately broader than the authority - a
+    # raw '\\' or control char in the path/query (which requests would otherwise
+    # percent-encode) is refused too; a fail-safe choice for a security guard,
+    # and callers can always pass a properly percent-encoded URL.
+    if "\\" in url or any(ord(c) < 0x20 or ord(c) == 0x7F for c in url):
+        raise NetworkPolicyError(
+            "URL contains a backslash or control character; refusing it "
+            "(possible SSRF parser differential).")
 
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in ("http", "https"):
@@ -147,12 +164,41 @@ def check_url(url: str) -> None:
         _check_public_address(host)
 
 
+# Special-use ranges that the stdlib marks is_global=True (so neither
+# ``not is_global`` nor any is_* flag catches them) yet are not ordinary public
+# hosts. The deprecated 6to4 relay anycast prefix (RFC 7526) sends packets to
+# whatever 6to4 relay the local network advertises - an internal/edge device on
+# some networks - so it does not belong on the reachable-public list.
+_EXTRA_BLOCKED_NETS = (
+    ipaddress.ip_network("192.88.99.0/24"),   # 6to4 relay anycast (deprecated)
+    ipaddress.ip_network("2002::/16"),         # 6to4
+)
+
+
 def _is_blocked_ip(ip: ipaddress._BaseAddress) -> bool:
-    """True for addresses the SSRF guard refuses (loopback, RFC1918 private,
-    link-local incl. 169.254.169.254 cloud metadata, reserved, multicast,
-    unspecified)."""
-    return bool(ip.is_loopback or ip.is_private or ip.is_link_local
-                or ip.is_reserved or ip.is_multicast or ip.is_unspecified)
+    """True for addresses the SSRF guard refuses: anything that is not a
+    globally-routable public address.
+
+    ``not ip.is_global`` is the primary predicate. It rejects loopback, RFC1918
+    private, link-local (incl. 169.254.169.254 cloud metadata), the CGNAT shared
+    space 100.64.0.0/10 (RFC 6598, which the stdlib does NOT mark is_private on
+    every version, so the old explicit list let it through), benchmarking,
+    documentation and other special-use ranges in one shot, and it stays correct
+    as the stdlib adds new reserved ranges.
+
+    The explicit special-use flags are KEPT as a belt-and-suspenders catch: the
+    stdlib quirkily marks a few deprecated IPv6 forms (IPv4-compatible
+    ``::127.0.0.1``, NAT64-embedded ``64:ff9b::7f00:1``) is_global=True even
+    though they still route to internal IPv4 - is_reserved catches those.
+    _EXTRA_BLOCKED_NETS covers the residual special-use ranges (6to4 anycast)
+    that is_global=True still misses. A genuine public address (is_global True
+    with no special-use flag, outside the extra nets) is the only thing that
+    passes."""
+    return bool(not ip.is_global
+                or ip.is_loopback or ip.is_private or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified
+                or any(ip.version == net.version and ip in net
+                       for net in _EXTRA_BLOCKED_NETS))
 
 
 def _literal_ipv4(host: str) -> Optional[ipaddress.IPv4Address]:
@@ -213,18 +259,21 @@ def _check_public_address(host: str) -> None:
 #  Fetching
 # ---------------------------------------------------------------------------
 
-def safe_fetch(
+def safe_fetch_bytes(
     url: str,
     *,
     max_bytes: int = _DEFAULT_MAX_BYTES,
     timeout: int = _DEFAULT_TIMEOUT,
-) -> tuple[str, str, str]:
+) -> tuple[str, str, bytes]:
     """
-    Policy-checked GET. Returns (final_url, content_type, body_text).
+    Policy-checked GET returning RAW bytes. Returns (final_url, content_type,
+    body_bytes).
 
-    Redirects are followed manually so every hop is re-validated against the
-    policy - a public page cannot bounce the agent into 127.0.0.1. The body
-    is capped at max_bytes.
+    Same protections as safe_fetch - redirects are followed manually so every
+    hop is re-validated against the policy (a public page cannot bounce the
+    fetch into 127.0.0.1), and the body is capped at max_bytes - but the body is
+    NOT decoded, so this is the entry point for binary payloads (images fetched
+    for vision input). Text callers go through safe_fetch / fetch_text.
 
     Raises NetworkPolicyError (policy refusal) or requests exceptions.
     """
@@ -256,12 +305,30 @@ def safe_fetch(
                 size += len(chunk)
                 if size >= max_bytes:
                     break
-            body = b"".join(chunks)[:max_bytes]
-            return current, content_type, body.decode("utf-8", errors="replace")
+            return current, content_type, b"".join(chunks)[:max_bytes]
         finally:
             resp.close()
     raise NetworkPolicyError(
         f"Too many redirects (>{_MAX_REDIRECTS}) fetching {url}")
+
+
+def safe_fetch(
+    url: str,
+    *,
+    max_bytes: int = _DEFAULT_MAX_BYTES,
+    timeout: int = _DEFAULT_TIMEOUT,
+) -> tuple[str, str, str]:
+    """
+    Policy-checked GET. Returns (final_url, content_type, body_text).
+
+    Thin text wrapper over safe_fetch_bytes (which does the policy check,
+    per-hop redirect re-validation and size cap); the body is decoded as UTF-8.
+
+    Raises NetworkPolicyError (policy refusal) or requests exceptions.
+    """
+    final_url, content_type, body = safe_fetch_bytes(
+        url, max_bytes=max_bytes, timeout=timeout)
+    return final_url, content_type, body.decode("utf-8", errors="replace")
 
 
 class _HTMLStripper(html.parser.HTMLParser):
@@ -365,13 +432,33 @@ def web_search(query: str, max_results: int = 5) -> list[dict]:
     return results
 
 
+def _refuse_redirect(resp, backend: str) -> None:
+    """The search backends call check_url ONCE on the request URL, so - unlike
+    safe_fetch - they cannot re-validate a redirect target per hop. requests
+    follows redirects by default, which would let a 3xx from the search host
+    bounce the GET into 127.0.0.1 / 169.254.169.254 / an RFC1918 service with no
+    policy check (SSRF). So the callers pass allow_redirects=False and we refuse
+    any 3xx outright (surfacing it rather than silently following an unchecked
+    hop) - the search backend is expected to answer directly."""
+    # getattr default: a real requests.Response always exposes these properties;
+    # the False default only applies to minimal test doubles, which stand in for
+    # a normal 200 - so production redirect detection is unchanged.
+    if getattr(resp, "is_redirect", False) or \
+            getattr(resp, "is_permanent_redirect", False):
+        raise NetworkPolicyError(
+            f"{backend} tried to redirect (to "
+            f"{resp.headers.get('Location', '?')!r}); refusing - a search "
+            "backend's redirect target is not policy-checked.")
+
+
 def _searxng_search(base: str, query: str, max_results: int) -> list[dict]:
     import requests
 
     url = f"{base}/search?{urllib.parse.urlencode({'q': query, 'format': 'json'})}"
     check_url(url)
-    resp = requests.get(url, timeout=_DEFAULT_TIMEOUT,
+    resp = requests.get(url, timeout=_DEFAULT_TIMEOUT, allow_redirects=False,
                         headers={"User-Agent": _USER_AGENT})
+    _refuse_redirect(resp, "The SearXNG search backend")
     resp.raise_for_status()
     out = []
     for item in resp.json().get("results", [])[:max_results]:
@@ -447,8 +534,10 @@ def _ddg_search(query: str, max_results: int) -> list[dict]:
         "https://html.duckduckgo.com/html/",
         data={"q": query},
         timeout=_DEFAULT_TIMEOUT,
+        allow_redirects=False,
         headers={"User-Agent": _USER_AGENT},
     )
+    _refuse_redirect(resp, "The DuckDuckGo search backend")
     resp.raise_for_status()
     parser = _DDGParser()
     try:
