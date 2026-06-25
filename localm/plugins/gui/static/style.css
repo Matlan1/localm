@@ -967,6 +967,11 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
   margin-top: 5px; font-family: var(--mono);
   font-size: 11.5px; color: var(--text-dim);
 }
+/* R06: per-file line above the bar for a multi-file (split GGUF) download. */
+.dl-file {
+  margin-bottom: 5px; font-family: var(--mono);
+  font-size: 11.5px; color: var(--text); overflow-wrap: anywhere;
+}
 
 /* R37: uploaded-files list under the Settings "Upload files" section. */
 .upload-list { list-style: none; margin: 12px 0 0; padding: 0;
