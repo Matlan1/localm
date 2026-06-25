@@ -22,6 +22,7 @@ import json
 import os
 import queue
 from pathlib import Path
+from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import (HTMLResponse, RedirectResponse, Response,
@@ -30,7 +31,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from localm import scopes
-from localm.inference.http_server import _require_auth, require_scope
+from localm.inference.http_server import (_require_auth, caller_scopes,
+                                          require_scope)
 from localm.plugins.coder.sessions import SessionManager
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -238,7 +240,7 @@ def attach_gui(
 
     # -------------------------- models ---------------------------- #
 
-    @app.get("/api/models", dependencies=[Depends(_require_auth)])
+    @app.get("/api/models", dependencies=[Depends(require_scope(scopes.MODELS_READ))])
     async def gui_models():
         from localm.config import load_registry
         registry = load_registry()
@@ -260,7 +262,7 @@ def attach_gui(
             })
         return {"models": models, "active": current}
 
-    @app.post("/api/models/load", dependencies=[Depends(_require_auth)])
+    @app.post("/api/models/load", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def gui_load_model(req: LoadModelRequest):
         from localm.config import load_registry
         if req.model not in load_registry():
@@ -285,7 +287,7 @@ def attach_gui(
         stats = await loop.run_in_executor(None, system_stats)
         return stats
 
-    @app.get("/api/vram-estimate", dependencies=[Depends(_require_auth)])
+    @app.get("/api/vram-estimate", dependencies=[Depends(require_scope(scopes.MODELS_READ))])
     async def vram_estimate(model: str = "", n_ctx: int = 4096, n_gpu_layers: int = 99):
         """Approximate VRAM needed to load *model* (defaults to the active one)
         at the given context + GPU-offload, vs free/total VRAM. Powers the live
@@ -310,7 +312,7 @@ def attach_gui(
         return {"model": name, "model_bytes": model_bytes, **est,
                 "free": free, "total": total, "fits": fits, "approximate": True}
 
-    @app.get("/api/companion", dependencies=[Depends(_require_auth)])
+    @app.get("/api/companion", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def gui_companion():
         """LAN / Tailscale address a phone should open to reach THIS server, for
         the Companion-app card. The card builds full URLs from these plus the
@@ -328,12 +330,46 @@ def attach_gui(
             "tailscale": addrs.get("tailscale") or "",
         }
 
+    @app.get("/api/capabilities", dependencies=[Depends(_require_auth)])
+    async def gui_capabilities(caller: Optional[set] = Depends(caller_scopes)):
+        """Effective navigation entitlements for the CURRENT key, so the GUI shows
+        ONLY the tabs this key can actually use - a capability the key's scopes do
+        not grant is never rendered (no show-then-'no access').
+
+        Baseline-gated (any valid key) on purpose: a key must be able to learn its
+        OWN entitlements without holding plugins:read, otherwise a narrow key could
+        never see the tabs it IS allowed. In open mode (no key configured) caller is
+        None and everything is granted. chat is always present - chatting needs no
+        scope; the 'chat' scope gates the chat-HISTORY plugin, not the chat turn."""
+        held = caller                      # None => open mode / full access
+        def granted(required: str) -> bool:
+            return held is None or scopes.grants(held, required)
+        core = {
+            "chat":     True,
+            "models":   granted(scopes.MODELS_READ),
+            "plugins":  granted(scopes.PLUGINS_READ),
+            "settings": granted(scopes.CONFIG_READ),
+        }
+        mgr = getattr(app.state, "plugin_manager", None)
+        plugins, suggest = [], True
+        if mgr is not None:
+            state = mgr.api_state()
+            suggest = bool(state.get("suggest_plugins", True))
+            # Only surface plugins this key's scopes grant; renderNav still filters
+            # to active+tab, and the command-hint map keeps inactive-but-granted
+            # entries so "/cmd needs the X plugin" still works for a scoped key.
+            for p in state.get("plugins", []):
+                if granted(p.get("scope") or p.get("name") or ""):
+                    plugins.append(p)
+        return {"scopes": sorted(held) if held else [], "open": held is None,
+                "core": core, "plugins": plugins, "suggest_plugins": suggest}
+
     # R47: the "/api/bug-report" POST lives on the core server (http_server.py) so
     # it works in headless `localm serve` too; the GUI button targets that single
     # canonical route. Duplicating it here would shadow it (first route registered
     # wins) and silently drop the user's description + include_log flag.
 
-    @app.post("/api/logs/export", dependencies=[Depends(_require_auth)])
+    @app.post("/api/logs/export", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def export_logs(req: LogExportRequest):
         """R30: copy every log of this running instance into a user-chosen folder
         (picked via the GUI's /api/fs/dirs browser). Writes a timestamped
@@ -453,7 +489,7 @@ def attach_gui(
                         media_type="image/svg+xml",
                         headers={"Cache-Control": "no-store"})
 
-    @app.get("/api/fs/dirs", dependencies=[Depends(_require_auth)])
+    @app.get("/api/fs/dirs", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def fs_dirs(path: str = ""):
         """Subdirectories of *path*, for the coder setup directory picker.
 
@@ -507,7 +543,7 @@ def attach_gui(
     app.state.switch_model = switch_model
     app.state.coder_sessions = manager
 
-    @app.post("/api/models/pull", dependencies=[Depends(_require_auth)])
+    @app.post("/api/models/pull", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def model_pull(req: PullRequest):
         spec = req.spec.strip()
         if not spec or set(spec) <= {"-"}:
@@ -530,7 +566,7 @@ def attach_gui(
         }, host_label=f"Model pull {spec}")
         return {"job_id": job.id}
 
-    @app.post("/api/models/remove", dependencies=[Depends(_require_auth)])
+    @app.post("/api/models/remove", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def model_remove(req: RemoveModelRequest):
         from localm.config import load_registry
         if req.model not in load_registry():
@@ -540,7 +576,7 @@ def attach_gui(
         job = jobs.start_cli("remove", ["rm", req.model, "--yes"])
         return {"job_id": job.id}
 
-    @app.post("/api/models/alias", dependencies=[Depends(_require_auth)])
+    @app.post("/api/models/alias", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def model_alias(req: AliasRequest):
         from localm.config import load_registry
         registry = load_registry()
@@ -608,7 +644,7 @@ def attach_gui(
             return 502          # HF unreachable
         return 422              # bad repo / no GGUF files
 
-    @app.get("/api/discover/search", dependencies=[Depends(_require_auth)])
+    @app.get("/api/discover/search", dependencies=[Depends(require_scope(scopes.MODELS_READ))])
     async def discover_search(q: str = "", limit: int = 20):
         from localm.discover import DiscoverError, hf_search, vram_info
         loop = asyncio.get_running_loop()
@@ -619,7 +655,7 @@ def attach_gui(
             raise HTTPException(_discover_status(e), str(e))
         return {"query": q, "results": results, "vram": vram_info()}
 
-    @app.get("/api/discover/files", dependencies=[Depends(_require_auth)])
+    @app.get("/api/discover/files", dependencies=[Depends(require_scope(scopes.MODELS_READ))])
     async def discover_files(repo: str):
         from localm.discover import (DiscoverError, fit_label, hf_gguf_files,
                                      vram_info)
