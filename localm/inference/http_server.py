@@ -387,6 +387,50 @@ def _request_shutdown(delay: float = 0.25) -> None:
     threading.Thread(target=_run, daemon=True).start()
 
 
+def _restart_argv() -> list:
+    """The command line to re-launch this server. Always ``python -m localm <args>``
+    - the canonical entry the codebase uses - so a restart works regardless of how
+    the server was originally started (a console-script .exe, ``-m``, or a script
+    path, any of which can make ``sys.argv[0]`` un-re-runnable by the interpreter)."""
+    import sys
+    return [sys.executable, "-m", "localm", *sys.argv[1:]]
+
+
+def _do_restart() -> None:
+    """R18: restart this server IN PLACE. Unload the model FIRST (clean native
+    teardown, like _do_shutdown - a hard re-exec while it is loaded can segfault),
+    clear the crash marker so this intentional restart is not reported as a crash,
+    then re-exec the same command line so the server comes back on the same port.
+    os.execv replaces the process image and does not return on success. Separated
+    from the route so it can be tested without actually re-execing."""
+    try:
+        if _engine is not None:
+            _engine.unload()
+    except Exception:
+        pass
+    try:
+        from localm import bugreport
+        bugreport.disarm_crash_guard()
+    except Exception:
+        pass
+    import os
+    import sys
+    os.execv(sys.executable, _restart_argv())
+
+
+def _request_restart(delay: float = 0.25) -> None:
+    """Run _do_restart shortly after returning, so the 200 response flushes to the
+    client before the process re-execs (mirrors _request_shutdown)."""
+    import threading
+    import time as _t
+
+    def _run():
+        _t.sleep(delay)
+        _do_restart()
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
     global _engine, _inference_sem
     _engine = engine
@@ -876,6 +920,16 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
         model is unloaded before exit. (A Settings button calls this - Lane E.)"""
         _request_shutdown()
         return {"stopping": True}
+
+    @app.post("/v1/server/restart",
+              dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
+    async def server_restart_ep():
+        """R18: restart this server in place (owner / config-write scope). The model
+        is unloaded first, then the process re-execs the same command line and comes
+        back on the same port - a Settings button calls this, and the GUI's reconnect
+        overlay auto-reconnects when the fresh process is up."""
+        _request_restart()
+        return {"restarting": True}
 
     @app.post("/api/bug-report",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
