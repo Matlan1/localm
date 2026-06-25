@@ -41,13 +41,18 @@ def _run_generate(monkeypatch, *, gen_result, cancelled):
     captured = {}
 
     class _FakeJobs:
-        def start_fn(self, kind, fn, result_path=None):
+        def start_fn(self, kind, fn, result_path=None, owner=None):
             captured["fn"] = fn
             return MagicMock(id="job1")
 
     request = MagicMock()
     request.app.state.jobs = _FakeJobs()
     request.app.state.self_url = "http://127.0.0.1:8642/v1"
+    # KEY-SCOPE-2: imagine() now stamps the job owner via principal_id(request),
+    # which reads real headers/cookies - give the mock empty ones so it resolves to
+    # an anonymous (None) principal instead of trying to hash a MagicMock attribute.
+    request.headers = {}
+    request.cookies = {}
 
     req = plug.ImagineRequest(prompt="a cat")
     asyncio.run(plug.imagine(req, request))

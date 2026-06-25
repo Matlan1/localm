@@ -29,6 +29,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from localm.inference.http_server import principal_id
 from localm.pathsafe import confined_file, confined_name
 from . import backend as _backend
 
@@ -257,7 +258,8 @@ async def imagine(req: ImagineRequest, request: Request):
             _reload_llm(job, self_url, s)
         return ok
 
-    job = jobs.start_fn("imagine", _generate, result_path=out_path.name)
+    job = jobs.start_fn("imagine", _generate, result_path=out_path.name,
+                        owner=principal_id(request))
     return {"job_id": job.id}
 
 

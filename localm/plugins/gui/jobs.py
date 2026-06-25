@@ -35,6 +35,13 @@ class Job:
     returncode: Optional[int] = None
     result: Optional[str] = None   # kind-specific payload (e.g. output image path)
     created_at: float = field(default_factory=time.time)
+    # Stable id (keystore hash) of the key that created this job, or None only when
+    # NO token was presented at all (a fully anonymous request). The events/cancel
+    # routes accept the creator or an admin/owner only (KEY-SCOPE-2), so a leaked
+    # job id is not enough to touch another key's job. (Note: the open-mode loopback
+    # GUI still presents its shell token, so its jobs are owned by that token's id,
+    # not None - tokenless callers simply cannot reach them.)
+    owner: Optional[str] = None
     _proc: Optional[subprocess.Popen] = None
     # Set by cancel(); in-thread jobs (start_fn, e.g. media gen) poll this to
     # stop cooperatively since there is no subprocess to terminate.
@@ -135,7 +142,8 @@ class JobManager:
     def start_cli(self, kind: str, cli_args: list, *,
                   result_path: str | None = None,
                   extra_env: dict | None = None,
-                  host_label: str | None = None) -> Job:
+                  host_label: str | None = None,
+                  owner: str | None = None) -> Job:
         """
         Run ``python -m localm <cli_args>`` as a job.
 
@@ -144,12 +152,15 @@ class JobManager:
         environment variables for the subprocess (e.g. progress reporting).
         host_label, when given, mirrors the job's start/progress/end to the host
         console + debug log (G2) so a client-initiated pull is visible there.
+        owner, when given, is the creating key's principal id - only that key (or
+        an admin/owner) may later stream or cancel the job (KEY-SCOPE-2).
         """
         job = Job(
             id=uuid.uuid4().hex[:12],
             kind=kind,
             argv=[sys.executable, "-X", "utf8", "-m", "localm", *cli_args],
             result=result_path,
+            owner=owner,
         )
         with self._lock:
             self._gc()
@@ -211,15 +222,18 @@ class JobManager:
         threading.Thread(target=_run, daemon=True).start()
         return job
 
-    def start_fn(self, kind: str, fn, *, result_path: str | None = None) -> Job:
+    def start_fn(self, kind: str, fn, *, result_path: str | None = None,
+                 owner: str | None = None) -> Job:
         """
         Run a Python callable as a job in a worker thread.
 
         ``fn`` receives the job and should return True on success. It may call
         ``job.push({"type": "line", ...})`` to report progress and may update
-        ``job.result``.
+        ``job.result``. owner, when given, binds the job to the creating key's
+        principal id so only that key (or an admin/owner) may stream/cancel it.
         """
-        job = Job(id=uuid.uuid4().hex[:12], kind=kind, argv=[], result=result_path)
+        job = Job(id=uuid.uuid4().hex[:12], kind=kind, argv=[], result=result_path,
+                  owner=owner)
         with self._lock:
             self._gc()
             self._jobs[job.id] = job

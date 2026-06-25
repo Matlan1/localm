@@ -32,6 +32,7 @@ from pydantic import BaseModel
 
 from localm import scopes
 from localm.inference.http_server import (_require_auth, caller_scopes,
+                                          job_owner_ok, principal_id,
                                           require_scope)
 from localm.plugins.coder.sessions import SessionManager
 
@@ -544,7 +545,7 @@ def attach_gui(
     app.state.coder_sessions = manager
 
     @app.post("/api/models/pull", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
-    async def model_pull(req: PullRequest):
+    async def model_pull(req: PullRequest, request: Request):
         spec = req.spec.strip()
         if not spec or set(spec) <= {"-"}:
             raise HTTPException(
@@ -563,17 +564,18 @@ def attach_gui(
         job = jobs.start_cli("pull", args, extra_env={
             "LOCALM_PROGRESS_JSON": "1",
             "HF_HUB_DISABLE_PROGRESS_BARS": "1",
-        }, host_label=f"Model pull {spec}")
+        }, host_label=f"Model pull {spec}", owner=principal_id(request))
         return {"job_id": job.id}
 
     @app.post("/api/models/remove", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
-    async def model_remove(req: RemoveModelRequest):
+    async def model_remove(req: RemoveModelRequest, request: Request):
         from localm.config import load_registry
         if req.model not in load_registry():
             raise HTTPException(404, f"Model not registered: {req.model}")
         if req.model == active_model():
             raise HTTPException(409, "Cannot remove the active model - switch first")
-        job = jobs.start_cli("remove", ["rm", req.model, "--yes"])
+        job = jobs.start_cli("remove", ["rm", req.model, "--yes"],
+                             owner=principal_id(request))
         return {"job_id": job.id}
 
     @app.post("/api/models/alias", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
@@ -593,9 +595,12 @@ def attach_gui(
         return {"status": "aliased", "model": req.model, "alias": req.alias}
 
     @app.get("/api/jobs/{job_id}/events", dependencies=[Depends(_require_auth)])
-    async def job_events(job_id: str):
+    async def job_events(job_id: str, request: Request):
         job = jobs.get(job_id)
-        if job is None:
+        # A job is reachable only by the key that created it (or an admin/owner).
+        # Return 404 - not 403 - on an ownership mismatch so a non-owner cannot even
+        # confirm the (unguessable) id exists (KEY-SCOPE-2).
+        if job is None or not job_owner_ok(request, job.owner):
             raise HTTPException(404, f"No such job: {job_id}")
         loop = asyncio.get_running_loop()
 
@@ -618,9 +623,11 @@ def attach_gui(
         )
 
     @app.post("/api/jobs/{job_id}/cancel", dependencies=[Depends(_require_auth)])
-    async def job_cancel(job_id: str):
+    async def job_cancel(job_id: str, request: Request):
         job = jobs.get(job_id)
-        if job is None:
+        # Same owner-binding as the events stream: only the creating key (or an
+        # admin/owner) may cancel; others get an indistinguishable 404.
+        if job is None or not job_owner_ok(request, job.owner):
             raise HTTPException(404, f"No such job: {job_id}")
         job.cancel()
         return {"status": "cancelling"}
