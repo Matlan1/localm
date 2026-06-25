@@ -968,6 +968,15 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
   font-size: 11.5px; color: var(--text-dim);
 }
 
+/* R37: uploaded-files list under the Settings "Upload files" section. */
+.upload-list { list-style: none; margin: 12px 0 0; padding: 0;
+  display: flex; flex-direction: column; gap: 6px; }
+.upload-list li { display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; padding: 6px 10px; border: 1px solid var(--border);
+  border-radius: 6px; background: var(--bg-input); }
+.upload-list .upload-name { font-family: var(--mono); font-size: 12px;
+  overflow-wrap: anywhere; }
+
 /* jobs list: without these rules the name/state and schedule/task/last-run
    spans collapse together ("look up the weatherenabled", "every 1mtask: chat"). */
 .jobs-list { display: flex; flex-direction: column; gap: 10px; }

@@ -213,6 +213,65 @@ def _parse_multipart(body: bytes, boundary: bytes):
     return fields, files
 
 
+# R37: a phone (or any browser) uploads files INTO a durable localm folder that
+# models and tools can then read - distinct from transient chat attachments and
+# the share_inbox. Capped per request because the hand-rolled parser reads the
+# whole body into memory; large model weights use the model pull flow, not this.
+_MAX_UPLOAD_BYTES = 100 * 1024 * 1024   # 100 MB / request
+
+
+# Characters never allowed in an uploaded file's basename: the Windows-reserved
+# set (a name like "x.txt:stream" would otherwise write to an NTFS alternate data
+# stream that the list/delete routes cannot see) plus all control chars (a literal
+# NUL would raise ValueError deep in pathlib and surface as a bare 500).
+_BAD_NAME_CHARS = set('<>:"|?*\\/') | {chr(c) for c in range(32)}
+
+
+def _name_is_safe(safe: str) -> bool:
+    """True if *safe* (already a basename) is a usable, listable file name."""
+    return bool(safe) and safe not in (".", "..") and not (set(safe) & _BAD_NAME_CHARS)
+
+
+def _uploads_dir() -> Path:
+    """<home>/uploads/, created on demand."""
+    from localm.config import home_dir
+    d = home_dir() / "uploads"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _confined_upload_path(name: str) -> Path:
+    """Resolve a user-supplied file name to a path INSIDE the uploads dir. Strips
+    any directory components (basename only) and rejects anything that would
+    resolve outside the uploads dir - so '..', absolute paths, encoded slashes, or
+    a name with illegal/control chars cannot traverse out or crash. Raises
+    HTTPException(400) on an unsafe name."""
+    base = _uploads_dir()
+    safe = Path(name or "").name            # basename only, drops any dir parts
+    if not _name_is_safe(safe):
+        raise HTTPException(400, "Invalid file name.")
+    target = (base / safe).resolve()
+    if not target.is_relative_to(base.resolve()):
+        raise HTTPException(400, "Invalid file name.")
+    return target
+
+
+def _unique_upload_target(base: Path, safe_name: str) -> Path:
+    """A non-clobbering path for *safe_name* in *base*: 'note.txt' -> 'note (1).txt'
+    if it already exists (mirrors the log-export dedup), so an upload never
+    silently overwrites an existing file."""
+    target = base / safe_name
+    if not target.exists():
+        return target
+    stem, suffix = Path(safe_name).stem, Path(safe_name).suffix
+    n = 1
+    while True:
+        cand = base / f"{stem} ({n}){suffix}"
+        if not cand.exists():
+            return cand
+        n += 1
+
+
 # ------------------------------------------------------------------ #
 #  Attach                                                             #
 # ------------------------------------------------------------------ #
@@ -764,6 +823,78 @@ def attach_gui(
                 except OSError:
                     pass
         return {"removed": removed}
+
+    # --------------------- uploads (R37) -------------------------- #
+
+    @app.post("/api/upload", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
+    async def upload_files(request: Request):
+        """R37: accept files from a phone/browser into <home>/uploads/ so models
+        and tools can read them, beyond transient chat attachments. Multipart,
+        parsed without python-multipart. CONFIG_WRITE (owner/companion-admin)
+        because writing host files is privileged - a restricted shared key must
+        not be able to drop files on the host. Capped at _MAX_UPLOAD_BYTES."""
+        clen = request.headers.get("content-length", "")
+        cap_mb = _MAX_UPLOAD_BYTES // (1024 * 1024)
+        if clen.isdigit() and int(clen) > _MAX_UPLOAD_BYTES:
+            raise HTTPException(413, f"Upload too large (max {cap_mb} MB per request).")
+        boundary = _multipart_boundary(request.headers.get("content-type", ""))
+        if boundary is None:
+            raise HTTPException(400, "Expected a multipart/form-data upload.")
+        body = await request.body()
+        if len(body) > _MAX_UPLOAD_BYTES:
+            raise HTTPException(413, f"Upload too large (max {cap_mb} MB per request).")
+        _fields, files = _parse_multipart(body, boundary)
+        base = _uploads_dir()
+        saved = []
+        for filename, _ctype, data in files:
+            if not data:
+                continue
+            safe = Path(filename or "").name[:255]
+            if not _name_is_safe(safe):
+                continue            # empty/.. or illegal/control chars (e.g. NTFS ADS)
+            target = _unique_upload_target(base, safe)
+            # Defense in depth: never write outside the uploads dir.
+            if not target.resolve().is_relative_to(base.resolve()):
+                continue
+            try:
+                target.write_bytes(data)
+            except OSError as e:
+                raise HTTPException(500, f"Could not save {safe}: {e}")
+            saved.append({"name": target.name, "bytes": len(data)})
+        if not saved:
+            raise HTTPException(400, "No files were uploaded.")
+        return {"uploaded": saved, "dir": str(base)}
+
+    @app.get("/api/uploads", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
+    async def list_uploads():
+        """R37: list files in <home>/uploads/ (name, size, mtime) for the Settings
+        'Uploaded files' list."""
+        base = _uploads_dir()
+        items = []
+        for p in sorted(base.iterdir()):
+            if not p.is_file():
+                continue
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            items.append({"name": p.name, "bytes": st.st_size,
+                          "mtime": int(st.st_mtime)})
+        return {"items": items, "dir": str(base)}
+
+    @app.delete("/api/uploads/{name}",
+                dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
+    async def delete_upload(name: str):
+        """R37: remove one uploaded file. The name is basename-confined to the
+        uploads dir (no path is built from raw input), so it cannot traverse out."""
+        target = _confined_upload_path(name)
+        if not target.is_file():
+            raise HTTPException(404, "No such uploaded file.")
+        try:
+            target.unlink()
+        except OSError as e:
+            raise HTTPException(500, f"Could not delete {target.name}: {e}")
+        return {"removed": target.name}
 
     # ------------------------- static ----------------------------- #
     # Mounted last: API routes above take precedence over the SPA files.
