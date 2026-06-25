@@ -312,11 +312,20 @@ if ($("bug-send")) {
     const includeLog = !!($("bug-include-log") && $("bug-include-log").checked);
     const btn = $("bug-send");
     btn.disabled = true;
+    // Attach browser context so a GUI-filed report carries what actually broke in
+    // the page (env snapshot + server state are added server-side). Sanitized and
+    // capped on the server; rendered as plain text, never executed.
+    const client = {
+      userAgent: navigator.userAgent,
+      page: location.hash || location.pathname,
+      viewport: window.innerWidth + "x" + window.innerHeight,
+      console: (window.__localmClientLog || []).slice(-40),
+    };
     try {
       const r = await fetch("/api/bug-report", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...authHeaders() },
-        body: JSON.stringify({ description: desc, include_log: includeLog }),
+        body: JSON.stringify({ description: desc, include_log: includeLog, client }),
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(data.detail || r.statusText);
