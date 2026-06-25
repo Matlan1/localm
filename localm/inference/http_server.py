@@ -234,6 +234,33 @@ def caller_scopes(request: Request) -> Optional[set]:
     return verify(token) if token else None
 
 
+def principal_id(request: Request) -> Optional[str]:
+    """A stable, opaque per-key identity for the CURRENT caller, or None in open
+    mode / when no token is presented. It is the same SHA-256 the keystore stores
+    (never the plaintext key), so it identifies the key WITHOUT exposing it, and
+    is identical whether the key arrives via the Authorization header or the
+    session cookie. Used to bind a background job to the key that created it
+    (KEY-SCOPE-2), so only that key (or an admin/owner) may stream or cancel it."""
+    from localm.auth import _hash_key
+    token, _ = _request_token(request)
+    if not token or not token.strip():
+        return None
+    return _hash_key(token.strip())
+
+
+def job_owner_ok(request: Request, job_owner: Optional[str]) -> bool:
+    """Whether the caller may stream/cancel a job created by *job_owner*. A job
+    with NO recorded owner (created in open mode) is unrestricted; an admin/owner
+    key may reach any job; otherwise the caller's principal must match the
+    creator's. Pairs with principal_id() stamped at job creation."""
+    if job_owner is None:
+        return True
+    held = caller_scopes(request)
+    if held is not None and scopes.ADMIN in held:
+        return True
+    return principal_id(request) == job_owner
+
+
 # ------------------------------------------------------------------ #
 #  Surface mounting (H6 phase 5: on-demand GUI on a running instance)  #
 # ------------------------------------------------------------------ #
