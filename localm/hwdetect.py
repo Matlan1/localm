@@ -128,6 +128,25 @@ def _amd_known_non_gfx103x(names: str) -> bool:
                ("rx 5", "rx 7", "rx 9", "radeon vii", "instinct"))
 
 
+def amd_gfx_family(names: str) -> str:
+    """Best-effort AMD GPU family from the adapter name, used to pick a Windows
+    PyTorch ROCm wheel source. Coarse and conservative - an unrecognised AMD card
+    returns "". Families (checked most-recent first so "rx 9"/"rx 7" win):
+      * "gfx120x" - RDNA4 / RX 9000 (Navi 4x)
+      * "gfx110x" - RDNA3 / RX 7000 (Navi 3x)
+      * "gfx103x" - RDNA2 / RX 6000 (Navi 2x) -> localm's bundled self-contained build
+    RDNA1 (RX 5000) and older return "" - no current prebuilt Windows ROCm wheel.
+    """
+    n = names or ""
+    if "rx 9" in n:
+        return "gfx120x"
+    if "rx 7" in n:
+        return "gfx110x"
+    if "rx 6" in n:
+        return "gfx103x"
+    return ""
+
+
 def recommended_install_backend(det: "Detection | None" = None) -> str:
     """The backend the INSTALLER should provision by default - the ONE policy both
     setup.bat and setup.sh call, so the two detectors can never drift:
@@ -152,7 +171,7 @@ def recommended_install_backend(det: "Detection | None" = None) -> str:
 def recommended_torch_variant(backend: str, det: "Detection | None" = None) -> str:
     """The PyTorch variant the INSTALLER should provision for the HuggingFace /
     transformers backend, given the user's chosen llama.cpp *backend* and the
-    detected hardware. Returns "cuda" | "rocm" | "none". Both setup.bat and
+    detected hardware. Returns "cuda" | "rocm" | "xpu" | "none". Both setup.bat and
     setup.sh call this (via ``python -m localm.hwdetect torch <backend>``) AFTER the
     backend pick, so the GGUF runtime choice and the HF torch choice stay coherent.
 
@@ -163,28 +182,89 @@ def recommended_torch_variant(backend: str, det: "Detection | None" = None) -> s
 
       * ``cuda`` backend           -> cuda   (the user asked for the NVIDIA path)
       * ``amd-rocm`` / ``hip``     -> rocm   (the user asked for the AMD path)
+      * ``sycl`` backend           -> xpu    (explicit Intel GGUF pick -> Intel HF torch)
       * ``cpu`` backend            -> none   (no GPU; HF torch is opt-in, see installer)
-      * ``vulkan`` / ``own`` / other -> cuda when an NVIDIA GPU is present (CUDA torch
-                                       is a clean pip wheel, no toolkit), else none.
-                                       NEVER rocm: a vendor-neutral pick must not drag
-                                       in the ROCm stack.
+      * ``vulkan`` / ``own`` / other -> cuda when an NVIDIA GPU is present, xpu when an
+                                       Intel GPU is present (both clean pip wheels that
+                                       self-provision their runtime; the xpu wheels carry
+                                       the oneAPI runtime), else none. NEVER rocm on a
+                                       vendor-neutral pick.
 
-    "none" means the installer SKIPS the heavy torch stack and tells the user how to
-    add CPU / CUDA / ROCm torch themselves: honest, no surprise download, and no
+    "none" means the installer SKIPS the heavy torch stack and tells the user how to add
+    CPU / CUDA / ROCm / Intel-XPU torch themselves: honest, no surprise download, and no
     wrong-vendor stack installed behind their back."""
     b = (backend or "").strip().lower()
     if b == "cuda":
         return "cuda"
     if b in ("amd-rocm", "rocm", "hip"):
         return "rocm"
+    if b == "sycl":
+        return "xpu"          # explicit Intel GGUF pick -> Intel HF torch (xpu)
     if b == "cpu":
         return "none"
-    # vulkan / own / metal / unknown / empty: vendor-neutral runtime choice. Offer
-    # CUDA torch only when NVIDIA is present (a no-toolkit wheel); never ROCm.
+    # vulkan / own / metal / unknown / empty: vendor-neutral runtime choice. Route the HF
+    # torch by the DETECTED GPU: NVIDIA -> cuda, Intel -> xpu (both clean pip wheels that
+    # self-provision; the xpu wheels carry the oneAPI runtime). Never ROCm on a neutral
+    # pick. No GPU signal -> none.
     d = det or detect()
     if "nvidia" in d.vendors:
         return "cuda"
+    if "intel" in d.vendors:
+        return "xpu"
     return "none"
+
+
+# PyTorch wheel index URLs by variant. Centralised so setup.bat / setup.sh never
+# drift on the source. cu126 = current CUDA line; xpu = Intel (the wheels carry the
+# oneAPI runtime); rocm-linux = upstream ROCm wheels (broad gfx); rocm-win = AMD's
+# Windows ROCm wheels (public preview, RDNA3/RDNA4). AMD-on-Windows is resolved PER
+# gfx family in torch_pip_args - gfx103X uses localm's bundled self-contained build.
+_TORCH_INDEX = {
+    "cuda": "https://download.pytorch.org/whl/cu126",
+    "xpu": "https://download.pytorch.org/whl/xpu",
+    "rocm-linux": "https://download.pytorch.org/whl/rocm6.2",
+    "rocm-win": "https://download.pytorch.org/whl/rocm6.4",
+}
+
+
+def torch_pip_args(backend: str, det: "Detection | None" = None) -> str:
+    """The exact ``uv pip install -p .venv <ARGS>`` arguments to provision the HF
+    PyTorch stack for *backend* on THIS machine - or "" when no verified prebuilt
+    exists and the installer should skip and guide the user. SINGLE source of truth
+    for the torch wheel SOURCE (setup.bat and setup.sh both consult it via
+    ``python -m localm.hwdetect torch-args <backend>``), so the gfx-specific
+    AMD-on-Windows routing lives in one tested place and the two installers cannot
+    drift.
+
+      * cuda            -> CUDA wheels (cu126); any OS with NVIDIA
+      * xpu             -> Intel wheels (self-provision the oneAPI runtime)
+      * rocm, Linux     -> upstream ROCm wheels (broad gfx support)
+      * rocm, Windows, gfx103X (RX 6000 / RDNA2) -> localm's bundled self-contained
+                           build, the ``[gpu]`` extra (no upstream Windows wheel for it)
+      * rocm, Windows, gfx110X / gfx120X (RX 7000 / 9000) -> AMD's Windows ROCm
+                           wheels (public preview)
+      * rocm, Windows, other / unknown AMD       -> "" (no verified prebuilt; the
+                           installer skips and prints how to add torch by hand)
+      * none            -> ""
+
+    Routing is unit-tested. Actual EXECUTION of the RX 7000/9000 Windows wheels is
+    pending real RDNA3/RDNA4 hardware (this dev box is gfx1030); the gfx103X path is
+    the verified one."""
+    variant = recommended_torch_variant(backend, det)
+    if variant == "cuda":
+        return f"torch torchvision --index-url {_TORCH_INDEX['cuda']}"
+    if variant == "xpu":
+        return f"torch torchvision --index-url {_TORCH_INDEX['xpu']}"
+    if variant == "rocm":
+        if sys.platform != "win32":
+            return f"torch torchvision --index-url {_TORCH_INDEX['rocm-linux']}"
+        fam = amd_gfx_family((det or detect()).gpu_names)
+        if fam == "gfx103x":
+            return "-e .[gpu]"          # bundled gfx1030 self-contained build
+        if fam in ("gfx110x", "gfx120x"):
+            return f"torch torchvision --index-url {_TORCH_INDEX['rocm-win']}"
+        return ""                        # unknown AMD on Windows: no verified prebuilt
+    return ""
 
 
 def main(argv=None) -> int:
@@ -193,9 +273,17 @@ def main(argv=None) -> int:
     tested detector + policy instead of each rolling their own.
 
     ``python -m localm.hwdetect torch <backend>`` -> prints the HF torch variant
-    ("cuda" | "rocm" | "none") for that backend on this machine, so the installers
-    pick a torch stack that matches the user's runtime choice (SETUP-1)."""
+    ("cuda" | "rocm" | "xpu" | "none") for that backend on this machine.
+
+    ``python -m localm.hwdetect torch-args <backend>`` -> prints the exact
+    ``uv pip install`` arguments for the torch wheel SOURCE on this machine
+    (resolving AMD-on-Windows per gfx family), or "" to skip. The installers use
+    this so the torch stack matches the user's runtime choice + hardware (SETUP-1)."""
     args = [] if argv is None else list(argv)
+    if args and args[0] == "torch-args":
+        backend = args[1] if len(args) > 1 else ""
+        print(torch_pip_args(backend))
+        return 0
     if args and args[0] == "torch":
         backend = args[1] if len(args) > 1 else ""
         print(recommended_torch_variant(backend))
