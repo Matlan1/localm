@@ -10,7 +10,7 @@ is not merely surprising - it forces a vendor stack the user stepped off.
 
 `recommended_torch_variant(backend, det)` is the single shared policy both
 setup.bat and setup.sh call (via ``python -m localm.hwdetect torch <backend>``)
-so the two installers can never drift. Returns one of "cuda" | "rocm" | "none".
+so the two installers can never drift. Returns one of "cuda" | "rocm" | "xpu" | "none".
 """
 
 from __future__ import annotations
@@ -63,13 +63,16 @@ def test_vulkan_on_nvidia_keeps_cuda_torch():
     assert tv("vulkan", MIXED) == "cuda"        # any NVIDIA present -> cuda
 
 
-def test_vulkan_with_no_or_intel_gpu_is_none():
+def test_vulkan_no_gpu_is_none_but_intel_is_xpu():
     assert tv("vulkan", NOGPU) == "none"
-    assert tv("vulkan", INTEL) == "none"        # no standard Arc pip wheel
+    # Intel Arc/Xe gets the native PyTorch XPU wheels (they self-provision the oneAPI
+    # runtime), so a vendor-neutral pick on Intel routes HF torch to xpu, not none.
+    assert tv("vulkan", INTEL) == "xpu"
 
 
 def test_own_backend_follows_vendor_but_never_forces_rocm():
     assert tv("own", NVIDIA) == "cuda"
+    assert tv("own", INTEL) == "xpu"            # Intel -> the native XPU wheels
     assert tv("own", AMD) == "none"             # power user: do not force ROCm
     assert tv("own", NOGPU) == "none"
 
@@ -97,7 +100,7 @@ def test_variant_is_always_a_known_token():
     for backend in ("cuda", "amd-rocm", "hip", "vulkan", "cpu", "own", "metal", ""):
         for det in (AMD, NVIDIA, INTEL, NOGPU, MIXED):
             assert hwdetect.recommended_torch_variant(backend, det) in (
-                "cuda", "rocm", "none")
+                "cuda", "rocm", "xpu", "none")
 
 
 # --------------------------- the CLI the shells call --------------------- #
@@ -116,7 +119,7 @@ def test_cli_torch_mode_is_deterministic_for_hw_independent_backends(capsys):
 def test_cli_torch_mode_emits_one_known_token(capsys):
     assert hwdetect.main(["torch", "vulkan"]) == 0
     out = capsys.readouterr().out.strip()
-    assert out in ("cuda", "none")               # depends on this box's GPU vendor
+    assert out in ("cuda", "xpu", "none")        # depends on this box's GPU vendor
 
 
 def test_cli_default_mode_unchanged(capsys):

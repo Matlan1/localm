@@ -148,28 +148,32 @@ rem  PyTorch powers the HuggingFace/transformers backend; GGUF chat needs none o
 rem  it. The variant FOLLOWS the llama.cpp backend you picked above (not just the
 rem  detected vendor), so choosing the vendor-neutral 'vulkan' runtime does NOT
 rem  drag in the AMD ROCm stack (the reported SETUP-1 surprise). One shared policy
-rem  decides it - `hwdetect torch <backend>` prints "cuda" | "rocm" | "none" - so
-rem  setup.bat and setup.sh can never disagree.
-set "TORCHVAR=none"
-.venv\Scripts\python -m localm.hwdetect torch %BACKEND% > "%TEMP%\localm_torch.txt" 2>nul
-if exist "%TEMP%\localm_torch.txt" for /f "usebackq delims=" %%a in ("%TEMP%\localm_torch.txt") do set "TORCHVAR=%%a"
+rem  decides it - `hwdetect torch-args <backend>` resolves the exact wheel SOURCE
+rem  for THIS hardware+OS (including AMD-on-Windows per gfx family: gfx103X uses the
+rem  bundled self-contained build, RX 7000/9000 use AMD's Windows ROCm wheels), so
+rem  setup.bat and setup.sh can never disagree and every card gets correct packages.
+set "TORCHSPEC="
+.venv\Scripts\python -m localm.hwdetect torch-args %BACKEND% > "%TEMP%\localm_torch.txt" 2>nul
+if exist "%TEMP%\localm_torch.txt" for /f "usebackq delims=" %%a in ("%TEMP%\localm_torch.txt") do set "TORCHSPEC=%%a"
 del "%TEMP%\localm_torch.txt" 2>nul
-if "%TORCHVAR%"=="" set "TORCHVAR=none"
 echo.
-if /i "%TORCHVAR%"=="rocm" (
-    echo  Installing PyTorch ^(AMD ROCm^) + transformers for HuggingFace models ...
-    uv pip install -p .venv -e ".[gpu,audio]" || echo  [!] ROCm torch stack failed - GGUF chat still works without it.
-) else if /i "%TORCHVAR%"=="cuda" (
-    echo  Installing PyTorch ^(NVIDIA CUDA^) + transformers for HuggingFace models ...
-    uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu124 || echo  [!] CUDA torch failed - GGUF chat still works without it.
-    uv pip install -p .venv "transformers[kernels]~=5.12" "tokenizers==0.22.2" "accelerate>=1.0" "pillow>=10.0" "soundfile>=0.12" || echo  [!] transformers stack failed - GGUF chat still works.
-) else (
+if not defined TORCHSPEC (
     echo  Skipping the PyTorch/transformers stack ^(not needed for GGUF chat^).
     echo  You picked the '%BACKEND%' runtime, so no vendor GPU torch was auto-installed.
     echo  To use HuggingFace transformers models, add PyTorch for your setup later:
     echo      CPU ^(any machine^):    uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cpu
-    echo      NVIDIA CUDA:          uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu124
+    echo      NVIDIA CUDA:          uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu126
     echo      AMD ROCm ^(gfx103X^):   uv pip install -p .venv -e ".[gpu]"
+) else if "%TORCHSPEC%"=="-e .[gpu]" (
+    rem  gfx103X (RX 6000): the bundled self-contained build carries torch + the HF
+    rem  stack + the ROCm runtime; add audio (soundfile) for unified-audio models.
+    echo  Installing PyTorch ^(AMD ROCm, gfx103X^) + transformers for HuggingFace models ...
+    uv pip install -p .venv -e ".[gpu,audio]" || echo  [!] ROCm torch stack failed - GGUF chat still works without it.
+) else (
+    echo  Installing PyTorch + transformers for HuggingFace models ...
+    echo %TORCHSPEC% | find "rocm6.4" >nul && echo    ^(note: AMD ROCm on Windows is in public preview - expect rough edges^)
+    uv pip install -p .venv %TORCHSPEC% || echo  [!] torch install failed - GGUF chat still works without it.
+    uv pip install -p .venv "transformers[kernels]~=5.12" "tokenizers==0.22.2" "accelerate>=1.0" "pillow>=10.0" "soundfile>=0.12" || echo  [!] transformers stack failed - GGUF chat still works.
 )
 
 rem ---- provision the native llama.cpp binaries ------------------------------

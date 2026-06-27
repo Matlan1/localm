@@ -139,22 +139,36 @@ localm run mymodel --gpu-layers 0 --prompt "hello"
 ## HuggingFace Transformers (PyTorch)
 
 GGUF inference needs no PyTorch - this section is only for HF-format models. The
-installer sets PyTorch up to match your GPU; to do it by hand:
+installer auto-detects your GPU and installs the matching torch wheels (it asks
+`localm.hwdetect torch-args <backend>`, the single source of truth both `setup.bat`
+and `setup.sh` consult, so the right packages are picked for your hardware+OS). To
+do it by hand, use the line for your hardware:
 
 ```bash
-# AMD (ROCm 7.13, Windows, Python 3.12) - the [gpu] extra:
+# NVIDIA (CUDA), any OS:
+uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu126
+
+# Intel (Arc / Xe), any OS - the wheels carry the oneAPI runtime:
+uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/xpu
+
+# AMD on Linux - upstream ROCm wheels (broad gfx support):
+uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/rocm6.2
+
+# AMD on Windows, RX 6000 / RDNA2 (gfx103X) - localm's bundled self-contained build:
 uv pip install -p .venv -e ".[gpu]"
 
-# NVIDIA (CUDA):
-uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu124
+# AMD on Windows, RX 7000 / 9000 (RDNA3 / RDNA4) - AMD's Windows ROCm wheels (public preview):
+uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/rocm6.4
 
-# CPU:
+# CPU (any machine):
 uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cpu
 ```
 
-The `[gpu]` extra is AMD-ROCm-specific (Windows, Python 3.12) - do **not** install
-it on an NVIDIA box; use the CUDA wheels above. GPU is selected automatically;
-override with `--device cuda` / `--device cpu`.
+The `[gpu]` extra is the gfx103X (RX 6000) self-contained build (Windows, Python
+3.12) - on other AMD Windows cards use the ROCm 6.4 preview wheels above, and on
+Linux use the upstream ROCm index. AMD ROCm on Windows is a recent **public
+preview**, so expect rough edges there. GPU is selected automatically; override
+with `--device cuda` / `--device xpu` / `--device cpu`.
 
 ## When something goes wrong
 
