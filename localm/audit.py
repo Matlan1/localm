@@ -201,8 +201,8 @@ class AuditLog:
         try:
             self._write("system", {"msg": "session ended"})
             self._fh.close()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("AuditLog close failed: %s", e)
 
     def _write(self, event_type: str, data: Any) -> None:
         try:
@@ -265,8 +265,8 @@ class MarkdownTranscript:
                 if reasoning.strip():
                     fh.write("\n<details>\n<summary>reasoning</summary>\n\n"
                              f"{reasoning.strip()}\n\n</details>\n")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("MarkdownTranscript write failed: %s", e)
 
 
 # ---------------------------------------------------------------------------

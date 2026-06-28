@@ -88,6 +88,32 @@ class _RingBufferHandler(logging.Handler):
         return list(self._buf)
 
 
+def dump_ring_buffer() -> None:
+    """Save the in-memory ring buffer to disk to survive os.execv."""
+    if _ring_handler:
+        try:
+            from localm.config import HOME_DIR
+            import json
+            path = HOME_DIR / "run" / "ring_buffer.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(list(_ring_handler._buf)), encoding="utf-8")
+        except Exception:
+            pass
+
+def load_ring_buffer() -> None:
+    """Load the saved ring buffer from disk after os.execv."""
+    if _ring_handler:
+        try:
+            from localm.config import HOME_DIR
+            import json
+            path = HOME_DIR / "run" / "ring_buffer.json"
+            if path.exists():
+                items = json.loads(path.read_text(encoding="utf-8"))
+                _ring_handler._buf.extend(items)
+                path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
 _ring_handler: Optional[_RingBufferHandler] = None
 
 
@@ -112,6 +138,7 @@ def install_ring_buffer(capacity: int = _RING_CAPACITY) -> bool:
     if logger.level == logging.NOTSET or logger.level > logging.INFO:
         logger.setLevel(logging.INFO)
     _ring_handler = handler
+    load_ring_buffer()
     return True
 
 

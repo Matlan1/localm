@@ -710,17 +710,8 @@ function showKeyGate(message) {
   }
 }
 
-// Decide whether the key gate should offer "Install certificate". Over HTTPS,
-// offer it UNLESS the local CA is CONFIRMED trusted. The trust signal: a service
-// worker registers only in a real secure context, so once SW registration
-// succeeds (__swFailed === false) the CA is trusted and the step stays hidden - a
-// returning trusted user is never told to "reinstall the certificate" (the
-// SEAMLESS goal). But when trust is UNKNOWN - __swFailed still undefined, e.g.
-// Firefox on a phone, or a clicked-through self-signed cert where SW registration
-// never cleanly resolved - we MUST still offer it: gating on `=== true` (#201) hid
-// the cert from exactly those mobile users, leaving them on a self-signed cert
-// with no way to download it. So the test is `!== false` (show unless proven
-// trusted). Re-run from index.html's renderInstall when SW registration resolves.
+// Decide whether the key gate should offer "Install certificate". 
+// The user requested this to be always visible on the API key authentication page.
 function updateKeyGateCertStep() {
   const cert = $("key-gate-cert");
   if (!cert) return;
@@ -1674,7 +1665,7 @@ window.openImageLightbox = openImageLightbox;
 function addMessageRow(container, role, text, opts = {}) {
   const row = el("div", "msg-row " + role + (opts.cls ? " " + opts.cls : ""));
   row.appendChild(el("div", "msg-role",
-    opts.label || (role === "user" ? "You" : "Model")));
+    opts.label || (role === "user" ? "You" : (modelCache.active || "Model"))));
   const body = el("div", "msg-body");
   if (role === "user") {
     // CHAT-1: a user's OWN message renders LITERALLY (exactly as typed). Markdown is
@@ -3379,6 +3370,18 @@ async function runCompletion(conv, webDepth = 0, web = null) {
     if (usage.ttft_ms != null) bits.push(`TTFT ${usage.ttft_ms} ms`);
     if (usage.tokens_per_sec != null) bits.push(`${usage.tokens_per_sec} tok/s`);
     $("chat-usage").textContent = bits.join(" · ");
+    
+    // Update context gauge
+    const gaugeContainer = $("context-gauge-container");
+    const gaugeBar = $("context-gauge-bar");
+    if (gaugeContainer && gaugeBar && usage.context_capacity) {
+      const pct = Math.min(100, Math.max(0, (usage.total_tokens / usage.context_capacity) * 100));
+      gaugeBar.style.width = pct + "%";
+      gaugeBar.className = "context-gauge-bar" + (pct > 90 ? " danger" : (pct > 75 ? " warning" : ""));
+      gaugeContainer.classList.add("visible");
+    } else if (gaugeContainer) {
+      gaugeContainer.classList.remove("visible");
+    }
   }
   renderChat();
 
@@ -3584,7 +3587,7 @@ function exportConversation() {
   if (!conv || !conv.messages.length) { toast("Nothing to export", true); return; }
   const lines = [`# ${conv.title}`, ""];
   for (const m of conv.messages) {
-    lines.push(`**${m.role === "user" ? "You" : "Model"}:**`, "", msgText(m), "");
+    lines.push(`**${m.role === "user" ? "You" : (modelCache.active || "Model")}:**`, "", msgText(m), "");
     if (msgImages(m).length) lines.push(`*[${msgImages(m).length} image(s) attached]*`, "");
   }
   const blob = new Blob([lines.join("\n")], { type: "text/markdown" });
@@ -4301,9 +4304,10 @@ $("setup-cancel").onclick = () => {
 
 /* ---- directory picker (browse… on the setup form) ---- */
 
-async function fetchDirs(path) {
-  const r = await fetch("/api/fs/dirs?path=" + encodeURIComponent(path || ""),
-                        { headers: authHeaders() });
+async function fetchDirs(path, includeFiles = false) {
+  let url = "/api/fs/dirs?path=" + encodeURIComponent(path || "");
+  if (includeFiles) url += "&include_files=true";
+  const r = await fetch(url, { headers: authHeaders() });
   const data = await r.json();
   if (!r.ok) throw new Error(data.detail || r.statusText);
   return data;
@@ -4370,6 +4374,77 @@ function pickDirectory(title, startPath = "") {
         }
       }
       show(startPath).catch(() => {});
+    });
+  });
+}
+
+/** Modal file browser. Resolves with the chosen file path, or null when the
+ *  modal is dismissed. */
+function pickFile(title, startPath = "") {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      $("modal").style.display = "none";
+      resolve(value);
+    };
+    openModal(title || "Pick a file", (body) => {
+      const pathEl = el("div", "dir-picker-path");
+      const listEl = el("div", "dir-picker-list");
+      body.append(pathEl, listEl);
+      let current = "";
+
+      const watch = setInterval(() => {
+        if ($("modal").style.display === "none") {
+          clearInterval(watch);
+          finish(null);
+        }
+      }, 200);
+
+      async function show(path) {
+        let data;
+        try {
+          data = await fetchDirs(path, true);
+        } catch (e) {
+          toast("Cannot open: " + e.message, true);
+          if (path) { show(""); return; }
+          throw e;
+        }
+        current = data.path;
+        pathEl.textContent = current || "This PC";
+        listEl.innerHTML = "";
+        
+        if (data.parent !== null) {
+          const up = el("div", "item parent", "↑ Parent directory");
+          up.onclick = () => show(data.parent);
+          listEl.appendChild(up);
+        }
+        
+        if (data.dirs && data.dirs.length) {
+          for (const d of data.dirs) {
+            const row = el("div", "item dir", d + "/");
+            // Windows: roots have trailing slash, else join with slash
+            const next = current ? (current.endsWith("/") || current.endsWith("\\") ? current + d : current + "/" + d) : d;
+            row.onclick = () => show(next);
+            listEl.appendChild(row);
+          }
+        }
+        
+        if (data.files && data.files.length) {
+          for (const f of data.files) {
+            const row = el("div", "item file", f);
+            const fullPath = current ? (current.endsWith("/") || current.endsWith("\\") ? current + f : current + "/" + f) : f;
+            row.onclick = () => finish(fullPath);
+            listEl.appendChild(row);
+          }
+        }
+        
+        if (!data.dirs?.length && !data.files?.length) {
+          listEl.appendChild(el("div", "empty", "No items here."));
+        }
+      }
+      show(startPath);
     });
   });
 }

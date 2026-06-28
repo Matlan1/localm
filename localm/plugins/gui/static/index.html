@@ -113,6 +113,9 @@
           <button class="attach chat-camera" id="chat-camera" title="Take a photo with the camera">&#128247;</button>
           <input type="file" id="chat-file" accept="image/*,.pdf,.docx,.txt,.md,.markdown,.rst,.html,.htm,.ipynb,.json,.jsonl,.yaml,.yml,.toml,.csv,.tsv,.log,.py,.js,.ts,.java,.c,.h,.cpp,.cs,.go,.rs,.rb,.sh,.ps1,.sql,.xml,.css" multiple style="display:none">
           <input type="file" id="chat-camera-file" accept="image/*" capture="environment" style="display:none">
+          <div id="context-gauge-container" class="context-gauge-container">
+            <div id="context-gauge-bar" class="context-gauge-bar"></div>
+          </div>
           <textarea id="chat-input" rows="1" placeholder="Message the model…" title="Enter to send · Shift+Enter for a new line"></textarea>
           <button class="send" id="chat-send" title="Send">&#10148;</button>
         </div>
@@ -234,6 +237,9 @@
           <div class="row">
             <input type="text" id="pull-spec" placeholder="owner/repo:file.gguf  ·  https://…  ·  a local folder or .gguf path" spellcheck="false">
             <input type="text" id="pull-name" placeholder="name (optional)" spellcheck="false" style="max-width:180px">
+            <select id="pull-mmproj" style="display:none; max-width:200px">
+              <option value="">No vision projector</option>
+            </select>
             <button class="btn-quiet" id="pull-browse" title="Pick a folder on this machine that holds the model(s)">Browse…</button>
             <button class="btn-primary" id="pull-start">Add</button>
           </div>
@@ -463,6 +469,12 @@
               <label>API key - saved on this device (a secure cookie) so you stay
                 signed in. Leave blank and Save to sign out.</label>
               <input type="password" id="gui-api-key" placeholder="only needed when LOCALM_API_KEY is set">
+              
+              <label style="margin-top:20px; display:flex; align-items:center; gap:8px;">
+                <input type="checkbox" id="show-mmproj-files" style="width:auto; margin:0">
+                Show vision projector (.mmproj) files in repository search results
+              </label>
+
               <div class="actions">
                 <button class="btn-quiet" id="gui-key-save">Save key</button>
                 <button class="btn-quiet" id="gui-clear-convs">Delete all conversations</button>
@@ -545,7 +557,7 @@
               <textarea id="bug-desc" rows="4" placeholder="What did you do, and what happened?"></textarea>
               <label class="check"><input type="checkbox" id="bug-include-log"> Also attach this session's full debug log tail (debug mode only)</label>
               <div class="actions">
-                <button class="btn" id="bug-send">Save report</button>
+                <button class="btn-primary" id="bug-send">Save report</button>
               </div>
               <div id="bug-result" class="sub" hidden></div>
             </section>
@@ -569,7 +581,7 @@
               downloader instead.</div>
               <div class="actions">
                 <input type="file" id="upload-input" multiple>
-                <button class="btn" id="upload-send">Upload</button>
+                <button class="btn-primary" id="upload-send">Upload</button>
               </div>
               <div id="upload-result" class="sub" hidden></div>
               <ul id="upload-list" class="upload-list"></ul>

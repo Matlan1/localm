@@ -130,9 +130,6 @@ echo    [3] cuda       - NVIDIA, peak performance (fetches the CUDA runtime for 
 echo    [4] amd-rocm   - AMD RX 6000 (gfx103X), self-contained
 echo    [5] cpu        - no GPU
 echo    [6] I will build / provide my own (skip the download)
-echo    (your pick is load-tested here; if it cannot load on this machine,
-echo     setup explains why and offers the universal Vulkan build instead -
-echo     your choice is never changed silently)
 set "BSEL="
 set /p "BSEL=  Pick 1-6 [1]: "
 if not defined BSEL set "BSEL=1"
@@ -159,11 +156,6 @@ del "%TEMP%\localm_torch.txt" 2>nul
 echo.
 if not defined TORCHSPEC (
     echo  Skipping the PyTorch/transformers stack ^(not needed for GGUF chat^).
-    echo  You picked the '%BACKEND%' runtime, so no vendor GPU torch was auto-installed.
-    echo  To use HuggingFace transformers models, add PyTorch for your setup later:
-    echo      CPU ^(any machine^):    uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cpu
-    echo      NVIDIA CUDA:          uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu126
-    echo      AMD ROCm ^(gfx103X^):   uv pip install -p .venv -e ".[gpu]"
 ) else if "%TORCHSPEC%"=="-e .[gpu]" (
     rem  gfx103X (RX 6000): the bundled self-contained build carries torch + the HF
     rem  stack + the ROCm runtime; add audio (soundfile) for unified-audio models.
@@ -187,13 +179,21 @@ if /i "%BACKEND%"=="own" (
     set /p "LLAMABUILD=  Path to your llama.cpp build dir with llama.dll (blank = skip): "
     if not "!LLAMABUILD!"=="" (
         .venv\Scripts\localm setup-llama --from "!LLAMABUILD!"
-        if errorlevel 1 echo  [!] Provisioning failed - run later: .venv\Scripts\localm setup-llama --from "!LLAMABUILD!"
+        if errorlevel 1 (
+            echo  [!] Provisioning failed - run later: .venv\Scripts\localm setup-llama --from "!LLAMABUILD!"
+            pause
+            exit /b 1
+        )
     ) else (
         echo  Skipped - provision later: .venv\Scripts\localm setup-llama --backend ^<vulkan^|cuda^|amd-rocm^|cpu^>
     )
 ) else (
     .venv\Scripts\localm setup-llama --backend %BACKEND%
-    if errorlevel 1 echo  [!] Provisioning failed - run later: .venv\Scripts\localm setup-llama --backend %BACKEND%
+    if errorlevel 1 (
+        echo  [!] Provisioning failed - run later: .venv\Scripts\localm setup-llama --backend %BACKEND%
+        pause
+        exit /b 1
+    )
 )
 
 rem ---- choose where data lives ----------------------------------------------

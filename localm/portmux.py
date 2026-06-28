@@ -81,6 +81,35 @@ def run_server(
     bugreport.check_and_report_prior_crash()
     bugreport.arm_crash_guard(context={"host": host, "port": port,
                                         "tls": bool(ssl_certfile)})
+    zeroconf = None
+    info = None
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        try:
+            from zeroconf import Zeroconf, ServiceInfo
+            import socket
+            hostname = socket.gethostname()
+            
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                    s.connect(("8.8.8.8", 80))
+                    ip = s.getsockname()[0]
+            except Exception:
+                ip = socket.gethostbyname(hostname)
+                
+            info = ServiceInfo(
+                "_localm._tcp.local.",
+                f"{hostname}._localm._tcp.local.",
+                addresses=[socket.inet_aton(ip)],
+                port=port,
+                properties={'tls': str(bool(ssl_certfile)).lower()},
+                server=f"{hostname}.local.",
+            )
+            zeroconf = Zeroconf()
+            zeroconf.register_service(info)
+        except Exception as e:
+            from localm.debuglog import logger as _dbg
+            _dbg.warning("mDNS broadcast failed: %s", e)
+
     try:
         if not ssl_certfile:
             # Plain-HTTP bind (the loopback default, or a network bind without
@@ -118,6 +147,13 @@ def run_server(
             uvicorn.run(app, host=host, port=port, log_level=log_level,
                         ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
     finally:
+        if zeroconf and info:
+            try:
+                zeroconf.unregister_service(info)
+            except Exception:
+                pass
+            finally:
+                zeroconf.close()
         bugreport.disarm_crash_guard()
 
 
@@ -146,9 +182,20 @@ async def _serve_async(app, host, port, ssl_certfile, ssl_keyfile, log_level) ->
         await _handle_conn(reader, writer, internal_port, port)
 
     demux = await asyncio.start_server(_on_conn, host=host, port=port)
+
+    # SRV-6: Ensure Windows event loop wakes up to process Ctrl+C
+    wakeup_task = None
+    if sys.platform == "win32":
+        async def _wakeup():
+            while True:
+                await asyncio.sleep(0.5)
+        wakeup_task = asyncio.ensure_future(_wakeup())
+
     try:
         await serve_task          # runs until Ctrl+C / should_exit
     finally:
+        if wakeup_task:
+            wakeup_task.cancel()
         demux.close()
         try:
             await demux.wait_closed()
@@ -183,9 +230,20 @@ async def _serve_async_plain(app, host, port, log_level) -> None:
         await _handle_conn_plain(reader, writer, internal_port, port, state)
 
     demux = await asyncio.start_server(_on_conn, host=host, port=port)
+
+    # SRV-6: Ensure Windows event loop wakes up to process Ctrl+C
+    wakeup_task = None
+    if sys.platform == "win32":
+        async def _wakeup():
+            while True:
+                await asyncio.sleep(0.5)
+        wakeup_task = asyncio.ensure_future(_wakeup())
+
     try:
         await serve_task          # runs until Ctrl+C / should_exit
     finally:
+        if wakeup_task:
+            wakeup_task.cancel()
         demux.close()
         try:
             await demux.wait_closed()

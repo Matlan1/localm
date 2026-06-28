@@ -486,7 +486,16 @@ def _ring_activity() -> list:
     """The in-memory recent-activity buffer, or [] if unavailable. Never raises."""
     try:
         from localm.debuglog import recent_activity
-        return recent_activity()
+        lines = recent_activity()
+        try:
+            from localm.config import home_dir
+            pre_log = home_dir() / "logs" / "pre_restart.log"
+            if pre_log.exists():
+                lines = pre_log.read_text(encoding="utf-8").splitlines() + ["--- RESTART ---"] + lines
+                pre_log.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return lines
     except Exception:
         return []
 

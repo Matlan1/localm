@@ -648,7 +648,10 @@ class LlamaCpp:
         max_new_tokens = self._fit_generation_budget(n_prompt, max_new_tokens)
 
         _ctx = _quiet_stderr if not self._verbose else contextlib.nullcontext
-        needed = n_prompt + max_new_tokens + 64
+        
+        # If unlimited (<= 0), allocate a modest chunk up front and grow later
+        initial_budget = max_new_tokens if max_new_tokens > 0 else 512
+        needed = n_prompt + initial_budget + 64
 
         # One contiguous suppression scope covering context work and prefill.
         # The ROCm lazy-buffer verification messages fire asynchronously
@@ -685,8 +688,9 @@ class LlamaCpp:
         # stop-string match in _filtered_stream abandoning this generator,
         # client abort). Only a genuinely exhausted token budget is "length".
         self.last_finish_reason = "stop"
+        tokens_generated = 0
         try:
-            for _ in range(max_new_tokens):
+            while max_new_tokens <= 0 or tokens_generated < max_new_tokens:
                 # --- locked native region 1: sample the next token ---
                 with self._gen_lock:
                     if self._stop.is_set() or self._ctx_ptr is None:
@@ -715,15 +719,28 @@ class LlamaCpp:
                     with _ctx():
                         ret = api.llama_decode(self._ctx_ptr, batch)
                     if ret != 0:
-                        # KV cache full or error - the reply was cut short.
-                        # The cache bookkeeping has diverged from native KV
-                        # state, so invalidate it: the next turn must not try
-                        # to reuse a prefix the cache no longer truly holds.
-                        self.last_finish_reason = "length"
-                        self._cached_tokens = []
-                        break
+                        # KV cache full or error.
+                        # Attempt mid-generation context growth if there is headroom.
+                        current_needed = pos + 512
+                        target = self._target_ctx(current_needed)
+                        if target > self._ctx_capacity:
+                            # We can grow! Re-prefill the context.
+                            prompt_and_gen = self._cached_tokens.copy()
+                            self._prefill_fresh_context(prompt_and_gen, current_needed)
+                            # Retry decode on the newly grown context
+                            with _ctx():
+                                ret = api.llama_decode(self._ctx_ptr, batch)
+                            
+                        if ret != 0:
+                            # The reply was cut short and we cannot grow further.
+                            # The cache bookkeeping has diverged from native KV
+                            # state, so invalidate it.
+                            self.last_finish_reason = "length"
+                            self._cached_tokens = []
+                            break
                     self._cached_tokens.append(token)
                     pos += 1
+                    tokens_generated += 1
             else:
                 # Budget exhausted without the model finishing its turn
                 self.last_finish_reason = "length"

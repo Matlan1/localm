@@ -600,7 +600,7 @@ pre:hover .canvas-btn { opacity: 1; }
 #coder-setup .checks { display: flex; gap: 22px; margin-top: 16px; font-size: 13.5px; }
 #coder-setup .checks label { display: flex; align-items: center; gap: 7px; margin: 0; cursor: pointer; }
 #coder-setup .actions { margin-top: 24px; }
-.btn-primary {
+.btn, .btn-primary {
   background: var(--accent);
   color: #fff;
   border: none;
@@ -609,8 +609,8 @@ pre:hover .canvas-btn { opacity: 1; }
   font-size: 14px;
   cursor: pointer;
 }
-.btn-primary:disabled { background: var(--border); cursor: default; }
-.btn-quiet {
+.btn:disabled, .btn-primary:disabled { background: var(--border); cursor: default; }
+.btn-secondary, .btn-quiet {
   background: none;
   border: 1px solid var(--border);
   color: var(--text-dim);
@@ -1120,6 +1120,39 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
   max-width: var(--thread-max); margin: 0 auto 6px;
   display: flex; gap: 8px; flex-wrap: wrap;
 }
+.composer {
+  display: flex; align-items: flex-end; gap: 8px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 8px 12px;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  position: relative;
+  overflow: hidden;
+}
+
+.context-gauge-container {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 2px;
+  background-color: transparent;
+  opacity: 0;
+  transition: opacity 0.3s;
+  pointer-events: none;
+}
+.context-gauge-container.visible {
+  opacity: 1;
+}
+.context-gauge-bar {
+  height: 100%;
+  width: 0%;
+  background-color: var(--accent);
+  transition: width 0.3s ease-out, background-color 0.3s;
+}
+.context-gauge-bar.warning { background-color: var(--orange, #d29922); }
+.context-gauge-bar.danger { background-color: var(--red, #cb2431); }
 .chip {
   display: flex; align-items: center; gap: 6px;
   background: var(--bg-input); border: 1px solid var(--border);

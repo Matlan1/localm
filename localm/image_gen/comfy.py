@@ -684,9 +684,12 @@ def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
         launch_out = subprocess.DEVNULL
         launch_log_path = None
     try:
-        subprocess.Popen(argv, cwd=workdir,
+        proc = subprocess.Popen(argv, cwd=workdir,
                          stdout=launch_out,
                          stderr=subprocess.STDOUT)
+        _t.sleep(0.5)
+        if proc.poll() is not None and proc.returncode != 0:
+            return False, f"ComfyUI launcher exited immediately with code {proc.returncode}"
     except Exception as e:
         return False, f"Could not launch ComfyUI ({launch_cmd}): {e}"
     finally:

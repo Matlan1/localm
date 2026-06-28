@@ -148,6 +148,7 @@ class UsageInfo(BaseModel):
     # localm extensions - OpenAI clients ignore unknown fields
     ttft_ms:        Optional[float] = None   # time to first generated token
     tokens_per_sec: Optional[float] = None   # completion tokens / generation time
+    context_capacity: Optional[int] = None   # total tokens allowed in context
 
 
 class ChatChunk(BaseModel):

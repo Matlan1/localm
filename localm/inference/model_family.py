@@ -16,7 +16,7 @@ from __future__ import annotations
 # is recognised, not just the canonical repos. Lower-cased substring match.
 THINKING_MARKERS = (
     "deepseek-r1", "deepseek_r1", "qwq", "qwen3",
-    "thinking", "reasoning", "-r1", "_r1", "cot", "magistral",
+    "thinking", "reasoning", "-r1", "_r1", "cot", "magistral", "gemma-4",
 )
 
 

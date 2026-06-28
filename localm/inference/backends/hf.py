@@ -199,8 +199,8 @@ class HFBackend(BaseBackend):
             # Fall back to plain tokenizer. This is intentional for text-only
             # models (no processor to load), but a logged failure here may mean
             # a genuine multimodal model lost its image/audio capability, so
-            # surface it under --debug rather than swallowing it silently.
-            logger.debug(
+            # surface it rather than swallowing it silently.
+            logger.warning(
                 "processor load failed (%s: %s); falling back to text-only tokenizer",
                 type(e).__name__, e,
             )

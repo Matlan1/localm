@@ -1040,7 +1040,9 @@ def benchmark(model, gen_tokens, prompts, ctx, gpu_layers):
                    "refused for full-repo snapshots). Download is deleted on mismatch.")
 @click.option("--redownload", is_flag=True,
               help="Download even when an identical model is already registered.")
-def pull(model_spec, name, sha256, redownload):
+@click.option("--mmproj", default=None, metavar="FILE",
+              help="Download an associated mmproj file alongside the main model.")
+def pull(model_spec, name, sha256, redownload, mmproj):
     """Download a model from HuggingFace or a URL.
 
     \b
@@ -1059,7 +1061,7 @@ def pull(model_spec, name, sha256, redownload):
 
     Models are stored in ~/.localm/models/ and registered automatically.
     """
-    if not pull_model(model_spec, name, expected_sha256=sha256, redownload=redownload):
+    if not pull_model(model_spec, name, expected_sha256=sha256, redownload=redownload, mmproj_spec=mmproj):
         sys.exit(1)
 
 
@@ -2229,7 +2231,30 @@ except ImportError:
 # Provision the native llama.cpp binaries into localm's own venv (self-contained).
 from .setup_llama import main as _setup_llama_main
 main.add_command(_setup_llama_main, name="setup-llama")
-
+@main.command("mcp")
+def mcp():
+    """Start the MCP server over STDIO.
+    
+    Provides tools for external MCP clients to interact with localm.
+    Requires the mcp plugin to be enabled.
+    """
+    from .config import load_config
+    plugins = load_config().get("plugins", {})
+    if not plugins.get("mcp", {}).get("enabled"):
+        import sys
+        from .winconsole import console
+        console.print("[red]Error: MCP plugin is not enabled.[/red] Run 'localm plugin enable mcp' first.", stderr=True)
+        sys.exit(1)
+        
+    try:
+        from .plugins.mcpserver import main as mcp_main
+    except ImportError as e:
+        import sys
+        from .winconsole import console
+        console.print(f"[red]Error loading MCP server:[/red] {e}")
+        sys.exit(1)
+        
+    mcp_main()
 
 @main.command("bug-report")
 @click.option("-m", "--message", default="", help="One-line summary of the problem.")

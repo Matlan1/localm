@@ -79,6 +79,9 @@ def set_api_key(key: Optional[str]) -> None:
     if not key or not key.strip():
         clear_api_key()
         return
+    key = key.strip()
+    if len(key) < 8:
+        raise ValueError("API key must be at least 8 characters long.")
     from localm.config import ensure_dirs
     ensure_dirs()
     path = key_file()
