@@ -23,8 +23,8 @@ class UnsupportedInputError(ValueError):
 IMAGE_UNSUPPORTED_MESSAGE = (
     "This model cannot accept image input, so the attached image would be "
     "ignored. To chat about images, load a vision-capable HuggingFace-format "
-    "model (for example a Gemma 3 vision or Qwen2-VL checkpoint). The built-in "
-    "GGUF backend is text-only: the --mmproj / image path is not implemented."
+    "model, or ensure you have a vision projector (.mmproj) loaded alongside "
+    "your GGUF model."
 )
 
 

@@ -21,7 +21,7 @@
     "class_type": "ConditioningZeroOut"
   },
   "5": {
-    "inputs": { "model": ["1", 0], "shift": 5.0 },
+    "inputs": { "model": ["1", 0], "shift": 3.0 },
     "class_type": "ModelSamplingSD3"
   },
   "6": {

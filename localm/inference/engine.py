@@ -210,6 +210,13 @@ class Engine:
         """
         return self._backend.count_tokens(text)
 
+    def context_capacity(self) -> Optional[int]:
+        """Return the maximum token capacity of the loaded model's context."""
+        try:
+            return getattr(self._backend, "_n_ctx_max", None) or self._backend._llm.n_ctx()
+        except AttributeError:
+            return None
+
     def embed(self, texts: List[str]) -> List[List[float]]:
         """
         Return embedding vectors for a list of texts.

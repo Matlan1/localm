@@ -432,6 +432,26 @@ def _do_restart() -> None:
         bugreport.disarm_crash_guard()
     except Exception:
         pass
+
+    try:
+        global _audit
+        if _audit is not None and hasattr(_audit, "close"):
+            _audit.close()
+    except Exception:
+        pass
+
+    try:
+        from localm.debuglog import dump_ring_buffer, recent_activity
+        dump_ring_buffer()
+        # Also write a clear text log for the bug reporter to ingest directly,
+        # in case the JSON buffer fails to load back into memory.
+        from localm.config import home_dir
+        pre_log = home_dir() / "logs" / "pre_restart.log"
+        pre_log.parent.mkdir(parents=True, exist_ok=True)
+        pre_log.write_text("\n".join(recent_activity()), encoding="utf-8")
+    except Exception:
+        pass
+
     import os
     import sys
     os.execv(sys.executable, _restart_argv())
@@ -1131,6 +1151,13 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
         block = (cfg.get("plugins") or {}).get(name) or {}
         return {"plugin": name, "fields": media_schema_json(name, block, cfg)}
 
+    @app.get("/v1/comfy/status", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
+    async def get_comfy_status():
+        """Returns the alive status of the ComfyUI server."""
+        from localm.image_gen.comfy import _comfy_alive, _comfy_api_url
+        alive = _comfy_alive(_comfy_api_url(), timeout=1.0)
+        return {"alive": alive}
+
     # ---------------------------------------------------------------- #
     #  API keys - scoped keystore (auth.json)                            #
     # ---------------------------------------------------------------- #
@@ -1585,6 +1612,26 @@ async def _stream_sse(
     )
     prompt_tokens = engine.count_tokens(prompt_text)
 
+    # Context Limit Handling: Trigger compact_messages if we are dangerously close to the limit.
+    # We reserve a buffer of 2048 tokens for compaction overhead and response generation.
+    capacity = engine.context_capacity()
+    if capacity is not None and len(messages) > 3:
+        buffer = max(2048, int(capacity * 0.10))
+        if capacity - prompt_tokens < buffer:
+            from localm.inference.compact import compact_messages
+            def _gen_for_compact(ms: list[dict], max_t: int) -> str:
+                return "".join(engine.chat_stream(ms, max_tokens=max_t, temperature=0.3))
+            new_messages, changed = compact_messages(messages, _gen_for_compact)
+            if changed:
+                messages = list(new_messages)
+                prompt_text = " ".join(
+                    m.get("content") if isinstance(m.get("content"), str)
+                    else " ".join(p.get("text", "") for p in (m.get("content") or [])
+                                  if p.get("type") == "text")
+                    for m in messages
+                )
+                prompt_tokens = engine.count_tokens(prompt_text)
+
     # Role announcement
     role_chunk = ChatChunk(
         id=chunk_id,
@@ -1675,6 +1722,7 @@ async def _stream_sse(
         total_tokens=prompt_tokens + completion_tokens,
         ttft_ms=_ttft_ms(gen_start, first_token_at),
         tokens_per_sec=_tokens_per_sec(completion_tokens, gen_elapsed),
+        context_capacity=engine.context_capacity(),
     )
     done = ChatChunk.done(model_id, chunk_id, ts, usage=usage,
                           finish_reason=_engine_finish_reason(engine))
@@ -1815,6 +1863,23 @@ async def _complete(
     )
     prompt_tokens = engine.count_tokens(prompt_text)
 
+    capacity = engine.context_capacity()
+    if capacity is not None and len(messages) > 3:
+        buffer = max(2048, int(capacity * 0.10))
+        if capacity - prompt_tokens < buffer:
+            from localm.inference.compact import compact_messages
+            def _gen_for_compact(ms: list[dict], max_t: int) -> str:
+                return "".join(engine.chat_stream(ms, max_tokens=max_t, temperature=0.3))
+            new_messages, changed = compact_messages(messages, _gen_for_compact)
+            if changed:
+                messages = list(new_messages)
+                prompt_text = " ".join(
+                    m.get("content") if isinstance(m.get("content"), str)
+                    else " ".join(p.get("text", "") for p in (m.get("content") or [])
+                                  if p.get("type") == "text")
+                    for m in messages
+                )
+                prompt_tokens = engine.count_tokens(prompt_text)
     def _run():
         return "".join(engine.chat_stream(messages, **gen_kwargs))
 

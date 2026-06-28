@@ -470,6 +470,7 @@ def pull_model(
     name: Optional[str] = None,
     expected_sha256: Optional[str] = None,
     redownload: bool = False,
+    mmproj_spec: Optional[str] = None,
 ) -> bool:
     """Download a model from HuggingFace or a URL.
 
@@ -492,16 +493,16 @@ def pull_model(
 
     spec = resolve_spec(model_spec)
     if spec.startswith("http://") or spec.startswith("https://"):
-        return _pull_url(spec, _sanitize_name(name or _stem_from_url(spec)),
+        res = _pull_url(spec, _sanitize_name(name or _stem_from_url(spec)),
                          expected_sha256=expected_sha256, redownload=redownload)
     elif "/" in spec:
         if ":" in spec or spec.rsplit("/", 1)[-1].endswith(".gguf"):
             # owner/repo:file.gguf  or  owner/repo/file.gguf  -> single GGUF file
-            return _pull_gguf_file(spec, name, expected_sha256=expected_sha256,
+            res = _pull_gguf_file(spec, name, expected_sha256=expected_sha256,
                                    redownload=redownload)
         else:
             # owner/repo  (no filename) -> full HuggingFace snapshot
-            return _pull_hf_snapshot(spec, name, expected_sha256=expected_sha256,
+            res = _pull_hf_snapshot(spec, name, expected_sha256=expected_sha256,
                                      redownload=redownload)
     else:
         console.print(f"[red]Unknown spec:[/red] {model_spec}")
@@ -510,7 +511,16 @@ def pull_model(
         console.print("  [bold]owner/repo:file.gguf[/bold]   single GGUF file")
         console.print("  [bold]https://...[/bold]             direct URL")
         console.print("Run [bold]localm models[/bold] for GGUF shortcuts.")
-        return False
+        res = False
+
+    if res and mmproj_spec:
+        console.print(f"Pulling mmproj: {mmproj_spec}")
+        if ":" in mmproj_spec or mmproj_spec.rsplit("/", 1)[-1].endswith(".gguf"):
+            _pull_gguf_file(mmproj_spec, name=None, register=False)
+        else:
+            console.print("[red]mmproj spec must be a specific file (owner/repo:file.gguf)[/red]")
+
+    return res
 
 
 def _stem_from_url(url: str) -> str:
@@ -594,6 +604,7 @@ def _pull_gguf_file(
     name: Optional[str],
     expected_sha256: Optional[str] = None,
     redownload: bool = False,
+    register: bool = True,
 ) -> bool:
     """Download a single .gguf file from a HuggingFace repo.
 
@@ -666,8 +677,9 @@ def _pull_gguf_file(
                     f"({on_disk[:16]}…) does not match --sha256 ({want[:16]}…)."
                 )
                 return False
-        _register_with_dedup(model_name, dest, f"hf:{repo_id}",
-                             digest=verify_digest)
+        if register:
+            _register_with_dedup(model_name, dest, f"hf:{repo_id}",
+                                 digest=verify_digest)
         return True
 
     # Pre-download duplicate check: same bytes already on disk elsewhere?
@@ -739,9 +751,12 @@ def _pull_gguf_file(
             return False
         console.print(f"[green]✓[/green] SHA256 verified: {actual[:16]}…")
 
-    _register(model_name, MODELS_DIR / filename, f"hf:{repo_id}",
-              sha256=verify_digest)
-    console.print(f"[green]✓[/green] [bold]{model_name}[/bold] is ready")
+    if register:
+        _register(model_name, MODELS_DIR / filename, f"hf:{repo_id}",
+                  sha256=verify_digest)
+        console.print(f"[green]✓[/green] [bold]{model_name}[/bold] is ready")
+    else:
+        console.print(f"[green]✓[/green] [bold]{filename}[/bold] downloaded")
     return True
 
 

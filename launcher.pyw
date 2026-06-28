@@ -753,6 +753,9 @@ class Launcher(tk.Tk):
             self.status_msg("Set or Generate an API key before exposing on the "
                             "network", error=True)
             return
+        if key and len(key) < 8:
+            self.status_msg("API key must be at least 8 characters long.", error=True)
+            return
         a = _auth()
         if a:
             try:

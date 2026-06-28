@@ -212,7 +212,15 @@ async function discoverFiles(repo, filesBox, btn) {
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
     filesBox.replaceChildren();
-    for (const f of data.files) {
+    
+    // Check settings for whether to show mmproj files in the list
+    const showMmproj = localStorage.getItem("localm.showMmprojFiles") === "true";
+    let filesToShow = data.files;
+    if (showMmproj && data.mmprojs && data.mmprojs.length > 0) {
+      filesToShow = filesToShow.concat(data.mmprojs);
+    }
+    
+    for (const f of filesToShow) {
       const row = el("div", "disc-file");
       row.appendChild(el("span", "quant", f.quant || "?"));
       const desc = `${(f.size_bytes / GIB).toFixed(1)} GB` +
@@ -227,6 +235,46 @@ async function discoverFiles(repo, filesBox, btn) {
         // server's default name (file name without .gguf).
         $("pull-spec").value = `${repo}:${f.file}`;
         $("pull-name").value = f.file.replace(/\.gguf$/i, "");
+        
+        // Populate the mmproj dropdown
+        const mmprojSelect = $("pull-mmproj");
+        mmprojSelect.replaceChildren();
+        const noOption = el("option", "", "No vision projector");
+        noOption.value = "";
+        mmprojSelect.appendChild(noOption);
+        
+        if (data.mmprojs && data.mmprojs.length > 0) {
+          mmprojSelect.style.display = "inline-block";
+          
+          // Try to guess the best mmproj based on quant or stem
+          // E.g. if model is model-f16.gguf and mmproj is mmproj-model-f16.gguf
+          let bestMatch = "";
+          let bestScore = 0;
+          
+          for (const m of data.mmprojs) {
+            const opt = el("option", "", m.file);
+            opt.value = `${repo}:${m.file}`;
+            mmprojSelect.appendChild(opt);
+            
+            // Simple scoring: count matching tokens separated by -
+            const fTokens = f.file.toLowerCase().replace(".gguf", "").split("-");
+            const mTokens = m.file.toLowerCase().replace(".gguf", "").split("-");
+            let score = 0;
+            for (const t of fTokens) {
+              if (mTokens.includes(t)) score++;
+            }
+            if (score > bestScore) {
+              bestScore = score;
+              bestMatch = opt.value;
+            }
+          }
+          if (bestMatch && !f.file.toLowerCase().includes("mmproj")) {
+            mmprojSelect.value = bestMatch;
+          }
+        } else {
+          mmprojSelect.style.display = "none";
+        }
+
         const nameInput = $("pull-name");
         nameInput.scrollIntoView({ behavior: "smooth", block: "center" });
         nameInput.focus();
@@ -465,6 +513,9 @@ $("pull-start").onclick = async () => {
     return;
   }
   const name = $("pull-name").value.trim();
+  const mmprojInput = $("pull-mmproj");
+  const mmproj = mmprojInput && mmprojInput.style.display !== "none" ? mmprojInput.value : null;
+
   $("pull-start").disabled = true;
   const log = $("pull-log");
   log.style.display = "block";
@@ -482,9 +533,12 @@ $("pull-start").onclick = async () => {
   if ($("pull-file")) { $("pull-file").hidden = true; $("pull-file").textContent = ""; }
   const samples = [];   // rolling {t, downloaded} window for speed/ETA (U4)
   try {
+    const payload = { spec, name: name || null };
+    if (mmproj) payload.mmproj = mmproj;
+    
     const r = await fetch("/api/models/pull", {
       method: "POST", headers: authHeaders(),
-      body: JSON.stringify({ spec, name: name || null }),
+      body: JSON.stringify(payload),
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
@@ -1370,15 +1424,20 @@ function buildSettingControl(field) {
   };
   // FOLDER / PATH fields get a "Browse..." button wired to the existing
   // directory picker, so the user does not have to type a path by hand (U10).
-  if (field.widget === "folder" || field.widget === "path") {
+  const isPath = field.widget === "path" || field.key.endsWith("_path") || field.key.endsWith("_file");
+  const isDir = field.widget === "folder" || field.key.endsWith("_dir");
+  if (isPath || isDir) {
     const row = el("div", "dir-picker-row");
     const browse = el("button", "btn-secondary dir-picker-btn", "Browse...");
     browse.type = "button";                 // never submit the settings form
     browse.dataset.browse = field.key;
     browse.onclick = async () => {
-      const picked = await pickDirectory(
-        field.widget === "path" ? "Pick a location" : "Pick a directory",
-        input.value.trim());
+      let picked;
+      if (isPath) {
+        picked = await pickFile("Pick a file", input.value.trim());
+      } else {
+        picked = await pickDirectory("Pick a directory", input.value.trim());
+      }
       if (picked) { input.value = picked; input.classList.remove("auto-detected"); }
     };
     row.append(input, browse);
@@ -1984,7 +2043,35 @@ function renderMediaSubsection(name) {
   if (!entry) return;
   const { sub, label, fields } = entry;
   sub.replaceChildren();
-  sub.appendChild(el("h4", "media-sub-head", label));
+  const head = el("h4", "media-sub-head", label);
+  sub.appendChild(head);
+  if (["image", "music", "video"].includes(name)) {
+    const badge = el("span", "sub comfy-status-badge", "ComfyUI: checking...");
+    badge.style.marginLeft = "12px";
+    badge.style.padding = "2px 6px";
+    badge.style.borderRadius = "4px";
+    badge.style.backgroundColor = "var(--bg-card-hover, #30363d)";
+    head.appendChild(badge);
+    
+    const checkComfy = () => {
+      if (!badge.isConnected) {
+        clearInterval(timer);
+        return;
+      }
+      fetch("/v1/comfy/status", { headers: authHeaders() })
+        .then(r => r.json())
+        .then(d => {
+          badge.textContent = d.alive ? "ComfyUI: Running" : "ComfyUI: Stopped";
+          badge.style.color = d.alive ? "var(--success-color, #2ea043)" : "var(--error-color, #cb2431)";
+        }).catch(() => {
+          badge.textContent = "ComfyUI: Unknown";
+        });
+    };
+    
+    checkComfy();
+    const timer = setInterval(checkComfy, 5000);
+  }
+  
   const grid = el("div", "settings-fields");
   const controls = [];
   for (const f of (fields || [])) {
@@ -2173,6 +2260,14 @@ async function uploadWorkflow(media, fileInput) {
   } else {
     toast(d.detail || "Upload failed", true);
   }
+}
+
+const showMmprojCheckbox = $("show-mmproj-files");
+if (showMmprojCheckbox) {
+  showMmprojCheckbox.checked = localStorage.getItem("localm.showMmprojFiles") === "true";
+  showMmprojCheckbox.addEventListener("change", (e) => {
+    localStorage.setItem("localm.showMmprojFiles", e.target.checked ? "true" : "false");
+  });
 }
 
 $("gui-key-save").onclick = async () => {

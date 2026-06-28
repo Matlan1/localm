@@ -41,6 +41,8 @@ dependencies = [
     # QR codes: the companion pairing flow renders a key QR server-side and the
     # GUI/CLI print LAN-URL QRs. Core so phone pairing works out of the box.
     "qrcode>=8.2",
+    "zeroconf>=0.131.0",
+    "mcp>=1.0.0",
 ]
 
 [project.optional-dependencies]

@@ -127,6 +127,7 @@ class LoadModelRequest(BaseModel):
 class PullRequest(BaseModel):
     spec: str
     name: str | None = None
+    mmproj: str | None = None
 
 
 class RemoveModelRequest(BaseModel):
@@ -550,7 +551,7 @@ def attach_gui(
                         headers={"Cache-Control": "no-store"})
 
     @app.get("/api/fs/dirs", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
-    async def fs_dirs(path: str = ""):
+    async def fs_dirs(path: str = "", include_files: bool = False):
         """Subdirectories of *path*, for the coder setup directory picker.
 
         An empty path lists drive roots on Windows (filesystem root
@@ -563,18 +564,22 @@ def attach_gui(
                 import string
                 roots = [f"{letter}:\\" for letter in string.ascii_uppercase
                          if Path(f"{letter}:\\").is_dir()]
-                return {"path": "", "parent": None, "dirs": roots}
+                return {"path": "", "parent": None, "dirs": roots, "files": []}
             path = "/"
         p = Path(path).expanduser()
         if not p.is_dir():
             raise HTTPException(404, f"Not a directory: {path}")
         p = p.resolve()
         dirs = []
+        files = []
         try:
             for child in sorted(p.iterdir(), key=lambda c: c.name.lower()):
                 try:
-                    if child.is_dir() and not child.name.startswith("."):
-                        dirs.append(child.name)
+                    if not child.name.startswith("."):
+                        if child.is_dir():
+                            dirs.append(child.name)
+                        elif include_files and child.is_file():
+                            files.append(child.name)
                 except OSError:
                     continue   # broken junction / reparse point
         except PermissionError:
@@ -582,7 +587,8 @@ def attach_gui(
         at_root = p.parent == p
         return {"path": str(p),
                 "parent": "" if at_root else str(p.parent),
-                "dirs": dirs}
+                "dirs": dirs,
+                "files": files}
 
     # ----------------------- model ops + jobs --------------------- #
 
@@ -617,6 +623,8 @@ def attach_gui(
         args = ["pull"]
         if req.name:
             args += ["--name", req.name]
+        if req.mmproj:
+            args += ["--mmproj", req.mmproj]
         args += ["--", spec]
         # Stream structured download progress; suppress huggingface_hub's own
         # tqdm bars (their \r output doesn't line-stream cleanly).
@@ -733,9 +741,15 @@ def attach_gui(
             raise HTTPException(_discover_status(e), str(e))
         vram = vram_info()
         total = vram.get("total")
+        models = []
+        mmprojs = []
         for f in files:
             f["fit"] = fit_label(f["size_bytes"], total)
-        return {"repo": repo.strip().strip("/"), "files": files, "vram": vram}
+            if "mmproj" in f["file"].lower():
+                mmprojs.append(f)
+            else:
+                models.append(f)
+        return {"repo": repo.strip().strip("/"), "files": models, "mmprojs": mmprojs, "vram": vram}
 
     # Chat persistence (/api/conversations, /api/memory, /api/prompts) moved
     # to the builtin "chat" plugin (localm/plugins/builtin/chat) - the
