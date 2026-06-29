@@ -88,6 +88,44 @@ def test_upload_report_omits_token_header_when_none():
     assert "X-Localm-Token" not in seen["headers"]
 
 
+# ------------------------------- CLI menu --------------------------------- #
+
+def test_cli_menu_upload_branch_calls_upload(tmp_path, monkeypatch):
+    """When an upload endpoint is configured, the CLI report menu offers "[1] Send
+    now", and picking it uploads the (edited) report rather than opening a browser."""
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
+    monkeypatch.setattr(bugreport, "upload_config",
+                        lambda: ("https://proxy.example", "tok"))
+    sent = {}
+
+    def fake_upload(title, body, *, url=None, token=None, **kw):
+        sent.update(title=title, url=url, token=token, body=body)
+        return {"url": "https://github.com/x/localm/issues/3"}
+
+    monkeypatch.setattr(bugreport, "upload_report", fake_upload)
+    opened = []
+    bugreport.report_failure(
+        summary="bug", interactive=True,
+        open_browser=lambda u: opened.append(u), prompt=lambda _t: "1")
+    assert sent.get("url") == "https://proxy.example"
+    assert sent.get("token") == "tok"
+    assert opened == []   # upload does not open a browser
+
+
+def test_cli_menu_no_upload_option_when_unconfigured(tmp_path, monkeypatch, capsys):
+    """Without an endpoint, the menu has no "Send now" option and "1" maps to nothing
+    (email is [2], not [1]) - so picking "1" opens no browser."""
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
+    monkeypatch.setattr(bugreport, "upload_config", lambda: (None, None))
+    opened = []
+    bugreport.report_failure(
+        summary="bug", interactive=True,
+        open_browser=lambda u: opened.append(u), prompt=lambda _t: "1")
+    out = capsys.readouterr().out
+    assert "Send to the maintainer now" not in out
+    assert opened == []
+
+
 # ------------------------------- endpoint --------------------------------- #
 
 def _engine():
