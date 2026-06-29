@@ -264,7 +264,14 @@ def _resolve_backend_url(backend: str) -> str:
             assets = json.loads(r.read().decode("utf-8")).get("assets", [])
         for a in assets:
             name = str(a.get("name", "")).lower()
-            if any(m in name for m in matchers) and a.get("browser_download_url"):
+            # Exclude the cudart RUNTIME bundle: cudart-llama-bin-win-cuda-12.x
+            # contains the same "bin-win-cuda-12" fragment as the build and is
+            # often listed first, so without this the cuda build resolves to the
+            # runtime-only zip (no llama.dll) and provisioning aborts with "the
+            # archive did not contain llama.dll" (NEW-CUDADLL). The build is
+            # always llama-..., never cudart-..., so this is safe for every backend.
+            if (any(m in name for m in matchers) and "cudart" not in name
+                    and a.get("browser_download_url")):
                 return a["browser_download_url"]
     except Exception:
         pass
@@ -571,20 +578,30 @@ def _release_assets(tag: str) -> list:
         return []
 
 
-def _pick_asset(assets: list, *needles: str) -> Optional[dict]:
-    """First asset whose (lowercased) name contains ALL *needles*."""
+def _pick_asset(assets: list, *needles: str, exclude: tuple = ()) -> Optional[dict]:
+    """First asset whose (lowercased) name contains ALL *needles* and NONE of
+    *exclude*."""
     for a in assets:
         name = str(a.get("name", "")).lower()
-        if all(n in name for n in needles) and a.get("browser_download_url"):
+        if (all(n in name for n in needles)
+                and not any(x in name for x in exclude)
+                and a.get("browser_download_url")):
             return a
     return None
 
 
 def _resolve_cuda_pair(tag: str) -> tuple:
     """(build_asset, cudart_asset) for the Windows CUDA 12.x line. Either may be
-    None when the release listing is unavailable or lacks it."""
+    None when the release listing is unavailable or lacks it.
+
+    The build and the cudart runtime share the "...bin-win-cuda-12.x..." name
+    fragment (the runtime is e.g. cudart-llama-bin-win-cuda-12.4-x64.zip), and
+    the runtime is often listed FIRST, so the build matcher MUST exclude
+    "cudart" - otherwise build resolves to the runtime-only zip (CUDA DLLs, no
+    llama.dll) and provisioning aborts with "the archive did not contain
+    llama.dll" (NEW-CUDADLL)."""
     assets = _release_assets(tag)
-    build = _pick_asset(assets, "bin-win-" + _CUDA_LINE)
+    build = _pick_asset(assets, "bin-win-" + _CUDA_LINE, exclude=("cudart",))
     cudart = _pick_asset(assets, "cudart", "win-" + _CUDA_LINE)
     return build, cudart
 
