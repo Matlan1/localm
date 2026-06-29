@@ -131,10 +131,17 @@ class TestToolConfinement:
 
 
 class TestSidecarContent:
-    def test_sidecar_written_next_to_output(self, tmp_path):
+    def test_sidecar_written_next_to_output(self, tmp_path, monkeypatch):
         """Drive generate_image fully mocked to the save step and verify
         the sidecar JSON lands as <output>.png.json with the seed."""
         import json
+
+        # Force the committed example workflow so the test is independent of any
+        # personal flux_workflow.json on the dev's machine (gitignored, and it
+        # takes precedence in _workflow_path()); otherwise the test reads a
+        # machine-specific graph and is non-deterministic across checkouts.
+        monkeypatch.setattr(comfy, "_workflow_path",
+                            lambda: comfy._WORKFLOW_EXAMPLE_PATH)
 
         out = tmp_path / "art.png"
 

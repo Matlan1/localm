@@ -112,6 +112,31 @@ def test_ensure_comfy_discovers_launcher_in_workdir(tmp_path):
     assert "comfyui" in str(spawned["argv"])
 
 
+def test_ensure_comfy_reports_launcher_immediate_exit(tmp_path):
+    # The spawn exit-guard (comfy.py): if the launcher dies right after spawn
+    # with a non-zero code (broken .bat, missing venv, bad path), ensure_comfy
+    # must surface that failure NOW instead of waiting out the whole cold-start
+    # timeout. This is the FIRING side of the guard the success tests step over
+    # (where poll() is None == still running).
+    launcher = tmp_path / f"comfyui.{_ext()}"
+    launcher.write_text("exit 1\n", encoding="utf-8")
+    cfg = {"comfy_launch_cmd": None, "comfy_workdir": str(tmp_path),
+           "comfy_launch_timeout": 30}
+
+    def fake_popen(argv, cwd=None, **kw):
+        proc = MagicMock()
+        proc.poll.return_value = 1        # already exited (not None)
+        proc.returncode = 1              # with a non-zero code
+        return proc
+
+    with patch("localm.config.load_config", return_value=cfg), \
+         patch.object(comfy, "_comfy_alive", side_effect=lambda *a, **k: False), \
+         patch("subprocess.Popen", side_effect=fake_popen):
+        ok, msg = comfy.ensure_comfy("http://127.0.0.1:8188")
+    assert ok is False
+    assert "exited immediately with code 1" in msg
+
+
 def _spawn_with_cfg(tmp_path, cfg):
     """Run ensure_comfy with a discoverable launcher in tmp_path and capture the
     spawned argv. Returns the argv (str on Windows, list on POSIX)."""
