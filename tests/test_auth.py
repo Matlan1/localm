@@ -85,15 +85,16 @@ def test_require_auth_dependency(auth, monkeypatch):
     # open mode: no key, not required -> allowed
     assert _require_auth(_req()) is None
 
-    # required but no key -> 503
+    # required but no key configured -> fail closed (401; was 503). A 401 makes
+    # the GUI prompt for a key rather than show a server-down overlay.
     monkeypatch.setenv("LOCALM_REQUIRE_AUTH", "1")
     with pytest.raises(HTTPException) as exc:
         _require_auth(_req())
-    assert exc.value.status_code == 503
+    assert exc.value.status_code == 401
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH")
 
     # key configured (file): missing/invalid credentials -> 401
-    auth.set_api_key("k")
+    auth.set_api_key("owner-key-1")
     with pytest.raises(HTTPException) as exc:
         _require_auth(_req())
     assert exc.value.status_code == 401
@@ -102,7 +103,7 @@ def test_require_auth_dependency(auth, monkeypatch):
     assert exc.value.status_code == 401
 
     # correct credentials -> allowed
-    assert _require_auth(_req("k")) is None
+    assert _require_auth(_req("owner-key-1")) is None
 
 
 # --------------------------------------------------------------------------- #
