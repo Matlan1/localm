@@ -76,6 +76,8 @@ def settings(full_config: dict) -> dict:
         # Privacy mode forces deletion separately, in plug.py.
         "delete_outputs": bool(comfy_blk.get(
             "delete_outputs", full_config.get("comfy_delete_outputs", False))),
+        "float_type": comfy_blk.get("float_type")
+        or full_config.get("comfy_float_type"),
         "swap_policy": resolve_swap_policy(block, full_config),
         "vram_estimate_bytes": media_estimate_bytes("music", block),
         "warning": warning,
@@ -120,7 +122,8 @@ def _comfy_generate(s: dict, tags: str, out_path: Path, *,
             write_sidecar=write_sidecar,
             launch_cmd=s["launch_cmd"] or None,
             workdir=s["workdir"] or None,
-            swap=swap,
+            float_type=s.get("float_type"),
+            swap=s["swap_policy"] != "never",
             cancel_check=cancel_check,
             delete_outputs=delete_outputs,
             **kwargs,

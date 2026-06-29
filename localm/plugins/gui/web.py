@@ -609,6 +609,60 @@ def attach_gui(
     app.state.switch_model = switch_model
     app.state.coder_sessions = manager
 
+    @app.post("/api/comfyui/create-launcher", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
+    async def create_comfy_launcher(workdir: str):
+        if not workdir:
+            raise HTTPException(400, "Missing workdir parameter")
+            
+        from localm.config import load_config
+        cfg = load_config()
+        
+        valid_workdirs = []
+        if cfg.get("comfy_workdir"):
+            valid_workdirs.append(cfg["comfy_workdir"])
+            
+        plugins_cfg = cfg.get("plugins", {})
+        if isinstance(plugins_cfg, dict):
+            for p_cfg in plugins_cfg.values():
+                if isinstance(p_cfg, dict):
+                    c_cfg = p_cfg.get("comfy", {})
+                    if isinstance(c_cfg, dict) and c_cfg.get("workdir"):
+                        valid_workdirs.append(c_cfg["workdir"])
+                        
+        if not valid_workdirs:
+            raise HTTPException(400, "ComfyUI working directory is not configured")
+            
+        import os
+        try:
+            p = Path(workdir).resolve()
+            
+            resolved_valids = [Path(v).resolve() for v in valid_workdirs]
+            if p not in resolved_valids:
+                raise HTTPException(403, "workdir must match a configured comfy_workdir")
+                
+            if not p.is_dir():
+                raise HTTPException(400, "workdir is not a valid directory")
+                
+            if os.name == "nt":
+                script = p / "launch-comfyui.bat"
+                if script.exists():
+                    raise HTTPException(409, "Launcher script already exists")
+                script.write_text("@echo off\r\ncd /d \"%~dp0\"\r\nif exist venv\\Scripts\\activate (call venv\\Scripts\\activate)\r\npython main.py\r\npause\r\n", encoding="utf-8")
+            else:
+                script = p / "launch-comfyui.sh"
+                if script.exists():
+                    raise HTTPException(409, "Launcher script already exists")
+                script.write_text("#!/bin/bash\ncd \"$(dirname \"$0\")\"\n[ -f venv/bin/activate ] && source venv/bin/activate\npython3 main.py\n", encoding="utf-8")
+                script.chmod(0o755)
+        except PermissionError:
+            raise HTTPException(403, "Permission denied while checking or writing the launcher script")
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(500, f"Failed to create launcher: {e}")
+            
+        return {"status": "ok"}
+
     @app.post("/api/models/pull", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def model_pull(req: PullRequest, request: Request):
         spec = req.spec.strip()

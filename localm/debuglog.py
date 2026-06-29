@@ -88,12 +88,26 @@ class _RingBufferHandler(logging.Handler):
         return list(self._buf)
 
 
+def flush_log_handlers() -> None:
+    """Flush all file handlers on the localm logger.
+
+    Call immediately before os.execv() so no buffered log lines are lost
+    when the process image is replaced (Task 1: save-bug / log durability).
+    The file handlers use buffering=1 (line-buffered) so this is a belt-and-
+    suspenders guard against any remaining buffer; it never raises."""
+    for h in list(logger.handlers):
+        try:
+            h.flush()
+        except Exception:
+            pass
+
+
 def dump_ring_buffer() -> None:
     """Save the in-memory ring buffer to disk to survive os.execv."""
     if _ring_handler:
         try:
-            from localm.config import HOME_DIR
             import json
+            from localm.config import HOME_DIR
             path = HOME_DIR / "run" / "ring_buffer.json"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(list(_ring_handler._buf)), encoding="utf-8")
@@ -243,7 +257,15 @@ def enable_debug() -> Path:
     path = logs_dir() / f"localm_{time.strftime('%Y-%m-%d_%H%M%S')}_{os.getpid()}.log"
     os.environ[_ENV_VAR] = str(path)
 
-    handler = logging.FileHandler(path, encoding="utf-8")
+    # buffering=1 = line-buffered: each log record is flushed to disk immediately
+    # so no lines are lost if the process is killed or os.execv'd (Task 1: save-bug).
+    # delay=True prevents FileHandler from opening the file internally; we then
+    # set stream to a manually opened line-buffered handle so baseFilename is
+    # preserved (used by attach_child_logging to deduplicate) while the fd is
+    # opened exactly once with the correct buffer mode.
+    handler = logging.FileHandler(path, mode="a", encoding="utf-8", delay=True)
+    handler.stream = open(path, "a", buffering=1, encoding="utf-8",
+                         errors="backslashreplace")
     handler.setFormatter(logging.Formatter(
         "%(asctime)s %(levelname)-7s %(name)s: %(message)s"))
     logger.addHandler(handler)
@@ -298,7 +320,11 @@ def attach_child_logging() -> None:
         for h in logger.handlers
     ):
         return
-    handler = logging.FileHandler(path, encoding="utf-8")
+    # buffering=1 = line-buffered: same guarantee as enable_debug() above.
+    # delay=True + manual stream avoids opening the file twice.
+    handler = logging.FileHandler(path, mode="a", encoding="utf-8", delay=True)
+    handler.stream = open(path, "a", buffering=1, encoding="utf-8",
+                         errors="backslashreplace")
     handler.setFormatter(logging.Formatter(
         "%(asctime)s %(levelname)-7s %(name)s: %(message)s"))
     logger.addHandler(handler)

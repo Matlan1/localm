@@ -1592,45 +1592,71 @@ ws     ::= [ \t\n\r]*
         return kw
 
     def _call_llm(self, messages: list[dict], interactive: bool) -> str:
-        if self.on_event is not None:
-            # Event-sink mode (GUI/web session): stream tokens to the sink,
-            # keep the server terminal quiet.
-            full = ""
-            for piece, hidden in self._stream_hiding_tool_calls(
-                self.backend.chat_stream(messages, **self._llm_kwargs())
-            ):
-                full += piece
-                if not hidden:
-                    self._emit("token", text=piece)
-                if self._stop_requested:
-                    break
-            self._accumulate_usage()
-            self._audit.llm(full, tokens=self._total_tokens)
-            return full
-        if interactive:
-            print_thinking()
-            print_assistant_label(self.name)
-            full = ""
+        from .backends.http import CoderAuthError
+        first_attempt = True
+        while True:
             try:
-                for piece, hidden in self._stream_hiding_tool_calls(
-                    self.backend.chat_stream(messages, **self.gen_kwargs)
-                ):
-                    full += piece
-                    if not hidden:
-                        print_streaming_token(piece)
-                print_streaming_done()
-            except KeyboardInterrupt:
-                print_streaming_done()
-                print_info("(interrupted)")
-            self._accumulate_usage()
-            self._audit.llm(full, tokens=self._total_tokens)
-            return full
-        else:
-            # Silent call - used by sub-agents and non-interactive mode
-            result = self.backend.chat(messages, **self._llm_kwargs())
-            self._accumulate_usage()
-            self._audit.llm(result, tokens=self._total_tokens)
-            return result
+                if self.on_event is not None:
+                    # Event-sink mode (GUI/web session): stream tokens to the sink,
+                    # keep the server terminal quiet.
+                    full = ""
+                    for piece, hidden in self._stream_hiding_tool_calls(
+                        self.backend.chat_stream(messages, **self._llm_kwargs())
+                    ):
+                        full += piece
+                        if not hidden:
+                            self._emit("token", text=piece)
+                        if self._stop_requested:
+                            break
+                    self._accumulate_usage()
+                    self._audit.llm(full, tokens=self._total_tokens)
+                    return full
+                if interactive:
+                    if first_attempt:
+                        print_thinking()
+                        print_assistant_label(self.name)
+                        first_attempt = False
+                    full = ""
+                    try:
+                        for piece, hidden in self._stream_hiding_tool_calls(
+                            self.backend.chat_stream(messages, **self.gen_kwargs)
+                        ):
+                            full += piece
+                            if not hidden:
+                                print_streaming_token(piece)
+                        print_streaming_done()
+                    except KeyboardInterrupt:
+                        print_streaming_done()
+                        print_info("(interrupted)")
+                    self._accumulate_usage()
+                    self._audit.llm(full, tokens=self._total_tokens)
+                    return full
+                else:
+                    # Silent call - used by sub-agents and non-interactive mode
+                    result = self.backend.chat(messages, **self._llm_kwargs())
+                    self._accumulate_usage()
+                    self._audit.llm(result, tokens=self._total_tokens)
+                    return result
+            except CoderAuthError as e:
+                import sys
+                import os
+                from .display import print_error, print_info
+                import getpass
+                
+                # Cannot prompt for a key if there's no TTY or we are in CI
+                if not sys.stdin.isatty() or os.environ.get("CI"):
+                    raise
+                    
+                print_error(str(e))
+                new_key = ""
+                while not new_key:
+                    try:
+                        new_key = getpass.getpass("Enter API key: ").strip()
+                    except (EOFError, KeyboardInterrupt):
+                        print()
+                        raise
+                self.backend._api_key = new_key
+                print_info("Retrying with new API key...")
 
     def _accumulate_usage(self) -> None:
         """Pull token counts from the backend's last call and add to the session total."""

@@ -59,7 +59,7 @@
       <select id="model-select"></select>
       <div id="model-status"><span class="dot" id="status-dot"></span><span id="status-text">connecting…</span></div>
       <div id="hw-stats" class="hw-stats" title="Live system load (CPU / RAM / VRAM / GPU)" hidden></div>
-      <button class="btn-quiet theme-btn" id="theme-toggle" title="Toggle light/dark">&#9728; theme</button>
+      <button class="btn-secondary theme-btn" id="theme-toggle" title="Toggle light/dark">&#9728; theme</button>
     </div>
   </aside>
 
@@ -88,8 +88,8 @@
           <div class="full"><label>Persona - a saved system prompt + sampling defaults</label>
             <div class="row">
               <select id="p-persona"><option value="">(none)</option></select>
-              <button class="btn-quiet" id="persona-save" title="Save the current system prompt and sampling values under a name">save…</button>
-              <button class="btn-quiet" id="persona-delete" title="Delete the selected persona">delete</button>
+              <button class="btn-secondary" id="persona-save" title="Save the current system prompt and sampling values under a name">save…</button>
+              <button class="btn-secondary" id="persona-delete" title="Delete the selected persona">delete</button>
             </div>
           </div>
           <div><label>Temperature</label><input id="p-temperature" type="number" step="0.05" min="0" max="2" placeholder="default"></div>
@@ -137,18 +137,18 @@
       <div id="coder-main">
       <div id="coder-bar">
         <select id="session-select" title="Switch session"></select>
-        <button class="btn-quiet" id="session-new">+ new</button>
+        <button class="btn-secondary" id="session-new">+ new</button>
         <span class="cwd" id="coder-cwd"></span>
         <span id="coder-state"></span>
         <span class="spacer"></span>
-        <button class="btn-quiet" id="coder-undo" title="Revert the last file write">undo</button>
-        <button class="btn-quiet" id="coder-files" title="Files changed this session, with diffs">files</button>
-        <button class="btn-quiet" id="coder-compact" title="Summarise old turns to free context">compact</button>
-        <button class="btn-quiet" id="coder-export" title="Download this session's feed as markdown">export</button>
-        <button class="btn-quiet" id="coder-log" title="View the audit log">log</button>
-        <button class="btn-quiet" id="coder-history" title="Browse past session logs">history</button>
-        <button class="btn-quiet" id="coder-stop">Stop</button>
-        <button class="btn-quiet" id="coder-end">End</button>
+        <button class="btn-secondary" id="coder-undo" title="Revert the last file write">undo</button>
+        <button class="btn-secondary" id="coder-files" title="Files changed this session, with diffs">files</button>
+        <button class="btn-secondary" id="coder-compact" title="Summarise old turns to free context">compact</button>
+        <button class="btn-secondary" id="coder-export" title="Download this session's feed as markdown">export</button>
+        <button class="btn-secondary" id="coder-log" title="View the audit log">log</button>
+        <button class="btn-secondary" id="coder-history" title="Browse past session logs">history</button>
+        <button class="btn-secondary" id="coder-stop">Stop</button>
+        <button class="btn-secondary" id="coder-end">End</button>
       </div>
 
       <div id="coder-setup">
@@ -159,7 +159,7 @@
         <label for="setup-cwd">Project directory</label>
         <div class="row">
           <input type="text" id="setup-cwd" placeholder="path to your project" spellcheck="false">
-          <button class="btn-quiet" id="setup-browse" title="Pick the project directory">browse…</button>
+          <button class="btn-secondary" id="setup-browse" title="Pick the project directory">browse…</button>
         </div>
         <div class="grid2">
           <div>
@@ -191,8 +191,8 @@
         </div>
         <div class="actions">
           <button class="btn-primary" id="setup-start">Start session</button>
-          <button class="btn-quiet" id="setup-cancel" style="display:none" title="Return to the running session without starting a new one">&#8617; back to session</button>
-          <button class="btn-quiet" id="setup-history" title="Browse audit logs of past sessions (log/full modes)">past sessions</button>
+          <button class="btn-secondary" id="setup-cancel" style="display:none" title="Return to the running session without starting a new one">&#8617; back to session</button>
+          <button class="btn-secondary" id="setup-history" title="Browse audit logs of past sessions (log/full modes)">past sessions</button>
         </div>
       </div>
 
@@ -240,7 +240,7 @@
             <select id="pull-mmproj" style="display:none; max-width:200px">
               <option value="">No vision projector</option>
             </select>
-            <button class="btn-quiet" id="pull-browse" title="Pick a folder on this machine that holds the model(s)">Browse…</button>
+            <button class="btn-secondary" id="pull-browse" title="Pick a folder on this machine that holds the model(s)">Browse…</button>
             <button class="btn-primary" id="pull-start">Add</button>
           </div>
           <div id="pull-progress" class="dl-progress" style="display:none">
@@ -277,7 +277,7 @@
           <input type="text" id="img-input" placeholder="path to a base image" spellcheck="false">
           <div class="actions">
             <button class="btn-primary" id="img-generate">Generate</button>
-            <button class="btn-quiet" id="img-stop" style="display:none" title="Stop this generation and free the GPU">Stop</button>
+            <button class="btn-secondary" id="img-stop" style="display:none" title="Stop this generation and free the GPU">Stop</button>
             <label class="inline-check" title="When off, ComfyUI stays loaded for fast batch generation; the chat model reloads on the next chat message.">
               <input type="checkbox" id="img-reload-llm" checked> reload chat model after generation
             </label>
@@ -321,7 +321,7 @@
           </div>
           <div class="actions">
             <button class="btn-primary" id="music-generate">Generate</button>
-            <button class="btn-quiet" id="music-stop" style="display:none" title="Stop this generation and free the GPU">Stop</button>
+            <button class="btn-secondary" id="music-stop" style="display:none" title="Stop this generation and free the GPU">Stop</button>
           </div>
           <pre id="music-log" class="job-log" style="display:none"></pre>
           <div id="music-result"></div>
@@ -365,7 +365,7 @@
           </div>
           <div class="actions">
             <button class="btn-primary" id="video-generate">Generate</button>
-            <button class="btn-quiet" id="video-stop" style="display:none" title="Stop this generation and free the GPU">Stop</button>
+            <button class="btn-secondary" id="video-stop" style="display:none" title="Stop this generation and free the GPU">Stop</button>
           </div>
           <pre id="video-log" class="job-log" style="display:none"></pre>
           <div id="video-result"></div>
@@ -449,9 +449,8 @@
               <h3>Performance</h3>
               <div class="sub">How much of the model runs on the GPU, and how large its context window
               is. Applies on the next model load. The VRAM figure is an estimate.</div>
-              <label>GPU layers - how much of the model to offload to the GPU
-                (<span id="perf-gl-val">all</span>)</label>
-              <input type="range" id="perf-gpu-layers" min="0" max="99" step="1" value="99">
+              <label>GPU layers (0-999) - how much of the model to offload to the GPU</label>
+              <input type="number" id="perf-gpu-layers" min="0" max="999" step="1" value="999">
               <label>Context window - the most tokens the model can attend to
                 (<span id="perf-ctx-val">4096</span>)</label>
               <input type="range" id="perf-ctx" min="512" max="32768" step="512" value="4096">
@@ -476,8 +475,8 @@
               </label>
 
               <div class="actions">
-                <button class="btn-quiet" id="gui-key-save">Save key</button>
-                <button class="btn-quiet" id="gui-clear-convs">Delete all conversations</button>
+                <button class="btn-secondary" id="gui-key-save">Save key</button>
+                <button class="btn-secondary" id="gui-clear-convs">Delete all conversations</button>
               </div>
             </section>
 
@@ -501,7 +500,7 @@
                 </select>
               </label>
               <div class="actions">
-                <button class="btn-quiet" id="key-create">Create &amp; show QR</button>
+                <button class="btn-secondary" id="key-create">Create &amp; show QR</button>
               </div>
               <div id="key-secret" class="key-secret" style="display:none"></div>
               <div id="keys-list" class="keys-list"></div>
@@ -542,8 +541,8 @@
               either way. Restart brings the server back automatically; Shut down stops it (start
               it again from your launcher or terminal).</div>
               <div class="actions">
-                <button class="btn-quiet" id="server-restart">Restart server</button>
-                <button class="btn-quiet" id="server-shutdown">Shut down server</button>
+                <button class="btn-secondary" id="server-restart">Restart server</button>
+                <button class="btn-secondary" id="server-shutdown">Shut down server</button>
               </div>
             </section>
 
@@ -568,7 +567,7 @@
               choose - handy when sending diagnostics. Each export goes into its own
               timestamped subfolder, so nothing is overwritten.</div>
               <div class="actions">
-                <button class="btn-quiet" id="logs-export">Export logs to a folder…</button>
+                <button class="btn-secondary" id="logs-export">Export logs to a folder…</button>
               </div>
               <div id="logs-result" class="sub" hidden></div>
             </section>
@@ -603,8 +602,8 @@
   <div class="artifact-head">
     <span class="artifact-title">Artifact</span>
     <span class="spacer"></span>
-    <button class="btn-quiet" id="artifact-refresh" title="Re-render">&#8635;</button>
-    <button class="btn-quiet" id="artifact-close" title="Close">&times;</button>
+    <button class="btn-secondary" id="artifact-refresh" title="Re-render">&#8635;</button>
+    <button class="btn-secondary" id="artifact-close" title="Close">&times;</button>
   </div>
   <div class="artifact-body"></div>
 </div>
@@ -633,7 +632,7 @@
         <p class="dim">LocaLM secures the connection with its own certificate.
           Install it once to remove the browser's "not secure" warning and to enable
           <b>Install app</b>.</p>
-        <a id="key-gate-cert-link" class="btn-quiet onboard-cta" href="/localm-ca.crt"
+        <a id="key-gate-cert-link" class="btn-secondary onboard-cta" href="/localm-ca.crt"
            download="localm-ca.crt">Install certificate</a>
         <details class="onboard-help">
           <summary>How do I install it?</summary>
@@ -656,8 +655,8 @@
         <input type="password" id="key-gate-input" autocomplete="off" spellcheck="false"
                placeholder="LOCALM_API_KEY">
         <div class="actions">
-          <button class="btn-quiet" id="key-gate-submit">Connect</button>
-          <button class="btn-quiet" id="key-gate-scan" style="display:none">Scan QR code</button>
+          <button class="btn-secondary" id="key-gate-submit">Connect</button>
+          <button class="btn-secondary" id="key-gate-scan" style="display:none">Scan QR code</button>
         </div>
       </div>
     </div>
@@ -675,7 +674,7 @@
       <video id="qr-video" class="qr-video" playsinline muted></video>
       <p id="qr-scan-status" class="sub"></p>
       <div class="actions">
-        <button class="btn-quiet" id="qr-scan-cancel">Cancel</button>
+        <button class="btn-secondary" id="qr-scan-cancel">Cancel</button>
       </div>
     </div>
   </div>
@@ -815,3 +814,4 @@
 </script>
 </body>
 </html>
+
