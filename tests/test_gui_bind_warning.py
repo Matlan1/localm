@@ -32,5 +32,5 @@ class TestGuiBindWarning:
     def test_api_key_silences_warning(self):
         # Setting an API key is the documented precaution; stay quiet then,
         # consistent with `localm serve`.
-        with patch.dict("os.environ", {"LOCALM_API_KEY": "secret"}):
+        with patch.dict("os.environ", {"LOCALM_API_KEY": "a-strong-secret"}):
             assert _gui_bind_warning("0.0.0.0") is None
