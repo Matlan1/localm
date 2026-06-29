@@ -242,6 +242,16 @@ DEFAULT_CONFIG: dict = {
     # instead of "unknown command". False silences the hint; a truly unknown
     # command always errors regardless.
     "suggest_plugins": True,
+    # Bug-report upload endpoint. When set, the in-app "Send to maintainer" channel
+    # POSTs the (user-reviewed) report to this URL, which files it as a GitHub issue
+    # - so a tester needs no GitHub account and no token ships in the app. Intended
+    # to point at the localm bug-report proxy (a small Cloudflare Worker that holds
+    # the GitHub token server-side; see tools/bugreport-proxy/). None = no upload
+    # channel (the report is still saved to a file and can be emailed). The token is
+    # an OPTIONAL low-value shared secret the proxy may require to deter spam; it can
+    # only file an issue through the rate-limited proxy, never read the repo.
+    "bugreport_upload_url": None,
+    "bugreport_upload_token": None,
     # Names of enabled engine plugins (WordPress-style). Managed by the plugin
     # engine (localm plugin enable/disable and the GUI Plugins page) via
     # update_config, NOT the settings form. Declared here so it has a documented

@@ -190,6 +190,18 @@ CORE_FIELDS: list = [
                  "Names of enabled engine plugins. Managed by the Plugins page "
                  "and `localm plugin enable/disable`, not edited here.",
                  group="Plugins"),
+    # ---- Bug-report upload (deployment config) ----
+    # HIDDEN: the maintainer sets these in config.json when preparing a tester
+    # build (see tools/bugreport-proxy/). Not rendered in the form, so a tester on
+    # a shared build does not see or change the proxy URL / shared secret.
+    SettingField("bugreport_upload_url", Widget.HIDDEN, "Bug-report upload URL",
+                 "Endpoint the in-app 'Send to maintainer' button POSTs the report "
+                 "to (the bug-report proxy). Blank = no upload channel.",
+                 group="Bug reports"),
+    SettingField("bugreport_upload_token", Widget.HIDDEN, "Bug-report upload token",
+                 "Optional shared secret the proxy may require, sent as a header. "
+                 "Set in config.json, not here.",
+                 group="Bug reports"),
     SettingField("plugins", Widget.HIDDEN, "Per-plugin config",
                  "Per-plugin settings (e.g. media output dirs). Managed by the "
                  "Plugins/Settings pages and plugin backends, not edited here.",

@@ -557,6 +557,10 @@
               <label class="check"><input type="checkbox" id="bug-include-log"> Also attach this session's full debug log tail (debug mode only)</label>
               <div class="actions">
                 <button class="btn-primary" id="bug-send">Save report</button>
+                <!-- Shown only when an upload endpoint is configured (capabilities
+                     .bugreport_upload); files the report as a GitHub issue via the
+                     proxy so no GitHub account is needed. -->
+                <button class="btn-primary" id="bug-upload" hidden>Send to maintainer</button>
               </div>
               <div id="bug-result" class="sub" hidden></div>
             </section>

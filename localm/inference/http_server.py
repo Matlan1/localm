@@ -1048,8 +1048,25 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
         if path is None:
             # A failed save must not report success (we do not hide problems).
             raise HTTPException(500, "Could not save the bug report to disk.")
-        return {"saved": True, "filename": path.name, "path": str(path),
-                "maintainer": bugreport.MAINTAINER_EMAIL}
+        result = {"saved": True, "filename": path.name, "path": str(path),
+                  "maintainer": bugreport.MAINTAINER_EMAIL}
+        # Optional explicit upload: file the saved report as a GitHub issue via the
+        # configured proxy. Always user-initiated (never automatic). A failed upload
+        # is surfaced as upload_error, NOT a false success - the file is still saved.
+        if body.get("upload"):
+            title = (description.splitlines()[0] if description else "")[:120] \
+                or "user-reported issue"
+            try:
+                report_text = path.read_text(encoding="utf-8")
+                up = bugreport.upload_report(title, report_text)
+                result["uploaded"] = True
+                if isinstance(up, dict) and up.get("url"):
+                    result["issue_url"] = up["url"]
+            except bugreport.LocalmError as e:
+                result["uploaded"] = False
+                result["upload_error"] = (f"{e.summary}: {e.reason}"
+                                          .strip().strip(":").strip())
+        return result
 
     @app.post("/v1/plugins/install", dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
     async def install_plugin_ep(body: dict):

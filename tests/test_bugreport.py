@@ -147,10 +147,11 @@ def test_report_failure_noninteractive_saves_without_prompt(tmp_path, monkeypatc
 
 def test_report_failure_email_channel_opens_mailto(tmp_path, monkeypatch):
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
+    # Email is the always-present channel [2] (upload, when configured, is [1]).
     opened = []
     bugreport.report_failure(
         summary="bug", interactive=True,
-        open_browser=lambda u: opened.append(u), prompt=lambda _t: "1")
+        open_browser=lambda u: opened.append(u), prompt=lambda _t: "2")
     assert opened and opened[0].startswith(f"mailto:{bugreport.MAINTAINER_EMAIL}")
 
 
@@ -159,7 +160,7 @@ def test_report_failure_issue_channel_opens_github(tmp_path, monkeypatch):
     opened = []
     bugreport.report_failure(
         summary="bug", interactive=True,
-        open_browser=lambda u: opened.append(u), prompt=lambda _t: "2")
+        open_browser=lambda u: opened.append(u), prompt=lambda _t: "3")
     assert opened and opened[0].startswith(bugreport.ISSUES_NEW_URL)
 
 
@@ -265,7 +266,7 @@ def test_report_failure_sends_edited_file_not_original(tmp_path, monkeypatch):
     opened = []
     bugreport.report_failure(
         summary="bug", interactive=True,
-        open_browser=lambda u: opened.append(u), prompt=lambda _t: "1")
+        open_browser=lambda u: opened.append(u), prompt=lambda _t: "2")  # [2] = email
     assert opened
     assert "EDITED REPORT BODY" in unquote(opened[0])   # the edit, not the original
 

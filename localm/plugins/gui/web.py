@@ -422,8 +422,17 @@ def attach_gui(
             for p in state.get("plugins", []):
                 if granted(p.get("scope") or p.get("name") or ""):
                     plugins.append(p)
+        # Whether the in-app "Send to maintainer" upload channel is configured, so
+        # the GUI shows that button only when it will actually work (otherwise the
+        # report is saved-to-file and emailed, as before).
+        try:
+            from localm import bugreport
+            bug_upload = bugreport.upload_available()
+        except Exception:
+            bug_upload = False
         return {"scopes": sorted(held) if held else [], "open": held is None,
-                "core": core, "plugins": plugins, "suggest_plugins": suggest}
+                "core": core, "plugins": plugins, "suggest_plugins": suggest,
+                "bugreport_upload": bug_upload}
 
     # R47: the "/api/bug-report" POST lives on the core server (http_server.py) so
     # it works in headless `localm serve` too; the GUI button targets that single
