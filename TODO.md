@@ -66,6 +66,26 @@ the by-hand QA campaign in `qa/`; everything else (todos/tasks/requests) lives i
 - [ ] Add `CONTRIBUTING.md` + a CLA/DCO template BEFORE accepting any external PR (S5; neither
   exists in the tree today)
 
+### Tester distribution via the bug-report proxy (private-repo testers, no GitHub account)
+The Cloudflare Worker bug-report proxy shipped (PR #266: in-app "Send to maintainer" files a
+GitHub issue via a server-side Issues:write token; `tools/bugreport-proxy/`). Two more surfaces
+were designed to ride the SAME Worker (full design + build checklist in
+`dev-notes/self-updater-design-2026-06-30.md`, local/gitignored). NOT built yet.
+- [ ] **Self-updater (check-only auto, apply always user-initiated).** Most updates = swap files
+  + reboot because the install is editable (`uv pip install -e`) and the R18 `os.execv` restart
+  exists; only `pyproject`-deps changes need `uv pip install`, only a llama.cpp build bump needs
+  `setup-llama`. Source = published GitHub Releases (a build zip), pulled through the Worker via a
+  SEPARATE `UPDATE_GITHUB_TOKEN` (Contents:read), shared secret then mandatory. Needs: a live-read
+  `VERSION` file + `localm/_version.py` (editable-install dist-info does not update on a code swap);
+  `localm update [--check]` + a Settings "Check for updates" button + a quiet throttled startup
+  check (notify only, never auto-apply); a detached apply helper with backup + health-checked
+  rollback that never touches `.venv`/data/`.git`/config/models; a `make-release` packaging helper.
+- [ ] **Issues tracker (read-only).** `localm issues [--open|--closed|--all]` + a GUI "Issues" view
+  showing open/resolved issues (highlight the tester's own filed reports) via a Worker `GET /issues`
+  route reusing the Issues token. Closes the loop: report -> track -> "fixed in vX" -> update.
+- Branch `claude/self-updater` exists (design doc only); no code yet.
+- Future hardening (not v1): cryptographically sign the release zip + verify in-app before apply.
+
 ### Real-hardware / real-resource verification (the suite is mock-based)
 - [ ] Real-HW inference verification on NVIDIA + Intel + macOS - dev box is AMD-only; the code
   paths are unit-tested and docs flag them "experimental/unverified" (V3/V4)
