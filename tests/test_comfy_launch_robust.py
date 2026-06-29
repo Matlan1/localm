@@ -99,7 +99,9 @@ def test_ensure_comfy_discovers_launcher_in_workdir(tmp_path):
 
     def fake_popen(argv, cwd=None, **kw):
         spawned["argv"], spawned["cwd"] = argv, cwd
-        return MagicMock()
+        proc = MagicMock()
+        proc.poll.return_value = None        # still running (not an immediate exit)
+        return proc
 
     with patch("localm.config.load_config", return_value=cfg), \
          patch.object(comfy, "_comfy_alive", side_effect=lambda *a, **k: next(alive)), \
@@ -122,7 +124,9 @@ def _spawn_with_cfg(tmp_path, cfg):
 
     def fake_popen(argv, cwd=None, **kw):
         spawned["argv"] = argv
-        return MagicMock()
+        proc = MagicMock()
+        proc.poll.return_value = None        # still running (not an immediate exit)
+        return proc
 
     with patch("localm.config.load_config", return_value=cfg), \
          patch.object(comfy, "_comfy_alive", side_effect=lambda *a, **k: next(alive)), \
