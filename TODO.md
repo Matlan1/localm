@@ -34,6 +34,57 @@ paths, which the mock-based suite does not cover.
 
 ---
 
+## Open items consolidated from dev-notes (2026-06-30)
+
+This is the SINGLE canonical todo / roadmap list. On 2026-06-30 the scattered dev-notes
+worklogs and open-point files were re-verified against master (b878a66) by a 6-agent
+fan-out; almost all of their `[ ]` items had already shipped. The genuinely-open,
+not-already-tracked items are folded in here. Division of labour: **bugs live in
+`issues/issues.txt`**, the recovered backlog in `issues/RECOVERED-BACKLOG-localm.md`,
+the by-hand QA campaign in `qa/`; everything else (todos/tasks/requests) lives in THIS file.
+
+### Setup / installer
+- [ ] Explicit HuggingFace opt-in at install: setup.bat/setup.sh auto-install the torch stack
+  from TORCHSPEC today; ask "Run HuggingFace (non-GGUF) models too? [y/N]" first instead of
+  pulling the heavy stack unprompted (U4/U5; setup.bat:148-164 / setup.sh:199-217)
+- [ ] `localm setup-torch [variant]`: add the HF/torch stack AFTER install without re-running
+  the whole installer (U6)
+- [ ] Reject unknown plugin tokens loudly: `localm plugin ...` junk-accepts a bogus name (e.g.
+  "ewew") instead of erroring (GO-PUBLIC-READINESS note)
+
+### Server / coder
+- [ ] Completions SSE error parity: `_stream_sse_completion` swallows a mid-stream inference
+  error (bare try/finally) while chat's `_stream_sse` emits `[inference error: ...]`; surface it
+  on the completions path too (~5-line fix; B17b, HANDOFF-2026-06-20)
+
+### Media
+- [ ] Autodetect `comfy_launch_cmd`: optional follow-up to the U10 Settings dir-picker - find the
+  ComfyUI launcher automatically instead of requiring the path (HANDOFF-2026-06-22)
+
+### Release / licensing (pairs with META-1 + the Security-pentest standing item below)
+- [ ] Ship MIT notices for the bundled llama.cpp / ggml binaries with the release artifacts (S4)
+- [ ] Add `CONTRIBUTING.md` + a CLA/DCO template BEFORE accepting any external PR (S5; neither
+  exists in the tree today)
+
+### Real-hardware / real-resource verification (the suite is mock-based)
+- [ ] Real-HW inference verification on NVIDIA + Intel + macOS - dev box is AMD-only; the code
+  paths are unit-tested and docs flag them "experimental/unverified" (V3/V4)
+- [ ] VRAM unload -> media-gen smoke on a real 16 GB AMD GPU (swap code merged #114, never
+  re-confirmed live) (V1)
+- [ ] Real-API integration test for the OpenAI / Anthropic coder backends (currently mock-only) (B18)
+- (Music real-ComfyUI E2E with `ace_step_v1_3.5b` is already tracked at the Music item below.)
+
+### Bug candidates surfaced during consolidation (triage into issues/issues.txt - your call)
+Not added to issues.txt yet; each needs a quick live verify (may be cosmetic or already fixed):
+- R39: on Windows, closing the console window can still print a native forrtl/rocBLAS abort even
+  though the CTRL_CLOSE cleanup handler runs (winconsole.py) - distinct from SRV-CTRLC
+- U-STOP: confirm the chat Stop button aborts inference SERVER-SIDE (not just the client stream);
+  the note said it persisted a partial reply / kept reading aloud / triggered web
+- VIS-1 image-wedge: confirm an image sent to a text-only model rejects cleanly without wedging
+  the engine (the VIS-1 messaging work #221 likely covers this - verify)
+
+---
+
 ## Context & Memory
 
 - [x] Project map / codebase index: build a semantic map of the repo upfront; don't re-read files on demand every turn
