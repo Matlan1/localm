@@ -642,8 +642,15 @@ def upload_report(title: str, body: str, *, url: Optional[str] = None,
     tests (defaults to urllib)."""
     import json as _json
 
-    if url is None and token is None:
-        url, token = upload_config()
+    # Fill each of url/token from config independently when not explicitly passed,
+    # so an explicit token does not suppress loading the url from config (and vice
+    # versa).
+    if url is None or token is None:
+        cfg_url, cfg_token = upload_config()
+        if url is None:
+            url = cfg_url
+        if token is None:
+            token = cfg_token
     if not url:
         raise LocalmError("no upload endpoint is configured",
                           reason="set bugreport_upload_url to enable the Send channel")
@@ -758,6 +765,12 @@ def report_failure(*, summary: str, reason: str = "",
     choice = (ask("  Pick a number") or "").strip()
     action = actions.get(choice, "none")
 
+    # When the file save failed (path is None) the channels still work off the
+    # in-memory text, but messages must not claim a file exists - say where the
+    # report actually is, honestly ("we do not hide problems").
+    where = (str(path) if path is not None
+             else "the text above (it could not be saved to a file)")
+
     try:
         if action == "upload":
             try:
@@ -768,7 +781,7 @@ def report_failure(*, summary: str, reason: str = "",
             except LocalmError as e:
                 # A failed send must not look like success - say so and keep the file.
                 console.print(f"[yellow]Could not send it ({e.summary}: {e.reason}). "
-                              f"The report is saved at {path} - email it instead.[/yellow]")
+                              f"The report is at {where} - email it instead.[/yellow]")
         elif action == "email":
             open_browser(mailto_url(summary, body))
             console.print(f"[green]Opened your mail app to {MAINTAINER_EMAIL}.[/green]")
@@ -777,13 +790,13 @@ def report_failure(*, summary: str, reason: str = "",
             console.print("[green]Opened a prefilled GitHub issue in your browser.[/green]")
             console.print("[dim](If it 404s, the repo is private - email it instead.)[/dim]")
         elif action == "self":
-            console.print(f"[dim]Thanks. Send {path} to {MAINTAINER_EMAIL} or on Discord "
+            console.print(f"[dim]Thanks. Send {where} to {MAINTAINER_EMAIL} or on Discord "
                           "when you can.[/dim]")
         else:
             console.print("[dim]No report sent. It is saved if you change your mind.[/dim]")
     except Exception:
-        console.print("[yellow]Could not open that automatically - the report is saved "
-                      f"at {path}.[/yellow]")
+        console.print("[yellow]Could not open that automatically - the report is at "
+                      f"{where}.[/yellow]")
     return path
 
 

@@ -88,6 +88,24 @@ def test_upload_report_omits_token_header_when_none():
     assert "X-Localm-Token" not in seen["headers"]
 
 
+def test_upload_report_fills_url_from_config_when_only_token_passed(monkeypatch):
+    """An explicit token must not suppress loading the url from config (each of
+    url/token defaults from config independently)."""
+    monkeypatch.setattr("localm.config.load_config", lambda: {
+        "bugreport_upload_url": "https://cfg.example/file",
+        "bugreport_upload_token": "cfg-tok"})
+    seen = {}
+
+    def opener(url, data, headers, timeout):
+        seen["url"] = url
+        seen["headers"] = dict(headers)
+        return 201, "{}"
+
+    bugreport.upload_report("t", "b", token="explicit-tok", opener=opener)
+    assert seen["url"] == "https://cfg.example/file"          # url loaded from config
+    assert seen["headers"]["X-Localm-Token"] == "explicit-tok"  # explicit token wins
+
+
 # ------------------------------- CLI menu --------------------------------- #
 
 def test_cli_menu_upload_branch_calls_upload(tmp_path, monkeypatch):
@@ -124,6 +142,24 @@ def test_cli_menu_no_upload_option_when_unconfigured(tmp_path, monkeypatch, caps
     out = capsys.readouterr().out
     assert "Send to the maintainer now" not in out
     assert opened == []
+
+
+def test_cli_menu_channels_stable_when_upload_configured(tmp_path, monkeypatch):
+    """With upload configured, the upload option is [1] but email stays [2] and
+    issue stays [3] - the always-present channels are not renumbered."""
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
+    monkeypatch.setattr(bugreport, "upload_config",
+                        lambda: ("https://proxy.example", "tok"))
+    opened = []
+    bugreport.report_failure(
+        summary="bug", interactive=True,
+        open_browser=lambda u: opened.append(u), prompt=lambda _t: "2")
+    assert opened and opened[0].startswith(f"mailto:{bugreport.MAINTAINER_EMAIL}")
+    opened.clear()
+    bugreport.report_failure(
+        summary="bug", interactive=True,
+        open_browser=lambda u: opened.append(u), prompt=lambda _t: "3")
+    assert opened and opened[0].startswith(bugreport.ISSUES_NEW_URL)
 
 
 # ------------------------------- endpoint --------------------------------- #

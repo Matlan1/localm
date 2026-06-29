@@ -93,3 +93,17 @@ test("R47: Send to maintainer POSTs upload:true and shows the tracking issue URL
   assert.equal(out.hidden, false);
   assert.match(out.textContent, /issues\/42/);
 });
+
+test("R47: a 2xx upload with no issue_url still reports 'Sent' (matches the toast)", async () => {
+  const posts = [];
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch(posts, {
+    saved: true, uploaded: true, path: "/home/bug-reports/bug-z.md",
+    maintainer: "owner@example.com",  // note: proxy returned no issue_url
+  }) });
+  const doc = window.document;
+  doc.getElementById("bug-desc").value = "no url returned";
+  doc.getElementById("bug-upload").click();
+  await flush();
+  const out = doc.getElementById("bug-result");
+  assert.match(out.textContent, /^Sent\./, "shows Sent, not the Saved fallback");
+});

@@ -388,8 +388,9 @@ async function submitBugReport(upload) {
     const uploadFailed = upload && data.upload_error;
     if (out) {
       out.hidden = false;
-      if (upload && data.uploaded && data.issue_url) {
-        out.textContent = "Sent. Tracking issue: " + data.issue_url;
+      if (upload && data.uploaded) {
+        out.textContent = "Sent." +
+          (data.issue_url ? " Tracking issue: " + data.issue_url : "");
       } else if (uploadFailed) {
         out.textContent = "Saved: " + where + "  -  could not send (" +
           data.upload_error + "); email it to " + (data.maintainer || "the maintainer");

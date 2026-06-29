@@ -43,11 +43,16 @@ cannot do safely. (Free Worker tier is far more than enough for 1-2 testers.)
 4. **Set the secrets**:
    ```sh
    wrangler secret put GITHUB_TOKEN     # paste the fine-grained PAT
-   wrangler secret put SHARED_SECRET    # optional: any random string (recommended)
+   wrangler secret put SHARED_SECRET    # STRONGLY RECOMMENDED: any random string
    ```
+   Without `SHARED_SECRET` the endpoint accepts a POST from anyone who finds the
+   URL (it can only file issues, never read the repo, but they could spam issues).
+   Set it - and consider a Cloudflare rate-limiting rule (below) - before sharing
+   the build.
 
-5. **Point localm at it** - in the build you hand to testers, set in
-   `~/.localm/config.json` (or via Settings):
+5. **Point localm at it** - in the build you hand to testers, set these in
+   `~/.localm/config.json` (they are intentionally not in the Settings form, so a
+   tester does not see or change the proxy URL / secret):
    ```json
    {
      "bugreport_upload_url": "https://localm-bugreport-proxy.<you>.workers.dev",
