@@ -40,6 +40,12 @@ ENV_VAR = "LOCALM_API_KEY"
 REQUIRE_ENV_VAR = "LOCALM_REQUIRE_AUTH"
 _TRUTHY = ("1", "true", "yes", "on")
 
+# Minimum length for an owner key to count as "strong enough" to authenticate a
+# NETWORK bind. Enforced at set time (set_api_key) AND at the network-bind gate
+# (cli._exposed_bind_warning), so a trivially-guessable key supplied via the
+# LOCALM_API_KEY env var or a hand-edited auth.key cannot be served to the LAN.
+MIN_KEY_LEN = 8
+
 
 def key_file() -> Path:
     """Path to the persisted API key, inside the resolved localm data dir.
@@ -80,8 +86,9 @@ def set_api_key(key: Optional[str]) -> None:
         clear_api_key()
         return
     key = key.strip()
-    if len(key) < 8:
-        raise ValueError("API key must be at least 8 characters long.")
+    if len(key) < MIN_KEY_LEN:
+        raise ValueError(
+            f"API key must be at least {MIN_KEY_LEN} characters long.")
     from localm.config import ensure_dirs
     ensure_dirs()
     path = key_file()

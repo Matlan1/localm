@@ -39,15 +39,16 @@ def test_generate_is_random(auth):
 
 
 def test_set_get_clear_roundtrip(auth):
+    # Keys must be >= 8 chars (auth.MIN_KEY_LEN); use a realistic one.
     assert auth.get_api_key() is None
-    auth.set_api_key("s3cret")
-    assert auth.get_api_key() == "s3cret"
+    auth.set_api_key("s3cret-key")
+    assert auth.get_api_key() == "s3cret-key"
     auth.clear_api_key()
     assert auth.get_api_key() is None
 
 
 def test_env_overrides_file(auth, monkeypatch):
-    auth.set_api_key("filekey")
+    auth.set_api_key("file-key-1")
     monkeypatch.setenv("LOCALM_API_KEY", "envkey")
     assert auth.get_api_key() == "envkey"
 
