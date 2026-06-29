@@ -1640,7 +1640,7 @@ ws     ::= [ \t\n\r]*
             except CoderAuthError as e:
                 import sys
                 import os
-                from .display import print_error, print_info
+                from .display import print_error
                 import getpass
                 
                 # Cannot prompt for a key if there's no TTY or we are in CI
