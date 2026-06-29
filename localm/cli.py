@@ -28,19 +28,36 @@ _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 def _exposed_bind_warning(host: str) -> Optional[str]:
     """
-    Warning text when binding beyond loopback without an API key set -
-    that combination serves an unauthenticated LLM API to the whole network.
-    Returns None when the configuration is safe.
+    Warning text when binding beyond loopback unsafely. Two unsafe cases, both of
+    which serve a takeable LLM API to the whole network:
+      * no API key set at all (unauthenticated), or
+      * a key is set but is too weak (e.g. a 1-char LOCALM_API_KEY env var or a
+        hand-edited auth.key) - the 8-char floor is only enforced at SET time, so
+        an env/file-sourced key bypasses it; a trivially-guessable owner secret
+        is no better than none (NEW-O).
+    Returns None when the configuration is safe (loopback, or a strong key).
     """
-    from localm.auth import any_key_configured
-    if host in _LOOPBACK_HOSTS or any_key_configured():
+    from localm.auth import MIN_KEY_LEN, any_key_configured, get_api_key
+    if host in _LOOPBACK_HOSTS:
         return None
-    return (
-        f"⚠ Binding to {host} WITHOUT authentication - anyone on the network "
-        f"can use this server, unload your model, and read every response.\n"
-        f"  Set an API key first:  $env:LOCALM_API_KEY = \"<secret>\"  "
-        f"(clients send it as a Bearer token)"
-    )
+    if not any_key_configured():
+        return (
+            f"⚠ Binding to {host} WITHOUT authentication - anyone on the network "
+            f"can use this server, unload your model, and read every response.\n"
+            f"  Set an API key first:  $env:LOCALM_API_KEY = \"<secret>\"  "
+            f"(clients send it as a Bearer token)"
+        )
+    key = get_api_key() or ""
+    if len(key) < MIN_KEY_LEN:
+        return (
+            f"⚠ Binding to {host} with a WEAK API key ({len(key)} "
+            f"char{'s' if len(key) != 1 else ''}) - a key this short is trivially "
+            f"guessable, so the server is effectively unauthenticated on the "
+            f"network.\n"
+            f"  Set a strong key (>= {MIN_KEY_LEN} chars):  "
+            f"$env:LOCALM_API_KEY = \"<secret>\""
+        )
+    return None
 
 
 def _resolve_tls(host, *, no_tls, tls_cert, tls_key):
