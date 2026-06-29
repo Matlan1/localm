@@ -2873,6 +2873,10 @@ async function refreshPluginCommands() {
     pluginCommands.suggest = data.suggest_plugins !== false;
     pluginState = data.plugins || [];
     if (data.core) applyCoreTabVisibility(data.core);
+    // Reveal the bug-report "Send to maintainer" button only when an upload
+    // endpoint is configured (otherwise the report is saved-to-file + emailed).
+    const bugUp = $("bug-upload");
+    if (bugUp) bugUp.hidden = !data.bugreport_upload;
     renderNav();
   } catch { /* server unreachable; fall back to plain unknown-command */ }
 }

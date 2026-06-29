@@ -7,14 +7,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages } from "./harness.mjs";
 
-function makeFetch(posts) {
+function makeFetch(posts, bugResponse) {
   return async (url, opts = {}) => {
     const u = String(url);
     if (u === "/api/bug-report") {
       posts.push(JSON.parse(opts.body || "{}"));
       return {
         ok: true, status: 200, text: async () => "",
-        json: async () => ({ saved: true, filename: "bug-x.md",
+        json: async () => (bugResponse || { saved: true, filename: "bug-x.md",
           path: "/home/bug-reports/bug-x.md", maintainer: "owner@example.com" }),
       };
     }
@@ -73,4 +73,23 @@ test("R47: the POST carries a browser client context (UA, page, viewport, consol
   assert.ok(
     client.console.some((l) => /TypeError: render is not a function/.test(l)),
     "the captured console error is included");
+});
+
+test("R47: Send to maintainer POSTs upload:true and shows the tracking issue URL", async () => {
+  const posts = [];
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch(posts, {
+    saved: true, uploaded: true, path: "/home/bug-reports/bug-y.md",
+    issue_url: "https://github.com/Matlan1/localm/issues/42",
+    maintainer: "owner@example.com",
+  }) });
+  const doc = window.document;
+  doc.getElementById("bug-desc").value = "studio froze";
+  // The button is revealed by capabilities in the app; click it directly here.
+  doc.getElementById("bug-upload").click();
+  await flush();
+  assert.equal(posts.length, 1, "one bug-report POST");
+  assert.equal(posts[0].upload, true, "upload flag set");
+  const out = doc.getElementById("bug-result");
+  assert.equal(out.hidden, false);
+  assert.match(out.textContent, /issues\/42/);
 });

@@ -352,48 +352,66 @@ if ($("server-shutdown")) {
   };
 }
 
-// R47: file a bug report from Settings. Saves an editable markdown report to the
-// data folder (safe env snapshot, optional log tail - never secrets/chat) that
-// the user can then send to the maintainer.
-if ($("bug-send")) {
-  $("bug-send").onclick = async () => {
-    const desc = ($("bug-desc").value || "").trim();
-    if (!desc) { toast("Describe the problem first", true); return; }
-    const includeLog = !!($("bug-include-log") && $("bug-include-log").checked);
-    const btn = $("bug-send");
-    btn.disabled = true;
-    // Attach browser context so a GUI-filed report carries what actually broke in
-    // the page (env snapshot + server state are added server-side). Sanitized and
-    // capped on the server; rendered as plain text, never executed.
-    const client = {
-      userAgent: navigator.userAgent,
-      page: location.hash || location.pathname,
-      viewport: window.innerWidth + "x" + window.innerHeight,
-      console: (window.__localmClientLog || []).slice(-40),
-    };
-    try {
-      const r = await fetch("/api/bug-report", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...authHeaders() },
-        body: JSON.stringify({ description: desc, include_log: includeLog, client }),
-      });
-      const data = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(data.detail || r.statusText);
-      const out = $("bug-result");
-      if (out) {
-        out.hidden = false;
-        out.textContent = "Saved: " + (data.path || data.filename || "report") +
+// R47: file a bug report from Settings. "Save report" writes an editable markdown
+// report to the data folder (safe snapshot, optional log tail - never secrets or
+// chat). "Send to maintainer" (shown only when an upload endpoint is configured,
+// via capabilities.bugreport_upload) ALSO files it as a GitHub issue through the
+// proxy, so a tester needs no GitHub account. A failed upload is reported honestly
+// (the file is still saved), never as success.
+async function submitBugReport(upload) {
+  const desc = ($("bug-desc").value || "").trim();
+  if (!desc) { toast("Describe the problem first", true); return; }
+  const includeLog = !!($("bug-include-log") && $("bug-include-log").checked);
+  const saveBtn = $("bug-send"), upBtn = $("bug-upload");
+  if (saveBtn) saveBtn.disabled = true;
+  if (upBtn) upBtn.disabled = true;
+  // Browser context so the report carries what actually broke in the page (env
+  // snapshot + server state are added server-side). Sanitized + capped on the
+  // server; rendered as plain text, never executed.
+  const client = {
+    userAgent: navigator.userAgent,
+    page: location.hash || location.pathname,
+    viewport: window.innerWidth + "x" + window.innerHeight,
+    console: (window.__localmClientLog || []).slice(-40),
+  };
+  try {
+    const r = await fetch("/api/bug-report", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({ description: desc, include_log: includeLog, client,
+        upload: !!upload }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    const out = $("bug-result");
+    const where = data.path || data.filename || "report";
+    const uploadFailed = upload && data.upload_error;
+    if (out) {
+      out.hidden = false;
+      if (upload && data.uploaded && data.issue_url) {
+        out.textContent = "Sent. Tracking issue: " + data.issue_url;
+      } else if (uploadFailed) {
+        out.textContent = "Saved: " + where + "  -  could not send (" +
+          data.upload_error + "); email it to " + (data.maintainer || "the maintainer");
+      } else {
+        out.textContent = "Saved: " + where +
           (data.maintainer ? "  -  send it to " + data.maintainer : "");
       }
-      $("bug-desc").value = "";
-      toast("Bug report saved");
-    } catch (e) {
-      toast("Could not save report: " + e.message, true);
-    } finally {
-      btn.disabled = false;
     }
-  };
+    $("bug-desc").value = "";
+    if (upload && data.uploaded) toast("Bug report sent");
+    else if (uploadFailed) toast("Saved, but could not send: " + data.upload_error, true);
+    else toast("Bug report saved");
+  } catch (e) {
+    toast("Could not file report: " + e.message, true);
+  } finally {
+    if (saveBtn) saveBtn.disabled = false;
+    if (upBtn) upBtn.disabled = false;
+  }
 }
+
+if ($("bug-send")) $("bug-send").onclick = () => submitBugReport(false);
+if ($("bug-upload")) $("bug-upload").onclick = () => submitBugReport(true);
 
 // R30: export all logs of this instance to a folder the user picks (reuses the
 // shared directory-picker modal), then POSTs the chosen path to /api/logs/export.
