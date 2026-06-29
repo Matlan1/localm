@@ -598,6 +598,100 @@ def issue_url(summary: str, body: str) -> str:
     return f"{ISSUES_NEW_URL}?{q}"
 
 
+# --------------------------------------------------------------------------- #
+#  Upload channel: file the report as a GitHub issue WITHOUT a tester account  #
+#                                                                              #
+#  The app POSTs the (user-reviewed) report to a configured endpoint - the     #
+#  localm bug-report proxy, a small Cloudflare Worker that holds a fine-grained #
+#  GitHub token SERVER-SIDE and creates the issue. No token ships in the app,   #
+#  the token can only file issues through the rate-limited proxy (never read    #
+#  the repo), and it rotates at the proxy without re-shipping. See              #
+#  tools/bugreport-proxy/. Uploading is ALWAYS explicit (a user action), never  #
+#  automatic - a crash report is only saved to a file.                         #
+# --------------------------------------------------------------------------- #
+
+def upload_config() -> tuple:
+    """(url, token) for the upload channel from config, or (None, None) when not
+    configured. The token is an optional shared secret. Never raises."""
+    try:
+        from localm.config import load_config
+        cfg = load_config()
+        url = (cfg.get("bugreport_upload_url") or "").strip() or None
+        token = (cfg.get("bugreport_upload_token") or "").strip() or None
+        return url, token
+    except Exception:
+        return None, None
+
+
+def upload_available() -> bool:
+    """True when an upload endpoint is configured (the GUI uses this to decide
+    whether to offer a 'Send to maintainer' button)."""
+    return upload_config()[0] is not None
+
+
+def upload_report(title: str, body: str, *, url: Optional[str] = None,
+                  token: Optional[str] = None, timeout: float = 15.0,
+                  opener=None) -> dict:
+    """POST a user-reviewed report to the upload endpoint and return its JSON
+    response (e.g. ``{"url": "<issue url>"}``).
+
+    Only the report text (plus an optional shared secret) is sent; the GitHub
+    token lives at the proxy. Raises :class:`LocalmError` on any failure - no
+    endpoint, a network error, or a non-2xx response - so a failed send is NEVER
+    reported as success (we do not hide problems). *opener* is injectable for
+    tests (defaults to urllib)."""
+    import json as _json
+
+    # Fill each of url/token from config independently when not explicitly passed,
+    # so an explicit token does not suppress loading the url from config (and vice
+    # versa).
+    if url is None or token is None:
+        cfg_url, cfg_token = upload_config()
+        if url is None:
+            url = cfg_url
+        if token is None:
+            token = cfg_token
+    if not url:
+        raise LocalmError("no upload endpoint is configured",
+                          reason="set bugreport_upload_url to enable the Send channel")
+    payload = _json.dumps(
+        {"title": (title or "localm bug report")[:200], "body": body or ""}
+    ).encode("utf-8")
+    headers = {"Content-Type": "application/json", "User-Agent": "localm-bugreport"}
+    if token:
+        headers["X-Localm-Token"] = token
+
+    if opener is None:
+        import urllib.error
+        import urllib.request
+
+        def opener(u, data, hdrs, to):  # noqa: E306
+            req = urllib.request.Request(u, data=data, headers=hdrs, method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=to) as resp:
+                    return resp.status, resp.read().decode("utf-8", "replace")
+            except urllib.error.HTTPError as e:
+                detail = ""
+                try:
+                    detail = e.read().decode("utf-8", "replace")[:300]
+                except Exception:
+                    pass
+                raise LocalmError("the bug-report server rejected the upload",
+                                  reason=f"HTTP {e.code}: {detail}".strip())
+            except (urllib.error.URLError, OSError) as e:
+                raise LocalmError("could not reach the bug-report server",
+                                  reason=str(getattr(e, "reason", e)))
+
+    status, raw = opener(url, payload, headers, timeout)
+    if not (200 <= int(status) < 300):
+        raise LocalmError("the bug-report server rejected the upload",
+                          reason=f"HTTP {status}: {raw[:300]}".strip())
+    try:
+        return _json.loads(raw) if raw.strip() else {}
+    except ValueError:
+        return {"raw": raw[:300]}
+
+
 def report_failure(*, summary: str, reason: str = "",
                    error: Optional[BaseException] = None,
                    context: Optional[dict] = None,
@@ -636,19 +730,6 @@ def report_failure(*, summary: str, reason: str = "",
                       "Discord, or open a GitHub issue once you have repo access.[/dim]")
         return path
 
-    console.print("How would you like to send it (edit the file first if you want)?")
-    console.print("  [1] Email the maintainer  [dim](opens your mail app, works anywhere)[/dim]")
-    console.print("  [2] Open a GitHub issue   [dim](needs access while the repo is private)[/dim]")
-    console.print(f"  [3] I'll send it myself   [dim](Discord / email to {MAINTAINER_EMAIL})[/dim]")
-    console.print("  [Enter] not now")
-
-    ask = prompt
-    if ask is None:
-        import click
-        def ask(text_):  # noqa: E306
-            return click.prompt(text_, default="", show_default=False)
-    choice = (ask("  Pick 1-3") or "").strip()
-
     # Re-read the saved file so the user's edits (made before picking a channel)
     # are what actually gets sent - otherwise "edit it first" would be a lie.
     body = text
@@ -657,22 +738,65 @@ def report_failure(*, summary: str, reason: str = "",
             body = path.read_text(encoding="utf-8")
         except OSError:
             body = text
+
+    up_url, up_token = upload_config()
+    can_upload = up_url is not None
+
+    console.print("How would you like to send it (edit the file first if you want)?")
+    # Map the displayed number -> action, so an extra "send now" option when an
+    # upload endpoint is configured does not renumber the always-present channels
+    # (email is [2], issue [3], self [4] regardless of the upload option).
+    actions = {}
+    if can_upload:
+        console.print("  [1] Send to the maintainer now  "
+                      "[dim](uploads the report - no GitHub account needed)[/dim]")
+        actions["1"] = "upload"
+    console.print("  [2] Email the maintainer  [dim](opens your mail app, works anywhere)[/dim]")
+    console.print("  [3] Open a GitHub issue   [dim](needs access while the repo is private)[/dim]")
+    console.print(f"  [4] I'll send it myself   [dim](Discord / email to {MAINTAINER_EMAIL})[/dim]")
+    console.print("  [Enter] not now")
+    actions.update({"2": "email", "3": "issue", "4": "self"})
+
+    ask = prompt
+    if ask is None:
+        import click
+        def ask(text_):  # noqa: E306
+            return click.prompt(text_, default="", show_default=False)
+    choice = (ask("  Pick a number") or "").strip()
+    action = actions.get(choice, "none")
+
+    # When the file save failed (path is None) the channels still work off the
+    # in-memory text, but messages must not claim a file exists - say where the
+    # report actually is, honestly ("we do not hide problems").
+    where = (str(path) if path is not None
+             else "the text above (it could not be saved to a file)")
+
     try:
-        if choice == "1":
+        if action == "upload":
+            try:
+                res = upload_report(summary, body, url=up_url, token=up_token)
+                link = res.get("url") if isinstance(res, dict) else None
+                console.print("[green]Sent to the maintainer.[/green]"
+                              + (f" Tracking issue: {link}" if link else ""))
+            except LocalmError as e:
+                # A failed send must not look like success - say so and keep the file.
+                console.print(f"[yellow]Could not send it ({e.summary}: {e.reason}). "
+                              f"The report is at {where} - email it instead.[/yellow]")
+        elif action == "email":
             open_browser(mailto_url(summary, body))
             console.print(f"[green]Opened your mail app to {MAINTAINER_EMAIL}.[/green]")
-        elif choice == "2":
+        elif action == "issue":
             open_browser(issue_url(summary, body))
             console.print("[green]Opened a prefilled GitHub issue in your browser.[/green]")
             console.print("[dim](If it 404s, the repo is private - email it instead.)[/dim]")
-        elif choice == "3":
-            console.print(f"[dim]Thanks. Send {path} to {MAINTAINER_EMAIL} or on Discord "
+        elif action == "self":
+            console.print(f"[dim]Thanks. Send {where} to {MAINTAINER_EMAIL} or on Discord "
                           "when you can.[/dim]")
         else:
             console.print("[dim]No report sent. It is saved if you change your mind.[/dim]")
     except Exception:
-        console.print("[yellow]Could not open that automatically - the report is saved "
-                      f"at {path}.[/yellow]")
+        console.print("[yellow]Could not open that automatically - the report is at "
+                      f"{where}.[/yellow]")
     return path
 
 
