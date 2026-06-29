@@ -61,6 +61,52 @@ def _workflow_path() -> Path:
 _INSTRUMENTAL = "[inst]"
 
 
+def _audio_quality_warning(path: Path) -> str:
+    """Best-effort spectral sanity check on a freshly generated track.
+
+    Returns a one-line warning when the audio is pathologically band-limited
+    (almost no high-frequency content) - the signature of a broken ComfyUI/model
+    audio path (e.g. a ComfyUI build that produces muffled ACE-Step output),
+    else "". RULE 5 (do not hide problems): surface "it came out degraded"
+    instead of reporting a muffled track as a clean success. Never raises and
+    never fails generation - skips silently if numpy/soundfile are unavailable
+    or on any error.
+    """
+    try:
+        import numpy as np
+        import soundfile as sf
+        from numpy.fft import rfft, rfftfreq
+    except Exception:
+        return ""
+    try:
+        data, sr = sf.read(str(path), always_2d=True)
+        mono = data.mean(axis=1).astype("float64")
+        if mono.size < sr:                       # under ~1s: not worth judging
+            return ""
+        if float(np.sqrt(np.mean(mono ** 2))) < 1e-4:  # silent: a different fault
+            return ""
+        n = 8192
+        win = np.hanning(n)
+        frames = [np.abs(rfft(mono[s:s + n] * win)) ** 2
+                  for s in range(0, mono.size - n + 1, n)]
+        if not frames:
+            return ""
+        psd = np.mean(frames, axis=0)
+        freqs = rfftfreq(n, 1.0 / sr)
+        total = psd.sum() + 1e-12
+        rolloff95 = float(freqs[np.searchsorted(np.cumsum(psd), 0.95 * total)])
+        # Real music rolls off ~12-18 kHz; flag only clearly-degraded output so a
+        # legitimately bass-heavy track is not false-flagged.
+        if rolloff95 < 4000.0:
+            return ("the track came out band-limited (95% of its energy is below "
+                    f"{int(round(rolloff95))} Hz - almost no treble). That is an "
+                    "audio-quality fault in the ComfyUI/model build, not in localm; "
+                    "try a different ComfyUI build/version for ACE-Step.")
+    except Exception:
+        return ""
+    return ""
+
+
 def generate_music(
     tags: str,
     output_path: Path,
@@ -319,6 +365,12 @@ def generate_music(
          "type": audio_info.get("type", "output")},
         delete_outputs=delete_outputs,
     )
+
+    # Honesty (RULE 5): if the track came out pathologically band-limited, say so
+    # in the result rather than reporting a muffled track as a clean success.
+    _quality_warning = _audio_quality_warning(output_path)
+    if _quality_warning:
+        contain_warning = "; ".join(w for w in (contain_warning, _quality_warning) if w)
 
     # Sidecar JSON - everything needed to reproduce or tweak the track.
     # Skipped entirely in privacy mode (write_sidecar=False) so the prompt
