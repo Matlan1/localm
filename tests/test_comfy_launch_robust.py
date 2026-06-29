@@ -2,6 +2,8 @@
 """ComfyUI launch robustness: derive the launcher's own folder as the working
 directory, and honour the configurable cold-start timeout."""
 
+import os
+import sys
 from unittest.mock import MagicMock, patch
 
 from localm.image_gen import comfy
@@ -23,6 +25,48 @@ def test_derive_workdir_quoted_path_with_args(tmp_path):
 def test_derive_workdir_none_for_bare_relative_name():
     # A bare "launch-comfyui.bat" is not an existing file from here -> no guess.
     assert comfy._derive_workdir_from_cmd("launch-comfyui.bat") is None
+
+
+# --- ROCm/bin on PATH for a ZLUDA ComfyUI launch (cublas64_11.dll dependency) ---
+
+def test_amd_rocm_launch_env_none_off_windows(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert comfy._amd_rocm_launch_env() is None
+
+
+def test_amd_rocm_launch_env_none_without_hip_path(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.delenv("HIP_PATH", raising=False)
+    assert comfy._amd_rocm_launch_env() is None
+
+
+def test_amd_rocm_launch_env_prepends_rocm_bin(monkeypatch, tmp_path):
+    rocm_bin = tmp_path / "bin"
+    rocm_bin.mkdir()
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("HIP_PATH", str(tmp_path))
+    monkeypatch.setenv("PATH", r"C:\Windows\System32")
+    env = comfy._amd_rocm_launch_env()
+    assert env is not None
+    assert env["PATH"].split(os.pathsep)[0] == str(rocm_bin)
+    assert r"C:\Windows\System32" in env["PATH"]
+
+
+def test_amd_rocm_launch_env_noop_when_already_on_path(monkeypatch, tmp_path):
+    rocm_bin = tmp_path / "bin"
+    rocm_bin.mkdir()
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("HIP_PATH", str(tmp_path))
+    monkeypatch.setenv("PATH", str(rocm_bin) + os.pathsep + r"C:\Windows\System32")
+    assert comfy._amd_rocm_launch_env() is None
+
+
+def test_amd_rocm_launch_env_none_when_bin_missing(monkeypatch, tmp_path):
+    # HIP_PATH set but no bin subdir under it -> nothing to add.
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("HIP_PATH", str(tmp_path))
+    monkeypatch.setenv("PATH", r"C:\Windows\System32")
+    assert comfy._amd_rocm_launch_env() is None
 
 
 def test_ensure_comfy_uses_configured_timeout(monkeypatch):

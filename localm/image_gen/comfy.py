@@ -564,6 +564,32 @@ def discover_launch_cmd(folder: Path) -> Optional[str]:
     return None
 
 
+def _amd_rocm_launch_env() -> Optional[dict]:
+    """Child env for the ComfyUI launch with ROCm's bin on PATH, or None to inherit.
+
+    ZLUDA's ``cublas64_11.dll`` / ``cusparse64_11.dll`` shims load rocBLAS / rocSPARSE
+    from ``%HIP_PATH%\\bin`` at ``import torch`` time. A localm process spawned from a
+    context that has only HIP_PATH set (not ROCm\\bin on PATH) would otherwise make a
+    ZLUDA ComfyUI die importing torch (WinError 126 on cublas64_11.dll). No-op off
+    Windows, without HIP_PATH, when the bin is missing, or when it is already on PATH.
+    """
+    import sys as _sys
+    if _sys.platform != "win32":
+        return None
+    hip = os.environ.get("HIP_PATH")
+    if not hip:
+        return None
+    rocm_bin = os.path.join(hip, "bin")
+    if not os.path.isdir(rocm_bin):
+        return None
+    cur = os.environ.get("PATH", "")
+    if any(rocm_bin.lower() == p.strip().lower() for p in cur.split(os.pathsep) if p):
+        return None
+    env = dict(os.environ)
+    env["PATH"] = rocm_bin + os.pathsep + cur
+    return env
+
+
 def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
                  wait_seconds: Optional[int] = None,
                  launch_cmd: Optional[str] = None,
@@ -685,6 +711,7 @@ def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
         launch_log_path = None
     try:
         proc = subprocess.Popen(argv, cwd=workdir,
+                         env=_amd_rocm_launch_env(),
                          stdout=launch_out,
                          stderr=subprocess.STDOUT)
         _t.sleep(0.5)
