@@ -224,8 +224,8 @@ if "%DATAPICK%"=="2" (
         rem A non-empty ./home survived: localm prefers a portable ./home, so
         rem shared mode would be silently ignored. Warn loudly and record the
         rem dir localm will actually use, rather than printing a false "shared".
-        echo  [!] ./home is not empty. LocalM will continue using it.
-        echo      To use shared mode, remove ./home and re-run setup.
+        echo  [!] ./home is not empty - shared mode will NOT take effect; LocalM
+        echo      will continue using ./home. To use shared mode, remove ./home and re-run setup.
         set "DATADIR=%CD%\home"
     ) else (
         echo  Data directory: %USERPROFILE%\.localm  ^(shared^)
