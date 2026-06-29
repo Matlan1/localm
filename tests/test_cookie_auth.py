@@ -209,11 +209,13 @@ def test_login_in_open_mode_no_bypass(tmp_path, monkeypatch):
 
 
 def test_require_auth_no_key_fails_closed_even_with_forged_cookie(tmp_path, monkeypatch):
-    """LOCALM_REQUIRE_AUTH with no key configured must fail CLOSED (503) on a
-    protected route, and a forged session cookie cannot bypass that gate."""
+    """LOCALM_REQUIRE_AUTH with no key configured must fail CLOSED on a protected
+    route, and a forged session cookie cannot bypass that gate. The refusal is now
+    401 (was 503): a 401 makes the GUI show the key prompt instead of a 'server
+    down' overlay; the security property is that it is refused, never 200."""
     _open_mode(monkeypatch, tmp_path)
     monkeypatch.setenv("LOCALM_REQUIRE_AUTH", "1")
     with TestClient(create_app(_make_engine()), raise_server_exceptions=True) as c:
-        assert c.get("/v1/models").status_code == 503
+        assert c.get("/v1/models").status_code == 401
         c.cookies.set(SESSION_COOKIE, "forged-value")
-        assert c.get("/v1/models").status_code == 503
+        assert c.get("/v1/models").status_code == 401

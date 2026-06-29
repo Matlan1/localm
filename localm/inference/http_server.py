@@ -1123,7 +1123,7 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
         except ValueError as e:
             raise HTTPException(400, str(e))
         # SEC-3: refuse to enable require_auth while no API key exists. Doing so
-        # is a one-way self-lockout: the very next keyless request 503s and the
+        # is a one-way self-lockout: the very next keyless request 401s and the
         # GUI sends no Bearer, so the toggle could never be undone from the GUI.
         # Only block ENABLING it (turning it off or unrelated edits are fine);
         # the auth-state check belongs here, not in the static schema validator.

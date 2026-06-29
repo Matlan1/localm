@@ -329,10 +329,12 @@ def test_guard_different_explicit_backend_reprovisions(wired, monkeypatch):
     result = _run(["--backend", "cuda"])
     assert result.exit_code == 0, result.output
     # Collapse whitespace: rich word-wraps the console at ~80 cols, so the phrase
-    # may straddle a newline ("provisioning\ncuda now.").
+    # may straddle a newline. The reprovision message was shortened to
+    # "replacing <old> build with <new>" (was "X already provisioned, but you
+    # asked for cuda - provisioning cuda now"); the BEHAVIOUR (cuda fetched +
+    # recorded) below is the real R23 guarantee.
     flat = " ".join(result.output.lower().split())
-    assert "provisioning cuda" in flat
-    assert "already provisioned, but you asked for cuda" in flat
+    assert "replacing vulkan build with cuda" in flat
     assert trace.extracted                                   # cuda WAS fetched
     assert setup_llama._provisioned_backend(target) == "cuda"
 
