@@ -139,25 +139,25 @@ export function register(ctx) {
 
     const actions = el("div", "job-actions");
 
-    const run = el("button", "btn-quiet", "Run now");
+    const run = el("button", "btn-secondary", "Run now");
     run.dataset.action = "run";
     run.dataset.id = job.id;
     run.onclick = () => runNow(job);
     actions.appendChild(run);
 
-    const toggle = el("button", "btn-quiet", job.enabled ? "Disable" : "Enable");
+    const toggle = el("button", "btn-secondary", job.enabled ? "Disable" : "Enable");
     toggle.dataset.action = "toggle";
     toggle.dataset.id = job.id;
     toggle.onclick = () => setEnabled(job, !job.enabled);
     actions.appendChild(toggle);
 
-    const results = el("button", "btn-quiet", "Results");
+    const results = el("button", "btn-secondary", "Results");
     results.dataset.action = "results";
     results.dataset.id = job.id;
     results.onclick = () => showResults(job);
     actions.appendChild(results);
 
-    const del = el("button", "btn-quiet danger", "Delete");
+    const del = el("button", "btn-danger", "Delete");
     del.dataset.action = "delete";
     del.dataset.id = job.id;
     del.onclick = () => remove(job);
@@ -210,7 +210,7 @@ export function register(ctx) {
     clear(panel);
     const header = el("div", "row");
     header.appendChild(el("h3", null, `Results - ${job.name}`));
-    const close = el("button", "btn-quiet", "close");
+    const close = el("button", "btn-secondary", "close");
     close.onclick = () => { panel.style.display = "none"; };
     header.appendChild(close);
     panel.appendChild(header);

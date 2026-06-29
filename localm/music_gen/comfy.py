@@ -79,6 +79,7 @@ def generate_music(
     write_sidecar: bool = True,
     launch_cmd: Optional[str] = None,
     workdir: Optional[str] = None,
+    float_type: Optional[str] = None,
     swap: bool = True,
     cancel_check: Optional[callable] = None,
     delete_outputs: bool = False,
@@ -188,6 +189,16 @@ def generate_music(
             workflow, "CheckpointLoaderSimple", "CheckpointLoader")
         if ckpt_loader is not None and "ckpt_name" in ckpt_loader.get("inputs", {}):
             ckpt_loader["inputs"]["ckpt_name"] = ckpt_name
+            
+    if float_type and float_type != "default":
+        for node in workflow.values():
+            if node.get("class_type") in (
+                "UNETLoader", "UnetLoaderGGUF", "UnetLoaderGGUFAdvanced",
+                "CheckpointLoaderSimple", "CheckpointLoader"
+            ):
+                if "inputs" not in node:
+                    node["inputs"] = {}
+                node["inputs"]["weight_dtype"] = float_type
 
     # Pre-submit model validation: confirm the ACE-Step checkpoint exists
     # (substituting an unambiguous precision variant), failing EARLY with the exact

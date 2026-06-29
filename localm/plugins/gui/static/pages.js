@@ -300,13 +300,15 @@ $("disc-query").addEventListener("keydown", (e) => {
 // folder on this machine and drop its path into the spec field (the /api/models/
 // pull endpoint already accepts a local folder/file path). The user no longer has
 // to guess that pasting a path works.
-if ($("pull-browse")) {
-  $("pull-browse").onclick = async () => {
+document.addEventListener("click", async (e) => {
+  if (e.target && e.target.id === "pull-browse") {
+    const spec = $("pull-spec");
+    if (!spec) return;
     const dir = await pickDirectory("Pick a folder that holds the model(s)",
-                                    $("pull-spec").value.trim());
-    if (dir) $("pull-spec").value = dir;
-  };
-}
+                                    spec.value.trim());
+    if (dir) spec.value = dir;
+  }
+});
 
 // R18: restart the server in place from Settings - the backend unloads the model,
 // then re-execs the same process, so it comes back on the same port. The reconnect
@@ -445,7 +447,7 @@ async function refreshUploadsList() {
       span.className = "upload-name";
       span.textContent = `${it.name}  ·  ${fmtBytes(it.bytes)}`;
       const del = document.createElement("button");
-      del.className = "btn-quiet upload-del";
+      del.className = "btn-secondary upload-del";
       del.textContent = "Remove";
       del.onclick = () => deleteUpload(it.name);
       li.appendChild(span);
@@ -715,7 +717,7 @@ function renderImageGrid() {
     grid.appendChild(thumb);
   }
   if (imgState.items.length > IMG_GRID_DEFAULT) {
-    const toggle = el("button", "btn-quiet img-show-all",
+    const toggle = el("button", "btn-secondary img-show-all",
       imgState.showAll ? "show fewer"
                        : `show all (${imgState.items.length})`);
     toggle.onclick = () => { imgState.showAll = !imgState.showAll; renderImageGrid(); };
@@ -732,7 +734,7 @@ function renderImgBulkBar() {
   bar.replaceChildren();
   bar.appendChild(el("span", "count", `${n} selected`));
 
-  const move = el("button", "btn-quiet", "move to folder…");
+  const move = el("button", "btn-secondary", "move to folder…");
   move.onclick = async () => {
     const dest = await pickDirectory(`Move ${n} image(s) to…`,
       localStorage.getItem("localm.imgMoveDest") || "");
@@ -761,7 +763,7 @@ function renderImgBulkBar() {
     refreshImageHistory();
   };
 
-  const clear = el("button", "btn-quiet", "clear selection");
+  const clear = el("button", "btn-secondary", "clear selection");
   clear.onclick = () => {
     imgState.selected.clear();
     renderImageGrid();
@@ -783,7 +785,7 @@ function showImageDetail(item) {
 
     const actions = el("div", "actions");
 
-    const useInput = el("button", "btn-quiet", "use as input");
+    const useInput = el("button", "btn-secondary", "use as input");
     useInput.title = "Use this image as the img2img input";
     useInput.onclick = () => {
       $("img-input").value = item.path || item.name;
@@ -792,7 +794,7 @@ function showImageDetail(item) {
     };
     actions.appendChild(useInput);
 
-    const toChat = el("button", "btn-quiet", "send to chat");
+    const toChat = el("button", "btn-secondary", "send to chat");
     toChat.title = "Attach this image to the chat composer";
     toChat.onclick = async () => {
       try {
@@ -817,7 +819,7 @@ function showImageDetail(item) {
     actions.appendChild(toChat);
 
     if (item.meta?.prompt) {
-      const reuse = el("button", "btn-quiet", "reuse settings");
+      const reuse = el("button", "btn-secondary", "reuse settings");
       reuse.title = "Fill the generation form with this image's prompt, seed, and settings";
       reuse.onclick = () => {
         $("img-prompt").value = item.meta.prompt || "";
@@ -832,12 +834,12 @@ function showImageDetail(item) {
       actions.appendChild(reuse);
     }
 
-    const dl = el("button", "btn-quiet", "download");
+    const dl = el("button", "btn-secondary", "download");
     dl.onclick = () =>
       imgDownload(item.name).catch((e) => toast("Download failed: " + e.message, true));
     actions.appendChild(dl);
 
-    const copyImg = el("button", "btn-quiet", "copy image");
+    const copyImg = el("button", "btn-secondary", "copy image");
     copyImg.title = "Copy the image to the clipboard";
     copyImg.onclick = async () => {
       try {
@@ -852,7 +854,7 @@ function showImageDetail(item) {
     };
     actions.appendChild(copyImg);
 
-    const copyPath = el("button", "btn-quiet", "copy path");
+    const copyPath = el("button", "btn-secondary", "copy path");
     copyPath.title = item.path || "";
     copyPath.onclick = async () => {
       try {
@@ -862,7 +864,7 @@ function showImageDetail(item) {
     };
     actions.appendChild(copyPath);
 
-    const rename = el("button", "btn-quiet", "rename…");
+    const rename = el("button", "btn-secondary", "rename…");
     rename.onclick = async () => {
       const newName = prompt("New name:", item.name);
       if (!newName || newName.trim() === item.name) return;
@@ -882,7 +884,7 @@ function showImageDetail(item) {
     };
     actions.appendChild(rename);
 
-    const move = el("button", "btn-quiet", "move to folder…");
+    const move = el("button", "btn-secondary", "move to folder…");
     move.onclick = async () => {
       const dest = await pickDirectory("Move image to…",
         localStorage.getItem("localm.imgMoveDest") || "");
@@ -1424,8 +1426,9 @@ function buildSettingControl(field) {
   };
   // FOLDER / PATH fields get a "Browse..." button wired to the existing
   // directory picker, so the user does not have to type a path by hand (U10).
-  const isPath = field.widget === "path" || field.key.endsWith("_path") || field.key.endsWith("_file");
-  const isDir = field.widget === "folder" || field.key.endsWith("_dir");
+  const lbl = (field.label || field.key).toLowerCase();
+  const isPath = field.widget === "path" || field.key.endsWith("_path") || field.key.endsWith("_file") || lbl.includes("file") || lbl.includes("path") || lbl.includes("cmd");
+  const isDir = field.widget === "folder" || field.key.endsWith("_dir") || lbl.includes("folder") || lbl.includes("dir");
   if (isPath || isDir) {
     const row = el("div", "dir-picker-row");
     const browse = el("button", "btn-secondary dir-picker-btn", "Browse...");
@@ -1446,6 +1449,24 @@ function buildSettingControl(field) {
     wrap.appendChild(input);
   }
   if (field.help) wrap.appendChild(el("div", "sub", field.help));
+  if (field.action) {
+    const actRow = el("div", "");
+    actRow.style.marginTop = "0.5rem";
+    const btn = el("button", "btn-secondary", field.action.label);
+    btn.type = "button";
+    btn.onclick = async () => {
+      const r = await fetch(field.action.endpoint, { method: "POST", headers: authHeaders() });
+      if (r.ok) {
+        toast(field.action.success_msg || "Action completed");
+        refreshSettingsPage();
+      } else {
+        const err = await r.json().catch(() => ({}));
+        toast(err.error || "Action failed", true);
+      }
+    };
+    actRow.appendChild(btn);
+    wrap.appendChild(actRow);
+  }
   return { field, node: wrap, read, write };
 }
 
@@ -1553,7 +1574,7 @@ function buildKeyPresets(presets, isOwner) {
   if (presets && presets.length) {
     box.appendChild(el("span", "sub key-presets-label", "Presets:"));
     for (const p of presets) {
-      const b = el("button", "btn-quiet key-preset-btn", p.name);
+      const b = el("button", "btn-secondary key-preset-btn", p.name);
       b.type = "button";
       b.onclick = () => applyKeyPreset(p.scopes || []);
       if (isOwner) {
@@ -1566,7 +1587,7 @@ function buildKeyPresets(presets, isOwner) {
     }
   }
   if (isOwner) {
-    const save = el("button", "btn-quiet key-preset-save", "+ Save as preset");
+    const save = el("button", "btn-secondary key-preset-save", "+ Save as preset");
     save.type = "button";
     save.onclick = () => saveCurrentAsPreset(presets || []);
     box.appendChild(save);
@@ -1725,7 +1746,7 @@ async function refreshKeysPanel() {
     row.appendChild(el("span", "mono key-scope-tags", (k.scopes || []).join(", ")));
     row.appendChild(el("span", "sub key-expiry-tag", keyExpiryLabel(k.expires)));
     row.appendChild(el("span", "sub key-lastused-tag", keyLastUsedLabel(k.last_used)));
-    const rm = el("button", "btn-quiet", "Revoke");
+    const rm = el("button", "btn-secondary", "Revoke");
     rm.onclick = async () => {
       if (!confirm(`Revoke key "${k.name || k.id}"?`)) return;
       const d = await fetch(`/v1/keys/${encodeURIComponent(k.id)}`,
@@ -1770,7 +1791,7 @@ async function refreshKeysPanel() {
     secret.type = "text"; secret.readOnly = true; secret.value = made.key;
     secret.className = "key-secret-value";
     box.appendChild(secret);
-    const copy = el("button", "btn-quiet", "Copy");
+    const copy = el("button", "btn-secondary", "Copy");
     copy.onclick = () => {
       secret.select();
       if (navigator.clipboard) navigator.clipboard.writeText(made.key);
@@ -2781,3 +2802,4 @@ $("gui-clear-convs").onclick = async () => {
   localStorage.removeItem("localm.conversations");
   location.reload();
 };
+

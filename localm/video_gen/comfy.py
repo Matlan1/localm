@@ -104,6 +104,7 @@ def generate_video(
     write_sidecar: bool = True,
     launch_cmd: Optional[str] = None,
     workdir: Optional[str] = None,
+    float_type: Optional[str] = None,
     swap: bool = True,
     cancel_check: Optional[callable] = None,
     delete_outputs: bool = False,
@@ -234,6 +235,16 @@ def generate_video(
     _, create_video = find_node_by_class(workflow, "CreateVideo")
     if create_video is not None and "fps" in create_video.get("inputs", {}):
         create_video["inputs"]["fps"] = fps
+
+    if float_type and float_type != "default":
+        for node in workflow.values():
+            if node.get("class_type") in (
+                "UNETLoader", "UnetLoaderGGUF", "UnetLoaderGGUFAdvanced",
+                "CheckpointLoaderSimple", "CheckpointLoader"
+            ):
+                if "inputs" not in node:
+                    node["inputs"] = {}
+                node["inputs"]["weight_dtype"] = float_type
 
     # Image-to-video: upload the picture and feed it as the latent's start frame.
     # A fresh node id (not a hardcoded "20") avoids clobbering a user's own node.

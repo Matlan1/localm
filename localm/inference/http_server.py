@@ -209,7 +209,7 @@ def _enforce_request(request: Request, scope: Optional[str]) -> None:
     if not any_key_configured():
         if require_auth_enabled():
             raise HTTPException(
-                status_code=503,
+                status_code=401,
                 detail="Auth required but no API key configured "
                        "(set one via the launcher or LOCALM_API_KEY)")
         return  # open/dev mode
@@ -441,7 +441,7 @@ def _do_restart() -> None:
         pass
 
     try:
-        from localm.debuglog import dump_ring_buffer, recent_activity
+        from localm.debuglog import dump_ring_buffer, flush_log_handlers, recent_activity
         dump_ring_buffer()
         # Also write a clear text log for the bug reporter to ingest directly,
         # in case the JSON buffer fails to load back into memory.
@@ -449,6 +449,9 @@ def _do_restart() -> None:
         pre_log = home_dir() / "logs" / "pre_restart.log"
         pre_log.parent.mkdir(parents=True, exist_ok=True)
         pre_log.write_text("\n".join(recent_activity()), encoding="utf-8")
+        # Flush all log handlers before os.execv so no buffered lines are lost
+        # (Task 1: log durability / save-bug).
+        flush_log_handlers()
     except Exception:
         pass
 
@@ -751,11 +754,57 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
         return {"authed": True, "scopes": sorted(held)}
 
     @app.post("/api/session/logout", include_in_schema=False)
-    async def session_logout(response: Response):
-        """Clear the session + CSRF cookies (sign the browser out)."""
-        response.delete_cookie(SESSION_COOKIE, path="/")
-        response.delete_cookie(CSRF_COOKIE, path="/")
+    async def session_logout(request: Request, response: Response):
+        """Clear the session + CSRF cookies (sign the browser out).
+
+        A POST from the cookie-authenticated browser GUI is subject to the
+        same double-submit CSRF check as every other state-changing endpoint
+        (Task 3: CSRF-post-clear). A bearer-header caller (CLI / SDK) is
+        CSRF-exempt because it cannot be driven cross-site."""
+        token, source = _request_token(request)
+        if source == "cookie" and not _csrf_double_submit_ok(request):
+            raise HTTPException(
+                403,
+                "Missing or invalid CSRF token. Include the localm_csrf "
+                "cookie value in the X-CSRF-Token header.")
+        secure = request.url.scheme == "https"
+        response.delete_cookie(SESSION_COOKIE, path="/", httponly=True, secure=secure, samesite="strict")
+        response.delete_cookie(CSRF_COOKIE, path="/", httponly=False, secure=secure, samesite="strict")
         return {"authed": False}
+
+    @app.post("/api/auth/key/clear",
+              dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))],
+              include_in_schema=False)
+    async def clear_owner_key(request: Request, response: Response):
+        """Delete the server-side owner key (auth.key) and immediately
+        invalidate the caller's session cookie.
+
+        CSRF-protected: a cookie-authenticated caller must echo the
+        localm_csrf cookie value in X-CSRF-Token (double-submit pattern).
+        After this call any_key_configured() returns False (assuming no
+        LOCALM_API_KEY env var and an empty keystore), and all subsequent
+        web UI requests that rely on the session cookie will fail auth and
+        be redirected to the key gate by the client (Task 3: CSRF-post-clear).
+        """
+        _, source = _request_token(request)
+        if source == "cookie" and not _csrf_double_submit_ok(request):
+            raise HTTPException(
+                403,
+                "Missing or invalid CSRF token. Include the localm_csrf "
+                "cookie value in the X-CSRF-Token header.")
+        from localm.auth import clear_api_key
+        clear_api_key()
+        secure = request.url.scheme == "https"
+        # Invalidate the session cookie immediately so the browser is forced
+        # back to the key gate on the next navigation (the old cookie value
+        # no longer matches any key). Also clear the CSRF token.
+        response.delete_cookie(SESSION_COOKIE, path="/", httponly=True,
+                               secure=secure, samesite="strict")
+        response.delete_cookie(CSRF_COOKIE, path="/", httponly=False,
+                               secure=secure, samesite="strict")
+        from localm.debuglog import logger as _dbg
+        _dbg.info("owner API key cleared via /api/auth/key/clear; session invalidated")
+        return {"cleared": True}
 
     @app.get("/api/session", include_in_schema=False)
     async def session_state(request: Request):
@@ -1985,6 +2034,41 @@ def serve(engine: Engine, host: str = "127.0.0.1", port: int = 8642,
     # CA download) can reason about loopback vs network binds.
     app.state.bind_host = host
     scheme = "https" if ssl_certfile else "http"
+
+    # Task 2: Ctrl+C (Windows SIGINT). On Windows, signal.signal(SIGINT) is
+    # unreliable in async code (the Python signal handler runs on the main thread
+    # only at bytecode boundaries, and uvicorn's event loop often does not give it
+    # a chance). The Win32 SetConsoleCtrlHandler fires on a dedicated OS thread
+    # that the event loop does not block. We catch CTRL_C_EVENT (0) and
+    # CTRL_BREAK_EVENT (1) there and tell the running loop to stop, which causes
+    # uvicorn to wind down cleanly (model unload in _do_shutdown runs from the
+    # route or via atexit). No new third-party dependencies needed - ctypes is
+    # in the stdlib.
+    if sys.platform == "win32":
+        import ctypes
+        import threading
+
+        _ctrl_stop_event = threading.Event()
+
+        @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_ulong)
+        def _ctrl_handler(ctrl_type):
+            # CTRL_C_EVENT = 0, CTRL_BREAK_EVENT = 1
+            if ctrl_type in (0, 1):
+                _ctrl_stop_event.set()
+                try:
+                    # Find the running asyncio loop and ask it to stop from the
+                    # control-handler thread (which is NOT the event loop thread).
+                    import asyncio
+                    loop = asyncio.get_event_loop_policy().get_event_loop()
+                    if loop is not None and loop.is_running():
+                        loop.call_soon_threadsafe(loop.stop)
+                except Exception:
+                    pass
+                return True   # handled; suppress the default Ctrl+C handler
+            return False      # pass through other control events
+
+        ctypes.windll.kernel32.SetConsoleCtrlHandler(_ctrl_handler, True)
+
     with instances.advertise(app, home_dir(), host=host, port=port, mode="api",
                              scheme=scheme, project=project, isolated=isolated):
         # On a TLS bind, also catch a plain-http request on the same port with an
@@ -1994,3 +2078,4 @@ def serve(engine: Engine, host: str = "127.0.0.1", port: int = 8642,
         portmux.run_server(app, host=host, port=port,
                            log_level=uvicorn_log_level(),
                            ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
+

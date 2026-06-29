@@ -106,7 +106,7 @@ CORE_FIELDS: list = [
     SettingField("n_gpu_layers", Widget.NUMBER, "GPU layers",
                  "Model layers to run on the GPU. 99 puts the whole model on the "
                  "GPU; lower it if you run out of VRAM.",
-                 group="Engine", applies=Applies.NEXT_LOAD, min=0, max=1000),
+                 group="Engine", applies=Applies.NEXT_LOAD, min=0, max=999),
     SettingField("idle_unload_seconds", Widget.NUMBER, "Idle model unload (s)",
                  "Free the model's VRAM after this many seconds with no request "
                  "(0 = never; the model stays resident). The next message reloads "
@@ -565,6 +565,7 @@ class MediaField:
     help: str = ""
     options: Optional[list] = None
     image_only: bool = False       # fast_dequant only applies to the Flux image backend
+    plugins: Optional[list] = None # restrict to these plugins only (e.g. ["music", "video"])
 
 
 # Order = display order within each plugin subsection.
@@ -596,6 +597,11 @@ MEDIA_PLUGIN_FIELDS: list = [
                Widget.TOGGLE, "Fast GGUF dequant (fp16)",
                "Rewrite a slow float32 Flux GGUF dequant to fp16/bf16 on submit.",
                image_only=True),
+    MediaField("float_type", ("comfy", "float_type"), "comfy_float_type",
+               Widget.SELECT, "Model weight dtype",
+               "Force the compute precision (dtype) of the model weights.",
+               options=["default", "fp16", "bf16", "fp32", "fp8_e4m3fn", "fp8_e5m2"],
+               plugins=["music", "video"]),
     MediaField("reload_after", ("reload_llm_after_generate",), "reload_llm_after_imagine",
                Widget.TOGGLE, "Reload chat model after generating",
                "Free this backend's VRAM and reload the chat model after a gen."),
@@ -614,7 +620,11 @@ def _block_get(block: dict, path: tuple):
 
 def media_fields_for(name: str) -> list:
     """The MediaFields that apply to plugin *name* (drops image-only ones else)."""
-    return [f for f in MEDIA_PLUGIN_FIELDS if not (f.image_only and name != "image")]
+    return [
+        f for f in MEDIA_PLUGIN_FIELDS
+        if not (f.image_only and name != "image")
+        and not (f.plugins is not None and name not in f.plugins)
+    ]
 
 
 def media_schema_json(name: str, block: Optional[dict], full_config: dict) -> list:
@@ -633,6 +643,25 @@ def media_schema_json(name: str, block: Optional[dict], full_config: dict) -> li
              "value": value, "is_override": has_own, "global": full_config.get(f.global_key)}
         if f.options:
             d["options"] = f.options
+            
+        if f.key == "launch_cmd":
+            try:
+                workdir = _block_get(block, ("comfy", "workdir")) or full_config.get("comfy_workdir")
+                if workdir:
+                    from localm.image_gen.comfy import discover_launch_cmd
+                    from pathlib import Path
+                    found = discover_launch_cmd(Path(workdir))
+                    d["auto"] = found if found else ""
+                    if not found and Path(workdir).is_dir():
+                        import urllib.parse
+                        d["action"] = {
+                            "label": "Create launch script",
+                            "endpoint": f"/api/comfyui/create-launcher?workdir={urllib.parse.quote(str(workdir))}",
+                            "success_msg": "Launcher script created!"
+                        }
+            except Exception:
+                pass
+                
         out.append(d)
     return out
 
