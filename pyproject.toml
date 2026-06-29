@@ -83,7 +83,7 @@ audio = [
 # a package; txt/md/docx/html/code extraction is stdlib.
 # Install with:  pip install "localm[rag]"
 rag = [
-    "pypdf>=6.13.2",
+    "pypdf>=6.14.2",
 ]
 # Speech-to-text for the GUI mic button (Whisper, CPU int8 - no torch).
 # Install with:  pip install "localm[voice]"
