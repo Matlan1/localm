@@ -443,9 +443,9 @@ function confirmDanger(title, message, confirmLabel, onConfirm) {
   openModal(title, (body) => {
     body.appendChild(el("p", "", message));
     const row = el("div", "actions");
-    const cancel = el("button", "btn-quiet", "Cancel");
+    const cancel = el("button", "btn-secondary", "Cancel");
     cancel.onclick = () => ($("modal").style.display = "none");
-    const ok = el("button", "btn-quiet btn-danger", confirmLabel);
+    const ok = el("button", "btn-secondary btn-danger", confirmLabel);
     ok.onclick = () => { $("modal").style.display = "none"; onConfirm(); };
     row.appendChild(cancel);
     row.appendChild(ok);
@@ -1634,7 +1634,7 @@ function openImageLightbox(src, name) {
     document.removeEventListener("keydown", onKey);
   };
   function onKey(e) { if (e.key === "Escape") dismiss(); }
-  const save = el("button", "btn-quiet", "Save");
+  const save = el("button", "btn-secondary", "Save");
   save.onclick = () => {
     const a = document.createElement("a");
     a.href = src;
@@ -1643,12 +1643,12 @@ function openImageLightbox(src, name) {
     a.click();
     a.remove();
   };
-  const copy = el("button", "btn-quiet", "Copy image");
+  const copy = el("button", "btn-secondary", "Copy image");
   copy.onclick = async () => {
     const ok = await copyImageSrc(src);
     toast(ok ? "Image copied" : "Could not copy the image - use Save instead", !ok);
   };
-  const close = el("button", "btn-quiet", "Close");
+  const close = el("button", "btn-secondary", "Close");
   close.onclick = dismiss;
   bar.appendChild(save);
   bar.appendChild(copy);
@@ -1664,8 +1664,9 @@ window.openImageLightbox = openImageLightbox;
 
 function addMessageRow(container, role, text, opts = {}) {
   const row = el("div", "msg-row " + role + (opts.cls ? " " + opts.cls : ""));
+  const mName = opts.model && opts.model !== "MODEL" ? opts.model : (modelCache.active || "Model");
   row.appendChild(el("div", "msg-role",
-    opts.label || (role === "user" ? "You" : (modelCache.active || "Model"))));
+    opts.label || (role === "user" ? "You" : mName)));
   const body = el("div", "msg-body");
   if (role === "user") {
     // CHAT-1: a user's OWN message renders LITERALLY (exactly as typed). Markdown is
@@ -1763,7 +1764,7 @@ function buildEmptyHint() {
   big.appendChild(accent);
   div.appendChild(big);
   div.appendChild(document.createTextNode(
-    "Chat with your local model. Everything stays on this machine."));
+    "Chat with " + (modelCache.active || "your local model") + ". Everything stays on this machine."));
   const tip = el("div", "", "Type / for commands - /generate-image creates images locally.");
   tip.style.marginTop = "10px";
   tip.style.fontSize = "13px";
@@ -1796,10 +1797,11 @@ function renderChat() {
   let lastAssistantModel = null;
   conv.messages.forEach((m, i) => {
     if (m.role === "assistant" && m.model) {
-      if (lastAssistantModel && m.model !== lastAssistantModel) {
-        box.appendChild(el("div", "model-switch", "switched to " + m.model));
+      const currentModel = m.model === "MODEL" ? (modelCache.active || m.model) : m.model;
+      if (lastAssistantModel && currentModel !== lastAssistantModel) {
+        box.appendChild(el("div", "model-switch", "switched to " + currentModel));
       }
-      lastAssistantModel = m.model;
+      lastAssistantModel = currentModel;
     }
     const tag = m.tag || (m.web ? "web" : null);
     const actions = [];
@@ -1834,6 +1836,7 @@ function renderChat() {
       video: m.video ? [m.video] : [],
       actions,
       variant,
+      model: m.model,
       cls: tag ? "web-note" : "",
       label: tag ? NOTE_LABELS[tag] : undefined,
     });
@@ -2286,7 +2289,6 @@ window.addEventListener("beforeunload", (e) => {
 /* ================================================================ */
 
 function _perfGiB(b) { return (Number(b) / GIB).toFixed(1); }
-function perfGlLabel(v) { return Number(v) >= 99 ? "all" : String(v); }
 
 let _perfEstTimer = null;
 async function refreshPerfEstimate() {
@@ -2315,7 +2317,6 @@ function setupPerfCard() {
   const gl = $("perf-gpu-layers"), ctx = $("perf-ctx");
   if (!gl || !ctx) return;
   const sync = () => {
-    $("perf-gl-val").textContent = perfGlLabel(gl.value);
     $("perf-ctx-val").textContent = ctx.value;
   };
   const onInput = () => {
@@ -2327,10 +2328,15 @@ function setupPerfCard() {
   ctx.addEventListener("input", onInput);
   const apply = $("perf-apply");
   if (apply) apply.onclick = async () => {
+    const glVal = Number(gl.value);
+    if (!Number.isInteger(glVal) || glVal < 0 || glVal > 999) {
+      toast("GPU layers must be between 0 and 999", true);
+      return;
+    }
     try {
       const r = await fetch("/v1/config", {
         method: "PATCH", headers: authHeaders(),
-        body: JSON.stringify({ n_gpu_layers: Number(gl.value), n_ctx: Number(ctx.value) }),
+        body: JSON.stringify({ n_gpu_layers: glVal, n_ctx: Number(ctx.value) }),
       });
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
       toast("Saved - applies on the next model load");
@@ -2341,7 +2347,7 @@ function setupPerfCard() {
     .then((r) => (r.ok ? r.json() : {}))
     .then((cfg) => {
       if (typeof cfg.n_gpu_layers === "number")
-        gl.value = cfg.n_gpu_layers < 0 ? 99 : Math.min(99, cfg.n_gpu_layers);
+        gl.value = cfg.n_gpu_layers < 0 ? 999 : Math.min(999, cfg.n_gpu_layers);
       if (typeof cfg.n_ctx === "number")
         ctx.value = Math.min(Number(ctx.max), Math.max(Number(ctx.min), cfg.n_ctx));
       sync();
@@ -2400,13 +2406,13 @@ function confirmWebRequest(call) {
       remember.appendChild(document.createTextNode(" Don't ask again this session"));
       body.appendChild(remember);
       const row = el("div", "actions");
-      const deny = el("button", "btn-quiet", "Deny");
+      const deny = el("button", "btn-secondary", "Deny");
       deny.onclick = () => {
         if (cb.checked) webAskSession = false;
         $("modal").style.display = "none";
         resolve(false);
       };
-      const allow = el("button", "btn-quiet btn-primary", "Allow");
+      const allow = el("button", "btn-secondary btn-primary", "Allow");
       allow.onclick = () => {
         if (cb.checked) webAskSession = true;
         $("modal").style.display = "none";
@@ -3252,9 +3258,12 @@ async function runCompletion(conv, webDepth = 0, web = null) {
   box.scrollTop = box.scrollHeight;
 
   const sendBtn = $("chat-send");
+  const input = $("chat-input");
   sendBtn.classList.add("stop");
   sendBtn.textContent = "■";
   chat.abort = new AbortController();
+  input.disabled = true;
+  document.querySelectorAll(".message-actions button").forEach(b => b.disabled = true);
 
   // VIS-1: did this request carry a user-attached image? If a text-only model
   // rejects it (400), we must drop the image so the chat is not wedged.
@@ -3325,6 +3334,8 @@ async function runCompletion(conv, webDepth = 0, web = null) {
     chat.abort = null;
     sendBtn.classList.remove("stop");
     sendBtn.textContent = "➤";
+    input.disabled = false;
+    document.querySelectorAll(".message-actions button").forEach(b => b.disabled = false);
   }
 
   // User pressed Stop: leave the partial text on screen but do NOT persist it,
@@ -3604,12 +3615,20 @@ $("chat-send").onclick = () => {
 };
 /** Enter sends, Shift+Enter inserts a newline, Ctrl/Cmd+Enter also sends.
  *  Skipped while an IME composition or the slash-command menu is active
- *  (the menu's own keydown handler picks the highlighted command). */
+ *  (the menu's own keydown handler picks the highlighted command).
+ *  U1: Also blocked (preventDefault, no send) while a reply is actively
+ *  streaming - the input is disabled at that point, but we guard here too
+ *  so a race or accessibility path cannot slip a second message through. */
 function composerEnterToSend(e, send) {
   if (e.key !== "Enter" || e.isComposing) return;
   if (e.shiftKey) return;   // newline - the textarea's default behaviour
   const menu = e.target.closest(".composer-wrap")?.querySelector(".slash-menu");
   if (menu && menu.style.display !== "none") return;
+  // U1: block the form-submit path while streaming (not just visually).
+  // preventDefault here means the Enter never becomes a newline and the send
+  // function is never called - the chat.abort check in sendChat() is the
+  // second line of defence, but preventing dispatch is the correct first one.
+  if (chat.abort) { e.preventDefault(); return; }
   e.preventDefault();
   send();
 }
@@ -3869,8 +3888,8 @@ function buildConfirmCard(s, ev) {
     inner.appendChild(el("pre", "diff", JSON.stringify(ev.args, null, 2)));
   }
   const buttons = el("div", "buttons");
-  const yes = el("button", "btn-approve", "Approve");
-  const no = el("button", "btn-reject", "Reject");
+  const yes = el("button", "btn-primary", "Approve");
+  const no = el("button", "btn-danger", "Reject");
   // "always allow" lives inside .buttons so the answered-state CSS hides it
   const allowCb = document.createElement("input");
   allowCb.type = "checkbox";
@@ -4114,7 +4133,7 @@ async function startCoderSession(opts = {}) {
 let _coderContinueBtn = null;
 function coderContinueButton() {
   if (_coderContinueBtn) return _coderContinueBtn;
-  const btn = el("button", "btn-quiet coder-continue", "Continue last session");
+  const btn = el("button", "btn-secondary coder-continue", "Continue last session");
   btn.style.display = "none";
   btn.onclick = () => startCoderSession({ resume: true });
   const start = $("setup-start");
@@ -4574,14 +4593,14 @@ async function openFilesModal() {
       // Download the file itself (pull coder output onto this device / phone).
       // Only for files that still exist on disk.
       if (f.exists) {
-        const dl = el("button", "btn-quiet file-dl", "download");
+        const dl = el("button", "btn-secondary file-dl", "download");
         dl.title = "Download this file to your device";
         dl.onclick = (ev) => { ev.stopPropagation(); downloadCoderFile(s, f.path); };
         row.appendChild(dl);
       }
       body.appendChild(row);
     }
-    const all = el("button", "btn-quiet", "full session diff");
+    const all = el("button", "btn-secondary", "full session diff");
     all.onclick = () => showDiff("");
     body.appendChild(all);
     body.appendChild(diffBox);
@@ -5392,3 +5411,4 @@ reattachSessions();
     }
   }
 }
+

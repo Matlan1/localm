@@ -276,10 +276,8 @@ def _resolve_backend_url(backend: str) -> str:
     ext = "zip" if plat == "win32" else "tar.gz"
     fname = f"llama-{tag}-{stem}.{ext}"
     guess = f"https://github.com/{_UPSTREAM_REPO}/releases/download/{tag}/{fname}"
-    console.print(f"[yellow]Could not verify the release asset list (offline or "
-                  f"rate-limited); using an unverified URL: {guess}[/yellow]\n"
-                  "[yellow]If the download 404s, pass --from <build dir> or "
-                  "--url <archive>.[/yellow]")
+    console.print(f"[yellow]Could not verify release asset list; using unverified URL: {guess}[/yellow]\n"
+                  "[yellow]If download fails, pass --from <build dir> or --url <archive>.[/yellow]")
     return guess
 
 
@@ -638,9 +636,8 @@ def _provision_backend(chosen: str, target: Path, sha256: Optional[str],
         if build is None:
             # Asset listing unavailable: fall back to the templated build URL and
             # warn that the runtime bundle could not be resolved automatically.
-            console.print("[yellow]Could not resolve the CUDA assets from the release "
-                          "listing; fetching the CUDA build only. If it fails to load, "
-                          "use --backend vulkan or install the CUDA Toolkit.[/yellow]")
+            console.print("[yellow]Could not resolve CUDA assets; fetching build only.[/yellow]\n"
+                          "[yellow]If it fails to load, use --backend vulkan or install CUDA Toolkit.[/yellow]")
             _fetch_and_place(_resolve_backend_url("cuda"), target, sha256)
             return
         console.print(f"[dim]CUDA build:[/dim] {build['name']} ({_human_mb(build.get('size'))})")
@@ -650,15 +647,12 @@ def _provision_backend(chosen: str, target: Path, sha256: Optional[str],
                 # The pin is a single hash; it can only cover the build. Be honest
                 # that the cudart bundle is validated by size + archive shape, not
                 # by the pinned digest (upstream publishes no per-asset hash here).
-                console.print("[yellow]Note:[/yellow] --sha256 pins the CUDA build only; "
-                              "the cudart runtime bundle is validated by size + archive "
-                              "shape (no per-release hash is published for it).")
+                console.print("[yellow]Note:[/yellow] --sha256 pins the CUDA build only.")
             console.print(f"[dim]CUDA runtime:[/dim] {cudart['name']} "
                           f"({_human_mb(cudart.get('size'))}) - no Toolkit install needed")
             _fetch_and_place(cudart["browser_download_url"], target)
         else:
-            console.print("[yellow]No cudart bundle found in the release; the CUDA build "
-                          "may need the CUDA Toolkit present at run time.[/yellow]")
+            console.print("[yellow]No cudart bundle found; CUDA Toolkit may be required.[/yellow]")
         return
     # Every other backend is a single archive resolved from the chosen name.
     _fetch_and_place(_resolve_backend_url(chosen), target, sha256)
@@ -698,9 +692,8 @@ def _warn_off_profile(chosen: str) -> None:
         return
     if vendors and owner not in vendors:
         seen = ", ".join(vendors)
-        console.print(f"[yellow]Heads up:[/yellow] you picked [bold]{chosen}[/bold] but "
-                      f"we detected [bold]{seen}[/bold], not {owner}. Proceeding as you "
-                      "asked - it will only work if that hardware is actually present.")
+        console.print(f"[yellow]Heads up:[/yellow] Picked [bold]{chosen}[/bold] but detected [bold]{seen}[/bold].\n"
+                      "[yellow]Proceeding. Hardware must be present.[/yellow]")
 
 
 def _cuda_setup_dialogue(info: NvidiaInfo, assume_yes: bool) -> tuple:
@@ -731,13 +724,9 @@ def _cuda_setup_dialogue(info: NvidiaInfo, assume_yes: bool) -> tuple:
 
     # Driver too old: the one thing we cannot fetch for the user.
     if info.present and info.cuda_capability and not info.driver_ok:
-        console.print("  The GPU driver is a system component I cannot update for you "
-                      "(it needs admin rights and a reboot).")
-        console.print("  [dim]Enable CUDA later: update from "
-                      "https://www.nvidia.com/Download/index.aspx , reboot, then run "
-                      "localm setup-llama --backend cuda --force[/dim]")
-        console.print("  [green]Using Vulkan now[/green] (works on your current driver, "
-                      "no toolkit).")
+        console.print("  GPU driver update required for CUDA.")
+        console.print("  [dim]To enable later: update driver, reboot, run setup-llama --backend cuda[/dim]")
+        console.print("  [green]Using Vulkan now[/green].")
         return "vulkan", False
 
     # No NVIDIA detected, but the user explicitly asked for cuda: their call.
@@ -745,15 +734,12 @@ def _cuda_setup_dialogue(info: NvidiaInfo, assume_yes: bool) -> tuple:
         if assume_yes:
             console.print("  [dim]--yes: using Vulkan (no NVIDIA GPU detected).[/dim]")
             return "vulkan", False
-        if click.confirm("  Continue with CUDA anyway? (No = use Vulkan, which runs on "
-                         "any GPU)", default=False):
+        if click.confirm("  Continue with CUDA anyway? (No = use Vulkan)", default=False):
             return "cuda", True
         return "vulkan", False
 
     # Driver OK (or capability unknown but a GPU is present): offer the fetch.
-    console.print("  [yellow]i[/yellow] The CUDA build needs runtime libraries; I can "
-                  "fetch a self-contained bundle from the same llama.cpp release - "
-                  "[bold]no CUDA Toolkit install needed[/bold].")
+    console.print("  [yellow]i[/yellow] Fetching self-contained CUDA runtime bundle. [bold]No Toolkit needed[/bold].")
     if assume_yes or click.confirm("  Download the CUDA build + runtime now?", default=True):
         return "cuda", True
     console.print("  [dim]Falling back to Vulkan (works on your driver).[/dim]")
@@ -837,10 +823,9 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
     # swap it silently. INFORM why, then OFFER the universal build (interactive)
     # or fall back with a LOUD warning (non-interactive), and always say how to
     # retry the real pick once the cause is fixed (R20 / never-override-user-selection).
-    console.print(f"[yellow]Your chosen '{chosen}' backend was provisioned but does "
-                  f"not load on this machine[/yellow] [dim]({detail})[/dim].")
-    console.print("[dim]Once the cause is fixed, restore it with: "
-                  f"localm setup-llama --backend {chosen} --force[/dim]")
+    why = detail
+    console.print(f"[yellow]'{chosen}' backend provisioned but failed to load: {why}[/yellow]")
+    console.print(f"[dim]To retry later: localm setup-llama --backend {chosen} --force[/dim]")
     interactive = (not assume_yes) and sys.stdin.isatty()
     if interactive:
         if not click.confirm(
@@ -852,10 +837,7 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
                           f"localm setup-llama --backend {chosen} --force")
             sys.exit(1)
     else:
-        console.print("[yellow][!] Non-interactive install: provisioning the universal "
-                      f"Vulkan build so this is not left broken. This is NOT your chosen "
-                      f"'{chosen}' backend - re-run 'localm setup-llama --backend {chosen} "
-                      "--force' once the cause is fixed.[/yellow]")
+        console.print("[yellow][!] Non-interactive: falling back to universal build.[/yellow]")
     for fb in ("vulkan", "cpu"):
         console.print(f"[yellow]Trying {fb}...[/yellow]")
         try:
@@ -941,12 +923,9 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
             _ensure_importable()
             return
         if have:
-            console.print(f"[yellow]A {have} build is already provisioned, but you "
-                          f"asked for {want}[/yellow] - provisioning {want} now.")
+            console.print(f"[yellow]Replacing {have} build with {want}.[/yellow]")
         else:
-            console.print("[yellow]A build is already provisioned but its backend is "
-                          f"unrecorded[/yellow] - provisioning the requested {want} "
-                          "to honour your choice.")
+            console.print(f"[yellow]Replacing unrecorded build with {want}.[/yellow]")
 
     if from_dir:
         src = Path(from_dir)

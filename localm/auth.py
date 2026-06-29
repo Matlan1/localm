@@ -98,6 +98,10 @@ def clear_api_key() -> None:
         key_file().unlink(missing_ok=True)
     except OSError:
         pass
+    try:
+        keystore_file().unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def regenerate_key(nbytes: int = 32) -> str:

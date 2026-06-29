@@ -25,10 +25,11 @@ from .backends.http import (
     make_anthropic_backend,
     make_localm_backend,
     make_openai_backend,
+    CoderAuthError,
 )
 from .agent import Agent
 from .audit import SessionMode, parse_mode
-from .backends.http import CoderAuthError
+
 from .privacy import (
     clear_shell_history_traces,
     suppress_readline_history,
@@ -423,10 +424,7 @@ def main(
                     "Type /resume to continue."
                 )
             _repl(agent)
-
     except CoderAuthError as e:
-        # Single-shot / estimate path: surface the actionable key hint instead
-        # of a bare 401 traceback.
         print_error(str(e))
         sys.exit(2 if ci else 1)
     finally:
@@ -715,15 +713,17 @@ def _repl(agent: Agent) -> None:
         except KeyboardInterrupt:
             # Checkpoint was already saved inside _loop; just swallow here
             pass
-        except CoderAuthError as e:
-            # Print the actionable key hint cleanly (no "Agent error:" noise).
-            print_error(str(e))
+        except CoderAuthError:
+            # Must raise here to bypass generic Exception block and bubble up to main
+            raise
         except Exception as e:
             print_error(f"Agent error: {e}")
             import traceback
             if agent.verbose:
                 traceback.print_exc()
-
+            # Do not break here if it was just an API/Agent error,
+            # but wait, previously there was a break for `while True` which we removed.
+            # So now we don't break at all, we just catch the exception and let the REPL loop continue.
 
 def _handle_command(raw: str, agent: Agent) -> bool:
     """Handle a /command. Returns True if the REPL should exit."""

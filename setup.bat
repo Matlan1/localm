@@ -30,9 +30,8 @@ if /i "%~1"=="--rollback"  goto uninstall
 rem ---- uv is required (fast, reliable resolver; handles the GPU wheels) ------
 where uv >nul 2>nul
 if errorlevel 1 (
-    echo  [!] uv is not installed. Install it first:
+    echo  [!] uv is not installed. Install it first.
     echo      winget install astral-sh.uv
-    echo      or: powershell -c "irm https://astral.sh/uv/install.ps1 ^| iex"
     echo.
     pause
     exit /b 1
@@ -53,16 +52,13 @@ if exist ".venv\.localm-venv" set "OURS=1"
 if exist ".venv\Scripts\localm.exe" set "OURS=1"
 echo.
 if "%OURS%"=="1" (
-    echo  An existing localm .venv was found in this folder.
-    choice /c YN /n /m "  Replace it and reinstall from scratch? [y/N]: "
+    choice /c YN /n /m "  LocalM .venv found. Replace it? [y/N]: "
 ) else (
-    echo  [!] A .venv exists here but does not look like a localm environment.
-    echo      Replacing it deletes its current contents.
-    choice /c YN /n /m "  Replace this foreign .venv? [y/N]: "
+    choice /c YN /n /m "  Foreign .venv found. Replace it? [y/N]: "
 )
 rem choice sets errorlevel: 1=Y, 2=N. Test the higher index first.
 if errorlevel 2 (
-    echo  Keeping the existing .venv and continuing setup.
+    echo  Keeping existing .venv.
     goto venv_done
 )
 
@@ -71,8 +67,7 @@ echo.
 echo  Creating .venv (Python %PYVER%) ...
 uv venv --python %PYVER% --clear .venv
 if errorlevel 1 (
-    echo  [!] Could not create the environment. Is Python %PYVER% available?
-    echo      uv can fetch it:  uv python install %PYVER%
+    echo  [!] Could not create the environment. Install Python %PYVER%.
     pause
     exit /b 1
 )
@@ -159,13 +154,13 @@ if not defined TORCHSPEC (
 ) else if "%TORCHSPEC%"=="-e .[gpu]" (
     rem  gfx103X (RX 6000): the bundled self-contained build carries torch + the HF
     rem  stack + the ROCm runtime; add audio (soundfile) for unified-audio models.
-    echo  Installing PyTorch ^(AMD ROCm, gfx103X^) + transformers for HuggingFace models ...
-    uv pip install -p .venv -e ".[gpu,audio]" || echo  [!] ROCm torch stack failed - GGUF chat still works without it.
+    echo  Installing PyTorch ^(AMD ROCm, gfx103X^) + transformers ...
+    uv pip install -p .venv -e ".[gpu,audio]" || echo  [!] ROCm torch install failed. GGUF chat still works.
 ) else (
-    echo  Installing PyTorch + transformers for HuggingFace models ...
-    echo %TORCHSPEC% | find "rocm6.4" >nul && echo    ^(note: AMD ROCm on Windows is in public preview - expect rough edges^)
-    uv pip install -p .venv %TORCHSPEC% || echo  [!] torch install failed - GGUF chat still works without it.
-    uv pip install -p .venv "transformers[kernels]~=5.12" "tokenizers==0.22.2" "accelerate>=1.0" "pillow>=10.0" "soundfile>=0.12" || echo  [!] transformers stack failed - GGUF chat still works.
+    echo  Installing PyTorch + transformers ...
+
+    uv pip install -p .venv %TORCHSPEC% || echo  [!] torch install failed. GGUF chat still works.
+    uv pip install -p .venv "transformers[kernels]~=5.12" "tokenizers==0.22.2" "accelerate>=1.0" "pillow>=10.0" "soundfile>=0.12" || echo  [!] transformers install failed. GGUF chat still works.
 )
 
 rem ---- provision the native llama.cpp binaries ------------------------------
@@ -198,10 +193,9 @@ if /i "%BACKEND%"=="own" (
 
 rem ---- choose where data lives ----------------------------------------------
 echo.
-echo  Where should localm keep its data (models, config, logs, images)?
-echo    [1] Inside this folder (.\home) - fully portable, isolated per clone
-echo    [2] Shared per-user folder (%USERPROFILE%\.localm) - clones share
-echo        models and settings
+echo  Where should localm keep its data?
+echo    [1] Portable (.\home)
+echo    [2] Shared (%USERPROFILE%\.localm)
 echo    [3] Custom path
 rem  set /p (type a number, then Enter), NOT `choice`: `choice` returns on a single
 rem  keypress, so the user's habitual confirming Enter used to leak into the custom
@@ -230,10 +224,8 @@ if "%DATAPICK%"=="2" (
         rem A non-empty ./home survived: localm prefers a portable ./home, so
         rem shared mode would be silently ignored. Warn loudly and record the
         rem dir localm will actually use, rather than printing a false "shared".
-        echo  [!] ./home is not empty - shared mode will NOT take effect while it
-        echo      exists ^(localm keeps using the portable ./home^). It may hold
-        echo      your models/config, so it was left in place. Remove it manually
-        echo      and re-run setup to switch to the shared dir.
+        echo  [!] ./home is not empty. LocalM will continue using it.
+        echo      To use shared mode, remove ./home and re-run setup.
         set "DATADIR=%CD%\home"
     ) else (
         echo  Data directory: %USERPROFILE%\.localm  ^(shared^)
@@ -247,10 +239,10 @@ if "%DATAPICK%"=="3" call :do_custom_home
 
 rem ---- optional desktop shortcut ----------------------------------------------
 echo.
-echo  Desktop shortcut - what should it open?
-echo    [1] Launcher (pick mode/model, set an API key)   recommended
+echo  Create desktop shortcut?
+echo    [1] Launcher
 echo    [2] Web GUI directly
-echo    [3] No shortcut
+echo    [3] None
 rem  set /p for a consistent "type a number then Enter" across every menu.
 set "SCPICK="
 set /p "SCPICK=  Pick 1, 2 or 3 [1]: "
@@ -296,20 +288,8 @@ if errorlevel 1 echo  [!] Could not record the install manifest (uninstall will 
 
 rem ---- done ------------------------------------------------------------------
 echo.
-echo  Done. This clone is self-contained:
-echo    localm-launcher.bat   graphical launcher (GUI / chat / server / coder)
-echo                          (use this, not launcher.pyw - .pyw has no file
-echo                          association when Python comes from uv)
-echo    localm.bat            terminal chat with the default model
-echo    .venv\Scripts\localm  CLI directly, e.g.:
-echo        .venv\Scripts\localm pull ^<model^>
-echo        .venv\Scripts\localm gui
-echo.
-echo  Re-provision or change the inference backend any time with:
-echo        .venv\Scripts\localm setup-llama --backend ^<auto^|vulkan^|cuda^|amd-rocm^|cpu^> --force
-echo.
-echo  Tip: avoid "uv tool install" for this project - tool installs are
-echo  global per package name and clones would overwrite each other.
+echo  Done. Setup complete.
+echo  Run localm-launcher.bat to start.
 echo.
 pause
 exit /b 0

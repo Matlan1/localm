@@ -73,6 +73,8 @@ def settings(full_config: dict) -> dict:
         # Privacy mode forces deletion later in plug.py regardless of this.
         "delete_outputs": bool(comfy_blk.get(
             "delete_outputs", full_config.get("comfy_delete_outputs", False))),
+        "float_type": comfy_blk.get("float_type")
+        or full_config.get("comfy_float_type"),
         "reload_after": bool(block.get(
             "reload_llm_after_generate",
             full_config.get("reload_llm_after_imagine", True))),
@@ -121,6 +123,7 @@ def _comfy_generate(s: dict, prompt: str, out_path: Path, *,
             write_sidecar=write_sidecar,
             launch_cmd=s["launch_cmd"] or None,
             workdir=s["workdir"] or None,
+            float_type=s.get("float_type"),
             swap=swap,
             delete_outputs=delete_outputs,
             cancel_check=cancel_check,
