@@ -146,6 +146,12 @@ def _complete_model(ctx, param, incomplete):
                   "e.g. 'src/**/*.py'.  Requests touching files outside the "
                   "scope are rejected."
               ))
+@click.option("--system", "system_instructions", default=None, metavar="TEXT",
+              help=(
+                  "Custom system instructions for the agent (conventions, style, "
+                  "constraints). Overrides .localcoder/system.md for this run; when "
+                  "omitted, that file is used automatically if present."
+              ))
 @click.option("--episodes", "show_episodes", is_flag=True, default=False,
               help="List the episodic-memory lessons stored for this project and exit.")
 @click.option("--forget-episodes", "forget_episodes", is_flag=True, default=False,
@@ -162,7 +168,8 @@ def main(
     task, model, url, api_key, port, cwd,
     no_server, force_new, max_turns, temperature, max_tokens,
     verbose, yes, interactive_confirm, dry_run, estimate, patch_mode, ci, output_format,
-    native_tools, provider, mode, scope, show_episodes, forget_episodes,
+    native_tools, provider, mode, scope, system_instructions,
+    show_episodes, forget_episodes,
     until_cmd, goal_max_iters,
 ):
     """
@@ -235,6 +242,7 @@ def main(
         dry_run=dry_run,
         mode=session_mode,
         scope=scope,
+        custom_instructions=system_instructions,
         **gen_kw,
     )
 

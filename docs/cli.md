@@ -242,9 +242,12 @@ Third-party plugins are folders containing a `plugin.toml` manifest and Python f
 localm coder --model mymodel              # interactive session in the current repo
 localm coder "fix the failing test"       # single task
 localcoder --model mymodel                # same thing, standalone entry point (installed with the coder plugin)
+localm coder --system "always run pytest before finishing"   # custom instructions for this run
 ```
 
 The agent auto-starts `localm serve` when needed, plans with tool calls (read, write, edit, patch, shell, search, tests, image generation, plus tools exported by other installed plugins), asks before destructive actions, tracks a turn budget so it asks for help instead of guessing forever, and verifies its own code changes before answering. Privacy mode is the default: nothing is persisted unless you opt into `--mode log` or `--mode full`.
+
+Give the agent standing guidance (conventions, style, constraints) with a `.localcoder/system.md` file in the repo - it is injected into the system prompt under "## User Instructions" for every session in that project. The `--system TEXT` flag overrides the file for a single run. This is separate from `LOCALCODER.md`, which is auto-managed project memory (facts the agent appends via `/remember` and its own reflection).
 
 ---
 
