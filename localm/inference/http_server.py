@@ -1068,6 +1068,74 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
                                           .strip().strip(":").strip())
         return result
 
+    @app.get("/api/issues", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
+    async def issues_ep(state: str = "all"):
+        """Read-only list of the project's issues via the proxy (no GitHub account
+        needed), so a tester can see whether a filed bug is acknowledged or fixed.
+        A proxy failure is surfaced as ``error`` (never a fake empty success)."""
+        from localm import issue_tracker
+        from localm.bugreport import LocalmError
+        if not issue_tracker.available():
+            return {"available": False, "issues": []}
+        try:
+            issues = await asyncio.to_thread(issue_tracker.list_issues, state)
+            return {"available": True, "issues": issues}
+        except LocalmError as e:
+            return {"available": True, "issues": [],
+                    "error": f"{e.summary}: {e.reason}".strip().strip(":").strip()}
+
+    @app.get("/api/update/check", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
+    async def update_check_ep():
+        """Check the proxy for a newer release. Read-only; never applies. Returns
+        ``{available, current, latest, newer, notes, asset}`` or ``{available:false}``
+        / ``{error}``."""
+        from localm import updater
+        from localm.bugreport import LocalmError
+        if not updater.available():
+            return {"available": False}
+        try:
+            info = await asyncio.to_thread(updater.check)
+            info["available"] = True
+            return info
+        except LocalmError as e:
+            return {"available": True,
+                    "error": f"{e.summary}: {e.reason}".strip().strip(":").strip()}
+
+    @app.post("/api/update/apply", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
+    async def update_apply_ep():
+        """Apply the latest update (download + swap + class step), then restart in
+        place so the new code loads. EXPLICIT only (a button calls this); localm never
+        self-updates on its own. A failed apply rolls back and is surfaced honestly,
+        never as success. The asset is re-derived from the latest release server-side
+        (not taken from the client)."""
+        from localm import updater
+        from localm.bugreport import LocalmError
+        if not updater.available():
+            raise HTTPException(400, "The updater is not configured.")
+        try:
+            info = await asyncio.to_thread(updater.check)
+        except LocalmError as e:
+            raise HTTPException(502, f"{e.summary}: {e.reason}".strip().strip(":").strip())
+        if not info.get("newer"):
+            return {"applied": False, "reason": "already up to date",
+                    "current": info.get("current")}
+        asset = info.get("asset") or {}
+        if not asset.get("id"):
+            raise HTTPException(400, "This release has no downloadable build attached.")
+        try:
+            res = await asyncio.to_thread(updater.apply, asset["id"])
+        except LocalmError as e:
+            # apply() already rolled back; report the failure, do not fake success.
+            return {"applied": False,
+                    "error": f"{e.summary}: {e.reason}".strip().strip(":").strip()}
+        res["available"] = True
+        # Restart in place so the swapped (editable) code loads - except a setup-class
+        # update, which needs setup.bat re-run by the user.
+        if res.get("klass") != "setup":
+            _request_restart()
+            res["restarting"] = True
+        return res
+
     @app.post("/v1/plugins/install", dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
     async def install_plugin_ep(body: dict):
         from pathlib import Path as _P

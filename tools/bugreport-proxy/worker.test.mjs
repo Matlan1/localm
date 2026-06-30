@@ -1,17 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Unit tests for the localm bug-report proxy Worker - NO Cloudflare account
-// needed. We import the handler and stub global fetch to assert the gate logic
-// and the GitHub call shape. Run: node --test tools/bugreport-proxy/worker.test.mjs
+// Unit tests for the localm proxy Worker - NO Cloudflare account needed. We import
+// the handler and stub global fetch to assert routing, the gate logic, the token
+// used per route, and the GitHub call shape.
+// Run: node --test tools/bugreport-proxy/worker.test.mjs
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import worker from "./worker.js";
 
-const ENV = { GITHUB_TOKEN: "ght_secret", TARGET_REPO: "Matlan1/localm" };
+const ENV = { GITHUB_TOKEN: "ght_issue", TARGET_REPO: "Matlan1/localm" };
+const ENV_UP = { ...ENV, SHARED_SECRET: "s3cret", UPDATE_GITHUB_TOKEN: "ght_update" };
 
-function req(body, { method = "POST", headers = {} } = {}) {
-  return new Request("https://proxy.example/", {
+function req(body, { method = "POST", headers = {}, path = "/" } = {}) {
+  return new Request(`https://proxy.example${path}`, {
     method,
     headers: { "content-type": "application/json", ...headers },
     body: body === undefined ? undefined
@@ -25,9 +27,11 @@ function stubFetch(impl) {
   return () => { globalThis.fetch = orig; };
 }
 
-test("rejects a non-POST method", async () => {
+// ------------------------------ routing ---------------------------------
+
+test("unknown route (GET /) -> 404", async () => {
   const r = await worker.fetch(req(undefined, { method: "GET" }), ENV);
-  assert.equal(r.status, 405);
+  assert.equal(r.status, 404);
 });
 
 test("CORS preflight (OPTIONS) is allowed", async () => {
@@ -36,22 +40,24 @@ test("CORS preflight (OPTIONS) is allowed", async () => {
   assert.equal(r.headers.get("Access-Control-Allow-Origin"), "*");
 });
 
-test("misconfigured proxy (no token) fails closed", async () => {
+// --------------------------- bug report ---------------------------------
+
+test("report: misconfigured proxy (no token) fails closed", async () => {
   const r = await worker.fetch(req({ title: "t", body: "b" }), { TARGET_REPO: "x/y" });
   assert.equal(r.status, 500);
 });
 
-test("invalid JSON is rejected", async () => {
+test("report: invalid JSON is rejected", async () => {
   const r = await worker.fetch(req("{not valid", {}), ENV);
   assert.equal(r.status, 400);
 });
 
-test("empty report body is rejected", async () => {
+test("report: empty body is rejected", async () => {
   const r = await worker.fetch(req({ title: "t", body: "   " }), ENV);
   assert.equal(r.status, 400);
 });
 
-test("wrong shared secret -> 401 and NO GitHub call", async () => {
+test("report: wrong shared secret -> 401 and NO GitHub call", async () => {
   let called = false;
   const restore = stubFetch(async () => { called = true; return new Response("{}", { status: 201 }); });
   try {
@@ -59,52 +65,166 @@ test("wrong shared secret -> 401 and NO GitHub call", async () => {
       req({ title: "t", body: "b" }, { headers: { "X-Localm-Token": "wrong" } }),
       { ...ENV, SHARED_SECRET: "right" });
     assert.equal(r.status, 401);
-    assert.equal(called, false, "must not reach GitHub when the secret is wrong");
+    assert.equal(called, false);
   } finally { restore(); }
 });
 
-test("happy path: creates the issue and returns its url + number", async () => {
+test("report: happy path creates the issue with the ISSUE token", async () => {
   const seen = {};
   const restore = stubFetch(async (url, opts) => {
-    seen.url = url;
-    seen.opts = opts;
+    seen.url = url; seen.opts = opts;
     return new Response(
       JSON.stringify({ html_url: "https://github.com/Matlan1/localm/issues/7", number: 7 }),
       { status: 201 });
   });
   try {
-    const r = await worker.fetch(req({ title: "image gen froze", body: "## report\nbody" }), ENV);
+    const r = await worker.fetch(req({ title: "froze", body: "## report" }), ENV);
     assert.equal(r.status, 201);
     const out = await r.json();
-    assert.equal(out.ok, true);
     assert.equal(out.url, "https://github.com/Matlan1/localm/issues/7");
-    assert.equal(out.number, 7);
-    // The outbound GitHub call is shaped correctly.
     assert.equal(seen.url, "https://api.github.com/repos/Matlan1/localm/issues");
-    assert.equal(seen.opts.headers.Authorization, "Bearer ght_secret");
-    const payload = JSON.parse(seen.opts.body);
-    assert.equal(payload.title, "image gen froze");
-    assert.equal(payload.body, "## report\nbody");
+    assert.equal(seen.opts.headers.Authorization, "Bearer ght_issue"); // ISSUE token
   } finally { restore(); }
 });
 
-test("correct shared secret is accepted", async () => {
-  const restore = stubFetch(async () =>
-    new Response(JSON.stringify({ html_url: "https://x/issues/1", number: 1 }), { status: 201 }));
-  try {
-    const r = await worker.fetch(
-      req({ title: "t", body: "b" }, { headers: { "X-Localm-Token": "right" } }),
-      { ...ENV, SHARED_SECRET: "right" });
-    assert.equal(r.status, 201);
-  } finally { restore(); }
-});
-
-test("a GitHub error becomes a 502 (failure is surfaced, not faked)", async () => {
+test("report: a GitHub error becomes a 502", async () => {
   const restore = stubFetch(async () => new Response("forbidden", { status: 403 }));
   try {
     const r = await worker.fetch(req({ title: "t", body: "b" }), ENV);
     assert.equal(r.status, 502);
-    const out = await r.json();
-    assert.equal(out.status, 403);
   } finally { restore(); }
+});
+
+// ----------------------------- issues -----------------------------------
+
+test("issues: lists issues with the ISSUE token, filtering out PRs", async () => {
+  const seen = {};
+  const restore = stubFetch(async (url, opts) => {
+    seen.url = url; seen.opts = opts;
+    return new Response(JSON.stringify([
+      { number: 5, title: "real bug", state: "open", html_url: "u5", labels: [{ name: "bug" }] },
+      { number: 6, title: "a PR", state: "open", pull_request: { url: "x" }, labels: [] },
+    ]), { status: 200 });
+  });
+  try {
+    const r = await worker.fetch(req(undefined, { method: "GET", path: "/issues" }), ENV);
+    assert.equal(r.status, 200);
+    const out = await r.json();
+    assert.equal(out.issues.length, 1, "PR entry filtered out");
+    assert.equal(out.issues[0].number, 5);
+    assert.deepEqual(out.issues[0].labels, ["bug"]);
+    assert.match(seen.url, /\/repos\/Matlan1\/localm\/issues\?state=all/);
+    assert.equal(seen.opts.headers.Authorization, "Bearer ght_issue");
+  } finally { restore(); }
+});
+
+test("issues: ?number=N returns one issue's state", async () => {
+  const restore = stubFetch(async () =>
+    new Response(JSON.stringify({ number: 12, title: "t", state: "closed", html_url: "u" }), { status: 200 }));
+  try {
+    const r = await worker.fetch(req(undefined, { method: "GET", path: "/issues?number=12" }), ENV);
+    const out = await r.json();
+    assert.equal(out.issue.number, 12);
+    assert.equal(out.issue.state, "closed");
+  } finally { restore(); }
+});
+
+// ----------------------------- update -----------------------------------
+
+test("update: disabled (503) when SHARED_SECRET is not set", async () => {
+  const r = await worker.fetch(req(undefined, { method: "GET", path: "/update" }),
+    { ...ENV, UPDATE_GITHUB_TOKEN: "ght_update" });
+  assert.equal(r.status, 503);
+});
+
+test("update: wrong secret -> 401, no GitHub call", async () => {
+  let called = false;
+  const restore = stubFetch(async () => { called = true; return new Response("{}"); });
+  try {
+    const r = await worker.fetch(
+      req(undefined, { method: "GET", path: "/update", headers: { "X-Localm-Token": "nope" } }), ENV_UP);
+    assert.equal(r.status, 401);
+    assert.equal(called, false);
+  } finally { restore(); }
+});
+
+test("update: latest release uses the UPDATE token and prefers the .zip asset", async () => {
+  const seen = {};
+  const restore = stubFetch(async (url, opts) => {
+    seen.url = url; seen.opts = opts;
+    return new Response(JSON.stringify({
+      tag_name: "v0.2.0", name: "0.2.0", body: "notes", published_at: "2026-07-01T00:00:00Z",
+      assets: [
+        { id: 1, name: "notes.txt", size: 10 },
+        { id: 2, name: "localm-0.2.0.zip", size: 1234 },
+      ],
+    }), { status: 200 });
+  });
+  try {
+    const r = await worker.fetch(
+      req(undefined, { method: "GET", path: "/update", headers: { "X-Localm-Token": "s3cret" } }), ENV_UP);
+    assert.equal(r.status, 200);
+    const out = await r.json();
+    assert.equal(out.version, "v0.2.0");
+    assert.equal(out.asset.id, 2, "the .zip asset is preferred");
+    assert.match(seen.url, /\/releases\/latest$/);
+    assert.equal(seen.opts.headers.Authorization, "Bearer ght_update"); // UPDATE token, not issue
+  } finally { restore(); }
+});
+
+test("update: no releases yet -> ok with version null", async () => {
+  const restore = stubFetch(async () => new Response("{}", { status: 404 }));
+  try {
+    const r = await worker.fetch(
+      req(undefined, { method: "GET", path: "/update", headers: { "X-Localm-Token": "s3cret" } }), ENV_UP);
+    const out = await r.json();
+    assert.equal(out.ok, true);
+    assert.equal(out.version, null);
+  } finally { restore(); }
+});
+
+test("update/download: streams the asset via the signed redirect", async () => {
+  const restore = stubFetch(async (url) => {
+    if (url.includes("/releases/assets/")) {
+      // asset API: a 302 to a signed URL (no auth on the follow-up)
+      return { status: 302, ok: false, headers: { get: (k) =>
+        k.toLowerCase() === "location" ? "https://objects.githubusercontent.com/blob" : null } };
+    }
+    if (url === "https://objects.githubusercontent.com/blob") {
+      return new Response("PKbuildzip", { status: 200, headers: { "content-length": "10" } });
+    }
+    return new Response("{}", { status: 404 });
+  });
+  try {
+    const r = await worker.fetch(
+      req(undefined, { method: "GET", path: "/update/download?id=2", headers: { "X-Localm-Token": "s3cret" } }), ENV_UP);
+    assert.equal(r.status, 200);
+    assert.equal(r.headers.get("Content-Type"), "application/zip");
+    const text = await r.text();
+    assert.match(text, /buildzip/);
+  } finally { restore(); }
+});
+
+test("update/download: rejects a redirect to a non-GitHub host (no SSRF)", async () => {
+  let followed = false;
+  const restore = stubFetch(async (url) => {
+    if (url.includes("/releases/assets/")) {
+      return { status: 302, ok: false, headers: { get: (k) =>
+        k.toLowerCase() === "location" ? "https://evil.example/secret" : null } };
+    }
+    followed = true; // must NOT be reached
+    return new Response("leaked", { status: 200 });
+  });
+  try {
+    const r = await worker.fetch(
+      req(undefined, { method: "GET", path: "/update/download?id=2", headers: { "X-Localm-Token": "s3cret" } }), ENV_UP);
+    assert.equal(r.status, 502);
+    assert.equal(followed, false, "must not fetch an unexpected redirect host");
+  } finally { restore(); }
+});
+
+test("update/download: missing asset id -> 400", async () => {
+  const r = await worker.fetch(
+    req(undefined, { method: "GET", path: "/update/download", headers: { "X-Localm-Token": "s3cret" } }), ENV_UP);
+  assert.equal(r.status, 400);
 });

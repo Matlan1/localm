@@ -2877,8 +2877,29 @@ async function refreshPluginCommands() {
     // endpoint is configured (otherwise the report is saved-to-file + emailed).
     const bugUp = $("bug-upload");
     if (bugUp) bugUp.hidden = !data.bugreport_upload;
+    // Reveal the Updates + Issues settings cards only when their proxy surfaces are
+    // configured. On startup, a single throttled, quiet update check surfaces a
+    // banner - it NEVER applies anything (apply is always an explicit click).
+    const upSec = $("sec-updates");
+    if (upSec) {
+      upSec.hidden = !data.update_available;
+      if (data.update_available) maybeAutoUpdateCheck();
+    }
+    const isSec = $("sec-issues");
+    if (isSec) isSec.hidden = !data.issues_available;
     renderNav();
   } catch { /* server unreachable; fall back to plain unknown-command */ }
+}
+
+// One quiet update check per ~6h (a startup auto-surface). Calls the check only -
+// never applies. Defined here; the actual fetch lives in pages.js (window hook).
+function maybeAutoUpdateCheck() {
+  try {
+    const last = +(localStorage.getItem("localm.updateCheckAt") || 0);
+    if (Date.now() - last < 6 * 3600 * 1000) return;
+    localStorage.setItem("localm.updateCheckAt", String(Date.now()));
+  } catch (e) { /* storage blocked: just check */ }
+  if (typeof window.__localmUpdateCheck === "function") window.__localmUpdateCheck();
 }
 
 /** A "/cmd needs the X plugin" hint when *cmd* belongs to a known first-party

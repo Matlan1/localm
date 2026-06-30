@@ -414,6 +414,86 @@ async function submitBugReport(upload) {
 if ($("bug-send")) $("bug-send").onclick = () => submitBugReport(false);
 if ($("bug-upload")) $("bug-upload").onclick = () => submitBugReport(true);
 
+// Updates: check-only auto-surface (a throttled startup check in app.js calls
+// __localmUpdateCheck) + an explicit "Update now". localm never self-updates; the
+// apply runs only on this click and the server rolls back + reports honestly on
+// failure.
+async function updateCheck() {
+  const out = $("update-status"), applyBtn = $("update-apply");
+  try {
+    const r = await fetch("/api/update/check", { headers: authHeaders() });
+    const d = await r.json().catch(() => ({}));
+    if (out) out.hidden = false;
+    if (!r.ok) throw new Error(d.detail || r.statusText);
+    if (d.error) { if (out) out.textContent = "Could not check: " + d.error; return; }
+    if (!d.available) { if (out) out.textContent = "The updater is not configured."; return; }
+    if (d.newer && d.asset && d.asset.id) {
+      if (out) out.textContent = "Update available: " + d.latest + " (you have " + d.current +
+        ")." + (d.notes ? "  " + String(d.notes).slice(0, 200) : "");
+      if (applyBtn) applyBtn.hidden = false;
+    } else if (d.newer) {
+      if (out) out.textContent = "Update " + d.latest + " is available but has no build attached.";
+      if (applyBtn) applyBtn.hidden = true;
+    } else {
+      if (out) out.textContent = "localm is up to date (running " + d.current + ").";
+      if (applyBtn) applyBtn.hidden = true;
+    }
+  } catch (e) { if (out) { out.hidden = false; out.textContent = "Could not check: " + e.message; } }
+}
+window.__localmUpdateCheck = updateCheck;
+
+async function updateApply() {
+  const out = $("update-status"), btn = $("update-apply");
+  if (btn) btn.disabled = true;
+  if (out) { out.hidden = false; out.textContent = "Downloading and applying ..."; }
+  try {
+    const r = await fetch("/api/update/apply", { method: "POST", headers: authHeaders() });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || r.statusText);
+    if (d.applied) {
+      if (out) out.textContent = "Updated to " + (d.version || "") +
+        (d.restarting ? ". Restarting ..." :
+          (d.klass === "setup" ? ". Re-run setup.bat to finish." : "."));
+      if (btn) btn.hidden = true;
+    } else if (d.error) {
+      if (out) out.textContent = "Update failed (rolled back): " + d.error;
+    } else {
+      if (out) out.textContent = d.reason || "Nothing to apply.";
+    }
+  } catch (e) { if (out) out.textContent = "Update failed: " + e.message; }
+  finally { if (btn) btn.disabled = false; }
+}
+if ($("update-check")) $("update-check").onclick = updateCheck;
+if ($("update-apply")) $("update-apply").onclick = updateApply;
+
+// Issues: read-only list (textContent only - never raw innerHTML for proxy data).
+async function issuesRefresh() {
+  const out = $("issues-list");
+  if (out) out.textContent = "Loading ...";
+  try {
+    const r = await fetch("/api/issues", { headers: authHeaders() });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || r.statusText);
+    if (!out) return;
+    if (d.error) { out.textContent = "Could not load: " + d.error; return; }
+    const list = d.issues || [];
+    if (!list.length) { out.textContent = "No issues."; return; }
+    out.textContent = "";
+    for (const it of list) {
+      const row = document.createElement("div");
+      row.textContent = "#" + it.number + " " + (it.state || "?") + "  " + (it.title || "");
+      if (it.html_url) {
+        const a = document.createElement("a");
+        a.href = it.html_url; a.target = "_blank"; a.rel = "noopener";
+        a.textContent = " (open)";
+        row.appendChild(a);
+      }
+      out.appendChild(row);
+    }
+  } catch (e) { if (out) out.textContent = "Could not load issues: " + e.message; }
+}
+if ($("issues-refresh")) $("issues-refresh").onclick = issuesRefresh;
+
 // R30: export all logs of this instance to a folder the user picks (reuses the
 // shared directory-picker modal), then POSTs the chosen path to /api/logs/export.
 if ($("logs-export")) {

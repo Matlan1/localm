@@ -202,6 +202,14 @@ CORE_FIELDS: list = [
                  "Optional shared secret the proxy may require, sent as a header. "
                  "Set in config.json, not here.",
                  group="Bug reports"),
+    SettingField("update_url", Widget.HIDDEN, "Update endpoint URL",
+                 "Override for the updater's Worker base (defaults to the bug-report "
+                 "URL when blank). Set in config.json, not here.",
+                 group="Bug reports"),
+    SettingField("update_token", Widget.HIDDEN, "Update endpoint token",
+                 "Override shared secret for the updater (defaults to the bug-report "
+                 "token when blank). Set in config.json, not here.",
+                 group="Bug reports"),
     SettingField("plugins", Widget.HIDDEN, "Per-plugin config",
                  "Per-plugin settings (e.g. media output dirs). Managed by the "
                  "Plugins/Settings pages and plugin backends, not edited here.",
