@@ -7,6 +7,11 @@ from unittest.mock import MagicMock, patch
 
 
 from localm.image_gen import comfy
+# ensure_comfy moved into the shared client and calls _comfy_alive as a bare
+# global there, so stubbing the reachability probe must patch comfy_client.
+# (generate_image still calls _localm_unload as a bare global in the image
+# module, so that patch stays on comfy.)
+from localm.media import comfy_client
 
 
 def _minimal_png(width: int, height: int) -> bytes:
@@ -92,7 +97,7 @@ class TestFailFastBeforeUnload:
     def test_dead_comfy_errors_without_unloading_llm(self, tmp_path):
         """A dead image server must not cost the user an LLM unload+reload."""
         unload_spy = MagicMock()
-        with patch.object(comfy, "_comfy_alive", return_value=False), \
+        with patch.object(comfy_client, "_comfy_alive", return_value=False), \
              patch.object(comfy, "_localm_unload", unload_spy):
             ok, msg = comfy.generate_image("a cat", tmp_path / "out.png")
         assert ok is False

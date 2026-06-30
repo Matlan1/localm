@@ -7,6 +7,13 @@ import sys
 from unittest.mock import MagicMock, patch
 
 from localm.image_gen import comfy
+# ensure_comfy and the launcher/discovery helpers moved into the shared client.
+# ensure_comfy calls _comfy_alive as a bare global in this module, so a test that
+# stubs the reachability probe must patch it on comfy_client (its home), not on
+# the image_gen.comfy re-export. (Helpers tested directly - discover_launch_cmd,
+# _amd_rocm_launch_env, _derive_workdir_from_cmd, apply_fast_dequant - stay on the
+# comfy re-export and need no change.)
+from localm.media import comfy_client
 
 
 def test_derive_workdir_from_full_bat_path(tmp_path):
@@ -72,8 +79,8 @@ def test_amd_rocm_launch_env_none_when_bin_missing(monkeypatch, tmp_path):
 def test_ensure_comfy_uses_configured_timeout(monkeypatch):
     # ComfyUI never comes up; with no launch ability we still resolve the
     # configurable timeout instead of the old hard-coded 180s.
-    monkeypatch.setattr(comfy, "_comfy_alive", lambda *a, **k: False)
-    monkeypatch.setattr(comfy, "load_config",
+    monkeypatch.setattr(comfy_client, "_comfy_alive", lambda *a, **k: False)
+    monkeypatch.setattr(comfy_client, "load_config",
                         lambda: {"comfy_launch_cmd": None,
                                  "comfy_launch_timeout": 600}, raising=False)
     # load_config is imported inside ensure_comfy from localm.config; patch there.
@@ -148,7 +155,7 @@ def test_ensure_comfy_discovers_launcher_in_workdir(tmp_path):
         return proc
 
     with patch("localm.config.load_config", return_value=cfg), \
-         patch.object(comfy, "_comfy_alive", side_effect=lambda *a, **k: next(alive)), \
+         patch.object(comfy_client, "_comfy_alive", side_effect=lambda *a, **k: next(alive)), \
          patch("subprocess.Popen", side_effect=fake_popen):
         ok, msg = comfy.ensure_comfy("http://127.0.0.1:8188")
     assert ok is True, msg
@@ -174,7 +181,7 @@ def test_ensure_comfy_reports_launcher_immediate_exit(tmp_path):
         return proc
 
     with patch("localm.config.load_config", return_value=cfg), \
-         patch.object(comfy, "_comfy_alive", side_effect=lambda *a, **k: False), \
+         patch.object(comfy_client, "_comfy_alive", side_effect=lambda *a, **k: False), \
          patch("subprocess.Popen", side_effect=fake_popen):
         ok, msg = comfy.ensure_comfy("http://127.0.0.1:8188")
     assert ok is False
@@ -198,7 +205,7 @@ def _spawn_with_cfg(tmp_path, cfg):
         return proc
 
     with patch("localm.config.load_config", return_value=cfg), \
-         patch.object(comfy, "_comfy_alive", side_effect=lambda *a, **k: next(alive)), \
+         patch.object(comfy_client, "_comfy_alive", side_effect=lambda *a, **k: next(alive)), \
          patch("subprocess.Popen", side_effect=fake_popen):
         ok, msg = comfy.ensure_comfy("http://127.0.0.1:8188")
     assert ok is True, msg
@@ -225,7 +232,7 @@ def test_ensure_comfy_error_points_at_the_folder():
     cfg = {"comfy_launch_cmd": None, "comfy_workdir": None,
            "comfy_launch_timeout": 30}
     with patch("localm.config.load_config", return_value=cfg), \
-         patch.object(comfy, "_comfy_alive", return_value=False):
+         patch.object(comfy_client, "_comfy_alive", return_value=False):
         ok, msg = comfy.ensure_comfy("http://127.0.0.1:8188")
     assert ok is False
     assert "comfy_workdir" in msg          # guides the user to set the folder
