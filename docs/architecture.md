@@ -12,7 +12,7 @@ and mcp are all
 plugins layered on top.
 
 ```
-CLI (cli.py)                       Plugin engine (localm/plugins/)
+CLI (localm/cli/)                  Plugin engine (localm/plugins/)
   └── Engine (inference/engine.py)   ├── engine.py    PluginManager
         ├── GgufBackend              ├── contract.py  Host / Surface / PluginSpec
         │     └── LlamaCpp (ctypes)  ├── catalog.py   first-party catalog
@@ -52,11 +52,13 @@ unloaded it (e.g. image generation borrowing the VRAM).
 
 ## HTTP server
 
-`inference/http_server.py` is a FastAPI app (`create_app(engine)`). The
-synchronous `engine.chat_stream()` runs in a thread; tokens cross into the
-event loop via `call_soon_threadsafe` and stream out as SSE. One asyncio
-semaphore serialises all inference. Endpoints are documented in
-[server-api.md](server-api.md).
+`inference/http_server.py` builds the FastAPI app (`create_app(engine)`) and
+holds the shared inference state; the route handlers themselves live in
+`inference/routes/` modules (chat, models, config, keys, session, admin,
+system, plugins). The synchronous `engine.chat_stream()` runs in a thread;
+tokens cross into the event loop via `call_soon_threadsafe` and stream out as
+SSE. One asyncio semaphore serialises all inference. Endpoints are documented
+in [server-api.md](server-api.md).
 
 ## Conversation compaction
 
@@ -65,9 +67,10 @@ conversation reaches 70% of the context ceiling, keeping the system prompt
 and the last two exchanges verbatim, with a hard-trim fallback that never
 raises. Used by `localm run` interactive chat; the GUI (itself a plugin
 surface now) implements the same protocol client-side. The coder agent has
-its own compaction in `localm/plugins/coder/agent.py` (GBNF-structured
+its own compaction in the `localm/plugins/coder/agent/` package (GBNF-structured
 summaries); coder is the builtin `coder` plugin (store dir
-`localm/plugins/builtin/coder/` wrapping `localm/plugins/coder/`).
+`localm/plugins/builtin/coder/` wrapping `localm/plugins/coder/`, which is split
+into `agent/`, `tools/`, `cli/`, and `backends/` packages).
 
 ## Plugin engine
 

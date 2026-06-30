@@ -646,18 +646,20 @@ localm run mymodel --prompt "..."
 runtime/                      # localm-llama-runtime wheel: native llama.cpp
 │                             #   binaries bundled in the venv (self-contained)
 localm/
-├── cli.py                    # Click command groups (core + plugin commands)
+├── cli/                      # Click command package, split by area (core + plugin command groups)
 ├── config.py                 # data-dir paths, config, port range, defaults
 ├── auth.py, scopes.py        # API-key auth and capability scopes
 ├── netpolicy.py              # the off/ask/allow web-access policy + SSRF guard
 ├── setup_llama.py            # `localm setup-llama`: provision native binaries
-├── model_manager.py          # registry, pull, dedup, aliases, Ollama manifests
+├── model_manager/            # registry, pull, dedup, aliases, Ollama manifests (gguf/registry/pull)
 ├── image_gen/                # shared ComfyUI FLUX transport (used by image plugin)
 ├── music_gen/                # shared ComfyUI ACE-Step transport (used by music plugin)
 ├── video_gen/                # shared ComfyUI Wan 2.2 transport (used by video plugin)
+├── media/                    # shared ComfyUI client (comfy_client.py), used by image/music/video
 ├── inference/
 │   ├── engine.py             # unified Engine: GGUF vs HF detection
-│   ├── http_server.py        # FastAPI app: /v1/* + management + /api/* plugin routes
+│   ├── http_server.py        # FastAPI app factory (create_app) + shared inference state
+│   ├── routes/               # HTTP route handlers (admin, chat, config, keys, models, plugins, session, system)
 │   ├── protocol.py           # Pydantic models (OpenAI wire format)
 │   ├── chat_pipeline.py      # kernel chat-pipeline hook chain (inlet/stream/outlet)
 │   ├── compact.py            # automatic history compaction
