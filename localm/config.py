@@ -252,6 +252,14 @@ DEFAULT_CONFIG: dict = {
     # only file an issue through the rate-limited proxy, never read the repo.
     "bugreport_upload_url": None,
     "bugreport_upload_token": None,
+    # Update channel + read-only issues tracker. One Worker hosts report + issues +
+    # update, so these default to the bug-report proxy above; set update_url/token
+    # ONLY to point updates at a different Worker. The updater needs a Contents:read
+    # token on the proxy (separate from the Issues token) and the shared secret.
+    # None = no update channel (the "Update available" banner + `localm update` are
+    # simply hidden). See tools/bugreport-proxy/ and dev-notes/self-updater-design.
+    "update_url": None,
+    "update_token": None,
     # Names of enabled engine plugins (WordPress-style). Managed by the plugin
     # engine (localm plugin enable/disable and the GUI Plugins page) via
     # update_config, NOT the settings form. Declared here so it has a documented
