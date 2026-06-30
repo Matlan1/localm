@@ -241,7 +241,7 @@ Third-party plugins are folders containing a `plugin.toml` manifest and Python f
 ```bash
 localm coder --model mymodel              # interactive session in the current repo
 localm coder "fix the failing test"       # single task
-localcoder --model mymodel                # same thing, standalone command
+localcoder --model mymodel                # same thing, standalone entry point (installed with the coder plugin)
 ```
 
 The agent auto-starts `localm serve` when needed, plans with tool calls (read, write, edit, patch, shell, search, tests, image generation, plus tools exported by other installed plugins), asks before destructive actions, tracks a turn budget so it asks for help instead of guessing forever, and verifies its own code changes before answering. Privacy mode is the default: nothing is persisted unless you opt into `--mode log` or `--mode full`.
