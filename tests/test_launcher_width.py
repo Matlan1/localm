@@ -2,6 +2,7 @@
 """The launcher window must keep a FIXED width: a long status line or a long
 model name in the dropdown must never widen it (issues.txt)."""
 
+import importlib.machinery
 import importlib.util
 from pathlib import Path
 
@@ -11,7 +12,11 @@ _LAUNCHER = Path(__file__).resolve().parents[1] / "launcher.pyw"
 
 
 def _load_launcher():
-    spec = importlib.util.spec_from_file_location("localm_launcher_mod", _LAUNCHER)
+    # .pyw is a recognized Python source suffix only on Windows; on POSIX
+    # spec_from_file_location returns None for it. Pass an explicit
+    # SourceFileLoader so launcher.pyw loads as source on every platform.
+    loader = importlib.machinery.SourceFileLoader("localm_launcher_mod", str(_LAUNCHER))
+    spec = importlib.util.spec_from_file_location("localm_launcher_mod", _LAUNCHER, loader=loader)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod

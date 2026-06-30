@@ -14,8 +14,18 @@ permissions:
 
 jobs:
   test:
-    name: lint + hygiene + tests
-    runs-on: windows-latest
+    # INFRA-1: run on Linux as well as Windows. Both are declared supported
+    # platforms (see the classifiers in pyproject.toml), so cross-platform
+    # regressions (paths, line endings, signals, the SetConsoleCtrlHandler path,
+    # process spawning) must be caught here, not by a user on the other OS.
+    name: lint + hygiene + tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Do not cancel the other OS on the first failure: a Linux-only break is
+      # exactly the signal this matrix exists to surface, so let Windows finish.
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
     steps:
       - uses: actions/checkout@v7
 
@@ -37,8 +47,13 @@ jobs:
       - name: Hygiene gate
         run: python scripts/check_hygiene.py
 
+      # TEST-1: publish coverage for visibility. There is no --cov-fail-under gate
+      # yet (a low number must not fail the build); the goal this pass is a number
+      # in the log plus an uploaded coverage.xml. Config is in pyproject
+      # [tool.coverage]. The [gpu]/[gguf] extras are not installed, so tests that
+      # need them importorskip and are simply not counted.
       - name: Tests
-        run: pytest -m "not integration"
+        run: pytest -m "not integration" --cov=localm --cov-report=term-missing --cov-report=xml
 
       # GUI is vanilla JS (localm/plugins/gui/static); the jsdom harness under
       # tests-js/ loads app.js and exercises it. node:test, no build step.

@@ -28,6 +28,8 @@ desktop.ini
 .pytest_cache/
 htmlcov/
 .coverage
+.coverage.*
+coverage.xml
 
 # Secrets / local state
 *.env
