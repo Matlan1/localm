@@ -545,26 +545,18 @@ From the seamless auth/cert session (#201) + the reopened I3 Wan-video item.
 Reconstructed from lost session logs, cross-verified against the code (origin/master
 #267) by an independent verifier + adversarial counter-check, confirmed genuinely
 open/partial, and confirmed ABSENT from the rest of this TODO at the time of writing.
-108 distinct items (deduplicated from 183; the 25 bug items were moved to issues/issues.txt per the bugs-live-in-issues convention). "(P)" = partially done. "rec#N" = the
+97 distinct items (deduplicated from 183; the 25 bug items and 11 security findings were moved to issues/issues.txt per the bugs/findings-live-in-issues convention). "(P)" = partially done. "rec#N" = the
 recovered-backlog id(s); full per-item evidence lives in the gitignored local files
 issues/RECOVERED-BACKLOG-localm-VERIFIED-2026-06-30.md and
 issues/TODO-RECONCILIATION-2026-06-30.md.
 
-### Security (14)
+Related: the bug + security-finding items moved out of this list live in
+issues/issues.txt (the RECOVERED-BACKLOG BUGS block + the SECURITY section).
+
+### Security (3)
 - [ ] Reconsider a scoped network policy for the coder run_shell capability (P) - run_shell is owner/coder:full-gated, but a scoped NETWORK policy for shell-spawned access is explicitly not implemented (gated only by human approval).  (rec#245)
 - [ ] Gate /v1/chat/completions (+completions/embeddings) on a grantable CHAT scope (KEY-SCOPE-1) - Routes are gated on any-valid-key not require_scope(CHAT), so an mcp-only key can still chat; needs key-mgmt design (chat reframed as baseline by the maintainer).  (rec#249,611)
-- [ ] Enforce SKILL.md allowed-tools (currently advisory only) - allowed-tools is parsed and surfaced to the model but not hard-enforced; no enforcement code restricting a skill to its declared tool subset.  (rec#326)
-- [ ] Harden GUI-editable media backend launch_cmd/api_url (Phase-5 hardening) - launch_cmd/api_url are request-editable via POST /v1/media/config gated only by config:write (not admin) with no escape/validation, and launch_cmd still runs through the shell.  (rec#330)
-- [ ] Close the DNS-rebinding TOCTOU gap in the SSRF guard - Host is resolved/checked before the request while the connection re-resolves; no connect-time pinning, so the known TOCTOU gap is acknowledged not closed.  (rec#336)
 - [ ] Add plugin sandboxing for untrusted third-party code - Third-party plugin Python still runs unsandboxed in-process (no sandbox or signing in v1).  (rec#351)
-- [ ] Gate restricted-coder system-prompt prose mentions of run_shell on disabled_tools (N1) - Tool docs are gated, but the RULES prose and subagent prompt still mention run_shell when disabled; the cosmetic gating fix was not applied.  (rec#361,465)
-- [ ] Implement the PWA hard auth gate (P1a): render only onboarding when keyless (P) - Shell is hidden and the primary data path is gated, but eight top-level /api fetches still fire unconditionally behind the gate (each bails only on !r.ok, never on __localmLocked).  (rec#392)
-- [ ] Close the open-mode GET-route gap behind --insecure - The origin/open-mode shell_token gate applies only to unsafe methods, so GET data routes remain ungated in open mode (reachable over network only via --insecure).  (rec#423)
-- [ ] Add checksum/signature verification to setup-llama binary downloads (P) - Only size+shape guards plus opt-in --sha256; no default checksum or signature, so a valid-but-tampered archive passes (HF GGUF pulls now verify HF-metadata sha256).  (rec#428,592)
-- [ ] Bump bundled DOMPurify 3.1.6 -> latest 3.2.x (R41-D2) - Bundled DOMPurify is still 3.1.6; not bumped (and there is no CSP / marked has no sanitizer).  (rec#565)
-- [ ] Harden the artifact iframe CSP injection + pin KaTeX trust:false (R41-D4/D5) - Artifact-iframe CSP is still regex-spliced after the head tag (content before <head> runs pre-CSP) and renderMathInElement is not pinned with trust:false.  (rec#566)
-- [ ] Make confirm-on-shell the effective default for the non-interactive coder CLI (R19a) - Non-interactive `localcoder "task"` still runs shell un-gated (auto_approve True); no network+shell combined warning and no SECURITY.md residual note.  (rec#571)
-- [ ] Add a SEC-3 lockout-recovery escape hatch (P) - Self-lockout prevention is implemented and a local-CLI key path can recover, but there is no dedicated lockout-recovery escape-hatch command.  (rec#647)
 
 ### Testing / verification (11)
 - [ ] Rewrite the entire test suite from scratch to kill mock-theater (VRAM-escape exemplar) (P) - Some real-behavior/contract tests were added (incl the unblocking unload-auth test), but the mandated from-scratch ~142-file rewrite with per-cluster mutation/negative testing is not done.  (rec#87,178,498,588,617)
