@@ -121,6 +121,9 @@ def collect_diagnostics(context: Optional[dict] = None) -> dict:
         diag["platform"] = platform.platform()
         diag["machine"] = platform.machine()
     except Exception:
+        # Best-effort: collect_diagnostics must never raise (it runs ON the
+        # failure path). A problem here just omits these basic fields; the rest
+        # of the snapshot is gathered by the independently guarded blocks below.
         pass
 
     try:
@@ -142,6 +145,9 @@ def collect_diagnostics(context: Optional[dict] = None) -> dict:
                 diag["nvidia_driver"] = nv.driver_version
                 diag["nvidia_cuda_capability"] = nv.cuda_capability
     except Exception:
+        # Best-effort: probing the NVIDIA driver/CUDA capability is optional
+        # detail. If it fails (no nvidia-smi, a driver hiccup) the report simply
+        # omits these fields; never break report generation over it.
         pass
 
     try:
@@ -151,6 +157,9 @@ def collect_diagnostics(context: Optional[dict] = None) -> dict:
         diag["native_runtime_provisioned"] = binary_dir is not None
         diag["native_libs"] = names
     except Exception:
+        # Best-effort: listing provisioned native libraries is diagnostic detail.
+        # A failure (runtime dir missing, unreadable) just omits the names; the
+        # report is still useful without them.
         pass
 
     # Caller-supplied context (chosen backend, the operation, etc.).
@@ -252,11 +261,16 @@ def _runtime_state() -> dict:
         from localm.audit import effective_mode
         state["session_mode"] = effective_mode("server").value
     except Exception:
+        # Best-effort diagnostic: if the session mode cannot be read the report
+        # just omits it. This is a status readout, NOT the privacy-mode gate that
+        # protects session writes, so omitting it weakens no privacy guarantee.
         pass
     try:
         from localm.debuglog import debug_enabled
         state["debug_mode"] = bool(debug_enabled())
     except Exception:
+        # Best-effort diagnostic: omitting the debug flag from the report is
+        # harmless; never raise from this collector.
         pass
     return state
 
@@ -496,6 +510,9 @@ def _ring_activity() -> list:
                 lines = pre_log.read_text(encoding="utf-8").splitlines() + ["--- RESTART ---"] + lines
                 pre_log.unlink(missing_ok=True)
         except Exception:
+            # Best-effort: prepending the pre-restart log tail is a nicety. If it
+            # is missing or unreadable we just return the in-memory activity on its
+            # own; never let it cost us the rest of the report.
             pass
         return lines
     except Exception:
@@ -539,6 +556,12 @@ def save_report(text: str, when: Optional[str] = None) -> Optional[Path]:
         try:
             path.chmod(0o600)
         except OSError:
+            # Best-effort hardening. chmod is a no-op on Windows and only fails on
+            # POSIX filesystems that do not support per-file perms (e.g. a FAT or
+            # network mount), where the data dir's own perms still apply. Proven
+            # low-risk regardless: the report deliberately carries NO secrets (no
+            # API key, env, config secrets, or chat content - see module docstring),
+            # so a world-readable report leaks nothing sensitive.
             pass
         return path
     except Exception:
@@ -677,6 +700,9 @@ def upload_report(title: str, body: str, *, url: Optional[str] = None,
                 try:
                     detail = e.read().decode("utf-8", "replace")[:300]
                 except Exception:
+                    # The error body is best-effort extra context; if it cannot be
+                    # read we still raise the failure below (with an empty detail),
+                    # so the rejection is never hidden.
                     pass
                 raise LocalmError("the bug-report server rejected the upload",
                                   reason=f"HTTP {e.code}: {detail}".strip())
@@ -853,6 +879,10 @@ def _handle_thread_exception(args) -> None:
         try:
             threading.__excepthook__(args)
         except Exception:
+            # Last resort: the bug reporter itself failed AND the stdlib default
+            # hook failed. There is nothing left to fall back to, and an
+            # excepthook must not raise (it would mask the original crash), so
+            # there is genuinely nothing safe to do but swallow here.
             pass
 
 
@@ -941,6 +971,10 @@ def arm_crash_guard(context: Optional[dict] = None, home=None) -> bool:
         try:
             faulthandler.enable(file=_crash_trace_fh, all_threads=True)
         except Exception:
+            # Best-effort: if faulthandler cannot attach (e.g. the fd is not a
+            # real file on some platforms) we still arm the crash marker below, so
+            # a hard death is still reported next start - just without the native
+            # traceback. Arming must not fail over this.
             pass
         (d / "server-crash.marker").write_text(
             json.dumps({"pid": os.getpid(), "context": context or {}}),
@@ -957,6 +991,9 @@ def disarm_crash_guard(home=None) -> None:
     try:
         (_crash_dir(home) / "server-crash.marker").unlink(missing_ok=True)
     except Exception:
+        # Best-effort cleanup on a CLEAN shutdown. Worst case the marker survives
+        # and the next start files one spurious "prior crash" report - annoying,
+        # not unsafe. disarm must not raise during shutdown.
         pass
     try:
         if _crash_trace_fh is not None:
@@ -964,6 +1001,8 @@ def disarm_crash_guard(home=None) -> None:
             _crash_trace_fh.close()
             _crash_trace_fh = None
     except Exception:
+        # Best-effort: releasing the faulthandler file on shutdown. A failure
+        # leaks a file handle until process exit (imminent anyway); never raise.
         pass
 
 
@@ -981,6 +1020,9 @@ def check_and_report_prior_crash(home=None, interactive: bool = False):
         try:
             info = json.loads(marker.read_text(encoding="utf-8"))
         except Exception:
+            # A corrupt/half-written marker (the process may have died mid-write)
+            # still means a crash happened: fall back to empty context and report
+            # it anyway rather than dropping the crash on the floor.
             pass
         trace = ""
         try:
@@ -988,11 +1030,16 @@ def check_and_report_prior_crash(home=None, interactive: bool = False):
             if tp.exists():
                 trace = tp.read_text(encoding="utf-8").strip()
         except Exception:
+            # Best-effort: the native traceback file is optional extra context.
+            # If unreadable we report the crash without it rather than not at all.
             pass
         # Clear FIRST so a failure while reporting cannot loop the marker forever.
         try:
             marker.unlink(missing_ok=True)
         except Exception:
+            # If the marker cannot be removed the next start may re-report this
+            # same crash (a duplicate, not a lost one). Tolerable; do not abort the
+            # report we are about to file over a failed unlink.
             pass
         ctx = {"prior_run": info}
         if trace:
