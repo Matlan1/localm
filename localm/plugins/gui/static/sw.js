@@ -6,12 +6,16 @@
  * must always hit the live server. The data lives on the server this app was
  * served from; the worker only caches the static front-end.
  */
-// Bump this whenever the cached shell assets (style.css, app.js, pages/*.js,
+// Bump this whenever the cached shell assets (style.css, app/*.js, pages/*.js,
 // index.html, icons) change, so an installed PWA drops the old cache on activate
 // and re-precaches the new files instead of serving stale cache-first assets.
-const CACHE = "localm-shell-v12";
+const CACHE = "localm-shell-v13";
 const SHELL = [
-  "/", "/index.html", "/style.css", "/app.js",
+  "/", "/index.html", "/style.css",
+  // app.js was split per section (same load order); precache each part.
+  "/app/client-log.js", "/app/helpers.js", "/app/theme.js", "/app/logo.js",
+  "/app/tabs.js", "/app/models-sidebar.js", "/app/chat.js", "/app/cmdk.js",
+  "/app/settings-perf.js", "/app/coder.js", "/app/slash.js", "/app/init.js",
   // pages.js was split per page (same load order); precache each part.
   "/pages/dispatch.js", "/pages/models.js", "/pages/images.js",
   "/pages/plugins.js", "/pages/settings.js", "/pages/workflow.js",
