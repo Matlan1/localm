@@ -1,0 +1,71 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""Module-level constants shared across the Agent mixins: the tool-category sets
+(mutating / undoable / scoped / network), the scope path-arg map, and the
+compaction / repair / error-breaker thresholds. Extracted verbatim from the
+former single-file agent.py."""
+
+from __future__ import annotations
+
+# Tools that mutate files - trigger a project map refresh after they run
+_MUTATING_TOOLS: frozenset[str] = frozenset({"write_file", "edit_file", "run_shell"})
+
+# Tools whose file changes can be undone (we snapshot before they run).
+# These are also the tools recorded in the changed-files tracker.
+_UNDOABLE_TOOLS: frozenset[str] = frozenset({
+    "write_file", "edit_file", "patch_file", "edit_notebook_cell",
+})
+
+# File-access tools whose target path must match the active scope glob.
+# The check keys on the `path` arg; for tools whose primary target is a
+# `glob` or `output_path` arg instead (or as well), that arg is checked too
+# (see _SCOPE_PATH_ARGS). run_shell is intentionally NOT scoped: it runs
+# arbitrary commands, so a path-arg check cannot meaningfully confine it.
+_SCOPED_TOOLS: frozenset[str] = frozenset({
+    "read_file", "write_file", "edit_file", "patch_file",
+    "list_dir", "tree",
+    # FAC-8: the rest of the file-reading/writing tools.
+    "grep", "search_files", "search_replace", "read_env",
+    "edit_notebook_cell", "generate_image",
+})
+
+# For each scoped tool, the argument names that name a path/glob to enforce the
+# scope against. Order matters only for which value is reported first; any
+# present arg that falls outside the scope rejects the call. Tools default to
+# checking "path"; entries here add (or replace with) the tool's real target.
+_SCOPE_PATH_ARGS: dict[str, tuple[str, ...]] = {
+    "grep":           ("path", "glob"),
+    "search_files":   ("path", "pattern"),
+    "search_replace": ("glob",),
+    "generate_image": ("output_path", "input_image"),
+}
+
+# Model-initiated network tools, governed by the net_mode policy
+# (localm.netpolicy): off = fail fast, ask = approval flow, allow = run.
+_NETWORK_TOOLS: frozenset[str] = frozenset({"fetch_url", "web_search"})
+
+# Fraction of estimated context window at which compaction is triggered
+_COMPACT_WARN_RATIO  = 0.70   # warn user in interactive mode
+
+_COMPACT_AUTO_RATIO  = 0.90   # silently compact in non-interactive mode
+
+_DEFAULT_CTX_TOKENS  = 4096   # fallback when n_ctx is unknown
+
+# How many times to re-prompt when a response looks like a tool call but cannot be
+# parsed. After this, the raw attempt is SURFACED (never silently finalised as a
+# hidden <tool_call> block - which rendered as an empty bubble + no file written).
+_MAX_TOOL_REPAIRS = 2
+
+# Abort a task after this many tool calls fail in a row across ANY tools. The
+# per-tool breaker only catches N IDENTICAL failures; a weak model can spin on
+# VARIED failing calls (e.g. git_show with invented hashes) and burn the whole
+# turn/token budget. Any successful tool call resets the streak.
+_GLOBAL_ERROR_ABORT = 6
+
+# Code file extensions that should be verified (tests / syntax) after writes
+_CODE_EXTS: frozenset[str] = frozenset({
+    ".py", ".js", ".ts", ".jsx", ".tsx", ".rs", ".go", ".java",
+    ".c", ".h", ".cpp", ".hpp", ".cs", ".rb", ".php",
+})
+
+# run_shell commands containing one of these substrings count as verification
+_TEST_COMMAND_MARKERS: tuple[str, ...] = ("pytest", "unittest", "npm test", "cargo test", "go test")
