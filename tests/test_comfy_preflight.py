@@ -10,6 +10,13 @@ precision variant, leaves enum (non-model) combos alone, and is a no-op when
 from unittest.mock import MagicMock, patch
 
 from localm.image_gen import comfy
+# preflight_models / comfy_object_info now live in the shared client; the
+# generic ComfyUI plumbing moved out of image_gen.comfy into here. preflight
+# calls comfy_object_info as a bare global in this module, so the stub that
+# replaces /object_info must be patched on comfy_client (the symbol's home),
+# not on the image_gen.comfy re-export. (Re-exports stay importable; this only
+# follows the moved symbol for the INTERNAL call.)
+from localm.media import comfy_client
 
 
 def _object_info(unet_options):
@@ -77,7 +84,7 @@ class TestComboHelpers:
         # so it must be reported missing, never silently swapped to the other version.
         wf = _wan_unet_workflow("wan2.2_ti2v_5B_fp16.safetensors")
         info = _object_info(["wan2.1_ti2v_5B_fp16.safetensors"])
-        with patch.object(comfy, "comfy_object_info", return_value=info):
+        with patch.object(comfy_client, "comfy_object_info", return_value=info):
             ok, msg = comfy.preflight_models(wf, "http://x")
         assert not ok
         assert wf["1"]["inputs"]["unet_name"] == "wan2.2_ti2v_5B_fp16.safetensors"
@@ -87,7 +94,7 @@ class TestPreflight:
     def test_present_model_passes_unchanged(self):
         wf = _wan_unet_workflow()
         info = _object_info(["wan2.2_ti2v_5B_fp16.safetensors", "other.safetensors"])
-        with patch.object(comfy, "comfy_object_info", return_value=info):
+        with patch.object(comfy_client, "comfy_object_info", return_value=info):
             ok, msg = comfy.preflight_models(wf, "http://x")
         assert ok and msg == ""
         assert wf["1"]["inputs"]["unet_name"] == "wan2.2_ti2v_5B_fp16.safetensors"
@@ -96,7 +103,7 @@ class TestPreflight:
         wf = _wan_unet_workflow()
         progress = []
         info = _object_info(["wan2.2_ti2v_5B_fp8_scaled.safetensors"])
-        with patch.object(comfy, "comfy_object_info", return_value=info):
+        with patch.object(comfy_client, "comfy_object_info", return_value=info):
             ok, msg = comfy.preflight_models(wf, "http://x",
                                              on_progress=progress.append)
         assert ok and msg == ""
@@ -106,7 +113,7 @@ class TestPreflight:
     def test_missing_with_no_variant_fails_naming_file(self):
         wf = _wan_unet_workflow()
         info = _object_info(["totally_different_model.safetensors"])
-        with patch.object(comfy, "comfy_object_info", return_value=info):
+        with patch.object(comfy_client, "comfy_object_info", return_value=info):
             ok, msg = comfy.preflight_models(wf, "http://x")
         assert not ok
         assert "wan2.2_ti2v_5B_fp16.safetensors" in msg
@@ -120,7 +127,7 @@ class TestPreflight:
         # two precision variants -> ambiguous -> report missing, never guess
         info = _object_info(["wan2.2_ti2v_5B_fp8_scaled.safetensors",
                              "wan2.2_ti2v_5B_bf16.safetensors"])
-        with patch.object(comfy, "comfy_object_info", return_value=info):
+        with patch.object(comfy_client, "comfy_object_info", return_value=info):
             ok, msg = comfy.preflight_models(wf, "http://x")
         assert not ok
         assert wf["1"]["inputs"]["unet_name"] == "wan2.2_ti2v_5B_fp16.safetensors"
@@ -131,13 +138,13 @@ class TestPreflight:
         wf = _wan_unet_workflow()
         wf["8"]["inputs"]["sampler_name"] = "uni_pc"        # valid file present too
         info = _object_info(["wan2.2_ti2v_5B_fp16.safetensors"])
-        with patch.object(comfy, "comfy_object_info", return_value=info):
+        with patch.object(comfy_client, "comfy_object_info", return_value=info):
             ok, msg = comfy.preflight_models(wf, "http://x")
         assert ok and msg == ""
 
     def test_unreachable_object_info_is_noop(self):
         wf = _wan_unet_workflow("does-not-exist.safetensors")
-        with patch.object(comfy, "comfy_object_info", return_value=None):
+        with patch.object(comfy_client, "comfy_object_info", return_value=None):
             ok, msg = comfy.preflight_models(wf, "http://x")
         assert ok and msg == ""                              # best-effort, never blocks
 
@@ -156,7 +163,7 @@ class TestPreflightBeforeUnload:
         info = _object_info(["unrelated_other.safetensors"])
         with patch.object(vcomfy, "ensure_comfy", return_value=(True, "up")), \
              patch.object(vcomfy, "_localm_unload", unload_spy), \
-             patch.object(comfy, "comfy_object_info", return_value=info):
+             patch.object(comfy_client, "comfy_object_info", return_value=info):
             ok, msg = vcomfy.generate_video("a fox", tmp_path / "out.mp4")
         assert not ok
         assert "wan2.2_ti2v_5B_fp16.safetensors" in msg     # the exact missing file
@@ -170,7 +177,7 @@ class TestPreflightBeforeUnload:
             "ckpt_name": [["some_other_checkpoint.safetensors"]]}}}}
         with patch.object(mcomfy, "ensure_comfy", return_value=(True, "up")), \
              patch.object(mcomfy, "_localm_unload", unload_spy), \
-             patch.object(comfy, "comfy_object_info", return_value=info):
+             patch.object(comfy_client, "comfy_object_info", return_value=info):
             ok, msg = mcomfy.generate_music("synthwave", tmp_path / "out.flac")
         assert not ok
         assert "ace_step_v1_3.5b.safetensors" in msg

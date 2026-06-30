@@ -24,7 +24,9 @@ class TestFluxImageTool(unittest.TestCase):
 
     # Preflight queries /object_info; stub it out so this test's strict positional
     # urlopen sequence (system_stats -> prompt -> history -> view) is unaffected.
-    @patch("localm.image_gen.comfy.comfy_object_info", return_value=None)
+    # preflight_models lives in the shared client and calls comfy_object_info as a
+    # bare global there, so the stub must target comfy_client (the symbol's home).
+    @patch("localm.media.comfy_client.comfy_object_info", return_value=None)
     @patch("urllib.request.urlopen")
     @patch("urllib.request.Request")
     def test_generate_image_success(self, mock_request_cls, mock_urlopen, mock_obj_info):
@@ -155,7 +157,7 @@ def test_repl_generate_image_privacy_no_sidecar(tmp_path, monkeypatch):
         return (True, "ok")
 
     with patch("localm.image_gen.comfy.generate_image", fake_gen), \
-         patch("localm.image_gen.comfy._comfy_alive", return_value=True), \
+         patch("localm.media.comfy_client._comfy_alive", return_value=True), \
          patch("localm.image_gen.comfy.default_api_url", return_value="http://127.0.0.1:9999"), \
          patch("localm.image_gen.comfy.free_comfy_vram"), \
          patch("localm.audit.effective_mode", return_value=SessionMode.PRIVACY):
@@ -178,7 +180,7 @@ def test_repl_generate_image_logmode_keeps_sidecar(tmp_path, monkeypatch):
         return (True, "ok")
 
     with patch("localm.image_gen.comfy.generate_image", fake_gen), \
-         patch("localm.image_gen.comfy._comfy_alive", return_value=True), \
+         patch("localm.media.comfy_client._comfy_alive", return_value=True), \
          patch("localm.image_gen.comfy.default_api_url", return_value="http://127.0.0.1:8188"), \
          patch("localm.image_gen.comfy.free_comfy_vram"), \
          patch("localm.audit.effective_mode", return_value=SessionMode.LOG):

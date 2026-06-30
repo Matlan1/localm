@@ -25,26 +25,43 @@ from __future__ import annotations
 import json
 import random
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 from pathlib import Path
 from typing import Optional
 
-# Shared ComfyUI plumbing lives in image_gen - one server, one set of helpers
-from localm.image_gen.comfy import (
+# urllib.request is no longer used directly here (the transport moved to
+# localm.media.comfy_client), but tests patch it as a module attribute -
+# patch.object(comfy.urllib.request, "urlopen", ...) - and resolving
+# comfy.urllib.request needs the name bound in this namespace. The shared client
+# calls the SAME (global) module object, so the patch still bites.
+import urllib.request  # noqa: F401
+
+# Shared ComfyUI plumbing lives in localm.media.comfy_client - one server, one
+# set of helpers. Imported as bare module globals so a test patching
+# localm.video_gen.comfy.<name> still rebinds what generate_video calls.
+from localm.media.comfy_client import (
     _localm_unload,
     _upload_image,
     _with_warning,
+    comfy_fetch_output,
     comfy_http_error_detail,
+    comfy_poll_until_done,
+    comfy_submit_prompt,
     contain_comfy_artifacts,
     default_api_url,
     ensure_comfy,
     find_node_by_class,
     next_node_id,
+    POLL_CANCELLED,
+    POLL_EXEC_ERROR,
+    POLL_TIMEOUT,
     preflight_models,
     resolve_sampler_roles,
+    select_output_info,
     set_seed_on_all,
+    SUBMIT_ERROR,
+    SUBMIT_HTTP_ERROR,
+    SUBMIT_NO_ID,
+    SUBMIT_URL_ERROR,
 )
 
 # wan_workflow.json is the committed generic template (public Wan 2.2 5B
@@ -82,6 +99,153 @@ def _snap_frames(seconds: float, fps: int) -> int:
 # SaveVideo/SaveWEBM report under "images" (with an animated flag),
 # VHS_VideoCombine under "gifs"; newer builds may use "videos".
 _OUTPUT_KEYS = ("videos", "gifs", "images")
+
+
+def _build_video_workflow(
+    workflow: dict,
+    *,
+    prompt: str,
+    negative_prompt: Optional[str],
+    frames: int,
+    fps: int,
+    width: Optional[int],
+    height: Optional[int],
+    steps: Optional[int],
+    cfg: Optional[float],
+    seed: int,
+    float_type: Optional[str],
+    input_image: Optional[Path],
+    api_url: str,
+) -> tuple[bool, str, Optional[str]]:
+    """Shape the Wan workflow in place from the call's parameters.
+
+    Returns ``(ok, message, uploaded_name)``: ``ok=False`` with an error message
+    when the graph has no sampler / prompt / latent node localm can drive, or the
+    input image is missing / fails to upload. ``uploaded_name`` is the ComfyUI-side
+    filename of an uploaded img2video source (for later containment) or None."""
+    # Resolve the nodes we drive by ROLE (sampler by class_type, then positive /
+    # negative / latent by following its graph edges) instead of hardcoded ids, so
+    # a user's own exported Wan graph works without renumbering (I3).
+    roles = resolve_sampler_roles(workflow)
+    _, sampler = roles["sampler"]
+    _, positive = roles["positive"]
+    _, negative = roles["negative"]
+    _, latent = roles["latent"]
+    sampler_inputs = sampler.get("inputs") if sampler else None
+    latent_inputs = latent.get("inputs") if latent else None
+    if (sampler is None or positive is None or latent is None
+            or not isinstance(sampler_inputs, dict)
+            or not isinstance(latent_inputs, dict)):
+        return False, (
+            "The video workflow has no sampler / prompt / latent node (with inputs) "
+            "localm can drive. Export a Wan 2.2 workflow from ComfyUI (Save -> API "
+            "format) and select it on the Workflow panel (Settings -> Media -> Video)."), None
+
+    # Positive prompt (the conditioning node feeding the sampler's positive input).
+    if "text" in positive.get("inputs", {}):
+        positive["inputs"]["text"] = prompt
+    # Negative prompt - only when the negative branch is actually a text-encode
+    # node (Wan wires a CLIPTextEncode; a graph that zeroes the negative has no text).
+    if (negative_prompt is not None and negative is not None
+            and "text" in negative.get("inputs", {})):
+        negative["inputs"]["text"] = negative_prompt
+    # Video latent: frame count, then optional resolution.
+    latent_inputs["length"] = frames
+    if width is not None:
+        latent_inputs["width"] = width
+    if height is not None:
+        latent_inputs["height"] = height
+    # Sampler knobs: the seed goes on EVERY sampler (a two-stage Wan high/low-noise
+    # graph has two), steps/cfg on the primary sampler driving this latent.
+    set_seed_on_all(workflow, seed)
+    if steps is not None:
+        sampler_inputs["steps"] = steps
+    if cfg is not None:
+        sampler_inputs["cfg"] = cfg
+    # Output frame rate on the CreateVideo node, wherever it sits in the graph.
+    _, create_video = find_node_by_class(workflow, "CreateVideo")
+    if create_video is not None and "fps" in create_video.get("inputs", {}):
+        create_video["inputs"]["fps"] = fps
+
+    if float_type and float_type != "default":
+        for node in workflow.values():
+            if node.get("class_type") in (
+                "UNETLoader", "UnetLoaderGGUF", "UnetLoaderGGUFAdvanced",
+                "CheckpointLoaderSimple", "CheckpointLoader"
+            ):
+                if "inputs" not in node:
+                    node["inputs"] = {}
+                node["inputs"]["weight_dtype"] = float_type
+
+    # Image-to-video: upload the picture and feed it as the latent's start frame.
+    # A fresh node id (not a hardcoded "20") avoids clobbering a user's own node.
+    uploaded_name: Optional[str] = None
+    if input_image is not None:
+        if not input_image.is_file():
+            return False, f"Input image not found: {input_image}", None
+        try:
+            uploaded_name = _upload_image(input_image, api_url)
+        except Exception as e:
+            return False, f"Failed to upload input image to ComfyUI: {e}", None
+        load_id = next_node_id(workflow)
+        workflow[load_id] = {
+            "inputs": {"image": uploaded_name, "upload": "image"},
+            "class_type": "LoadImage",
+        }
+        latent_inputs["start_image"] = [load_id, 0]
+
+    return True, "", uploaded_name
+
+
+def _write_video_sidecar(
+    output_path: Path,
+    *,
+    prompt: str,
+    negative_prompt: Optional[str],
+    frames: int,
+    fps: int,
+    width: Optional[int],
+    height: Optional[int],
+    seed: int,
+    steps: Optional[int],
+    cfg: Optional[float],
+    input_image: Optional[Path],
+    start_time: float,
+) -> Optional[str]:
+    """Write the ``<output>.json`` reproducibility sidecar next to the clip.
+
+    The clip is already saved; a failed sidecar must not fail the whole
+    generation - returns a note string on failure (surfaced, not swallowed),
+    else None."""
+    try:
+        sidecar = {
+            "prompt": prompt,
+            "negative_prompt": negative_prompt,
+            "seconds": round(frames / fps, 2),
+            "frames": frames,
+            "fps": fps,
+            "width": width,
+            "height": height,
+            "seed": seed,
+            "steps": steps,
+            "cfg": cfg,
+            "input_image": str(input_image) if input_image else None,
+            "elapsed_seconds": round(time.time() - start_time, 1),
+            "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }
+        output_path.with_suffix(output_path.suffix + ".json").write_text(
+            json.dumps({k: v for k, v in sidecar.items() if v is not None},
+                       indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except OSError as e:
+        # The clip is already saved; a failed sidecar must not fail the whole
+        # generation - surface it as a note instead of silently swallowing it.
+        return (
+            f"the reproducibility sidecar could not be saved ({e}); "
+            "the clip itself was saved."
+        )
+    return None
 
 
 def generate_video(
@@ -192,76 +356,23 @@ def generate_video(
     seed = seed if seed is not None else random.randint(1, 10 ** 12)
     frames = _snap_frames(seconds, fps)
 
-    # Resolve the nodes we drive by ROLE (sampler by class_type, then positive /
-    # negative / latent by following its graph edges) instead of hardcoded ids, so
-    # a user's own exported Wan graph works without renumbering (I3).
-    roles = resolve_sampler_roles(workflow)
-    _, sampler = roles["sampler"]
-    _, positive = roles["positive"]
-    _, negative = roles["negative"]
-    _, latent = roles["latent"]
-    sampler_inputs = sampler.get("inputs") if sampler else None
-    latent_inputs = latent.get("inputs") if latent else None
-    if (sampler is None or positive is None or latent is None
-            or not isinstance(sampler_inputs, dict)
-            or not isinstance(latent_inputs, dict)):
-        return False, (
-            "The video workflow has no sampler / prompt / latent node (with inputs) "
-            "localm can drive. Export a Wan 2.2 workflow from ComfyUI (Save -> API "
-            "format) and select it on the Workflow panel (Settings -> Media -> Video).")
-
-    # Positive prompt (the conditioning node feeding the sampler's positive input).
-    if "text" in positive.get("inputs", {}):
-        positive["inputs"]["text"] = prompt
-    # Negative prompt - only when the negative branch is actually a text-encode
-    # node (Wan wires a CLIPTextEncode; a graph that zeroes the negative has no text).
-    if (negative_prompt is not None and negative is not None
-            and "text" in negative.get("inputs", {})):
-        negative["inputs"]["text"] = negative_prompt
-    # Video latent: frame count, then optional resolution.
-    latent_inputs["length"] = frames
-    if width is not None:
-        latent_inputs["width"] = width
-    if height is not None:
-        latent_inputs["height"] = height
-    # Sampler knobs: the seed goes on EVERY sampler (a two-stage Wan high/low-noise
-    # graph has two), steps/cfg on the primary sampler driving this latent.
-    set_seed_on_all(workflow, seed)
-    if steps is not None:
-        sampler_inputs["steps"] = steps
-    if cfg is not None:
-        sampler_inputs["cfg"] = cfg
-    # Output frame rate on the CreateVideo node, wherever it sits in the graph.
-    _, create_video = find_node_by_class(workflow, "CreateVideo")
-    if create_video is not None and "fps" in create_video.get("inputs", {}):
-        create_video["inputs"]["fps"] = fps
-
-    if float_type and float_type != "default":
-        for node in workflow.values():
-            if node.get("class_type") in (
-                "UNETLoader", "UnetLoaderGGUF", "UnetLoaderGGUFAdvanced",
-                "CheckpointLoaderSimple", "CheckpointLoader"
-            ):
-                if "inputs" not in node:
-                    node["inputs"] = {}
-                node["inputs"]["weight_dtype"] = float_type
-
-    # Image-to-video: upload the picture and feed it as the latent's start frame.
-    # A fresh node id (not a hardcoded "20") avoids clobbering a user's own node.
-    uploaded_name: Optional[str] = None
-    if input_image is not None:
-        if not input_image.is_file():
-            return False, f"Input image not found: {input_image}"
-        try:
-            uploaded_name = _upload_image(input_image, api_url)
-        except Exception as e:
-            return False, f"Failed to upload input image to ComfyUI: {e}"
-        load_id = next_node_id(workflow)
-        workflow[load_id] = {
-            "inputs": {"image": uploaded_name, "upload": "image"},
-            "class_type": "LoadImage",
-        }
-        latent_inputs["start_image"] = [load_id, 0]
+    ok, msg, uploaded_name = _build_video_workflow(
+        workflow,
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        frames=frames,
+        fps=fps,
+        width=width,
+        height=height,
+        steps=steps,
+        cfg=cfg,
+        seed=seed,
+        float_type=float_type,
+        input_image=input_image,
+        api_url=api_url,
+    )
+    if not ok:
+        return False, msg
 
     # Pre-submit model validation: confirm the Wan model files exist (substituting
     # an unambiguous precision variant), failing EARLY with the exact missing file
@@ -275,83 +386,64 @@ def generate_video(
         _localm_unload(localm_url)
 
     # Queue
-    try:
-        req = urllib.request.Request(
-            f"{api_url}/prompt",
-            data=json.dumps({"prompt": workflow}).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=10) as response:
-            prompt_id = json.loads(response.read().decode("utf-8")).get("prompt_id")
-        if not prompt_id:
-            return False, (
-                "ComfyUI accepted the request but returned no prompt_id.\n"
-                "Check the ComfyUI console for workflow validation errors - "
-                "missing Wan 2.2 model files are the usual cause (see "
-                "docs/video.md for the download list), and the Wan nodes "
-                "need ComfyUI v0.3.46+."
-            )
-    except urllib.error.HTTPError as e:
+    kind, value = comfy_submit_prompt(api_url, workflow)
+    if kind == SUBMIT_NO_ID:
         return False, (
-            f"ComfyUI rejected the Wan 2.2 workflow (HTTP {e.code}):\n"
-            f"{comfy_http_error_detail(e)}\n"
+            "ComfyUI accepted the request but returned no prompt_id.\n"
+            "Check the ComfyUI console for workflow validation errors - "
+            "missing Wan 2.2 model files are the usual cause (see "
+            "docs/video.md for the download list), and the Wan nodes "
+            "need ComfyUI v0.3.46+."
+        )
+    elif kind == SUBMIT_HTTP_ERROR:
+        return False, (
+            f"ComfyUI rejected the Wan 2.2 workflow (HTTP {value.code}):\n"
+            f"{comfy_http_error_detail(value)}\n"
             "Missing Wan 2.2 model files are the usual cause (see "
             "docs/video.md for the download list); the Wan nodes need "
             "ComfyUI v0.3.46+."
         )
-    except urllib.error.URLError as e:
-        return False, f"Could not connect to ComfyUI at {api_url}: {e}"
-    except Exception as e:
-        return False, f"Error queuing prompt in ComfyUI: {e}"
+    elif kind == SUBMIT_URL_ERROR:
+        return False, f"Could not connect to ComfyUI at {api_url}: {value}"
+    elif kind == SUBMIT_ERROR:
+        return False, f"Error queuing prompt in ComfyUI: {value}"
+    prompt_id = value
 
     _say(f"Rendering {frames} frames ({frames / fps:.1f}s at {fps} fps)…")
 
-    # Poll history until the clip is rendered
+    # Poll history until the clip is rendered. Throttle the "Rendering…" line to
+    # once every 15s (the same cadence as before). start_time is taken here (as
+    # the original did) so the sidecar's elapsed_seconds covers poll + download.
     start_time = time.time()
-    video_info = None
-    last_said = 0.0
-    last_poll_error: Optional[str] = None  # remember the last poll failure so a timeout can tell "crashed/unreachable" from "slow render"
-    while time.time() - start_time < max_poll_seconds:
-        if cancel_check and cancel_check():
-            from localm.image_gen.comfy import clear_comfy_history, interrupt_comfy
-            interrupt_comfy(api_url)
-            clear_comfy_history(api_url, prompt_id)
-            return False, "Generation cancelled."
-        elapsed = time.time() - start_time
-        if elapsed - last_said >= 15:
+    last_said = [0.0]
+
+    def _tick(elapsed: float) -> None:
+        if elapsed - last_said[0] >= 15:
             _say(f"Rendering… ({int(elapsed)}s elapsed)")
-            last_said = elapsed
-        try:
-            hist_req = urllib.request.Request(f"{api_url}/history/{prompt_id}")
-            with urllib.request.urlopen(hist_req, timeout=5) as response:
-                history = json.loads(response.read().decode("utf-8"))
-            if prompt_id in history:
-                from localm.image_gen.comfy import history_execution_error
-                err = history_execution_error(history[prompt_id])
-                if err:
-                    return False, f"ComfyUI execution failed: {err}"
-                for node_output in history[prompt_id].get("outputs", {}).values():
-                    for key in _OUTPUT_KEYS:
-                        if node_output.get(key):
-                            video_info = node_output[key][0]
-                            break
-                    if video_info:
-                        break
-                break
-        except Exception as e:
-            # Keep retrying (ComfyUI may still be rendering), but remember the
-            # failure so a timeout can surface an unreachable/crashed server.
-            last_poll_error = str(e)
-        time.sleep(2)
-    else:
+            last_said[0] = elapsed
+
+    status, payload = comfy_poll_until_done(
+        api_url, prompt_id,
+        max_poll_seconds=max_poll_seconds,
+        cancel_check=cancel_check,
+        on_tick=_tick,
+    )
+    if status == POLL_CANCELLED:
+        return False, "Generation cancelled."
+    if status == POLL_EXEC_ERROR:
+        return False, f"ComfyUI execution failed: {payload}"
+    if status == POLL_TIMEOUT:
         msg = (
             f"Video generation timed out after {max_poll_seconds // 60} minutes."
         )
-        if last_poll_error:
+        if payload is not None:
             # A persistent poll error means ComfyUI likely crashed or went
             # unreachable, not just a slow render - say so instead of hiding it.
-            msg += f" Last poll error: {last_poll_error}"
+            msg += f" Last poll error: {payload}"
         return False, msg
+
+    # status == POLL_FINISHED
+    video_info = select_output_info(payload, _OUTPUT_KEYS)
 
     if not video_info:
         return False, (
@@ -362,14 +454,7 @@ def generate_video(
 
     # Fetch the file from ComfyUI and save locally
     try:
-        params = urllib.parse.urlencode({
-            "filename": video_info.get("filename"),
-            "subfolder": video_info.get("subfolder", ""),
-            "type": video_info.get("type", "output"),
-        })
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with urllib.request.urlopen(f"{api_url}/view?{params}", timeout=120) as response:
-            output_path.write_bytes(response.read())
+        comfy_fetch_output(api_url, video_info, output_path, timeout=120)
     except Exception as e:
         return False, f"Failed to download generated clip from ComfyUI: {e}"
 
@@ -397,35 +482,21 @@ def generate_video(
         return True, _with_warning(
             f"Clip saved to {output_path} "
             f"(seed {seed} - reuse it to reproduce)", contain_warning)
-    sidecar_warning: Optional[str] = None
-    try:
-        sidecar = {
-            "prompt": prompt,
-            "negative_prompt": negative_prompt,
-            "seconds": round(frames / fps, 2),
-            "frames": frames,
-            "fps": fps,
-            "width": width,
-            "height": height,
-            "seed": seed,
-            "steps": steps,
-            "cfg": cfg,
-            "input_image": str(input_image) if input_image else None,
-            "elapsed_seconds": round(time.time() - start_time, 1),
-            "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        }
-        output_path.with_suffix(output_path.suffix + ".json").write_text(
-            json.dumps({k: v for k, v in sidecar.items() if v is not None},
-                       indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-    except OSError as e:
-        # The clip is already saved; a failed sidecar must not fail the whole
-        # generation - surface it as a note instead of silently swallowing it.
-        sidecar_warning = (
-            f"the reproducibility sidecar could not be saved ({e}); "
-            "the clip itself was saved."
-        )
+
+    sidecar_warning = _write_video_sidecar(
+        output_path,
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        frames=frames,
+        fps=fps,
+        width=width,
+        height=height,
+        seed=seed,
+        steps=steps,
+        cfg=cfg,
+        input_image=input_image,
+        start_time=start_time,
+    )
 
     return True, _with_warning(
         _with_warning(
