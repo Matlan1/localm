@@ -43,6 +43,23 @@ not-already-tracked items are folded in here. Division of labour: **bugs live in
 `issues/issues.txt`**, the recovered backlog in `issues/RECOVERED-BACKLOG-localm.md`,
 the by-hand QA campaign in `qa/`; everything else (todos/tasks/requests) lives in THIS file.
 
+### Audit follow-ups (full-audit /localm-checkup 2026-06-30 @ d53e8ec)
+The BUGS this audit found live in `issues/issues.txt` (the `AUD-*` block, 2 HIGH + 5 MEDIUM
++ 8 LOW); the full write-up + 4 engagement reports are in `dev-notes/checkup/REPORT-2026-06-30.md`.
+The non-bug (design / docs / process) follow-ups are tracked here:
+- [ ] Config-default migration beyond read-time: a CHANGED default value or a nested-dict subkey
+  stays frozen on an existing install (only new TOP-LEVEL keys reach existing users). Add a
+  versioned migration for changed/nested defaults (audit LM-DA-004; see also the config-defaults
+  discussion). [arch]
+- [ ] Plugin-boundary docstring overstates isolation: the `Host`-only plugin boundary is convention,
+  not enforcement (a plugin can `import localm.config` directly). Soften the contract docstring, or
+  add an import guard only if third-party plugins ever become untrusted (audit LM-DA-006). [chore/docs]
+- [ ] Follow-up fuzzing pass for GGUF-native load + GBNF/xgrammar samplers: NOT fuzzable in the
+  checkup venv (no provisioned llama runtime / model; `xgrammar`/`pypdf` absent). Run a dedicated
+  pass against a provisioned runtime + a tiny model (audit FUZZING coverage gap). [chore/test]
+- [ ] (conditional) Named-key hash is unsalted SHA-256 - fine today because keys are 256-bit random
+  `token_urlsafe`, but if keys ever become user-chosen, switch to a salted KDF (audit SA-5). [security/arch]
+
 ### Setup / installer
 - [ ] Explicit HuggingFace opt-in at install: setup.bat/setup.sh auto-install the torch stack
   from TORCHSPEC today; ask "Run HuggingFace (non-GGUF) models too? [y/N]" first instead of
