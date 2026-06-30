@@ -81,9 +81,11 @@ class LocalmError(Exception):
 
 
 def _localm_version() -> str:
+    # Live VERSION-file read (falls back to installed metadata): the install is
+    # editable, so a code-only update changes VERSION without refreshing dist-info.
     try:
-        from importlib.metadata import version
-        return version("localm")
+        from localm._version import read_version
+        return read_version()
     except Exception:
         return "unknown"
 

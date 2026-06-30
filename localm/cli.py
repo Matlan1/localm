@@ -150,8 +150,18 @@ class _GracefulGroup(click.Group):
             raise SystemExit(1)
 
 
+def _read_version_for_cli() -> str:
+    """Version string for ``localm --version``: the live VERSION file (so it tracks
+    a code-only self-update), falling back to a static string if unreadable."""
+    try:
+        from localm._version import read_version
+        return read_version()
+    except Exception:
+        return "0.1.0"
+
+
 @click.group(cls=_GracefulGroup, context_settings={"help_option_names": ["-h", "--help"]})
-@click.version_option("0.1.0", prog_name="localm")
+@click.version_option(_read_version_for_cli(), prog_name="localm")
 def main() -> None:
     """Run local LLMs offline - HuggingFace and GGUF models, AMD/NVIDIA/CPU."""
     # Install the process-wide graceful-failure net so a crash anywhere - a
