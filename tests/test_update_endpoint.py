@@ -1,0 +1,154 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""The server endpoints for the issues tracker + updater: /api/issues,
+/api/update/check (read-only), /api/update/apply (mutates -> CONFIG_WRITE). Apply is
+explicit-only; failures roll back and are surfaced, never faked. All proxy calls are
+monkeypatched (no network)."""
+
+from unittest.mock import MagicMock
+
+from fastapi.testclient import TestClient
+
+from localm import issue_tracker, updater
+from localm.inference.http_server import create_app
+
+
+def _engine():
+    e = MagicMock()
+    e.display_name = "m"
+    e.loaded = True
+    return e
+
+
+def _get(app, path):
+    with TestClient(app) as c:
+        return c.get(path, headers={"Authorization": f"Bearer {app.state.shell_token}"})
+
+
+def _post(app, path):
+    with TestClient(app) as c:
+        return c.post(path, headers={"Authorization": f"Bearer {app.state.shell_token}"})
+
+
+def _open_mode(monkeypatch):
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+
+
+# ------------------------------ issues ----------------------------------
+
+def test_issues_endpoint_lists(monkeypatch):
+    _open_mode(monkeypatch)
+    monkeypatch.setattr(issue_tracker, "available", lambda: True)
+    monkeypatch.setattr(issue_tracker, "list_issues",
+                        lambda state="all": [{"number": 5, "state": "open", "title": "t"}])
+    r = _get(create_app(_engine()), "/api/issues")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["available"] and data["issues"][0]["number"] == 5
+
+
+def test_issues_endpoint_unconfigured(monkeypatch):
+    _open_mode(monkeypatch)
+    monkeypatch.setattr(issue_tracker, "available", lambda: False)
+    r = _get(create_app(_engine()), "/api/issues")
+    assert r.json()["available"] is False
+
+
+def test_issues_endpoint_error_surfaced(monkeypatch):
+    _open_mode(monkeypatch)
+    from localm.bugreport import LocalmError
+    monkeypatch.setattr(issue_tracker, "available", lambda: True)
+
+    def boom(state="all"):
+        raise LocalmError("could not reach the localm proxy", reason="timeout")
+
+    monkeypatch.setattr(issue_tracker, "list_issues", boom)
+    data = _get(create_app(_engine()), "/api/issues").json()
+    assert "error" in data and "could not reach" in data["error"]
+
+
+# --------------------------- update check -------------------------------
+
+def test_update_check_endpoint(monkeypatch):
+    _open_mode(monkeypatch)
+    monkeypatch.setattr(updater, "available", lambda: True)
+    monkeypatch.setattr(updater, "check", lambda: {
+        "current": "0.1.0", "latest": "v0.2.0", "newer": True, "notes": "n", "asset": {"id": 3}})
+    data = _get(create_app(_engine()), "/api/update/check").json()
+    assert data["available"] and data["newer"] and data["latest"] == "v0.2.0"
+
+
+def test_update_check_unconfigured(monkeypatch):
+    _open_mode(monkeypatch)
+    monkeypatch.setattr(updater, "available", lambda: False)
+    assert _get(create_app(_engine()), "/api/update/check").json()["available"] is False
+
+
+# --------------------------- update apply -------------------------------
+
+def test_update_apply_endpoint(monkeypatch):
+    _open_mode(monkeypatch)
+    import localm.inference.http_server as hs
+    monkeypatch.setattr(hs, "_request_restart", lambda *a, **k: None)  # do not really restart
+    monkeypatch.setattr(updater, "available", lambda: True)
+    monkeypatch.setattr(updater, "check", lambda: {
+        "current": "0.1.0", "latest": "v0.2.0", "newer": True, "notes": "", "asset": {"id": 3}})
+    applied = {}
+
+    def fake_apply(aid):
+        applied["aid"] = aid
+        return {"applied": True, "version": "0.2.0", "klass": "reboot", "backup": "b"}
+
+    monkeypatch.setattr(updater, "apply", fake_apply)
+    data = _post(create_app(_engine()), "/api/update/apply").json()
+    assert data["applied"] is True and applied["aid"] == 3 and data.get("restarting") is True
+
+
+def test_update_apply_already_current(monkeypatch):
+    _open_mode(monkeypatch)
+    monkeypatch.setattr(updater, "available", lambda: True)
+    monkeypatch.setattr(updater, "check", lambda: {
+        "current": "0.2.0", "latest": "0.2.0", "newer": False, "asset": None})
+    data = _post(create_app(_engine()), "/api/update/apply").json()
+    assert data["applied"] is False
+
+
+def test_update_apply_failure_is_surfaced(monkeypatch):
+    _open_mode(monkeypatch)
+    from localm.bugreport import LocalmError
+    monkeypatch.setattr(updater, "available", lambda: True)
+    monkeypatch.setattr(updater, "check", lambda: {
+        "current": "0.1.0", "latest": "v0.2.0", "newer": True, "asset": {"id": 3}})
+
+    def boom(aid):
+        raise LocalmError("the post-update step failed; rolled back", reason="uv exited 1")
+
+    monkeypatch.setattr(updater, "apply", boom)
+    data = _post(create_app(_engine()), "/api/update/apply").json()
+    assert data["applied"] is False and "error" in data
+
+
+def test_update_apply_setup_class_does_not_restart(monkeypatch):
+    _open_mode(monkeypatch)
+    import localm.inference.http_server as hs
+    restarted = []
+    monkeypatch.setattr(hs, "_request_restart", lambda *a, **k: restarted.append(1))
+    monkeypatch.setattr(updater, "available", lambda: True)
+    monkeypatch.setattr(updater, "check", lambda: {
+        "current": "0.1.0", "latest": "v0.2.0", "newer": True, "asset": {"id": 3}})
+    monkeypatch.setattr(updater, "apply", lambda aid: {
+        "applied": True, "version": "0.2.0", "klass": "setup", "backup": "b"})
+    data = _post(create_app(_engine()), "/api/update/apply").json()
+    assert data["applied"] is True and not data.get("restarting")
+    assert restarted == [], "a setup-class update must NOT auto-restart"
+
+
+# ------------------------------- auth -----------------------------------
+
+def test_update_apply_requires_management_auth(monkeypatch):
+    """The mutating apply must be behind the management gate (shell-token /
+    same-origin), so a no-token cross-origin caller cannot drive a self-update. The
+    read-only check/issues follow the server's existing open-on-loopback read posture."""
+    _open_mode(monkeypatch)
+    with TestClient(create_app(_engine())) as c:
+        assert c.post("/api/update/apply").status_code in (401, 403)

@@ -430,9 +430,18 @@ def attach_gui(
             bug_upload = bugreport.upload_available()
         except Exception:
             bug_upload = False
+        # Whether the read-only issues view and the update banner should be shown
+        # (both ride the same proxy; hidden when not configured).
+        try:
+            from localm import issue_tracker, updater
+            issues_avail = issue_tracker.available()
+            update_avail = updater.available()
+        except Exception:
+            issues_avail = update_avail = False
         return {"scopes": sorted(held) if held else [], "open": held is None,
                 "core": core, "plugins": plugins, "suggest_plugins": suggest,
-                "bugreport_upload": bug_upload}
+                "bugreport_upload": bug_upload,
+                "issues_available": issues_avail, "update_available": update_avail}
 
     # R47: the "/api/bug-report" POST lives on the core server (http_server.py) so
     # it works in headless `localm serve` too; the GUI button targets that single
