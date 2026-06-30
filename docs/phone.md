@@ -21,7 +21,9 @@ terminal.) So the only real questions are *how the phone reaches your server* an
 1. **Bind to your network.** By default `localm gui` listens only on this machine
    (`127.0.0.1`). To let your phone reach it, bind to all interfaces - and set an
    API key first, because the GUI also exposes the coder agent:
-   - set `LOCALM_API_KEY` to something only you know, then
+   - set `LOCALM_API_KEY` to something only you know - Linux/macOS:
+     `export LOCALM_API_KEY=...`; Windows PowerShell: `$env:LOCALM_API_KEY="..."`
+     (or use the desktop launcher's Generate button), then
    - `localm gui -H 0.0.0.0`
 
    localm now serves **HTTPS automatically** on a network bind, so the key and
