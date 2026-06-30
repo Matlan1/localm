@@ -24,6 +24,13 @@ Each skill is a sub-folder containing a `SKILL.md`:
     template.json
 ```
 
+Skills are something you provide; localm ships no built-in catalog. Write your
+own (just a `SKILL.md` plus any helper files), or get one from a colleague or a
+public repo. To install a skill, drop its folder into the global skills dir
+(reusable everywhere) or a project's `.localcoder/skills/`; to share one, copy
+the folder out. Review any skill from an unknown source first (see the security
+note below).
+
 ## The `SKILL.md` format
 
 YAML-style frontmatter (a flat `key: value` block) followed by the instruction

@@ -19,7 +19,14 @@ itself on a network bind, so both protections are on by default.
 ## Always set an API key
 
 ```powershell
+# Windows PowerShell
 $env:LOCALM_API_KEY = Read-Host -MaskInput "localm API key"
+localm serve mymodel -H 0.0.0.0
+```
+
+```bash
+# Linux / macOS
+read -rs LOCALM_API_KEY && export LOCALM_API_KEY
 localm serve mymodel -H 0.0.0.0
 ```
 

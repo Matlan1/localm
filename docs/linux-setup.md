@@ -32,6 +32,10 @@ installs localm, optionally installs the PyTorch stack for your GPU, lets you
 copy in a llama.cpp build, picks a data directory, and adds an app-menu entry.
 Pass `--yes` for defaults.
 
+The PyTorch stack is only needed to run HuggingFace (non-GGUF) Transformers
+models; GGUF chat through the llama.cpp backend needs none of it, so answer no
+if you only run GGUF models (you can add it later, see the README extras).
+
 Prerequisites:
 - `uv` - `curl -LsSf https://astral.sh/uv/install.sh | sh`
 - For the graphical launcher: Tk - `sudo apt install python3-tk` (Debian/Ubuntu),
