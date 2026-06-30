@@ -60,9 +60,17 @@ function installStubs(win, { fetchImpl } = {}) {
   win.SpeechSynthesisUtterance = class { constructor(t) { this.text = t; } };
 }
 
+// app.js was split per section into app/<name>.js (same load order). Inject in
+// this exact order to preserve the original top-level execution order; they share
+// one global lexical environment so cross-section references resolve as before.
+const APP_SCRIPTS = [
+  "client-log", "helpers", "theme", "logo", "tabs", "models-sidebar",
+  "chat", "cmdk", "settings-perf", "coder", "slash", "init",
+];
+
 /**
- * Build a jsdom window with app.js loaded but its DOMContentLoaded init NOT run.
- * Returns { dom, window }. Pass fetchImpl to control network.
+ * Build a jsdom window with the app scripts loaded but the DOMContentLoaded init
+ * NOT run. Returns { dom, window }. Pass fetchImpl to control network.
  */
 export function loadApp({ fetchImpl, url } = {}) {
   const html = read("index.html");
@@ -77,14 +85,18 @@ export function loadApp({ fetchImpl, url } = {}) {
   _openWindows.add(win);   // closed in the after-hook so the process can exit
   installStubs(win, { fetchImpl });
 
-  // Run app.js as an injected inline script. jsdom executes it in the window
-  // context; top-level function declarations land on the window. The HTML's own
-  // <script src> tags are not fetched (no resource loader), so app.js does not
-  // auto-run and the DOMContentLoaded init (already fired during parse) does not
-  // re-run.
-  const script = win.document.createElement("script");
-  script.textContent = read("app.js");
-  win.document.body.appendChild(script);
+  // app.js was split per section into app/<name>.js (same load order). Inject
+  // each as a classic script in order: jsdom executes them in the window context;
+  // top-level function declarations land on the window and the shared global
+  // lexical environment holds the top-level const/let exactly as a single app.js
+  // did. The HTML's own <script src> tags are not fetched (no resource loader),
+  // so this does not auto-run and the DOMContentLoaded init (already fired during
+  // parse) does not re-run.
+  for (const name of APP_SCRIPTS) {
+    const script = win.document.createElement("script");
+    script.textContent = read(`app/${name}.js`);
+    win.document.body.appendChild(script);
+  }
   return { dom, window: win };
 }
 
