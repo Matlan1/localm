@@ -200,6 +200,16 @@ def plugin_setup(plugins_csv, install_all, install_defaults):
         chosen = [e.name for e in available]
     elif plugins_csv is not None:
         chosen = _parse_plugin_selection(plugins_csv, available)
+        # Non-interactive: a non-empty --plugins that resolved to NOTHING is a
+        # typo, not a deliberate skip. Fail loudly so an install/CI script does
+        # not read a no-op as success (the per-token "Ignoring unknown selection"
+        # notes above already name which tokens were bad). A blank/whitespace
+        # value is a deliberate skip and is left to the generic path below.
+        if plugins_csv.strip() and not chosen:
+            console.print(
+                f"[red]No known plugins in --plugins {plugins_csv!r}.[/red] "
+                f"Choose from: {', '.join(e.name for e in available)}.")
+            sys.exit(1)
     elif install_defaults:
         chosen = list(_SETUP_DEFAULTS)
     elif not sys.stdin.isatty():
