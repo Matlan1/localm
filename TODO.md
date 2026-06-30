@@ -545,7 +545,7 @@ From the seamless auth/cert session (#201) + the reopened I3 Wan-video item.
 Reconstructed from lost session logs, cross-verified against the code (origin/master
 #267) by an independent verifier + adversarial counter-check, confirmed genuinely
 open/partial, and confirmed ABSENT from the rest of this TODO at the time of writing.
-133 distinct items (deduplicated from 183). "(P)" = partially done. "rec#N" = the
+108 distinct items (deduplicated from 183; the 25 bug items were moved to issues/issues.txt per the bugs-live-in-issues convention). "(P)" = partially done. "rec#N" = the
 recovered-backlog id(s); full per-item evidence lives in the gitignored local files
 issues/RECOVERED-BACKLOG-localm-VERIFIED-2026-06-30.md and
 issues/TODO-RECONCILIATION-2026-06-30.md.
@@ -565,33 +565,6 @@ issues/TODO-RECONCILIATION-2026-06-30.md.
 - [ ] Harden the artifact iframe CSP injection + pin KaTeX trust:false (R41-D4/D5) - Artifact-iframe CSP is still regex-spliced after the head tag (content before <head> runs pre-CSP) and renderMathInElement is not pinned with trust:false.  (rec#566)
 - [ ] Make confirm-on-shell the effective default for the non-interactive coder CLI (R19a) - Non-interactive `localcoder "task"` still runs shell un-gated (auto_approve True); no network+shell combined warning and no SECURITY.md residual note.  (rec#571)
 - [ ] Add a SEC-3 lockout-recovery escape hatch (P) - Self-lockout prevention is implemented and a local-CLI key path can recover, but there is no dedicated lockout-recovery escape-hatch command.  (rec#647)
-
-### Bugs (25)
-- [ ] Fix U-5: gemma Q4_1 GGUF load failure - No Q4_1 branch or fix in the loader; runtime-only repro item on the maintainer's box.  (rec#12)
-- [ ] Investigate the 'two rejected shell commands for one' coder report (rejected-2-shell) (P) - Could not reproduce: rejection emits exactly one tool_result and the confirm card is idempotent; needs maintainer to point at where '2' was shown (coder-history-chat half is fixed).  (rec#24,261)
-- [ ] Ensure loaded models follow instructions / call tools and never hallucinate web access (P) - Always-on prompt guardrails exist (disabled tools omitted, honesty-floor prompts) but enforcement is prompt-only with no grammar/tool_choice coercion.  (rec#39)
-- [ ] Add Intel to the installer 'add PyTorch later' guidance - The guidance lists CPU/NVIDIA/AMD-ROCm only with no Intel-XPU line.  (rec#79)
-- [ ] Real coder grammar/tool-call enforcement so it writes files instead of narrating (P) - Grammar runtime exists but coder TOOL_CALLS_ONLY ships dormant-by-default, so narration-instead-of-writing is only mitigated, not enforced.  (rec#88,459)
-- [ ] Investigate why the b9740 CPU llama build returns NULL on model load - No investigation/root-cause/fix for the CPU b9740 NULL-on-load; b9740 references are only ABI struct-drift checks.  (rec#122)
-- [ ] Fix Add-job handler rejecting a blank schedule with interval kind - parseInt('') -> NaN serializes to null and the add validation guards only name+prompt; no blank-interval guard.  (rec#153)
-- [ ] Investigate model-copy-into-folder breaking the app (half of R45) (P) - GGUF-magic validation guard is present, but the actual model-copy incident still needs a live repro to confirm cause and containment.  (rec#258)
-- [ ] Re-verify or re-fix Kokoro TTS still pinging/cracking with no speech - The fp32 dtype fix is present but the maintainer's 'still cracks/pings after the fix' report needs live browser re-verification.  (rec#259)
-- [ ] Update ComfyUI/ACE-Step to clear the external music-node crash (music gen end-to-end) (P) - localm preflights and surfaces the external ACE-Step '__func__' crash, but the crash is external to localm and 'music must work end to end' remains unproven.  (rec#277)
-- [ ] Implement on_first_use plugin lifecycle hook (reserved but never invoked) (P) - on_install is now called but on_first_use is still RESERVED and never invoked by the engine; neither implemented nor removed.  (rec#331,440,663)
-- [ ] Fix LOCALM_DEBUG=1 env var not creating a debug log file - LOCALM_DEBUG=1 sets debug_enabled() true but enable_debug() is called only under the --debug flag, so no log file is written.  (rec#357,495)
-- [ ] Fix LLAMA_CPP_LIB pointing at a bad path silently falling back instead of erroring - A typo'd LLAMA_CPP_LIB is silently skipped and the loader falls back to the provisioned runtime with no error or warning.  (rec#358,496,666)
-- [ ] Remove machine-path leaks: stop persisting absolute coder cwd in launcher.json/localStorage (P) - Placeholder leak is fixed, but coder_dir in launcher.json and localm.coderCwd in localStorage still persist absolute machine paths (not privacy-gated).  (rec#399)
-- [ ] Validate/clamp gpu_layers > 99 with a correct message at the layer where it errors (P) - Inputs are now range-bounded, but the loader sets n_gpu_layers raw with no clamp against the model's real layer count and no gpu_layers-specific message.  (rec#407)
-- [ ] Enforce plugin 'requires' dependency declarations (and unload dependents on removal) (P) - 'requires' is still print-only warning, never enforced, and uninstalling a dependency does not unload dependents (data_subdir traversal guard is in place).  (rec#439,596)
-- [ ] Fix per-request seed non-reproducibility at temp>0 (H15, native sampler) - Seed is correctly plumbed to llama_sampler_init_dist; temp>0 non-reproducibility is a native-sampler determinism issue with no code-level workaround added.  (rec#458,667)
-- [ ] Thread the model's true repo-id/GGUF metadata into coder family detection - Family detection still keys on the opaque registry alias; true repo id / GGUF metadata is not threaded into build_system_prompt.  (rec#460,581)
-- [ ] Unify RAG embedding mode at index time (GUI always embeds vs CLI lexical-only) (B10/M11) (P) - Query side got --embed parity, but indexing is still asymmetric (GUI always embeds, CLI rag add lexical-only) with no GUI toggle or aligned add-time defaults.  (rec#473)
-- [ ] Flag/relocate stale external model paths (B13/M14) (P) - Gone files are flagged 'missing', but the specific is_external marker and relocate affordance do not exist.  (rec#474)
-- [ ] Make Kokoro TTS model survive a hard reload (R08) (P) - Cache + storage.persist() is wired and a plain reload hits cache, but the SW activate handler deletes the transformers-cache on a shell-version bump.  (rec#515)
-- [ ] Fix coder narrating / silent no-op via lenient parser + no-progress breaker residuals - No dedicated sampling/loop guard for the runaway 'Message 1..4 / I will now wait' scaffold-repetition loop; only the generic repeat_penalty exists.  (rec#525)
-- [ ] Return a 3-state coder-history status + fix effective_mode ignoring .localcoder/config.toml (P) - 3-state status is returned, but effective_mode('coder') still ignores .localcoder/config.toml and loopback GUI is owner only via the admin key in protected mode.  (rec#645)
-- [ ] Fix coder-via-GUI hallucination + machine-path leak (P) - GUI-driven coder hallucinates / leaks machine paths; prompt asks relative paths but injects the absolute cwd, and no code oracle settles the runtime behavior.  (rec#657)
-- [ ] Resolve D1 bare role-word token leak (Model/him) at the model level - scrub_text removes structural markers only; bare role-words like 'Model'/'him' are model output behavior and deliberately uncovered.  (rec#670)
 
 ### Testing / verification (11)
 - [ ] Rewrite the entire test suite from scratch to kill mock-theater (VRAM-escape exemplar) (P) - Some real-behavior/contract tests were added (incl the unblocking unload-auth test), but the mandated from-scratch ~142-file rewrite with per-cluster mutation/negative testing is not done.  (rec#87,178,498,588,617)
