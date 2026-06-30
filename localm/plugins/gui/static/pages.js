@@ -2093,9 +2093,16 @@ function renderMediaSubsection(name) {
     badge.style.backgroundColor = "var(--bg-card-hover, #30363d)";
     head.appendChild(badge);
     
+    // `timer` must be declared (not just `const`-assigned below) BEFORE checkComfy is
+    // called: the first synchronous checkComfy() runs before the interval is set, and
+    // when the badge is not yet connected it calls clearInterval(timer). With a bare
+    // `const timer = setInterval(...)` after the call, that read hit the temporal dead
+    // zone ("Cannot access 'timer' before initialization") and broke the whole media
+    // subsection render. `let timer = null` initialized up front fixes it.
+    let timer = null;
     const checkComfy = () => {
       if (!badge.isConnected) {
-        clearInterval(timer);
+        if (timer) clearInterval(timer);
         return;
       }
       fetch("/v1/comfy/status", { headers: authHeaders() })
@@ -2107,9 +2114,9 @@ function renderMediaSubsection(name) {
           badge.textContent = "ComfyUI: Unknown";
         });
     };
-    
+
     checkComfy();
-    const timer = setInterval(checkComfy, 5000);
+    timer = setInterval(checkComfy, 5000);
   }
   
   const grid = el("div", "settings-fields");

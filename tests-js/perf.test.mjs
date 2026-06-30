@@ -45,8 +45,10 @@ test("perf card seeds sliders from config and renders the estimate", async () =>
   const ctx = window.document.getElementById("perf-ctx");
   const est = window.document.getElementById("perf-estimate");
   assert.ok(await waitFor(() => ctx.value === "8192"), "ctx slider seeded from config (8192)");
-  assert.equal(window.document.getElementById("perf-gl-val").textContent, "all",
-    "gpu-layers 99 shows as 'all'");
+  // GPU layers is now an editable number input (id perf-gpu-layers), not a span
+  // showing "all" - it seeds its value from config (n_gpu_layers 99 -> "99").
+  assert.ok(await waitFor(() => window.document.getElementById("perf-gpu-layers").value === "99"),
+    "gpu-layers input seeded from config (99)");
   assert.ok(await waitFor(() => /needed/.test(est.textContent)), "VRAM estimate rendered");
   assert.match(est.textContent, /fits/);
 });
