@@ -101,15 +101,26 @@ export function runScript(win, code) {
   win.document.body.appendChild(s);
 }
 
+// pages.js was split per page into pages/<name>.js (same load order). They are
+// classic scripts that share the realm's global lexical environment with app.js,
+// so their helpers ($, el, authHeaders, toast, ...) resolve by bare name. Inject
+// in this exact order to preserve the original top-level execution order.
+const PAGE_SCRIPTS = [
+  "dispatch", "models", "images", "plugins", "settings",
+  "workflow", "music", "video", "knowledge",
+];
+
 /**
- * Load app.js (via loadApp) and then pages.js in the same realm. pages.js holds
- * the Models / Images / Plugins / Settings page logic (refreshSettingsPage, the
- * config-save click handler, ...) and relies on helpers from app.js ($, el,
- * authHeaders, toast, ...), so it must run AFTER app.js. Its top-level
- * `$("...").onclick = ...` wiring runs against the real index.html elements.
+ * Load app.js (via loadApp) and then the per-page scripts in the same realm. They
+ * hold the Models / Images / Plugins / Settings page logic (refreshSettingsPage,
+ * the config-save click handler, ...) and rely on helpers from app.js, so they
+ * run AFTER app.js. Their top-level `$("...").onclick = ...` wiring runs against
+ * the real index.html elements.
  */
 export function loadAppWithPages({ fetchImpl } = {}) {
   const { dom, window } = loadApp({ fetchImpl });
-  runScript(window, read("pages.js"));
+  for (const name of PAGE_SCRIPTS) {
+    runScript(window, read(`pages/${name}.js`));
+  }
   return { dom, window };
 }
