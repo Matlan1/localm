@@ -103,12 +103,20 @@ def clear_api_key() -> None:
     """Remove the persisted key (open mode). A leftover env var still applies."""
     try:
         key_file().unlink(missing_ok=True)
-    except OSError:
-        pass
+    except OSError as e:
+        # Surface, do not silence: this is a security step (removing the persisted
+        # key). If the file cannot be deleted the key STILL GRANTS access, so a
+        # silent pass would imply a clear that did not happen (rule 5). Warn loudly.
+        logger.warning("could not remove the API key file %s (%s); the key may "
+                       "still be active until it is deleted by hand", key_file(), e)
     try:
         keystore_file().unlink(missing_ok=True)
-    except OSError:
-        pass
+    except OSError as e:
+        # Same: a leftover keystore means scoped keys remain valid. Do not let a
+        # failed delete look like a successful clear.
+        logger.warning("could not remove the keystore %s (%s); scoped keys may "
+                       "still be active until it is deleted by hand",
+                       keystore_file(), e)
 
 
 def regenerate_key(nbytes: int = 32) -> str:
@@ -158,6 +166,10 @@ def _restrict_perms(path: Path) -> None:
                      "/grant:r", f"{user}:F"],
                     capture_output=True, check=False)
     except Exception:
+        # Best-effort (see docstring): the data dir is already user-scoped, so this
+        # per-file tightening is defense-in-depth. A failure (icacls missing, an FS
+        # without perms) leaves the home-dir scoping in effect, which is the real
+        # protection; a perms nicety must never raise.
         pass
 
 

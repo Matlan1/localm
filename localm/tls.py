@@ -101,6 +101,9 @@ def _host_ips() -> list[str]:
         _, _, addrs = socket.gethostbyname_ex(hostname)
         out.extend(addrs)
     except OSError:
+        # Best-effort SAN enrichment: if reverse/forward resolution fails we just
+        # certify fewer addresses. The loopback/explicit SANs added elsewhere
+        # still cover the working case; never fail cert minting over this.
         pass
     return out
 
@@ -188,6 +191,9 @@ def _iface_ips() -> list[str]:
                 if getattr(a, "family", None) == socket.AF_INET:
                     out.append(a.address)
     except Exception:
+        # Best-effort: enumerating interface IPs via psutil is optional. If psutil
+        # is absent or errors we return whatever was gathered; the caller (the
+        # Companion address card) degrades to fewer addresses, not a failure.
         pass
     return out
 
@@ -269,6 +275,12 @@ def _lock_down_dir(path: Path) -> None:
         path.mkdir(parents=True, exist_ok=True)
         os.chmod(path, 0o700)
     except OSError:
+        # Defense-in-depth, proven low-risk. chmod is a Windows no-op and only
+        # raises on POSIX filesystems with no per-file perms (FAT, some network
+        # mounts) - exactly the case where NO process could restrict perms anyway.
+        # The tls dir lives under the user-owned data home, so its parent perms
+        # already scope it; this 0o700 is a belt-and-braces tightening, not the
+        # sole protection.
         pass
 
 
@@ -278,6 +290,15 @@ def _write_private(path: Path, data: bytes) -> None:
     try:
         os.chmod(path, 0o600)
     except OSError:
+        # Private key perms - the most sensitive write here, so the reasoning is
+        # explicit. chmod is a Windows no-op and only raises on POSIX filesystems
+        # that have no per-file perms at all (FAT, some network mounts). On such a
+        # filesystem NO API could restrict this file, and the same limit applied
+        # to the enclosing tls dir (already 0o700-attempted by _lock_down_dir) and
+        # to the user data home it sits in: the key is exactly as protected as
+        # everything else the user stores there. So a failure here cannot single
+        # out the key as newly exposed; it is the user's storage choice, not a
+        # localm regression. Hence safe to proceed rather than refuse to serve TLS.
         pass
 
 
@@ -351,7 +372,11 @@ def _load_or_make_ca(home: Path):
             if cert.not_valid_after_utc > _now():
                 return cert, key
         except Exception:
-            pass   # corrupt/unreadable -> regenerate below
+            # The files EXIST (guarded above) but are corrupt/unreadable: fall
+            # through and mint a fresh CA. The "missing" case is the other branch
+            # (the enclosing if), so this only ever handles the genuinely-bad file,
+            # by regenerating - never by serving a broken CA.
+            pass
     return _make_ca(home)
 
 
@@ -417,6 +442,9 @@ def _make_leaf(home: Path, ca_cert, ca_key, hostnames: list[str], ips: list[str]
             "not_after": cert.not_valid_after_utc.isoformat(),
         }, indent=2), encoding="utf-8")
     except OSError:
+        # Best-effort: the meta sidecar is a reuse optimization (lets us skip
+        # re-minting when the SANs are unchanged). If it cannot be written the
+        # leaf is simply regenerated next time; the cert itself is already saved.
         pass
     return cert
 
@@ -432,6 +460,9 @@ def _cert_sans(cert) -> tuple[set[str], set[str]]:
         hosts.update(ext.get_values_for_type(x509.DNSName))
         ips.update(str(ip) for ip in ext.get_values_for_type(x509.IPAddress))
     except x509.ExtensionNotFound:
+        # A cert with no SubjectAlternativeName simply has no SANs to report;
+        # return the empty sets. Narrow catch (only ExtensionNotFound), so a
+        # malformed-cert error would still surface, not be swallowed here.
         pass
     return hosts, ips
 

@@ -116,6 +116,11 @@ def read_manifest(staged_dir) -> dict:
         if p.is_file():
             return _json.loads(p.read_text(encoding="utf-8")) or {}
     except Exception:
+        # Absent is handled by the is_file() guard; this path is the corrupt or
+        # unreadable manifest. Fall back to {} so classify() relies on its own
+        # tree auto-detection (the conservative default). A bad manifest can only
+        # LOSE a `needs` escalation hint, never weaken the update - the heavier
+        # action is the escalation, so the fallback is the safe direction.
         pass
     return {}
 
