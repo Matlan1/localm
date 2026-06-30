@@ -5,11 +5,17 @@
    name exactly as before. */
 "use strict";
 
+// --- ES module imports (auto-generated boundary; bodies unchanged) ---
+import { $, authHeaders, autoGrow, confirmDanger, el, fetchImageURL, renderMarkdown, scrubMarkers, stripThink, toast } from "./helpers.js";
+import { modelCache, modelSelect } from "./models-sidebar.js";
+import { runCompletion, speak, webAskSession } from "./settings-perf.js";
+import { showView } from "./tabs.js";
+
 /* ================================================================ */
 /*  Chat                                                             */
 /* ================================================================ */
 
-const chat = {
+export const chat = {
   conversations: JSON.parse(localStorage.getItem("localm.conversations") || "[]"),
   activeId: null,
   abort: null,
@@ -27,17 +33,17 @@ const chat = {
 // summariser whole messages truncated at word boundaries with reasoning stripped,
 // and sanitise the returned summary so half-words / <think> never re-enter
 // context. Never blocks chat.
-const COMPACT_RATIO = 0.7;
-const COMPACT_KEEP = 4;            // floor: always keep at least this many recent turns
-const COMPACT_TARGET = 0.5;        // R44: keep recent turns verbatim up to ~50% of the ceiling
+export const COMPACT_RATIO = 0.7;
+export const COMPACT_KEEP = 4;            // floor: always keep at least this many recent turns
+export const COMPACT_TARGET = 0.5;        // R44: keep recent turns verbatim up to ~50% of the ceiling
 
 /** R44: rough token estimate - ~4 chars/token plus a small per-message overhead
  *  for the role and delimiters. Coarse, but less skewed than a bare length/4. */
-function estimateTokens(text) {
+export function estimateTokens(text) {
   return Math.ceil((text || "").length / 4) + 4;
 }
 
-function estimateConvTokens(conv) {
+export function estimateConvTokens(conv) {
   let total = estimateTokens($("p-system").value || "");
   for (const m of conv.messages) {
     total += estimateTokens(msgText(m)) + msgImages(m).length * 750;
@@ -47,14 +53,14 @@ function estimateConvTokens(conv) {
 
 /** R44: truncate at a word boundary with an explicit marker, instead of a raw
  *  mid-word slice that fed half-words (e.g. "REA") into the summariser. */
-function truncateAtWord(text, max) {
+export function truncateAtWord(text, max) {
   if (!text || text.length <= max) return text || "";
   const cut = text.slice(0, max);
   const sp = cut.lastIndexOf(" ");
   return (sp > max * 0.6 ? cut.slice(0, sp) : cut).trimEnd() + " ...[truncated]";
 }
 
-async function compactConversation(conv) {
+export async function compactConversation(conv) {
   if (conv.messages.length <= COMPACT_KEEP) return false;
   // R44: keep as many of the most-recent turns verbatim as fit in COMPACT_TARGET
   // of the ceiling (at least COMPACT_KEEP), summarising only what is older -
@@ -122,14 +128,14 @@ async function compactConversation(conv) {
   return true;
 }
 
-async function maybeCompactConversation(conv) {
+export async function maybeCompactConversation(conv) {
   if (!chat.ctxMax || chat.ctxMax <= 0) return;
   if (estimateConvTokens(conv) >= COMPACT_RATIO * chat.ctxMax) {
     await compactConversation(conv);
   }
 }
 
-async function refreshCtxLimit() {
+export async function refreshCtxLimit() {
   try {
     const r = await fetch("/v1/config", { headers: authHeaders() });
     if (r.ok) {
@@ -175,7 +181,7 @@ async function refreshCtxLimit() {
 // user's saved choice; for web, when there is no saved choice fall back to the
 // global net policy (net_mode=allow auto-enables web; ask/off leave it off so
 // consent still applies). Writes are gated on privacy mode (no traces there).
-function hydrateChatToggles(cfg) {
+export function hydrateChatToggles(cfg) {
   const webEl = $("p-web"), speakEl = $("p-speak");
   if (!webEl || !speakEl) return;
   const lsGet = (k) => { try { return localStorage.getItem(k); } catch (e) { return null; } };
@@ -187,7 +193,7 @@ function hydrateChatToggles(cfg) {
 }
 window.hydrateChatToggles = hydrateChatToggles;
 
-function saveConversations(changed) {
+export function saveConversations(changed) {
   if (chat.privacy) return;   // privacy mode: no traces, not even localStorage
   // R40: do NOT cache server index-only rows (_meta) - they carry no messages, so
   // caching them would shadow a real local copy and show empty conversations
@@ -206,10 +212,10 @@ function saveConversations(changed) {
 
 /* ---- server-side conversation store (non-privacy modes only) ---- */
 
-const _convPushTimers = new Map();
+export const _convPushTimers = new Map();
 
 /** Debounced upsert of one conversation to the server store. */
-function pushConversation(conv) {
+export function pushConversation(conv) {
   if (!chat.persist) return;
   // Brand-new conversations with nothing in them yet aren't worth a file.
   if (!conv.messages.length && conv.title === "New chat") return;
@@ -232,7 +238,7 @@ function pushConversation(conv) {
   }, 600));
 }
 
-function deleteConversationRemote(convId) {
+export function deleteConversationRemote(convId) {
   if (!chat.persist) return;
   clearTimeout(_convPushTimers.get(convId));
   _convPushTimers.delete(convId);
@@ -243,7 +249,7 @@ function deleteConversationRemote(convId) {
 
 /** R40: fetch a full conversation's body on demand and replace its index-only
  *  ("_meta") placeholder in chat.conversations. Returns true on success. */
-async function hydrateConversation(conv) {
+export async function hydrateConversation(conv) {
   if (!conv || !conv._meta) return true;
   try {
     const r = await fetch("/api/conversations/" + encodeURIComponent(conv.id),
@@ -268,7 +274,7 @@ window.hydrateConversation = hydrateConversation;
  *  of each conversation wins; local-only ones are uploaded. R40: the server
  *  list is a lightweight index (no message bodies); each conversation's messages
  *  load lazily on open via hydrateConversation. */
-async function initServerConversations() {
+export async function initServerConversations() {
   if (chat.privacy) return;
   try {
     // R40: lightweight, paginated index - no message bodies or data-URI images.
@@ -314,11 +320,11 @@ async function initServerConversations() {
   } catch (e) { /* store unavailable - localStorage keeps working */ }
 }
 
-function currentConv() {
+export function currentConv() {
   return chat.conversations.find((c) => c.id === chat.activeId) || null;
 }
 
-function newConversation() {
+export function newConversation() {
   const conv = { id: Date.now().toString(36), title: "New chat", messages: [] };
   chat.conversations.unshift(conv);
   chat.activeId = conv.id;
@@ -328,11 +334,11 @@ function newConversation() {
 }
 
 /* message content helpers - content is a string or OpenAI multipart list */
-function msgText(m) {
+export function msgText(m) {
   if (typeof m.content === "string") return m.content;
   return (m.content || []).filter((p) => p.type === "text").map((p) => p.text).join("");
 }
-function msgImages(m) {
+export function msgImages(m) {
   if (typeof m.content === "string") return [];
   return (m.content || []).filter((p) => p.type === "image_url")
     .map((p) => p.image_url?.url).filter(Boolean);
@@ -344,7 +350,7 @@ function msgImages(m) {
  *  in endless empty assistant replies; dropping it keeps the chat usable.
  *  Server-generated /api/ images are display-only (already mapped to text before
  *  sending), so they are left alone. Returns the number of images dropped. */
-function stripUserImages(conv) {
+export function stripUserImages(conv) {
   let dropped = 0;
   for (const m of conv.messages) {
     if (m.role !== "user" || !Array.isArray(m.content)) continue;
@@ -362,20 +368,20 @@ function stripUserImages(conv) {
 
 /* ---- conversation list: search, pin, folders ---- */
 
-const convUI = {
+export const convUI = {
   search: "",
   collapsed: new Set(JSON.parse(
     localStorage.getItem("localm.convCollapsed") || "[]")),
 };
 
-function saveCollapsed() {
+export function saveCollapsed() {
   if (chat.privacy) return;   // folder names are conversation-derived
   localStorage.setItem("localm.convCollapsed",
     JSON.stringify([...convUI.collapsed]));
 }
 
 /** Short excerpt around the first content match, or null (no match). */
-function searchSnippet(conv, term) {
+export function searchSnippet(conv, term) {
   for (const m of conv.messages) {
     const text = msgText(m);
     const idx = text.toLowerCase().indexOf(term);
@@ -388,7 +394,7 @@ function searchSnippet(conv, term) {
   return null;
 }
 
-function buildConvItem(conv, snippet) {
+export function buildConvItem(conv, snippet) {
   const item = el("div", "conv-item" + (conv.id === chat.activeId ? " active" : ""));
   const title = el("span", "title");
   title.appendChild(document.createTextNode(conv.title));
@@ -459,7 +465,7 @@ function buildConvItem(conv, snippet) {
   return item;
 }
 
-function renderConvList() {
+export function renderConvList() {
   const list = $("conv-list");
   list.replaceChildren();
   const term = convUI.search.trim().toLowerCase();
@@ -528,7 +534,7 @@ $("conv-search").addEventListener("input", (e) => {
 
 // A sensible download name for a chat image (VIS-2): from the data: URI's mime,
 // or the /api path's basename, falling back to localm-image.png.
-function imageFilename(url) {
+export function imageFilename(url) {
   try {
     if (url.startsWith("data:")) {
       const m = url.match(/^data:image\/([a-z0-9.+-]+)/i);
@@ -542,7 +548,7 @@ function imageFilename(url) {
 // Copy an image (by its resolved src) to the clipboard. Returns true on success.
 // Not every browser/context can write an image to the clipboard, so the caller
 // surfaces a fallback instead of silently failing (RULE 5).
-async function copyImageSrc(src) {
+export async function copyImageSrc(src) {
   try {
     if (!window.ClipboardItem || !navigator.clipboard || !navigator.clipboard.write)
       return false;
@@ -556,7 +562,7 @@ window.copyImageSrc = copyImageSrc;
 // Full-view image lightbox (VIS-2): a click on a chat image opens it large with
 // Save (download to disk) and Copy controls. Closes on the backdrop, the Close
 // button, or Escape.
-function openImageLightbox(src, name) {
+export function openImageLightbox(src, name) {
   if (!src) return;
   const back = el("div", "img-lightbox");
   const panel = el("div", "img-lightbox-panel");
@@ -598,7 +604,7 @@ function openImageLightbox(src, name) {
 }
 window.openImageLightbox = openImageLightbox;
 
-function addMessageRow(container, role, text, opts = {}) {
+export function addMessageRow(container, role, text, opts = {}) {
   const row = el("div", "msg-row " + role + (opts.cls ? " " + opts.cls : ""));
   const mName = opts.model && opts.model !== "MODEL" ? opts.model : (modelCache.active || "Model");
   row.appendChild(el("div", "msg-role",
@@ -691,7 +697,7 @@ function addMessageRow(container, role, text, opts = {}) {
   return { row, body, meta };
 }
 
-function buildEmptyHint() {
+export function buildEmptyHint() {
   const div = el("div", "empty-hint");
   const big = el("div", "big");
   big.appendChild(document.createTextNode("local"));
@@ -708,7 +714,7 @@ function buildEmptyHint() {
   return div;
 }
 
-function renderChat() {
+export function renderChat() {
   const box = $("chat-messages");
   box.innerHTML = "";
   const conv = currentConv();
@@ -793,18 +799,18 @@ function renderChat() {
    old tail as a sibling instead of destroying it; ‹ k/N › in the message
    meta row navigates between siblings. */
 
-let _msgIdCounter = 0;
+export let _msgIdCounter = 0;
 
-function msgId(m) {
+export function msgId(m) {
   if (!m.id) m.id = Date.now().toString(36) + "-" + (_msgIdCounter++);
   return m.id;
 }
 
-function parentIdAt(conv, index) {
+export function parentIdAt(conv, index) {
   return index > 0 ? msgId(conv.messages[index - 1]) : "root";
 }
 
-function forkRecord(conv, parentId, create) {
+export function forkRecord(conv, parentId, create) {
   conv.branches = conv.branches || [];
   let rec = conv.branches.find((b) => b.parent === parentId);
   if (!rec && create) {
@@ -815,7 +821,7 @@ function forkRecord(conv, parentId, create) {
 }
 
 /** Park the live tail from *index* as a sibling and open a fresh timeline. */
-function forkAt(conv, index) {
+export function forkAt(conv, index) {
   const rec = forkRecord(conv, parentIdAt(conv, index), true);
   if (!rec.tails.length) {
     rec.tails.push(null);          // slot for the pre-existing timeline
@@ -828,7 +834,7 @@ function forkAt(conv, index) {
 }
 
 /** Switch the fork at *index* one sibling left/right (dir = ±1). */
-function switchBranch(conv, index, dir) {
+export function switchBranch(conv, index, dir) {
   if (chat.abort) { toast("Wait for the current reply to finish", true); return; }
   const rec = forkRecord(conv, parentIdAt(conv, index), false);
   if (!rec || rec.tails.length < 2) return;
@@ -845,7 +851,7 @@ function switchBranch(conv, index, dir) {
 /** Drop fork records whose parent message no longer exists anywhere
  *  (active branch or any parked tail) - called after compaction rewrites
  *  old history. */
-function pruneBranches(conv) {
+export function pruneBranches(conv) {
   if (!conv.branches || !conv.branches.length) return;
   const ids = new Set(["root"]);
   for (const m of conv.messages) if (m.id) ids.add(m.id);
@@ -857,7 +863,7 @@ function pruneBranches(conv) {
   conv.branches = conv.branches.filter((b) => ids.has(b.parent));
 }
 
-function editMessage(conv, index) {
+export function editMessage(conv, index) {
   // Editing forks the branch tree (forkAt); doing that mid-stream parks the
   // messages before the streaming reply has landed, corrupting the branch
   // state. Bail while a reply streams, like switchBranch / regenerate do.
@@ -873,7 +879,7 @@ function editMessage(conv, index) {
   $("chat-input").focus();
 }
 
-function regenerate(conv) {
+export function regenerate(conv) {
   if (chat.abort) return;
   const last = conv.messages.length - 1;
   if (conv.messages[last]?.role !== "assistant") return;
@@ -886,7 +892,7 @@ function regenerate(conv) {
 /** Count the sibling timelines a revert to *index* would permanently destroy:
  *  every fork point at or after the revert point keeps its alternatives in the
  *  region being removed. Used to warn before reverting *past* a branch point. */
-function branchesLostByRevert(conv, index) {
+export function branchesLostByRevert(conv, index) {
   let lost = 0;
   for (let i = index; i < conv.messages.length; i++) {
     const pid = i > 0 ? conv.messages[i - 1].id : "root";
@@ -903,7 +909,7 @@ function branchesLostByRevert(conv, index) {
  *  clicked message back into the composer to modify and resend. Stays in the
  *  SAME branch. Reverting past a fork point destroys the sibling branches in the
  *  removed region, so confirm first when that would happen (the safeguard). */
-function revertTo(conv, index) {
+export function revertTo(conv, index) {
   if (chat.abort) { toast("Wait for the current reply to finish", true); return; }
   if (index < 0 || index >= conv.messages.length) return;
   const text = msgText(conv.messages[index]);
@@ -942,7 +948,7 @@ function revertTo(conv, index) {
   }
 }
 
-function chatParams() {
+export function chatParams() {
   const num = (id) => {
     const v = $(id).value.trim();
     return v === "" ? null : Number(v);
@@ -961,7 +967,7 @@ function chatParams() {
 
 /* attachments */
 
-function renderAttachChips() {
+export function renderAttachChips() {
   const box = $("attach-chips");
   box.replaceChildren();
   chat.attachments.forEach((att, i) => {
@@ -988,7 +994,7 @@ function renderAttachChips() {
 
 /** Document attachment → text via /api/rag/extract. The file is converted
  *  in memory on the server and never written to disk (privacy-clean). */
-async function attachDocument(file) {
+export async function attachDocument(file) {
   const b64 = await new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "");
@@ -1009,7 +1015,7 @@ async function attachDocument(file) {
 /** Ingest files as chat attachments: images inline (data URI), every other
  *  type extracted to text server-side. Shared by the file picker and the
  *  drag-and-drop zone so both behave identically. */
-function addAttachedFiles(files) {
+export function addAttachedFiles(files) {
   for (const file of files) {
     if (file.type.startsWith("image/")) {
       const reader = new FileReader();
@@ -1048,7 +1054,7 @@ $("chat-file").addEventListener("change", (e) => {
 /** Ingest images shared INTO localm from the phone's share sheet (PWA share
  *  target). The server stashed them; we pull them as chat attachments and then
  *  clear the server inbox. Text/links shared in drop into the composer. */
-async function ingestSharedFiles() {
+export async function ingestSharedFiles() {
   let items;
   try {
     const r = await fetch("/api/share/pending", { headers: authHeaders() });
@@ -1084,7 +1090,7 @@ async function ingestSharedFiles() {
 /** Drag-and-drop files anywhere on the chat view to attach them, with a
  *  highlight while a file is hovering. Only reacts to file drags (not text
  *  selections), and preventDefault stops the browser opening the dropped file. */
-function setupChatDropZone() {
+export function setupChatDropZone() {
   const zone = $("view-chat");
   if (!zone) return;
   const isFileDrag = (e) =>

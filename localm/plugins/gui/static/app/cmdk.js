@@ -5,13 +5,20 @@
    name exactly as before. */
 "use strict";
 
+// --- ES module imports (auto-generated boundary; bodies unchanged) ---
+import { newConversation } from "./chat.js";
+import { $, el } from "./helpers.js";
+import { exportConversation } from "./settings-perf.js";
+import { VIEWS, isSettingsView, showView } from "./tabs.js";
+import { gotoSettingsSection } from "../pages/settings.js";
+
 /* ================================================================ */
 /*  Command palette (Ctrl/Cmd+K)                                     */
 /* ================================================================ */
 
 // Built fresh on open so runtime-added plugin views are included. The view
 // labels are taken from the live nav buttons so they match exactly.
-function cmdkCommands() {
+export function cmdkCommands() {
   const cmds = [];
   for (const v of VIEWS) {
     if (!$("view-" + v)) continue;
@@ -35,14 +42,14 @@ function cmdkCommands() {
   return cmds;
 }
 
-let _cmdkAll = [], _cmdkShown = [], _cmdkSel = 0;
+export let _cmdkAll = [], _cmdkShown = [], _cmdkSel = 0;
 
-function cmdkFilter(query) {
+export function cmdkFilter(query) {
   const q = (query || "").trim().toLowerCase();
   return q ? _cmdkAll.filter((c) => c.label.toLowerCase().includes(q)) : _cmdkAll.slice();
 }
 
-function renderCmdk(query) {
+export function renderCmdk(query) {
   _cmdkShown = cmdkFilter(query);
   if (_cmdkSel >= _cmdkShown.length) _cmdkSel = Math.max(0, _cmdkShown.length - 1);
   const list = $("cmdk-list");
@@ -54,12 +61,12 @@ function renderCmdk(query) {
   });
 }
 
-function cmdkIsOpen() {
+export function cmdkIsOpen() {
   const m = $("cmdk");
   return !!m && m.style.display !== "none";
 }
 
-function openCommandPalette() {
+export function openCommandPalette() {
   _cmdkAll = cmdkCommands();
   _cmdkSel = 0;
   $("cmdk-input").value = "";
@@ -68,11 +75,11 @@ function openCommandPalette() {
   $("cmdk-input").focus();
 }
 
-function closeCommandPalette() {
+export function closeCommandPalette() {
   $("cmdk").style.display = "none";
 }
 
-function runCmdk(index) {
+export function runCmdk(index) {
   const cmd = _cmdkShown[index];
   closeCommandPalette();
   if (cmd) cmd.run();

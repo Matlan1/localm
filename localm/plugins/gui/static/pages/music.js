@@ -5,6 +5,11 @@
    resolve by bare name exactly as before. */
 "use strict";
 
+// --- ES module imports (auto-generated boundary; bodies unchanged) ---
+import { $, authHeaders, fetchImageURL, streamJob, toast } from "../app/helpers.js";
+import { hideStop, showStop } from "./images.js";
+import { refreshMusicHistory } from "./video.js";
+
 /* ================================================================ */
 /*  Music page                                                       */
 /* ================================================================ */

@@ -5,6 +5,11 @@
    resolve by bare name exactly as before. */
 "use strict";
 
+// --- ES module imports (auto-generated boundary; bodies unchanged) ---
+import { chat } from "../app/chat.js";
+import { $, MIB, authHeaders, el, fetchImageURL, streamJob, toast } from "../app/helpers.js";
+import { hideStop, showStop } from "./images.js";
+
 /* ================================================================ */
 /*  Video page                                                       */
 /* ================================================================ */
@@ -62,7 +67,7 @@ $("video-generate").onclick = async () => {
   }
 };
 
-async function refreshVideoHistory() {
+export async function refreshVideoHistory() {
   const box = $("video-history");
   box.replaceChildren();
   let data;
@@ -147,7 +152,7 @@ async function refreshVideoHistory() {
   }
 }
 
-async function refreshMusicHistory() {
+export async function refreshMusicHistory() {
   const box = $("music-history");
   box.replaceChildren();
   let data;

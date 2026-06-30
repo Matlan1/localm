@@ -5,6 +5,9 @@
    name exactly as before. */
 "use strict";
 
+// --- ES module imports (auto-generated boundary; bodies unchanged) ---
+import { $, authHeaders } from "./helpers.js";
+
 /* ================================================================ */
 /*  Logo style                                                       */
 /* ================================================================ */
@@ -15,17 +18,17 @@
 // half always goes in the <span> (#logo span / .logo-tile span = var(--accent));
 // the rest inherits the white/ink text colour. The console command, app icon,
 // and desktop shortcut are fixed and unaffected.
-const LOGO_STYLES = [
+export const LOGO_STYLES = [
   { id: "local-m", white: "LocaL", blue: "M"  },   // default: single blue M, matches the icon (L white, M blue)
   { id: "loca-lm", white: "Loca",  blue: "LM" },
   { id: "localm",  white: "local", blue: "m"  },
 ];
-const LOGO_DEFAULT = LOGO_STYLES[0].id;
+export const LOGO_DEFAULT = LOGO_STYLES[0].id;
 
 // Draw a wordmark into el as white text + an accent-coloured <span>. The parts
 // are constant strings, but build via DOM nodes (no innerHTML) to stay clear of
 // the no-raw-HTML house style.
-function drawWordmark(el, style) {
+export function drawWordmark(el, style) {
   el.textContent = style.white;
   const span = document.createElement("span");
   span.textContent = style.blue;
@@ -34,7 +37,7 @@ function drawWordmark(el, style) {
 
 // Render the wordmark, reflect the active picker tile, and cache the choice
 // locally so the next load paints instantly. Does NOT touch the server.
-function applyLogoStyle(id) {
+export function applyLogoStyle(id) {
   const style = LOGO_STYLES.find((s) => s.id === id) || LOGO_STYLES[0];
   drawWordmark($("logo"), style);
   localStorage.setItem("localm.logoStyle", style.id);
@@ -46,7 +49,7 @@ function applyLogoStyle(id) {
 
 // Apply a pick locally, then persist it to the shared server config so the
 // launcher (and other browsers) follow. Offline: the cached style still shows.
-async function setLogoStyle(id) {
+export async function setLogoStyle(id) {
   const applied = applyLogoStyle(id);
   try {
     await fetch("/v1/config", {
@@ -58,7 +61,7 @@ async function setLogoStyle(id) {
 
 // Reconcile the cached wordmark with the shared server truth on load (the
 // launcher or another browser may have changed it). Best-effort.
-async function syncLogoStyleFromConfig() {
+export async function syncLogoStyleFromConfig() {
   try {
     const r = await fetch("/v1/config", { headers: authHeaders() });
     if (!r.ok) return;
@@ -69,7 +72,7 @@ async function syncLogoStyleFromConfig() {
 
 // Render the three preview tiles into the Settings -> GUI card. Each tile shows
 // the wordmark in its own style; clicking one applies + persists it.
-function renderLogoPicker() {
+export function renderLogoPicker() {
   const wrap = $("logo-style-picker");
   if (!wrap) return;
   wrap.textContent = "";

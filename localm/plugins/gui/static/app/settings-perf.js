@@ -5,14 +5,21 @@
    name exactly as before. */
 "use strict";
 
+// --- ES module imports (auto-generated boundary; bodies unchanged) ---
+import { COMPACT_KEEP, addMessageRow, chat, chatParams, compactConversation, currentConv, maybeCompactConversation, msgImages, msgText, newConversation, renderAttachChips, renderChat, renderConvList, saveConversations, stripUserImages } from "./chat.js";
+import { $, GIB, authHeaders, autoGrow, el, nearBottom, openModal, readSSE, renderMarkdown, stripThink, toast } from "./helpers.js";
+import { modelCache, modelSelect } from "./models-sidebar.js";
+import { execChatCommand, handleSlashSubmit } from "./slash.js";
+import { CORE_VIEWS, VIEWS, _applyActiveClasses, closeNav, showView } from "./tabs.js";
+
 /* ================================================================ */
 /*  Settings: performance sliders (GPU layers + context) + VRAM est  */
 /* ================================================================ */
 
-function _perfGiB(b) { return (Number(b) / GIB).toFixed(1); }
+export function _perfGiB(b) { return (Number(b) / GIB).toFixed(1); }
 
-let _perfEstTimer = null;
-async function refreshPerfEstimate() {
+export let _perfEstTimer = null;
+export async function refreshPerfEstimate() {
   const gl = $("perf-gpu-layers"), ctx = $("perf-ctx"), out = $("perf-estimate");
   if (!gl || !ctx || !out) return;
   try {
@@ -34,7 +41,7 @@ async function refreshPerfEstimate() {
   }
 }
 
-function setupPerfCard() {
+export function setupPerfCard() {
   const gl = $("perf-gpu-layers"), ctx = $("perf-ctx");
   if (!gl || !ctx) return;
   const sync = () => {
@@ -79,12 +86,12 @@ function setupPerfCard() {
 
 /* ---- web access (model-initiated, via the params-drawer toggle) ---- */
 
-const WEB_MAX_ROUNDS = 3;
+export const WEB_MAX_ROUNDS = 3;
 
 // R27: a remembered "don't ask again this session" choice. null = ask each time;
 // true = allow all this session; false = deny all this session. In-memory only
 // (so it resets on reload = a new session) and leaves no persisted trace.
-let webAskSession = null;
+export let webAskSession = null;
 
 // net_mode = ask means the GUI must APPROVE each model-initiated web request
 // before it runs (the settings promise: "ask = approve each request"). Read it
@@ -92,7 +99,7 @@ let webAskSession = null;
 // the cost is one small GET per model-initiated round (bounded by
 // WEB_MAX_ROUNDS). Unknown / unreachable -> do not block (the per-conversation
 // toggle is the standing consent; only "off", enforced server-side, blocks).
-async function webModeIsAsk() {
+export async function webModeIsAsk() {
   try {
     const r = await fetch("/v1/config", { headers: authHeaders() });
     if (r.ok) {
@@ -108,7 +115,7 @@ window.webModeIsAsk = webModeIsAsk;
 // a promise<boolean>. Uses the in-page modal (window.confirm/prompt are
 // suppressed in some PWA/mobile browsers, the NET-1 class of bug). Overridable
 // in tests.
-function confirmWebRequest(call) {
+export function confirmWebRequest(call) {
   // R27: a remembered choice short-circuits the modal for the rest of the session.
   if (webAskSession !== null) return Promise.resolve(webAskSession);
   return new Promise((resolve) => {
@@ -147,7 +154,7 @@ function confirmWebRequest(call) {
 }
 window.confirmWebRequest = confirmWebRequest;
 
-const WEB_TOOL_PROMPT =
+export const WEB_TOOL_PROMPT =
   "You can access the internet through tools. When the answer depends on " +
   "current, real-time, or external information you cannot be certain of " +
   "(news, prices, software versions, documentation, anything after your " +
@@ -163,7 +170,7 @@ const WEB_TOOL_PROMPT =
   "and received its result. If a search fails or finds nothing useful, say " +
   "so plainly instead of making something up.";
 
-const NO_WEB_PROMPT =
+export const NO_WEB_PROMPT =
   "You are offline with NO internet access in this conversation. Do not " +
   "present guessed or invented information as verified fact: current events, " +
   "news, prices, live data, software versions, or anything you cannot confirm " +
@@ -178,7 +185,7 @@ const NO_WEB_PROMPT =
 // model-initiated search) but the standing toggle is off: the model HAS fresh
 // results in hand, so the offline-denial floor would contradict them. Tell it
 // to use and cite the provided results, and not to fabricate beyond them.
-const WEB_GROUNDED_PROMPT =
+export const WEB_GROUNDED_PROMPT =
   "Web search results have been provided to you in this conversation. Use them " +
   "to answer, and cite the source URLs you relied on. Stay within what the " +
   "results actually support: do not invent facts, URLs, or details beyond them, " +
@@ -187,7 +194,7 @@ const WEB_GROUNDED_PROMPT =
 /** True when the most recent message is freshly injected web grounding (search
  *  results or fetched page content), as opposed to a repair note or a failure
  *  note. Used so an explicit /web run is not told it is offline. */
-function lastTurnHasWebResults(conv) {
+export function lastTurnHasWebResults(conv) {
   const last = conv.messages[conv.messages.length - 1];
   if (!last || !last.web) return false;
   const text = typeof last.content === "string" ? last.content : "";
@@ -199,11 +206,11 @@ function lastTurnHasWebResults(conv) {
 // as <tool_call|>) and ```tool_call / ```json / bare ``` fences, mirroring the
 // coder's lenient parser so a slightly-off call still runs instead of being
 // silently dropped (which let the model's un-grounded answer through).
-const _WEB_TOOLS = new Set(["web_search", "fetch_url"]);
+export const _WEB_TOOLS = new Set(["web_search", "fetch_url"]);
 
 /** Lenient JSON parse for the mangles local finetunes produce (single-quoted
  *  keys, trailing commas). Returns the parsed object, or null. */
-function _lenientJSON(body) {
+export function _lenientJSON(body) {
   const tries = [
     (s) => s,
     (s) => s.replace(/'([^']+)'\s*:/g, '"$1":'),       // single-quoted keys
@@ -221,7 +228,7 @@ function _lenientJSON(body) {
 
 /** Yield every brace-balanced top-level {...} region in text. String literals
  *  are tracked so braces inside them do not confuse the depth count. */
-function* _topLevelObjects(text) {
+export function* _topLevelObjects(text) {
   for (let i = 0; i < text.length; i++) {
     if (text[i] !== "{") continue;
     let depth = 0, inStr = false, esc = false;
@@ -243,7 +250,7 @@ function* _topLevelObjects(text) {
 
 /** Normalise a parsed object to a {name, args} web call, or null. Accepts the
  *  OpenAI "arguments" alias for "args". */
-function _asWebCall(obj) {
+export function _asWebCall(obj) {
   if (!obj || typeof obj.name !== "string" || !_WEB_TOOLS.has(obj.name)) return null;
   const args = (obj.args && typeof obj.args === "object") ? obj.args
              : (obj.arguments && typeof obj.arguments === "object") ? obj.arguments
@@ -253,7 +260,7 @@ function _asWebCall(obj) {
 
 /** First web tool call in a reply, or null. Tolerates the wrapper and JSON
  *  mangles local models emit so a real attempt is not silently dropped. */
-function parseWebCall(text) {
+export function parseWebCall(text) {
   const clean = stripThink(text);
   // Candidate {prefixName, body} pairs, in priority order: explicit wrappers
   // first (the name may live in a "call:NAME" prefix, Gemma-style), then
@@ -285,14 +292,14 @@ function parseWebCall(text) {
  *  tool-call wrapper/fence, or a JSON object that mentions a web tool by name.
  *  Lets the caller ask the model to re-emit it cleanly instead of accepting an
  *  un-grounded answer. */
-function looksLikeWebToolAttempt(text) {
+export function looksLikeWebToolAttempt(text) {
   const clean = stripThink(text);
   if (/<\|?\/?tool_call\|?>/.test(clean) || /```[ \t]*tool_call\b/.test(clean)) return true;
   return /"name"\s*:/.test(clean) && /web_search|fetch_url/.test(clean);
 }
 
 /** Run a web tool call through the policy-enforced server endpoints. */
-async function requestWebTool(call) {
+export async function requestWebTool(call) {
   const a = call.args || call.arguments || {};
   if (call.name === "web_search") {
     const r = await fetch("/api/web/search", {
@@ -321,7 +328,7 @@ async function requestWebTool(call) {
 
 /** Run one model-requested web call, injecting the result (or the failure,
  *  so the model can adapt) as a dimmed "Web" message. */
-async function runWebCall(conv, call) {
+export async function runWebCall(conv, call) {
   let note;
   try {
     note = await requestWebTool(call);
@@ -337,12 +344,12 @@ async function runWebCall(conv, call) {
 
 /* ---- voice: mic (Whisper STT) + read-aloud (browser TTS) ---- */
 
-const voice = { rec: null, chunks: [], available: true, reason: "",
+export const voice = { rec: null, chunks: [], available: true, reason: "",
                 modelCached: true, model: "" };
 
 /** Grey out the mic up front when the server lacks the [voice] extra,
  *  instead of letting the user record and only then failing. */
-async function refreshVoiceStatus() {
+export async function refreshVoiceStatus() {
   try {
     const r = await fetch("/api/voice/status", { headers: authHeaders() });
     if (!r.ok) return;   // old server without the endpoint - leave enabled
@@ -357,7 +364,7 @@ async function refreshVoiceStatus() {
   } catch (e) { /* server unreachable - status refreshes on next load */ }
 }
 
-function blobToB64(blob) {
+export function blobToB64(blob) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "");
@@ -366,7 +373,7 @@ function blobToB64(blob) {
   });
 }
 
-async function toggleMic() {
+export async function toggleMic() {
   const btn = $("chat-mic");
   if (voice.rec) {           // second click stops and transcribes
     voice.rec.stop();
@@ -437,18 +444,18 @@ $("chat-mic").onclick = toggleMic;
  *  voices. The browser fallback can only reach robotic local voices on Windows
  *  (the good Win11 voices are Narrator-only or cloud), which is exactly why the
  *  tts plugin exists. */
-let ttsProvider = null;   // {name, voices(), getVoice(), setVoice(id),
+export let ttsProvider = null;   // {name, voices(), getVoice(), setVoice(id),
                           //  speaking(), ready(), speak(text, opts), stop()}
 
 /** Install (or clear, with null) the active TTS provider, then refresh the
  *  voice picker. Called by a client plugin's register(ctx). */
-function registerTTS(provider) {
+export function registerTTS(provider) {
   ttsProvider = provider;
   populateVoicePicker();
 }
 
 /** The browser SpeechSynthesisVoice the user picked for the fallback, if any. */
-function selectedBrowserVoice() {
+export function selectedBrowserVoice() {
   if (!window.speechSynthesis) return null;
   const want = localStorage.getItem("localm.ttsVoiceBrowser");
   if (!want) return null;
@@ -457,7 +464,7 @@ function selectedBrowserVoice() {
 
 /** Read text aloud. With toggle: true (the 🔊 button) a second call stops
  *  instead; auto-speak replaces the current utterance. */
-function speak(text, opts = {}) {
+export function speak(text, opts = {}) {
   const clean = stripThink(text).replace(/[*_`#>\[\]()]/g, " ").trim();
   if (ttsProvider) {
     if (ttsProvider.speaking()) {
@@ -486,7 +493,7 @@ function speak(text, opts = {}) {
 /** Fill the voice picker from the active provider (or, with no provider, the
  *  browser's LOCAL voices) and remember the choice. Hidden when there is
  *  nothing to choose. */
-function populateVoicePicker() {
+export function populateVoicePicker() {
   const sel = $("p-voice");
   const row = $("voice-row");
   if (!sel) return;
@@ -521,7 +528,7 @@ function populateVoicePicker() {
 }
 
 /** Persist the picked voice and apply it to the active provider. */
-function onVoicePick() {
+export function onVoicePick() {
   const id = $("p-voice").value;
   if (ttsProvider) {
     ttsProvider.setVoice(id);
@@ -534,7 +541,7 @@ function onVoicePick() {
 /** Load client-side plugin modules: for each ACTIVE plugin that ships a
  *  client_entry, import it and call register(ctx). Failures are isolated so a
  *  broken plugin module never breaks chat. */
-async function loadClientPlugins() {
+export async function loadClientPlugins() {
   let plugins = [];
   try {
     // /api/capabilities (not /api/plugins) so client-entry modules load for a
@@ -564,19 +571,19 @@ async function loadClientPlugins() {
 // instead of a confusing 404 or "unknown command". Populated from /api/plugins;
 // stays empty (silent, current behaviour) until loaded or if the server is
 // unreachable. `suggest` mirrors the suggest_plugins config toggle.
-const pluginCommands = { map: {}, suggest: true };
+export const pluginCommands = { map: {}, suggest: true };
 
 // R50: signal other same-origin tabs that the installed/enabled plugin set
 // changed (a new value is required for the storage event to fire, so use the
 // clock). The writing tab refreshes itself directly; other tabs react to the
 // storage event wired near the focus listener.
-function bumpPluginsRev() {
+export function bumpPluginsRev() {
   try { localStorage.setItem("localm.pluginsRev", String(Date.now())); }
   catch (e) { /* storage blocked / full - cross-tab sync degrades to focus only */ }
 }
 window.bumpPluginsRev = bumpPluginsRev;
 
-async function refreshPluginCommands() {
+export async function refreshPluginCommands() {
   try {
     // /api/capabilities returns ONLY what THIS key may use (scope-filtered) and
     // the core-tab flags, so the nav shows just the usable tabs without needing
@@ -614,7 +621,7 @@ async function refreshPluginCommands() {
 
 // One quiet update check per ~6h (a startup auto-surface). Calls the check only -
 // never applies. Defined here; the actual fetch lives in pages.js (window hook).
-function maybeAutoUpdateCheck() {
+export function maybeAutoUpdateCheck() {
   try {
     const last = +(localStorage.getItem("localm.updateCheckAt") || 0);
     if (Date.now() - last < 6 * 3600 * 1000) return;
@@ -625,7 +632,7 @@ function maybeAutoUpdateCheck() {
 
 /** A "/cmd needs the X plugin" hint when *cmd* belongs to a known first-party
  *  plugin that is not active, else null (handle it normally). */
-function pluginSuggestion(cmd) {
+export function pluginSuggestion(cmd) {
   if (!pluginCommands.suggest) return null;
   const hit = pluginCommands.map[cmd];
   if (!hit || hit.active) return null;
@@ -634,16 +641,16 @@ function pluginSuggestion(cmd) {
 
 /* ---- dynamic nav rail (tabs follow the active plugins) ---- */
 // The most recent /api/plugins entries, refreshed alongside the command cache.
-let pluginState = [];
+export let pluginState = [];
 
 // Each plugin's manifest icon name -> the nav emoji. Kernel buttons keep their
 // own emoji in index.html; "studio" is the media parent.
-const NAV_ICON = { chat: "💬", code: "⚙️", image: "🖼️", music: "🎵", video: "🎬", book: "📚", clock: "⏰" };
+export const NAV_ICON = { chat: "💬", code: "⚙️", image: "🖼️", music: "🎵", video: "🎬", book: "📚", clock: "⏰" };
 // Canonical rail order of first-party plugin tabs (stable so the rail does not
 // reshuffle as plugins toggle); "studio" is the media slot (image/music/video).
-const NAV_TAB_ORDER = ["coder", "studio", "knowledge"];
+export const NAV_TAB_ORDER = ["coder", "studio", "knowledge"];
 
-function _navButton(id, icon, label, onClick, cls) {
+export function _navButton(id, icon, label, onClick, cls) {
   const b = el("button", cls || "", `${icon} ${label}`);
   b.id = id;
   b.onclick = onClick;
@@ -659,7 +666,7 @@ function _navButton(id, icon, label, onClick, cls) {
  * /api/capabilities .core. If the active view becomes hidden (e.g. a remembered
  * Settings tab on a key without config:read), fall back to chat so the user is
  * never parked on an inaccessible view. */
-function applyCoreTabVisibility(core) {
+export function applyCoreTabVisibility(core) {
   if (!core) return;
   const activeView = (document.querySelector(".view.active") || {}).id;
   let activeHidden = false;
@@ -674,7 +681,7 @@ function applyCoreTabVisibility(core) {
 }
 window.applyCoreTabVisibility = applyCoreTabVisibility;
 
-function renderNav() {
+export function renderNav() {
   const slot = $("nav-plugin-slot");
   if (!slot) return;
   slot.replaceChildren();
@@ -707,7 +714,7 @@ function renderNav() {
 /** Studio hybrid grouping: nothing for 0 media plugins, a single flat tab for
  *  exactly 1, and one stable-position "Studio" parent expanding to the active
  *  children for 2+. */
-function renderStudioGroup(slot, studio) {
+export function renderStudioGroup(slot, studio) {
   if (studio.length === 0) return;
   if (studio.length === 1) {
     const p = studio[0];
@@ -747,7 +754,7 @@ function renderStudioGroup(slot, studio) {
   slot.appendChild(wrap);
 }
 
-function rebuildViews() {
+export function rebuildViews() {
   const tabs = pluginState
     .filter((p) => p.active && p.tab && !CORE_VIEWS.includes(p.tab))
     .map((p) => p.tab);
@@ -757,7 +764,7 @@ function rebuildViews() {
 // After the rail is rebuilt, keep the shown view reachable: if its plugin was
 // just disabled/uninstalled, fall back to chat; otherwise re-assert the active
 // highlight on the (possibly freshly created) nav button.
-function reconcileActiveView() {
+export function reconcileActiveView() {
   const cur = document.querySelector(".view.active");
   const name = cur ? cur.id.replace("view-", "") : "chat";
   const ok = CORE_VIEWS.includes(name) ||
@@ -778,9 +785,9 @@ function reconcileActiveView() {
 
 /* ---- assistant memory ---- */
 
-const memory = { text: "", writable: false };
+export const memory = { text: "", writable: false };
 
-async function refreshMemory() {
+export async function refreshMemory() {
   try {
     const r = await fetch("/api/memory", { headers: authHeaders() });
     if (!r.ok) return;
@@ -790,7 +797,7 @@ async function refreshMemory() {
   } catch (e) { /* server unreachable */ }
 }
 
-async function rememberFact(fact) {
+export async function rememberFact(fact) {
   if (!fact) { toast("Usage: /remember <fact>", true); return; }
   try {
     const r = await fetch("/api/memory/append", {
@@ -806,7 +813,7 @@ async function rememberFact(fact) {
   }
 }
 
-function openMemoryModal() {
+export function openMemoryModal() {
   openModal("Memory - what the model knows about you", (body) => {
     body.appendChild(el("div", "sub", memory.writable
       ? "Injected into the system prompt while the 🧠 toggle is on. " +
@@ -844,7 +851,7 @@ function openMemoryModal() {
 
 /* ---- prompt library (personas) ---- */
 
-const PERSONA_PARAM_IDS = {
+export const PERSONA_PARAM_IDS = {
   temperature: "p-temperature",
   top_p: "p-top-p",
   top_k: "p-top-k",
@@ -852,9 +859,9 @@ const PERSONA_PARAM_IDS = {
   max_tokens: "p-max-tokens",
 };
 
-let personaCache = [];
+export let personaCache = [];
 
-async function refreshPersonas() {
+export async function refreshPersonas() {
   try {
     const r = await fetch("/api/prompts", { headers: authHeaders() });
     if (!r.ok) return;
@@ -876,7 +883,7 @@ async function refreshPersonas() {
   } catch (e) { /* server unreachable */ }
 }
 
-function applyPersona(name) {
+export function applyPersona(name) {
   const p = personaCache.find((x) => x.name === name);
   if (!p) { toast("No such persona: " + name, true); return false; }
   $("p-system").value = p.system || "";
@@ -934,7 +941,7 @@ $("persona-delete").onclick = async () => {
 
 /* sending */
 
-async function runCompletion(conv, webDepth = 0, web = null) {
+export async function runCompletion(conv, webDepth = 0, web = null) {
   // R36: per-send web state. `seen` dedupes already-issued queries so the model
   // cannot loop on the same search; `ask` caches the net policy so a transient
   // /v1/config blip mid-loop cannot silently flip approval off; `forced` ensures
@@ -1227,7 +1234,7 @@ async function runCompletion(conv, webDepth = 0, web = null) {
 }
 
 /** Query the selected knowledge collection and inject cited excerpts. */
-async function retrieveKnowledge(conv, query) {
+export async function retrieveKnowledge(conv, query) {
   const kb = $("p-kb").value;
   if (!kb || !query) return;
   try {
@@ -1260,7 +1267,7 @@ async function retrieveKnowledge(conv, query) {
 
 /** Populate the params-drawer knowledge selector. pages.js calls this after
  *  collections change on the Knowledge page. */
-async function refreshKbSelect() {
+export async function refreshKbSelect() {
   try {
     const r = await fetch("/api/rag/collections", { headers: authHeaders() });
     if (!r.ok) return;
@@ -1282,7 +1289,7 @@ async function refreshKbSelect() {
   } catch (e) { /* server unreachable - selector stays as-is */ }
 }
 
-async function sendChat() {
+export async function sendChat() {
   const input = $("chat-input");
   const text = input.value.trim();
   if (!text && chat.attachments.length === 0 && chat.docs.length === 0) return;
@@ -1339,7 +1346,7 @@ async function sendChat() {
   await runCompletion(conv);
 }
 
-function exportConversation() {
+export function exportConversation() {
   const conv = currentConv();
   if (!conv || !conv.messages.length) { toast("Nothing to export", true); return; }
   const lines = [`# ${conv.title}`, ""];
@@ -1365,7 +1372,7 @@ $("chat-send").onclick = () => {
  *  U1: Also blocked (preventDefault, no send) while a reply is actively
  *  streaming - the input is disabled at that point, but we guard here too
  *  so a race or accessibility path cannot slip a second message through. */
-function composerEnterToSend(e, send) {
+export function composerEnterToSend(e, send) {
   if (e.key !== "Enter" || e.isComposing) return;
   if (e.shiftKey) return;   // newline - the textarea's default behaviour
   const menu = e.target.closest(".composer-wrap")?.querySelector(".slash-menu");

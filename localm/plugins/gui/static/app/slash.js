@@ -5,11 +5,17 @@
    name exactly as before. */
 "use strict";
 
+// --- ES module imports (auto-generated boundary; bodies unchanged) ---
+import { addMessageRow, chat, currentConv, newConversation, renderChat, renderConvList, saveConversations } from "./chat.js";
+import { exportCoderSession, openFilesModal } from "./coder.js";
+import { $, authHeaders, autoGrow, el, nearBottom, openModal, streamJob, toast } from "./helpers.js";
+import { applyPersona, exportConversation, openMemoryModal, personaCache, pluginSuggestion, rememberFact, requestWebTool, runCompletion } from "./settings-perf.js";
+
 /* ================================================================ */
 /*  Slash commands                                                   */
 /* ================================================================ */
 
-const CHAT_COMMANDS = [
+export const CHAT_COMMANDS = [
   { cmd: "generate-image", hint: "generate an image with FLUX", args: "<prompt>" },
   { cmd: "generate-music", hint: "generate a music track (ACE-Step, 120s instrumental)", args: "<style tags>" },
   { cmd: "generate-video", hint: "generate a short video clip (Wan, ~5s - slow)", args: "<prompt>" },
@@ -27,7 +33,7 @@ const CHAT_COMMANDS = [
   { cmd: "new", hint: "start a new conversation" },
 ];
 
-const CODER_COMMANDS = [
+export const CODER_COMMANDS = [
   { cmd: "undo", hint: "revert the last file write" },
   { cmd: "files", hint: "files changed this session, with diffs" },
   { cmd: "compact", hint: "summarise older turns" },
@@ -38,7 +44,7 @@ const CODER_COMMANDS = [
   { cmd: "help", hint: "list available commands" },
 ];
 
-async function runImagineInChat(promptText) {
+export async function runImagineInChat(promptText) {
   if (!promptText) { toast("Usage: /generate-image <prompt>", true); return; }
   if (!currentConv()) newConversation();
   const conv = currentConv();
@@ -83,7 +89,7 @@ async function runImagineInChat(promptText) {
 
 /** /web <query> - explicit, user-initiated web grounding: search, inject the
  *  results into the conversation, and let the model answer from them. */
-async function runWebInChat(query) {
+export async function runWebInChat(query) {
   if (!query) { toast("Usage: /web <query>", true); return; }
   if (chat.abort) { toast("Wait for the current reply to finish", true); return; }
   if (!currentConv()) newConversation();
@@ -112,7 +118,7 @@ async function runWebInChat(query) {
 
 /** /music <tags> - generate a default-length instrumental inline; the Music
  *  page has the full form (lyrics, duration, seed…). */
-async function runMusicInChat(tags) {
+export async function runMusicInChat(tags) {
   if (!tags) { toast("Usage: /generate-music <style tags>", true); return; }
   if (!currentConv()) newConversation();
   const conv = currentConv();
@@ -154,7 +160,7 @@ async function runMusicInChat(tags) {
 
 /** /video <prompt> - generate a default-length (~5s) clip inline; the Video
  *  page has the full form (negative, duration, size, start image…). */
-async function runVideoInChat(promptText) {
+export async function runVideoInChat(promptText) {
   if (!promptText) { toast("Usage: /generate-video <prompt>", true); return; }
   if (!currentConv()) newConversation();
   const conv = currentConv();
@@ -194,7 +200,7 @@ async function runVideoInChat(promptText) {
   }
 }
 
-function execChatCommand(cmd, arg) {
+export function execChatCommand(cmd, arg) {
   switch (cmd) {
     case "generate-image": case "imagine": runImagineInChat(arg); return true;
     case "generate-music": case "music": runMusicInChat(arg); return true;
@@ -263,7 +269,7 @@ function execChatCommand(cmd, arg) {
   return false;
 }
 
-function execCoderCommand(cmd) {
+export function execCoderCommand(cmd) {
   switch (cmd) {
     case "undo": $("coder-undo").onclick(); return true;
     case "files": openFilesModal(); return true;
@@ -289,7 +295,7 @@ function execCoderCommand(cmd) {
 }
 
 /** Attach a slash-command dropdown to a composer textarea. */
-function attachSlashMenu(textarea, commands, execute) {
+export function attachSlashMenu(textarea, commands, execute) {
   const menu = el("div", "slash-menu");
   menu.style.display = "none";
   textarea.closest(".composer-wrap").appendChild(menu);
@@ -353,7 +359,7 @@ function attachSlashMenu(textarea, commands, execute) {
 }
 
 /** Intercept "/cmd arg" on submit. Returns true when handled (not for the model). */
-function handleSlashSubmit(text, execute) {
+export function handleSlashSubmit(text, execute) {
   if (!text.startsWith("/")) return false;
   const space = text.indexOf(" ");
   const cmd = (space === -1 ? text.slice(1) : text.slice(1, space)).toLowerCase();

@@ -5,14 +5,18 @@
    name exactly as before. */
 "use strict";
 
+// --- ES module imports (auto-generated boundary; bodies unchanged) ---
+import { chat } from "./chat.js";
+import { $ } from "./helpers.js";
+
 /* ================================================================ */
 /*  Tabs                                                             */
 /* ================================================================ */
 
 // Kernel pages are always present; plugin views (coder, images, music, video,
 // knowledge) are added to VIEWS by renderNav() while their plugin is active.
-const CORE_VIEWS = ["chat", "models", "plugins", "settings"];
-let VIEWS = [...CORE_VIEWS];
+export const CORE_VIEWS = ["chat", "models", "plugins", "settings"];
+export let VIEWS = [...CORE_VIEWS];
 
 // Toggle the .active class on the view sections + nav buttons. Split out of
 // showView so the nav rebuild (reconcileActiveView) can re-assert the highlight
@@ -20,7 +24,7 @@ let VIEWS = [...CORE_VIEWS];
 // onViewShown for chat/coder calls refreshPluginCommands, which calls renderNav
 // -> reconcileActiveView -> showView -> onViewShown, an infinite /api/plugins
 // loop.
-function _applyActiveClasses(name) {
+export function _applyActiveClasses(name) {
   for (const v of VIEWS) {
     const view = $("view-" + v), nav = $("nav-" + v);
     if (view) view.classList.toggle("active", v === name);
@@ -29,13 +33,13 @@ function _applyActiveClasses(name) {
 }
 
 /** R09/R10: is the Settings view currently the active one? */
-function isSettingsView() {
+export function isSettingsView() {
   const v = document.querySelector(".view.active");
   return !!v && v.id === "view-settings";
 }
 window.isSettingsView = isSettingsView;
 
-function showView(name) {
+export function showView(name) {
   // Fall back to chat for an unknown name OR a view whose section is gone
   // (e.g. a remembered tab whose plugin was since uninstalled). Tolerating a
   // missing nav/view element is what lets the nav rail be rebuilt at runtime.
@@ -62,13 +66,13 @@ for (const v of CORE_VIEWS) $("nav-" + v).onclick = () => showView(v);
 // On a narrow screen the sidebar is off-canvas; the hamburger in the top bar
 // toggles it, the backdrop or any navigation closes it. No-ops on desktop,
 // where the sidebar is always visible and the toggle/backdrop are hidden.
-function setNavOpen(open) {
+export function setNavOpen(open) {
   const app = $("app");
   if (app) app.classList.toggle("nav-open", open);
   const toggle = $("nav-toggle");
   if (toggle) toggle.setAttribute("aria-expanded", open ? "true" : "false");
 }
-function closeNav() { setNavOpen(false); }
+export function closeNav() { setNavOpen(false); }
 if ($("nav-toggle")) {
   $("nav-toggle").onclick = () => {
     const app = $("app");

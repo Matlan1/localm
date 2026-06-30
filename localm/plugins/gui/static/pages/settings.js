@@ -5,6 +5,10 @@
    resolve by bare name exactly as before. */
 "use strict";
 
+// --- ES module imports (auto-generated boundary; bodies unchanged) ---
+import { pickDirectory, pickFile } from "../app/coder.js";
+import { $, authHeaders, el, toast } from "../app/helpers.js";
+
 /* ================================================================ */
 /*  Settings page                                                    */
 /* ================================================================ */
@@ -22,22 +26,22 @@
 
 // The schema field list from the last successful fetch, keyed by field for the
 // save pass. Each entry mirrors a control: { field, read() }.
-let _settingsControls = [];
+export let _settingsControls = [];
 // Monotonic token so overlapping refreshes don't both render (the old text
 // dumper doubled every field when two refreshes raced; we keep the guard).
-let _settingsRenderToken = 0;
+export let _settingsRenderToken = 0;
 // The section the user explicitly navigated to (a section element id). Survives
 // re-renders so saving a section keeps you on it. Null = use the default tab.
-let _activeSettingsSection = null;
+export let _activeSettingsSection = null;
 
 // R10: track which setting inputs the user edited so we can warn before leaving
 // with unsaved changes. A control that is re-rendered (full settings refresh, or
 // the per-subsection media re-render in R12) disconnects its old node from the
 // DOM; the isConnected check below makes those stop counting, so the signal stays
 // honest without any per-save bookkeeping.
-const _dirtySettings = new Set();
-function markSettingDirty(input) { _dirtySettings.add(input); }
-function settingsDirty() {
+export const _dirtySettings = new Set();
+export function markSettingDirty(input) { _dirtySettings.add(input); }
+export function settingsDirty() {
   for (const n of _dirtySettings) if (n.isConnected) return true;
   return false;
 }
@@ -46,7 +50,7 @@ window.settingsDirty = settingsDirty;
 /** R09: Ctrl+S on the Settings page saves the active section. Clicks the core
  *  section's Save button, or (Media section) the first subsection's Save - reusing
  *  all the existing save/validation logic. Returns true when it triggered a save. */
-function saveActiveSettingsSection() {
+export function saveActiveSettingsSection() {
   const content = $("settings-content");
   if (!content) return false;
   const active = content.querySelector(".settings-section.active:not(.sec-hidden)");
@@ -61,7 +65,7 @@ window.saveActiveSettingsSection = saveActiveSettingsSection;
 
 /** Build one labelled control for a schema field. Returns { field, read } or
  *  null for HIDDEN fields (never rendered). */
-function buildSettingControl(field) {
+export function buildSettingControl(field) {
   if (field.widget === "hidden") return null;
   const value = field.default;     // current value (omitted for secrets)
 
@@ -215,7 +219,7 @@ function buildSettingControl(field) {
 
 // Fetch the server-rendered key QR (owner-scope) and show the "Pair a phone"
 // block. Hidden in open mode / when no key is configured (the endpoint 404s).
-async function refreshPairingQR() {
+export async function refreshPairingQR() {
   const wrap = $("pairing"), box = $("pairing-qr");
   if (!wrap || !box) return;
   try {
@@ -240,7 +244,7 @@ async function refreshPairingQR() {
 //   - hint : a one-line note when there is no reachable address to show - on the
 //            default loopback bind, how to bind to the network instead.
 // Pure + exported so the branches are unit-tested without a live server.
-function companionView(info, loc) {
+export function companionView(info, loc) {
   info = info || {};
   loc = loc || {};
   const proto = loc.protocol || "https:";
@@ -263,7 +267,7 @@ function companionView(info, loc) {
 // Fill the Companion-app card with the phone-reachable address(es) from
 // /api/companion, or a hint when there is none yet. Best-effort: a failed fetch
 // falls through to companionView's loopback-bind hint.
-async function refreshCompanion() {
+export async function refreshCompanion() {
   const list = $("companion-addrs"), hintEl = $("companion-hint");
   if (!list || !hintEl) return;
   let info = {};
@@ -289,7 +293,7 @@ async function refreshCompanion() {
 // Scopes offered in the GUI key minter (label per scope). Privileged scopes
 // (coder:full, admin) are shown but OWNER-ONLY: the /v1/keys API refuses them for
 // a non-owner key, so a keys:admin device cannot hand out shell / admin access.
-const KEY_SCOPES = [
+export const KEY_SCOPES = [
   ["coder", "Coder agent - restricted: read + edit this project (no shell)"],
   ["coder:full", "Coder agent - FULL: shell + edit (owner-only, dangerous)"],
   ["models:read", "List and inspect models"],
@@ -310,7 +314,7 @@ const KEY_SCOPES = [
 // (so a keys:admin device that lacks config:read still sees the bundles). Clicking a
 // preset sets the scope checkboxes; the OWNER can also save the current pick as a
 // preset or delete one (persisted via PATCH /v1/config, which needs config:write).
-function buildKeyPresets(presets, isOwner) {
+export function buildKeyPresets(presets, isOwner) {
   const box = $("key-presets");
   if (!box) return;
   box.replaceChildren();
@@ -337,7 +341,7 @@ function buildKeyPresets(presets, isOwner) {
   }
 }
 
-function applyKeyPreset(want) {
+export function applyKeyPreset(want) {
   const set = new Set(want), box = $("key-scopes");
   if (!box) return;
   for (const cb of box.querySelectorAll(".key-scope-cb")) {
@@ -348,7 +352,7 @@ function applyKeyPreset(want) {
 // Disable + dim the owner-only (privileged) scopes for a non-owner key minter, so a
 // keys:admin device cannot even try to mint a coder:full / admin key (the API would
 // 403 anyway; this avoids the confusing failed-submit round-trip).
-function applyOwnerGate(isOwner) {
+export function applyOwnerGate(isOwner) {
   for (const cb of document.querySelectorAll("#key-scopes .key-scope-cb")) {
     const ownerOnly = cb.value === "admin" || cb.value.endsWith(":full");
     cb.disabled = ownerOnly && !isOwner;
@@ -359,7 +363,7 @@ function applyOwnerGate(isOwner) {
 }
 
 // Owner-only: persist an edited preset list (PATCH /v1/config needs config:write).
-async function saveKeyPresets(presets) {
+export async function saveKeyPresets(presets) {
   const r = await fetch("/v1/config", {
     method: "PATCH",
     headers: { ...authHeaders(), "Content-Type": "application/json" },
@@ -372,7 +376,7 @@ async function saveKeyPresets(presets) {
   }
 }
 
-function saveCurrentAsPreset(presets) {
+export function saveCurrentAsPreset(presets) {
   const scopes = [...document.querySelectorAll("#key-scopes .key-scope-cb")]
     .filter((c) => c.checked).map((c) => c.value);
   if (!scopes.length) { toast("Check the scopes for the preset first"); return; }
@@ -383,14 +387,14 @@ function saveCurrentAsPreset(presets) {
   saveKeyPresets(next);
 }
 
-function deleteKeyPreset(name, presets) {
+export function deleteKeyPreset(name, presets) {
   if (!confirm(`Delete preset "${name}"?`)) return;
   saveKeyPresets(presets.filter((p) => p.name !== name));
 }
 
 // Server-rendered pairing QR for a freshly-minted SCOPED key: scan it in localm
 // on the other device to pair it with exactly these capabilities (no typing).
-async function renderKeyQR(box, key) {
+export async function renderKeyQR(box, key) {
   try {
     const r = await fetch("/api/pairing/qr", {
       method: "POST",
@@ -412,7 +416,7 @@ async function renderKeyQR(box, key) {
   } catch (e) { /* QR is best-effort; the copyable secret is the fallback */ }
 }
 
-function keyExpiryLabel(expires) {
+export function keyExpiryLabel(expires) {
   if (!expires) return "never expires";
   const ms = expires * 1000 - Date.now();
   if (ms <= 0) return "expired";
@@ -421,7 +425,7 @@ function keyExpiryLabel(expires) {
   return `expires in ${Math.max(1, Math.floor(ms / 3600000))}h`;
 }
 
-function keyLastUsedLabel(ts) {
+export function keyLastUsedLabel(ts) {
   if (!ts) return "unused";
   const ms = Date.now() - ts * 1000;
   if (ms < 0) return "used just now";
@@ -434,7 +438,7 @@ function keyLastUsedLabel(ts) {
 
 // Settings -> API keys: mint named, scope-limited keys, list them, revoke them.
 // Owner-gated (/v1/keys needs keys:admin); the card hides for a non-owner key.
-async function refreshKeysPanel() {
+export async function refreshKeysPanel() {
   const card = $("keys-card"), list = $("keys-list"), scopesBox = $("key-scopes");
   if (!card || !list || !scopesBox) return;
 
@@ -550,7 +554,7 @@ async function refreshKeysPanel() {
 }
 
 // Friendly section label per plugin owner (falls back to the capitalized scope).
-const PLUGIN_SECTION_LABEL = {
+export const PLUGIN_SECTION_LABEL = {
   image: "Image", web: "Web access", voice: "Voice", coder: "Coder",
   abliterate: "Abliterate", music: "Music", video: "Video", rag: "Knowledge",
   mcp: "MCP", chat: "Chat",
@@ -558,7 +562,7 @@ const PLUGIN_SECTION_LABEL = {
 
 /** Which settings section a field belongs to: each core `group` is its own
  *  section; each plugin (owner != core) is its own section (its own tab). */
-function settingsSectionOf(field) {
+export function settingsSectionOf(field) {
   if (field.owner && field.owner !== "core") {
     return {
       id: "plugin-" + field.owner,
@@ -571,7 +575,7 @@ function settingsSectionOf(field) {
 }
 
 /** Show one settings section (others hidden) and highlight its nav link. */
-function showSettingsSection(secId) {
+export function showSettingsSection(secId) {
   const content = $("settings-content");
   if (!content) return;
   for (const sec of content.querySelectorAll(".settings-section")) {
@@ -589,7 +593,7 @@ function showSettingsSection(secId) {
  *  (e.g. the owner-only keys card resolving) cannot bounce the selection back to a
  *  default. Used by the command palette to reach "Keys & devices" directly instead
  *  of hunting the settings sub-nav. */
-function gotoSettingsSection(secId) {
+export function gotoSettingsSection(secId) {
   _activeSettingsSection = secId;
   showSettingsSection(secId);
 }
@@ -600,7 +604,7 @@ window.gotoSettingsSection = gotoSettingsSection;
  *  The active tab is the user's explicit choice if still present, else the first
  *  config section - chosen deterministically so a stray rebuild (e.g. the
  *  owner-only keys panel resolving) can never leave a static card selected. */
-function buildSettingsNav() {
+export function buildSettingsNav() {
   const nav = $("settings-nav"), content = $("settings-content");
   if (!nav || !content) return;
   const secs = [...content.querySelectorAll(".settings-section")]
@@ -627,7 +631,7 @@ function buildSettingsNav() {
 }
 
 /** Save just one section: PATCH only the keys whose controls live in it. */
-async function saveSettingsSection(secId) {
+export async function saveSettingsSection(secId) {
   const panel = $("settings-sec-" + secId);
   if (!panel) return;
   const updates = {};
@@ -651,7 +655,7 @@ async function saveSettingsSection(secId) {
   }
 }
 
-async function refreshSettingsPage() {
+export async function refreshSettingsPage() {
   const myToken = ++_settingsRenderToken;
   _dirtySettings.clear();   // R10: a fresh render is a clean baseline
   $("gui-api-key").value = "";   // HttpOnly key is unreadable; field is for entry only
@@ -726,12 +730,12 @@ async function refreshSettingsPage() {
 }
 
 // Media plugins, in display order, that the Media section configures.
-const MEDIA_PLUGIN_ORDER = ["image", "music", "video"];
+export const MEDIA_PLUGIN_ORDER = ["image", "music", "video"];
 
 /** Did a media control's value change from what was displayed? Treats
  *  null/undefined/"" as the same "empty", so saving an untouched inherited field
  *  does not pin it as an override. */
-function _mediaChanged(cur, orig) {
+export function _mediaChanged(cur, orig) {
   const empty = (v) => v === null || v === undefined || v === "";
   if (empty(cur) && empty(orig)) return false;
   return cur !== orig;
@@ -741,7 +745,7 @@ function _mediaChanged(cur, orig) {
  *  (image/music/video), each editing that plugin's own ComfyUI config block via
  *  /v1/media/config. A field left at its inherited value is not sent, so the
  *  plugin keeps falling back to the shared default until the user overrides it. */
-async function buildMediaSection(form) {
+export async function buildMediaSection(form) {
   let data;
   try {
     const r = await fetch("/v1/media/config", { headers: authHeaders() });
@@ -796,13 +800,13 @@ async function buildMediaSection(form) {
 
 // R11/R12: live media subsection registry, so we can re-render just the saved one
 // (R12) and prefill fields between subsections client-side (R11).
-let _mediaSubs = {};        // name -> { sub: <div.media-subsection>, label, fields }
-let _mediaControls = {};    // name -> controls[] (each {field,node,read,write,orig})
+export let _mediaSubs = {};        // name -> { sub: <div.media-subsection>, label, fields }
+export let _mediaControls = {};    // name -> controls[] (each {field,node,read,write,orig})
 
 /** (Re)build one media subsection's body in place (head + grid + Copy-from + Save)
  *  from its registered fields. Used for the initial build and the R12 single-
  *  subsection re-render after a save. */
-function renderMediaSubsection(name) {
+export function renderMediaSubsection(name) {
   const entry = _mediaSubs[name];
   if (!entry) return;
   const { sub, label, fields } = entry;
@@ -883,7 +887,7 @@ function renderMediaSubsection(name) {
 /** R11: prefill the *to* subsection's shared fields from the *from* subsection's
  *  current in-DOM values. Prefill only (no server call); the user still presses
  *  Save. Only fields present in BOTH subsections are copied. */
-function copyMediaFields(from, to) {
+export function copyMediaFields(from, to) {
   const src = _mediaControls[from] || [];
   const dst = _mediaControls[to] || [];
   const byKey = {};
@@ -904,7 +908,7 @@ function copyMediaFields(from, to) {
 /** Save one media plugin's block: POST only the fields the user changed (so an
  *  untouched inherited field is not pinned), then re-render JUST this subsection
  *  (R12) so unsaved edits in the other subsections are preserved. */
-async function saveMediaPlugin(name) {
+export async function saveMediaPlugin(name) {
   const controls = _mediaControls[name] || [];
   const updates = {};
   for (const c of controls) {
