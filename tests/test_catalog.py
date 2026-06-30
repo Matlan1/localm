@@ -78,18 +78,22 @@ def _run_command(monkeypatch, raw):
     return buf.getvalue()
 
 
+# /knowledge (the rag plugin) is a catalogued verb that is NOT a built-in chat
+# REPL command, so it still exercises the unknown-command -> suggestion wiring.
+# (generate-image/music/video are now real REPL commands - see
+# tests/test_cli_repl_media.py - so they no longer fall through to the hint.)
 def test_unknown_plugin_command_suggests_install(cfg_env, monkeypatch):
-    out = _run_command(monkeypatch, "/generate-music")
-    assert "music plugin" in out
-    assert "localm plugin install music" in out
+    out = _run_command(monkeypatch, "/knowledge")
+    assert "rag plugin" in out
+    assert "localm plugin install rag" in out
     assert "Unknown" not in out
 
 
 def test_suggest_plugins_off_falls_back_to_unknown(cfg_env, monkeypatch):
     cfg_env.save_config({"suggest_plugins": False})
-    out = _run_command(monkeypatch, "/generate-music")
+    out = _run_command(monkeypatch, "/knowledge")
     assert "Unknown" in out
-    assert "music plugin" not in out
+    assert "rag plugin" not in out
 
 
 def test_genuinely_unknown_command_is_unknown(cfg_env, monkeypatch):
