@@ -1,9 +1,9 @@
-# Cloudflare Worker config for the localm bug-report proxy. See README.md.
+# Cloudflare Worker config for the localm proxy (report + issues + update). See README.md.
 name = "localm-bugreport-proxy"
 main = "worker.js"
 compatibility_date = "2024-11-01"
 
-# Public, non-secret config. Point this at the repo issues should land in.
+# Public, non-secret config. Point this at the repo issues + releases live in.
 [vars]
 TARGET_REPO = "Matlan1/localm"
 # Optional: comma-separated labels that ALREADY EXIST on the repo. Leave unset to
@@ -11,5 +11,8 @@ TARGET_REPO = "Matlan1/localm"
 # ISSUE_LABELS = "bug"
 
 # Secrets are NOT stored in this file. Set them once with wrangler (encrypted):
-#   wrangler secret put GITHUB_TOKEN    # fine-grained PAT: Issues = Read and write, this repo only
-#   wrangler secret put SHARED_SECRET   # optional; if set, the app must send X-Localm-Token
+#   wrangler secret put GITHUB_TOKEN          # PAT: Issues = Read and write (report + issues list)
+#   wrangler secret put SHARED_SECRET         # required for the update routes (gate)
+#   wrangler secret put UPDATE_GITHUB_TOKEN   # SEPARATE PAT: Contents = Read only (releases/builds)
+# The issue token cannot read code; the update token cannot write. SHARED_SECRET is
+# REQUIRED once you enable updates (the update routes serve private builds).
