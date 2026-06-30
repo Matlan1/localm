@@ -188,9 +188,9 @@ test("update/download: streams the asset via the signed redirect", async () => {
     if (url.includes("/releases/assets/")) {
       // asset API: a 302 to a signed URL (no auth on the follow-up)
       return { status: 302, ok: false, headers: { get: (k) =>
-        k.toLowerCase() === "location" ? "https://signed.example/blob" : null } };
+        k.toLowerCase() === "location" ? "https://objects.githubusercontent.com/blob" : null } };
     }
-    if (url === "https://signed.example/blob") {
+    if (url === "https://objects.githubusercontent.com/blob") {
       return new Response("PKbuildzip", { status: 200, headers: { "content-length": "10" } });
     }
     return new Response("{}", { status: 404 });
@@ -202,6 +202,24 @@ test("update/download: streams the asset via the signed redirect", async () => {
     assert.equal(r.headers.get("Content-Type"), "application/zip");
     const text = await r.text();
     assert.match(text, /buildzip/);
+  } finally { restore(); }
+});
+
+test("update/download: rejects a redirect to a non-GitHub host (no SSRF)", async () => {
+  let followed = false;
+  const restore = stubFetch(async (url) => {
+    if (url.includes("/releases/assets/")) {
+      return { status: 302, ok: false, headers: { get: (k) =>
+        k.toLowerCase() === "location" ? "https://evil.example/secret" : null } };
+    }
+    followed = true; // must NOT be reached
+    return new Response("leaked", { status: 200 });
+  });
+  try {
+    const r = await worker.fetch(
+      req(undefined, { method: "GET", path: "/update/download?id=2", headers: { "X-Localm-Token": "s3cret" } }), ENV_UP);
+    assert.equal(r.status, 502);
+    assert.equal(followed, false, "must not fetch an unexpected redirect host");
   } finally { restore(); }
 });
 

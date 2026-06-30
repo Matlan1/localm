@@ -153,3 +153,61 @@ def test_post_swap_command_per_class():
     assert au.post_swap_command("deps")[:3] == ["uv", "pip", "install"]
     assert au.post_swap_command("runtime", backend="cuda")[-1] == "cuda"
     assert au.post_swap_command("setup") is None
+
+
+# ---------------------- safe extraction (zip slip) ----------------------
+
+def test_extract_rejects_traversal_member(tmp_path):
+    zp = tmp_path / "b.zip"
+    _make_zip(zp, {"VERSION": "0.2.0", "pyproject.toml": "x", "../evil.txt": "pwn"})
+    with pytest.raises(ValueError):
+        au.extract(zp, tmp_path / "stg")
+    # Nothing escaped the staging dir.
+    assert not (tmp_path / "evil.txt").exists()
+
+
+def test_extract_rejects_absolute_member(tmp_path):
+    zp = tmp_path / "b.zip"
+    _make_zip(zp, {"VERSION": "0.2.0", "pyproject.toml": "x", "/abs/evil.txt": "pwn"})
+    with pytest.raises(ValueError):
+        au.extract(zp, tmp_path / "stg")
+
+
+def test_unsafe_member_detection():
+    assert au._unsafe_member("../evil") is True
+    assert au._unsafe_member("a/../../evil") is True
+    assert au._unsafe_member("/etc/passwd") is True
+    assert au._unsafe_member("C:/windows") is True
+    assert au._unsafe_member("localm/foo.py") is False
+    assert au._unsafe_member("VERSION") is False
+    assert au._unsafe_member("a..b/c") is False   # '..' only as a path component counts
+
+
+# ----------------- rollback surfaces restore failures -------------------
+
+def test_rollback_raises_when_a_restore_fails(tmp_path, monkeypatch):
+    inst, bdir = tmp_path / "inst", tmp_path / "bak"
+    inst.mkdir(); bdir.mkdir()
+    (bdir / "localm").mkdir()
+    (bdir / "localm" / "x.py").write_text("orig", encoding="utf-8")
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(au.shutil, "copytree", boom)   # restore fails
+    with pytest.raises(RuntimeError, match="rollback incomplete"):
+        au.rollback(bdir, inst, ["localm"])
+
+
+def test_swap_with_backup_surfaces_double_failure(tmp_path, monkeypatch):
+    staged, inst, bdir = tmp_path / "s", tmp_path / "i", tmp_path / "b"
+    staged.mkdir(); inst.mkdir()
+    (staged / "VERSION").write_text("0.2.0", encoding="utf-8")
+
+    def raise_os(*a, **k):
+        raise OSError("boom")
+
+    monkeypatch.setattr(au, "apply_files", raise_os)   # swap fails
+    monkeypatch.setattr(au, "rollback", raise_os)      # AND rollback fails
+    with pytest.raises(RuntimeError, match="rollback also failed"):
+        au.swap_with_backup(staged, inst, bdir)

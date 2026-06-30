@@ -138,7 +138,7 @@ def classify(staged_dir, installed_dir=None, manifest: Optional[dict] = None) ->
     if isinstance(manifest, dict) and manifest.get("needs") in _ORDER:
         klass = _max_class(klass, manifest["needs"])
     new_py, old_py = _requires_python(staged), _requires_python(installed)
-    if new_py and new_py != old_py:
+    if new_py != old_py:   # any change INCLUDING removal (empty new) needs setup
         klass = _max_class(klass, "setup")
     if _deps_set(staged) != _deps_set(installed):
         klass = _max_class(klass, "deps")
@@ -233,20 +233,43 @@ def apply(asset_id, *, installed=None, download_opener=None, runner=None) -> dic
     klass = classify(root, target, read_manifest(root))
     names = au.swap_with_backup(root, target, backup_dir)
 
-    cmd = au.post_swap_command(klass)
+    cmd = au.post_swap_command(klass, backend=_installed_backend())
     if cmd:
         run = runner or (lambda c: subprocess.run(c, cwd=str(target)).returncode)
+
+        def _rollback_or_raise(why):
+            # If recovery ITSELF fails, say so loudly - never report a clean rollback
+            # over a broken install (we do not hide problems).
+            try:
+                au.rollback(backup_dir, target, names)
+            except Exception as rb:
+                raise LocalmError(
+                    "the post-update step failed AND rollback failed - manual recovery needed",
+                    reason=f"{why}; rollback: {rb}; restore from {backup_dir}")
+
         try:
             rc = int(run(cmd))
         except Exception as e:
-            au.rollback(backup_dir, target, names)
+            _rollback_or_raise(f"post-update step crashed: {e}")
             raise LocalmError("the post-update step crashed; rolled back", reason=str(e))
         if rc != 0:
-            au.rollback(backup_dir, target, names)
+            _rollback_or_raise(f"{cmd[0]} exited {rc}")
             raise LocalmError("the post-update step failed; rolled back",
                               reason=f"{cmd[0]} exited {rc}")
     return {"applied": True, "version": new_version, "klass": klass,
             "backup": str(backup_dir), "restart_needed": True}
+
+
+def _installed_backend() -> str:
+    """Best-effort backend for a runtime re-provision: the hwdetect recommendation
+    (the same universal-safe policy setup uses), defaulting to the vendor-neutral
+    'vulkan'. The install manifest does not record the chosen backend, so this is a
+    detection, not a lookup."""
+    try:
+        from localm import hwdetect
+        return hwdetect.detect().recommended or "vulkan"
+    except Exception:
+        return "vulkan"
 
 
 def rollback_last(*, installed=None) -> dict:

@@ -54,14 +54,37 @@ def verify_zip(zip_path) -> None:
                          "(no VERSION + pyproject.toml)")
 
 
+def _unsafe_member(name: str) -> bool:
+    """True if a zip member name would escape the extraction root: an absolute path,
+    a Windows drive (``C:``), or any ``..`` traversal component. We reject these
+    OUTRIGHT rather than rely on extractall's silent sanitization, which would still
+    drop a sanitized name (``../evil`` -> ``evil``) at the staging root where
+    swap_entries() would then pick it up and copy it into the install."""
+    norm = (name or "").replace("\\", "/")
+    if not norm:
+        return False
+    if norm.startswith("/"):
+        return True
+    if len(norm) >= 2 and norm[1] == ":":   # drive letter (C:...)
+        return True
+    return ".." in norm.split("/")
+
+
 def extract(zip_path, staging) -> Path:
     """Extract *zip_path* into *staging* (cleared first) and return the source root -
-    descending into a single wrapper directory if the archive has one."""
+    descending into a single wrapper directory if the archive has one.
+
+    REJECTS any member whose path would escape the staging dir (absolute path, drive
+    letter, or ``..`` traversal), so a crafted build cannot write outside staging or
+    plant top-level debris via a sanitized name."""
     staging = Path(staging)
     if staging.exists():
         shutil.rmtree(staging)
     staging.mkdir(parents=True)
     with zipfile.ZipFile(zip_path) as z:
+        for member in z.namelist():
+            if _unsafe_member(member):
+                raise ValueError(f"unsafe path in update archive: {member!r}")
         z.extractall(staging)
     if not (staging / "VERSION").exists():
         entries = list(staging.iterdir())
@@ -119,23 +142,37 @@ def apply_files(staged_root, installed, names) -> None:
 def rollback(backup_dir, installed, names) -> None:
     """Undo a swap: remove the swapped *names* from the install, then restore
     whatever was backed up. A name that was NEW (absent from the backup) is therefore
-    removed and not restored - the correct pre-apply state."""
+    removed and not restored - the correct pre-apply state.
+
+    Raises RuntimeError listing any restore operation that FAILED, so a failed
+    rollback is NEVER silently reported as a success (we do not hide problems). The
+    backup dir is left intact for manual recovery. Best-effort: it attempts every
+    name even if one fails, then reports the collected failures."""
     backup_dir, installed = Path(backup_dir), Path(installed)
+    errors = []
     for name in names:
         dst = installed / name
-        if dst.exists():
-            if dst.is_dir():
-                shutil.rmtree(dst)
-            else:
-                dst.unlink()
-    if not backup_dir.exists():
-        return
-    for entry in backup_dir.iterdir():
-        dst = installed / entry.name
-        if entry.is_dir():
-            shutil.copytree(entry, dst)
-        else:
-            shutil.copy2(entry, dst)
+        try:
+            if dst.exists():
+                if dst.is_dir():
+                    shutil.rmtree(dst)
+                else:
+                    dst.unlink()
+        except OSError as e:
+            errors.append(f"remove {name}: {e}")
+    if backup_dir.exists():
+        for entry in backup_dir.iterdir():
+            dst = installed / entry.name
+            try:
+                if entry.is_dir():
+                    shutil.copytree(entry, dst)
+                else:
+                    shutil.copy2(entry, dst)
+            except OSError as e:
+                errors.append(f"restore {entry.name}: {e}")
+    if errors:
+        raise RuntimeError(
+            f"rollback incomplete (backup kept at {backup_dir}): " + "; ".join(errors[:6]))
 
 
 def swap_with_backup(staged_root, installed, backup_dir) -> list:
@@ -146,8 +183,15 @@ def swap_with_backup(staged_root, installed, backup_dir) -> list:
     backup(installed, names, backup_dir)
     try:
         apply_files(staged_root, installed, names)
-    except Exception:
-        rollback(backup_dir, installed, names)
+    except Exception as swap_err:
+        try:
+            rollback(backup_dir, installed, names)
+        except Exception as rb:
+            # Both the swap AND the recovery failed - surface both; never pretend the
+            # tree is intact. The backup dir is kept for manual restore.
+            raise RuntimeError(
+                f"update swap failed ({swap_err}) AND rollback also failed ({rb}); "
+                f"the install may be inconsistent - restore from {backup_dir}") from swap_err
         raise
     return names
 

@@ -158,6 +158,12 @@ async function downloadBuild(request, env, url) {
   if (r1.status === 301 || r1.status === 302 || r1.status === 307 || r1.status === 308) {
     const loc = r1.headers.get("location");
     if (!loc) return json({ error: "asset redirect had no location" }, 502);
+    // Constrain the redirect target: GitHub asset downloads redirect to a signed URL
+    // on a GitHub/AWS asset host. Refuse anything else so a surprising Location cannot
+    // turn this into an SSRF that fetches an arbitrary URL.
+    if (!redirectHostAllowed(loc)) {
+      return json({ error: "asset redirect to an unexpected host" }, 502);
+    }
     upstream = await fetch(loc); // signed URL: no auth header
   }
   if (!upstream.ok || !upstream.body) {
@@ -199,6 +205,19 @@ function cors(resp) {
   resp.headers.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   resp.headers.set("Access-Control-Allow-Headers", "Content-Type, X-Localm-Token");
   return resp;
+}
+
+// Allow only GitHub / GitHub-AWS asset hosts as a release-asset redirect target, so
+// the manual redirect-follow in /update/download cannot be steered into an SSRF.
+function redirectHostAllowed(loc) {
+  let host;
+  try { host = new URL(loc).hostname.toLowerCase(); } catch { return false; }
+  return host === "github.com" ||
+    host === "api.github.com" ||
+    host === "codeload.github.com" ||
+    host.endsWith(".githubusercontent.com") ||   // objects/release-assets.githubusercontent.com
+    host.endsWith(".s3.amazonaws.com") ||         // github-cloud.s3.amazonaws.com
+    host === "github-cloud.s3.amazonaws.com";
 }
 
 // Constant-time-ish compare so the secret check does not leak its contents via

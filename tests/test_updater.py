@@ -122,6 +122,16 @@ def test_classify_setup_on_python_change(tmp_path):
     assert updater.classify(stg, inst) == "setup"
 
 
+def test_classify_setup_when_requires_python_removed(tmp_path):
+    # Installed pins requires-python; the staged build drops it -> still a setup change.
+    inst, stg = tmp_path / "i", tmp_path / "s"
+    inst.mkdir(); stg.mkdir()
+    _write_pyproject(inst, ["click"], requires_python="==3.12.*")
+    (stg / "pyproject.toml").write_text(
+        '[project]\nname = "localm"\ndependencies = ["click"]\n', encoding="utf-8")
+    assert updater.classify(stg, inst) == "setup"
+
+
 def test_classify_manifest_escalates_to_runtime(tmp_path):
     inst, stg = tmp_path / "i", tmp_path / "s"
     inst.mkdir(); stg.mkdir()
@@ -251,6 +261,25 @@ def test_rollback_last_restores(tmp_path, monkeypatch):
     updater.rollback_last(installed=inst)
     assert (inst / "VERSION").read_text().strip() == "0.1.0"
     assert (inst / "localm" / "__init__.py").read_text() == "# 0.1.0"
+
+
+def test_apply_surfaces_rollback_failure(tmp_path, monkeypatch):
+    """If the post-update step fails AND rollback also fails, apply() must say so
+    (manual recovery needed) - never report a clean rollback over a broken install."""
+    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
+    inst = _fake_install(tmp_path, deps=("click",))
+    from localm import _apply_update as au
+    from localm.bugreport import LocalmError
+
+    def rb_fail(*a, **k):
+        raise OSError("rollback boom")
+
+    monkeypatch.setattr(au, "rollback", rb_fail)
+    with pytest.raises(LocalmError, match="rollback failed"):
+        updater.apply(5, installed=inst,
+                      download_opener=_build_zip_opener("0.2.0", ["click", "httpx"]),  # deps -> post cmd
+                      runner=lambda c: 1)  # post step fails -> rollback attempted -> also fails
 
 
 def test_rollback_last_without_backup_raises(tmp_path, monkeypatch):
