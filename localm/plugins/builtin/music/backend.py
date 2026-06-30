@@ -59,8 +59,14 @@ def settings(full_config: dict) -> dict:
     """Resolve the music plugin's effective backend settings."""
     block, warning = media_config.resolve_config("music", full_config)
     comfy_blk = block.get("comfy") if isinstance(block.get("comfy"), dict) else {}
+    backend_name = block.get("backend", "comfy")
+    # We do not hide problems: when the configured backend cannot be loaded the
+    # job still falls back to comfy (best-effort), but say so instead of silently
+    # pretending the chosen backend is active.
+    warning = media_config.combine_warnings(
+        warning, media_config.backend_unavailable_warning(__package__, backend_name))
     return {
-        "backend": block.get("backend", "comfy"),
+        "backend": backend_name,
         "api_url": (comfy_blk.get("api_url") or _comfy.default_api_url()).rstrip("/"),
         "launch_cmd": comfy_blk.get("launch_cmd")
         or full_config.get("comfy_launch_cmd", "") or "",
@@ -143,7 +149,7 @@ def _impl(s: dict):
     """The backend for s['backend']: the inline ComfyUI reference for 'comfy'
     (the default), else backends/<name>.py loaded by media_config. An unknown or
     missing backend name falls back to comfy so a typo never hard-crashes a
-    generate."""
+    generate (the settings 'warning' already carries config notes)."""
     name = (s.get("backend") or "comfy").strip().lower()
     if name in ("", "comfy"):
         return _COMFY_REF
