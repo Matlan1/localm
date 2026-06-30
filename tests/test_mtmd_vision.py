@@ -9,7 +9,12 @@ import base64
 import io
 
 import pytest
-from PIL import Image
+
+# Pillow ships only with the [gpu] extra, which CI deliberately does not install
+# (the ci.yml Tests step uses [dev,rag] only). Skip cleanly when it is absent so
+# the suite still collects, matching the repo convention that gpu/gguf-tier tests
+# importorskip themselves rather than break collection for everyone.
+Image = pytest.importorskip("PIL.Image")
 
 
 def _data_url(w=8, h=8):

@@ -967,7 +967,11 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
             "id": model_id,
             "object": "model",
             "owned_by": "localm",
-            "path": Path(path).name if path else "",  # basename only; never leak the absolute path
+            # Basename only; never leak the absolute path. Normalise backslashes
+            # to "/" first so the guarantee holds for a Windows-style path even on
+            # POSIX, where Path(...).name would not split on "\\" and would leak
+            # the whole directory (registry entries can carry either separator).
+            "path": Path(str(path).replace("\\", "/")).name if path else "",
             "source": entry.get("source", ""),
             "sha256": entry.get("sha256"),
             "size_bytes": size,

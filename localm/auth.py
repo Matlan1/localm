@@ -323,7 +323,13 @@ def _touch_last_used(key_hash: str) -> None:
         return
     now = time.monotonic()
     with _LAST_USED_LOCK:
-        if now - _last_used_writes.get(key_hash, 0.0) < _LAST_USED_THROTTLE_S:
+        # Use dict-ABSENCE (not a 0.0 sentinel) for "never stamped this process":
+        # time.monotonic()'s epoch is platform-defined and is seconds-since-boot
+        # on Linux, so on a freshly-booted machine `now` can be < the throttle
+        # window and `now - 0.0` would wrongly throttle the very FIRST stamp,
+        # leaving last_used None until 5 min of uptime had passed.
+        prev = _last_used_writes.get(key_hash)
+        if prev is not None and now - prev < _LAST_USED_THROTTLE_S:
             return
         _last_used_writes[key_hash] = now
     try:

@@ -131,6 +131,9 @@ abliterate = []
 dev = [
     "ruff>=0.15.17",
     "pytest>=8.0",
+    # Coverage measurement (TEST-1). Visibility only for now: CI publishes a
+    # number, there is no --cov-fail-under gate. See [tool.coverage] below.
+    "pytest-cov>=5.0",
 ]
 
 [project.scripts]
@@ -185,3 +188,30 @@ target-version = "py310"
 # rest of ruff's default E set. The unused-import/variable backlog has been
 # cleared and CI's ruff step is now blocking (.github/workflows/ci.yml).
 ignore = ["E741", "E701", "E702", "E402"]
+
+# Coverage measurement (TEST-1). This is for VISIBILITY: CI prints a number and
+# uploads coverage.xml; there is intentionally no --cov-fail-under gate yet, so a
+# low number never fails a build. Run locally with:
+#   pytest -m "not integration" --cov=localm --cov-report=term-missing
+[tool.coverage.run]
+source = ["localm"]
+# Branch coverage matters here: the debt this measures is concentrated in a few
+# very large, heavily-branched functions (e.g. create_app), so line coverage
+# alone would overstate how exercised they are.
+branch = true
+omit = [
+    # Module entry shims that only run when the package is executed, not imported
+    # by the unit suite; counting them just depresses the number with dead noise.
+    "localm/__main__.py",
+    "localm/*/__main__.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+# Keep coverage's default "pragma: no cover" and ADD these intentionally
+# unreachable-in-tests lines so they do not count against the number.
+exclude_also = [
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]

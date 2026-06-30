@@ -39,7 +39,13 @@ class TestSplitGgufParts:
         assert len(parts) == 2
 
     def test_path_with_directory(self):
-        parts = split_gguf_parts(r"D:\models\m-00001-of-00002.gguf")
+        # A path with a leading directory still reduces to the bare part names.
+        # Use the platform's own separator: split_gguf_parts strips the dir via
+        # Path(...).name, which only recognises the NATIVE separator, so a
+        # hardcoded Windows "D:\\..." path would not split on POSIX.
+        import os
+        p = os.path.join("models", "m-00001-of-00002.gguf")
+        parts = split_gguf_parts(p)
         assert parts == ["m-00001-of-00002.gguf", "m-00002-of-00002.gguf"]
 
     def test_non_gguf_extension_returns_none(self):

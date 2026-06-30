@@ -23,6 +23,7 @@ plain ``import``, so we load it from its file path.
 
 from __future__ import annotations
 
+import importlib.machinery
 import importlib.util
 from pathlib import Path
 
@@ -38,7 +39,12 @@ def _load_launcher():
     The module only ``import``s tkinter at load time (it does not build a root
     window until ``Launcher()`` is constructed), so this is safe headless.
     """
-    spec = importlib.util.spec_from_file_location("localm_launcher", str(LAUNCHER_PATH))
+    # launcher.pyw uses the .pyw suffix, which is a recognized Python source
+    # suffix only on Windows. On POSIX spec_from_file_location cannot infer a
+    # loader for it and returns None, so pass an explicit SourceFileLoader to
+    # load it as plain source on every platform.
+    loader = importlib.machinery.SourceFileLoader("localm_launcher", str(LAUNCHER_PATH))
+    spec = importlib.util.spec_from_file_location("localm_launcher", str(LAUNCHER_PATH), loader=loader)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
