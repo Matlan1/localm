@@ -270,7 +270,11 @@ def reap_stale(home: Path, *, self_id: Optional[str] = None,
     d = run_dir(home)
     if not d.is_dir():
         return []
-    alive = is_alive or (lambda e: pid_alive(int(e.get("pid", -1))))
+    # `or -1` so a null/empty pid (a malformed entry) reads as a dead process and
+    # is reaped, consistent with find_attachable(); without it int(None) raises a
+    # TypeError that the probe-guard below swallows, KEEPING the corrupt entry
+    # forever (it would never be cleaned and never be attachable).
+    alive = is_alive or (lambda e: pid_alive(int(e.get("pid", -1) or -1)))
     removed: list[str] = []
     for f in sorted(d.glob("*.json")):
         entry = read_entry(f)

@@ -173,7 +173,15 @@ def _repo_runtime_lib() -> Path:
     try:
         import localm_llama_runtime
         return Path(localm_llama_runtime.LIB_DIR)
-    except Exception:
+    except Exception as e:
+        # The wheel is legitimately ABSENT before `setup-llama` installs it, so
+        # the repo-relative fallback is correct then - do NOT hard-fail. But a
+        # BROKEN install (import error other than not-found) would otherwise be
+        # invisible and lead to loading stale binaries, so surface it at debug
+        # level (rule 5: do not silence) without breaking the not-yet-installed
+        # path. Mirrors the visible-fallback pattern in _auto_backend below.
+        logger.debug("localm_llama_runtime import failed (%s); "
+                     "using the repo-relative runtime lib dir", e)
         repo_root = Path(__file__).resolve().parent.parent
         return repo_root / "runtime" / "localm_llama_runtime" / "lib"
 
@@ -368,10 +376,40 @@ def _validate_archive(
             )
 
 
+def _safe_extractall_tar(tf: tarfile.TarFile, dest: Path) -> None:
+    """Path-traversal-safe tar extraction for Python < 3.12, which has no
+    extraction ``filter`` keyword. Backports the 'data' filter's core guarantee:
+    every member, and every symlink/hardlink TARGET, must resolve INSIDE *dest*.
+    Absolute, drive-letter, ``..`` and escaping-link members are refused. On
+    Python 3.12+ ``filter="data"`` is used directly (see _extract_archive), so
+    this is only the older-interpreter path - but it must be just as safe."""
+    dest_resolved = dest.resolve()
+
+    def _contained(p: Path) -> bool:
+        rp = p.resolve()
+        return rp == dest_resolved or dest_resolved in rp.parents
+
+    for m in tf.getmembers():
+        name = m.name
+        if name.startswith(("/", "\\")) or ".." in Path(name).parts \
+                or (len(name) > 1 and name[1] == ":"):
+            raise ArtifactError(f"unsafe path in archive: {name!r}")
+        if not _contained(dest / name):
+            raise ArtifactError(f"unsafe path in archive: {name!r}")
+        if m.issym() or m.islnk():
+            link = m.linkname
+            if link.startswith(("/", "\\")) or (len(link) > 1 and link[1] == ":") \
+                    or not _contained(dest / Path(name).parent / link):
+                raise ArtifactError(
+                    f"unsafe link target in archive: {name!r} -> {link!r}")
+    tf.extractall(dest)
+
+
 def _extract_archive(path: Path, dest: Path) -> None:
     """Extract a validated zip or tar.gz into *dest*, refusing any member that
     would escape *dest* (an absolute path, a drive letter, or a ``..`` segment).
-    Tar uses the 'data' filter (Python 3.12+) for the same guarantee."""
+    Tar uses the 'data' filter (Python 3.12+), or a hand-rolled equivalent
+    (_safe_extractall_tar) on older interpreters, for the same guarantee."""
     if zipfile.is_zipfile(path):
         with zipfile.ZipFile(path) as zf:
             for n in zf.namelist():
@@ -384,7 +422,7 @@ def _extract_archive(path: Path, dest: Path) -> None:
         try:
             tf.extractall(dest, filter="data")     # py3.12+: path-traversal safe
         except TypeError:
-            tf.extractall(dest)                    # older python: best effort
+            _safe_extractall_tar(tf, dest)         # py<3.12: same guarantee, by hand
 
 
 # Fallback notice written next to the bundled binaries when the upstream archive
