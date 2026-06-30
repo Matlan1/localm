@@ -9,6 +9,8 @@ caching (cheap 304s via the ETag) but forces a revalidation every load, so the
 server - not the user - delivers current code.
 """
 
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -22,10 +24,27 @@ def _client():
     return TestClient(app)
 
 
+_STATIC = Path(__file__).resolve().parents[1] / "localm" / "plugins" / "gui" / "static"
+
+
+def _a_served_js() -> str:
+    """A served GUI JS module path that exists, robust to the ESM split (app.js and
+    pages.js became app/*.js + pages/*.js). Excludes the service worker
+    (special-cased separately) and vendored third-party libs."""
+    for p in sorted(_STATIC.rglob("*.js")):
+        if "vendor" in p.parts or p.name == "sw.js":
+            continue
+        return "/" + p.relative_to(_STATIC).as_posix()
+    raise AssertionError("no served GUI JS module found under static/")
+
+
 def test_assets_revalidate():
-    """app.js / style.css / pages.js / sw.js must carry Cache-Control: no-cache."""
+    """JS/CSS assets must carry Cache-Control: no-cache so new code is picked up
+    without a manual cache clear. Covers a per-module JS file discovered under
+    static/ (ARCH-1 split app.js/pages.js into app/*.js + pages/*.js) to prove the
+    policy reaches subdirectory assets, not just top-level files."""
     with _client() as c:
-        for path in ("/app.js", "/style.css", "/pages.js", "/sw.js"):
+        for path in ("/style.css", "/sw.js", _a_served_js()):
             r = c.get(path)
             assert r.status_code == 200, path
             assert "no-cache" in r.headers.get("cache-control", ""), (
@@ -47,8 +66,9 @@ def test_unchanged_asset_can_304():
     """no-cache is not no-store: an unchanged asset still revalidates to a cheap
     304 (the ETag round-trip), so caching efficiency is preserved."""
     with _client() as c:
-        r1 = c.get("/app.js")
+        asset = _a_served_js()
+        r1 = c.get(asset)
         etag = r1.headers.get("etag")
         assert etag, "StaticFiles should still send an ETag for conditional requests"
-        r2 = c.get("/app.js", headers={"If-None-Match": etag})
+        r2 = c.get(asset, headers={"If-None-Match": etag})
         assert r2.status_code == 304

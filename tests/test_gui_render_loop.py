@@ -22,8 +22,19 @@ import re
 from pathlib import Path
 
 _STATIC = Path(__file__).resolve().parents[1] / "localm" / "plugins" / "gui" / "static"
-APP_JS = _STATIC / "app.js"
-PAGES_JS = _STATIC / "pages.js"
+
+
+def _all_js() -> str:
+    """The shipped GUI JS as one string. ARCH-1 split the old monolithic app.js
+    and pages.js into ES modules under app/ and pages/, so read EVERY .js under
+    static/ (recursively, minus vendored third-party libs). The guarded functions
+    are unique by name, so which module holds one no longer matters - this survives
+    the split regardless of how the modules end up arranged."""
+    return "\n".join(
+        p.read_text(encoding="utf-8")
+        for p in sorted(_STATIC.rglob("*.js"))
+        if "vendor" not in p.parts
+    )
 
 
 def _func_body(src: str, name: str) -> str:
@@ -49,14 +60,14 @@ def _strip_line_comments(src: str) -> str:
 
 
 def test_apply_active_classes_helper_exists():
-    src = APP_JS.read_text(encoding="utf-8")
+    src = _all_js()
     assert "function _applyActiveClasses(" in src, (
         "_applyActiveClasses (highlight-only re-assert, split out of showView) is "
         "missing - without it the nav rebuild re-fires onViewShown and loops")
 
 
 def test_showview_uses_apply_active_classes():
-    body = _func_body(APP_JS.read_text(encoding="utf-8"), "showView")
+    body = _func_body(_all_js(), "showView")
     assert "_applyActiveClasses(" in body
 
 
@@ -65,7 +76,7 @@ def test_reconcile_active_view_does_not_reenter_showview():
     that re-enters onViewShown and recreates the /api/plugins loop. Only the
     fallback showView("chat") is allowed."""
     body = _strip_line_comments(
-        _func_body(APP_JS.read_text(encoding="utf-8"), "reconcileActiveView"))
+        _func_body(_all_js(), "reconcileActiveView"))
     assert "_applyActiveClasses(" in body, (
         "reconcileActiveView must re-assert the highlight via _applyActiveClasses")
     for arg in re.findall(r"showView\(([^)]*)\)", body):
@@ -79,6 +90,6 @@ def test_reconcile_active_view_does_not_reenter_showview():
 def test_settings_render_is_guarded_against_overlap():
     """refreshSettingsPage must guard overlapping renders with a token so two
     concurrent calls can't double-render the form (the 60-vs-30 inputs bug)."""
-    body = _func_body(PAGES_JS.read_text(encoding="utf-8"), "refreshSettingsPage")
+    body = _func_body(_all_js(), "refreshSettingsPage")
     assert "_settingsRenderToken" in body, (
         "refreshSettingsPage must use a render token to drop superseded renders")

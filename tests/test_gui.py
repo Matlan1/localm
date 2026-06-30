@@ -762,7 +762,13 @@ class TestStaticFiles:
             r = client.get("/")
             assert r.status_code == 200
             assert "localm" in r.text
-            assert client.get("/app.js").status_code == 200
+            # app.js was split into app/*.js ES modules (ARCH-1); assert a
+            # representative JS module is served, discovered so this survives
+            # further module reshuffling. vendor libs + the SW are not "the app".
+            _static = Path(__file__).resolve().parents[1] / "localm" / "plugins" / "gui" / "static"
+            _a_js = next(p for p in sorted(_static.rglob("*.js"))
+                         if "vendor" not in p.parts and p.name != "sw.js")
+            assert client.get("/" + _a_js.relative_to(_static).as_posix()).status_code == 200
             assert client.get("/style.css").status_code == 200
             assert client.get("/vendor/marked.min.js").status_code == 200
 

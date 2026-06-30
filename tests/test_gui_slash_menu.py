@@ -17,8 +17,19 @@ close-on-space behavior is removed. The behavioral proof is the live GUI test.""
 import re
 from pathlib import Path
 
-APP_JS = (Path(__file__).resolve().parents[1]
-          / "localm" / "plugins" / "gui" / "static" / "app.js")
+_STATIC = (Path(__file__).resolve().parents[1]
+           / "localm" / "plugins" / "gui" / "static")
+
+
+def _all_js() -> str:
+    """All shipped GUI JS as one string. ARCH-1 split app.js into ES modules under
+    app/, so read every .js under static/ (recursively, minus vendored libs);
+    attachSlashMenu is unique by name, so which module holds it does not matter."""
+    return "\n".join(
+        p.read_text(encoding="utf-8")
+        for p in sorted(_STATIC.rglob("*.js"))
+        if "vendor" not in p.parts
+    )
 
 
 def _func_body(src: str, name: str) -> str:
@@ -43,8 +54,7 @@ def test_slash_menu_closes_once_past_the_command_token():
     """attachSlashMenu must close the menu when the input has a space after the
     command (args being typed), so Enter sends the full line instead of pick()
     discarding the args."""
-    body = _strip_line_comments(_func_body(APP_JS.read_text(encoding="utf-8"),
-                                           "attachSlashMenu"))
+    body = _strip_line_comments(_func_body(_all_js(), "attachSlashMenu"))
     # A guard that, when the post-"/" text contains a space, closes the menu.
     assert re.search(r'includes\("\s"\)\s*\)\s*\{\s*close\(\)', body), (
         "slash menu must close once a space is typed past the command token; "
