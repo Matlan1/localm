@@ -756,9 +756,22 @@
 <script src="/vendor/highlight.min.js"></script>
 <script src="/vendor/katex.min.js"></script>
 <script src="/vendor/auto-render.min.js"></script>
-<script src="/app.js"></script>
+<!-- app.js was split per section (same load order; classic scripts sharing one
+     global lexical environment). See localm/plugins/gui/static/app/. -->
+<script src="/app/client-log.js"></script>
+<script src="/app/helpers.js"></script>
+<script src="/app/theme.js"></script>
+<script src="/app/logo.js"></script>
+<script src="/app/tabs.js"></script>
+<script src="/app/models-sidebar.js"></script>
+<script src="/app/chat.js"></script>
+<script src="/app/cmdk.js"></script>
+<script src="/app/settings-perf.js"></script>
+<script src="/app/coder.js"></script>
+<script src="/app/slash.js"></script>
+<script src="/app/init.js"></script>
 <!-- pages.js was split per page (same load order; classic scripts sharing the
-     global lexical environment with app.js). See localm/plugins/gui/static/pages/. -->
+     global lexical environment with app/*). See localm/plugins/gui/static/pages/. -->
 <script src="/pages/dispatch.js"></script>
 <script src="/pages/models.js"></script>
 <script src="/pages/images.js"></script>
