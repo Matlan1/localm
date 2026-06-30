@@ -423,21 +423,58 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
 
 
 
-def _cmd_generate_image(cmd: str, arg: str, engine, console, home_dir) -> None:
-    """REPL /generate-image (and the /imagine alias): generate one image via the
-    configured ComfyUI backend, unloading the chat model first to free VRAM.
-    console + home_dir are passed in so a caller that resolved the (monkeypatchable)
-    localm.cli.console / localm.cli.HOME_DIR is honoured here too."""
-    if cmd == "imagine":
-        console.print("[dim]/imagine was renamed to /generate-image[/dim]")
+# The REPL media-generation commands (/generate-image, /generate-music,
+# /generate-video) all share one shape: ensure ComfyUI is reachable (auto-
+# launching it from the configured comfy_launch_cmd/comfy_workdir if needed),
+# unload the chat model to free VRAM, generate one file into <home>/<subdir>,
+# then free ComfyUI's VRAM. Only the generator, output subdir/extension and the
+# argument label differ, so the three paths are table-driven to stay identical.
+# Each helper imports its generator from the `.comfy` submodule at call time so a
+# test that patches e.g. localm.image_gen.comfy.generate_image is honoured.
+def _media_generate_image():
+    from ..image_gen.comfy import generate_image
+    return generate_image
+
+
+def _media_generate_music():
+    from ..music_gen.comfy import generate_music
+    return generate_music
+
+
+def _media_generate_video():
+    from ..video_gen.comfy import generate_video
+    return generate_video
+
+
+_MEDIA_REPL = {
+    "generate-image": {
+        "subdir": "gui_images", "ext": ".png", "arg": "prompt",
+        "get_generate": _media_generate_image,
+    },
+    "generate-music": {
+        "subdir": "gui_music", "ext": ".flac", "arg": "tags",
+        "get_generate": _media_generate_music,
+    },
+    "generate-video": {
+        "subdir": "gui_video", "ext": ".mp4", "arg": "prompt",
+        "get_generate": _media_generate_video,
+    },
+}
+
+
+def _cmd_generate_media(label: str, arg: str, engine, console, home_dir) -> None:
+    """REPL /generate-image|/generate-music|/generate-video: generate one media
+    file via the configured ComfyUI backend, unloading the chat model first to
+    free VRAM. console + home_dir are passed in so a caller that resolved the
+    (monkeypatchable) localm.cli.console / localm.cli.HOME_DIR is honoured here."""
+    spec = _MEDIA_REPL[label]
     if engine is None:
-        console.print("[dim]/generate-image not available in this mode[/dim]")
+        console.print(f"[dim]/{label} not available in this mode[/dim]")
         return
     if not arg:
-        console.print("[dim]Usage: /generate-image <prompt>[/dim]")
+        console.print(f"[dim]Usage: /{label} <{spec['arg']}>[/dim]")
         return
-    from ..image_gen.comfy import (
-        default_api_url, ensure_comfy, free_comfy_vram, generate_image)
+    from ..image_gen.comfy import default_api_url, ensure_comfy, free_comfy_vram
     api = default_api_url()
     # Auto-launch ComfyUI from the configured comfy_launch_cmd/comfy_workdir (the
     # GUI does this; the CLI used to just bail - H1). Only unload the chat model
@@ -448,14 +485,15 @@ def _cmd_generate_image(cmd: str, arg: str, engine, console, home_dir) -> None:
         console.print(f"[yellow]{msg}[/yellow]")
         return
     import time as _t
-    out_dir = home_dir / "gui_images"
+    out_dir = home_dir / spec["subdir"]
     out_dir.mkdir(parents=True, exist_ok=True)
-    out = out_dir / f"{_t.strftime('%Y%m%d_%H%M%S')}_cli.png"
+    out = out_dir / f"{_t.strftime('%Y%m%d_%H%M%S')}_cli{spec['ext']}"
     console.print("[dim]Freeing VRAM (chat model unloads, "
-                  "reloads on your next message)…[/dim]")
+                  "reloads on your next message)...[/dim]")
     engine.unload()
     from ..audit import SessionMode, effective_mode
-    ok, message = generate_image(
+    generate = spec["get_generate"]()
+    ok, message = generate(
         arg, out,
         api_url=api,
         write_sidecar=effective_mode("chat") != SessionMode.PRIVACY,
@@ -463,6 +501,15 @@ def _cmd_generate_image(cmd: str, arg: str, engine, console, home_dir) -> None:
     console.print(message)
     if ok:
         free_comfy_vram(api)
+
+
+def _cmd_generate_image(cmd: str, arg: str, engine, console, home_dir) -> None:
+    """REPL /generate-image (and the /imagine alias): generate one image via the
+    configured ComfyUI backend. Thin wrapper over the shared media path that
+    keeps the /imagine rename notice."""
+    if cmd == "imagine":
+        console.print("[dim]/imagine was renamed to /generate-image[/dim]")
+    _cmd_generate_media("generate-image", arg, engine, console, home_dir)
 
 
 def _cmd_save(arg: str, messages: list, console) -> None:
@@ -507,6 +554,10 @@ def _handle_command(
         return True
     elif cmd in ("generate-image", "imagine"):
         _cmd_generate_image(cmd, arg, engine, console, HOME_DIR)
+    elif cmd == "generate-music":
+        _cmd_generate_media("generate-music", arg, engine, console, HOME_DIR)
+    elif cmd == "generate-video":
+        _cmd_generate_media("generate-video", arg, engine, console, HOME_DIR)
     elif cmd == "compact":
         if engine is None:
             console.print("[dim]/compact not available in this mode[/dim]")
@@ -601,6 +652,8 @@ def _handle_command(
             "/save [file]            save conversation to JSON\n"
             "/compact                summarise older turns to free context\n"
             "/generate-image <prompt> generate an image via ComfyUI FLUX\n"
+            "/generate-music <tags>  generate music via ComfyUI ACE-Step\n"
+            "/generate-video <prompt> generate a clip via ComfyUI Wan\n"
             "/temp <float>           sampling temperature\n"
             "/tokens <int>           max response tokens"
             "[/dim]"
