@@ -76,3 +76,17 @@ to get vectors.
 - One indexing job per collection at a time is the supported pattern; the
   files are rewritten atomically, so a concurrent query sees a consistent
   snapshot.
+
+## Troubleshooting
+
+- **No embeddings? It still works.** If the backend cannot embed (no embedding
+  model, or embedding fails), retrieval degrades to lexical-only (BM25)
+  automatically rather than failing - results are keyword-matched instead of
+  semantic. Load an embedding-capable model (or index from the GUI) to get
+  vectors blended back in.
+- **A query returns nothing.** No chunk matched: broaden or rephrase the query
+  (exact words matter in lexical mode), or confirm the collection actually
+  indexed the files (re-index if a source changed).
+- **Indexing failed.** Indexing is atomic, so a failed index leaves the previous
+  snapshot intact. Check the error in the GUI/CLI and `--debug` log; common causes
+  are an unreadable/encrypted file or a missing `[rag]` extra for PDF parsing.

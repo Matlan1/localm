@@ -106,3 +106,15 @@ Schedules are one of two kinds:
 The scheduler polls about every 30 seconds, so a job fires at the first tick at
 or after its due time, not to the exact second. Because it runs inside the
 server process, schedules are evaluated only while that process is alive.
+
+## Troubleshooting
+
+- **A run failed.** The error is surfaced, not swallowed: the CLI prints
+  `Job failed: <reason>`, the Jobs tab shows a toast and the run in the history.
+  Check the error there (and `--debug`/the server log for the full trace).
+- **No automatic retry.** A failed run does not retry immediately; the job fires
+  again at its next scheduled tick. Re-run it now from the Jobs tab or the CLI.
+- **A job never fires.** Schedules only advance while the server process is alive
+  (see above) - keep `localm serve`/`localm gui` running, or run it on a machine
+  that stays up. Confirm the job is enabled and its next-run time is in the future.
+- **Stop a job.** Disable or delete it from the Jobs tab or with `localm job`.

@@ -4,11 +4,38 @@ localm generates images through a local ComfyUI instance running a FLUX
 GGUF workflow. Everything runs on your own GPU; nothing leaves the machine.
 This guide covers the setup for a 16 GB VRAM card and how localm drives it.
 
+localm drives ComfyUI over HTTP; you do not need to learn the ComfyUI UI.
+The integration handles VRAM handoff, model loading, and output retrieval
+automatically - you just ask for images through localm's chat, CLI, or MCP
+interface.
+
 ## ComfyUI setup
 
-1. Install ComfyUI (directly or via Stability Matrix) and add the
-   [ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF) extension.
-2. Download the model files:
+### 1. Install ComfyUI
+
+Clone the ComfyUI repository and install it:
+
+```bash
+git clone https://github.com/comfyanonymous/ComfyUI
+cd ComfyUI
+pip install -r requirements.txt
+```
+
+Or use a launcher like Stability Matrix (https://lykos.ai/) which automates
+this and manages plugins.
+
+### 2. Install the ComfyUI-GGUF extension
+
+Add support for GGUF quantized models (FLUX with lower VRAM overhead) by
+installing the ComfyUI-GGUF extension. This extension enables GGUF model
+loading and dequantization in ComfyUI workflows, letting FLUX run on consumer
+GPUs.
+
+```bash
+git clone https://github.com/city96/ComfyUI-GGUF ComfyUI/custom_nodes/ComfyUI-GGUF
+```
+
+### 3. Download model files
 
 These are the exact files the committed example workflow loads, so a fresh
 download matches it on the first run (roughly 20 to 25 GB in total):
@@ -19,17 +46,68 @@ download matches it on the first run (roughly 20 to 25 GB in total):
 | Text encoders | `clip_l.safetensors` + `t5xxl_fp8_e4m3fn.safetensors` | `models/clip/` |
 | VAE | `ae.safetensors` | `models/vae/` |
 
-3. Start ComfyUI on its default port 8188. localm reads `FLUX_API_URL` if
-   yours runs elsewhere. Optionally tell localm how to start it so image
-   requests can launch it on demand:
+### 4. Start ComfyUI
+
+Launch ComfyUI on its default port 8188:
+
+#### Windows (batch launcher)
+
+If you installed via Stability Matrix or a batch launcher, run:
 
 ```bash
-localm config comfy_launch_cmd "D:\path\to\comfyui.bat"
+launch-comfyui.bat
 ```
 
+Or from the ComfyUI directory:
+
+```bash
+python main.py
+```
+
+It prints `Starting server at http://127.0.0.1:8188` - localm reads this URL
+automatically.
+
+#### Linux / macOS
+
+From the ComfyUI directory:
+
+```bash
+python main.py
+```
+
+### 5. Configure localm (optional: for auto-launch)
+
+If you want localm to automatically start ComfyUI when you request an image,
+configure the launch command:
+
+```bash
+localm config comfy_launch_cmd "D:\path\to\launch-comfyui.bat"
+```
+
+(On Windows, use your launcher's full path; on Linux/macOS, use the path to
+your `main.py`.)
+
+If your launcher expects to run from its own folder (common for batch scripts):
+
+```bash
+localm config comfy_workdir "D:\path\to\ComfyUI"
+```
+
+localm respects the `FLUX_API_URL` environment variable if you need to override
+the default `http://127.0.0.1:8188`. Otherwise it auto-detects ComfyUI's URL.
+
+## Performance notes
+
 Quantized FLUX dev (Q8_0) generates in roughly 30 to 60 seconds on a 16 GB
-card. On AMD, a native Windows ROCm environment works well; the AMD ROCm /
-HIP setup is documented in [gpu-setup.md](gpu-setup.md).
+NVIDIA card with CUDA. Performance varies by hardware:
+
+- **NVIDIA (CUDA):** 30-60 seconds (Q8_0)
+- **AMD (ROCm):** 60-120 seconds (cold start compiles GPU kernels; subsequent runs faster)
+- **Vulkan (universal):** varies by GPU model
+
+These numbers are typical but not guaranteed; actual time depends on your
+specific hardware, driver, and system load. For AMD hardware, see the
+ROCm/HIP setup notes in [gpu-setup.md](gpu-setup.md).
 
 ## How localm drives it
 
@@ -73,13 +151,13 @@ one. If you need filtering, implement it at the ComfyUI pipeline level.
 The committed template, `localm/image_gen/flux_workflow.example.json`, uses
 the vanilla public FLUX stack (`flux1-dev-Q8_0.gguf`, `clip_l`,
 `t5xxl_fp8_e4m3fn`, `ae.safetensors`). To use your own models, encoders, or
-node graph, export your workflow from ComfyUI (Save → API format) as
+node graph, export your workflow from ComfyUI (Save -> API format) as
 `localm/image_gen/flux_workflow.json` - it takes precedence automatically
 and is **gitignored**, so which models you actually run never leaves your
 machine. The same applies to ComfyUI's own output folder: set the
 `comfy_output_dir` config key (or `COMFY_OUTPUT_DIR` env var) if you want
 localm to clean up ComfyUI's duplicate copy after each generation.
 
-Suggested host stack: [StabilityMatrix](https://lykos.ai/) managing ComfyUI -
-on RDNA2 (RX 6xxx) combine it with the ROCm/HIP fixes described in the GPU
-setup section of the README.
+Suggested host stack: Stability Matrix managing ComfyUI - on RDNA2 (RX 6xxx)
+combine it with the ROCm/HIP fixes described in the GPU setup section of the
+README.
