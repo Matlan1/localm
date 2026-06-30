@@ -87,12 +87,15 @@ class Agent(
         turn_budget: Optional[int] = None,
         on_event=None,
         confirm_handler=None,
+        custom_instructions: Optional[str] = None,
         **gen_kwargs,
     ) -> None:
         # Live-attribute access so tests patching agent.load_memory /
-        # make_audit_log are honoured (these names moved into this submodule when
-        # agent.py became a package; the _init_* helpers below unpack the rest).
+        # load_custom_instructions / make_audit_log are honoured (these names moved
+        # into this submodule when agent.py became a package; the _init_* helpers
+        # below unpack the rest).
         load_memory = _agent.load_memory
+        load_custom_instructions = _agent.load_custom_instructions
         make_audit_log = _agent.make_audit_log
         self.backend        = backend
         self.cwd            = cwd
@@ -158,6 +161,14 @@ class Agent(
         self._audit: AuditLogT = make_audit_log(mode, label=name)
         self._project_map: ProjectMap = self._build_project_map(cwd)
         self._memory: str = load_memory(cwd)
+        # User-authored custom instructions (rec#584): an explicit string (the CLI
+        # --system flag) overrides the .localcoder/system.md file; None means "read
+        # the file". The override is kept so it survives a later set_cwd, where the
+        # file is re-read from the new cwd. Distinct from project memory above.
+        self._system_override: Optional[str] = custom_instructions
+        self._custom_instructions: str = (
+            custom_instructions if custom_instructions is not None
+            else load_custom_instructions(cwd))
 
         self._init_episodic_memory(cwd)
         self._init_provenance()
