@@ -383,6 +383,10 @@ def html_to_text(markup: str) -> str:
     try:
         stripper.feed(markup)
     except Exception:
+        # Best-effort text extraction: HTMLParser can choke on malformed markup.
+        # Return whatever was parsed before the error rather than failing - a
+        # partial scrape is more useful than none, and the caller treats this as
+        # untrusted text anyway.
         pass
     return stripper.get_text()
 
@@ -543,6 +547,10 @@ def _ddg_search(query: str, max_results: int) -> list[dict]:
     try:
         parser.feed(resp.text)
     except Exception:
+        # Best-effort parse: if the results HTML is malformed, return whatever
+        # results were parsed so far instead of failing the whole search. The HTTP
+        # status was already checked (raise_for_status above), so this only guards
+        # the lenient HTML scrape, not network errors.
         pass
     out = []
     for item in parser.results[:max_results]:
