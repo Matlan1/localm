@@ -69,6 +69,15 @@ async function render(win) {
   for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 0));
 }
 
+// The subsection <h4> head holds the plugin label as its first text node and, for
+// image/music/video, ALSO carries a trailing ComfyUI status badge <span>. Read just
+// the label (the first child node), not the whole textContent (which would include
+// "ComfyUI: checking...").
+const headLabel = (s) => {
+  const h = s.querySelector(".media-sub-head");
+  return (h && h.firstChild ? h.firstChild.textContent : "").trim();
+};
+
 test("media config renders one independent subsection per plugin", async () => {
   const { window: win } = loadAppWithPages({ fetchImpl: makeFetch([]) });
   await render(win);
@@ -82,14 +91,12 @@ test("media config renders one independent subsection per plugin", async () => {
   assert.ok(media, "a Media section exists");
   const subs = media.querySelectorAll(".media-subsection");
   assert.equal(subs.length, 3, "image/music/video each get a subsection");
-  const heads = [...subs].map((s) => s.querySelector(".media-sub-head").textContent);
+  const heads = [...subs].map(headLabel);
   assert.deepEqual(heads, ["Image", "Music", "Video"], "in order, labelled");
 
   // fast_dequant (Flux-only) only on the image subsection.
-  const imageSub = [...subs].find(
-    (s) => s.querySelector(".media-sub-head").textContent === "Image");
-  const musicSub = [...subs].find(
-    (s) => s.querySelector(".media-sub-head").textContent === "Music");
+  const imageSub = [...subs].find((s) => headLabel(s) === "Image");
+  const musicSub = [...subs].find((s) => headLabel(s) === "Music");
   assert.ok(imageSub.querySelector('[data-key="fast_dequant"]'),
     "image has the fast_dequant control");
   assert.equal(musicSub.querySelector('[data-key="fast_dequant"]'), null,
@@ -109,7 +116,7 @@ test("saving a media plugin POSTs only the changed fields", async () => {
   const doc = win.document;
 
   const imageSub = [...doc.querySelectorAll(".media-subsection")].find(
-    (s) => s.querySelector(".media-sub-head").textContent === "Image");
+    (s) => headLabel(s) === "Image");
 
   // Override the inherited workdir and toggle delete_outputs; leave fast_dequant
   // and swap_policy at their inherited values.
