@@ -169,10 +169,17 @@ def _scrub_history_file(path: Path, pattern: re.Pattern) -> bool:
     Returns True if any lines were removed.
     """
     try:
-        raw = path.read_text(encoding="utf-8", errors="replace")
+        data = path.read_bytes()
     except (OSError, PermissionError):
         return False
 
+    # Read bytes (not read_text) so the original newline style is observable:
+    # read_text() applies universal-newline translation, turning \r\n into \n
+    # before we can detect it, which made the "preserve CRLF" logic below a
+    # no-op everywhere except Windows (where text-mode WRITE re-added \r\n by
+    # accident). Detect from the raw bytes and write byte-exact instead.
+    raw = data.decode("utf-8", errors="replace")
+    crlf = b"\r\n" in data
     lines = raw.splitlines()
     clean = []
     changed = False
@@ -189,9 +196,11 @@ def _scrub_history_file(path: Path, pattern: re.Pattern) -> bool:
         return False
 
     try:
-        # Preserve original line ending style
-        nl = "\r\n" if "\r\n" in raw else "\n"
-        path.write_text(nl.join(clean) + (nl if clean else ""), encoding="utf-8")
+        # Preserve the original line ending style byte-exactly (write_bytes does
+        # no OS newline translation, unlike write_text).
+        nl = "\r\n" if crlf else "\n"
+        out = (nl.join(clean) + (nl if clean else "")).encode("utf-8")
+        path.write_bytes(out)
     except (OSError, PermissionError) as exc:
         # Surface, don't silence: the secret-bearing lines are STILL on disk.
         # Reporting changed=True here would tell the user a scrub happened that

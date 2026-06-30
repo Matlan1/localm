@@ -2089,6 +2089,11 @@ class TestImageGeneration:
         import localm.image_gen.comfy as comfy
         monkeypatch.setattr(comfy, "ensure_comfy", lambda *a, **k: (True, "ComfyUI is running."))
         monkeypatch.setattr(comfy, "free_comfy_vram", lambda *a, **k: False)
+        # Hermetic: the VRAM-swap decision reads live GPU free memory. On a host
+        # with no GPU it returns "swap needed", and the job then POSTs to the
+        # (fake) self_url to unload the chat model and blocks on that 300s call.
+        # Pin no-swap so this exercises the generation path on any host.
+        monkeypatch.setattr("localm.vram.decide_media_swap", lambda *a, **k: False)
 
         def fake_gen(prompt, out_path, **kw):
             Path(out_path).write_bytes(b"\x89PNG fake")
@@ -2196,6 +2201,9 @@ class TestMusicPlugin:
         import localm.music_gen as music_gen
         monkeypatch.setattr(comfy, "ensure_comfy", lambda *a, **k: (True, "up"))
         monkeypatch.setattr(comfy, "free_comfy_vram", lambda *a, **k: False)
+        # Hermetic: pin no-swap so the job does not block on the VRAM-unload POST
+        # to the fake self_url on a GPU-less host (see the imagine test).
+        monkeypatch.setattr("localm.vram.decide_media_swap", lambda *a, **k: False)
 
         def fake_gen(tags, out_path, **kw):
             Path(out_path).write_bytes(b"FLACfake")
@@ -2381,6 +2389,9 @@ class TestVideoEndpoints:
         import localm.video_gen as video_gen
         monkeypatch.setattr(comfy, "ensure_comfy", lambda *a, **k: (True, "up"))
         monkeypatch.setattr(comfy, "free_comfy_vram", lambda *a, **k: False)
+        # Hermetic: pin no-swap so the job does not block on the VRAM-unload POST
+        # to the fake self_url on a GPU-less host (see the imagine test).
+        monkeypatch.setattr("localm.vram.decide_media_swap", lambda *a, **k: False)
 
         def fake_gen(prompt, out_path, **kw):
             Path(out_path).write_bytes(b"fake mp4")
