@@ -175,3 +175,87 @@ def test_download_bad_asset_id_raises(monkeypatch):
     from localm.bugreport import LocalmError
     with pytest.raises(LocalmError):
         updater.download("not-a-number", "/tmp/x")
+
+
+# ------------------------- apply / rollback -----------------------------
+
+def _build_zip_opener(version, deps):
+    """A download opener that writes a build zip with the given VERSION + deps."""
+    import zipfile
+    pyproject = '[project]\nname = "localm"\ndependencies = [' \
+        + ", ".join(f'"{d}"' for d in deps) + ']\n'
+
+    def dl(url, headers, timeout, dest):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(dest, "w") as z:
+            z.writestr("VERSION", version)
+            z.writestr("pyproject.toml", pyproject)
+            z.writestr("localm/__init__.py", f"# {version}")
+    return dl
+
+
+def _fake_install(tmp_path, deps=("click",)):
+    inst = tmp_path / "inst"
+    (inst / "localm").mkdir(parents=True)
+    (inst / "localm" / "__init__.py").write_text("# 0.1.0", encoding="utf-8")
+    (inst / "VERSION").write_text("0.1.0", encoding="utf-8")
+    (inst / "pyproject.toml").write_text(
+        '[project]\nname = "localm"\ndependencies = ['
+        + ", ".join(f'"{d}"' for d in deps) + ']\n', encoding="utf-8")
+    return inst
+
+
+def test_apply_reboot_swaps_and_reports(tmp_path, monkeypatch):
+    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
+    inst = _fake_install(tmp_path, deps=("click",))
+    res = updater.apply(5, installed=inst, download_opener=_build_zip_opener("0.2.0", ["click"]))
+    assert res["applied"] is True and res["version"] == "0.2.0"
+    assert res["klass"] == "reboot"  # deps unchanged
+    assert (inst / "VERSION").read_text().strip() == "0.2.0"
+    assert (inst / "localm" / "__init__.py").read_text() == "# 0.2.0"
+
+
+def test_apply_deps_runs_post_command(tmp_path, monkeypatch):
+    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
+    inst = _fake_install(tmp_path, deps=("click",))
+    ran = []
+    res = updater.apply(5, installed=inst,
+                        download_opener=_build_zip_opener("0.2.0", ["click", "httpx"]),
+                        runner=lambda c: ran.append(c) or 0)
+    assert res["klass"] == "deps"
+    assert ran and ran[0][:3] == ["uv", "pip", "install"]
+
+
+def test_apply_rolls_back_on_post_command_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
+    inst = _fake_install(tmp_path, deps=("click",))
+    from localm.bugreport import LocalmError
+    with pytest.raises(LocalmError):
+        updater.apply(5, installed=inst,
+                      download_opener=_build_zip_opener("0.2.0", ["click", "httpx"]),
+                      runner=lambda c: 1)  # post step fails -> rollback
+    # Rolled back to the pre-apply state.
+    assert (inst / "VERSION").read_text().strip() == "0.1.0"
+    assert (inst / "localm" / "__init__.py").read_text() == "# 0.1.0"
+
+
+def test_rollback_last_restores(tmp_path, monkeypatch):
+    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
+    inst = _fake_install(tmp_path, deps=("click",))
+    updater.apply(5, installed=inst, download_opener=_build_zip_opener("0.2.0", ["click"]))
+    assert (inst / "VERSION").read_text().strip() == "0.2.0"
+    updater.rollback_last(installed=inst)
+    assert (inst / "VERSION").read_text().strip() == "0.1.0"
+    assert (inst / "localm" / "__init__.py").read_text() == "# 0.1.0"
+
+
+def test_rollback_last_without_backup_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home2")
+    from localm.bugreport import LocalmError
+    with pytest.raises(LocalmError):
+        updater.rollback_last(installed=tmp_path / "inst")

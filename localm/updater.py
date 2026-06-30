@@ -197,3 +197,67 @@ def download(asset_id, dest, *, timeout: float = 120.0, opener=None) -> Path:
     except (urllib.error.URLError, OSError) as e:
         raise LocalmError("could not download the update", reason=str(getattr(e, "reason", e)))
     return dest
+
+
+# ------------------------------ apply -----------------------------------
+
+def _updates_dir() -> Path:
+    from localm.config import home_dir
+    d = home_dir() / "updates"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def apply(asset_id, *, installed=None, download_opener=None, runner=None) -> dict:
+    """Download, verify, and swap a build into the install, then run the class's
+    deps/runtime step. Returns ``{applied, version, klass, backup, restart_needed}``.
+
+    Rolls back on a swap or post-step failure (never a half-applied tree). Does NOT
+    restart - the caller does (the CLI tells the user; the server re-execs). The file
+    primitives live in :mod:`localm._apply_update`. *installed* defaults to the real
+    repo root; tests pass a fake tree so apply never touches the live install.
+    Injectables for tests: *download_opener* (download()'s opener) and *runner* (runs
+    the post-swap command, returns an int exit code)."""
+    import subprocess
+    from localm import _apply_update as au
+    from localm.bugreport import LocalmError
+    target = Path(installed) if installed else repo_root()
+    updir = _updates_dir()
+    zip_path, staging, backup_dir = updir / "build.zip", updir / "staging", updir / "backup"
+
+    download(asset_id, zip_path, opener=download_opener)
+    au.verify_zip(zip_path)
+    root = au.extract(zip_path, staging)
+    vf = root / "VERSION"
+    new_version = vf.read_text(encoding="utf-8").strip() if vf.exists() else ""
+    klass = classify(root, target, read_manifest(root))
+    names = au.swap_with_backup(root, target, backup_dir)
+
+    cmd = au.post_swap_command(klass)
+    if cmd:
+        run = runner or (lambda c: subprocess.run(c, cwd=str(target)).returncode)
+        try:
+            rc = int(run(cmd))
+        except Exception as e:
+            au.rollback(backup_dir, target, names)
+            raise LocalmError("the post-update step crashed; rolled back", reason=str(e))
+        if rc != 0:
+            au.rollback(backup_dir, target, names)
+            raise LocalmError("the post-update step failed; rolled back",
+                              reason=f"{cmd[0]} exited {rc}")
+    return {"applied": True, "version": new_version, "klass": klass,
+            "backup": str(backup_dir), "restart_needed": True}
+
+
+def rollback_last(*, installed=None) -> dict:
+    """Restore the install from the most recent update backup. Returns
+    ``{rolled_back, backup}``. Raises LocalmError when there is no backup."""
+    from localm import _apply_update as au
+    from localm.bugreport import LocalmError
+    target = Path(installed) if installed else repo_root()
+    backup_dir = _updates_dir() / "backup"
+    if not backup_dir.is_dir() or not any(backup_dir.iterdir()):
+        raise LocalmError("no update backup to roll back to", reason=str(backup_dir))
+    names = [p.name for p in backup_dir.iterdir()]
+    au.rollback(backup_dir, target, names)
+    return {"rolled_back": True, "backup": str(backup_dir)}
