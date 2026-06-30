@@ -150,3 +150,33 @@ def load_backend(package: str, name: Optional[str]):
     import importlib
     nm = (name or "comfy").strip().lower() or "comfy"
     return importlib.import_module(f"{package}.backends.{nm}")
+
+
+def backend_unavailable_warning(package: str, name: Optional[str]) -> Optional[str]:
+    """A warning when *name* is a media backend that is not the built-in ``comfy``
+    reference and cannot be imported (a typo, an unimplemented backend, or one
+    whose dependency is not installed), else None for ``comfy``/empty/loadable.
+
+    The caller still falls back to its inline ``comfy`` reference - a typo must
+    not hard-crash a generate - but we never silently pretend a missing backend
+    is the active one. The user is told their configured backend was ignored
+    (AGENTS rule 5, "we do not hide problems"). A plugin folds this into its
+    ``settings()['warning']`` so the surface that runs the job shows it."""
+    nm = (name or "comfy").strip().lower() or "comfy"
+    if nm == "comfy":
+        return None
+    try:
+        load_backend(package, nm)
+        return None
+    except ModuleNotFoundError:
+        return (f"Configured media backend '{nm}' is not available "
+                f"(not implemented or its dependency is not installed); "
+                f"using ComfyUI instead. Set the backend to 'comfy' to silence this.")
+
+
+def combine_warnings(*warnings: Optional[str]) -> Optional[str]:
+    """Join the non-empty *warnings* with ``'; '``, or None when all are empty.
+    Lets a caller merge several independent config notes into one ``warning``
+    without one silently dropping another."""
+    parts = [w for w in warnings if w]
+    return "; ".join(parts) if parts else None
