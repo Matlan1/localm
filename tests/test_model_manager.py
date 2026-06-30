@@ -51,7 +51,7 @@ class TestCheckDiskSpace:
 
     def test_prints_warning_on_insufficient_space(self, tmp_path, capsys):
         with self._patch_usage(free=1_000_000), \
-             patch("localm.model_manager.console") as mock_console:
+             patch("localm.model_manager.pull.console") as mock_console:
             _check_disk_space(tmp_path, required_bytes=2_000_000_000)
             mock_console.print.assert_called_once()
             msg = mock_console.print.call_args[0][0]
