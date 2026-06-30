@@ -49,13 +49,20 @@ class _SessionMixin:
             ),
             disabled_tools=self.disabled_tools,
             untrusted_provenance=self._untrusted_provenance,
+            custom_instructions=self._custom_instructions,
         )
 
     def set_cwd(self, cwd: Path) -> None:
         load_memory = _agent.load_memory  # live: honour a patched agent.load_memory
+        load_custom_instructions = _agent.load_custom_instructions
         self.cwd = cwd
         self._project_map = self._build_project_map(cwd)
         self._memory = load_memory(cwd)
+        # An explicit --system override persists across a cwd change; otherwise
+        # re-read the new cwd's .localcoder/system.md.
+        self._custom_instructions = (
+            self._system_override if self._system_override is not None
+            else load_custom_instructions(cwd))
         self._rebuild_system_prompt()
 
     def reindex(self) -> int:

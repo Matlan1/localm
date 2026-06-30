@@ -27,7 +27,7 @@ from ..display import (  # noqa: F401
     confirm, confirm_diff, print_diff_preview, print_warning,
 )
 from ..indexer import ProjectMap  # noqa: F401
-from ..memory import load_memory  # noqa: F401
+from ..memory import load_custom_instructions, load_memory  # noqa: F401
 from ..audit import make_audit_log  # noqa: F401
 from ..parser import parse_tool_calls  # noqa: F401
 from ..tools import TOOL_REGISTRY  # noqa: F401

@@ -49,6 +49,32 @@ def load_memory(cwd: Path) -> str:
         return ""
 
 
+# User-authored custom instructions (rec#584). This is distinct from the project
+# MEMORY above: memory is auto-managed facts (the agent appends to it via
+# /remember and episodic reflection), whereas system.md is hand-written guidance
+# the user wants the agent to follow (conventions, style, constraints). It is
+# injected into the system prompt under "## User Instructions". A single, obvious
+# location keeps it discoverable and out of the auto-managed memory file.
+CUSTOM_INSTRUCTIONS_FILE = ".localcoder/system.md"
+
+
+def custom_instructions_file(cwd: Path) -> Path:
+    """Path to the custom-instructions file for *cwd* (may not exist)."""
+    return cwd / CUSTOM_INSTRUCTIONS_FILE
+
+
+def load_custom_instructions(cwd: Path) -> str:
+    """Return the contents of ``.localcoder/system.md`` (stripped), or empty
+    string when the file does not exist or cannot be read."""
+    p = custom_instructions_file(cwd)
+    if not p.is_file():
+        return ""
+    try:
+        return p.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
 def remember(cwd: Path, text: str) -> Path:
     """
     Append a new bullet point to the memory file.

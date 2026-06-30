@@ -293,6 +293,7 @@ def build_system_prompt(
     extra_tool_docs: str = "",
     disabled_tools: frozenset = frozenset(),
     untrusted_provenance: bool = True,
+    custom_instructions: str = "",
 ) -> str:
     """
     Build the system prompt for the main agent.
@@ -312,6 +313,10 @@ def build_system_prompt(
     extra_tool_docs:
         Additional tool documentation appended after the built-in tool list
         (e.g. dynamically registered MCP tools).
+    custom_instructions:
+        User-authored guidance (the ``--system`` flag or ``.localcoder/system.md``);
+        injected under "## User Instructions". Distinct from ``memory``: these are
+        hand-written directives the user wants followed, not auto-managed facts.
     """
     family = detect_model_family(model_name) if model_name else "default"
 
@@ -322,6 +327,12 @@ def build_system_prompt(
     memory_section = ""
     if memory:
         memory_section = f"\n## Project Memory\n\n{memory}\n"
+
+    # User-authored directives carry more weight than auto-managed memory, so they
+    # get their own clearly-labelled section right after it.
+    custom_section = ""
+    if custom_instructions:
+        custom_section = f"\n## User Instructions\n\n{custom_instructions}\n"
 
     tool_docs = (_brief_tool_docs(disabled_tools) if family == "small"
                  else _full_tool_docs(disabled_tools))
@@ -349,6 +360,7 @@ def build_system_prompt(
         f"{identity}"
         f"{map_section}"
         f"{memory_section}"
+        f"{custom_section}"
         f"\n{think_hint}"
         f"{tool_block}\n\n"
         f"AVAILABLE TOOLS\n"
