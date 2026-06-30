@@ -5,11 +5,14 @@
    name exactly as before. */
 "use strict";
 
+// --- ES module imports (auto-generated boundary; bodies unchanged) ---
+import { $ } from "./helpers.js";
+
 /* ================================================================ */
 /*  Theme                                                            */
 /* ================================================================ */
 
-function applyTheme(name) {
+export function applyTheme(name) {
   document.documentElement.dataset.theme = name;
   localStorage.setItem("localm.theme", name);
 }

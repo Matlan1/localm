@@ -5,27 +5,34 @@
    name exactly as before. */
 "use strict";
 
+// --- ES module imports (auto-generated boundary; bodies unchanged) ---
+import { addMessageRow, chat } from "./chat.js";
+import { $, authHeaders, autoGrow, el, nearBottom, openModal, readSSE, renderMarkdown, toast } from "./helpers.js";
+import { modelCache, refreshModels } from "./models-sidebar.js";
+import { composerEnterToSend } from "./settings-perf.js";
+import { execCoderCommand, handleSlashSubmit } from "./slash.js";
+
 /* ================================================================ */
 /*  Coder - multi-session                                            */
 /* ================================================================ */
 
-const coder = {
+export const coder = {
   sessions: new Map(),   // id → {info, feedEl, busy, liveBody, liveText, pendingCards, gen}
   activeId: null,
   lastActiveId: null,    // session to return to when leaving setup mode
   docs: [],              // file attachments: {name, text, chars, truncated}
 };
 
-function activeSession() {
+export function activeSession() {
   return coder.activeId ? coder.sessions.get(coder.activeId) : null;
 }
 
-function sessionLabel(info) {
+export function sessionLabel(info) {
   const dir = info.cwd.split(/[\\/]/).filter(Boolean).pop() || info.cwd;
   return `${dir} (${info.id.slice(0, 6)})`;
 }
 
-function renderSessionSelect() {
+export function renderSessionSelect() {
   const sel = $("session-select");
   sel.replaceChildren();
   // In setup mode (no active session) a placeholder holds the selection, so
@@ -49,7 +56,7 @@ function renderSessionSelect() {
 
 // R17: the coder's right-side open-sessions rail (mirrors the chat conversation
 // list). The #session-select dropdown stays as the mobile fallback.
-function renderCoderSessionList() {
+export function renderCoderSessionList() {
   const list = $("coder-session-list");
   if (!list) return;
   list.replaceChildren();
@@ -66,7 +73,7 @@ function renderCoderSessionList() {
   }
 }
 
-function showCoderUI(hasSession) {
+export function showCoderUI(hasSession) {
   $("coder-setup").style.display = hasSession ? "none" : "block";
   $("coder-composer").style.display = hasSession ? "block" : "none";
   // Keep the bar while other sessions exist so they stay reachable
@@ -90,7 +97,7 @@ function showCoderUI(hasSession) {
     !hasSession && coder.sessions.size > 0 ? "" : "none";
 }
 
-function activateSession(id) {
+export function activateSession(id) {
   coder.activeId = id;
   for (const [sid, s] of coder.sessions) {
     s.feedEl.classList.toggle("active", sid === id);
@@ -106,7 +113,7 @@ function activateSession(id) {
   showCoderUI(!!s);
 }
 
-function registerSession(info, { replay }) {
+export function registerSession(info, { replay }) {
   const feedEl = el("div", "coder-feed");
   $("coder-feeds").appendChild(feedEl);
   const s = {
@@ -126,20 +133,20 @@ function registerSession(info, { replay }) {
 
 /* per-session feed helpers */
 
-function feedAppend(s, node) {
+export function feedAppend(s, node) {
   const stick = nearBottom(s.feedEl);
   s.feedEl.appendChild(node);
   if (stick) s.feedEl.scrollTop = s.feedEl.scrollHeight;
 }
 
-function startAssistantBlock(s) {
+export function startAssistantBlock(s) {
   if (s.liveBody) return;
   const { body } = addMessageRow(s.feedEl, "assistant", "");
   s.liveBody = body;
   s.liveText = "";
 }
 
-function flushAssistantBlock(s) {
+export function flushAssistantBlock(s) {
   // CODER-EMPTY-MODEL: when the assistant turn produced no VISIBLE text (it emitted
   // only a tool call, or its text scrubbed to nothing), drop the empty "Model" row
   // instead of leaving a blank bubble stacked above the tool card.
@@ -151,7 +158,7 @@ function flushAssistantBlock(s) {
   s.liveText = "";
 }
 
-function renderDiff(text) {
+export function renderDiff(text) {
   const pre = el("pre", "diff");
   for (const line of (text || "").split("\n")) {
     let cls = "";
@@ -164,7 +171,7 @@ function renderDiff(text) {
 }
 
 /** Args worth showing next to a diff - the bulky text fields ARE the diff. */
-function slimArgs(args) {
+export function slimArgs(args) {
   const slim = {};
   for (const [k, v] of Object.entries(args || {})) {
     if (k === "content" || k === "old" || k === "new" || k === "diff") continue;
@@ -173,7 +180,7 @@ function slimArgs(args) {
   return slim;
 }
 
-function buildToolCard(ev) {
+export function buildToolCard(ev) {
   const card = el("div", "tool-card");
   card.dataset.t0 = String(Date.now());
   const inner = el("div", "inner");
@@ -202,7 +209,7 @@ function buildToolCard(ev) {
 /** Mark a confirm card as resolved. Idempotent - fed both by the local
  *  button click and by the confirm_resolved event from the server (which is
  *  also what replay sends for already-answered confirmations). */
-function resolveConfirmCard(s, confirmId, approved, timedOut) {
+export function resolveConfirmCard(s, confirmId, approved, timedOut) {
   const entry = s.confirmCards.get(confirmId);
   if (!entry || entry.card.classList.contains("answered")) return;
   entry.card.classList.add("answered");
@@ -211,7 +218,7 @@ function resolveConfirmCard(s, confirmId, approved, timedOut) {
     : (approved ? "✓ Approved " : "✗ Rejected ") + entry.tool;
 }
 
-function buildConfirmCard(s, ev) {
+export function buildConfirmCard(s, ev) {
   const card = el("div", "confirm-card");
   const inner = el("div", "inner");
   const title = el("div", "title");
@@ -269,7 +276,7 @@ function buildConfirmCard(s, ev) {
   return card;
 }
 
-function handleCoderEvent(s, ev) {
+export function handleCoderEvent(s, ev) {
   // Keep a light event log (no token spam) so "export" can rebuild the
   // session as markdown without another server round-trip.
   if (ev.type !== "token") {
@@ -382,7 +389,7 @@ function handleCoderEvent(s, ev) {
   }
 }
 
-async function streamSession(s, replay) {
+export async function streamSession(s, replay) {
   while (coder.sessions.has(s.info.id) && !s.closed) {
     try {
       const r = await fetch(
@@ -405,7 +412,7 @@ async function streamSession(s, replay) {
 
 /* session lifecycle */
 
-function populateSetupModels() {
+export function populateSetupModels() {
   const sel = $("setup-model");
   sel.innerHTML = "";
   const current = document.createElement("option");
@@ -421,7 +428,7 @@ function populateSetupModels() {
   }
 }
 
-async function startCoderSession(opts = {}) {
+export async function startCoderSession(opts = {}) {
   const resume = !!opts.resume;
   const cwd = $("setup-cwd").value.trim();
   if (!cwd) { toast("Enter a project directory", true); return; }
@@ -467,8 +474,8 @@ async function startCoderSession(opts = {}) {
 /* Resume (CODER-2): a dynamically-created "Continue last session" button in the
  * setup panel, revealed when the chosen directory has a saved conversation. Built
  * in JS so it needs no index.html change. */
-let _coderContinueBtn = null;
-function coderContinueButton() {
+export let _coderContinueBtn = null;
+export function coderContinueButton() {
   if (_coderContinueBtn) return _coderContinueBtn;
   const btn = el("button", "btn-secondary coder-continue", "Continue last session");
   btn.style.display = "none";
@@ -479,7 +486,7 @@ function coderContinueButton() {
   return btn;
 }
 
-async function refreshResumable() {
+export async function refreshResumable() {
   const btn = coderContinueButton();
   const cwd = ($("setup-cwd")?.value || "").trim();
   if (!cwd) { btn.style.display = "none"; return; }
@@ -498,7 +505,7 @@ async function refreshResumable() {
   } catch { btn.style.display = "none"; }
 }
 
-async function reattachSessions() {
+export async function reattachSessions() {
   try {
     const r = await fetch("/api/coder/sessions", { headers: authHeaders() });
     if (!r.ok) return;
@@ -526,7 +533,7 @@ async function reattachSessions() {
  * /api/rag/extract path as chat docs) and prepended to the task message,
  * so the agent sees the content without needing the file inside cwd. */
 
-function renderCoderAttachChips() {
+export function renderCoderAttachChips() {
   const box = $("coder-attach-chips");
   box.replaceChildren();
   coder.docs.forEach((doc, i) => {
@@ -540,7 +547,7 @@ function renderCoderAttachChips() {
   });
 }
 
-async function attachCoderDocument(file) {
+export async function attachCoderDocument(file) {
   const b64 = await new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "");
@@ -567,7 +574,7 @@ $("coder-file").addEventListener("change", (e) => {
   e.target.value = "";
 });
 
-async function sendCoderTask() {
+export async function sendCoderTask() {
   const s = activeSession();
   const input = $("coder-input");
   const text = input.value.trim();
@@ -615,7 +622,7 @@ async function sendCoderTask() {
   }
 }
 
-async function endCoderSession() {
+export async function endCoderSession() {
   const s = activeSession();
   if (!s) return;
   try {
@@ -645,7 +652,7 @@ renderCoderSessionList();   // R17: show the empty-state rail on first load
 // Event as opts, making opts.resume truthy and always resuming (CODER-2).
 $("setup-start").onclick = () => startCoderSession();
 // Probe for a resumable checkpoint as the directory changes (debounced).
-let _resumeProbeTimer = null;
+export let _resumeProbeTimer = null;
 $("setup-cwd").addEventListener("input", () => {
   clearTimeout(_resumeProbeTimer);
   _resumeProbeTimer = setTimeout(refreshResumable, 350);
@@ -660,7 +667,7 @@ $("setup-cancel").onclick = () => {
 
 /* ---- directory picker (browse… on the setup form) ---- */
 
-async function fetchDirs(path, includeFiles = false) {
+export async function fetchDirs(path, includeFiles = false) {
   let url = "/api/fs/dirs?path=" + encodeURIComponent(path || "");
   if (includeFiles) url += "&include_files=true";
   const r = await fetch(url, { headers: authHeaders() });
@@ -671,7 +678,7 @@ async function fetchDirs(path, includeFiles = false) {
 
 /** Modal directory browser. Resolves with the chosen path, or null when the
  *  modal is dismissed. Used by the coder setup form and the media pages. */
-function pickDirectory(title, startPath = "") {
+export function pickDirectory(title, startPath = "") {
   return new Promise((resolve) => {
     let settled = false;
     const finish = (value) => {
@@ -736,7 +743,7 @@ function pickDirectory(title, startPath = "") {
 
 /** Modal file browser. Resolves with the chosen file path, or null when the
  *  modal is dismissed. */
-function pickFile(title, startPath = "") {
+export function pickFile(title, startPath = "") {
   return new Promise((resolve) => {
     let settled = false;
     const finish = (value) => {
@@ -857,7 +864,7 @@ $("coder-compact").onclick = async () => {
 
 /** Audit-entry modal shared by the live-session log and past-session history.
  *  A filter box narrows entries by substring (type, turn, or payload). */
-function showAuditModal(title, data) {
+export function showAuditModal(title, data) {
   openModal(title, (body) => {
     body.appendChild(el("div", "sub", data.path));
     const filter = document.createElement("input");
@@ -888,7 +895,7 @@ function showAuditModal(title, data) {
 }
 
 /** Files the agent changed this session, with per-file and full-session diffs. */
-async function openFilesModal() {
+export async function openFilesModal() {
   const s = activeSession();
   if (!s) return;
   let data;
@@ -947,7 +954,7 @@ async function openFilesModal() {
 /** Download one coder-created/changed file to this device (a phone, say). Fetched
  *  with auth so it works behind a key; saved via a blob so the OS "save file"
  *  flow runs. The server confines the download to tracked, in-root files. */
-async function downloadCoderFile(s, path) {
+export async function downloadCoderFile(s, path) {
   try {
     const r = await fetch(
       `/api/coder/sessions/${s.info.id}/files/download?path=` +
@@ -971,7 +978,7 @@ async function downloadCoderFile(s, path) {
 
 /** Download the active session's feed as markdown (explicit user action -
  *  works in privacy mode too, same contract as chat /export). */
-function exportCoderSession() {
+export function exportCoderSession() {
   const s = activeSession();
   const log = s?.eventLog || [];
   if (!log.length) { toast("Nothing to export yet", true); return; }
@@ -1014,7 +1021,7 @@ $("coder-log").onclick = async () => {
 
 /** Past coder sessions: audit logs left behind by log/full-mode sessions,
  *  including ones from before a server restart. */
-async function openSessionHistory() {
+export async function openSessionHistory() {
   let data = null;
   try {
     const r = await fetch("/api/coder/history", { headers: authHeaders() });

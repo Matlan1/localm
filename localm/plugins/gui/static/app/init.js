@@ -5,6 +5,15 @@
    name exactly as before. */
 "use strict";
 
+// --- ES module imports (auto-generated boundary; bodies unchanged) ---
+import { chat, ingestSharedFiles, initServerConversations, refreshCtxLimit, renderChat, renderConvList } from "./chat.js";
+import { populateSetupModels, reattachSessions } from "./coder.js";
+import { $, authHeaders, el } from "./helpers.js";
+import { syncLogoStyleFromConfig } from "./logo.js";
+import { addRevealToggle, applyInstallGateUI, dismissInstallGate, isIOSSafari, refreshModels, shouldShowInstallGate, showInstallGate, showKeyGate, startHwStats, startQrScan, stopQrScan, submitKeyGate } from "./models-sidebar.js";
+import { loadClientPlugins, onVoicePick, populateVoicePicker, refreshKbSelect, refreshMemory, refreshPersonas, refreshPluginCommands, refreshVoiceStatus, setupPerfCard } from "./settings-perf.js";
+import { VIEWS, showView } from "./tabs.js";
+
 /* ================================================================ */
 /*  Init                                                             */
 /* ================================================================ */
@@ -36,13 +45,13 @@ if ($("install-gate-install")) $("install-gate-install").onclick = () => {
 // none that works, show ONLY the onboarding - do NOT reveal the app shell or
 // load any /api data behind an unsatisfied gate. window.__localmLocked lets late
 // boot steps (deep-link restore, pages.js) bail too.
-function lockUI(message) {
+export function lockUI(message) {
   window.__localmLocked = true;
   const app = $("app");
   if (app) app.style.display = "none";          // nothing of localm behind the gate
   showKeyGate(message || "This LocaLM server requires an API key.");
 }
-function unlockUI() {
+export function unlockUI() {
   window.__localmLocked = false;
   const gate = $("key-gate");
   if (gate) gate.style.display = "none";
@@ -59,7 +68,7 @@ function unlockUI() {
 // sessionStorage guard bounds it to a single attempt so it can never loop. We do
 // NOT touch SameSite (the cookie IS sent on same-origin fetch; the rejected
 // misdiagnosis would only open CSRF).
-async function resetServiceWorkerAndCaches() {
+export async function resetServiceWorkerAndCaches() {
   try {
     if ("serviceWorker" in navigator) {
       const regs = await navigator.serviceWorker.getRegistrations();
@@ -80,7 +89,7 @@ window.resetServiceWorkerAndCaches = resetServiceWorkerAndCaches;
 // gate). Each step is independently guarded so one failure never blocks the rest.
 // (The HttpOnly localm_session cookie cannot be cleared from JS, but it never
 // wedges the client - a stale one simply yields a 401 -> the key gate.)
-async function resetClientState() {
+export async function resetClientState() {
   try {
     document.cookie.split(";").forEach((c) => {
       const n = c.split("=")[0].trim();
@@ -99,8 +108,8 @@ window.resetClientState = resetClientState;
 // overlay and auto-retry instead of the key gate, so a dead server is not
 // mistaken for a bad key and re-entered in a loop. When the server answers
 // again, reload for a clean boot (which then handles 200 vs 401 freshly).
-let _reconnectTimer = null;
-function showReconnectOverlay() {
+export let _reconnectTimer = null;
+export function showReconnectOverlay() {
   let ov = $("reconnect-overlay");
   if (!ov) {
     ov = el("div", "reconnect-overlay");
@@ -121,7 +130,7 @@ function showReconnectOverlay() {
   }
   ov.style.display = "flex";
 }
-function hideReconnectOverlay() {
+export function hideReconnectOverlay() {
   const ov = $("reconnect-overlay");
   if (ov) ov.style.display = "none";
 }
@@ -131,7 +140,7 @@ function hideReconnectOverlay() {
 // load is in progress instead of a blank / half-rendered shell. Distinct in copy
 // from the reconnect overlay, which means the server is DOWN. Hidden once the
 // model list resolves (or fails), so it never stacks over the gate or the app.
-function showStartupOverlay() {
+export function showStartupOverlay() {
   let ov = $("startup-overlay");
   if (!ov) {
     ov = el("div", "reconnect-overlay startup-overlay");
@@ -145,7 +154,7 @@ function showStartupOverlay() {
   }
   ov.style.display = "flex";
 }
-function hideStartupOverlay() {
+export function hideStartupOverlay() {
   const ov = $("startup-overlay");
   if (ov) ov.style.display = "none";
 }
@@ -157,7 +166,7 @@ window.hideStartupOverlay = hideStartupOverlay;
 // response - even 401 - proves the server is reachable; only a thrown fetch (no
 // response at all) means it is genuinely down. This is what makes the
 // "server unreachable" verdict actually mean unreachable, never a client problem.
-async function serverReachable() {
+export async function serverReachable() {
   try {
     await fetch("/api/models", { cache: "no-store" });
     return true;
@@ -167,7 +176,7 @@ async function serverReachable() {
 }
 window.serverReachable = serverReachable;
 
-function onServerUnreachable() {
+export function onServerUnreachable() {
   window.__localmLocked = true;
   const app = $("app");
   if (app) app.style.display = "none";
@@ -188,7 +197,7 @@ window.onServerUnreachable = onServerUnreachable;
 // loads the app). status 0 / unreachable -> reconnect overlay (NOT the gate);
 // 401 -> key gate, OR a one-shot stale-shell self-heal if a prior login should
 // already have authed; 200 -> unlock.
-async function bootAuthProbe() {
+export async function bootAuthProbe() {
   let status;
   try {
     const r = await fetch("/api/models", { headers: authHeaders() });

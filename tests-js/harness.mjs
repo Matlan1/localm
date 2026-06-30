@@ -21,6 +21,24 @@ const STATIC = join(ROOT, "localm", "plugins", "gui", "static");
 
 const read = (p) => readFileSync(join(STATIC, p), "utf-8");
 
+// The GUI ships as native ES modules (app/*.js, pages/*.js, entry app/main.js).
+// jsdom does NOT execute <script type="module">, and the conversion only ADDED
+// import/export lines (bodies are byte-identical to the pre-module classic
+// split). So for the unit tests we strip those generated lines back to the
+// classic form and inject the modules as classic scripts in the same realm -
+// exactly what jsdom can run. This tests the real module BODIES (identical to
+// the browser) and keeps the shared-global test access (window.foo,
+// runScript("chat...")) working; the real module GRAPH/resolution is covered by
+// node --check + the `localm gui` browser smoke, which jsdom could never run.
+const _IMPORT_BLOCK = /^\/\/ --- ES module imports.*\r?\n(?:import [^\n]*\r?\n)*\r?\n?/m;
+function moduleToClassic(code) {
+  return code
+    .replace(_IMPORT_BLOCK, "")     // drop the auto-generated import block
+    .replace(/^import [^\n]*\r?\n/gm, "")  // any stray import line
+    .replace(/^export\s+/gm, "");   // drop the `export ` declaration prefix
+}
+const readClassic = (p) => moduleToClassic(read(p));
+
 // Every loadApp() builds a jsdom window. With pretendToBeVisual: true jsdom
 // runs an internal requestAnimationFrame timer loop that keeps node's event
 // loop alive AFTER the tests finish, so a bare `node --test` would hang forever
@@ -94,7 +112,7 @@ export function loadApp({ fetchImpl, url } = {}) {
   // parse) does not re-run.
   for (const name of APP_SCRIPTS) {
     const script = win.document.createElement("script");
-    script.textContent = read(`app/${name}.js`);
+    script.textContent = readClassic(`app/${name}.js`);
     win.document.body.appendChild(script);
   }
   return { dom, window: win };
@@ -132,7 +150,7 @@ const PAGE_SCRIPTS = [
 export function loadAppWithPages({ fetchImpl } = {}) {
   const { dom, window } = loadApp({ fetchImpl });
   for (const name of PAGE_SCRIPTS) {
-    runScript(window, read(`pages/${name}.js`));
+    runScript(window, readClassic(`pages/${name}.js`));
   }
   return { dom, window };
 }

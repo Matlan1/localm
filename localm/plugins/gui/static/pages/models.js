@@ -5,16 +5,22 @@
    resolve by bare name exactly as before. */
 "use strict";
 
+// --- ES module imports (auto-generated boundary; bodies unchanged) ---
+import { pickDirectory } from "../app/coder.js";
+import { $, GIB, authHeaders, confirmDanger, downloadRate, el, fmtBytes, fmtDuration, openModal, streamJob, toast } from "../app/helpers.js";
+import { onServerUnreachable } from "../app/init.js";
+import { modelCache, refreshModels, switchModel } from "../app/models-sidebar.js";
+
 /* ================================================================ */
 /*  Models page                                                      */
 /* ================================================================ */
 
-function fmtSize(bytes) {
+export function fmtSize(bytes) {
   if (bytes == null) return "";
   return (bytes / GIB).toFixed(2) + " GB";   // binary GiB, labelled GB (see app.js)
 }
 
-async function refreshModelsPage() {
+export async function refreshModelsPage() {
   await refreshModels();
   const box = $("models-table");
   box.replaceChildren();
@@ -94,7 +100,7 @@ async function refreshModelsPage() {
   box.appendChild(table);
 }
 
-async function showModelDetail(name) {
+export async function showModelDetail(name) {
   const r = await fetch(`/v1/models/${encodeURIComponent(name)}`, {
     headers: authHeaders() });
   const data = await r.json();
@@ -119,17 +125,17 @@ async function showModelDetail(name) {
 
 /* ---- model discovery (HuggingFace search + VRAM fit badges) ---- */
 
-function fmtCount(n) {
+export function fmtCount(n) {
   if (n == null) return "0";
   if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
   if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
   return String(n);
 }
 
-const FIT_TEXT = { "fits": "fits your VRAM", "tight": "tight fit",
+export const FIT_TEXT = { "fits": "fits your VRAM", "tight": "tight fit",
                    "too-big": "needs partial CPU offload" };
 
-async function discoverSearch() {
+export async function discoverSearch() {
   const box = $("disc-results");
   box.replaceChildren(el("div", "sub", "searching HuggingFace…"));
   $("disc-search").disabled = true;
@@ -168,7 +174,7 @@ async function discoverSearch() {
   }
 }
 
-async function discoverFiles(repo, filesBox, btn) {
+export async function discoverFiles(repo, filesBox, btn) {
   if (filesBox.childElementCount) {            // toggle collapse
     filesBox.replaceChildren();
     return;
@@ -327,7 +333,7 @@ if ($("server-shutdown")) {
 // via capabilities.bugreport_upload) ALSO files it as a GitHub issue through the
 // proxy, so a tester needs no GitHub account. A failed upload is reported honestly
 // (the file is still saved), never as success.
-async function submitBugReport(upload) {
+export async function submitBugReport(upload) {
   const desc = ($("bug-desc").value || "").trim();
   if (!desc) { toast("Describe the problem first", true); return; }
   const includeLog = !!($("bug-include-log") && $("bug-include-log").checked);
@@ -387,7 +393,7 @@ if ($("bug-upload")) $("bug-upload").onclick = () => submitBugReport(true);
 // __localmUpdateCheck) + an explicit "Update now". localm never self-updates; the
 // apply runs only on this click and the server rolls back + reports honestly on
 // failure.
-async function updateCheck() {
+export async function updateCheck() {
   const out = $("update-status"), applyBtn = $("update-apply");
   try {
     const r = await fetch("/api/update/check", { headers: authHeaders() });
@@ -411,7 +417,7 @@ async function updateCheck() {
 }
 window.__localmUpdateCheck = updateCheck;
 
-async function updateApply() {
+export async function updateApply() {
   const out = $("update-status"), btn = $("update-apply");
   if (btn) btn.disabled = true;
   if (out) { out.hidden = false; out.textContent = "Downloading and applying ..."; }
@@ -436,7 +442,7 @@ if ($("update-check")) $("update-check").onclick = updateCheck;
 if ($("update-apply")) $("update-apply").onclick = updateApply;
 
 // Issues: read-only list (textContent only - never raw innerHTML for proxy data).
-async function issuesRefresh() {
+export async function issuesRefresh() {
   const out = $("issues-list");
   if (out) out.textContent = "Loading ...";
   try {
@@ -501,7 +507,7 @@ if ($("logs-export")) {
 // own boundary, but keep the auth + CSRF headers. CONFIG_WRITE-gated server-side.
 // The list is built with safe DOM nodes (textContent), never innerHTML, so a
 // crafted file name cannot inject markup.
-async function refreshUploadsList() {
+export async function refreshUploadsList() {
   const list = $("upload-list");
   if (!list) return;
   try {
@@ -526,7 +532,7 @@ async function refreshUploadsList() {
 }
 window.refreshUploadsList = refreshUploadsList;
 
-async function deleteUpload(name) {
+export async function deleteUpload(name) {
   try {
     const r = await fetch("/api/uploads/" + encodeURIComponent(name),
       { method: "DELETE", headers: authHeaders() });

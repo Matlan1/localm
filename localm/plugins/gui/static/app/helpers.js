@@ -9,15 +9,15 @@
 /*  Shared helpers                                                   */
 /* ================================================================ */
 
-const $ = (id) => document.getElementById(id);
+export const $ = (id) => document.getElementById(id);
 
 // S2: the API key is no longer kept in JS-readable localStorage. Open-mode
 // management uses the per-process shell token (injected as a global, sent as a
 // bearer HEADER); protected mode rides the HttpOnly session cookie set at login
 // or loopback auto-seed (auto-sent same-origin) with a double-submit CSRF token.
-const SHELL_TOKEN = window.__LOCALM_SHELL_TOKEN__ || "";
+export const SHELL_TOKEN = window.__LOCALM_SHELL_TOKEN__ || "";
 
-function readCookie(name) {
+export function readCookie(name) {
   const m = document.cookie.match(new RegExp("(?:^|; )" + name + "=([^;]*)"));
   if (!m) return "";
   // A cookie value is untrusted input. decodeURIComponent throws a URIError on a
@@ -31,7 +31,7 @@ function readCookie(name) {
   catch (e) { return m[1]; }
 }
 
-function authHeaders(extra = {}) {
+export function authHeaders(extra = {}) {
   const h = { "Content-Type": "application/json", ...extra };
   if (SHELL_TOKEN) h["Authorization"] = "Bearer " + SHELL_TOKEN;
   const csrf = readCookie("localm_csrf");
@@ -39,7 +39,7 @@ function authHeaders(extra = {}) {
   return h;
 }
 
-function toast(msg, isError = false) {
+export function toast(msg, isError = false) {
   const el = $("toast");
   el.textContent = msg;
   el.className = "show" + (isError ? " error" : "");
@@ -51,7 +51,7 @@ marked.setOptions({ breaks: true, mangle: false, headerIds: false });
 
 /** Split leading <think>…</think> reasoning from the visible reply.
  *  Handles a still-open block during streaming. */
-function splitThink(text) {
+export function splitThink(text) {
   const m = /<think>([\s\S]*?)(?:<\/think>([\s\S]*)|$)/.exec(text || "");
   if (!m) return { think: null, open: false, rest: text || "" };
   const closed = m[2] !== undefined;
@@ -65,13 +65,13 @@ function splitThink(text) {
 
 /** Reply text with reasoning blocks removed - what gets sent back to the
  *  model on later turns. */
-function stripThink(text) {
+export function stripThink(text) {
   return (text || "").replace(/<think>[\s\S]*?(<\/think>|$)/g, "").trim();
 }
 
 /** Replace raw <tool_call> JSON blocks with a compact human-readable note -
  *  shown while the web-access loop executes the request. */
-function formatToolCalls(text) {
+export function formatToolCalls(text) {
   return (text || "").replace(
     /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g,
     (m, body) => {
@@ -94,7 +94,7 @@ function formatToolCalls(text) {
  *  plugged-in backend might not, so the GUI never renders raw channel tokens.
  *  Mirrors the server regexes; runs on the full accumulated text so there is no
  *  streaming-boundary concern here. */
-function scrubMarkers(text) {
+export function scrubMarkers(text) {
   return (text || "")
     .replace(/<\|"\|>/g, '"')
     .replace(/<\|?\s*channel\s*\|?>(thought|thinking|analysis|reasoning|commentary|reflection)\n?(<\|?\s*message\s*\|?>)?/g, "<think>\n")
@@ -102,7 +102,7 @@ function scrubMarkers(text) {
     .replace(/<\|?\s*channel\s*\|?>|<\s*channel\s*\|>|<\|?\s*message\s*\|?>|<\|start\|>(assistant|user|system)?|<\|return\|>|<\|turn>(user|model|assistant|system)?\n?|<turn\|>|<\|tool>|<tool\|>|<\|think\|>|<think\|>|<unused\d+>?/g, "");
 }
 
-function renderMarkdown(target, text) {
+export function renderMarkdown(target, text) {
   const { think, open, rest: rawRest } = splitThink(scrubMarkers(text));
   const rest = formatToolCalls(rawRest);
 
@@ -177,7 +177,7 @@ function renderMarkdown(target, text) {
 /** The artifact language for a <code> element, or null if it is not a
  *  renderable self-contained block. Reads the captured data-lang first, then
  *  sniffs the content (so an unlabelled <svg>/<!doctype html> still works). */
-function artifactLang(codeEl) {
+export function artifactLang(codeEl) {
   if (!codeEl) return null;
   const cls = (codeEl.className || "").match(/language-([\w-]+)/);
   const lang = ((codeEl.dataset && codeEl.dataset.lang) || (cls && cls[1]) || "").toLowerCase();
@@ -192,7 +192,7 @@ function artifactLang(codeEl) {
 /** Build the iframe srcdoc for an artifact, injecting a strict CSP that blocks
  *  network access. Inline script/style are allowed (the artifact runs), data:
  *  images are allowed, everything else is denied. */
-function artifactSrcdoc(code, lang) {
+export function artifactSrcdoc(code, lang) {
   const csp = '<meta http-equiv="Content-Security-Policy" content="'
     + "default-src 'none'; img-src data: blob:; media-src data: blob:; "
     + "style-src 'unsafe-inline'; script-src 'unsafe-inline'; font-src data:;\">";
@@ -213,7 +213,7 @@ function artifactSrcdoc(code, lang) {
 }
 
 /** Open the artifact pane and render *code* in the hard-sandboxed iframe. */
-function openArtifact(code, lang) {
+export function openArtifact(code, lang) {
   const pane = document.getElementById("artifact-pane");
   if (!pane) return;
   const body = pane.querySelector(".artifact-body");
@@ -236,7 +236,7 @@ function openArtifact(code, lang) {
 }
 
 /** Close the artifact pane and tear down the iframe (stops any running script). */
-function closeArtifact() {
+export function closeArtifact() {
   const pane = document.getElementById("artifact-pane");
   if (!pane) return;
   pane.hidden = true;
@@ -246,7 +246,7 @@ function closeArtifact() {
 
 /** Add the copy button (and, for a renderable block, an "open canvas" button)
  *  to a <pre>. Idempotent. */
-function enhanceCodeBlock(pre) {
+export function enhanceCodeBlock(pre) {
   if (!pre.querySelector(".copy-btn")) {
     const btn = document.createElement("button");
     btn.className = "copy-btn";
@@ -271,24 +271,24 @@ function enhanceCodeBlock(pre) {
 }
 
 /** Create an element with class and (safe) text content. */
-function el(tag, className, text) {
+export function el(tag, className, text) {
   const node = document.createElement(tag);
   if (className) node.className = className;
   if (text !== undefined) node.textContent = text;
   return node;
 }
 
-function autoGrow(textarea) {
+export function autoGrow(textarea) {
   textarea.style.height = "auto";
   textarea.style.height = Math.min(textarea.scrollHeight, 220) + "px";
 }
 
-function nearBottom(elm) {
+export function nearBottom(elm) {
   return elm.scrollHeight - elm.scrollTop - elm.clientHeight < 80;
 }
 
 /** Parse an SSE byte stream from fetch(), invoking onData per `data:` payload. */
-async function readSSE(response, onData) {
+export async function readSSE(response, onData) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buf = "";
@@ -312,14 +312,14 @@ async function readSSE(response, onData) {
 // Ask the server to cancel a running job (model pull, media generation). The
 // job's worker stops cooperatively (media gen interrupts ComfyUI mid-render),
 // so streamJob's "end" event arrives with status "cancelled".
-async function cancelJob(jobId) {
+export async function cancelJob(jobId) {
   try {
     await fetch(`/api/jobs/${jobId}/cancel`,
                 { method: "POST", headers: authHeaders() });
   } catch (e) { /* best-effort - the stream will still end */ }
 }
 
-async function streamJob(jobId, onLine, onProgress) {
+export async function streamJob(jobId, onLine, onProgress) {
   const r = await fetch(`/api/jobs/${jobId}/events`, { headers: authHeaders() });
   if (!r.ok) throw new Error(r.statusText);
   let endEvent = null;
@@ -337,9 +337,9 @@ async function streamJob(jobId, onLine, onProgress) {
 // GPU/LLM convention: matches the VRAM printed on the card, llama.cpp's logs,
 // and HuggingFace quant tables. (The driver reports e.g. 16 GiB; showing
 // decimal GB would read a confusing 17.2 for the same card.)
-const GIB = 1024 ** 3, MIB = 1024 ** 2, KIB = 1024;
+export const GIB = 1024 ** 3, MIB = 1024 ** 2, KIB = 1024;
 
-function fmtBytes(n) {
+export function fmtBytes(n) {
   if (n == null) return "";
   if (n >= GIB) return (n / GIB).toFixed(2) + " GB";
   if (n >= MIB) return (n / MIB).toFixed(1) + " MB";
@@ -353,7 +353,7 @@ function fmtBytes(n) {
  *  readout does not flicker. Returns {bytesPerSec, etaSec}; either is null when
  *  it cannot be computed - needs >=2 samples, a positive time span, and forward
  *  progress; etaSec also needs a known total >= the bytes so far. */
-function downloadRate(samples, total) {
+export function downloadRate(samples, total) {
   const out = { bytesPerSec: null, etaSec: null };
   if (!samples || samples.length < 2) return out;
   const first = samples[0], last = samples[samples.length - 1];
@@ -369,7 +369,7 @@ function downloadRate(samples, total) {
 
 /** Seconds -> a compact ETA string: "1h 01m" / "1m 30s" / "45s". Empty for a
  *  missing / non-finite / negative value. */
-function fmtDuration(sec) {
+export function fmtDuration(sec) {
   if (sec == null || !isFinite(sec) || sec < 0) return "";
   sec = Math.round(sec);
   const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
@@ -379,7 +379,7 @@ function fmtDuration(sec) {
 }
 
 /** Fetch an auth-protected image into an object URL. */
-async function fetchImageURL(path) {
+export async function fetchImageURL(path) {
   const r = await fetch(path, { headers: authHeaders() });
   if (!r.ok) throw new Error(r.statusText);
   return URL.createObjectURL(await r.blob());
@@ -387,7 +387,7 @@ async function fetchImageURL(path) {
 
 /* ---- modal ---- */
 
-function openModal(title, bodyBuilder) {
+export function openModal(title, bodyBuilder) {
   $("modal-title").textContent = title;
   const body = $("modal-body");
   body.innerHTML = "";
@@ -400,7 +400,7 @@ $("modal").onclick = (e) => { if (e.target === $("modal")) $("modal").style.disp
 /** Confirm a destructive action with the in-page modal. window.confirm() is
  *  suppressed in some mobile / PWA browsers (the NET-1 prompt() class of bug),
  *  so we render our own Cancel / <confirm> dialog. */
-function confirmDanger(title, message, confirmLabel, onConfirm) {
+export function confirmDanger(title, message, confirmLabel, onConfirm) {
   openModal(title, (body) => {
     body.appendChild(el("p", "", message));
     const row = el("div", "actions");

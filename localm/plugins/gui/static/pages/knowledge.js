@@ -5,11 +5,16 @@
    resolve by bare name exactly as before. */
 "use strict";
 
+// --- ES module imports (auto-generated boundary; bodies unchanged) ---
+import { chat } from "../app/chat.js";
+import { $, authHeaders, el, openModal, streamJob, toast } from "../app/helpers.js";
+import { refreshKbSelect } from "../app/settings-perf.js";
+
 /* ================================================================ */
 /*  Knowledge page                                                   */
 /* ================================================================ */
 
-async function refreshKnowledgePage() {
+export async function refreshKnowledgePage() {
   refreshKbSelect();   // keep the chat drawer selector in sync
   const box = $("kb-table");
   box.replaceChildren();
@@ -91,7 +96,7 @@ $("kb-create").onclick = async () => {
   refreshKnowledgePage();
 };
 
-async function kbAddDocs(name) {
+export async function kbAddDocs(name) {
   const path = prompt(
     `Add documents to '${name}' - file or folder path on this machine\n` +
     "(folders are indexed recursively; txt/md/pdf/docx/html/code):",
@@ -123,7 +128,7 @@ async function kbAddDocs(name) {
   }
 }
 
-async function kbInfoModal(name) {
+export async function kbInfoModal(name) {
   const r = await fetch("/api/rag/collections/" + encodeURIComponent(name),
                         { headers: authHeaders() });
   const data = await r.json();
@@ -156,7 +161,7 @@ async function kbInfoModal(name) {
   });
 }
 
-function kbSearchModal(name) {
+export function kbSearchModal(name) {
   openModal("Search - " + name, (body) => {
     const row = el("div", "row");
     const input = document.createElement("input");
