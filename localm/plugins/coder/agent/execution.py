@@ -1,0 +1,429 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""Single tool-call execution: the security-critical dispatch path (disabled-tool
+gate, scope check, dry-run, network policy, fail-closed confirmation, snapshot,
+hidden-arg injection, the failure breaker), plus patch-mode capture, the
+confirm prompt, scope resolution, and the per-write map refresh. Mixed into Agent."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Optional
+
+import localm.plugins.coder.agent as _agent
+from ..display import (
+    console, print_tool_call, print_tool_error, print_tool_result,
+)
+from ..parser import ToolCall
+from ..tools import ToolResult
+from ..audit import SessionMode
+from .constants import (
+    _CODE_EXTS, _GLOBAL_ERROR_ABORT, _MUTATING_TOOLS, _NETWORK_TOOLS,
+    _SCOPE_PATH_ARGS, _SCOPED_TOOLS, _TEST_COMMAND_MARKERS, _UNDOABLE_TOOLS,
+)
+from .scope import _scope_pattern
+
+
+class _ExecutionMixin:
+    def _scope_rel(self, value: str) -> Optional[str]:
+        """
+        Resolve a path/glob arg to a cwd-relative POSIX string for scope
+        matching, or return None if it escapes cwd.
+
+        Relative paths are joined onto cwd; absolute paths are accepted only
+        when they live inside cwd (an in-cwd absolute path that matches the
+        scope must pass - BUG-6). Glob metacharacters in *value* (e.g.
+        ``**/*.py`` for grep/search_replace) survive resolution: they are kept
+        verbatim in the relative string and matched against the scope as-is.
+        """
+        raw = str(value).replace("\\", "/")
+        p = Path(raw)
+        cwd = self.cwd.resolve()
+        if p.is_absolute():
+            try:
+                # No resolve(): the path may contain glob chars or not exist.
+                rel = Path(raw).relative_to(cwd)
+            except ValueError:
+                # Try once more against the resolved abs form for symlinks etc.
+                try:
+                    rel = Path(raw).resolve().relative_to(cwd)
+                except ValueError:
+                    return None   # outside cwd
+            return rel.as_posix()
+        # Relative: collapse any leading ./ and reject cwd escapes (../).
+        rel_posix = (Path(".") / raw).as_posix()
+        if rel_posix.startswith("./"):
+            rel_posix = rel_posix[2:]
+        parts = [seg for seg in rel_posix.split("/") if seg not in ("", ".")]
+        if ".." in parts:
+            return None   # escapes cwd
+        return "/".join(parts)
+
+    def _scope_allows(self, value: str) -> bool:
+        """True if *value* (a path or glob arg) is within the active scope."""
+        rel = self._scope_rel(value)
+        if rel is None:
+            return False
+        return _scope_pattern(self.scope).match(rel) is not None
+
+    def _scope_violation(self, call: ToolCall) -> Optional[str]:
+        """
+        Return the first in-scope-checked arg value that falls outside the
+        active scope, or None if the call is allowed.
+
+        Defaults to checking the ``path`` arg; ``_SCOPE_PATH_ARGS`` overrides
+        this for tools whose primary target is a ``glob`` or ``output_path``
+        arg (and may add ``path`` alongside it).
+        """
+        arg_names = _SCOPE_PATH_ARGS.get(call.name, ("path",))
+        for name in arg_names:
+            value = call.args.get(name)
+            if value:
+                if not self._scope_allows(str(value)):
+                    return str(value)
+        return None
+
+    def _execute_tool(self, call: ToolCall, interactive: bool) -> ToolResult:
+        TOOL_REGISTRY = _agent.TOOL_REGISTRY  # live: honour a patched agent.TOOL_REGISTRY
+        # Hard gate: a tool disabled for this session (e.g. run_shell for a
+        # restricted, shareable coder key) can never execute, whatever the model
+        # emits. This is the security boundary - the prompt/parse exclusions below
+        # are only there so the model does not waste turns trying.
+        if call.name in self.disabled_tools:
+            result = ToolResult.error(
+                f"'{call.name}' is disabled for this session and was not run.")
+            if interactive:
+                print_tool_error(call.name, result.output)
+            return result
+
+        tool_def = TOOL_REGISTRY.get(call.name)
+
+        if tool_def is None:
+            result = ToolResult.error(
+                f"Unknown tool '{call.name}'. "
+                f"Available: {', '.join(TOOL_REGISTRY)}"
+            )
+            if interactive:
+                print_tool_error(call.name, result.output)
+            return result
+
+        self._audit.tool_call(call.name, call.args)
+        if interactive:
+            print_tool_call(call.name, call.args)
+        self._emit("tool_call", tool=call.name, args=call.args)
+
+        # Patch-mode: intercept write tools, accumulate diffs, don't touch disk.
+        # A write tool the interceptor can't express as a diff must NOT fall
+        # through to a real disk write - patch-mode promises no changes.
+        if self.patch_mode and call.name in _UNDOABLE_TOOLS:
+            chunk = self._patch_mode_intercept(call)
+            if chunk is not None:
+                self._patch_chunks.append(chunk)
+                result = ToolResult.success(
+                    f"[patch-mode] diff captured for {call.args.get('path', '?')}",
+                    summary=f"[patch-mode] {call.name}",
+                )
+                if interactive:
+                    console.print("    [dim cyan][patch-mode] diff captured[/dim cyan]")
+            else:
+                result = ToolResult.error(
+                    f"[patch-mode] {call.name} cannot be captured as a diff "
+                    "(no change, or unsupported operation) - skipped. Use "
+                    "write_file/edit_file/patch_file in patch mode."
+                )
+                if interactive:
+                    console.print("    [dim yellow][patch-mode] skipped[/dim yellow]")
+            return result
+
+        # Scope check - reject file operations that fall outside the active glob
+        if self.scope and call.name in _SCOPED_TOOLS:
+            offending = self._scope_violation(call)
+            if offending is not None:
+                result = ToolResult.error(
+                    f"'{offending}' is outside the active scope '{self.scope}'. "
+                    "Only files matching this glob pattern can be accessed."
+                )
+                if interactive:
+                    print_tool_error(call.name, result.output)
+                return result
+
+        # Dry-run: show destructive calls but don't execute them
+        if self.dry_run and tool_def.destructive:
+            result = ToolResult.success(
+                f"[dry-run] {call.name} - skipped",
+                summary=f"[dry-run] {call.name}",
+            )
+            if interactive:
+                console.print("    [dim yellow][dry-run] skipped[/dim yellow]")
+            return result
+
+        # Network policy: model-initiated network tools are governed by
+        # net_mode (off = fail fast, ask = approval flow, allow = run).
+        net_mode = None
+        if call.name in _NETWORK_TOOLS:
+            from localm.netpolicy import network_mode
+            net_mode = network_mode()
+            if net_mode == "off":
+                result = ToolResult.error(
+                    "Network access is disabled (net_mode=off). The user can "
+                    "enable it with: localm config net_mode ask"
+                )
+                if interactive:
+                    print_tool_error(call.name, result.output)
+                self._emit("tool_result", tool=call.name, ok=False,
+                           summary="blocked by network policy (net_mode=off)")
+                return result
+
+        # Confirmation for destructive tools (diff preview for write_file)
+        # and for network tools when net_mode is "ask"
+        needs_confirm = (
+            (tool_def.destructive or net_mode == "ask") and (
+                not self.auto_approve or call.name in self.always_confirm
+            )
+        )
+        if needs_confirm:
+            if self.confirm_handler is not None:
+                approved = self.confirm_handler(call)
+            elif interactive:
+                approved = self._confirm_tool(call)
+            else:
+                # Fail CLOSED: this tool requires confirmation, but there is no way
+                # to obtain it (non-interactive run, no approval handler). Deny it
+                # rather than silently executing - so a configured always_confirm or
+                # auto_approve=off is honoured, and an unattended run can never be
+                # steered into an unconfirmed destructive/network action. (RULE 5: a
+                # safety gate that cannot run must not be treated as passed. The safe
+                # default for an unattended coder is the restricted, no-shell agent.)
+                result = ToolResult.error(
+                    f"{call.name} requires confirmation, but this run is "
+                    "non-interactive with no approval handler - denied. Run "
+                    "interactively, or use the restricted coder for unattended runs.")
+                self._emit("tool_result", tool=call.name, ok=False,
+                           summary="denied: confirmation required, none available")
+                return result
+            if not approved:
+                result = ToolResult.error("Rejected by user.")
+                if interactive:
+                    print_tool_result(call.name, result, verbose=False)
+                self._emit("tool_result", tool=call.name, ok=False,
+                           summary="rejected by user")
+                return result
+
+        # Snapshot file content before undoable writes so /undo can restore
+        # it and the changed-files tracker can diff against the original
+        snapshot_old: bytes | None = None
+        if call.name in _UNDOABLE_TOOLS:
+            path_arg = call.args.get("path", "")
+            if path_arg:
+                abs_path = (self.cwd / path_arg).resolve()
+                try:
+                    snapshot_old = abs_path.read_bytes() if abs_path.is_file() else None
+                except Exception:
+                    snapshot_old = None
+                self._undo_stack.append({
+                    "path": abs_path,
+                    "old_content": snapshot_old,
+                    "tool": call.name,
+                })
+
+        # Inject hidden runtime args into specific tools
+        args = dict(call.args)
+        if call.name == "spawn_agent":
+            args["_parent_agent"] = self
+        if call.name in ("run_shell", "fetch_url", "web_search", "generate_image") \
+                and self.mode == SessionMode.PRIVACY:
+            args["_privacy"] = True
+
+        try:
+            result = tool_def.fn(self.cwd, **args)
+        except TypeError as e:
+            result = ToolResult.error(f"Bad arguments for {call.name}: {e}")
+        except Exception as e:
+            result = ToolResult.error(f"Tool error: {e}")
+
+        result = self._track_tool_failure(call, result)
+
+        self._audit.tool_result(call.name, result.ok, result.summary)
+        if interactive:
+            print_tool_result(call.name, result, verbose=self.verbose)
+        self._emit("tool_result", tool=call.name, ok=result.ok,
+                   summary=result.summary, output=result.output[:4000])
+
+        # Incremental map refresh after file-mutating tools
+        if result.ok and call.name in _MUTATING_TOOLS:
+            self._refresh_map_for_tool(call)
+
+        self._post_tool_success(call, result, snapshot_old)
+
+        return result
+
+    def _track_tool_failure(self, call: ToolCall, result: ToolResult) -> ToolResult:
+        """Update the per-tool + global failure streaks and arm the circuit
+        breakers; on a failure, fold escalating recovery hints into the result.
+        Returns the (possibly augmented) result. Split out of _execute_tool; the
+        breaker flags it sets are checked back in _loop."""
+        # Track consecutive failures and inject escalating recovery hints;
+        # at 4 identical failures the circuit breaker stops the task after
+        # this batch (checked in _loop) instead of burning the turn budget.
+        if not result.ok:
+            streak = self._consecutive_errors.get(call.name, 0) + 1
+            self._consecutive_errors[call.name] = streak
+            if streak == 2:
+                result = ToolResult.error(
+                    result.output
+                    + "\n\n[Hint: this tool has failed twice in a row. "
+                    "Try a different approach - check paths, arguments, or preconditions.]"
+                )
+            elif streak >= 3:
+                result = ToolResult.error(
+                    result.output
+                    + f"\n\n[Warning: {call.name} has failed {streak} times consecutively. "
+                    "Step back and reconsider your strategy. "
+                    "Consider reading the relevant files first, "
+                    "or breaking the task into smaller steps.]"
+                )
+            if streak >= 4:
+                self._abort_streak_tool = call.name
+            # Global no-progress breaker: count failures across ANY tool so a model
+            # spinning on varied failing calls cannot burn the whole budget.
+            self._global_error_streak += 1
+            if self._global_error_streak >= _GLOBAL_ERROR_ABORT:
+                self._abort_no_progress = True
+        else:
+            self._consecutive_errors.pop(call.name, None)
+            self._global_error_streak = 0
+        return result
+
+    def _post_tool_success(self, call: ToolCall, result: ToolResult,
+                           snapshot_old: "bytes | None") -> None:
+        """Post-success bookkeeping split out of _execute_tool: record changed
+        code files for the changed-files tracker and clear the unverified-writes
+        set when the agent runs the test suite (or a test command)."""
+        # Self-verification bookkeeping: remember code files changed on disk,
+        # forget them once the agent runs the test suite (or a test command)
+        if result.ok and not self.dry_run and not self.patch_mode:
+            if call.name in _UNDOABLE_TOOLS:
+                path_arg = call.args.get("path", "")
+                if path_arg:
+                    self._record_changed_file(path_arg, snapshot_old, call.name)
+                if path_arg and Path(path_arg).suffix.lower() in _CODE_EXTS:
+                    self._unverified_writes.add(path_arg)
+            elif call.name == "run_tests":
+                self._unverified_writes.clear()
+            elif call.name == "run_shell":
+                cmd = str(call.args.get("command", "")).lower()
+                if any(marker in cmd for marker in _TEST_COMMAND_MARKERS):
+                    self._unverified_writes.clear()
+
+    def _patch_mode_intercept(self, call: ToolCall) -> Optional[str]:
+        """
+        Compute a unified diff for a write/edit/patch call without touching disk.
+
+        Returns the diff string, or None if the diff cannot be computed.
+        """
+        import difflib as _difflib
+
+        path_arg = call.args.get("path", "")
+        abs_path = (self.cwd / path_arg).resolve() if path_arg else None
+        old_text = ""
+        if abs_path and abs_path.is_file():
+            try:
+                old_text = abs_path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+        if call.name == "write_file":
+            new_text = call.args.get("content", "")
+        elif call.name == "edit_file":
+            old_str = call.args.get("old", "")
+            new_str = call.args.get("new", "")
+            new_text = old_text.replace(old_str, new_str, 1)
+        elif call.name == "patch_file":
+            # diff is already a unified diff - wrap it as-is
+            diff = call.args.get("diff", "")
+            return diff if diff else None
+        else:
+            return None
+
+        diff_lines = list(_difflib.unified_diff(
+            old_text.splitlines(keepends=True),
+            new_text.splitlines(keepends=True),
+            fromfile=f"a/{path_arg}",
+            tofile=f"b/{path_arg}",
+        ))
+        return "".join(diff_lines) if diff_lines else None
+
+    def flush_patch(self, output_path: Optional[Path] = None) -> str:
+        """
+        Return the accumulated unified diff (and optionally write it to a file).
+
+        Clears the internal patch buffer.
+        """
+        content = "\n".join(c for c in self._patch_chunks if c)
+        self._patch_chunks.clear()
+        if output_path is not None:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(content, encoding="utf-8")
+        return content
+
+    def _confirm_tool(self, call: ToolCall) -> bool:
+        """
+        Ask the user to approve a destructive tool call.
+
+        For *write_file*, shows a coloured unified diff of the proposed change
+        before the prompt so the user can see exactly what will happen.
+        For all other destructive tools, falls back to a plain y/N prompt.
+        """
+        # Live-attribute access so tests patching agent.confirm / confirm_diff /
+        # print_diff_preview are honoured (the names moved into this submodule).
+        confirm = _agent.confirm
+        confirm_diff = _agent.confirm_diff
+        print_diff_preview = _agent.print_diff_preview
+        if call.name == "write_file":
+            path_arg = call.args.get("path", "")
+            new_content = call.args.get("content", "")
+            abs_path = (self.cwd / path_arg).resolve() if path_arg else None
+            old_content = ""
+            if abs_path and abs_path.is_file():
+                try:
+                    old_content = abs_path.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    pass
+            print_diff_preview(old_content, new_content, path_label=path_arg)
+            return confirm_diff(path_arg or "file")
+
+        if call.name == "edit_file":
+            path_arg    = call.args.get("path", "")
+            old_string  = call.args.get("old", "")
+            new_string  = call.args.get("new", "")
+            abs_path    = (self.cwd / path_arg).resolve() if path_arg else None
+            old_content = ""
+            if abs_path and abs_path.is_file():
+                try:
+                    old_content = abs_path.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    pass
+            new_content = old_content.replace(old_string, new_string, 1)
+            print_diff_preview(old_content, new_content, path_label=path_arg)
+            return confirm_diff(path_arg or "file")
+
+        if call.name == "patch_file":
+            path_arg = call.args.get("path", "")
+            patch    = call.args.get("diff", "")
+            # The patch is already a unified diff - display it directly
+            from ..display import console as _con
+            from rich.syntax import Syntax
+            _con.print()
+            _con.print(Syntax(patch, "diff", theme="monokai", line_numbers=False))
+            return confirm_diff(path_arg or "file")
+
+        return confirm(f"  Allow {call.name}?")
+
+    def _refresh_map_for_tool(self, call: ToolCall) -> None:
+        """Update the project map for files touched by a write/edit tool call."""
+        path_arg = call.args.get("path")
+        if path_arg:
+            abs_path = (self.cwd / path_arg).resolve()
+            self._project_map.refresh_file(abs_path)
+            # Regenerate the system prompt with the updated map (combined mcp+
+            # plugin+skill tool docs preserved - see _rebuild_system_prompt).
+            self._rebuild_system_prompt()
