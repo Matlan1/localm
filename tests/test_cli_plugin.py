@@ -113,3 +113,26 @@ def test_install_from_directory(cli_env, tmp_path):
 
     r2 = CliRunner().invoke(cli_env.main, ["plugin", "install", str(ext)])
     assert r2.exit_code == 1 and "already installed" in r2.output.lower()
+
+
+# --------------------------------------------------------------------------- #
+#  `plugin setup --plugins`: reject all-junk selections (go-public readiness)  #
+# --------------------------------------------------------------------------- #
+
+def test_setup_plugins_all_junk_is_error(cli_env):
+    """A non-interactive --plugins selection that resolves to nothing is a typo,
+    not a deliberate skip; it must fail loudly instead of reporting a no-op as
+    success (so an install/CI script does not silently install nothing)."""
+    r = CliRunner().invoke(cli_env.main, ["plugin", "setup", "--plugins", "ewew"])
+    assert r.exit_code == 1
+    assert "no known plugins" in r.output.lower()
+    # The bad token is named, and the valid choices are listed.
+    assert "ewew" in r.output
+    assert "coder" in r.output
+
+
+def test_setup_plugins_blank_is_a_skip_not_an_error(cli_env):
+    """An explicitly blank selection is a deliberate skip and exits 0."""
+    r = CliRunner().invoke(cli_env.main, ["plugin", "setup", "--plugins", "   "])
+    assert r.exit_code == 0
+    assert "no plugins selected" in r.output.lower()
