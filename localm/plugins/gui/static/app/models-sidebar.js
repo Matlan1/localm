@@ -5,13 +5,17 @@
    name exactly as before. */
 "use strict";
 
+// --- ES module imports (auto-generated boundary; bodies unchanged) ---
+import { chat } from "./chat.js";
+import { $, GIB, authHeaders, el, toast } from "./helpers.js";
+
 /* ================================================================ */
 /*  Models (sidebar selector)                                        */
 /* ================================================================ */
 
-const modelSelect = $("model-select");
+export const modelSelect = $("model-select");
 
-function setStatus(state, text) {
+export function setStatus(state, text) {
   $("status-dot").className = "dot " + state;
   $("status-text").textContent = text;
 }
@@ -20,7 +24,7 @@ function setStatus(state, text) {
 // Renders whatever /api/stats reports; any section the box can't measure is
 // simply absent (e.g. no psutil -> no CPU/RAM; AMD -> no GPU%). VRAM shows
 // used/total when free is known, otherwise just total.
-function renderHwStats(data) {
+export function renderHwStats(data) {
   const el = $("hw-stats");
   if (!el) return;
   const gib = (b) => (b / GIB).toFixed(1);
@@ -45,7 +49,7 @@ function renderHwStats(data) {
   }
 }
 
-async function pollHwStats() {
+export async function pollHwStats() {
   if (typeof document !== "undefined" && document.hidden) return;
   try {
     const r = await fetch("/api/stats", { headers: authHeaders() });
@@ -54,8 +58,8 @@ async function pollHwStats() {
   } catch (e) { /* transient - keep the last reading */ }
 }
 
-let _hwStatsTimer = null;
-function startHwStats(intervalMs = 2500) {
+export let _hwStatsTimer = null;
+export function startHwStats(intervalMs = 2500) {
   pollHwStats();
   if (_hwStatsTimer) clearInterval(_hwStatsTimer);
   _hwStatsTimer = setInterval(pollHwStats, intervalMs);
@@ -68,7 +72,7 @@ function startHwStats(intervalMs = 2500) {
 // browser has no working key - the network/phone case, where the loopback key
 // is never auto-seeded. Replaces window.prompt() (suppressed by mobile/PWA
 // browsers, the NET-1 white-page cause). Idempotent: safe to call repeatedly.
-function showKeyGate(message) {
+export function showKeyGate(message) {
   const gate = $("key-gate");
   if (!gate) return;
   if (message) { const m = $("key-gate-msg"); if (m) m.textContent = message; }
@@ -92,7 +96,7 @@ function showKeyGate(message) {
 
 // Decide whether the key gate should offer "Install certificate". 
 // The user requested this to be always visible on the API key authentication page.
-function updateKeyGateCertStep() {
+export function updateKeyGateCertStep() {
   const cert = $("key-gate-cert");
   if (!cert) return;
   const onHttps = location.protocol === "https:";
@@ -111,7 +115,7 @@ window.updateKeyGateCertStep = updateKeyGateCertStep;
 // POST the entered key to /api/session so the server sets the HttpOnly auth
 // cookie (the key never lives in JS), then reload so the boot re-runs
 // authenticated. The CSRF cookie set alongside it is read by authHeaders().
-async function loginWithKey(key) {
+export async function loginWithKey(key) {
   try {
     const r = await fetch("/api/session", {
       method: "POST",
@@ -124,7 +128,7 @@ async function loginWithKey(key) {
 
 // Submit the gate: log in with the entered key (trimmed) then reload. An empty
 // entry just reloads (still unauthenticated -> the gate shows again).
-function submitKeyGate() {
+export function submitKeyGate() {
   const input = $("key-gate-input");
   const key = (input ? input.value : "").trim();
   if (key) {
@@ -143,7 +147,7 @@ function submitKeyGate() {
 // Add a show/hide reveal toggle to a masked API-key input (AUTH-2), like the
 // "show password" eye on a login form, so the user can verify what they typed.
 // Idempotent: wraps the input in a flex row once and appends a small toggle.
-function addRevealToggle(input) {
+export function addRevealToggle(input) {
   if (!input || input.dataset.revealWired) return;
   input.dataset.revealWired = "1";
   const wrap = el("div", "input-reveal");
@@ -167,15 +171,15 @@ window.addRevealToggle = addRevealToggle;
 // BarcodeDetector and falls back to the bundled jsQR, so it works on browsers
 // that lack BarcodeDetector (Firefox, Brave, Opera, iOS Safari, ...) - any
 // browser that can open a camera in a secure context.
-function scanSupported() {
+export function scanSupported() {
   return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
 }
 
 // Lazily load the bundled jsQR decoder (only fetched when a scan starts on a
 // browser without BarcodeDetector). Sets window.jsQR (UMD). Cached after first
 // load; the service worker caches the file for later offline pairing.
-let _jsqrPromise = null;
-function loadJsQR() {
+export let _jsqrPromise = null;
+export function loadJsQR() {
   if (window.jsQR) return Promise.resolve(window.jsQR);
   if (_jsqrPromise) return _jsqrPromise;
   _jsqrPromise = new Promise((resolve, reject) => {
@@ -190,7 +194,7 @@ function loadJsQR() {
 
 // Decode a scanned payload -> save the key + reload. Returns true when it was a
 // localm pairing QR (so the scanner can stop). Factored out for unit testing.
-function handleScannedKey(text) {
+export function handleScannedKey(text) {
   const prefix = "localm-key:";
   if (typeof text !== "string" || !text.startsWith(prefix)) return false;
   const key = text.slice(prefix.length).trim();
@@ -202,16 +206,16 @@ function handleScannedKey(text) {
   return true;
 }
 
-let _qrStream = null;
-let _qrTimer = null;
-function stopQrScan() {
+export let _qrStream = null;
+export let _qrTimer = null;
+export function stopQrScan() {
   if (_qrTimer) { clearInterval(_qrTimer); _qrTimer = null; }
   if (_qrStream) { _qrStream.getTracks().forEach((t) => t.stop()); _qrStream = null; }
   const v = $("qr-video"); if (v) v.srcObject = null;
   const s = $("qr-scanner"); if (s) s.style.display = "none";
 }
 
-async function startQrScan() {
+export async function startQrScan() {
   const overlay = $("qr-scanner"), video = $("qr-video"), status = $("qr-scan-status");
   if (!overlay || !video) return;
   overlay.style.display = "flex";
@@ -278,7 +282,7 @@ async function startQrScan() {
 // installed launch (standalone display) just confirms it. applyInstallUI() is
 // the single decision point and is unit-tested by branch.
 
-function pwaDisplayMode() {
+export function pwaDisplayMode() {
   try {
     if (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) {
       return "standalone";
@@ -289,7 +293,7 @@ function pwaDisplayMode() {
   return "browser";
 }
 
-function isIOSSafari() {
+export function isIOSSafari() {
   const nav = window.navigator || {};
   const ua = nav.userAgent || "";
   // iPadOS 13+ reports itself as a Mac, so add the touch check for that case.
@@ -300,7 +304,7 @@ function isIOSSafari() {
 // Show exactly one of: installed confirmation, the native Install button, the
 // iOS Add-to-Home-Screen steps, or the generic hint. env = {standalone, ios,
 // canPrompt}; missing fields are treated as false.
-function applyInstallUI(env) {
+export function applyInstallUI(env) {
   env = env || {};
   const btn = document.getElementById("install-app");
   const hint = document.getElementById("install-hint");
@@ -334,7 +338,7 @@ function applyInstallUI(env) {
 // then taps "Continue" to enter the app. Desktop, an already-installed launch,
 // and a return visit skip it. This is the "land on a setup page, reach localm
 // via Continue" flow - the install affordance was previously buried in Settings.
-function shouldShowInstallGate() {
+export function shouldShowInstallGate() {
   if (pwaDisplayMode() === "standalone") return false;       // already installed
   try { if (localStorage.getItem("localm.onboarded") === "1") return false; }
   catch (e) { /* storage blocked - treat as not onboarded */ }
@@ -346,7 +350,7 @@ function shouldShowInstallGate() {
 
 // Render the gate's install affordance - mirror of applyInstallUI for the gate's
 // own elements. env = {ios, canPrompt}; missing fields treated as false.
-function applyInstallGateUI(env) {
+export function applyInstallGateUI(env) {
   env = env || {};
   const btn = $("install-gate-install");
   const ios = $("install-gate-ios");
@@ -356,7 +360,7 @@ function applyInstallGateUI(env) {
   if (hint) hint.style.display = (!env.canPrompt && !env.ios) ? "" : "none";
 }
 
-function showInstallGate() {
+export function showInstallGate() {
   const gate = $("install-gate");
   if (!gate) return;
   const app = $("app");
@@ -369,7 +373,7 @@ function showInstallGate() {
 // but never in privacy mode (no localStorage traces). refreshCtxLimit also wipes
 // the flag if privacy is detected after this runs, so the contract holds even if
 // Continue is tapped before the privacy state is known.
-function dismissInstallGate() {
+export function dismissInstallGate() {
   const gate = $("install-gate");
   if (gate) gate.style.display = "none";
   const app = $("app");
@@ -388,9 +392,9 @@ window.refreshInstallGateIfOpen = function () {
   }
 };
 
-let modelCache = { models: [], active: "" };
+export let modelCache = { models: [], active: "" };
 
-async function refreshModels() {
+export async function refreshModels() {
   try {
     const r = await fetch("/api/models", { headers: authHeaders() });
     if (r.status === 401) {
@@ -426,7 +430,7 @@ async function refreshModels() {
   }
 }
 
-async function switchModel(model) {
+export async function switchModel(model) {
   setStatus("busy", "loading " + model + "…");
   const r = await fetch("/api/models/load", {
     method: "POST",

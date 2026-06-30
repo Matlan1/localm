@@ -5,6 +5,10 @@
    resolve by bare name exactly as before. */
 "use strict";
 
+// --- ES module imports (auto-generated boundary; bodies unchanged) ---
+import { $, authHeaders, el, toast } from "../app/helpers.js";
+import { refreshPluginCommands } from "../app/settings-perf.js";
+
 /* ================================================================ */
 /*  Plugins page                                                     */
 /* ================================================================ */
@@ -16,10 +20,10 @@
 // Each call supersedes the previous one (a newer refresh or leaving the page);
 // the staggered populate below checks the token so a stale render stops. The
 // per-row delay is a module var so tests can drop it to 0.
-let _catalogRenderToken = 0;
-let _catalogStaggerMs = 24;
+export let _catalogRenderToken = 0;
+export let _catalogStaggerMs = 24;
 
-function _catalogRow(p) {
+export function _catalogRow(p) {
   const tr = el("tr");
   const nameTd = el("td");
   nameTd.appendChild(el("span", "name", p.label || p.name));
@@ -65,7 +69,7 @@ function _catalogRow(p) {
   return tr;
 }
 
-async function renderCatalogPlugins() {
+export async function renderCatalogPlugins() {
   const box = $("catalog-table");
   if (!box) return;
   const myToken = ++_catalogRenderToken;
@@ -119,7 +123,7 @@ async function renderCatalogPlugins() {
   }
 }
 
-function _catalogBtn(action, name, cls, label) {
+export function _catalogBtn(action, name, cls, label) {
   const b = el("button", cls, label);
   b.style.marginLeft = "6px";
   b.onclick = () => pluginCatalogAction(action, name);
@@ -129,7 +133,7 @@ function _catalogBtn(action, name, cls, label) {
 // Install every plugin a given plugin requires but that is not yet installed
 // (B15). Best-effort and sequential; each result is toasted, then the catalog
 // re-renders so the warnings clear.
-async function installRequirements(name, missing) {
+export async function installRequirements(name, missing) {
   for (const dep of missing) {
     try {
       const r = await fetch(`/api/plugins/${encodeURIComponent(dep)}/install`,
@@ -148,7 +152,7 @@ async function installRequirements(name, missing) {
   refreshPluginCommands();
 }
 
-async function pluginCatalogAction(action, name) {
+export async function pluginCatalogAction(action, name) {
   if (action === "uninstall" &&
       !confirm(`Uninstall '${name}'? Its plugin files are removed (your data is kept).`)) return;
   try {
@@ -175,7 +179,7 @@ async function pluginCatalogAction(action, name) {
   if (window.bumpPluginsRev) window.bumpPluginsRev();
 }
 
-async function refreshPluginsPage() {
+export async function refreshPluginsPage() {
   const box = $("plugins-table");
   box.replaceChildren();
   try {

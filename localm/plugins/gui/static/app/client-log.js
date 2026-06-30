@@ -16,7 +16,7 @@
 /* ================================================================ */
 
 window.__localmClientLog = window.__localmClientLog || [];
-function __localmPushClientError(msg) {
+export function __localmPushClientError(msg) {
   try {
     const line = String(msg).slice(0, 1000);
     const log = window.__localmClientLog;

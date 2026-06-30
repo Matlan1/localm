@@ -6,6 +6,18 @@
 
 "use strict";
 
+// --- ES module imports (auto-generated boundary; bodies unchanged) ---
+import { populateSetupModels } from "../app/coder.js";
+import { $, authHeaders } from "../app/helpers.js";
+import { refreshPluginCommands } from "../app/settings-perf.js";
+import { refreshImageHistory } from "./images.js";
+import { refreshKnowledgePage } from "./knowledge.js";
+import { refreshModelsPage, refreshUploadsList } from "./models.js";
+import { refreshPluginsPage, renderCatalogPlugins } from "./plugins.js";
+import { refreshSettingsPage } from "./settings.js";
+import { refreshMusicHistory, refreshVideoHistory } from "./video.js";
+import { refreshWorkflowPanel } from "./workflow.js";
+
 /* ================================================================ */
 /*  View refresh dispatcher                                          */
 /* ================================================================ */
@@ -26,7 +38,7 @@ window.onViewShown = (name) => {
 };
 
 /** Pre-select the configured coder session mode in the setup form. */
-async function presetCoderMode() {
+export async function presetCoderMode() {
   try {
     const r = await fetch("/v1/config", { headers: authHeaders() });
     if (!r.ok) return;

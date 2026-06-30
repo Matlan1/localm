@@ -5,13 +5,18 @@
    resolve by bare name exactly as before. */
 "use strict";
 
+// --- ES module imports (auto-generated boundary; bodies unchanged) ---
+import { $, authHeaders, el, toast } from "../app/helpers.js";
+import { loginWithKey } from "../app/models-sidebar.js";
+import { MEDIA_PLUGIN_ORDER } from "./settings.js";
+
 /* ================================================================ */
 /*  Per-plugin workflow management (on the Image/Music/Video pages)   */
 /* ================================================================ */
 
 /** Render the workflow panel for a media plugin: the built-in default plus each
  *  uploaded workflow, with select + delete, and an upload control. */
-async function refreshWorkflowPanel(media) {
+export async function refreshWorkflowPanel(media) {
   // Allowlist the media type before it ever reaches a selector/URL (defensive:
   // today it is only ever called with a hardcoded type).
   if (!MEDIA_PLUGIN_ORDER.includes(media)) return;
@@ -49,7 +54,7 @@ async function refreshWorkflowPanel(media) {
   box.appendChild(up);
 }
 
-function workflowRow(media, name, label, active, deletable) {
+export function workflowRow(media, name, label, active, deletable) {
   const row = el("div", "workflow-row" + (active ? " active" : ""));
   const pick = el("button", "workflow-pick", (active ? "● " : "○ ") + label);
   pick.type = "button";
@@ -66,7 +71,7 @@ function workflowRow(media, name, label, active, deletable) {
   return row;
 }
 
-async function selectWorkflow(media, name) {
+export async function selectWorkflow(media, name) {
   const r = await fetch(`/api/${media}/workflows/select`, {
     method: "POST", headers: authHeaders(), body: JSON.stringify({ name }),
   });
@@ -74,7 +79,7 @@ async function selectWorkflow(media, name) {
   else toast((await r.json().catch(() => ({}))).detail || "Failed", true);
 }
 
-async function deleteWorkflow(media, name) {
+export async function deleteWorkflow(media, name) {
   if (!confirm(`Delete workflow "${name}"?`)) return;
   const r = await fetch(`/api/${media}/workflows/${encodeURIComponent(name)}`, {
     method: "DELETE", headers: authHeaders(),
@@ -83,7 +88,7 @@ async function deleteWorkflow(media, name) {
   else toast((await r.json().catch(() => ({}))).detail || "Failed", true);
 }
 
-async function uploadWorkflow(media, fileInput) {
+export async function uploadWorkflow(media, fileInput) {
   const f = fileInput.files && fileInput.files[0];
   if (!f) { toast("Choose a .json file first", true); return; }
   let wf;
@@ -107,7 +112,7 @@ async function uploadWorkflow(media, fileInput) {
   }
 }
 
-const showMmprojCheckbox = $("show-mmproj-files");
+export const showMmprojCheckbox = $("show-mmproj-files");
 if (showMmprojCheckbox) {
   showMmprojCheckbox.checked = localStorage.getItem("localm.showMmprojFiles") === "true";
   showMmprojCheckbox.addEventListener("change", (e) => {

@@ -5,25 +5,31 @@
    resolve by bare name exactly as before. */
 "use strict";
 
+// --- ES module imports (auto-generated boundary; bodies unchanged) ---
+import { chat, renderAttachChips } from "../app/chat.js";
+import { pickDirectory } from "../app/coder.js";
+import { $, authHeaders, cancelJob, el, fetchImageURL, openModal, streamJob, toast } from "../app/helpers.js";
+import { showView } from "../app/tabs.js";
+
 /* ================================================================ */
 /*  Images page                                                      */
 /* ================================================================ */
 
-const imgState = {
+export const imgState = {
   items: [],
   selected: new Set(),   // names selected for bulk actions
   showAll: false,        // grid shows 24 by default
 };
 
-const IMG_GRID_DEFAULT = 24;
+export const IMG_GRID_DEFAULT = 24;
 
-async function imgApiDelete(name) {
+export async function imgApiDelete(name) {
   const r = await fetch(`/api/imagine/file/${encodeURIComponent(name)}`, {
     method: "DELETE", headers: authHeaders() });
   if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
 }
 
-async function imgApiMove(name, dest) {
+export async function imgApiMove(name, dest) {
   const r = await fetch(`/api/imagine/file/${encodeURIComponent(name)}/move`, {
     method: "POST", headers: authHeaders(),
     body: JSON.stringify({ dest }),
@@ -33,7 +39,7 @@ async function imgApiMove(name, dest) {
   return data.path;
 }
 
-async function imgDownload(name) {
+export async function imgDownload(name) {
   const url = await fetchImageURL(`/api/imagine/file/${encodeURIComponent(name)}`);
   const a = document.createElement("a");
   a.href = url;
@@ -41,7 +47,7 @@ async function imgDownload(name) {
   a.click();
 }
 
-async function refreshImageHistory() {
+export async function refreshImageHistory() {
   refreshReloadToggle();
   try {
     const r = await fetch("/api/imagine/history", { headers: authHeaders() });
@@ -54,7 +60,7 @@ async function refreshImageHistory() {
   renderImageGrid();
 }
 
-function renderImageGrid() {
+export function renderImageGrid() {
   const grid = $("img-history");
   grid.replaceChildren();
   renderImgBulkBar();
@@ -125,7 +131,7 @@ function renderImageGrid() {
 }
 
 /** Bulk actions bar - appears above the grid while a selection exists. */
-function renderImgBulkBar() {
+export function renderImgBulkBar() {
   const bar = $("img-bulk");
   const n = imgState.selected.size;
   bar.style.display = n ? "flex" : "none";
@@ -171,9 +177,9 @@ function renderImgBulkBar() {
   bar.append(move, del, clear);
 }
 
-function closeModal() { $("modal").style.display = "none"; }
+export function closeModal() { $("modal").style.display = "none"; }
 
-function showImageDetail(item) {
+export function showImageDetail(item) {
   openModal(item.name, (body) => {
     const img = document.createElement("img");
     img.style.maxWidth = "100%";
@@ -330,7 +336,7 @@ function showImageDetail(item) {
 /* reload-after-generation toggle - mirrors the reload_llm_after_imagine
    server config key */
 
-async function refreshReloadToggle() {
+export async function refreshReloadToggle() {
   try {
     const r = await fetch("/v1/config", { headers: authHeaders() });
     if (!r.ok) return;
@@ -356,14 +362,14 @@ $("img-reload-llm").onchange = async () => {
 
 // Media-generation Stop button: reveal it while a job runs and wire it to
 // cancel that job; hide it again when the job ends. Shared by image/music/video.
-function showStop(btnId, jobId) {
+export function showStop(btnId, jobId) {
   const btn = $(btnId);
   if (!btn) return;
   btn.style.display = "inline-block";
   btn.disabled = false;
   btn.onclick = () => { btn.disabled = true; btn.textContent = "Stopping…"; cancelJob(jobId); };
 }
-function hideStop(btnId) {
+export function hideStop(btnId) {
   const btn = $(btnId);
   if (!btn) return;
   btn.style.display = "none";
