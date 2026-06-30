@@ -19,13 +19,19 @@ classifiers = [
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Software Development :: Code Generators",
 ]
-requires-python = ">=3.10"
+# The 3.12 series is the one supported interpreter: the installers (setup.sh/
+# setup.bat) build a `uv venv --python 3.12`, the AMD ROCm wheels are cp312-only,
+# CI runs 3.12, and the core plugin loader imports tomllib (3.11+) unguarded. The
+# old ">=3.10" was never true (3.10 cannot even import localm.plugins.loader) and
+# was never exercised because CI only ever ran 3.12. Bounded ABOVE too (<3.13):
+# the cp312-only AMD wheels make any other 3.x unsatisfiable, and claiming an
+# untested 3.13+ would just recreate the same drift. Bump deliberately if the
+# installer ever provisions a newer Python.
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "click>=8.4.1",
     "rich>=15.0.0",

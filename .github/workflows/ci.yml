@@ -33,6 +33,15 @@ jobs:
         with:
           python-version: "3.12"
 
+      # DEP-1: the committed uv.lock must stay consistent with pyproject.toml so a
+      # dependency change without a matching `uv lock` cannot silently rot the lock
+      # into a stale claim. `uv lock --check` fails on drift. (The Install step
+      # below still uses pip; the lock is the pinned set for `uv sync --locked`.)
+      - name: Install uv (for the lockfile check)
+        uses: astral-sh/setup-uv@v6
+      - name: Verify uv.lock matches pyproject (DEP-1, no silent drift)
+        run: uv lock --check
+
       # Light extras only ([rag] = pypdf, pure-Python). The [gpu]/[gguf] extras
       # pull torch / ROCm / llama-cpp wheels from a custom AMD index and are
       # GPU-bound, so they are never installed in CI; tests needing those extras
