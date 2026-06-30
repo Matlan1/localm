@@ -3,7 +3,7 @@
 **Run local LLMs offline, then build on them.**
 
 ![License: AGPL v3](https://img.shields.io/badge/license-AGPL%20v3-blue)
-![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
+![Python 3.12](https://img.shields.io/badge/python-3.12-blue)
 ![Platform: Windows | Linux](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey)
 
 LocaLM runs GGUF models through a pure-Python ctypes binding to `llama.dll`
@@ -126,8 +126,8 @@ ships in the `builtin/` store but is inactive until you run
 
 ## Requirements
 
-- **Python 3.10+**. The recommended `setup.bat` and the `[gpu]` ROCm wheels need
-  **Python 3.12** specifically (the ROCm torch wheels are cp312-only).
+- **Python 3.12** (the project pins `requires-python = >=3.12,<3.13`). The
+  installers build a 3.12 venv, and the `[gpu]` ROCm torch wheels are cp312-only.
 - **For GGUF GPU inference:** a compiled `llama.dll` + GPU runtime DLLs.
   `localm setup-llama` provisions these for you (see [GPU setup](#gpu-setup-amd)).
   - AMD: ROCm `ggml-hip.dll`
@@ -724,7 +724,6 @@ boundaries.
 |---|---|
 | [docs/plugins.md](docs/plugins.md) | Authoring a plugin: manifest, tool exports, surfaces, chat-pipeline hooks, privacy rules |
 | [docs/plugin-interop.md](docs/plugin-interop.md) | Foreign-ecosystem interop: importing plugins from other tools over the MCP spine |
-| [docs/plugin-architecture-plan.md](docs/plugin-architecture-plan.md) | The plugin-first re-architecture: vision, phases, and contract |
 | [docs/skills.md](docs/skills.md) | The Agent Skills (`SKILL.md`) importer for the coder agent |
 | [docs/gui.md](docs/gui.md) | The web GUI: chat, coder sessions, studios, Jobs, approvals, security notes |
 | [docs/jobs.md](docs/jobs.md) | Scheduled jobs: the scheduler, `localm job` CLI, `/api/jobs`, the Jobs tab |
@@ -739,6 +738,7 @@ boundaries.
 | [docs/rag.md](docs/rag.md) | Knowledge: chat with your documents, collections, retrieval design |
 | [docs/network.md](docs/network.md) | Internet access for coder and chat: modes, domain rules, SSRF guard |
 | [docs/tls.md](docs/tls.md) | API keys, TLS, and reverse proxies for LAN serving |
+| [docs/phone.md](docs/phone.md) | Using localm from your phone: the installable PWA companion |
 
 ---
 
