@@ -39,25 +39,30 @@ def url_env(tmp_path, monkeypatch):
     reg_spy = MagicMock()
     monkeypatch.setattr(mm, "_register", reg_spy)
     monkeypatch.setattr(mm, "_register_with_dedup", MagicMock())
+    # check_url resolves the host; pin it to a public IP so the SSRF guard passes
+    # hermetically (no real DNS) and the pinned-transport seam is what the tests
+    # double below.
+    monkeypatch.setattr(
+        "socket.getaddrinfo",
+        lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))])
     return models, reg_spy
 
 
 def _wire_http(monkeypatch, head_total: int, response):
-    """Patch requests.head/get; return a dict that captures the GET headers."""
+    """Double netpolicy.pinned_request (the SSRF-REBIND transport seam the pull
+    path now uses); return a dict that captures the GET headers."""
     captured = {}
 
-    def fake_head(url, allow_redirects=None, timeout=None):
-        h = MagicMock()
-        h.status_code = 200                     # not a redirect (SSRF resolver reads this)
-        h.headers = {"content-length": str(head_total)}
-        return h
-
-    def fake_get(url, headers=None, stream=None, timeout=None, allow_redirects=None):
-        captured["headers"] = dict(headers or {})
+    def fake_pinned_request(method, url, **kwargs):
+        if method == "HEAD":
+            h = MagicMock()
+            h.status_code = 200                 # not a redirect (SSRF resolver reads this)
+            h.headers = {"content-length": str(head_total)}
+            return h
+        captured["headers"] = dict(kwargs.get("headers") or {})
         return response
 
-    monkeypatch.setattr("requests.head", fake_head)
-    monkeypatch.setattr("requests.get", fake_get)
+    monkeypatch.setattr("localm.netpolicy.pinned_request", fake_pinned_request)
     return captured
 
 
@@ -112,11 +117,10 @@ class TestUrlPull:
     def test_already_downloaded_skips_network(self, url_env, monkeypatch):
         models, _ = url_env
         (models / "model.gguf").write_bytes(b"already here")
-        get_spy = MagicMock()
-        monkeypatch.setattr("requests.get", get_spy)
-        monkeypatch.setattr("requests.head", MagicMock())
+        pin_spy = MagicMock()
+        monkeypatch.setattr("localm.netpolicy.pinned_request", pin_spy)
         mm._pull_url("http://example.com/model.gguf", "mymodel")
-        get_spy.assert_not_called()
+        pin_spy.assert_not_called()
 
 
 class TestUrlPullResult:
@@ -133,26 +137,25 @@ class TestUrlPullResult:
 
     def test_empty_stem_url_returns_false(self, url_env, monkeypatch):
         """A URL whose path has no file name is rejected before any network I/O."""
-        get_spy = MagicMock()
-        monkeypatch.setattr("requests.get", get_spy)
-        monkeypatch.setattr("requests.head", MagicMock())
+        pin_spy = MagicMock()
+        monkeypatch.setattr("localm.netpolicy.pinned_request", pin_spy)
         assert mm._pull_url("https://huggingface.co/asdasd/", "m") is False
-        get_spy.assert_not_called()
+        pin_spy.assert_not_called()
 
     def test_http_error_returns_false(self, url_env, monkeypatch, capsys):
         """A 404/bad URL yields a clear message and False, not a traceback."""
         import requests
 
-        def boom_get(url, headers=None, stream=None, timeout=None, allow_redirects=None):
+        def boom_pinned(method, url, **kwargs):
+            if method == "HEAD":
+                return MagicMock(status_code=200, headers={"content-length": "0"})
             resp = MagicMock()
             resp.status_code = 404
             err = requests.HTTPError("404 Not Found")
             err.response = resp
             raise err
 
-        monkeypatch.setattr("requests.head", MagicMock(
-            return_value=MagicMock(headers={"content-length": "0"})))
-        monkeypatch.setattr("requests.get", boom_get)
+        monkeypatch.setattr("localm.netpolicy.pinned_request", boom_pinned)
         assert mm._pull_url("http://example.com/model.gguf", "m") is False
         assert "download failed" in capsys.readouterr().out.lower()
 

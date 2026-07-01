@@ -347,6 +347,25 @@ def _session_for(url: str):
     return netpin.pinned_session(ip)
 
 
+def pinned_request(method: str, url: str, **kwargs):
+    """A single policy-pinned HTTP request (SSRF-REBIND) for callers that manage
+    their own response (streamed downloads, HEAD probes) instead of going through
+    safe_fetch_bytes. ``check_url`` MUST already have passed on *url*.
+
+    The socket is pinned to the pre-validated IP and the original hostname is sent
+    as the ``Host`` header. The pinned session is attached to the returned response
+    (``resp._localm_pin_session``) so a streamed body stays usable until the caller
+    is done with the response; it is released when the response is GC'd, matching
+    how requests' own streamed responses are managed. Raises NetworkPolicyError
+    when the host cannot be resolved to a validated address (fail-closed)."""
+    session = _session_for(url)
+    headers = {**(kwargs.pop("headers", None) or {}),
+               "Host": _host_header(urllib.parse.urlparse(url))}
+    resp = session.request(method, url, headers=headers, **kwargs)
+    resp._localm_pin_session = session   # tie the session lifetime to the response
+    return resp
+
+
 # ---------------------------------------------------------------------------
 #  Fetching
 # ---------------------------------------------------------------------------

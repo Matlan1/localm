@@ -551,21 +551,27 @@ def _pull_hf_snapshot(
 
 
 
-def _ssrf_resolve_final_url(url: str, requests) -> str:
+def _ssrf_resolve_final_url(url: str) -> str:
     """Follow the redirect chain HEAD-only, re-validating EVERY hop against the
     netpolicy SSRF guard, and return the final URL. Model pulls legitimately
     redirect (HuggingFace -> CDN), so we follow - but check each hop instead of
     trusting requests' automatic, UNCHECKED redirect following, which a public
     URL could otherwise use to bounce the download into 127.0.0.1 /
-    169.254.169.254 / an RFC1918 service (SSRF-PULL). Raises NetworkPolicyError
-    if any hop resolves to a non-public host."""
-    from localm.netpolicy import check_url
+    169.254.169.254 / an RFC1918 service (SSRF-PULL). Each HEAD is IP-pinned to the
+    validated address so the connect cannot rebind off the checked host
+    (SSRF-REBIND). Raises NetworkPolicyError if any hop resolves to a non-public
+    host or cannot be resolved to a validated address."""
     import urllib.parse
+
+    from localm import netpolicy
     current = url
     for _ in range(6):
-        check_url(current)
+        netpolicy.check_url(current)
         try:
-            resp = requests.head(current, allow_redirects=False, timeout=10)
+            resp = netpolicy.pinned_request(
+                "HEAD", current, allow_redirects=False, timeout=10)
+        except netpolicy.NetworkPolicyError:
+            raise                       # a policy refusal / rebind must NOT be swallowed into a silent GET
         except Exception:
             break                       # unreachable HEAD -> let the GET report it
         if resp.status_code in (301, 302, 303, 307, 308):
@@ -575,7 +581,7 @@ def _ssrf_resolve_final_url(url: str, requests) -> str:
             current = urllib.parse.urljoin(current, loc)
             continue
         break
-    check_url(current)                  # final target, revalidated
+    netpolicy.check_url(current)        # final target, revalidated
     return current
 
 
@@ -658,15 +664,18 @@ def _pull_url(
     # SSRF-PULL: resolve the redirect chain with each hop validated, then use the
     # final CHECKED URL for both the size HEAD and the streaming GET with redirects
     # OFF - so no unchecked hop can bounce the download into an internal host.
+    from localm import netpolicy
     try:
-        dl_url = _ssrf_resolve_final_url(url, requests)
+        dl_url = _ssrf_resolve_final_url(url)
     except NetworkPolicyError as e:
         console.print(f"[red]Refused by network policy:[/red] {e}")
         return False
 
-    # HEAD the final URL to get total file size for the disk space check
+    # HEAD the final URL to get total file size for the disk space check. Pinned to
+    # the validated IP like the GET below; a connect error here is non-fatal (the
+    # size is only for the disk-space check), but the GET fails closed regardless.
     try:
-        head  = requests.head(dl_url, allow_redirects=False, timeout=10)
+        head  = netpolicy.pinned_request("HEAD", dl_url, allow_redirects=False, timeout=10)
         total = int(head.headers.get("content-length", 0))
     except Exception:
         total = 0
@@ -687,10 +696,9 @@ def _pull_url(
         console.print(f"Downloading [bold cyan]{url}[/bold cyan]")
 
     try:
-        from localm.netpolicy import check_url
-        check_url(dl_url)               # revalidate immediately before the connect
-        r = requests.get(dl_url, headers=headers, stream=True, timeout=30,
-                         allow_redirects=False)
+        netpolicy.check_url(dl_url)     # revalidate immediately before the connect
+        r = netpolicy.pinned_request("GET", dl_url, headers=headers, stream=True,
+                                     timeout=30, allow_redirects=False)
         if r.status_code in (301, 302, 303, 307, 308):
             console.print(f"[red]Refused:[/red] unexpected redirect from {dl_url}")
             return False
