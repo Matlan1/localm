@@ -67,7 +67,11 @@ def settings(full_config: dict) -> dict:
         warning, media_config.backend_unavailable_warning(__package__, backend_name))
     return {
         "backend": backend_name,
-        "api_url": (comfy_blk.get("api_url") or _comfy.default_api_url()).rstrip("/"),
+        # Sanitise the RESOLVED url: a per-plugin comfy.api_url short-circuits
+        # before default_api_url()'s guard, so an admin-set link-local/metadata
+        # host would otherwise reach the outbound comfy calls (CHK-COMFY-APIURL).
+        "api_url": _comfy.sanitize_comfy_url(
+            (comfy_blk.get("api_url") or _comfy.default_api_url()).rstrip("/")),
         "launch_cmd": comfy_blk.get("launch_cmd")
         or full_config.get("comfy_launch_cmd", "") or "",
         "workdir": comfy_blk.get("workdir")

@@ -73,6 +73,7 @@ from localm.media.comfy_client import (
     POLL_TIMEOUT,
     preflight_models,
     resolve_sampler_roles,
+    sanitize_comfy_url,
     set_seed_on,
     set_seed_on_all,
     SUBMIT_ERROR,
@@ -104,7 +105,8 @@ __all__ = [
     "find_node_by_class", "find_nodes_by_class", "free_comfy_vram",
     "history_execution_error", "interrupt_comfy", "next_node_id",
     "POLL_CANCELLED", "POLL_EXEC_ERROR", "POLL_FINISHED", "POLL_TIMEOUT",
-    "preflight_models", "resolve_sampler_roles", "set_seed_on", "set_seed_on_all",
+    "preflight_models", "resolve_sampler_roles", "sanitize_comfy_url",
+    "set_seed_on", "set_seed_on_all",
     "SUBMIT_ERROR", "SUBMIT_HTTP_ERROR", "SUBMIT_NO_ID", "SUBMIT_OK",
     "SUBMIT_URL_ERROR", "load_config",
 ]
