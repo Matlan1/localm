@@ -246,8 +246,14 @@ class JobScheduler:
                               "started": now, "finished": time.time()}
                 try:
                     self.store.record_result(job.id, result)
-                except Exception:
-                    pass    # recording must never crash the scheduler loop
+                except Exception as e:
+                    # Recording must never crash the scheduler loop, but a
+                    # persistence failure should be discoverable, not silent
+                    # (AGENTS.md rule 5: prefer a debug line over total silence).
+                    from localm.debuglog import logger
+                    logger.debug(
+                        "jobs scheduler: could not record result for %s: %s",
+                        job.id, e)
                 ran.append(job.id)
         return ran
 

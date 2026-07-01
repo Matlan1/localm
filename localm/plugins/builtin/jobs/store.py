@@ -299,7 +299,19 @@ class JobStore:
                 job.last_status = result.get("status")
                 job.last_result_id = result_id
                 jobs[job.id] = job
-                self._write_all(jobs)
+                try:
+                    self._write_all(jobs)
+                except Exception as e:
+                    # The result file IS persisted (result_id above); only the
+                    # job's last_run/last_status stamp failed. Surface the
+                    # inconsistency - the API would otherwise report this run as
+                    # 'never ran' (last_run=None) despite the result on disk -
+                    # rather than leaving it silent (AGENTS.md rule 5).
+                    from localm.debuglog import logger
+                    logger.warning(
+                        "jobs: result %s for job %s is persisted but its metadata "
+                        "stamp failed (%s); last_run will under-report this run",
+                        result_id, job_id, e)
         return result_id
 
     def list_results(self, job_id: str) -> list:
