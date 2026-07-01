@@ -51,6 +51,16 @@ real product, no need to ask. Use a small model (a tiny GGUF, or
 `localm gui --no-model`), prefer a throwaway `LOCALM_HOME` so it does not touch
 the user's real data, and stop it when done. See `AGENTS.md` for the full text.
 
+What localm is (do not over-defer to the maintainer): localm downloads and runs
+local LLMs itself, so an agent can verify almost anything end to end. `localm pull`
+a tiny GGUF, `localm setup-embeddings`, or `localm gui --no-model` in a throwaway
+`LOCALM_HOME` and check it yourself. Flagging something "maintainer-only" is usually
+wrong (genuinely maintainer-only = external secrets, cutting a release, or hardware
+nobody here has). Verifying or building without understanding what localm is causes
+false confidence (shipping broken work as "done") or false deferral (stalling on
+what the tool already does). See AGENTS.md "Understand what localm is before you
+decide something needs the maintainer".
+
 Merging PRs: this is a solo-maintained repo and you are pre-approved to MERGE
 your own PRs once ready (verified + CI green + mergeable), squash-merging and
 deleting the branch. Do not wait for the maintainer to merge. Never merge
