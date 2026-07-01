@@ -221,6 +221,50 @@ def test_vector_dim_mismatch_degrades(tmp_path):
     assert isinstance(top, list)
 
 
+def _kw_embed(texts):
+    """Keyword stub where 'alpha' and 'beta' share an axis (so a 'beta' record is
+    cosine-identical to an 'alpha' query) and 'delta' is a separate axis. Lets a test
+    separate the SEMANTIC signal from the LEXICAL one."""
+    out = []
+    for t in texts:
+        lo = t.lower()
+        out.append([1.0 if ("alpha" in lo or "beta" in lo) else 0.0,
+                    1.0 if "delta" in lo else 0.0, 0.1])
+    return out
+
+
+def test_relevance_weights_semantic_over_lexical(tmp_path):
+    # A record that matches SEMANTICALLY (cosine) but shares no query token must
+    # out-rank one that only matches LEXICALLY. The blend weights cosine above BM25
+    # when vectors are present (REL_LEX_SHARE < 0.5); this tuning tripled recall@1 in
+    # the memory benchmark. Under the old 50/50 blend the lexical-only record won, so
+    # this guards the change.
+    s = _store(tmp_path)
+    for i in range(TINY_CORPUS):        # >= TINY_CORPUS so the relevance signal is used
+        s.add(_rec(f"unrelated filler note {i}", importance=0.5), embed_fn=_kw_embed)
+    s.add(_rec("beta gamma", importance=0.5), embed_fn=_kw_embed)     # semantic match, no shared token
+    s.add(_rec("alpha delta", importance=0.5), embed_fn=_kw_embed)    # lexical match ('alpha')
+    texts = [r.text for r in s.recall("alpha", k=3, embed_fn=_kw_embed, now=NOW)]
+    assert "beta gamma" in texts
+    assert texts.index("beta gamma") < texts.index("alpha delta")
+
+
+def test_user_facts_exempt_from_recency_decay(tmp_path):
+    # A durable user fact stated long ago must not be buried under recent synth
+    # chatter: recall exempts source=user/import from recency decay (mirrors prune,
+    # which already exempts them from decay-based eviction).
+    s = _store(tmp_path)
+    old = NOW - 90 * DAY
+    s.add(_rec("The user's favorite language is Rust", source="user",
+               importance=0.7, last_used=old, created=old))
+    for i in range(5):
+        s.add(_rec(f"recent chatter {i}", source="synth", importance=0.5,
+                   last_used=NOW - i * 60))
+    # < TINY_CORPUS records -> ranked by recency + importance (where the fix matters)
+    top = s.recall("anything", k=6, now=NOW)
+    assert top and top[0].source == "user"
+
+
 # --------------------------------------------------------------------------- #
 #  3. Consolidation ADD/UPDATE/DELETE/NO_OP                                    #
 # --------------------------------------------------------------------------- #

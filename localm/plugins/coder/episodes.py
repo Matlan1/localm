@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -50,6 +51,27 @@ _RETRIEVE_K = 3
 # this reuses the shared embedder but NOT the chat MemoryStore's "always surface
 # the top fact" retrieval policy.
 _COS_MIN = 0.55
+
+# Stopwords stripped from the LEXICAL (BM25) relevance signal. BM25 has no stopword
+# removal, so a query and an episode that share only a common word (e.g. "the") would
+# score above _MIN_SCORE and break the silence-when-irrelevant guarantee (an unrelated
+# task must inject nothing). Filtering the lexical signal to CONTENT words fixes that;
+# the semantic (cosine) half is untouched and still runs on the full episode text.
+_STOPWORDS = frozenset(
+    "a an and are as at be been but by can could did do does done for from had has "
+    "have he her him his i if in into is it its me my no not of on only or our over "
+    "own same she should so some such than that the their them then there these they "
+    "this to too under up us very was we were what when where which who will with "
+    "would you your".split()
+)
+_WORD_RE = re.compile(r"[a-z0-9]+")
+
+
+def _content_tokens(text: str) -> str:
+    """Lowercased content words (stopwords removed), space-joined, for the lexical
+    relevance gate. Empty when *text* is all stopwords/punctuation."""
+    return " ".join(t for t in _WORD_RE.findall((text or "").lower())
+                    if t not in _STOPWORDS)
 
 
 def _embed_fn():
@@ -187,7 +209,12 @@ class EpisodeStore:
             return []
         from localm.rag.bm25 import BM25
         texts = [e.search_text() for e in eps]
-        bm = BM25(texts).scores(task)
+        # Lexical signal on CONTENT words only (see _content_tokens): a query and an
+        # episode sharing only a stopword must NOT clear the relevance floor. The
+        # semantic (cosine) half below still runs on the full episode text.
+        q_content = _content_tokens(task)
+        bm = (BM25([_content_tokens(t) for t in texts]).scores(q_content)
+              if q_content else [0.0] * len(eps))
         bm_top = max(bm) if bm else 0.0
 
         cos = None
