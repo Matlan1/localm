@@ -544,6 +544,127 @@ def _amd_rocm_launch_env() -> Optional[dict]:
     return env
 
 
+# NEW-STOPCOMFY: the ComfyUI processes localm itself launched, keyed by api_url,
+# so we can terminate/restart the one WE spawned (and never a ComfyUI the user
+# started themselves - we only have handles to our own). Guarded by a lock because
+# a launch and a stop can race across request threads.
+import threading as _threading
+
+_spawned_procs: dict = {}
+_spawned_lock = _threading.Lock()
+
+
+def _remember_spawned(api_url: str, proc) -> None:
+    with _spawned_lock:
+        _spawned_procs[api_url] = proc
+
+
+def _take_spawned(api_url: str):
+    """Pop and return the proc localm launched for *api_url*, or None."""
+    with _spawned_lock:
+        return _spawned_procs.pop(api_url, None)
+
+
+def spawned_pid(api_url: Optional[str] = None) -> Optional[int]:
+    """The PID of the ComfyUI localm launched for *api_url* if it is still ours
+    and running, else None (localm did not launch it, or it has exited)."""
+    api_url = (api_url or default_api_url()).rstrip("/")
+    with _spawned_lock:
+        proc = _spawned_procs.get(api_url)
+    if proc is None:
+        return None
+    try:
+        return proc.pid if proc.poll() is None else None
+    except Exception:
+        return None
+
+
+def _kill_process_tree(proc) -> None:
+    """Terminate *proc* AND its children. On Windows the launcher we spawn is a
+    `cmd /S /c "<bat>"` whose real ComfyUI (python) is a CHILD, so terminating the
+    cmd alone would orphan it - use taskkill /T. On POSIX the child was started in
+    its own session (start_new_session), so signal the whole process group."""
+    import os as _os
+    import signal as _signal
+    import subprocess as _sp
+    import sys as _sys
+    pid = getattr(proc, "pid", None)
+    if not pid:
+        return
+    if _sys.platform == "win32":
+        try:
+            _sp.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                    capture_output=True, timeout=15)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        return
+    # POSIX: signal the process group, then wait, then hard-kill the group.
+    try:
+        pgid = _os.getpgid(pid)
+    except Exception:
+        pgid = None
+    try:
+        if pgid is not None:
+            _os.killpg(pgid, _signal.SIGTERM)
+        else:
+            proc.terminate()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=10)
+        return
+    except Exception:
+        pass
+    try:
+        if pgid is not None:
+            _os.killpg(pgid, _signal.SIGKILL)
+        else:
+            proc.kill()
+    except Exception:
+        pass
+
+
+def stop_comfy(api_url: Optional[str] = None) -> tuple[bool, str]:
+    """Stop ComfyUI (NEW-STOPCOMFY). Always aborts the in-flight render + clears
+    the queue and frees VRAM first (graceful). Then, IF localm launched this
+    ComfyUI, terminates the process tree we spawned; if localm did NOT launch it,
+    the process is left alone (we only kill our own) and the caller is told so."""
+    api_url = (api_url or default_api_url()).rstrip("/")
+    interrupt_comfy(api_url)                       # abort render + clear queue
+    try:
+        free_comfy_vram(api_url)
+    except Exception:
+        pass
+    proc = _take_spawned(api_url)
+    if proc is None:
+        if _comfy_alive(api_url, timeout=2.0):
+            return True, ("Aborted the in-flight render and cleared the queue. "
+                          "localm did not launch this ComfyUI, so its process was "
+                          "left running - stop it where you started it.")
+        return True, "ComfyUI is not running."
+    try:
+        if proc.poll() is None:
+            _kill_process_tree(proc)
+    except Exception as e:
+        return False, f"Could not stop the ComfyUI localm launched: {e}"
+    return True, "Stopped the ComfyUI that localm launched."
+
+
+def restart_comfy(api_url: Optional[str] = None, on_progress=None,
+                  wait_seconds: Optional[int] = None,
+                  launch_cmd: Optional[str] = None,
+                  workdir: Optional[str] = None) -> tuple[bool, str]:
+    """Stop the ComfyUI localm launched (if any), then launch a fresh one
+    (NEW-STOPCOMFY). Only meaningful when localm has a launch command configured."""
+    stop_comfy(api_url)
+    return ensure_comfy(api_url=api_url, on_progress=on_progress,
+                        wait_seconds=wait_seconds, launch_cmd=launch_cmd,
+                        workdir=workdir)
+
+
 def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
                  wait_seconds: Optional[int] = None,
                  launch_cmd: Optional[str] = None,
@@ -663,13 +784,25 @@ def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
     except OSError:
         launch_out = subprocess.DEVNULL
         launch_log_path = None
+    # NEW-STOPCOMFY: start the launcher in its OWN process group/session so the
+    # whole ComfyUI tree (the launcher + the python it spawns) can later be
+    # terminated together (see stop_comfy / _kill_process_tree). Harmless to the
+    # normal run; only changes signal grouping.
+    _popen_kw: dict = {}
+    if _sys.platform == "win32":
+        _popen_kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        _popen_kw["start_new_session"] = True
     try:
         proc = subprocess.Popen(argv, cwd=workdir,
                          env=_amd_rocm_launch_env(),
                          stdout=launch_out,
-                         stderr=subprocess.STDOUT)
+                         stderr=subprocess.STDOUT,
+                         **_popen_kw)
+        _remember_spawned(api_url, proc)   # retain the handle so Stop can reach it
         _t.sleep(0.5)
         if proc.poll() is not None and proc.returncode != 0:
+            _take_spawned(api_url)         # it died; drop the dead handle
             return False, f"ComfyUI launcher exited immediately with code {proc.returncode}"
     except Exception as e:
         return False, f"Could not launch ComfyUI ({launch_cmd}): {e}"
