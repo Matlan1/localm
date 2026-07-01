@@ -807,13 +807,31 @@ def _register_with_dedup(
                 shutil.copy2(p, dest)
             else:
                 console.print(f"[dim]Moving to {dest}…[/dim]")
+                # Move first so the file lands under MODELS_DIR (where a launch-time
+                # sync_models_dir can always recover it), THEN commit the registry in
+                # ONE atomic write: repoint the moved file's other aliases AND register
+                # the new name together, so the registry never persists a half-updated
+                # state (L7 - previously a save_registry for the aliases and a separate
+                # _register for the new name left a window that a crash could split).
+                # The move-then-write step is still not one transaction, but a crash
+                # between them leaves the file in MODELS_DIR and the registry fully
+                # pre-move, which sync reconciles on the next launch.
                 shutil.move(str(p), str(dest))
-                # Keep other aliases of the old path working
                 moved_from = str(p.resolve())
-                for alias_name in dup_names:
-                    if reg.get(alias_name, {}).get("path") == moved_from:
-                        reg[alias_name]["path"] = str(dest.resolve())
-                _mm.save_registry(reg)
+                dest_str = str(dest.resolve())
+                entry = {"path": dest_str, "source": source}
+                if digest:
+                    entry["sha256"] = digest.lower()
+
+                def _relink_and_register(r: dict) -> None:
+                    for alias_name in dup_names:
+                        if r.get(alias_name, {}).get("path") == moved_from:
+                            r[alias_name]["path"] = dest_str
+                    r[model_name] = entry
+
+                _mm.update_registry(_relink_and_register)
+                console.print(f"[green]✓[/green] Registered [bold]{model_name}[/bold]")
+                return
             p = dest
         # action == "register" falls through unchanged
 

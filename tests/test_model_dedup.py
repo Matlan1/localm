@@ -180,6 +180,52 @@ class TestAddLocalDedup:
         assert store["moved"]["path"] == new_path
         assert store["first"]["path"] == new_path
 
+    def test_move_registry_update_is_atomic_on_failure(
+            self, fake_registry, tmp_path, monkeypatch):
+        """L7: a move updates the registry in ONE atomic write. If that write
+        fails after the file is physically moved, the registry is left FULLY
+        pre-move - never a half-update where the pre-existing alias is repointed
+        but the new name is missing. The file still lands under MODELS_DIR, where
+        a launch-time sync_models_dir recovers it."""
+        store, models_dir = fake_registry
+        f = _file(tmp_path, "m.gguf")
+        mm.add_local(str(f), "first", on_duplicate="register")   # 'first' -> external f
+        before = {k: dict(v) for k, v in store.items()}
+
+        def _boom(_mutator):
+            raise RuntimeError("registry write failed mid-move")
+        monkeypatch.setattr(mm, "update_registry", _boom)
+
+        with pytest.raises(RuntimeError):
+            mm.add_local(str(f), "moved", on_duplicate="move")
+
+        # The file DID move (it must land under MODELS_DIR so sync can recover it).
+        assert (models_dir / "m.gguf").is_file()
+        # But the registry is fully pre-move: no partial 'first'-repointed state,
+        # and 'moved' was never added.
+        assert store == before
+        assert "moved" not in store
+
+    def test_move_crash_state_is_recovered_by_sync(self, fake_registry, tmp_path):
+        """L7 end to end: the state a crash mid-move leaves behind - the file
+        already under MODELS_DIR, the registry still pointing the alias at the
+        vanished old path - is reconciled by sync_models_dir (which runs on
+        launch): the moved file is re-registered (not lost) and the stale entry
+        is flagged missing (not silently dropped)."""
+        store, models_dir = fake_registry
+        gone = tmp_path / "downloads" / "m.gguf"        # external path, file moved away
+        store["first"] = {"path": str(gone.resolve()), "source": "local"}
+        moved = models_dir / "m.gguf"
+        moved.write_bytes(b"GGUF" + b"\x00" * 16)       # the moved file, now in MODELS_DIR
+
+        result = mm.sync_models_dir(prune=False)
+
+        # The moved file is recovered (registered), not lost.
+        assert any(e.get("path") == str(moved.resolve()) for e in store.values())
+        assert result.added >= 1
+        # The stale external entry is flagged missing, never silently deleted.
+        assert store["first"].get("missing") is True
+
     def test_name_conflict_different_file_skipped_non_tty(
             self, fake_registry, tmp_path):
         store, _ = fake_registry
