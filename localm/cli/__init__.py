@@ -40,7 +40,7 @@ from ..model_manager import (  # noqa: F401
 # ``console`` are used below; the others are re-exported (gui/cli.py imports
 # _exposed_bind_warning / _setup_tls_or_exit from here).
 from ._core import (  # noqa: F401
-    main, console, _GracefulGroup, _read_version_for_cli,
+    main, console_main, console, _GracefulGroup, _read_version_for_cli,
     _exposed_bind_warning, _resolve_tls, _setup_tls_or_exit,
     _complete_model_name,
 )

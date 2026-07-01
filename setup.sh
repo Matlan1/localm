@@ -168,9 +168,7 @@ say "    [3] cuda     - NVIDIA, peak performance (needs the CUDA runtime)"
 say "    [4] hip      - AMD ROCm, peak performance (needs the ROCm runtime)"
 say "    [5] cpu      - no GPU"
 say "    [6] I will build / provide my own (skip the download)"
-say "    (your pick is load-tested here; if it cannot load on this machine, setup"
-say "     explains why and offers the universal Vulkan build instead - your"
-say "     choice is never changed silently)"
+say "    (your pick is load-tested; a failure offers Vulkan, never a silent swap)"
 bpick="$(ask "  Pick 1-6 [1]: " 1)"
 case "$bpick" in
   2) BACKEND=vulkan ;; 3) BACKEND=cuda ;; 4) BACKEND=hip ;; 5) BACKEND=cpu ;;
@@ -179,14 +177,23 @@ esac
 if [ "$BACKEND" = own ]; then
   buildpath="$(ask "  Path to a llama.cpp build dir to copy now (blank = skip): " "")"
   if [ -n "$buildpath" ]; then
-    .venv/bin/localm setup-llama --from "$buildpath" \
-      || say "  [!] setup-llama failed - run later:  .venv/bin/localm setup-llama --from <dir>"
+    .venv/bin/localm setup-llama --from "$buildpath" || {
+      # Mirror setup.bat: a declined/failed provision stops setup with a non-zero
+      # exit instead of silently continuing into the torch/data-dir steps as if
+      # the runtime were installed (NEW-CUDADECLINE).
+      say "  [!] setup-llama failed - run later:  .venv/bin/localm setup-llama --from <dir>"
+      exit 1
+    }
   else
     say "  Skipped. Provision later:  .venv/bin/localm setup-llama --backend <vulkan|cuda|hip|cpu>"
   fi
 else
-  .venv/bin/localm setup-llama --backend "$BACKEND" \
-    || say "  [!] setup-llama failed - run later:  .venv/bin/localm setup-llama --backend $BACKEND"
+  .venv/bin/localm setup-llama --backend "$BACKEND" || {
+    # Mirror setup.bat's `if errorlevel 1 (... exit /b 1)`: stop on a declined or
+    # failed runtime provision rather than falling through silently (NEW-CUDADECLINE).
+    say "  [!] setup-llama failed - run later:  .venv/bin/localm setup-llama --backend $BACKEND"
+    exit 1
+  }
 fi
 
 # ---- PyTorch + transformers for the HuggingFace backend (FOLLOWS the backend) -
@@ -214,6 +221,7 @@ else
   say "    CPU (any machine): uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cpu"
   say "    NVIDIA CUDA:       uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu126"
   say "    AMD ROCm (Linux):  uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/rocm6.2"
+  say "    Intel Arc / XPU:   uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/xpu"
 fi
 
 # ---- data directory ---------------------------------------------------------

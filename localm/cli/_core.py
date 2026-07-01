@@ -177,9 +177,24 @@ def main() -> None:
     # The _GracefulGroup above still handles per-command errors with nicer
     # context; this covers everything the group does not wrap.
     from localm import bugreport
-    from localm.debuglog import install_ring_buffer
+    from localm.debuglog import honor_env_debug, install_ring_buffer
     # Always-on, in-memory recent-activity buffer so a bug report carries what the
     # app was doing before it broke - even without --debug (a tester has no log
     # file). INFO+ only, so chat content (logged at DEBUG) never enters it.
     install_ring_buffer()
+    # Honour LOCALM_DEBUG=1 as a real debug request: open the log file, not just
+    # flip verbose semantics (REC-DEBUGENV). No-op unless the env var is set.
+    honor_env_debug()
     bugreport.install_global_handlers()
+
+
+def console_main() -> None:
+    """The ``localm`` console-script entry point (pyproject [project.scripts]).
+
+    Guards that we are inside the project venv, then runs the CLI group. Kept
+    SEPARATE from ``main`` so in-process callers - the test suite's CliRunner and
+    the ``localm coder`` route - invoke the group directly without the venv gate;
+    only the stray-global-exe path (a separate ``pip install``) hits it (NEW-J)."""
+    from localm._venvguard import require_venv
+    require_venv()
+    main()

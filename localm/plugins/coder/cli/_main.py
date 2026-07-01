@@ -504,3 +504,15 @@ def _warn_sensitive_changes(agent: Agent) -> None:
             print_warning(message)
     except Exception:                                       # noqa: BLE001
         pass
+
+
+def console_main() -> None:
+    """The ``localcoder`` console-script entry point (pyproject [project.scripts]).
+
+    Guards that we are inside the project venv, then runs the coder command. Kept
+    SEPARATE from ``main`` so the ``localm coder`` route and the test suite invoke
+    the command directly, without the venv gate; only a stray global ``localcoder``
+    (a separate ``pip install``) hits it (NEW-J / NEW-J-CODER)."""
+    from localm._venvguard import require_venv
+    require_venv()
+    main()
