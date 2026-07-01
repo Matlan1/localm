@@ -451,6 +451,30 @@ def _do_restart() -> None:
 
     import os
     import sys
+
+    # NEW-G: no inheritable fd (the debug-log FileHandler, the uvicorn listening
+    # socket) must survive into the re-exec'd image, where the freshly loaded
+    # ggml/llama runtime warns "Failed to close child file descriptors at 3/4".
+    # os.execv does NOT close fds; marking them non-inheritable drops them at exec
+    # (POSIX O_CLOEXEC / Windows handle inheritance). Best-effort per fd; stdin/
+    # stdout/stderr (0-2) are left inheritable so the new process keeps the console.
+    try:
+        max_fd = 4096
+        try:
+            import resource
+            soft = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+            if isinstance(soft, int) and 0 < soft < max_fd:
+                max_fd = soft
+        except Exception:
+            pass  # no resource module (Windows) - the 4096 default is plenty
+        for fd in range(3, max_fd):
+            try:
+                os.set_inheritable(fd, False)
+            except OSError:
+                pass  # not an open fd
+    except Exception:
+        pass  # never let fd hygiene block the restart
+
     os.execv(sys.executable, _restart_argv())
 
 
@@ -621,6 +645,19 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
     _cors_allowlist = cors_cfg if isinstance(cors_cfg, list) else []
     _cors_wildcard = cors_cfg == "*"
 
+    # REC-OPEN-GET-GATE: on a keyless (open-mode) NETWORK bind, GET data routes
+    # are otherwise readable by any network client (reachable via --insecure).
+    # These few GET paths stay public even then, so a remote client can still
+    # health-check and bootstrap TLS; everything else needs the loopback shell
+    # token (or a key). Loopback binds are unaffected - the local model is
+    # unchanged. The OpenAI-compatible inference GETs (_CROSS_ORIGIN_OK) stay
+    # network-callable by design.
+    _NETWORK_GET_PUBLIC = ("/health", "/localm-ca.crt")
+
+    def _is_loopback_bind(host: str) -> bool:
+        h = (host or "").strip().lower()
+        return h in ("", "localhost", "127.0.0.1", "::1") or h.startswith("127.")
+
     @app.middleware("http")
     async def _origin_guard(request, call_next):
         if (request.method in _UNSAFE_METHODS
@@ -665,6 +702,28 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
                                  "localm GUI shell on this machine, or an API key "
                                  "(run 'localm key generate')."},
                     )
+        elif (request.method in ("GET", "HEAD")
+                and not request.url.path.startswith(_CROSS_ORIGIN_OK)
+                and not request.url.path.startswith(_NETWORK_GET_PUBLIC)):
+            # REC-OPEN-GET-GATE: a GET data route on a keyless NETWORK bind is
+            # otherwise world-readable. Require the loopback shell token (or a
+            # key) for reads from a network-exposed bind in open mode; loopback
+            # reads are untouched (the accepted local-only open model).
+            bind_host = getattr(request.app.state, "bind_host", "127.0.0.1")
+            if not _is_loopback_bind(bind_host):
+                from localm.auth import any_key_configured, require_auth_enabled
+                if not any_key_configured() and not require_auth_enabled():
+                    token = getattr(request.app.state, "shell_token", None)
+                    presented = _bearer_token(request)
+                    if not (token and presented
+                            and hmac.compare_digest(presented, token)):
+                        return JSONResponse(
+                            status_code=403,
+                            content={"detail": "This keyless server is exposed on "
+                                     "the network; reads require the localm GUI "
+                                     "shell on this machine or an API key (run "
+                                     "'localm key generate')."},
+                        )
         return await call_next(request)
 
     # Security response headers (R41 defense-in-depth). The user-content render
