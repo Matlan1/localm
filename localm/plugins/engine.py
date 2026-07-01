@@ -21,6 +21,7 @@ import importlib.util
 import json
 import logging
 import sys
+import threading
 import tomllib
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -438,6 +439,8 @@ class PluginManager:
         self._loaded: dict[str, tuple] = {}     # name -> (spec, module, host, uniq)
         self._errors: dict[str, str] = {}            # load/runtime errors (persist)
         self._discover_errors: dict[str, str] = {}   # bad manifests (reset each discover)
+        self._dep_tasks: dict = {}                   # name -> DepInstallTask (GUI installs)
+        self._dep_tasks_lock = threading.Lock()
 
     # ---- discovery (INSTALLED folder only) ---------------------------------
     def discover(self) -> dict[str, PluginSpec]:
@@ -997,6 +1000,100 @@ class PluginManager:
         installed = self._installed_set()
         return [r for r in spec.requires if r not in installed]
 
+    # ---- pip-extra dependencies (host-side install) -------------------------
+    def _spec_for(self, name: str):
+        return self._specs.get(name) or self.store_catalog().get(name)
+
+    def plugin_requirements(self, name: str) -> list:
+        """Concrete requirement strings a plugin's ``requires_extras`` map to,
+        resolved from localm's installed metadata."""
+        spec = self._spec_for(name)
+        if not spec or not spec.requires_extras:
+            return []
+        from localm.plugins import deps
+        return deps.plugin_requirements(spec.requires_extras)
+
+    def plugin_missing_deps(self, name: str) -> list:
+        """The subset of a plugin's declared pip-extra requirements that are NOT
+        installed on this host. Empty when it declares none or all are present."""
+        from localm.plugins import deps
+        return deps.missing_requirements(self.plugin_requirements(name))
+
+    def all_missing_deps(self, *, enabled_only: bool = True) -> dict:
+        """``{plugin: [missing requirement strings]}`` across installed plugins
+        (enabled ones by default) that are missing a declared pip extra."""
+        self.discover()
+        names = self._enabled_set() if enabled_only else self._installed_set()
+        out = {}
+        for name in sorted(names):
+            miss = self.plugin_missing_deps(name)
+            if miss:
+                out[name] = miss
+        return out
+
+    def scope_deps_warnings(self, granted_scopes) -> list:
+        """Warnings for minting a key: a granted capability scope that maps to a
+        first-party plugin which is not installed, or is installed but missing a
+        declared pip extra. Empty when every granted plugin scope is ready. This
+        is the 'catch at grant' check - a key that unlocks a feature the host
+        cannot actually serve yet."""
+        from localm.plugins import catalog as _cat
+        self.discover()
+        installed = self._installed_set()
+        by_scope = {}
+        for name, spec in self.store_catalog().items():
+            by_scope.setdefault(spec.scope or name, name)
+        for name, spec in self._specs.items():          # installed specs win
+            by_scope[spec.scope or name] = name
+        for e in _cat.CATALOG:                          # catalog scope == name
+            by_scope.setdefault(e.name, e.name)
+        warnings = []
+        for sc in dict.fromkeys(granted_scopes or ()):  # de-dup, keep order
+            pname = by_scope.get(sc)
+            if not pname or self._is_protected(pname):   # not a plugin, or chat
+                continue
+            if pname not in installed:
+                warnings.append(
+                    f"key grants '{sc}' but the {pname} plugin is not installed")
+                continue
+            miss = self.plugin_missing_deps(pname)
+            if miss:
+                warnings.append(
+                    f"key grants '{sc}' but {pname} is missing: {', '.join(miss)}")
+        return warnings
+
+    def install_plugin_deps(self, name: str, *, on_progress=None):
+        """Install a plugin's declared pip extras on THIS host. HOST-ONLY: an
+        HTTP route must confirm the server is loopback-bound
+        (``deps_task.host_pip_allowed``) before calling this; the CLI is always
+        host-side. Returns a ``deps.InstallResult`` (a no-op success when the
+        plugin declares none)."""
+        from localm.plugins import deps
+        spec = self._spec_for(name)
+        extras = spec.requires_extras if spec else []
+        return deps.install_plugin_extras(extras, on_progress=on_progress)
+
+    def get_dep_task(self, name: str):
+        """The in-flight or finished dependency-install task for *name*, if any."""
+        with self._dep_tasks_lock:
+            return self._dep_tasks.get(name)
+
+    def start_dep_install(self, name: str):
+        """Start (or return the still-running) background dep install for *name*.
+        HOST-ONLY: the route confirms the request is local first. Idempotent while
+        a task is running so a double-click does not launch two pip runs."""
+        from localm.plugins.deps_task import DepInstallTask, run_dep_install
+        with self._dep_tasks_lock:
+            existing = self._dep_tasks.get(name)
+            if existing is not None and existing.status == "running":
+                return existing
+            task = DepInstallTask(name)
+            self._dep_tasks[name] = task
+        t = threading.Thread(target=run_dep_install, args=(self, name, task),
+                             name=f"dep-install-{name}", daemon=True)
+        t.start()
+        return task
+
     def set_installed_state(self, name: str, on: bool, *, enable: bool = True) -> None:
         """CLI/headless install/uninstall WITHOUT loading routes: copy store ->
         installed (or remove the installed dir); the GUI server reconciles via
@@ -1106,6 +1203,7 @@ class PluginManager:
         AVAILABLE to install (the bundled store + the static catalog, minus what
         is installed). Each entry carries installed/enabled/active/available."""
         from localm.plugins import catalog as _cat
+        from localm.plugins import deps as _deps
         self.discover()
         installed = self._installed_set()
         enabled = self._enabled_set()
@@ -1132,6 +1230,12 @@ class PluginManager:
                                 if spec and spec.surface and spec.surface.assets_dir
                                 else ""),
                 "requires_extras": spec.requires_extras if spec else [],
+                # Declared pip-extra requirements NOT installed on this host, so
+                # the GUI can offer a host-side "Install dependencies" action.
+                "missing_deps": (
+                    _deps.missing_requirements(
+                        _deps.plugin_requirements(spec.requires_extras))
+                    if spec and spec.requires_extras else []),
                 "requires": spec.requires if spec else [],
                 # Declared requirements that are not currently installed, so the
                 # GUI can warn "requires X (missing)" + offer one-click install.
@@ -1155,9 +1259,12 @@ class PluginManager:
                 continue
             plugins.append(_entry(store.get(name), name, available=True))
         from localm.config import load_config
+        _cfg = load_config()
         return {"plugins": plugins,
                 "errors": {**self._discover_errors, **self._errors},
-                "suggest_plugins": bool(load_config().get("suggest_plugins", True))}
+                "suggest_plugins": bool(_cfg.get("suggest_plugins", True)),
+                "auto_install_plugin_deps": bool(
+                    _cfg.get("auto_install_plugin_deps", True))}
 
 
 # --------------------------------------------------------------------------- #
@@ -1240,5 +1347,11 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
         except ValueError as e:
             raise HTTPException(409, str(e))
         return {"status": "disabled", "name": name}
+
+    # Host-side dependency install (pip extras). Lives in its own module so its
+    # fastapi Request annotation resolves against module globals (this file uses
+    # PEP 563 string annotations and imports fastapi lazily).
+    from localm.plugins.deps_routes import register_dep_routes
+    register_dep_routes(app, manager)
 
     return manager

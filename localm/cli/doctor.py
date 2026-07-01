@@ -194,6 +194,23 @@ def _check_packages() -> None:
         console.print(f"  {sym}  {label}{ver_str}")
 
 
+def _check_plugin_deps() -> None:
+    """Report enabled plugins whose declared pip extras are not installed, and
+    point at the one-shot fix."""
+    try:
+        from localm.plugins.engine import PluginManager
+        missing = PluginManager(None).all_missing_deps(enabled_only=True)
+    except Exception as e:
+        console.print(f"  {_WARN_SYM}  plugin dependency check skipped [dim]({e})[/dim]")
+        return
+    if not missing:
+        console.print(f"  {_OK_SYM}  plugin dependencies: enabled plugins have theirs")
+        return
+    for name, reqs in missing.items():
+        console.print(f"  {_WARN_SYM}  plugin {name!r} is missing: {', '.join(reqs)}")
+    console.print("       [dim]Install them with:  localm plugin install-deps --all[/dim]")
+
+
 @main.command()
 def doctor():
     """Check system requirements and report any issues.
@@ -205,6 +222,7 @@ def doctor():
       - CUDA / ROCm GPU driver
       - Available VRAM
       - Required Python packages (huggingface-hub, torch, uvicorn, fastapi)
+      - Enabled plugins have their pip extras installed
     """
     # Resolve find_binary_dir from the package at call time so tests that
     # monkeypatch localm.cli.find_binary_dir affect this call site.
@@ -221,3 +239,4 @@ def doctor():
     if not gpu_found and not torch_gpu_found:
         console.print(f"  {_WARN_SYM}  No GPU driver found (nvidia-smi / rocm-smi) - CPU mode only")
     _check_packages()
+    _check_plugin_deps()
