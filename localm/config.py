@@ -35,8 +35,15 @@ def _detect_home() -> Path:
                 line = cfg_marker.read_text(encoding="utf-8").strip()
                 if line:
                     return Path(line).expanduser()
-            except OSError:
-                pass
+            except OSError as e:
+                # The marker EXISTS but could not be read. Do NOT silently fall
+                # through to a different data dir - the user's configured data
+                # would appear to vanish with no clue why. Surface it. Use
+                # stderr, not the logger: this runs at import time before
+                # logging is wired and importing debuglog here would be circular
+                # (AUD-DETECTHOME).
+                print(f"[localm] WARNING: cannot read {cfg_marker} ({e}); "
+                      "falling back to the default data dir.", file=sys.stderr)
         portable = repo_root / "home"
         if portable.is_dir():
             return portable
@@ -356,7 +363,14 @@ def _read_json(path: Path, default):
         try:
             with open(candidate, encoding="utf-8") as f:
                 return json.load(f)
-        except (json.JSONDecodeError, OSError) as e:
+        except (ValueError, OSError, RecursionError) as e:
+            # Broadened from (JSONDecodeError, OSError): a non-UTF-8 file raises
+            # UnicodeDecodeError, a huge integer raises ValueError, and a deeply
+            # nested document raises RecursionError - all of which previously
+            # ESCAPED and crashed the app instead of honouring the documented
+            # "fall back to .bak then default, never take the app down"
+            # guarantee (AUD-CFGFALLBACK). JSONDecodeError/UnicodeDecodeError are
+            # ValueError subclasses, so this tuple covers them too.
             print(f"[localm] {candidate.name} is unreadable ({e}); "
                   "falling back.", file=sys.stderr)
             continue

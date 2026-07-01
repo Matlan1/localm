@@ -228,6 +228,20 @@ def main(
         provider, url, model, api_key, native_tools, port, no_server,
         force_new, work_dir, ci)
 
+    # R19a: an unattended one-shot (`localcoder "task"`) auto-approves file writes
+    # so it can run without a TTY - but shell (arbitrary code execution) and the
+    # network tools must NOT be silently auto-run. Require confirmation for
+    # run_shell unless the user explicitly passed --yes; a non-interactive run has
+    # no way to confirm, so the gate in execution.py fails CLOSED (denied). This
+    # makes confirm-on-shell the effective default for the one-shot CLI.
+    if task and not yes:
+        always_confirm = set(always_confirm) | {"run_shell"}
+        print_warning(
+            "Unattended one-shot: run_shell is code execution and the web tools "
+            "egress data. run_shell now requires --yes (else it is denied this "
+            "run); network tools still obey net_mode (off/ask/allow). Pass --yes "
+            "to auto-approve, or run interactively to confirm each call.")
+
     # ------------------------------------------------------------------ #
     #  Create agent
     # ------------------------------------------------------------------ #
@@ -504,3 +518,15 @@ def _warn_sensitive_changes(agent: Agent) -> None:
             print_warning(message)
     except Exception:                                       # noqa: BLE001
         pass
+
+
+def console_main() -> None:
+    """The ``localcoder`` console-script entry point (pyproject [project.scripts]).
+
+    Guards that we are inside the project venv, then runs the coder command. Kept
+    SEPARATE from ``main`` so the ``localm coder`` route and the test suite invoke
+    the command directly, without the venv gate; only a stray global ``localcoder``
+    (a separate ``pip install``) hits it (NEW-J / NEW-J-CODER)."""
+    from localm._venvguard import require_venv
+    require_venv()
+    main()

@@ -72,3 +72,51 @@ test("the service worker still bypasses API traffic and handles shell assets", (
   assert.equal(swHandles(h, "/plugins/jobs/jobs.js"), false, "/plugins is live (bypassed)");
   assert.equal(swHandles(h, "/app.js"), true, "shell assets are SW-handled (cache-first)");
 });
+
+// Load the SW with a caches mock that reports `existingKeys` and records every
+// caches.delete() call, so we can drive the activate handler and assert WHICH
+// caches it purges.
+function loadSWWithCaches(existingKeys) {
+  const deleted = [];
+  const handlers = {};
+  const self = {
+    location: { origin: "https://localhost:8642" },
+    addEventListener: (type, fn) => { handlers[type] = fn; },
+    skipWaiting: () => {},
+    clients: { claim: () => {} },
+  };
+  const caches = {
+    open: async () => ({ put: () => {}, add: () => {}, addAll: () => {} }),
+    match: async () => undefined,
+    keys: async () => existingKeys.slice(),
+    delete: async (k) => { deleted.push(k); return true; },
+  };
+  vm.runInNewContext(SW_SRC, {
+    self, caches, URL, Promise, console,
+    fetch: async () => ({ ok: true, clone: () => ({}) }),
+  }, { filename: "sw.js" });
+  return { handlers, deleted };
+}
+
+test("activate purges only OLD shell caches, never the transformers model cache (REC-KOKORO-RELOAD)", async () => {
+  // Read the current shell cache name straight from the source so this test
+  // does not need updating on every version bump.
+  const m = SW_SRC.match(/const CACHE = "([^"]+)"/);
+  assert.ok(m, "sw.js must define a CACHE constant");
+  const current = m[1];
+
+  const { handlers, deleted } = loadSWWithCaches(
+    ["localm-shell-v1", "localm-shell-vOLD", current, "transformers-cache"]);
+
+  // Drive the activate handler and wait for its waitUntil() work to finish.
+  let work;
+  await handlers.activate({ waitUntil: (p) => { work = p; } });
+  await work;
+
+  assert.ok(!deleted.includes("transformers-cache"),
+    "the Kokoro/transformers model cache must survive a shell-version bump");
+  assert.ok(!deleted.includes(current),
+    "the current shell cache must not be deleted");
+  assert.deepEqual(deleted.sort(), ["localm-shell-v1", "localm-shell-vOLD"].sort(),
+    "only stale localm-shell-* caches are purged");
+});

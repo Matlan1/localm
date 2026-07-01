@@ -12,6 +12,16 @@ from pathlib import Path
 # index from a runaway file. ~8 MB of text is far beyond any useful context.
 MAX_TEXT_CHARS = 8_000_000
 
+# Hard cap on the DECOMPRESSED bytes we will pull out of a zip container
+# (.docx). The upload route caps the COMPRESSED payload (~30 MB), but a zip's
+# deflate ratio is ~1000x, so a 1 MB upload can decompress to gigabytes and
+# exhaust RAM (a "zip bomb" DoS) before the text cap above ever applies. 80 MB
+# of decompressed XML is far more than any real document needs (the extracted
+# text is itself capped at MAX_TEXT_CHARS) while making the amplification
+# attack impossible. We enforce it with a BOUNDED stream read, not by trusting
+# the zip header's self-reported size (which an attacker controls).
+MAX_ARCHIVE_MEMBER_BYTES = 80_000_000
+
 # Suffixes handled by extract_text. Anything not listed is refused (binary
 # formats would poison the index with mojibake).
 _PLAIN_SUFFIXES = {
@@ -96,6 +106,24 @@ def extract_bytes(data: bytes, filename: str) -> str:
     return text[:MAX_TEXT_CHARS]
 
 
+def _read_zip_member(zf: zipfile.ZipFile, member: str, filename: str) -> str:
+    """Read one zip member as UTF-8 text with a HARD cap on the DECOMPRESSED
+    size (zip-bomb guard). The compressed upload is capped upstream, but a
+    zip's deflate ratio is ~1000x, so a 1 MB upload can decompress to
+    gigabytes; a bounded STREAM read - not trusting the header's self-reported
+    ZipInfo.file_size, which an attacker controls - is what actually prevents
+    the amplification from exhausting RAM (CWE-409)."""
+    limit = MAX_ARCHIVE_MEMBER_BYTES
+    with zf.open(member) as fh:            # ZipExtFile decompresses lazily on read
+        raw = fh.read(limit + 1)          # bounded: at most limit+1 decompressed bytes
+    if len(raw) > limit:
+        raise ExtractError(
+            f"{filename}: embedded '{member}' exceeds the "
+            f"{limit // 1_000_000} MB decompressed-size limit "
+            "(possible zip bomb); refusing to extract.")
+    return raw.decode("utf-8", errors="replace")
+
+
 def _extract_docx(data: bytes, filename: str) -> str:
     """.docx is a zip; the body lives in word/document.xml. Paragraph tags
     (<w:p>) become newlines, text runs (<w:t>) are concatenated - no
@@ -103,13 +131,18 @@ def _extract_docx(data: bytes, filename: str) -> str:
     import io
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
-            xml = zf.read("word/document.xml").decode("utf-8", errors="replace")
+            xml = _read_zip_member(zf, "word/document.xml", filename)
     except (zipfile.BadZipFile, KeyError, OSError) as e:
         raise ExtractError(f"Cannot parse {filename} as .docx: {e}")
     # Tabs and explicit breaks inside runs
     xml = re.sub(r"<w:(?:tab|br|cr)\b[^>]*/?>", "\t", xml)
+    # Split on the paragraph END tag - a LINEAR str.split, not a backtracking
+    # regex. The old `<w:p\b.*?</w:p>` findall was quadratic on malformed XML
+    # with tens of thousands of unmatched <w:p openers (ReDoS: ~135s CPU on a
+    # 50k-opener input). str.split is O(n); the inner <w:t> match is bounded to
+    # a single paragraph chunk and cannot backtrack across paragraph boundaries.
     paragraphs = []
-    for para in re.findall(r"<w:p\b.*?</w:p>", xml, flags=re.DOTALL):
+    for para in xml.split("</w:p>"):
         runs = re.findall(r"<w:t\b[^>]*>(.*?)</w:t>", para, flags=re.DOTALL)
         if runs:
             paragraphs.append(_unescape_xml("".join(runs)))
@@ -126,9 +159,26 @@ def _extract_ipynb(data: bytes, filename: str) -> str:
         nb = json.loads(data.decode("utf-8", errors="replace"))
     except json.JSONDecodeError as e:
         raise ExtractError(f"Cannot parse {filename} as a notebook: {e}")
+    # A notebook is a JSON object with a "cells" list, but an uploaded file may
+    # be malformed (cells as a string, a cell as an int, source as a non-list).
+    # Validate the shape and coerce defensively so a wrong type raises a clean
+    # ExtractError -> 422, never an unhandled TypeError/AttributeError -> 500.
+    if not isinstance(nb, dict):
+        raise ExtractError(f"{filename} is not a valid notebook (expected a JSON object)")
+    cells = nb.get("cells", [])
+    if not isinstance(cells, list):
+        raise ExtractError(f"{filename} is not a valid notebook ('cells' is not a list)")
     parts = []
-    for i, cell in enumerate(nb.get("cells", [])):
-        src = "".join(cell.get("source", []))
+    for i, cell in enumerate(cells):
+        if not isinstance(cell, dict):
+            continue                      # skip a malformed cell, do not crash
+        source = cell.get("source", "")
+        # "source" is normally a list of line strings, but hand-written or
+        # malformed notebooks may store a bare string (or other JSON); coerce.
+        if isinstance(source, list):
+            src = "".join(str(s) for s in source)
+        else:
+            src = str(source)
         if src.strip():
             parts.append(f"[cell {i} - {cell.get('cell_type', '?')}]\n{src}")
     return "\n\n".join(parts)

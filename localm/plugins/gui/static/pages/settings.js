@@ -174,8 +174,11 @@ export function buildSettingControl(field) {
   // FOLDER / PATH fields get a "Browse..." button wired to the existing
   // directory picker, so the user does not have to type a path by hand (U10).
   const lbl = (field.label || field.key).toLowerCase();
-  const isPath = field.widget === "path" || field.key.endsWith("_path") || field.key.endsWith("_file") || lbl.includes("file") || lbl.includes("path") || lbl.includes("cmd");
-  const isDir = field.widget === "folder" || field.key.endsWith("_dir") || lbl.includes("folder") || lbl.includes("dir");
+  // An explicit schema flag (widget:"path"/"folder" or accepts_path/accepts_dir)
+  // forces the Browse button for a path field whose key/label match none of the
+  // naming tokens below - so tagging beats guessing (NEW-M-BROWSE).
+  const isPath = field.widget === "path" || field.accepts_path || field.key.endsWith("_path") || field.key.endsWith("_file") || lbl.includes("file") || lbl.includes("path") || lbl.includes("cmd");
+  const isDir = field.widget === "folder" || field.accepts_dir || field.key.endsWith("_dir") || lbl.includes("folder") || lbl.includes("dir");
   if (isPath || isDir) {
     const row = el("div", "dir-picker-row");
     const browse = el("button", "btn-secondary dir-picker-btn", "Browse...");

@@ -78,16 +78,37 @@ def _candidate_dirs() -> List[Path]:
     return dirs
 
 
+_warned_explicit_lib = False
+
+
 def runtime_binary_dir() -> Optional[Path]:
     """The directory the llama library will be loaded from, or None if unprovisioned."""
     name = lib_filename()
+    result: Optional[Path] = None
     for d in _candidate_dirs():
         try:
             if d and d.is_dir() and (d / name).exists():
-                return d
+                result = d
+                break
         except OSError:
             continue
-    return None
+    # An explicit LLAMA_CPP_LIB override that does NOT actually yield the library
+    # must not be silently ignored (do-not-hide-problems): the user pointed us at
+    # a custom build and needs to know it was skipped and why. Warn once per
+    # process, naming the bad path, before the fallback is used (REC-LLAMALIB-SILENT).
+    global _warned_explicit_lib
+    explicit = os.environ.get("LLAMA_CPP_LIB")
+    if explicit and not _warned_explicit_lib:
+        p = Path(explicit)
+        explicit_dir = p.parent if p.suffix else p
+        if result != explicit_dir:
+            _warned_explicit_lib = True
+            logger.warning(
+                "LLAMA_CPP_LIB=%s does not contain %s; ignoring it and falling back to %s.",
+                explicit, name,
+                f"the provisioned runtime ({result})" if result
+                else "no runtime (none found - run 'localm setup-llama')")
+    return result
 
 
 def rocm_runtime_dirs() -> List[Path]:

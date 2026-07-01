@@ -40,6 +40,18 @@ def debug_enabled() -> bool:
     return bool(os.environ.get(_ENV_VAR))
 
 
+def honor_env_debug() -> None:
+    """Open the debug log file when debug was requested via the LOCALM_DEBUG env
+    var (e.g. ``LOCALM_DEBUG=1 localm run ...``), not only via the ``--debug``
+    flag. Previously the env var flipped debug SEMANTICS on (debug_enabled() ->
+    True, verbose uvicorn) but nothing ever called enable_debug(), so no log file
+    was written - a silent half-on state (REC-DEBUGENV). A truthy-but-non-path
+    value ("1"/"true"/"yes") is the user's request; a real path means we inherited
+    an already-open log from a parent process, so leave enable_debug() to no-op."""
+    if debug_enabled() and log_file_path() is None:
+        enable_debug()
+
+
 def uvicorn_log_level() -> str:
     """The uvicorn log level for a server launch: verbose ``info`` in debug mode
     so the console window shows requests / connections / errors live (SRV-5),
