@@ -367,6 +367,38 @@ def llama_get_logits(ctx: ctypes.c_void_p) -> ctypes.Array:
 
 
 # ---------------------------------------------------------------------------
+#  Embeddings (probe before use - present on any real llama.cpp, but keep the
+#  binding guarded so a stripped build degrades cleanly instead of AttributeError)
+# ---------------------------------------------------------------------------
+
+def has_embeddings_api() -> bool:
+    """True when this llama.dll exports the embedding accessors. Every mainline
+    llama.cpp build does; the probe lets a caller fall back (to lexical-only
+    retrieval) rather than crash on an exotic stripped build."""
+    lib = load_lib()
+    return all(hasattr(lib, fn)
+               for fn in ("llama_get_embeddings_seq", "llama_get_embeddings_ith"))
+
+
+def llama_get_embeddings_seq(ctx: ctypes.c_void_p, seq_id: int) -> ctypes.Array:
+    """Pooled embedding for sequence *seq_id* (a pointer to ``n_embd`` floats).
+
+    Valid after ``llama_decode`` on a context created with ``embeddings=True`` and
+    a pooling type other than NONE. Returns a NULL pointer when pooling is off or
+    the sequence has no output."""
+    fn = _bind("llama_get_embeddings_seq", ctypes.POINTER(ctypes.c_float),
+               LlamaContext, ctypes.c_int32)
+    return fn(ctx, seq_id)
+
+
+def llama_get_embeddings_ith(ctx: ctypes.c_void_p, i: int) -> ctypes.Array:
+    """Per-token embedding for batch position *i* (used when pooling is NONE)."""
+    fn = _bind("llama_get_embeddings_ith", ctypes.POINTER(ctypes.c_float),
+               LlamaContext, ctypes.c_int32)
+    return fn(ctx, i)
+
+
+# ---------------------------------------------------------------------------
 #  Sampler chain
 # ---------------------------------------------------------------------------
 

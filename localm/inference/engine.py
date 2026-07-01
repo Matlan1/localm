@@ -221,9 +221,22 @@ class Engine:
         """
         Return embedding vectors for a list of texts.
 
-        Delegates to the backend.  Raises ``NotImplementedError`` when the
-        loaded model does not support embeddings.
+        A backend that can embed the loaded model itself (HuggingFace) is used
+        directly. The bundled GGUF chat backend cannot (``can_embed=False``); for
+        it we use a small DEDICATED on-device embedding model
+        (:mod:`localm.inference.embedder`) instead of loading the large chat model
+        just to fail, so semantic search works on the default runtime. Raises
+        ``NotImplementedError`` only when no embedding path is available.
         """
+        if getattr(self._backend, "can_embed", True) is False:
+            from localm.inference.embedder import embed_texts
+            vecs = embed_texts(list(texts))
+            if vecs is not None:
+                return vecs
+            raise NotImplementedError(
+                "No embedding model available. Run 'localm setup-embeddings' (or "
+                "set net_mode=allow) to enable semantic search; memory and RAG use "
+                "lexical BM25 until then.")
         if not self._backend.loaded:
             with _LOAD_LOCK:
                 if not self._backend.loaded:

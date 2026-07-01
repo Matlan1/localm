@@ -163,6 +163,43 @@ def test_consolidate_requires_model(client):
 
 
 # --------------------------------------------------------------------------- #
+#  Episodic chat memory                                                       #
+# --------------------------------------------------------------------------- #
+
+def test_summarize_session_guard_and_sentence():
+    from localm.memory import summarize_session
+    assert summarize_session(lambda p: "{}", "a session") == ""        # degenerate
+    assert summarize_session(lambda p: "", "a session") == ""
+    assert summarize_session(lambda p: (_ for _ in ()).throw(RuntimeError()),
+                             "x") == ""                                # never raises
+    assert summarize_session(lambda p: "Discussed the database migration plan.",
+                             "x") == "Discussed the database migration plan."
+
+
+def test_store_episode_dedup_and_guard(home):
+    store = plug._chat_store()
+    n = plug._store_episode(store, "user talked about postgres",
+                            lambda p: "Discussed migrating to Postgres 16.")
+    assert n == 1
+    epi = [r for r in store.all() if r.kind == "episodic"]
+    assert len(epi) == 1 and "Postgres" in epi[0].text and epi[0].source == "synth"
+    # a near-duplicate episode is not stored again
+    assert plug._store_episode(store, "x",
+                               lambda p: "Discussed migrating to Postgres 16.") == 0
+    # a degenerate summary stores nothing
+    assert plug._store_episode(store, "x", lambda p: "{}") == 0
+    assert len([r for r in store.all() if r.kind == "episodic"]) == 1
+
+
+def test_episodic_record_is_recalled(home):
+    store = plug._chat_store()
+    store.add(MemoryRecord(text="Discussed migrating the database to Postgres",
+                           kind="episodic", source="synth", importance=0.5))
+    hits = [r.text for r in store.recall("database postgres migration", k=3)]
+    assert any("Postgres" in h for h in hits)
+
+
+# --------------------------------------------------------------------------- #
 #  End-to-end: the REAL plugin engine + chat pipeline                          #
 # --------------------------------------------------------------------------- #
 # Proves register(host) actually mounts /api/memory AND registers the memory

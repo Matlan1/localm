@@ -166,6 +166,14 @@ DEFAULT_CONFIG: dict = {
     # and, like every memory write, is skipped in privacy mode. Set False to stop
     # injecting remembered facts (existing memories are kept, just not used).
     "memory_enabled": True,
+    # On-device embedding model for semantic search (RAG hybrid retrieval + agent
+    # memory). A small dedicated GGUF (loaded separately from the chat model) so
+    # embeddings work on the default runtime. Value is a known key
+    # (bge-small-en-v1.5, nomic-embed-text-v1.5), a registered model name, or a
+    # path to a GGUF. A known model is fetched into <home>/models/embeddings on
+    # first use (auto only under net_mode=allow; else run 'localm setup-embeddings').
+    # Until an embedding model is present, memory/RAG fall back to lexical BM25.
+    "embedding_model": "bge-small-en-v1.5",
     # Seconds a GUI coder approval card may sit unanswered before it is
     # auto-rejected and the agent moves on.
     "coder_confirm_timeout": 600,

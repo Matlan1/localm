@@ -81,6 +81,37 @@ from ..setup_llama import main as _setup_llama_main
 main.add_command(_setup_llama_main, name="setup-llama")
 
 
+@main.command("setup-embeddings")
+@click.option("--model", "model", default=None,
+              help="Embedding model to install (a known key, a registered model "
+                   "name, or a path to a GGUF). Persisted as the embedding_model "
+                   "config. Default: the current embedding_model config.")
+def setup_embeddings(model):
+    """Install the on-device embedding model for semantic search (memory + RAG).
+
+    localm's chat models make poor embeddings, so semantic retrieval uses a small
+    dedicated model (bge-small, ~25 MB). This downloads it into
+    <home>/models/embeddings/ so memory and RAG retrieval become semantic instead
+    of lexical. Respects net_mode=off (a hard kill switch)."""
+    from ..config import load_config, update_config
+    from ..inference.embedder import (DEFAULT_EMBEDDING_MODEL,
+                                      KNOWN_EMBEDDING_MODELS,
+                                      resolve_embedding_model_path)
+    if model:
+        update_config(lambda c: c.update({"embedding_model": model}))
+    name = str(load_config().get("embedding_model") or DEFAULT_EMBEDDING_MODEL)
+    console.print(f"Installing embedding model: [bold cyan]{name}[/bold cyan]")
+    path = resolve_embedding_model_path(allow_download=True)
+    if not path:
+        console.print(
+            "[red]Could not install the embedding model.[/red] It must be a known "
+            f"key {tuple(KNOWN_EMBEDDING_MODELS)}, a registered model, or a GGUF "
+            "path, and network must be enabled (net_mode is not 'off').", stderr=True)
+        sys.exit(1)
+    console.print(f"[green]Embedding model ready:[/green] {path}\n"
+                  "Memory and RAG will now use semantic search.")
+
+
 @main.command("mcp")
 def mcp():
     """Start the MCP server over STDIO.
