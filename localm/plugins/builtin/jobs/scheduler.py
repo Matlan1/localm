@@ -218,8 +218,14 @@ class JobScheduler:
         cron job is not marked fired so its minute is not consumed."""
         if now is None:
             now = time.time()
-        due_jobs = [j for j in self.store.list()
-                    if j.enabled and self.due(j, now)]
+        current = self.store.list()
+        # Prune _cron_fired for jobs that no longer exist, so a long-running server
+        # with churny cron jobs does not leak dict entries forever (CHK-JOBS-CRONLEAK).
+        if self._cron_fired:
+            live = {j.id for j in current}
+            for jid in [k for k in self._cron_fired if k not in live]:
+                del self._cron_fired[jid]
+        due_jobs = [j for j in current if j.enabled and self.due(j, now)]
         if not due_jobs:
             return []
 

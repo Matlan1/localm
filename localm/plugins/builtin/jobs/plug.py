@@ -247,10 +247,16 @@ async def run_now(job_id: str, request: Request):
 
 
 @_router.get("/api/jobs/{job_id}/results")
-async def job_results(job_id: str, request: Request):
+async def job_results(job_id: str, request: Request,
+                      limit: int = 100, offset: int = 0):
     store = _store()
     _owned_job_or_404(store, job_id, request)     # only the owner sees a job's results
-    return {"id": job_id, "results": store.list_results(job_id)}
+    # Page the results so a high-frequency job's history cannot load every result
+    # file into memory and OOM the API (CHK-JOBS-RESULTS-PAGE). Default + hard cap.
+    limit = max(1, min(int(limit), 1000))
+    offset = max(0, int(offset))
+    return {"id": job_id, "limit": limit, "offset": offset,
+            "results": store.list_results(job_id, limit=limit, offset=offset)}
 
 
 # ------------------------------------------------------------------ #
