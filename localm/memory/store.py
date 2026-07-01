@@ -43,6 +43,12 @@ K_CAP = 32                  # hard ceiling on a recall k
 
 # ---- retrieval scoring ---------------------------------------------------- #
 W_REL, W_REC, W_IMP = 0.5, 0.3, 0.2     # blend weights (sum 1.0)
+# Within the relevance signal, weight semantic cosine ABOVE lexical BM25 when an
+# embedder is present. Paraphrased factual queries share few tokens with the stored
+# fact, so BM25 is near-zero and noisy; a 50/50 blend diluted the strong cosine
+# signal (in-house benchmark: recall@1 0.19 at 50/50 vs 0.63 at this share, recall@3
+# 0.56 -> 0.94). Some BM25 is kept so exact-term queries (ids, filenames) still hit.
+REL_LEX_SHARE = 0.20       # BM25 share of relevance when vectors present (rest = cosine)
 TAU_DAYS = 30.0             # recency e-folding time: 30d -> 0.37, 90d -> 0.05
 FLOOR = 0.05               # a recalled memory must beat this normalized score
 TINY_CORPUS = 8            # below this, BM25 idf is noisy -> rank by rec+imp only
@@ -279,7 +285,8 @@ class MemoryStore:
         rel = _maxnorm(self._bm25.scores(query))
         vec_rel = self._vector_relevance(query, embed_fn)
         if vec_rel is not None:
-            rel = [0.5 * a + 0.5 * b for a, b in zip(rel, vec_rel)]
+            rel = [REL_LEX_SHARE * a + (1.0 - REL_LEX_SHARE) * b
+                   for a, b in zip(rel, vec_rel)]
         return rel
 
     def _vector_relevance(self, query: str,
@@ -322,8 +329,14 @@ class MemoryStore:
         # could never fall silent on a store of only stale/irrelevant memories.
         # Raw decay (Generative-Agents style) lets an old, unimportant, off-topic
         # memory score below the floor and be dropped.
+        # Stable, user-authored facts (source user/import) do NOT decay in relevance:
+        # a durable preference stated long ago must not be buried under recent chatter
+        # (measured: an old user fact fell out of the injected top-k). Recency decay
+        # still applies to synth memories. Mirrors prune(), which already exempts
+        # user/import from decay-based eviction.
         rec = [
-            math.exp(-((now - r.last_used) / _DAY) / TAU_DAYS)
+            1.0 if r.source in ("user", "import")
+            else math.exp(-((now - r.last_used) / _DAY) / TAU_DAYS)
             for r in self._records
         ]
         scored = []
