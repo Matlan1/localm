@@ -103,14 +103,19 @@ export async function kbAddDocs(name) {
     localStorage.getItem("localm.kbAddPath") || "");
   if (!path || !path.trim()) return;
   if (!chat.privacy) localStorage.setItem("localm.kbAddPath", path.trim());
+  // Embeddings are opt-out here: the server defaults embed=true and degrades to
+  // BM25-only when unchecked (no embedding-capable model needed). The checkbox
+  // lets a user index lexical-only on purpose.
+  const embed = $("kb-embed") ? $("kb-embed").checked : true;
   const log = $("kb-log");
   log.style.display = "block";
-  log.textContent = `Indexing ${path.trim()} into '${name}'…\n`;
+  log.textContent = `Indexing ${path.trim()} into '${name}'`
+    + (embed ? "" : " (BM25 only)") + "…\n";
   try {
     const r = await fetch(
       `/api/rag/collections/${encodeURIComponent(name)}/add`, {
         method: "POST", headers: authHeaders(),
-        body: JSON.stringify({ paths: [path.trim()] }),
+        body: JSON.stringify({ paths: [path.trim()], embed }),
       });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
