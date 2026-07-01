@@ -188,6 +188,29 @@ def load_models() -> list:
         return []
 
 
+def _anchor_home(p: str) -> str:
+    """Store a path home-anchored ('~/...') so launcher.json does not persist the
+    absolute machine layout / OS username into a file that could be shared
+    (REC-CODER-CWD-LEAK). A path outside home keeps its form (no username in it)."""
+    if not p:
+        return p
+    try:
+        rel = Path(p).resolve().relative_to(Path.home().resolve())
+        return "~/" + rel.as_posix()
+    except Exception:
+        return p
+
+
+def _expand_home(p: str) -> str:
+    """Inverse of _anchor_home: expand a stored '~/...' back to an absolute path."""
+    if not p:
+        return p
+    try:
+        return str(Path(p).expanduser())
+    except Exception:
+        return p
+
+
 def load_settings() -> dict:
     try:
         return json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
@@ -220,7 +243,7 @@ class Launcher(tk.Tk):
         self.gpu_layers = tk.StringVar(value=saved.get("gpu_layers", ""))
         self.host_lan = tk.BooleanVar(value=False)   # deliberately not persisted
         self.no_browser = tk.BooleanVar(value=saved.get("no_browser", False))
-        self.coder_dir = tk.StringVar(value=saved.get("coder_dir", ""))
+        self.coder_dir = tk.StringVar(value=_expand_home(saved.get("coder_dir", "")))
         self.coder_yes = tk.BooleanVar(value=saved.get("coder_yes", False))
         self.keep_open = tk.BooleanVar(value=saved.get("keep_open", False))
         self.privacy_global = tk.StringVar(value=saved.get("privacy_global", "privacy"))
@@ -779,7 +802,7 @@ class Launcher(tk.Tk):
             "ctx": self.ctx.get(),
             "gpu_layers": self.gpu_layers.get(),
             "no_browser": self.no_browser.get(),
-            "coder_dir": self.coder_dir.get(),
+            "coder_dir": _anchor_home(self.coder_dir.get()),
             "coder_yes": self.coder_yes.get(),
             "keep_open": self.keep_open.get(),
             "privacy_global": self.privacy_global.get(),

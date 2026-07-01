@@ -298,6 +298,21 @@ RULES
 #  Public API
 # ---------------------------------------------------------------------------
 
+def _display_cwd(cwd) -> str:
+    """The working directory as shown to the model: home-anchored (``~/proj/app``)
+    when under the user's home, else just the project folder name. Hides the OS
+    username and absolute machine layout from the prompt (REC-CODER-GUI-PATH)."""
+    try:
+        p = Path(cwd).resolve()
+    except Exception:
+        return str(cwd)
+    try:
+        home = Path.home().resolve()
+        return "~/" + p.relative_to(home).as_posix()
+    except Exception:
+        return p.name or str(p)
+
+
 def build_system_prompt(
     cwd: Path,
     agent_name: str = "localcoder",
@@ -355,17 +370,22 @@ def build_system_prompt(
     rules      = _rules_section(family, disabled_tools)
     untrusted  = _untrusted_content_section(family) if untrusted_provenance else ""
 
-    # Identity line - terser for small models
+    # Identity line - terser for small models. The cwd is HOME-ANCHORED (~/... or
+    # just the project folder name) so the absolute machine path and OS username
+    # do not leak into the prompt - and thus into a shareable artifact or a model
+    # that echoes it back. The tools still operate on the real cwd; the RULES tell
+    # the model to use relative paths (REC-CODER-GUI-PATH).
+    shown_cwd = _display_cwd(cwd)
     if family == "small":
         identity = (
             f"You are {agent_name}, an AI coding assistant.\n"
-            f"Working directory: {cwd}"
+            f"Working directory: {shown_cwd}"
         )
     else:
         identity = (
             f"You are {agent_name}, an expert AI coding assistant running fully offline.\n"
             f"You help the user write, debug, refactor, and understand code.\n\n"
-            f"Working directory: {cwd}"
+            f"Working directory: {shown_cwd}"
         )
 
     extra_section = f"\n{extra_tool_docs}\n" if extra_tool_docs else ""

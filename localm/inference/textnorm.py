@@ -83,14 +83,34 @@ def split_think(text: str) -> tuple[str, str]:
     """Split *text* (already scrubbed to canonical ``<think>...</think>``) into
     ``(content, reasoning)``: the visible answer with the think block(s) removed,
     and the concatenated reasoning with the tags removed. An unclosed ``<think>``
-    runs to the end. Multiple blocks are concatenated (reasoning joined by a
-    blank line)."""
-    sp = ThinkSplitter()
-    c, r = sp.feed(text)
-    c2, r2 = sp.flush()
-    content = c + c2
-    reasoning_parts = [p for p in (r, r2) if p]
-    return content, "".join(reasoning_parts)
+    runs to the end. Multiple blocks are concatenated.
+
+    Linear single pass (AUD-SPLITTHINK): scans with ``str.find`` and slices each
+    segment exactly once, so it stays O(n) even on pathologically interleaved
+    tags. The previous ThinkSplitter path re-sliced its whole buffer per tag
+    (``buf = buf[cut:]`` in a loop) - the classic O(n^2) pattern. ThinkSplitter
+    is still used for the streaming path, where each piece is small."""
+    content: list[str] = []
+    reasoning: list[str] = []
+    i, n, in_think = 0, len(text), False
+    while i < n:
+        if in_think:
+            j = text.find(_THINK_CLOSE, i)
+            if j == -1:
+                reasoning.append(text[i:])          # unclosed think runs to the end
+                break
+            reasoning.append(text[i:j])
+            i = j + len(_THINK_CLOSE)
+            in_think = False
+        else:
+            j = text.find(_THINK_OPEN, i)
+            if j == -1:
+                content.append(text[i:])
+                break
+            content.append(text[i:j])
+            i = j + len(_THINK_OPEN)
+            in_think = True
+    return "".join(content), "".join(reasoning)
 
 
 def _held_tag_suffix(s: str, tag: str) -> int:
