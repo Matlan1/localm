@@ -513,6 +513,22 @@ class LlamaCpp:
             raise RuntimeError(
                 f"Failed to load model: {model_path}{hint}{suffix}")
 
+        # REC-GPULAYERS-CLAMP: llama.cpp already offloads min(n_gpu_layers, actual)
+        # internally, so an over-large value is harmless - but a silent clamp is
+        # confusing when a user set a SPECIFIC number, so surface a clear
+        # gpu_layers message. 99 is the "offload all" default, so skip it.
+        if 0 < n_gpu_layers < 99:
+            try:
+                actual = api.llama_model_n_layer(self._model_ptr)
+                if actual and n_gpu_layers > actual:
+                    from localm.debuglog import logger
+                    logger.info(
+                        "n_gpu_layers=%d exceeds the model's %d layers; "
+                        "offloading all %d (the extra has no effect)",
+                        n_gpu_layers, actual, actual)
+            except Exception:
+                pass  # introspection is best-effort; never block a successful load
+
         # --- create context ---
         cp = api.llama_context_default_params()
         cp.n_ctx             = n_ctx

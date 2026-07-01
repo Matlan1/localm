@@ -25,6 +25,8 @@ class _SessionMixin:
         self._consecutive_errors.clear()
         self._global_error_streak = 0
         self._abort_no_progress = False
+        self._last_response_fp = ""
+        self._repeat_response_count = 0
         self._last_run_ok = True
         self._unverified_writes.clear()
         self._review_task = ""
@@ -43,7 +45,7 @@ class _SessionMixin:
             agent_name=self.name,
             project_map=self._project_map,
             memory=self._memory,
-            model_name=self._model_name,
+            model_name=getattr(self, "_family_id", self._model_name),  # REC-CODER-FAMILY
             extra_tool_docs="\n\n".join(
                 d for d in (self._mcp_docs, self._plugin_docs, self._skill_docs) if d
             ),

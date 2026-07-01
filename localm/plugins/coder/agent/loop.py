@@ -15,7 +15,7 @@ from ..display import (
 from ..parser import looks_like_tool_attempt, split_response
 from ..tools import ToolResult
 from ..audit import SessionMode
-from .constants import _MAX_TOOL_REPAIRS
+from .constants import _MAX_TOOL_REPAIRS, _REPEAT_RESPONSE_ABORT
 
 
 class _LoopMixin:
@@ -176,6 +176,29 @@ class _LoopMixin:
                     self._stop_requested = False
                     self._add_assistant(response)
                     final_response = response or "[stopped by user]"
+                    self._last_run_ok = False
+                    break
+
+                # ---- repeated-scaffold breaker (REC-CODER-LOOPBREAK) ------
+                # A stuck model can emit the SAME response over and over (the
+                # "Message 1..4 / I will now wait" narration) making no progress.
+                # The error-streak breakers only catch FAILED tool calls; this
+                # catches identical NON-failing repetition. Abort after N in a row.
+                fp = (response or "").strip()
+                if fp and fp == self._last_response_fp:
+                    self._repeat_response_count += 1
+                else:
+                    self._repeat_response_count = 0
+                    self._last_response_fp = fp
+                if self._repeat_response_count >= _REPEAT_RESPONSE_ABORT - 1:
+                    final_response = (
+                        "[circuit breaker: the model repeated the same response "
+                        f"{self._repeat_response_count + 1} times with no progress - "
+                        "stopping so you can adjust the approach instead of burning "
+                        "more turns. The conversation is intact.]")
+                    print_warning(final_response)
+                    self._emit("info", text=final_response)
+                    self._add_assistant(response)
                     self._last_run_ok = False
                     break
 
