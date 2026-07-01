@@ -186,6 +186,16 @@ def pull_model(
     if is_local_path:
         return _mm.add_local(str(local), name=name)
 
+    # SSRF-PULL: honour the net_mode kill switch for a REMOTE pull. net_mode=off
+    # means "no network at all", so it must stop a model download too - previously
+    # it only gated the discovery prelude, not the actual pull.
+    from localm.netpolicy import network_mode
+    if network_mode() == "off":
+        console.print(
+            "[red]Network access is disabled (net_mode=off).[/red] A model pull "
+            "needs the network; enable it with: localm config net_mode ask")
+        return False
+
     spec = _mm.resolve_spec(model_spec)
     if spec.startswith("http://") or spec.startswith("https://"):
         res = _pull_url(spec, _sanitize_name(name or _stem_from_url(spec)),
@@ -541,6 +551,34 @@ def _pull_hf_snapshot(
 
 
 
+def _ssrf_resolve_final_url(url: str, requests) -> str:
+    """Follow the redirect chain HEAD-only, re-validating EVERY hop against the
+    netpolicy SSRF guard, and return the final URL. Model pulls legitimately
+    redirect (HuggingFace -> CDN), so we follow - but check each hop instead of
+    trusting requests' automatic, UNCHECKED redirect following, which a public
+    URL could otherwise use to bounce the download into 127.0.0.1 /
+    169.254.169.254 / an RFC1918 service (SSRF-PULL). Raises NetworkPolicyError
+    if any hop resolves to a non-public host."""
+    from localm.netpolicy import check_url
+    import urllib.parse
+    current = url
+    for _ in range(6):
+        check_url(current)
+        try:
+            resp = requests.head(current, allow_redirects=False, timeout=10)
+        except Exception:
+            break                       # unreachable HEAD -> let the GET report it
+        if resp.status_code in (301, 302, 303, 307, 308):
+            loc = resp.headers.get("Location")
+            if not loc:
+                break
+            current = urllib.parse.urljoin(current, loc)
+            continue
+        break
+    check_url(current)                  # final target, revalidated
+    return current
+
+
 def _pull_url(
     url: str,
     name: str,
@@ -549,6 +587,7 @@ def _pull_url(
 ) -> bool:
     """Download a model from a direct URL with resumable .part file support."""
     import requests
+    from localm.netpolicy import NetworkPolicyError
 
     stem = _stem_from_url(url)
     if not stem:
@@ -616,9 +655,18 @@ def _pull_url(
     # Determine how much we already have (from a prior interrupted download)
     already_have = part_file.stat().st_size if part_file.exists() else 0
 
-    # HEAD request to get total file size for the disk space check
+    # SSRF-PULL: resolve the redirect chain with each hop validated, then use the
+    # final CHECKED URL for both the size HEAD and the streaming GET with redirects
+    # OFF - so no unchecked hop can bounce the download into an internal host.
     try:
-        head  = requests.head(url, allow_redirects=True, timeout=10)
+        dl_url = _ssrf_resolve_final_url(url, requests)
+    except NetworkPolicyError as e:
+        console.print(f"[red]Refused by network policy:[/red] {e}")
+        return False
+
+    # HEAD the final URL to get total file size for the disk space check
+    try:
+        head  = requests.head(dl_url, allow_redirects=False, timeout=10)
         total = int(head.headers.get("content-length", 0))
     except Exception:
         total = 0
@@ -639,8 +687,17 @@ def _pull_url(
         console.print(f"Downloading [bold cyan]{url}[/bold cyan]")
 
     try:
-        r = requests.get(url, headers=headers, stream=True, timeout=30)
+        from localm.netpolicy import check_url
+        check_url(dl_url)               # revalidate immediately before the connect
+        r = requests.get(dl_url, headers=headers, stream=True, timeout=30,
+                         allow_redirects=False)
+        if r.status_code in (301, 302, 303, 307, 308):
+            console.print(f"[red]Refused:[/red] unexpected redirect from {dl_url}")
+            return False
         r.raise_for_status()
+    except NetworkPolicyError as e:
+        console.print(f"[red]Refused by network policy:[/red] {e}")
+        return False
     except requests.HTTPError as e:
         code = getattr(e.response, "status_code", "?")
         console.print(f"[red]Download failed[/red] (HTTP {code}): {url}")
