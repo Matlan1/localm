@@ -28,6 +28,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
+from localm.debuglog import logger as _log
 from .bm25 import BM25
 from .chunk import chunk_text
 from .extract import EXTRACTABLE_SUFFIXES, ExtractError, extract_text
@@ -46,6 +47,17 @@ def _first_dim(vectors: list) -> Optional[int]:
         if v:
             return len(v)
     return None
+
+
+def _well_formed_vectors(vectors) -> bool:
+    """Cheap (O(n)) structural check that *vectors* is what ``_save`` writes: a
+    list whose entries are each a null placeholder (a missing embedding) or a
+    list/tuple. A hand-corrupted or truncated vectors.json can hold scalars or
+    strings that pass JSON parsing but crash cosine scoring at QUERY time with an
+    opaque error (``object of type 'int' has no len()``); catch that at load and
+    degrade to BM25 with a reason instead of shipping a delayed crash."""
+    return isinstance(vectors, list) and all(
+        (not v) or isinstance(v, (list, tuple)) for v in vectors)
 
 # Directories never worth indexing when a folder is added
 _SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__",
@@ -193,6 +205,12 @@ class Collection:
         self._vec_dim: Optional[int] = None       # dimensionality of stored vectors
         self._bm25: Optional[BM25] = None
         self.corrupt: bool = False
+        # Why semantic (vector) scoring is unavailable when it should be present.
+        # None = vectors are used, or legitimately absent (no embeddings indexed).
+        # A non-None string means a corrupt/stale/mismatched vectors index was
+        # DETECTED and we fell back to BM25 lexical - surfaced, not silently
+        # swallowed (AGENTS rule 5). Exposed via stats() and logged once.
+        self.vector_degrade_reason: Optional[str] = None
         if self.exists():
             self._load()
 
@@ -237,16 +255,37 @@ class Collection:
                     continue
         self._vectors = None
         self._vec_dim = None
+        self.vector_degrade_reason = None
         vec_file = self.dir / "vectors.json"
         if vec_file.is_file():
+            # vectors.json PRESENT but unusable is the unexpected case: do NOT
+            # collapse it with "simply absent" into one silent path (AGENTS rule 5).
             try:
                 data = json.loads(vec_file.read_text(encoding="utf-8"))
                 vectors = data.get("vectors", [])
-                if len(vectors) == len(self._chunks):
+            except (json.JSONDecodeError, OSError) as e:
+                data, vectors = None, None
+                self._note_vector_degrade(
+                    f"vectors.json is unreadable ({type(e).__name__}); "
+                    f"using BM25 lexical retrieval only", warn=True)
+            if vectors is not None:
+                if not _well_formed_vectors(vectors):
+                    # Valid JSON but the entries are not vectors (scalars/strings
+                    # from a hand-edit or truncation): would crash cosine at query
+                    # time, so treat it as corrupt here rather than later.
+                    self._note_vector_degrade(
+                        "vectors.json is malformed (entries are not vectors); "
+                        "using BM25 lexical retrieval only", warn=True)
+                elif len(vectors) == len(self._chunks):
                     self._vectors = vectors
                     self._vec_dim = data.get("dim") or _first_dim(vectors)
-            except (json.JSONDecodeError, OSError):
-                pass
+                elif vectors:
+                    # A non-empty vectors list that does not line up with the
+                    # chunks is a stale/partial index, not "no embeddings yet".
+                    self._note_vector_degrade(
+                        f"vectors.json has {len(vectors)} vectors for "
+                        f"{len(self._chunks)} chunks (stale or partial index); "
+                        f"using BM25 lexical retrieval only", warn=True)
         self._bm25 = None
 
     def _save(self) -> None:
@@ -467,12 +506,31 @@ class Collection:
             for i in order if scores[i] > 0
         ]
 
+    def _note_vector_degrade(self, reason: str, *, warn: bool) -> None:
+        """Record WHY semantic (vector) scoring is unavailable and surface it once.
+
+        We do not hide problems (AGENTS rule 5): a corrupt, stale, or dimensionally
+        mismatched vectors index must not silently vanish into BM25-only. Recording
+        the reason (exposed via ``stats()``) and logging genuine corruption once -
+        idempotent, so a per-query path does not spam the log - is the right
+        altitude: the lexical fallback still works, but the fault is discoverable."""
+        if self.vector_degrade_reason == reason:
+            return
+        self.vector_degrade_reason = reason
+        if warn:
+            _log.warning("RAG collection %r: %s", self.name, reason)
+
     def _vector_scores(self, text: str,
                        embed_fn: Optional[EmbedFn]) -> Optional[list[float]]:
         if embed_fn is None or self._vectors is None:
             return None
         present = [v for v in self._vectors if v]
         if not self._chunks or len(present) / len(self._chunks) < 0.8:
+            # Partial coverage is expected while a collection is still embedding,
+            # so record it (visible in stats) but do not warn - not a corruption.
+            self._note_vector_degrade(
+                "vector coverage below 80% (index not fully embedded); "
+                "using BM25 lexical retrieval only", warn=False)
             return None
         # Stored vectors must share one dimensionality. A legacy collection with
         # mixed-dim vectors (built before the C3 add-time guard) is ambiguous -
@@ -480,17 +538,32 @@ class Collection:
         # zeros for the odd-dim chunks.
         dims = {len(v) for v in present}
         if len(dims) > 1:
+            self._note_vector_degrade(
+                "stored vectors have mixed dimensionality (legacy index); "
+                "using BM25 lexical retrieval only", warn=True)
             return None
         stored_dim = next(iter(dims))
         try:
             qvec = embed_fn([text])[0]
-        except Exception:
+        except Exception as e:
+            # The embedder raised: a real failure (backend down, model unloaded),
+            # not an expected transient like partial coverage - surface it. The
+            # note is idempotent, so this warns once per distinct error, not per query.
+            self._note_vector_degrade(
+                f"query embedding failed ({type(e).__name__}); "
+                f"using BM25 lexical retrieval only", warn=True)
             return None
         # A switched embedding model yields query vectors of a different
         # dimensionality than the stored ones: fall back to lexical-only rather
         # than crash or return wrong scores.
         if len(qvec) != stored_dim:
+            self._note_vector_degrade(
+                f"embedding model changed (query dim {len(qvec)} != stored "
+                f"{stored_dim}); using BM25 lexical retrieval only - rebuild the "
+                f"collection to restore semantic search", warn=True)
             return None
+        # Vectors are usable: clear any stale query-time degrade note.
+        self.vector_degrade_reason = None
         out = []
         for v in self._vectors:
             out.append(_cosine(qvec, v) if v else 0.0)
@@ -511,6 +584,9 @@ class Collection:
             "n_chunks": len(self._chunks),
             "has_vectors": bool(vectors) and all(v for v in vectors),
             "corrupt": self.corrupt,
+            # Why semantic search fell back to BM25 (None when vectors are used or
+            # legitimately absent); surfaced instead of silently swallowed.
+            "vector_degrade_reason": self.vector_degrade_reason,
         }
 
     def docs(self) -> list[dict]:

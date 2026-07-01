@@ -143,6 +143,14 @@ export async function kbInfoModal(name) {
       `${data.n_docs} documents · ${data.n_chunks} chunks · ` +
       (data.has_vectors ? "hybrid retrieval (BM25 + embeddings)"
                         : "lexical retrieval (BM25)")));
+    // Surface a degraded semantic index instead of silently answering lexically
+    // (AGENTS rule 5). The server sets this when vectors are corrupt/stale/mismatched.
+    if (data.vector_degrade_reason) {
+      const warn = el("div", "sub",
+        "⚠ Semantic search fell back to BM25: " + data.vector_degrade_reason);
+      warn.style.color = "var(--yellow)";
+      body.appendChild(warn);
+    }
     for (const d of data.docs) {
       const row = el("div", "log-entry");
       row.appendChild(el("span", "t", `${d.chunks} chunks`));
