@@ -31,3 +31,54 @@ def test_default_api_url_keeps_lan_config(monkeypatch):
     monkeypatch.setattr("localm.config.load_config",
                         lambda: {"comfy_api_url": "http://192.168.1.50:8188"})
     assert c.default_api_url() == "http://192.168.1.50:8188"
+
+
+# --------------------------------------------------------------------------- #
+# CHK-COMFY-APIURL residual: the image/music/video PLUGIN backends resolved
+# api_url as `comfy.api_url or [comfy_api_url or] default_api_url()`, so a
+# per-plugin (or the global) api_url short-circuited BEFORE default_api_url()'s
+# own guard and reached the outbound comfy calls unsanitised. settings() must
+# sanitise the RESOLVED value, closing that bypass on every media plugin.
+# --------------------------------------------------------------------------- #
+
+from localm.plugins.builtin.image import backend as _image_backend    # noqa: E402
+from localm.plugins.builtin.music import backend as _music_backend    # noqa: E402
+from localm.plugins.builtin.video import backend as _video_backend    # noqa: E402
+
+_METADATA = "http://169.254.169.254:8188"
+
+
+def _plugin_cfg(name: str, comfy_block: dict) -> dict:
+    return {"plugins": {name: {"comfy": comfy_block}}}
+
+
+def test_image_settings_sanitizes_per_plugin_api_url(monkeypatch):
+    monkeypatch.delenv("FLUX_API_URL", raising=False)
+    s = _image_backend.settings(_plugin_cfg("image", {"api_url": _METADATA}))
+    assert s["api_url"] == _LOOPBACK
+
+
+def test_image_settings_sanitizes_global_comfy_api_url(monkeypatch):
+    monkeypatch.delenv("FLUX_API_URL", raising=False)
+    # image also honours the legacy global comfy_api_url as a fallback.
+    s = _image_backend.settings({"comfy_api_url": _METADATA})
+    assert s["api_url"] == _LOOPBACK
+
+
+def test_music_settings_sanitizes_per_plugin_api_url(monkeypatch):
+    monkeypatch.delenv("FLUX_API_URL", raising=False)
+    s = _music_backend.settings(_plugin_cfg("music", {"api_url": _METADATA}))
+    assert s["api_url"] == _LOOPBACK
+
+
+def test_video_settings_sanitizes_per_plugin_api_url(monkeypatch):
+    monkeypatch.delenv("FLUX_API_URL", raising=False)
+    s = _video_backend.settings(_plugin_cfg("video", {"api_url": _METADATA}))
+    assert s["api_url"] == _LOOPBACK
+
+
+def test_image_settings_keeps_lan_per_plugin_api_url(monkeypatch):
+    monkeypatch.delenv("FLUX_API_URL", raising=False)
+    lan = "http://192.168.1.50:8188"
+    s = _image_backend.settings(_plugin_cfg("image", {"api_url": lan}))
+    assert s["api_url"] == lan
