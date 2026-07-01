@@ -109,6 +109,37 @@ def test_record_result_survives_metadata_stamp_failure(home, monkeypatch):
     assert list(store._result_dir(job.id).glob("*.json"))
 
 
+def test_list_results_paginates(home):
+    """CHK-JOBS-RESULTS-PAGE: list_results reads only the requested page, so a huge
+    history cannot OOM the caller; limit=None keeps the full list."""
+    from localm.plugins.builtin.jobs.store import JobStore
+    store = JobStore()
+    job = store.add(_make_job(name="j"))
+    for i in range(5):
+        store.record_result(job.id, {"status": "ok", "output": f"r{i}",
+                                     "started": 1000.0 + i, "finished": 1000.0 + i})
+    assert len(store.list_results(job.id)) == 5                  # default: all
+    assert len(store.list_results(job.id, limit=2)) == 2
+    assert len(store.list_results(job.id, limit=2, offset=2)) == 2
+    assert len(store.list_results(job.id, limit=2, offset=4)) == 1
+    assert len(store.list_results(job.id, limit=100)) == 5       # limit > count -> all
+    # the pages are disjoint and together cover every result
+    seen = []
+    for off in (0, 2, 4):
+        seen += [r["output"] for r in store.list_results(job.id, limit=2, offset=off)]
+    assert sorted(seen) == ["r0", "r1", "r2", "r3", "r4"]
+
+
+def test_scheduler_prunes_cron_fired_for_deleted_jobs(home):
+    """CHK-JOBS-CRONLEAK: a tick drops _cron_fired entries for jobs that no longer
+    exist, so a long-running server with churny cron jobs does not leak forever."""
+    from localm.plugins.builtin.jobs.scheduler import JobScheduler
+    sched = JobScheduler(run_job=lambda *a, **k: {})
+    sched._cron_fired["ghost-job"] = 12345           # a fired cron job since deleted
+    sched.tick(now=1000.0)                             # prunes stale entries first
+    assert "ghost-job" not in sched._cron_fired
+
+
 def test_job_validation_rejects_bad_defs(home):
     from localm.plugins.builtin.jobs.store import Job
     with pytest.raises(ValueError):

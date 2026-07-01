@@ -314,18 +314,30 @@ class JobStore:
                         result_id, job_id, e)
         return result_id
 
-    def list_results(self, job_id: str) -> list:
+    def list_results(self, job_id: str, *, limit: Optional[int] = None,
+                     offset: int = 0) -> list:
         """Run results for *job_id*, newest first. Each entry is the stored
-        record dict (prompt + output + status + timing)."""
+        record dict (prompt + output + status + timing).
+
+        With *limit* / *offset*, only that page of files is READ into memory (the
+        page is selected before reading, not sliced after loading everything), so
+        a job with a huge result history does not OOM the caller
+        (CHK-JOBS-RESULTS-PAGE). limit=None keeps the full-list behaviour for
+        internal/CLI callers."""
         try:
             d = self._result_dir(job_id)
         except ValueError:
             return []
         if not d.is_dir():
             return []
+        files = sorted(d.glob("*.json"),
+                       key=lambda f: f.stat().st_mtime, reverse=True)
+        if offset:
+            files = files[max(0, offset):]
+        if limit is not None:
+            files = files[:max(0, limit)]
         out = []
-        for p in sorted(d.glob("*.json"),
-                        key=lambda f: f.stat().st_mtime, reverse=True):
+        for p in files:
             try:
                 out.append(json.loads(p.read_text(encoding="utf-8")))
             except (json.JSONDecodeError, OSError):
