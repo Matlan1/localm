@@ -184,10 +184,29 @@ def download(asset_id, dest, *, timeout: float = 120.0, opener=None) -> Path:
         opener(url, headers, timeout, dest)
         return dest
     import urllib.error
+    import urllib.parse
     import urllib.request
+    # CHK-UPDATER-INTEGRITY (transport half): a code-update download must stay on
+    # HTTPS end to end. Refuse a non-HTTPS endpoint, and refuse a redirect that
+    # downgrades to http, so a MITM / redirect cannot serve the update in cleartext
+    # (or pivot it). Redirects that STAY https are still followed (the proxy may
+    # hand off to a release CDN). The signature/checksum half is separate and
+    # pending the release-signing scheme.
+    if urllib.parse.urlparse(url).scheme != "https":
+        raise LocalmError("refusing a non-HTTPS update download",
+                          reason="the update endpoint must be https")
+
+    class _HttpsOnlyRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, rq, fp, code, msg, hdrs, newurl):
+            if urllib.parse.urlparse(newurl).scheme != "https":
+                raise LocalmError("the update download tried to downgrade to http",
+                                  reason=f"blocked redirect to {newurl}")
+            return super().redirect_request(rq, fp, code, msg, hdrs, newurl)
+
+    built_opener = urllib.request.build_opener(_HttpsOnlyRedirect)
     req = urllib.request.Request(url, headers=headers, method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with built_opener.open(req, timeout=timeout) as resp:
             if not (200 <= int(resp.status) < 300):
                 raise LocalmError("the update download failed", reason=f"HTTP {resp.status}")
             dest.parent.mkdir(parents=True, exist_ok=True)
