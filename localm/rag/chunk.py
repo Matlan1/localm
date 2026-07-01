@@ -21,7 +21,13 @@ def chunk_text(text: str, *, chunk_chars: int = CHUNK_CHARS,
     """
     if not text.strip():
         return []
-    overlap = min(overlap, chunk_chars // 2)
+    # A non-positive chunk size makes the wrap loop below (len(line) > chunk_chars
+    # -> line = line[chunk_chars - overlap:]) never shrink `line`, spinning
+    # forever. Not reachable from any HTTP route today (chunk size is the module
+    # default), but guard the footgun so a bad caller fails fast instead.
+    if chunk_chars < 1:
+        raise ValueError("chunk_chars must be >= 1")
+    overlap = max(0, min(overlap, chunk_chars // 2))
 
     # Build (line_no, paragraph) pairs
     paragraphs: list[tuple[int, str]] = []

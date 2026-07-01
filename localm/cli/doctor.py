@@ -177,14 +177,15 @@ def _check_packages() -> None:
     for mod, label in packages + optional_pkgs:
         try:
             m = importlib.import_module(mod)
-            ver = getattr(m, "__version__", "")
-            if not ver:
-                # Some packages (e.g. 'rich') expose no __version__ attribute;
-                # read the installed distribution metadata instead of blanking.
-                try:
-                    ver = _ilm.version(_dist_names.get(mod, mod))
-                except _ilm.PackageNotFoundError:
-                    ver = ""
+            # Read the version from installed distribution METADATA first, not
+            # module.__version__: click deprecated __version__ (removed in Click
+            # 9.1) and accessing it emits a DeprecationWarning, so metadata-first
+            # avoids the warning and the eventual blank (AUD-CLICKVER). Fall back
+            # to __version__ only for a package whose dist metadata is missing.
+            try:
+                ver = _ilm.version(_dist_names.get(mod, mod))
+            except _ilm.PackageNotFoundError:
+                ver = getattr(m, "__version__", "")
             sym = _OK_SYM
             ver_str = f" {ver}" if ver else ""
         except ImportError:

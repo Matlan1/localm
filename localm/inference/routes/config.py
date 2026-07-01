@@ -140,6 +140,9 @@ def register(app: FastAPI, ctx) -> None:
     @app.get("/v1/comfy/status", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def get_comfy_status():
         """Returns the alive status of the ComfyUI server."""
-        from localm.image_gen.comfy import _comfy_alive, _comfy_api_url
-        alive = _comfy_alive(_comfy_api_url(), timeout=1.0)
+        # default_api_url is the current base-URL helper (the old _comfy_api_url
+        # name no longer exists after the #292 shared-comfy-client refactor, so
+        # importing it raised ImportError -> 500 on EVERY call) (NEW-COMFY-STATUS-IMPORT).
+        from localm.image_gen.comfy import _comfy_alive, default_api_url
+        alive = _comfy_alive(default_api_url(), timeout=1.0)
         return {"alive": alive}

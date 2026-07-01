@@ -32,8 +32,13 @@ from typing import List, Optional
 
 def plugins_dir() -> Path:
     """Root directory scanned for external plugins."""
-    from localm.config import HOME_DIR
-    return HOME_DIR / "plugins"
+    # Resolve the data dir LAZILY (home_dir()) rather than the module-level
+    # HOME_DIR frozen at import time: the rest of the code uses home_dir(), and
+    # the frozen constant is the root of the import-time test-isolation gotcha
+    # (a test that sets LOCALM_HOME after import saw the old dir here only)
+    # (AUD-PLUGINSDIR).
+    from localm.config import home_dir
+    return home_dir() / "plugins"
 
 
 # ------------------------------------------------------------------ #

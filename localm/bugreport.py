@@ -192,10 +192,27 @@ def _scrub_home(text: str) -> str:
     except Exception:
         home = ""
     if home:
-        return text.replace(home, "~")  # cannot fail once home is a non-empty string
-    # Home lookup failed: redact the username segment in known home roots so the
-    # account name still does not leak (e.g. C:\Users\<name>, /home/<name>).
-    return re.sub(r"([Cc]:\\Users\\|/home/|/Users/)[^\\/\r\n]+", r"\1<redacted>", text)
+        # Replace the home dir in BOTH separator forms: a config value entered
+        # with forward slashes does not match the native backslash form, and on
+        # Windows paths are case-insensitive - a lowercased drive/Users segment
+        # is the same directory - so a plain case-sensitive str.replace leaks
+        # the username on those variants (AUD-SCRUBHOME).
+        variants = {home, home.replace("\\", "/")}
+        if sys.platform == "win32":
+            for v in variants:
+                text = re.sub(re.escape(v), "~", text, flags=re.IGNORECASE)
+        else:
+            for v in variants:
+                text = text.replace(v, "~")
+    # ALWAYS apply the known-home-root username strip as a backstop, in both
+    # separator forms (and case-insensitively on Windows): it catches a
+    # home-rooted path that is NOT exactly Path.home() - a different account, or
+    # any path under C:\Users / /home / /Users the replacement above missed.
+    # A privacy scrub must never ship the account name, so this runs even when
+    # the home lookup succeeded (defence in depth).
+    flags = re.IGNORECASE if sys.platform == "win32" else 0
+    return re.sub(r"([A-Za-z]:[\\/]Users[\\/]|/home/|/Users/)[^\\/\r\n]+",
+                  r"\1<redacted>", text, flags=flags)
 
 
 def _scrub_url_creds(text: str) -> str:
@@ -204,6 +221,30 @@ def _scrub_url_creds(text: str) -> str:
     if not text:
         return text
     return re.sub(r"(://)[^/@\s]+@", r"\1<redacted>@", text)
+
+
+# Bearer tokens ("Authorization: Bearer <token>") and API keys (OpenAI-style
+# sk-..., or a localm key) can appear in a pasted console error, a fetch log
+# line, or a mistyped config value. A bug report is share-intended, so strip
+# them defensively even though no current code path is known to log a token
+# (AUD-CLIENTSCRUB, defence in depth).
+_BEARER_RE = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}")
+_APIKEY_RE = re.compile(r"(?i)\b(?:sk|localm[_-]sk)-[A-Za-z0-9._\-]{12,}")
+
+
+def _scrub_secrets(text: str) -> str:
+    """Run every scrubber over untrusted text: home paths (username), URL
+    ``user:pass@`` credentials, and bearer / API-key tokens. Used for
+    client-supplied fields and the bundled log tails / activity ring a
+    share-intended report carries - each of which is untrusted, free-form text
+    that could contain a secret the plain home-scrub alone would leave in."""
+    if not text:
+        return text
+    text = _scrub_home(text)
+    text = _scrub_url_creds(text)
+    text = _BEARER_RE.sub(r"\1<redacted>", text)
+    text = _APIKEY_RE.sub("<redacted>", text)
+    return text
 
 
 # Config keys SAFE to echo into a report and useful for debugging a setup. An
@@ -368,7 +409,7 @@ def _recent_log_tail(home=None, pid=None, max_lines: int = 120,
         if chosen is None:
             return ""
         lines = chosen.read_text(encoding="utf-8", errors="replace").splitlines()
-        return _scrub_home("\n".join(lines[-max_lines:]).strip())[-max_chars:]
+        return _scrub_secrets("\n".join(lines[-max_lines:]).strip())[-max_chars:]
     except Exception:
         return ""
 
@@ -479,7 +520,7 @@ def build_report(summary: str, reason: str = "",
     ring = _ring_activity()
     if ring:
         parts += ["", "## Recent activity (in-memory log)", "```",
-                  _scrub_home("\n".join(ring[-80:]))[-4000:], "```"]
+                  _scrub_secrets("\n".join(ring[-80:]))[-4000:], "```"]
 
     # Browser/client context for a GUI-filed report (user agent, page, viewport,
     # and recent JS console errors). Already a plain dict from the GUI; scrubbed
@@ -527,10 +568,10 @@ def _client_lines(client: dict) -> list:
                           ("viewport", "Viewport"), ("appVersion", "GUI build")):
         val = client.get(field)
         if val:
-            lines.append(f"- {label_}: {_scrub_home(str(val))[:300]}")
+            lines.append(f"- {label_}: {_scrub_secrets(str(val))[:300]}")
     console_errs = client.get("console")
     if isinstance(console_errs, list) and console_errs:
-        rendered = "\n".join(_scrub_home(str(e)) for e in console_errs[-40:])
+        rendered = "\n".join(_scrub_secrets(str(e)) for e in console_errs[-40:])
         lines += ["", "Recent browser console errors:", "```", rendered[-3000:], "```"]
     return lines
 

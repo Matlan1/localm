@@ -623,20 +623,26 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
 
     @app.middleware("http")
     async def _origin_guard(request, call_next):
-        if (request.method in _UNSAFE_METHODS and not _cors_wildcard
+        if (request.method in _UNSAFE_METHODS
                 and not request.url.path.startswith(_CROSS_ORIGIN_OK)):
-            origin = request.headers.get("origin")
-            allowlisted = bool(origin) and origin in _cors_allowlist
-            if origin:
-                host = request.headers.get("host", "")
-                same_origin = origin.split("://", 1)[-1] == host
-                if not (same_origin or allowlisted):
-                    return JSONResponse(
-                        status_code=403,
-                        content={"detail": "Cross-origin request refused "
-                                 "(only same-origin requests or a configured "
-                                 "'cors_origins' may use this endpoint)."},
-                    )
+            # Same-origin / CORS-allowlist check. "cors_origins": "*" opts OUT
+            # of THIS check only (an explicit "any origin may call me") - it
+            # must NOT also waive the open-mode shell-token gate below, which is
+            # a separate credential requirement, not a same-origin check
+            # (AUD-CORSWILD).
+            if not _cors_wildcard:
+                origin = request.headers.get("origin")
+                allowlisted = bool(origin) and origin in _cors_allowlist
+                if origin:
+                    host = request.headers.get("host", "")
+                    same_origin = origin.split("://", 1)[-1] == host
+                    if not (same_origin or allowlisted):
+                        return JSONResponse(
+                            status_code=403,
+                            content={"detail": "Cross-origin request refused "
+                                     "(only same-origin requests or a configured "
+                                     "'cors_origins' may use this endpoint)."},
+                        )
             # H5: open-mode management gate. With no key configured, management
             # routes still require the per-process shell token (injected into the
             # loopback GUI shell), so a no-Origin local client - curl, a script -
