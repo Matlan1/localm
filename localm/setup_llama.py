@@ -715,11 +715,19 @@ def _provision_backend(chosen: str, target: Path, sha256: Optional[str],
 
 def _native_loads_ok() -> tuple:
     """Load-test the provisioned native library in a FRESH interpreter, exactly
-    as ``localm run`` will. A subprocess keeps the setup process clean (the
-    loader mutates the DLL/lib search path) and matches the real run
-    environment. Returns (ok, last_error_line)."""
-    code = ("from localm.inference.backends.llamacpp._loader import load_lib; "
-            "load_lib()")
+    as ``localm run`` will, AND confirm it registered a compute backend. A build
+    can load cleanly yet register ZERO backends ("no backends are loaded"), which
+    must count as a FAILED provision, not a silent success (AGENTS.md rule 5) -
+    otherwise _provision_with_fallback's "prove it loads" guarantee holds only for
+    self-registering builds and a broken runtime slips through, failing only at
+    the first model load with the real cause already lost. A subprocess keeps the
+    setup process clean (the loader mutates the DLL/lib search path) and matches
+    the real run environment. Returns (ok, last_error_line)."""
+    # Exit 88 distinguishes "loaded but no compute backend" from a load crash
+    # (non-zero with a native traceback) and a clean, computing load (0).
+    code = ("from localm.inference.backends.llamacpp import _loader; "
+            "_loader.load_lib(); "
+            "import sys; sys.exit(0 if _loader.compute_backends_available() else 88)")
     try:
         r = subprocess.run([sys.executable, "-c", code],
                            capture_output=True, text=True, timeout=120)
@@ -727,6 +735,9 @@ def _native_loads_ok() -> tuple:
         return False, str(e)
     if r.returncode == 0:
         return True, ""
+    if r.returncode == 88:
+        return False, ('runtime loaded but registered no compute backends '
+                       '("no backends are loaded") - this build does not fit this machine')
     detail = (r.stderr or r.stdout or "").strip()
     return False, (detail.splitlines()[-1] if detail else "library failed to load")
 
