@@ -8,13 +8,20 @@ store under localm/plugins/builtin/, located repo-relative so it validates the
 checkout under test.
 """
 
+import tomllib
 from pathlib import Path
 
 import pytest
 
 from localm.plugins.engine import parse_spec
 
-_BUILTIN = Path(__file__).resolve().parents[1] / "localm" / "plugins" / "builtin"
+_ROOT = Path(__file__).resolve().parents[1]
+_BUILTIN = _ROOT / "localm" / "plugins" / "builtin"
+
+
+def _declared_extras() -> set:
+    data = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    return set(data.get("project", {}).get("optional-dependencies", {}))
 
 
 def _builtin_dirs():
@@ -48,3 +55,29 @@ def test_builtin_manifest_valid(plugin_dir):
             f"{spec.name}: client_entry set but assets_dir is empty"
         entry = plugin_dir / spec.surface.assets_dir / spec.surface.client_entry
         assert entry.is_file(), f"{spec.name}: client_entry {entry} missing"
+
+
+@pytest.mark.parametrize("plugin_dir", _builtin_dirs(), ids=lambda d: d.name)
+def test_builtin_requires_extras_are_real_pyproject_extras(plugin_dir):
+    """A builtin's requires_extras must name a real [project.optional-dependencies]
+    extra, so a typo cannot silently turn the plugin dep self-installer into a
+    no-op (the host resolves the extra name against localm's own metadata)."""
+    spec = parse_spec(plugin_dir, builtin=True)
+    extras = _declared_extras()
+    for e in spec.requires_extras:
+        assert e in extras, \
+            f"{spec.name}: requires_extras '{e}' is not a pyproject extra {sorted(extras)}"
+
+
+def test_rag_declares_its_pdf_extra():
+    """RAG's PDF extraction needs pypdf (the [rag] extra). It must self-provision
+    that on enable - like voice does for faster-whisper - or PDFs silently fail on
+    a default install (which ships .[coder,voice,monitor], no rag)."""
+    spec = parse_spec(_BUILTIN / "rag", builtin=True)
+    assert spec.requires_extras == ["rag"]
+    from localm.plugins import deps
+    reqs = deps.plugin_requirements(["rag"])
+    assert reqs, "the rag extra must resolve to at least one requirement"
+    # normally the concrete pypdf specifier; the localm[rag] fallback is tolerated
+    # only if the installed-metadata read is unavailable in some CI environment.
+    assert any("pypdf" in r for r in reqs) or reqs == ["localm[rag]"], reqs
