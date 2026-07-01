@@ -79,7 +79,7 @@ gpu = [
 # In-process GGUF inference - AMD GPU build:
 #   pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/rocm602
 gguf = [
-    "llama-cpp-python>=0.3.31",
+    "llama-cpp-python>=0.3.32",
 ]
 # Audio multimodal (Gemma4 unified audio)
 audio = [
