@@ -362,3 +362,64 @@ class TestPullDedup:
 
         assert store["urlm"]["sha256"] == mm._sha256_file(
             models_dir / "url-model.gguf")
+
+
+# ---------------------------------------------------------------------------
+#  Registry read-modify-write must be atomic (no lost update on a concurrent
+#  writer). These mutate-then-save sites had the same non-atomic pattern that
+#  #318 fixed for the move path: load_registry() (lock, read, release) -> mutate
+#  a stale snapshot -> save_registry() (lock, write) clobbers a write that landed
+#  in between. update_registry() re-reads inside the lock, so nothing is lost.
+# ---------------------------------------------------------------------------
+
+class TestRegistryRmwAtomicity:
+    def _racy_load(self, mm_mod, store, monkeypatch, inject):
+        """Patch load_registry so a concurrent writer lands right after the FIRST
+        read (the caller's initial snapshot), simulating another thread writing
+        between the caller's load and its save."""
+        real_load = mm_mod.load_registry
+        seen = {"n": 0}
+
+        def racy():
+            snap = real_load()
+            seen["n"] += 1
+            if seen["n"] == 1:
+                store.update(inject)      # concurrent write, after the snapshot
+            return snap
+        monkeypatch.setattr(mm_mod, "load_registry", racy)
+
+    def test_relocate_no_lost_update(self, fake_registry, tmp_path, monkeypatch):
+        store, models_dir = fake_registry
+        newf = models_dir / "m.gguf"
+        newf.write_bytes(b"GGUF" + b"\x00" * 16)
+        store["target"] = {"path": str(tmp_path / "gone.gguf"),
+                           "source": "local", "missing": True}
+        self._racy_load(mm, store, monkeypatch,
+                        {"concurrent": {"path": "x", "source": "local"}})
+
+        assert mm.relocate_model("target", str(newf)) is True
+        assert "concurrent" in store, "lost update: relocate clobbered a concurrent write"
+        assert store["target"]["path"] == str(newf.resolve())
+        assert "missing" not in store["target"]
+
+    def test_alias_no_lost_update(self, fake_registry, tmp_path, monkeypatch):
+        store, _ = fake_registry
+        store["orig"] = {"path": str(tmp_path / "m.gguf"), "source": "local"}
+        self._racy_load(mm, store, monkeypatch,
+                        {"concurrent": {"path": "x", "source": "local"}})
+
+        assert mm.alias_model("orig", "orig2") is True
+        assert "concurrent" in store, "lost update: alias clobbered a concurrent write"
+        assert store["orig2"]["path"] == store["orig"]["path"]
+
+    def test_remove_no_lost_update(self, fake_registry, tmp_path, monkeypatch):
+        store, _ = fake_registry
+        ext = tmp_path / "m.gguf"
+        ext.write_bytes(b"GGUF")
+        store["m"] = {"path": str(ext), "source": "local"}   # external -> kept, only unregistered
+        self._racy_load(mm, store, monkeypatch,
+                        {"concurrent": {"path": "x", "source": "local"}})
+
+        mm.remove_model("m")
+        assert "m" not in store
+        assert "concurrent" in store, "lost update: remove clobbered a concurrent write"
