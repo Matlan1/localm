@@ -1151,9 +1151,12 @@ class PluginManager:
                 continue
             plugins.append(_entry(store.get(name), name, available=True))
         from localm.config import load_config
+        _cfg = load_config()
         return {"plugins": plugins,
                 "errors": {**self._discover_errors, **self._errors},
-                "suggest_plugins": bool(load_config().get("suggest_plugins", True))}
+                "suggest_plugins": bool(_cfg.get("suggest_plugins", True)),
+                "auto_install_plugin_deps": bool(
+                    _cfg.get("auto_install_plugin_deps", True))}
 
 
 # --------------------------------------------------------------------------- #

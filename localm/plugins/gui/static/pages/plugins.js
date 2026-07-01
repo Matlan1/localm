@@ -6,7 +6,7 @@
 "use strict";
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
-import { $, authHeaders, el, toast } from "../app/helpers.js";
+import { $, authHeaders, el, readSSE, toast } from "../app/helpers.js";
 import { refreshPluginCommands } from "../app/settings-perf.js";
 
 /* ================================================================ */
@@ -22,6 +22,9 @@ import { refreshPluginCommands } from "../app/settings-perf.js";
 // per-row delay is a module var so tests can drop it to 0.
 export let _catalogRenderToken = 0;
 export let _catalogStaggerMs = 24;
+// Mirrors the auto_install_plugin_deps setting from the last /api/plugins fetch,
+// so an install/enable can auto-kick the host-side dependency install.
+export let _autoInstallDeps = true;
 
 export function _catalogRow(p) {
   const tr = el("tr");
@@ -39,6 +42,12 @@ export function _catalogRow(p) {
   if (missing.length) {
     descTd.appendChild(el("div", "sub plugin-missing-req",
       `requires ${(p.requires || []).join(", ")} (missing: ${missing.join(", ")})`));
+  }
+  // Warn when an installed plugin is missing its pip extras (Python packages).
+  const missingDeps = Array.isArray(p.missing_deps) ? p.missing_deps : [];
+  if (p.installed && missingDeps.length) {
+    descTd.appendChild(el("div", "sub plugin-missing-dep",
+      `needs Python packages: ${missingDeps.join(", ")}`));
   }
   tr.appendChild(descTd);
   const actions = el("td");
@@ -65,6 +74,15 @@ export function _catalogRow(p) {
     req.onclick = () => installRequirements(p.name, missing);
     actions.appendChild(req);
   }
+  // One-click install of missing pip extras (host-side; a remote client is told
+  // to install on the host).
+  if (p.installed && missingDeps.length) {
+    const dep = el("button", "btn-primary", "Install dependencies");
+    dep.style.marginLeft = "6px";
+    dep.dataset.depsfor = p.name;
+    dep.onclick = () => installPluginDeps(p.name);
+    actions.appendChild(dep);
+  }
   tr.appendChild(actions);
   return tr;
 }
@@ -84,6 +102,7 @@ export async function renderCatalogPlugins() {
     return;
   }
   if (myToken !== _catalogRenderToken) return;   // superseded while fetching
+  _autoInstallDeps = data.auto_install_plugin_deps !== false;
   const plugins = (data.plugins || []).filter((p) => p.builtin);
 
   // A status line that tells the user what is loading / what loaded (U2).
@@ -152,6 +171,83 @@ export async function installRequirements(name, missing) {
   refreshPluginCommands();
 }
 
+// Install a plugin's missing pip extras on the HOST, streaming progress. The
+// server refuses (403) a non-local caller, in which case we tell the user to
+// install on the host instead. `opts.silent` suppresses that note for the
+// auto-triggered path (a remote GUI just leaves the manual button in place).
+export async function installPluginDeps(name, opts = {}) {
+  const box = $("catalog-table");
+  let r;
+  try {
+    r = await fetch(`/api/plugins/${encodeURIComponent(name)}/install-deps`,
+                    { method: "POST", headers: authHeaders() });
+  } catch (e) {
+    if (!opts.silent) toast(`install deps failed: ${e.message}`, true);
+    return;
+  }
+  if (r.status === 403) {
+    if (!opts.silent) {
+      toast(`Install ${name}'s dependencies on the host, e.g.:  `
+            + `localm plugin install-deps ${name}`, true);
+    }
+    return;
+  }
+  const started = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    if (!opts.silent) toast(`install deps: ${started.detail || "failed"}`, true);
+    return;
+  }
+  // A small progress panel that updates with the latest installer line.
+  const panel = el("div", "dep-install-progress");
+  panel.dataset.plugin = name;
+  panel.appendChild(el("div", "sub", `Installing ${name} dependencies...`));
+  const lineEl = el("div", "mono dep-install-line", "");
+  panel.appendChild(lineEl);
+  if (box) box.prepend(panel);
+
+  let end = null;
+  try {
+    const stream = await fetch(
+      `/api/plugins/${encodeURIComponent(name)}/install-deps/events`,
+      { headers: authHeaders() });
+    if (stream.ok) {
+      await readSSE(stream, (payload) => {
+        let ev;
+        try { ev = JSON.parse(payload); } catch { return; }
+        if (ev.type === "log") lineEl.textContent = ev.line;
+        if (ev.type === "end") end = ev;
+      });
+    }
+  } catch (e) { /* stream ended or dropped; fall through to a re-render */ }
+  panel.remove();
+  if (end && end.ok) {
+    toast(`${name}: dependencies installed`);
+  } else {
+    toast(`${name}: dependency install `
+          + (end ? "failed: " + (end.error || "unknown") : "did not complete"),
+          true);
+  }
+  renderCatalogPlugins();
+  refreshPluginCommands();
+}
+
+// After an install/enable, kick the host-side dependency install when the
+// setting is on and the plugin is still missing packages. Best-effort and
+// silent (a remote GUI leaves the manual "Install dependencies" button).
+export async function _maybeAutoInstallDeps(name) {
+  if (!_autoInstallDeps) return;
+  try {
+    const r = await fetch("/api/plugins", { headers: authHeaders() });
+    if (!r.ok) return;
+    const data = await r.json();
+    if (data.auto_install_plugin_deps === false) return;
+    const p = (data.plugins || []).find((x) => x.name === name);
+    if (p && Array.isArray(p.missing_deps) && p.missing_deps.length) {
+      await installPluginDeps(name, { silent: true });
+    }
+  } catch (e) { /* best-effort */ }
+}
+
 export async function pluginCatalogAction(action, name) {
   if (action === "uninstall" &&
       !confirm(`Uninstall '${name}'? Its plugin files are removed (your data is kept).`)) return;
@@ -177,6 +273,9 @@ export async function pluginCatalogAction(action, name) {
   // R50: tell other open tabs (which may be parked on this plugin's page) so they
   // re-sync and leave a now-disabled view instead of erroring on its dead routes.
   if (window.bumpPluginsRev) window.bumpPluginsRev();
+  // Auto-install the plugin's pip extras when the setting is on (host-only; a
+  // remote GUI silently leaves the manual "Install dependencies" button).
+  if (action === "install" || action === "enable") _maybeAutoInstallDeps(name);
 }
 
 export async function refreshPluginsPage() {
