@@ -405,6 +405,14 @@ export async function refreshModels() {
       showKeyGate("This LocaLM server requires an API key.");
       return;
     }
+    if (!r.ok) {
+      // A non-401 error (500, 503, ...) returns a JSON body with no `models`
+      // array (e.g. FastAPI's {"detail": ...}), so the empty-list fallback below
+      // would silently show an empty dropdown + an "ok / no model" status,
+      // masking the server error. Surface it instead.
+      setStatus("err", `models unavailable (HTTP ${r.status})`);
+      return;
+    }
     const data = await r.json();
     // Tolerate a malformed or empty payload (an old server or a proxy returning
     // {}). Without this, iterating an undefined model list throws and the model
