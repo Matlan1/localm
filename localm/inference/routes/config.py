@@ -9,6 +9,7 @@ from the http_server module global and the session-scoped audit mode from ctx.
 from __future__ import annotations
 
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 
 import localm.inference.http_server as _hs
 from localm import scopes
@@ -150,10 +151,30 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.get("/v1/comfy/status", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def get_comfy_status():
-        """Returns the alive status of the ComfyUI server."""
+        """Alive status of ComfyUI, and whether localm launched THIS one (so the
+        GUI can show Stop/Restart only for a ComfyUI it can actually control)."""
         # default_api_url is the current base-URL helper (the old _comfy_api_url
         # name no longer exists after the #292 shared-comfy-client refactor, so
         # importing it raised ImportError -> 500 on EVERY call) (NEW-COMFY-STATUS-IMPORT).
         from localm.image_gen.comfy import _comfy_alive, default_api_url
-        alive = _comfy_alive(default_api_url(), timeout=1.0)
-        return {"alive": alive}
+        from localm.media.comfy_client import spawned_pid
+        url = default_api_url()
+        alive = _comfy_alive(url, timeout=1.0)
+        return {"alive": alive, "launched_by_localm": spawned_pid(url) is not None}
+
+    @app.post("/v1/comfy/stop", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
+    async def post_comfy_stop():
+        """Stop ComfyUI (NEW-STOPCOMFY): abort the in-flight render + clear the
+        queue + free VRAM, and terminate the process localm launched (a ComfyUI the
+        user started themselves is only aborted, never killed)."""
+        from localm.media.comfy_client import stop_comfy
+        ok, message = await run_in_threadpool(stop_comfy)
+        return {"ok": ok, "message": message}
+
+    @app.post("/v1/comfy/restart", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
+    async def post_comfy_restart():
+        """Restart the ComfyUI localm launched (NEW-STOPCOMFY): stop it, then
+        re-launch via the configured comfy_launch_cmd/comfy_workdir."""
+        from localm.media.comfy_client import restart_comfy
+        ok, message = await run_in_threadpool(restart_comfy)
+        return {"ok": ok, "message": message}

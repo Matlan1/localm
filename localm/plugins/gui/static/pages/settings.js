@@ -830,6 +830,19 @@ export function renderMediaSubsection(name) {
     // `const timer = setInterval(...)` after the call, that read hit the temporal dead
     // zone ("Cannot access 'timer' before initialization") and broke the whole media
     // subsection render. `let timer = null` initialized up front fixes it.
+    // NEW-STOPCOMFY: Stop/Restart controls. Stop shows whenever ComfyUI is up
+    // (it always aborts the render + clears the queue; it terminates the process
+    // only if localm launched it). Restart shows only for a localm-launched one.
+    const stopBtn = el("button", "btn-secondary comfy-stop-btn", "Stop");
+    const restartBtn = el("button", "btn-secondary comfy-restart-btn", "Restart");
+    for (const b of [stopBtn, restartBtn]) {
+      b.type = "button";
+      b.style.marginLeft = "8px";
+      b.style.display = "none";
+    }
+    head.appendChild(stopBtn);
+    head.appendChild(restartBtn);
+
     let timer = null;
     const checkComfy = () => {
       if (!badge.isConnected) {
@@ -841,10 +854,26 @@ export function renderMediaSubsection(name) {
         .then(d => {
           badge.textContent = d.alive ? "ComfyUI: Running" : "ComfyUI: Stopped";
           badge.style.color = d.alive ? "var(--success-color, #2ea043)" : "var(--error-color, #cb2431)";
+          stopBtn.style.display = d.alive ? "" : "none";
+          restartBtn.style.display = d.launched_by_localm ? "" : "none";
         }).catch(() => {
           badge.textContent = "ComfyUI: Unknown";
+          stopBtn.style.display = "none";
+          restartBtn.style.display = "none";
         });
     };
+
+    const comfyAction = (path, btn, busyLabel) => {
+      const prev = btn.textContent;
+      btn.disabled = true; btn.textContent = busyLabel;
+      fetch(path, { method: "POST", headers: authHeaders() })
+        .then(r => r.json())
+        .then(d => { if (d && d.message) toast(d.message, !d.ok); })
+        .catch(() => toast("ComfyUI control failed", true))
+        .finally(() => { btn.disabled = false; btn.textContent = prev; checkComfy(); });
+    };
+    stopBtn.onclick = () => comfyAction("/v1/comfy/stop", stopBtn, "Stopping...");
+    restartBtn.onclick = () => comfyAction("/v1/comfy/restart", restartBtn, "Restarting...");
 
     checkComfy();
     timer = setInterval(checkComfy, 5000);
