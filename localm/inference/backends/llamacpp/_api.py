@@ -138,6 +138,10 @@ def llama_model_n_embd(model: ctypes.c_void_p) -> int:
     return _bind("llama_model_n_embd", ctypes.c_int32, LlamaModel)(model)
 
 
+def llama_model_n_layer(model: ctypes.c_void_p) -> int:
+    return _bind("llama_model_n_layer", ctypes.c_int32, LlamaModel)(model)
+
+
 # ---------------------------------------------------------------------------
 #  Vocabulary / tokenisation
 # ---------------------------------------------------------------------------

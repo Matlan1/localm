@@ -48,10 +48,11 @@ def _wire_http(monkeypatch, head_total: int, response):
 
     def fake_head(url, allow_redirects=None, timeout=None):
         h = MagicMock()
+        h.status_code = 200                     # not a redirect (SSRF resolver reads this)
         h.headers = {"content-length": str(head_total)}
         return h
 
-    def fake_get(url, headers=None, stream=None, timeout=None):
+    def fake_get(url, headers=None, stream=None, timeout=None, allow_redirects=None):
         captured["headers"] = dict(headers or {})
         return response
 
@@ -142,7 +143,7 @@ class TestUrlPullResult:
         """A 404/bad URL yields a clear message and False, not a traceback."""
         import requests
 
-        def boom_get(url, headers=None, stream=None, timeout=None):
+        def boom_get(url, headers=None, stream=None, timeout=None, allow_redirects=None):
             resp = MagicMock()
             resp.status_code = 404
             err = requests.HTTPError("404 Not Found")

@@ -139,6 +139,8 @@ class Agent(
         self._abort_streak_tool: Optional[str] = None  # set when the circuit breaker trips
         self._global_error_streak: int = 0     # consecutive failed tool calls (ANY tool)
         self._abort_no_progress: bool = False  # set when the no-progress breaker trips
+        self._last_response_fp: str = ""       # last LLM response (repeated-scaffold breaker)
+        self._repeat_response_count: int = 0   # consecutive identical responses
         self._compact_warned: bool = False
         self._last_run_ok: bool = True    # False when the last _loop hit max_turns
         self._undo_stack: list[dict] = []
@@ -152,6 +154,18 @@ class Agent(
         self._queued_messages: list[str] = []
         self._queue_lock = threading.Lock()
         self._model_name: str = getattr(backend, "model_id", "")
+        # Family-detection identity: enrich the (possibly opaque) alias with its
+        # registry source (e.g. "hf:google/gemma-4-4b") so family-specific prompt
+        # tuning keys off the model's REAL identity, not the alias (REC-CODER-FAMILY).
+        # Display / logging still use the bare alias (self._model_name).
+        self._family_id: str = self._model_name
+        try:
+            from localm.model_manager import get_model_info
+            _src = (get_model_info(self._model_name) or {}).get("source", "")
+            if isinstance(_src, str) and _src.strip():
+                self._family_id = f"{self._model_name} {_src}"
+        except Exception:
+            pass
         # Per-model harness profile: fill gen-kwarg defaults the caller did not set
         # (e.g. a steadier temperature for a small model). Explicit caller values
         # always win. max_tokens is handled in the CLI, not here (see

@@ -73,6 +73,16 @@ _MAX_TOOL_REPAIRS = 2
 # turn/token budget. Any successful tool call resets the streak.
 _GLOBAL_ERROR_ABORT = 6
 
+# Abort when the model emits the SAME response this many times in a row - the
+# "Message 1..4 / I will now wait" scaffold-repetition where it narrates without
+# making progress. The error-streak breakers above only catch FAILED tool calls
+# and the repair path re-prompts a malformed call; this catches identical
+# NON-failing repetition. Kept ABOVE _GLOBAL_ERROR_ABORT-adjacent thresholds and
+# the repair cap so those more-specific guards fire first for a failing/broken
+# loop; this is the last-resort catch for a succeeding-but-pointless one
+# (REC-CODER-LOOPBREAK).
+_REPEAT_RESPONSE_ABORT = 5
+
 # Code file extensions that should be verified (tests / syntax) after writes
 _CODE_EXTS: frozenset[str] = frozenset({
     ".py", ".js", ".ts", ".jsx", ".tsx", ".rs", ".go", ".java",
