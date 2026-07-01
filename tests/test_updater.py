@@ -187,6 +187,16 @@ def test_download_bad_asset_id_raises(monkeypatch):
         updater.download("not-a-number", "/tmp/x")
 
 
+def test_download_refuses_non_https_endpoint(tmp_path, monkeypatch):
+    """CHK-UPDATER-INTEGRITY (transport): a code-update download over the real
+    urllib path must refuse a non-HTTPS endpoint (no cleartext code delivery)."""
+    monkeypatch.setattr("localm.config.load_config", lambda: {
+        "bugreport_upload_url": "http://insecure.example"})   # http, not https
+    from localm.bugreport import LocalmError
+    with pytest.raises(LocalmError):
+        updater.download(7, tmp_path / "build.zip")           # opener=None -> urllib path
+
+
 # ------------------------- apply / rollback -----------------------------
 
 def _build_zip_opener(version, deps):

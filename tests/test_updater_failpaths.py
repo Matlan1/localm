@@ -129,13 +129,15 @@ def _config(monkeypatch):
                         lambda: {"bugreport_upload_url": "https://w", "bugreport_upload_token": "t"})
 
 
+# download() now streams through a build_opener() (an HTTPS-only redirect handler,
+# CHK-UPDATER-INTEGRITY), so these mock OpenerDirector.open (the real transport).
 def test_download_http_error_raises_localmerror(tmp_path, monkeypatch):
     import urllib.request
     _config(monkeypatch)
 
-    def boom(req, timeout):
+    def boom(self, req, timeout=None):
         raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)
-    monkeypatch.setattr(urllib.request, "urlopen", boom)
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open", boom)
     with pytest.raises(LocalmError, match="download failed"):
         updater.download(7, tmp_path / "b.zip")
 
@@ -144,9 +146,9 @@ def test_download_urlerror_raises_localmerror(tmp_path, monkeypatch):
     import urllib.request
     _config(monkeypatch)
 
-    def boom(req, timeout):
+    def boom(self, req, timeout=None):
         raise urllib.error.URLError("connection refused")
-    monkeypatch.setattr(urllib.request, "urlopen", boom)
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open", boom)
     with pytest.raises(LocalmError, match="could not download"):
         updater.download(7, tmp_path / "b.zip")
 
@@ -160,7 +162,8 @@ def test_download_non_2xx_status_raises(tmp_path, monkeypatch):
         def __enter__(self): return self
         def __exit__(self, *a): return False
         def read(self, n): return b""
-    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout: _Resp())
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open",
+                        lambda self, req, timeout=None: _Resp())
     with pytest.raises(LocalmError, match="download failed"):
         updater.download(7, tmp_path / "b.zip")
 
