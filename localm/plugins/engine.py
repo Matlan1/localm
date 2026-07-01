@@ -21,6 +21,7 @@ import importlib.util
 import json
 import logging
 import sys
+import threading
 import tomllib
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -438,6 +439,8 @@ class PluginManager:
         self._loaded: dict[str, tuple] = {}     # name -> (spec, module, host, uniq)
         self._errors: dict[str, str] = {}            # load/runtime errors (persist)
         self._discover_errors: dict[str, str] = {}   # bad manifests (reset each discover)
+        self._dep_tasks: dict = {}                   # name -> DepInstallTask (GUI installs)
+        self._dep_tasks_lock = threading.Lock()
 
     # ---- discovery (INSTALLED folder only) ---------------------------------
     def discover(self) -> dict[str, PluginSpec]:
@@ -977,6 +980,27 @@ class PluginManager:
         extras = spec.requires_extras if spec else []
         return deps.install_plugin_extras(extras, on_progress=on_progress)
 
+    def get_dep_task(self, name: str):
+        """The in-flight or finished dependency-install task for *name*, if any."""
+        with self._dep_tasks_lock:
+            return self._dep_tasks.get(name)
+
+    def start_dep_install(self, name: str):
+        """Start (or return the still-running) background dep install for *name*.
+        HOST-ONLY: the route confirms the request is local first. Idempotent while
+        a task is running so a double-click does not launch two pip runs."""
+        from localm.plugins.deps_task import DepInstallTask, run_dep_install
+        with self._dep_tasks_lock:
+            existing = self._dep_tasks.get(name)
+            if existing is not None and existing.status == "running":
+                return existing
+            task = DepInstallTask(name)
+            self._dep_tasks[name] = task
+        t = threading.Thread(target=run_dep_install, args=(self, name, task),
+                             name=f"dep-install-{name}", daemon=True)
+        t.start()
+        return task
+
     def set_installed_state(self, name: str, on: bool, *, enable: bool = True) -> None:
         """CLI/headless install/uninstall WITHOUT loading routes: copy store ->
         installed (or remove the installed dir); the GUI server reconciles via
@@ -1212,5 +1236,11 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
         except ValueError as e:
             raise HTTPException(409, str(e))
         return {"status": "disabled", "name": name}
+
+    # Host-side dependency install (pip extras). Lives in its own module so its
+    # fastapi Request annotation resolves against module globals (this file uses
+    # PEP 563 string annotations and imports fastapi lazily).
+    from localm.plugins.deps_routes import register_dep_routes
+    register_dep_routes(app, manager)
 
     return manager
