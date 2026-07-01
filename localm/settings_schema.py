@@ -321,8 +321,11 @@ CORE_FIELDS: list = [
                  options=["auto", "always", "never"]),
     # ---- Network (web plugin) ----
     SettingField("net_mode", Widget.SELECT, "Network access",
-                 "Model-initiated web access: off = blocked; ask = approve each "
-                 "request; allow = no prompt.",
+                 "Model-initiated web access: off = blocked (all requests fail); "
+                 "ask = the GUI prompts before a browser-initiated request (a "
+                 "non-browser API/MCP client with web scope is NOT prompted - its "
+                 "requests proceed); allow = no prompt. The private-address SSRF "
+                 "guard and domain rules apply in every mode.",
                  group="Network", owner="web", options=["off", "ask", "allow"]),
     SettingField("net_allow", Widget.LIST, "Allowed domains",
                  "Domains the model may reach. Empty = any. e.g. example.com "

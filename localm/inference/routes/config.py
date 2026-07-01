@@ -8,7 +8,7 @@ from the http_server module global and the session-scoped audit mode from ctx.
 
 from __future__ import annotations
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 
 import localm.inference.http_server as _hs
 from localm import scopes
@@ -102,7 +102,7 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/v1/media/config/{name}",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
-    async def set_media_config(name: str, body: dict):
+    async def set_media_config(name: str, body: dict, request: Request):
         """Save ONE media plugin's own config block, deep-merged so the other
         fields and the other plugins are untouched. A blank field clears that
         plugin's override (it falls back to the shared global default)."""
@@ -111,6 +111,17 @@ def register(app: FastAPI, ctx) -> None:
                                              validate_media_block)
         if name not in MEDIA_PLUGINS:
             raise HTTPException(404, f"unknown media plugin: {name}")
+        # REC-MEDIA-CMD: launch_cmd is run through the shell and api_url redirects
+        # the render target, so setting either is privilege-escalation for a
+        # non-owner config:write key. Require an ADMIN principal for those fields
+        # in protected mode. Open mode is the trusted local owner (already gated by
+        # the origin / shell-token guard), so caller_scopes is None there.
+        if any(k in ("launch_cmd", "api_url") for k in (body or {})):
+            held = _hs.caller_scopes(request)
+            if held is not None and scopes.ADMIN not in held:
+                raise HTTPException(
+                    403, "Setting a media backend's launch_cmd or api_url requires "
+                    "an admin key (it configures a shell command / network target).")
         try:
             merge = validate_media_block(name, body or {})
         except ValueError as e:
