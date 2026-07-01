@@ -995,8 +995,14 @@ async def _stream_sse(
         tokens_per_sec=_tokens_per_sec(completion_tokens, gen_elapsed),
         context_capacity=engine.context_capacity(),
     )
+    # Honesty: a generation that errored mid-stream must not report a clean
+    # "stop" on the terminal frame. The error text was already streamed as a
+    # visible chunk above, but a PROGRAMMATIC client keys off finish_reason and
+    # would otherwise read the failure as a successful completion. Mark it
+    # "error" so the failure is machine-detectable, not only human-readable.
+    finish_reason = "error" if gen_error is not None else _engine_finish_reason(engine)
     done = ChatChunk.done(model_id, chunk_id, ts, usage=usage,
-                          finish_reason=_engine_finish_reason(engine))
+                          finish_reason=finish_reason)
     yield f"data: {done.model_dump_json()}\n\n"
     yield "data: [DONE]\n\n"
 
@@ -1092,10 +1098,14 @@ async def _stream_sse_completion(
     _audit_exchange(audit, transcript, messages, reply)
 
     completion_tokens = engine.count_tokens(streamed)
+    # Honesty (mirrors the chat path): a mid-stream error is reported as "error",
+    # not "stop", so a client keying off finish_reason detects the failure even
+    # though the error text was already streamed as a visible chunk.
     done = {
         "id": chunk_id, "object": "text_completion.chunk",
         "created": ts, "model": model_id,
-        "choices": [{"text": "", "index": 0, "finish_reason": "stop"}],
+        "choices": [{"text": "", "index": 0,
+                     "finish_reason": ("error" if gen_error is not None else "stop")}],
         "usage": {
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,

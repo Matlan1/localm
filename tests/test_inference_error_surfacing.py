@@ -81,3 +81,106 @@ def test_server_survives_error_and_serves_next_request():
         # A plain liveness probe still works.
         health = client.get("/health")
         assert health.status_code == 200
+
+
+# --------------------------------------------------------------------------- #
+# Honesty: surfacing the error text is necessary but NOT sufficient - the
+# TERMINAL frame's finish_reason must also say "error", not "stop". A
+# programmatic client keys off finish_reason and would otherwise treat the
+# (visible) error chunk as a successful completion.
+# --------------------------------------------------------------------------- #
+
+import json   # noqa: E402
+
+
+def _terminal_finish_reason(sse_text: str):
+    """The last non-null choices[].finish_reason across all SSE data frames."""
+    reasons = []
+    for line in sse_text.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[len("data:"):].strip()
+        if payload == "[DONE]":
+            continue
+        try:
+            obj = json.loads(payload)
+        except ValueError:
+            continue
+        for ch in obj.get("choices", []):
+            fr = ch.get("finish_reason")
+            if fr is not None:
+                reasons.append(fr)
+    return reasons[-1] if reasons else None
+
+
+def _yielding_engine(tokens=("hel", "lo"), reason="stop"):
+    """A loaded engine whose chat_stream yields *tokens* then ends with *reason*."""
+    engine = MagicMock()
+    _state = {"loaded": True}
+
+    def _chat_stream(messages, **kwargs):
+        for t in tokens:
+            yield t
+
+    engine.chat_stream.side_effect = _chat_stream
+    engine.count_tokens.return_value = len(tokens)
+    engine.display_name = "test-model"
+    engine.supports_images = False
+    engine.can_be_multimodal = False
+    engine.last_finish_reason = reason
+    type(engine).loaded = property(lambda self: _state["loaded"])
+    return engine
+
+
+def test_chat_stream_error_marks_finish_reason_error():
+    # last_finish_reason is "stop" so a passing test proves the HTTP layer sets
+    # "error" from gen_error, not merely echoing whatever the engine happened to
+    # leave behind after the exception.
+    engine = _raising_engine()
+    engine.last_finish_reason = "stop"
+    with TestClient(create_app(engine)) as client:
+        r = client.post("/v1/chat/completions", json={
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        })
+    assert r.status_code == 200
+    assert _terminal_finish_reason(r.text) == "error"
+
+
+def test_completions_stream_error_marks_finish_reason_error():
+    engine = _raising_engine()
+    engine.last_finish_reason = "stop"
+    with TestClient(create_app(engine)) as client:
+        r = client.post("/v1/completions", json={
+            "model": "test-model", "prompt": "hi", "stream": True,
+        })
+    assert r.status_code == 200
+    assert _terminal_finish_reason(r.text) == "error"
+
+
+def test_chat_stream_success_keeps_stop():
+    # The happy path must still report "stop" - the error override must not leak
+    # into a clean generation.
+    engine = _yielding_engine(reason="stop")
+    with TestClient(create_app(engine)) as client:
+        r = client.post("/v1/chat/completions", json={
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        })
+    assert r.status_code == 200
+    assert "[inference error" not in r.text
+    assert _terminal_finish_reason(r.text) == "stop"
+
+
+def test_completions_stream_success_keeps_stop():
+    engine = _yielding_engine(reason="stop")
+    with TestClient(create_app(engine)) as client:
+        r = client.post("/v1/completions", json={
+            "model": "test-model", "prompt": "hi", "stream": True,
+        })
+    assert r.status_code == 200
+    assert "[inference error" not in r.text
+    assert _terminal_finish_reason(r.text) == "stop"
