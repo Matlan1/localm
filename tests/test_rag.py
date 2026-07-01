@@ -249,6 +249,38 @@ class TestCollection:
         assert c2.stats()["n_chunks"] == c.stats()["n_chunks"]
         assert "gpu.md" in c2.query("ROCm runtime", k=1)[0]["source"]
 
+    def test_concurrent_add_paths_no_data_loss(self, tmp_path):
+        """CHK-RAG-LOCK: two concurrent add_paths() to ONE collection must BOTH
+        persist. Pre-fix, each Collection instance _load()s the same state, adds a
+        different doc, and _save()s with no per-collection coordination -> the
+        last writer overwrote the other and one doc was silently lost."""
+        import threading
+        base = tmp_path / "rag"
+        Collection("kb", base=base).create()
+        files = []
+        for i in range(2):
+            f = tmp_path / f"doc{i}.txt"
+            f.write_text(f"unique content block {i} " * 30, encoding="utf-8")
+            files.append(f)
+        start = threading.Barrier(len(files))
+        errors: list = []
+
+        def worker(path):
+            try:
+                start.wait()                       # release both threads together
+                Collection("kb", base=base).add_paths([str(path)])
+            except Exception as e:                 # pragma: no cover
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker, args=(f,)) for f in files]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert not errors, errors
+        docs = Collection("kb", base=base).documents()
+        assert len(docs) == 2, f"data loss: expected both docs, got {docs}"
+
     def test_unchanged_files_skipped_changed_reindexed(self, tmp_path, docs_dir):
         import os
         base = tmp_path / "rag"
