@@ -24,6 +24,7 @@ import json
 import hashlib
 import math
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Callable, Optional
@@ -195,6 +196,26 @@ def delete_collection(name: str, base: Optional[Path] = None) -> bool:
     return True
 
 
+# Per-collection-NAME locks. The mutation race (CHK-RAG-LOCK) is across Collection
+# INSTANCES: two requests each construct Collection(name), each _load()s the same
+# on-disk state, each add a different doc, and each _save()s - last writer wins and
+# one update is silently lost. A per-instance lock cannot help (different objects);
+# the lock must be keyed by the collection name so writes to one collection serialise
+# process-wide. Keyed by name, so the map is bounded by the number of collections
+# (small, stable), not per-event. RLock so a locked method may call another safely.
+_COLLECTION_LOCKS: dict = {}
+_LOCKS_GUARD = threading.Lock()
+
+
+def _collection_lock(name: str):
+    with _LOCKS_GUARD:
+        lock = _COLLECTION_LOCKS.get(name)
+        if lock is None:
+            lock = threading.RLock()
+            _COLLECTION_LOCKS[name] = lock
+        return lock
+
+
 class Collection:
     def __init__(self, name: str, base: Optional[Path] = None) -> None:
         self.name = _check_name(name)
@@ -363,6 +384,21 @@ class Collection:
         collection's also raises ``ValueError`` rather than corrupting the
         vectors with mixed dimensions (C3).
         """
+        # Serialise the whole read-modify-write per collection AND re-sync with the
+        # latest committed state under the lock, so a concurrent add_paths() that
+        # finished first is not read-stale-then-overwritten (CHK-RAG-LOCK).
+        with _collection_lock(self.name):
+            self._load()
+            return self._add_paths_locked(
+                paths, embed_fn=embed_fn, on_progress=on_progress,
+                allowed_roots=allowed_roots, force=force)
+
+    def _add_paths_locked(self, paths: list, *, embed_fn: Optional[EmbedFn] = None,
+                          on_progress: Optional[ProgressFn] = None,
+                          allowed_roots: Optional[list] = None,
+                          force: bool = False) -> dict:
+        """The add_paths read-modify-write body. MUST run under
+        _collection_lock(self.name) after a fresh _load() (see add_paths)."""
         say = on_progress or (lambda _t: None)
         if allowed_roots is not None:
             for p in paths:
@@ -465,16 +501,20 @@ class Collection:
         return list(self._meta.get("docs", {}).keys())
 
     def remove_doc(self, source: str) -> bool:
-        if source not in self._meta.get("docs", {}):
-            return False
-        keep = [i for i, c in enumerate(self._chunks)
-                if c.get("source") != source]
-        self._chunks = [self._chunks[i] for i in keep]
-        if self._vectors is not None:
-            self._vectors = [self._vectors[i] for i in keep]
-        del self._meta["docs"][source]
-        self._save()
-        return True
+        # Same per-collection lock + re-sync as add_paths so a concurrent add and
+        # remove on one collection cannot lose each other's write (CHK-RAG-LOCK).
+        with _collection_lock(self.name):
+            self._load()
+            if source not in self._meta.get("docs", {}):
+                return False
+            keep = [i for i, c in enumerate(self._chunks)
+                    if c.get("source") != source]
+            self._chunks = [self._chunks[i] for i in keep]
+            if self._vectors is not None:
+                self._vectors = [self._vectors[i] for i in keep]
+            del self._meta["docs"][source]
+            self._save()
+            return True
 
     # ------------------------------------------------------------- #
     #  Retrieval                                                     #
