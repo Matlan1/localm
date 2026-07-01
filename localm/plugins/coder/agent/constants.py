@@ -51,6 +51,18 @@ _SCOPE_PATH_ARGS: dict[str, tuple[str, ...]] = {
     "generate_image": ("output_path", "input_image"),
 }
 
+# MCP tools (mcp_<server>_<tool>) are registered dynamically with unknown arg
+# schemas, so they are not in _SCOPED_TOOLS / _SCOPE_PATH_ARGS. When a scope is
+# active we still apply it to an MCP tool's common path-like args, so an owner's
+# declared --scope is honoured by MCP file tools too (CHK-MCP-SCOPE, defense-in-
+# depth). Best-effort: an MCP tool using an unusual path-arg name is not caught
+# (its author is the owner's own MCP config).
+_MCP_SCOPE_PATH_ARGS: tuple[str, ...] = (
+    "path", "file", "filename", "filepath", "file_path", "source", "source_path",
+    "src", "target", "target_path", "dest", "destination", "dir", "directory",
+    "folder", "output", "output_path", "glob",
+)
+
 # Model-initiated network tools, governed by the net_mode policy
 # (localm.netpolicy): off = fail fast, ask = approval flow, allow = run.
 _NETWORK_TOOLS: frozenset[str] = frozenset({"fetch_url", "web_search"})

@@ -17,8 +17,9 @@ from ..parser import ToolCall
 from ..tools import ToolResult
 from ..audit import SessionMode
 from .constants import (
-    _CODE_EXTS, _GLOBAL_ERROR_ABORT, _MUTATING_TOOLS, _NETWORK_TOOLS,
-    _SCOPE_PATH_ARGS, _SCOPED_TOOLS, _TEST_COMMAND_MARKERS, _UNDOABLE_TOOLS,
+    _CODE_EXTS, _GLOBAL_ERROR_ABORT, _MCP_SCOPE_PATH_ARGS, _MUTATING_TOOLS,
+    _NETWORK_TOOLS, _SCOPE_PATH_ARGS, _SCOPED_TOOLS, _TEST_COMMAND_MARKERS,
+    _UNDOABLE_TOOLS,
 )
 from .scope import _scope_pattern
 
@@ -74,7 +75,12 @@ class _ExecutionMixin:
         this for tools whose primary target is a ``glob`` or ``output_path``
         arg (and may add ``path`` alongside it).
         """
-        arg_names = _SCOPE_PATH_ARGS.get(call.name, ("path",))
+        # MCP tools have unknown arg schemas: check a broad set of common path-arg
+        # names so an owner's --scope still confines their file ops (CHK-MCP-SCOPE).
+        if call.name.startswith("mcp_"):
+            arg_names = _MCP_SCOPE_PATH_ARGS
+        else:
+            arg_names = _SCOPE_PATH_ARGS.get(call.name, ("path",))
         for name in arg_names:
             value = call.args.get(name)
             if value:
@@ -134,8 +140,9 @@ class _ExecutionMixin:
                     console.print("    [dim yellow][patch-mode] skipped[/dim yellow]")
             return result
 
-        # Scope check - reject file operations that fall outside the active glob
-        if self.scope and call.name in _SCOPED_TOOLS:
+        # Scope check - reject file operations that fall outside the active glob.
+        # MCP tools (mcp_*) are included so an owner's --scope confines them too.
+        if self.scope and (call.name in _SCOPED_TOOLS or call.name.startswith("mcp_")):
             offending = self._scope_violation(call)
             if offending is not None:
                 result = ToolResult.error(
