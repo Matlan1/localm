@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Host-side plugin dependency-install routes (pip extras).
 
-Split out of engine.attach_engine so the fastapi ``Request`` annotation resolves
-against this module's globals (engine.py uses PEP 563 string annotations and
-imports fastapi lazily, which would otherwise make ``request`` look like a query
-parameter).
+Split out of engine.attach_engine into its own module with top-level fastapi
+imports, keeping engine.py fastapi-free at import time (it imports fastapi
+lazily).
 
 Security: a remote client must NEVER trigger a server-side pip. Both endpoints
-fail closed with 403 for a non-local (non-loopback) caller, on top of the
-PLUGINS_ADMIN scope already required.
+fail closed with 403 whenever the server is on a NETWORK bind - decided from the
+bind host, not the request peer, because portmux relays every connection through
+an internal loopback socket (see deps_task.host_pip_allowed). This is on top of
+the PLUGINS_ADMIN scope already required.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
 from localm import scopes
@@ -27,12 +28,12 @@ from localm.plugins import deps_task
 def register_dep_routes(app, manager) -> None:
     @app.post("/api/plugins/{name}/install-deps",
               dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
-    async def install_plugin_deps_ep(name: str, request: Request):
-        if not deps_task.is_local_request(request):
+    async def install_plugin_deps_ep(name: str):
+        if not deps_task.host_pip_allowed(app):
             raise HTTPException(
-                403, "Dependency install runs on the host only. Install on the "
-                     "machine running localm (e.g. localm plugin install-deps "
-                     f"{name}).")
+                403, "Dependency install runs on the host only, and this server "
+                     "is on a network bind. Install on the machine running localm "
+                     f"(e.g. localm plugin install-deps {name}).")
         if manager._spec_for(name) is None:
             raise HTTPException(404, f"No such plugin: {name}")
         task = manager.start_dep_install(name)
@@ -42,8 +43,8 @@ def register_dep_routes(app, manager) -> None:
 
     @app.get("/api/plugins/{name}/install-deps/events",
              dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])
-    async def install_plugin_deps_events(name: str, request: Request):
-        if not deps_task.is_local_request(request):
+    async def install_plugin_deps_events(name: str):
+        if not deps_task.host_pip_allowed(app):
             raise HTTPException(403, "Dependency install runs on the host only.")
         task = manager.get_dep_task(name)
         if task is None:

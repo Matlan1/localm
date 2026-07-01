@@ -37,8 +37,12 @@ class DepInstallTask:
             return list(self.lines)
 
     def finish(self, result) -> None:
-        self.result = result
-        self.status = "done" if result.ok else "error"
+        # Set result before status, both under the lock, so the SSE reader (which
+        # checks status then reads result) never sees a finished status with a
+        # not-yet-set result.
+        with self._lock:
+            self.result = result
+            self.status = "done" if result.ok else "error"
 
     def end_event(self) -> dict:
         r = self.result
@@ -65,12 +69,8 @@ def run_dep_install(manager, name: str, task: DepInstallTask) -> None:
     task.finish(result)
 
 
-def is_local_request(request) -> bool:
-    """True when the request comes from the local host (a loopback peer). This
-    is what gates the host-only pip install. Unknown/parse-failure is treated as
-    NOT local (fail closed)."""
-    client = getattr(request, "client", None)
-    host = getattr(client, "host", None) if client else None
+def is_loopback_host(host: str) -> bool:
+    """True for a loopback host (127.0.0.0/8, ::1, localhost)."""
     if not host:
         return False
     if host == "localhost":
@@ -79,3 +79,20 @@ def is_local_request(request) -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
+
+
+def host_pip_allowed(app) -> bool:
+    """Whether the HTTP dependency-install path may run pip on this host.
+
+    We decide from the server's BIND host, never the request peer. The GUI runs
+    behind portmux, which relays every connection through an internal loopback
+    socket, so ``request.client.host`` reads as 127.0.0.1 even for a genuinely
+    REMOTE client (see localm/portmux.py, and gui/web.py which makes the same
+    decision for open-mode key seeding). Only a loopback BIND means every client
+    is truly on this machine. On a network bind (e.g. -H 0.0.0.0) we cannot tell
+    a local operator from a remote client, so we fail closed: the pip path is
+    refused and the operator installs on the host via the CLI. Unknown bind host
+    -> deny."""
+    state = getattr(app, "state", None)
+    bind_host = getattr(state, "bind_host", None)
+    return is_loopback_host(bind_host or "")

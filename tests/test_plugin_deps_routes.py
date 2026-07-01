@@ -27,11 +27,14 @@ def app_mgr(tmp_path, monkeypatch):
     from localm.plugins.engine import attach_engine
     app = FastAPI()
     mgr = attach_engine(app)
+    # Default to a loopback bind (the `localm gui` default), i.e. every client is
+    # truly on this host, so the pip path is allowed. Network-bind tests override.
+    app.state.bind_host = "127.0.0.1"
     return app, mgr
 
 
-def _be_local(monkeypatch, local=True):
-    monkeypatch.setattr(deps_task, "is_local_request", lambda req: local)
+def _set_bind(app, host):
+    app.state.bind_host = host
 
 
 def _fake_install(monkeypatch, *, ok=True, lines=("resolving...", "installed x")):
@@ -51,7 +54,7 @@ def _fake_install(monkeypatch, *, ok=True, lines=("resolving...", "installed x")
 
 def test_install_deps_remote_is_forbidden(app_mgr, monkeypatch):
     app, _ = app_mgr
-    _be_local(monkeypatch, local=False)         # simulate a remote client
+    _set_bind(app, "0.0.0.0")                    # a network bind
     with TestClient(app) as c:
         r = c.post("/api/plugins/voice/install-deps")
     assert r.status_code == 403
@@ -60,15 +63,29 @@ def test_install_deps_remote_is_forbidden(app_mgr, monkeypatch):
 
 def test_events_remote_is_forbidden(app_mgr, monkeypatch):
     app, _ = app_mgr
-    _be_local(monkeypatch, local=False)
+    _set_bind(app, "0.0.0.0")
     with TestClient(app) as c:
         r = c.get("/api/plugins/voice/install-deps/events")
     assert r.status_code == 403
 
 
+def test_network_bind_denies_even_from_loopback_peer(app_mgr, monkeypatch):
+    """REGRESSION: the GUI runs behind portmux, so request.client.host is always
+    127.0.0.1 (a loopback peer) even for a genuinely remote client. The gate MUST
+    key off the bind host, not the peer - a network bind is refused regardless of
+    the (loopback-looking) peer the TestClient presents."""
+    app, mgr = app_mgr
+    _set_bind(app, "0.0.0.0")                    # network bind; TestClient peer is loopback
+    _fake_install(monkeypatch)                  # would run if the gate were wrong
+    with TestClient(app) as c:
+        r = c.post("/api/plugins/voice/install-deps")
+    assert r.status_code == 403
+    # And no background install task was ever created.
+    assert mgr.get_dep_task("voice") is None
+
+
 def test_install_deps_unknown_plugin_404(app_mgr, monkeypatch):
     app, _ = app_mgr
-    _be_local(monkeypatch, local=True)
     with TestClient(app) as c:
         r = c.post("/api/plugins/nope/install-deps")
     assert r.status_code == 404
@@ -76,7 +93,6 @@ def test_install_deps_unknown_plugin_404(app_mgr, monkeypatch):
 
 def test_events_without_task_404(app_mgr, monkeypatch):
     app, _ = app_mgr
-    _be_local(monkeypatch, local=True)
     with TestClient(app) as c:
         r = c.get("/api/plugins/voice/install-deps/events")
     assert r.status_code == 404
@@ -88,7 +104,6 @@ def test_events_without_task_404(app_mgr, monkeypatch):
 
 def test_install_deps_starts_and_streams(app_mgr, monkeypatch):
     app, mgr = app_mgr
-    _be_local(monkeypatch, local=True)
     _fake_install(monkeypatch, ok=True, lines=("resolving...", "installed x"))
     with TestClient(app) as c:
         r = c.post("/api/plugins/voice/install-deps")
@@ -104,7 +119,6 @@ def test_install_deps_starts_and_streams(app_mgr, monkeypatch):
 
 def test_install_deps_failure_streams_error(app_mgr, monkeypatch):
     app, mgr = app_mgr
-    _be_local(monkeypatch, local=True)
     _fake_install(monkeypatch, ok=False, lines=("resolving...", "ERROR: boom"))
     with TestClient(app) as c:
         c.post("/api/plugins/voice/install-deps")
@@ -113,21 +127,34 @@ def test_install_deps_failure_streams_error(app_mgr, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  Unit: is_local_request + DepInstallTask + worker                           #
+#  Unit: bind-host gate + DepInstallTask + worker                             #
 # --------------------------------------------------------------------------- #
 
-class _Req:
-    def __init__(self, host):
-        self.client = type("C", (), {"host": host})() if host is not None else None
-
-
-@pytest.mark.parametrize("host,local", [
+@pytest.mark.parametrize("host,loop", [
     ("127.0.0.1", True), ("::1", True), ("localhost", True),
     ("127.0.0.5", True), ("10.0.0.7", False), ("192.168.1.4", False),
-    ("testclient", False), ("", False), (None, False),
+    ("0.0.0.0", False), ("testclient", False), ("", False), (None, False),
 ])
-def test_is_local_request(host, local):
-    assert deps_task.is_local_request(_Req(host)) is local
+def test_is_loopback_host(host, loop):
+    assert deps_task.is_loopback_host(host) is loop
+
+
+class _App:
+    def __init__(self, bind_host="__unset__"):
+        self.state = type("S", (), {})()
+        if bind_host != "__unset__":
+            self.state.bind_host = bind_host
+
+
+@pytest.mark.parametrize("bind,allowed", [
+    ("127.0.0.1", True), ("::1", True), ("localhost", True),
+    ("0.0.0.0", False), ("192.168.1.10", False),  # network binds -> deny
+    (None, False), ("__unset__", False),          # unknown -> fail closed
+])
+def test_host_pip_allowed(bind, allowed):
+    # Fail-closed on a network or unknown bind: the pip path is host-only and the
+    # portmux relay makes the peer useless, so only a loopback bind may allow it.
+    assert deps_task.host_pip_allowed(_App(bind)) is allowed
 
 
 def test_dep_task_lifecycle():

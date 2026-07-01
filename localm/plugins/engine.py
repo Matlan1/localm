@@ -1003,9 +1003,11 @@ class PluginManager:
         return warnings
 
     def install_plugin_deps(self, name: str, *, on_progress=None):
-        """Install a plugin's declared pip extras on THIS host. HOST-ONLY: a
-        route must confirm the request is local before calling this. Returns a
-        ``deps.InstallResult`` (a no-op success when the plugin declares none)."""
+        """Install a plugin's declared pip extras on THIS host. HOST-ONLY: an
+        HTTP route must confirm the server is loopback-bound
+        (``deps_task.host_pip_allowed``) before calling this; the CLI is always
+        host-side. Returns a ``deps.InstallResult`` (a no-op success when the
+        plugin declares none)."""
         from localm.plugins import deps
         spec = self._spec_for(name)
         extras = spec.requires_extras if spec else []
