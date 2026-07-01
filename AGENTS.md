@@ -192,6 +192,39 @@ disclosure in history (a secret, a personal email, or a real-user absolute path
 baked into a committed file or binary) requires a history rewrite and a
 force-push, and the maintainer must be told before that happens.
 
+## Understand what localm is before you decide something needs the maintainer
+
+localm is an offline local-LLM inference and plugin engine: it DOWNLOADS and RUNS
+local models itself. So an agent can verify almost anything end to end without the
+maintainer. Before you write "only the maintainer can test/do this", check whether
+localm's own capabilities already cover it:
+
+- `localm pull owner/repo:model.gguf` downloads a GGUF from HuggingFace; `localm
+  run` / `localm serve` / `localm gui` runs it; `localm gui --no-model` runs the
+  app with no model at all.
+- `localm setup-embeddings` installs the small on-device embedding model, so
+  semantic memory and RAG can be exercised for real, not just their lexical
+  fallback.
+- The coder plugin has file, shell, search, and test tools and speaks MCP both
+  ways. Chat is the only always-on plugin; everything else is one you install.
+
+So "needs a model to test", "needs someone to run the app", or "needs the coder to
+try it" are NOT maintainer-only: pull a tiny model (or use `--no-model`) in a
+throwaway `LOCALM_HOME` and check it yourself (see the next section). Treat any
+"maintainer-only" conclusion as a claim you have to justify, not a default.
+
+Genuinely maintainer-only is a short list: deploying or holding an external secret
+(a server or worker deploy, an update token), cutting a public release, and
+verifying on hardware nobody here has (for example a specific NVIDIA, Intel, or
+macOS box). Almost everything else, an agent can do by understanding the project
+and running it.
+
+The deeper point: verifying or building without actually understanding what localm
+is produces false confidence (shipping broken work under a "done" label) or false
+deferral (stalling on something the tool already does). Real understanding is the
+precondition for the "we do not hide problems" and verify-before-done rules above,
+not an optional extra.
+
 ## Running a test instance for verification
 
 Agents may launch a local instance of the full app to verify a change in the
