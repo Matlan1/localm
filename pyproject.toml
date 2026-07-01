@@ -140,6 +140,11 @@ dev = [
     # Coverage measurement (TEST-1). Visibility only for now: CI publishes a
     # number, there is no --cov-fail-under gate. See [tool.coverage] below.
     "pytest-cov>=5.0",
+    # Feature parsers whose extraction code has tests that otherwise SILENTLY SKIP
+    # when the optional extra is absent (the default install is .[coder,voice,
+    # monitor], no rag). pypdf gates tests/test_rag.py's real PDF round-trip; keep
+    # it here so the PDF path (incl. its hardening) is actually exercised in dev/CI.
+    "pypdf>=6.14.2",
 ]
 
 [project.scripts]
