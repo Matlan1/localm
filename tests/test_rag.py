@@ -499,6 +499,22 @@ class TestCollection:
         assert any("lexical-only" in m for m in messages)
         assert c.query("sourdough flour", k=1)    # lexical retrieval works
 
+    def test_has_vectors_matches_query_blend_threshold(self, tmp_path):
+        """stats() has_vectors reflects what query() DOES (blend at >=80% coverage),
+        not 'every chunk embedded' - so a partially-embedded collection is not
+        mislabelled BM25-only when it is actually doing hybrid retrieval."""
+        base = tmp_path / "rag"
+        c = Collection("kb", base=base).create()
+        c._chunks = [{"text": f"c{i}", "source": "d"} for i in range(10)]
+        c._vectors = [[1.0, 0.0, 0.0]] * 9 + [None]       # 90% -> query blends
+        assert c.stats()["has_vectors"] is True
+        c._vectors = [[1.0, 0.0, 0.0]] * 8 + [None] * 2    # 80% -> still blends
+        assert c.stats()["has_vectors"] is True
+        c._vectors = [[1.0, 0.0, 0.0]] * 7 + [None] * 3    # 70% -> below threshold
+        assert c.stats()["has_vectors"] is False
+        c._vectors = None                                 # no embeddings at all
+        assert c.stats()["has_vectors"] is False
+
     def test_query_empty_collection(self, tmp_path):
         c = Collection("kb", base=tmp_path / "rag").create()
         assert c.query("anything") == []
