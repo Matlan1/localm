@@ -32,6 +32,35 @@ from localm import netpolicy
 from localm.netpolicy import NetworkPolicyError, check_url
 
 
+class _FakeSession:
+    """Doubles netpolicy._session_for (the pinned-transport seam) so these tests
+    exercise the real check_url + redirect logic without a live socket. get/post
+    may each be a fixed response object or a responder callable (url, **kw)."""
+
+    def __init__(self, *, get=None, post=None):
+        self._get, self._post = get, post
+
+    def _resolve(self, fn, url, **kw):
+        if fn is None:
+            raise AssertionError(f"unexpected request to {url}")
+        return fn(url, **kw) if callable(fn) else fn
+
+    def get(self, url, **kw):
+        return self._resolve(self._get, url, **kw)
+
+    def post(self, url, **kw):
+        return self._resolve(self._post, url, **kw)
+
+    def close(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
 @pytest.fixture(autouse=True)
 def _allow_mode(monkeypatch):
     """net_mode=allow (so check_url runs the IP/host gates, not the off bail) and
@@ -177,15 +206,15 @@ class TestN3SearchRedirects:
         monkeypatch.setattr(
             "socket.getaddrinfo",
             lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))])
-        with patch("requests.get",
-                   return_value=_FakeResp(status=302, location="http://127.0.0.1/")):
+        with patch("localm.netpolicy._session_for", return_value=_FakeSession(
+                get=_FakeResp(status=302, location="http://127.0.0.1/"))):
             with pytest.raises(NetworkPolicyError, match="redirect"):
                 netpolicy.web_search("hello")
 
     def test_ddg_redirect_refused(self, monkeypatch):
         monkeypatch.setenv("LOCALM_NET_MODE", "allow")
-        with patch("requests.post",
-                   return_value=_FakeResp(status=302, location="http://127.0.0.1/")):
+        with patch("localm.netpolicy._session_for", return_value=_FakeSession(
+                post=_FakeResp(status=302, location="http://127.0.0.1/"))):
             with pytest.raises(NetworkPolicyError, match="redirect"):
                 netpolicy.web_search("hello")
 
@@ -202,7 +231,8 @@ class TestN3SearchRedirects:
             return _FakeResp(json_body={"results": [
                 {"title": "T", "url": "https://ok.example", "content": "c"}]})
 
-        with patch("requests.get", side_effect=fake_get):
+        with patch("localm.netpolicy._session_for",
+                   return_value=_FakeSession(get=fake_get)):
             results = netpolicy.web_search("hello")
         assert captured.get("allow_redirects") is False
         assert results and results[0]["url"] == "https://ok.example"
@@ -264,7 +294,8 @@ class TestF2ImageUrlSSRF:
         monkeypatch.setattr(
             "socket.getaddrinfo",
             lambda host, port, *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))])
-        with patch("requests.get", return_value=_FakeBytesResp(_png_bytes())):
+        with patch("localm.netpolicy._session_for",
+                   return_value=_FakeSession(get=_FakeBytesResp(_png_bytes()))):
             img = decode_image_url("https://example.com/pic.png")
         assert img.size == (2, 2)
 
@@ -279,7 +310,8 @@ def test_safe_fetch_bytes_returns_raw_bytes(monkeypatch):
         "socket.getaddrinfo",
         lambda host, port, *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))])
     raw = bytes(range(256))   # includes non-UTF-8 bytes
-    with patch("requests.get", return_value=_FakeBytesResp(raw, "image/png")):
+    with patch("localm.netpolicy._session_for",
+               return_value=_FakeSession(get=_FakeBytesResp(raw, "image/png"))):
         final_url, ctype, body = netpolicy.safe_fetch_bytes("https://example.com/x")
     assert body == raw          # exact bytes, not utf-8 mangled
     assert ctype == "image/png"
