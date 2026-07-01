@@ -160,8 +160,11 @@ class Agent(
         # Display / logging still use the bare alias (self._model_name).
         self._family_id: str = self._model_name
         try:
-            from localm.model_manager import get_model_info
-            _src = (get_model_info(self._model_name) or {}).get("source", "")
+            # The registry entry (not get_model_info, which returns a (path, hint)
+            # tuple) carries "source" e.g. "hf:google/gemma-4-4b" (REC-CODER-FAMILY).
+            from localm.model_manager import load_registry
+            _entry = load_registry().get(self._model_name) or {}
+            _src = _entry.get("source", "") if isinstance(_entry, dict) else ""
             if isinstance(_src, str) and _src.strip():
                 self._family_id = f"{self._model_name} {_src}"
         except Exception:
