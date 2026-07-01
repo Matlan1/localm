@@ -121,6 +121,31 @@ def key_clear(yes):
 
 
 
+@key_group.command("recover")
+def key_recover():
+    """Recover owner access after a lockout (run LOCALLY on the server machine).
+
+    Mints a FRESH owner key and prints it once - use this when you have lost the
+    owner key but still need to manage the server. Existing scoped DEVICE keys are
+    untouched, so devices keep working; only the owner credential is rotated. The
+    local CLI is the trusted recovery path, so this does not require the old key
+    (SEC-3). To instead drop all auth and return to open mode, use 'key clear'."""
+    from localm import auth
+    had = auth.get_api_key() is not None
+    key = auth.regenerate_key()
+    console.print("[green]Owner access recovered. New owner key (shown once - "
+                  "copy it now):[/green]")
+    console.print(f"  [bold]{key}[/bold]")
+    console.print("[dim]Clients send it as: Authorization: Bearer <key>[/dim]")
+    if had:
+        console.print("[dim]The previous owner key no longer works; scoped device "
+                      "keys are unchanged.[/dim]")
+    env_key = os.environ.get(auth.ENV_VAR)
+    if env_key and env_key.strip():
+        console.print(f"[yellow]Note:[/yellow] {auth.ENV_VAR} is set and overrides "
+                      "this stored key until it is unset.")
+
+
 @key_group.command("list")
 def key_list():
     """List named, scope-limited keys (metadata only - never the secret)."""

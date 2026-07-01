@@ -143,11 +143,13 @@ dev = [
 ]
 
 [project.scripts]
-localm    = "localm.cli:main"
+# console_main wraps the CLI group with the venv guard (NEW-J); the bare `main`
+# stays importable for in-process callers (tests, the `localm coder` route).
+localm    = "localm.cli:console_main"
 # backward-compat alias - installed only when the [coder] extra is present.
 # pip/uv honours this because the package is installed; the command always
 # works as long as localm[coder] was requested.
-localcoder = "localm.plugins.coder.cli:main"
+localcoder = "localm.plugins.coder.cli:console_main"
 localabliterate = "localm.plugins.abliterate.cli:main"
 
 [tool.uv]

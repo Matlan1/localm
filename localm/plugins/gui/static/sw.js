@@ -9,7 +9,7 @@
 // Bump this whenever the cached shell assets (style.css, app/*.js, pages/*.js,
 // index.html, icons) change, so an installed PWA drops the old cache on activate
 // and re-precaches the new files instead of serving stale cache-first assets.
-const CACHE = "localm-shell-v15";
+const CACHE = "localm-shell-v17";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).
@@ -41,10 +41,17 @@ self.addEventListener("install", (e) => {
 });
 
 self.addEventListener("activate", (e) => {
-  // Drop old shell versions so an updated app does not serve stale assets.
+  // Drop old shell versions so an updated app does not serve stale assets, but
+  // ONLY our own shell caches (localm-shell-*). The transformers.js model cache
+  // ("transformers-cache" - the Kokoro TTS weights, tens of MB) must SURVIVE a
+  // shell-version bump: the old `k !== CACHE` filter deleted every non-current
+  // cache, so the model was re-downloaded after every app/shell update
+  // (REC-KOKORO-RELOAD).
   e.waitUntil(
     caches.keys()
-      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+      .then((keys) => Promise.all(
+        keys.filter((k) => k.startsWith("localm-shell-") && k !== CACHE)
+            .map((k) => caches.delete(k))))
       .then(() => self.clients.claim())
   );
 });

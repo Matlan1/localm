@@ -451,6 +451,30 @@ def _do_restart() -> None:
 
     import os
     import sys
+
+    # NEW-G: no inheritable fd (the debug-log FileHandler, the uvicorn listening
+    # socket) must survive into the re-exec'd image, where the freshly loaded
+    # ggml/llama runtime warns "Failed to close child file descriptors at 3/4".
+    # os.execv does NOT close fds; marking them non-inheritable drops them at exec
+    # (POSIX O_CLOEXEC / Windows handle inheritance). Best-effort per fd; stdin/
+    # stdout/stderr (0-2) are left inheritable so the new process keeps the console.
+    try:
+        max_fd = 4096
+        try:
+            import resource
+            soft = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+            if isinstance(soft, int) and 0 < soft < max_fd:
+                max_fd = soft
+        except Exception:
+            pass  # no resource module (Windows) - the 4096 default is plenty
+        for fd in range(3, max_fd):
+            try:
+                os.set_inheritable(fd, False)
+            except OSError:
+                pass  # not an open fd
+    except Exception:
+        pass  # never let fd hygiene block the restart
+
     os.execv(sys.executable, _restart_argv())
 
 
@@ -623,20 +647,26 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
 
     @app.middleware("http")
     async def _origin_guard(request, call_next):
-        if (request.method in _UNSAFE_METHODS and not _cors_wildcard
+        if (request.method in _UNSAFE_METHODS
                 and not request.url.path.startswith(_CROSS_ORIGIN_OK)):
-            origin = request.headers.get("origin")
-            allowlisted = bool(origin) and origin in _cors_allowlist
-            if origin:
-                host = request.headers.get("host", "")
-                same_origin = origin.split("://", 1)[-1] == host
-                if not (same_origin or allowlisted):
-                    return JSONResponse(
-                        status_code=403,
-                        content={"detail": "Cross-origin request refused "
-                                 "(only same-origin requests or a configured "
-                                 "'cors_origins' may use this endpoint)."},
-                    )
+            # Same-origin / CORS-allowlist check. "cors_origins": "*" opts OUT
+            # of THIS check only (an explicit "any origin may call me") - it
+            # must NOT also waive the open-mode shell-token gate below, which is
+            # a separate credential requirement, not a same-origin check
+            # (AUD-CORSWILD).
+            if not _cors_wildcard:
+                origin = request.headers.get("origin")
+                allowlisted = bool(origin) and origin in _cors_allowlist
+                if origin:
+                    host = request.headers.get("host", "")
+                    same_origin = origin.split("://", 1)[-1] == host
+                    if not (same_origin or allowlisted):
+                        return JSONResponse(
+                            status_code=403,
+                            content={"detail": "Cross-origin request refused "
+                                     "(only same-origin requests or a configured "
+                                     "'cors_origins' may use this endpoint)."},
+                        )
             # H5: open-mode management gate. With no key configured, management
             # routes still require the per-process shell token (injected into the
             # loopback GUI shell), so a no-Origin local client - curl, a script -

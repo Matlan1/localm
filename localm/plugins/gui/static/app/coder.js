@@ -817,7 +817,9 @@ $("setup-browse").onclick = async () => {
                                   $("setup-cwd").value.trim());
   if (dir) {
     $("setup-cwd").value = dir;
-    localStorage.setItem("localm.coderCwd", dir);
+    // Gate on privacy like the other coderCwd write (REC-CODER-CWD-LEAK): do not
+    // persist the absolute project path to localStorage in privacy mode.
+    if (!chat.privacy) localStorage.setItem("localm.coderCwd", dir);
     refreshResumable();   // setting .value does not fire 'input' (CODER-2)
   }
 };

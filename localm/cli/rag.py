@@ -45,18 +45,25 @@ def rag_list():
 @click.argument("paths", nargs=-1, required=True)
 @click.option("--force", is_flag=True,
               help="Re-index even unchanged files (rebuild stale entries).")
-def rag_add(collection, paths, force):
+@click.option("--embed", is_flag=True,
+              help="Also compute embeddings at index time via a running localm "
+                   "server, for hybrid (vector+lexical) retrieval - matching the "
+                   "GUI. Degrades to lexical-only if no server is reachable.")
+@click.option("--url", default=None,
+              help="Server base URL for --embed (default: auto-discover a running "
+                   "instance, else the configured port on localhost).")
+def rag_add(collection, paths, force, embed, url):
     """Index files/folders into COLLECTION (created if missing).
 
     Folders are indexed recursively (txt/md/pdf/docx/html/code). Unchanged
     files (same content) are skipped; changed ones are re-indexed. Use --force
-    to re-index regardless. CLI indexing is lexical-only - index from the GUI to
-    add embeddings when the active model supports them.
+    to re-index regardless. By default CLI indexing is lexical-only; pass --embed
+    to add embeddings via a running server, matching the GUI (REC-RAG-EMBED-PARITY).
 
     \b
     Examples:
       localm rag add manuals path/to/printer-manual.pdf
-      localm rag add project path/to/myapp
+      localm rag add project path/to/myapp --embed
     """
     from rich.console import Console
     from ..rag import Collection
@@ -67,7 +74,8 @@ def rag_add(collection, paths, force):
         console.print(f"[red]{e}[/red]")
         sys.exit(1)
     coll.create()
-    result = coll.add_paths(list(paths), force=force,
+    embed_fn = _cli_rag_embed_fn(url) if embed else None
+    result = coll.add_paths(list(paths), force=force, embed_fn=embed_fn,
                             on_progress=lambda t: console.print(f"  [dim]{t}[/dim]"))
     console.print(f"[green]{result['added']} added, {result['updated']} updated, "
                   f"{result['skipped']} unchanged[/green] - "

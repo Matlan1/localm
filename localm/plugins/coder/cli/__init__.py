@@ -23,6 +23,8 @@ from .goal import (  # noqa: F401
 )
 from .estimate import _run_estimate  # noqa: F401
 from .repl import _handle_command, _repl, _setup_readline  # noqa: F401
-from ._main import main, _complete_model, _warn_sensitive_changes  # noqa: F401
+from ._main import (  # noqa: F401
+    main, console_main, _complete_model, _warn_sensitive_changes,
+)
 
-__all__ = ["main"]
+__all__ = ["main", "console_main"]
