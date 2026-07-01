@@ -349,20 +349,66 @@ def _localm_unload(localm_url: Optional[str] = None) -> Optional[dict]:
         return None
 
 
+_COMFY_LOOPBACK_DEFAULT = "http://127.0.0.1:8188"
+
+
+def _host_is_link_local(host: str) -> bool:
+    """True if *host* is (or resolves to) a link-local / cloud-metadata address
+    (169.254.0.0/16, fe80::/10). A ComfyUI never lives there; loopback / LAN /
+    public do, and are allowed."""
+    import ipaddress
+    import socket
+    if not host:
+        return False
+    try:
+        return ipaddress.ip_address(host).is_link_local
+    except ValueError:
+        pass
+    try:
+        for info in socket.getaddrinfo(host, None):
+            try:
+                if ipaddress.ip_address(info[4][0]).is_link_local:
+                    return True
+            except ValueError:
+                continue
+    except (socket.gaierror, OSError):
+        return False
+    return False
+
+
+def sanitize_comfy_url(url: str) -> str:
+    """Return *url* unless its host is link-local / cloud-metadata, in which case
+    warn and fall back to the loopback default. Defense-in-depth so an ADMIN-set
+    comfy_api_url cannot turn the comfy control calls (free / interrupt / stop)
+    into an SSRF probe of cloud metadata (CHK-COMFY-APIURL). Loopback + LAN +
+    public are allowed - a real ComfyUI runs on any of those."""
+    try:
+        if _host_is_link_local(urllib.parse.urlparse(url).hostname or ""):
+            from localm.debuglog import logger
+            logger.warning(
+                "comfy_api_url %r targets a link-local/metadata address; ignoring "
+                "it and using the loopback default (CHK-COMFY-APIURL)", url)
+            return _COMFY_LOOPBACK_DEFAULT
+    except Exception:
+        pass
+    return url
+
+
 def default_api_url() -> str:
     """ComfyUI base URL: FLUX_API_URL env override, then the ``comfy_api_url``
-    config key, else the ComfyUI default port."""
+    config key, else the ComfyUI default port. A link-local / cloud-metadata
+    target is refused and falls back to loopback (CHK-COMFY-APIURL)."""
     env = os.environ.get("FLUX_API_URL")
     if env:
-        return env.rstrip("/")
+        return sanitize_comfy_url(env.rstrip("/"))
     try:
         from localm.config import load_config
         cfg_url = load_config().get("comfy_api_url")
         if cfg_url:
-            return str(cfg_url).rstrip("/")
+            return sanitize_comfy_url(str(cfg_url).rstrip("/"))
     except Exception:
         pass
-    return "http://127.0.0.1:8188"
+    return _COMFY_LOOPBACK_DEFAULT
 
 
 def free_comfy_vram(api_url: Optional[str] = None) -> bool:

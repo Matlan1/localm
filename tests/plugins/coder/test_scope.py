@@ -53,6 +53,28 @@ class TestScopeEnforcement:
         # read_file will fail (file has no content mock) but shouldn't be scope-rejected
         assert "outside the active scope" not in result.output
 
+    def test_mcp_tool_path_confined_by_scope(self, tmp_path):
+        """CHK-MCP-SCOPE: a REGISTERED mcp_* tool's path arg is confined by the
+        active scope, even though MCP tools are not in _SCOPED_TOOLS. (MCP tools are
+        registered dynamically in production; here a stub reaches the scope gate.)"""
+        from localm.plugins.coder import agent as _agent
+        agent = _make_agent(tmp_path, scope="src/**")
+        call = _make_tool_call("mcp_fs_read_file", path="/etc/passwd")   # outside scope
+        with patch.dict(_agent.TOOL_REGISTRY,
+                        {"mcp_fs_read_file": MagicMock(destructive=False)}, clear=False):
+            result = agent._execute_tool(call, interactive=False)
+        assert "outside the active scope" in result.output
+
+    def test_mcp_tool_uncommon_path_arg_confined(self, tmp_path):
+        """A path under an uncommon MCP arg name (source_path) is still scoped."""
+        from localm.plugins.coder import agent as _agent
+        agent = _make_agent(tmp_path, scope="src/**")
+        call = _make_tool_call("mcp_fs_copy", source_path="/etc/shadow")  # outside scope
+        with patch.dict(_agent.TOOL_REGISTRY,
+                        {"mcp_fs_copy": MagicMock(destructive=False)}, clear=False):
+            result = agent._execute_tool(call, interactive=False)
+        assert "outside the active scope" in result.output
+
     def test_scope_allows_matching_path(self, tmp_path):
         agent = _make_agent(tmp_path, scope="src/*.py")
         call = _make_tool_call("read_file", path="src/main.py")
