@@ -5,6 +5,11 @@ description = "Document collections for retrieval-augmented chat (knowledge base
 scope = "rag"
 register = "plug"
 data_subdir = "rag"
+# PDF extraction needs pypdf (the [rag] extra); txt/md/docx/html/code are stdlib.
+# Declaring it here lets the host self-provision pypdf on enable via the plugin
+# dep-installer (auto_install_plugin_deps), the same way voice pulls faster-whisper -
+# so "chat with your documents" handles PDFs without a manual pip install.
+requires_extras = ["rag"]
 
 [surface]
 tab_id = "knowledge"
