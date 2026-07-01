@@ -120,3 +120,27 @@ def test_load_all_used_when_nothing_registered(tmp_path, monkeypatch):
     assert _loader._register_ggml_backends(tmp_path, lib) is True
     assert lib.ggml_backend_load_all.calls == 1
     assert lib.ggml_backend_load.calls == [], "load_all succeeded; no per-path probe"
+
+
+def test_loaded_but_no_device_reports_false(tmp_path, monkeypatch):
+    """A non-null ggml_backend_load handle does NOT prove a usable device. When
+    the plugin loads "succeed" but the device registry still reports 0, the
+    registration is a FAILURE - the authoritative device count wins over the raw
+    load signal, so setup does not report a broken build as a success (rule 5)."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    _touch(tmp_path, ["ggml-base.dll", "ggml-cpu.dll", "ggml-vulkan.dll", "llama.dll"])
+    lib = _FakeLib(with_loader=True, dev_count=0)   # loads return truthy, 0 devices
+    assert _loader._register_ggml_backends(tmp_path, lib) is False
+    assert lib.ggml_backend_load.calls, "the explicit per-path load was attempted"
+
+
+def test_compute_backends_available_reflects_flag(monkeypatch):
+    """compute_backends_available() mirrors the flag load_lib() records, and is
+    False before a load has happened (None) so a caller never reads a stale True."""
+    monkeypatch.setattr(_loader, "load_lib", lambda: None)   # do not touch real lib
+    monkeypatch.setattr(_loader, "_compute_backends_ok", True)
+    assert _loader.compute_backends_available() is True
+    monkeypatch.setattr(_loader, "_compute_backends_ok", False)
+    assert _loader.compute_backends_available() is False
+    monkeypatch.setattr(_loader, "_compute_backends_ok", None)
+    assert _loader.compute_backends_available() is False
