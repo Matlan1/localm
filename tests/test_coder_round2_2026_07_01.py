@@ -47,12 +47,13 @@ def test_detect_family_substring_and_repo_id():
 #  REC-CODER-LOOPBREAK
 # --------------------------------------------------------------------------- #
 
-def _make_agent(tmp_path, **kwargs):
+def _make_agent(tmp_path, backend=None, **kwargs):
     from localm.plugins.coder.agent import Agent
     from unittest.mock import MagicMock
-    backend = MagicMock()
-    backend.model_id = "test-model"
-    backend.native_tools = False
+    if backend is None:
+        backend = MagicMock()
+        backend.model_id = "test-model"
+        backend.native_tools = False
     with patch("localm.plugins.coder.agent.ProjectMap") as MockPM, \
          patch("localm.plugins.coder.agent.make_audit_log"), \
          patch("localm.plugins.coder.agent.load_memory", return_value=""):
@@ -71,3 +72,20 @@ def test_repeated_response_breaker_aborts(tmp_path):
     assert "repeated the same response" in result.lower()
     # It stopped well before the turn ceiling.
     assert agent._turns < 12
+
+
+def test_family_enrichment_uses_registry_source(tmp_path, monkeypatch):
+    # An opaque alias whose registry source is a gemma repo must classify as gemma
+    # (the enrichment reads the registry entry's "source", not the (path,hint) tuple).
+    import localm.model_manager as mm
+    monkeypatch.setattr(
+        mm, "load_registry",
+        lambda: {"mycoder": {"source": "hf:google/gemma-4-4b", "path": "/x"}})
+    from unittest.mock import MagicMock
+    from localm.plugins.coder.prompts import detect_model_family
+    backend = MagicMock()
+    backend.model_id = "mycoder"
+    backend.native_tools = False
+    agent = _make_agent(tmp_path, backend=backend)
+    assert "gemma" in agent._family_id.lower(), agent._family_id
+    assert detect_model_family(agent._family_id) == "gemma"
