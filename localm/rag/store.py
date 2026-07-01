@@ -576,13 +576,17 @@ class Collection:
     # ------------------------------------------------------------- #
 
     def stats(self) -> dict:
-        vectors = self._vectors or []
+        present = [v for v in (self._vectors or []) if v]
         return {
             "name": self.name,
             "created": self._meta.get("created"),
             "n_docs": len(self._meta.get("docs", {})),
             "n_chunks": len(self._chunks),
-            "has_vectors": bool(vectors) and all(v for v in vectors),
+            # "has vectors" = whether query() will actually blend embeddings: the
+            # same >=80% coverage threshold _vector_scores uses, NOT "every chunk
+            # embedded". A partially-embedded collection (80-99%) still does hybrid
+            # retrieval, so the retrieval-mode label must not under-report it (rule 5).
+            "has_vectors": bool(present) and len(present) >= 0.8 * len(self._chunks),
             "corrupt": self.corrupt,
             # Why semantic search fell back to BM25 (None when vectors are used or
             # legitimately absent); surfaced instead of silently swallowed.
