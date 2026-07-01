@@ -348,9 +348,16 @@ def relocate_model(name: str, new_path: str) -> bool:
     if not isinstance(entry, dict):
         console.print(f"[red]Corrupt registry entry for {name}[/red]")
         return False
-    entry["path"] = str(p.resolve())
-    entry.pop("missing", None)              # it is present again at the new path
-    _mm.save_registry(reg)
+    new_path = str(p.resolve())
+    # Atomic read-modify-write so a concurrent registry writer (GUI thread, a
+    # parallel pull, sync_models_dir) is not clobbered by a stale save (same
+    # lost-update fix as the move path in #318).
+    def _apply(r: dict) -> None:
+        e = r.get(name)
+        if isinstance(e, dict):
+            e["path"] = new_path
+            e.pop("missing", None)          # it is present again at the new path
+    _mm.update_registry(_apply)
     console.print(f"[green]Relocated[/green] [bold]{name}[/bold] -> {p}")
     return True
 
@@ -453,8 +460,11 @@ def alias_model(existing: str, new_name: str) -> bool:
     if new_name in reg:
         console.print(f"[red]Name already in use:[/red] {new_name}")
         return False
-    reg[new_name] = dict(reg[existing])
-    _mm.save_registry(reg)
+    # Atomic RMW (re-read inside the lock) so a concurrent writer is not lost.
+    def _apply(r: dict) -> None:
+        if existing in r and new_name not in r:
+            r[new_name] = dict(r[existing])
+    _mm.update_registry(_apply)
     console.print(
         f"[green]✓[/green] [bold]{new_name}[/bold] is now an alias of "
         f"[bold]{existing}[/bold]"
@@ -750,8 +760,11 @@ def _register_with_dedup(
             f"file[/yellow] [dim]({p})[/dim]"
         )
         if digest and not reg[model_name].get("sha256"):
-            reg[model_name]["sha256"] = digest.lower()
-            _mm.save_registry(reg)
+            def _backfill(r: dict) -> None:      # atomic RMW
+                e = r.get(model_name)
+                if isinstance(e, dict) and not e.get("sha256"):
+                    e["sha256"] = digest.lower()
+            _mm.update_registry(_backfill)
         others = [a for a in aliases if a != model_name]
         if others:
             console.print(f"[dim]Also registered as: {', '.join(others)}[/dim]")
@@ -852,8 +865,7 @@ def remove_model(name: str) -> None:
     # this name - never delete a file out from under another alias.
     other_aliases = [a for a in find_aliases_by_path(path, reg) if a != name]
     if other_aliases:
-        del reg[name]
-        _mm.save_registry(reg)
+        _mm.update_registry(lambda r: r.pop(name, None))   # atomic RMW
         console.print(
             f"[green]✓[/green] Removed [bold]{name}[/bold] "
             f"[dim](file kept - still registered as: "
@@ -880,8 +892,7 @@ def remove_model(name: str) -> None:
                     console.print(f"[dim]Deleted {part_path}[/dim]")
     elif path.exists():
         console.print("[dim]Unregistered (file not deleted - lives outside ~/.localm/models)[/dim]")
-    del reg[name]
-    _mm.save_registry(reg)
+    _mm.update_registry(lambda r: r.pop(name, None))       # atomic RMW
     console.print(f"[green]✓[/green] Removed [bold]{name}[/bold]")
 
 
