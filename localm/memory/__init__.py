@@ -24,7 +24,7 @@ from typing import Optional
 
 from localm.textguard import neutralise
 
-from .consolidate import extract, run_consolidation
+from .consolidate import extract, run_consolidation, summarize_session
 from .gating import writes_allowed
 from .record import MemoryRecord
 from .store import (K_CAP, MAX_TEXT_LEN, N_MAX, MemoryStore, namespace_file,
@@ -32,7 +32,8 @@ from .store import (K_CAP, MAX_TEXT_LEN, N_MAX, MemoryStore, namespace_file,
 
 __all__ = [
     "MemoryRecord", "MemoryStore", "open_store", "render_memories",
-    "run_consolidation", "extract", "writes_allowed", "principal_of",
+    "run_consolidation", "extract", "summarize_session",
+    "writes_allowed", "principal_of",
     "namespace_hash", "namespace_file", "MAX_TEXT_LEN", "N_MAX", "K_CAP",
     "MAX_INJECT", "INJECT_BLOCK_CHARS", "INJECT_LINE_CHARS",
 ]
