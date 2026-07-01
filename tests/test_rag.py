@@ -320,6 +320,106 @@ class TestCollection:
         hits = c.query("ROCm DLLs", k=1, embed_fn=bigger_model)   # must not raise
         assert hits and "gpu.md" in hits[0]["source"]             # lexical fallback
 
+    # --- L6: a corrupt / stale / mismatched vectors index is SURFACED, not ---- #
+    # --- silently swallowed into BM25-only (AGENTS rule 5). ------------------- #
+
+    def test_absent_vectors_is_not_a_degrade(self, tmp_path, docs_dir):
+        """The benign case: no embeddings indexed -> no vectors.json, no degrade
+        reason. 'Absent' must not be conflated with 'corrupt' (rule 5)."""
+        base = tmp_path / "rag"
+        c = Collection("kb", base=base).create()
+        c.add_paths([docs_dir])                       # no embed_fn -> no vectors.json
+        assert not (base / "kb" / "vectors.json").exists()
+        assert c.vector_degrade_reason is None
+        assert c.stats()["vector_degrade_reason"] is None
+
+    def test_corrupt_vectors_json_warns_and_degrades(self, tmp_path, docs_dir, caplog):
+        """An unreadable vectors.json surfaces a warning + a stats reason and still
+        answers lexically - it does not silently vanish or crash."""
+        base = tmp_path / "rag"
+        c = Collection("kb", base=base).create()
+        c.add_paths([docs_dir], embed_fn=lambda ts: [[1.0, 0.0, 0.0] for _ in ts])
+        (base / "kb" / "vectors.json").write_text("{ not valid json",
+                                                  encoding="utf-8")
+        with caplog.at_level("WARNING", logger="localm"):
+            c2 = Collection("kb", base=base)          # reload from disk
+        assert c2.vector_degrade_reason and "unreadable" in c2.vector_degrade_reason
+        assert c2.stats()["vector_degrade_reason"] == c2.vector_degrade_reason
+        assert "unreadable" in caplog.text
+        assert c2.query("ROCm DLLs", k=1)             # BM25 fallback, no crash
+
+    def test_stale_vectors_length_mismatch_warns(self, tmp_path, docs_dir, caplog):
+        """A vectors list that no longer lines up with the chunks (stale/partial
+        index) is surfaced, not silently dropped."""
+        base = tmp_path / "rag"
+        c = Collection("kb", base=base).create()
+        c.add_paths([docs_dir], embed_fn=lambda ts: [[1.0, 0.0, 0.0] for _ in ts])
+        p = base / "kb" / "vectors.json"
+        data = json.loads(p.read_text(encoding="utf-8"))
+        data["vectors"].append([9.0, 9.0, 9.0])       # one more vector than chunks
+        p.write_text(json.dumps(data), encoding="utf-8")
+        with caplog.at_level("WARNING", logger="localm"):
+            c2 = Collection("kb", base=base)
+        assert (c2.vector_degrade_reason
+                and "stale or partial" in c2.vector_degrade_reason)
+        assert "stale or partial" in caplog.text
+        assert c2.query("ROCm DLLs", k=1)
+
+    def test_query_embedding_model_change_warns(self, tmp_path, docs_dir, caplog):
+        """Querying with an embedding model of a different dimensionality than the
+        stored vectors surfaces a 'model changed' warning + a stats reason (and
+        still answers lexically)."""
+        base = tmp_path / "rag"
+        c = Collection("kb", base=base).create()
+        c.add_paths([docs_dir],
+                    embed_fn=lambda ts: [[1.0, 0.0, 0.0] for _ in ts])   # dim 3
+        with caplog.at_level("WARNING", logger="localm"):
+            hits = c.query("ROCm DLLs", k=1,
+                           embed_fn=lambda ts: [[1.0, 0.0] for _ in ts])  # dim 2
+        assert hits and "gpu.md" in hits[0]["source"]        # lexical fallback works
+        assert (c.vector_degrade_reason
+                and "embedding model changed" in c.vector_degrade_reason)
+        assert c.stats()["vector_degrade_reason"] == c.vector_degrade_reason
+        assert "embedding model changed" in caplog.text
+
+    def test_malformed_vectors_json_degrades_not_crashes(self, tmp_path, docs_dir,
+                                                         caplog):
+        """Valid JSON whose entries are scalars (a hand-edit or truncation) must be
+        caught at LOAD and degraded - not accepted and then crashed by cosine at
+        query time with an opaque 'int has no len()'."""
+        base = tmp_path / "rag"
+        c = Collection("kb", base=base).create()
+        c.add_paths([docs_dir], embed_fn=lambda ts: [[1.0, 0.0, 0.0] for _ in ts])
+        p = base / "kb" / "vectors.json"
+        n = len(c._chunks)
+        p.write_text(json.dumps({"dim": 3, "vectors": [1] * n}),  # scalars, right length
+                     encoding="utf-8")
+        with caplog.at_level("WARNING", logger="localm"):
+            c2 = Collection("kb", base=base)
+        assert c2.vector_degrade_reason and "malformed" in c2.vector_degrade_reason
+        assert "malformed" in caplog.text
+        # Must answer lexically without raising at query time.
+        hits = c2.query("ROCm DLLs", k=1,
+                        embed_fn=lambda ts: [[1.0, 0.0, 0.0] for _ in ts])
+        assert hits and "gpu.md" in hits[0]["source"]
+
+    def test_query_embedding_failure_warns(self, tmp_path, docs_dir, caplog):
+        """A raising embed_fn (embedder down) is a real failure, surfaced once, not
+        swallowed into silent lexical-only."""
+        base = tmp_path / "rag"
+        c = Collection("kb", base=base).create()
+        c.add_paths([docs_dir], embed_fn=lambda ts: [[1.0, 0.0, 0.0] for _ in ts])
+
+        def broken(texts):
+            raise RuntimeError("embedder down")
+
+        with caplog.at_level("WARNING", logger="localm"):
+            hits = c.query("ROCm DLLs", k=1, embed_fn=broken)
+        assert hits and "gpu.md" in hits[0]["source"]          # lexical fallback
+        assert (c.vector_degrade_reason
+                and "query embedding failed" in c.vector_degrade_reason)
+        assert "query embedding failed" in caplog.text
+
     def test_cosine_dim_mismatch_raises(self):
         # C3: a dim mismatch is corruption, not a real zero-similarity. _cosine
         # must fail loud; _vector_scores guarantees equal lengths before calling.
