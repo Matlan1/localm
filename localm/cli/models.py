@@ -6,7 +6,7 @@ import click
 
 from ..config import HOME_DIR, find_binary_dir, load_config, save_config
 from ..model_manager import (
-    get_model_info, list_models, pull_model,
+    get_model_info, list_models, pull_model, relocate_model,
     remove_model, show_shortcuts, sync_models_dir,
 )
 from ._core import console, main, _complete_model_name
@@ -221,6 +221,22 @@ def list_cmd():
     if result.note:
         console.print(f"[yellow]{result.note}[/yellow]")
     list_models()
+
+
+@main.command("relocate")
+@click.argument("model", shell_complete=_complete_model_name)
+@click.argument("new_path", type=click.Path())
+def relocate_cmd(model, new_path):
+    """Re-point a registered MODEL to NEW_PATH after you MOVED its file.
+
+    An externally-referenced model (one whose file lives outside ~/.localm/models)
+    shows as 'missing' when you move it. Instead of re-adding it under a new name,
+    relocate re-points the existing registry entry - keeping its name, source, and
+    any aliases. NEW_PATH must be a real .gguf file or a HuggingFace model dir.
+    """
+    import sys
+    if not relocate_model(model, str(new_path)):
+        sys.exit(1)
 
 
 
