@@ -190,6 +190,42 @@ class _FakeResponse:
         pass
 
 
+class _FakeSession:
+    """Doubles netpolicy._session_for - the pinned-transport seam - so tests
+    exercise the real fetch/redirect logic without opening a live socket."""
+
+    def __init__(self, responder):
+        self._responder = responder      # (method, url, **kw) -> response
+
+    def get(self, url, **kw):
+        return self._responder("GET", url, **kw)
+
+    def post(self, url, **kw):
+        return self._responder("POST", url, **kw)
+
+    def close(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _patch_session(monkeypatch, *, get=None, post=None):
+    """Route netpolicy's pinned session to fake get/post responders."""
+    import localm.netpolicy as netpolicy
+
+    def responder(method, url, **kw):
+        fn = get if method == "GET" else post
+        if fn is None:
+            raise AssertionError(f"unexpected {method} to {url}")
+        return fn(url, **kw)
+    monkeypatch.setattr(netpolicy, "_session_for",
+                        lambda url: _FakeSession(responder))
+
+
 class TestSafeFetch:
     def _public_dns(self, monkeypatch):
         monkeypatch.setattr(
@@ -199,7 +235,7 @@ class TestSafeFetch:
     def test_basic_fetch(self, monkeypatch):
         _with_config(monkeypatch, {"net_mode": "allow"})
         self._public_dns(monkeypatch)
-        monkeypatch.setattr("requests.get", lambda url, **kw: _FakeResponse(
+        _patch_session(monkeypatch, get=lambda url, **kw: _FakeResponse(
             headers={"Content-Type": "text/plain"}, body=b"hello"))
         final, ctype, text = safe_fetch("https://example.com/a")
         assert (final, text) == ("https://example.com/a", "hello")
@@ -219,14 +255,14 @@ class TestSafeFetch:
                 return _FakeResponse(status=302,
                                      redirect="http://localhost:8642/v1/models")
             return _FakeResponse(body=b"secret")
-        monkeypatch.setattr("requests.get", fake_get)
+        _patch_session(monkeypatch, get=fake_get)
         with pytest.raises(NetworkPolicyError, match="non-public"):
             safe_fetch("https://example.com/jump")
 
     def test_too_many_redirects(self, monkeypatch):
         _with_config(monkeypatch, {"net_mode": "allow"})
         self._public_dns(monkeypatch)
-        monkeypatch.setattr("requests.get", lambda url, **kw: _FakeResponse(
+        _patch_session(monkeypatch, get=lambda url, **kw: _FakeResponse(
             status=302, redirect="https://example.com/again"))
         with pytest.raises(NetworkPolicyError, match="redirects"):
             safe_fetch("https://example.com/loop")
@@ -234,7 +270,7 @@ class TestSafeFetch:
     def test_body_capped(self, monkeypatch):
         _with_config(monkeypatch, {"net_mode": "allow"})
         self._public_dns(monkeypatch)
-        monkeypatch.setattr("requests.get", lambda url, **kw: _FakeResponse(
+        _patch_session(monkeypatch, get=lambda url, **kw: _FakeResponse(
             headers={"Content-Type": "text/plain"}, body=b"x" * 500_000))
         _, _, text = safe_fetch("https://example.com/big", max_bytes=1000)
         assert len(text) <= 65536   # stops after the first chunk crosses the cap
@@ -310,7 +346,7 @@ class TestWebSearch:
             text = _DDG_HTML
             def raise_for_status(self):
                 pass
-        monkeypatch.setattr("requests.post", lambda url, **kw: _R())
+        _patch_session(monkeypatch, post=lambda url, **kw: _R())
 
         results = web_search("example docs")
         assert results[0]["url"] == "https://example.com/docs"   # uddg decoded
@@ -338,7 +374,7 @@ class TestWebSearch:
         def fake_get(url, **kw):
             seen["url"] = url
             return _R()
-        monkeypatch.setattr("requests.get", fake_get)
+        _patch_session(monkeypatch, get=fake_get)
 
         results = web_search("query", max_results=1)
         assert seen["url"].startswith("http://127.0.0.1:8080/search?")
@@ -355,7 +391,7 @@ class TestWebSearch:
             text = "<html><body>captcha?</body></html>"
             def raise_for_status(self):
                 pass
-        monkeypatch.setattr("requests.post", lambda url, **kw: _R())
+        _patch_session(monkeypatch, post=lambda url, **kw: _R())
         with pytest.raises(RuntimeError, match="no parseable results"):
             web_search("anything")
 

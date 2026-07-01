@@ -255,6 +255,98 @@ def _check_public_address(host: str) -> None:
                 "(set net_allow_private true to permit them).")
 
 
+def _resolve_pinned(host: str) -> Optional[str]:
+    """Resolve *host* to ONE IP to pin the connection to, closing the
+    check-and-connect DNS-rebinding TOCTOU (SSRF-REBIND). ``check_url`` resolves
+    and validates the host, but ``requests`` re-resolves at connect time, so a
+    TTL-0 attacker can answer 'public' for the check and 'internal' for the
+    connect. Here we resolve ONCE, validate the address(es), and return the exact
+    IP the socket will dial - there is no second lookup to poison.
+
+    Returns the canonical IP string to pin, or None when the host is unresolvable
+    (the caller then lets the request fail with a normal DNS error - nothing
+    connects, so there is no race). Numeric/short-form and IPv6 literals are
+    pinned directly (already validated by check_url). When net_allow_private is
+    False, an address that fails the SSRF class check is refused HERE too, on the
+    exact IP to be dialled - this is what catches a rebind that slipped past
+    check_url's separate lookup."""
+    allow_private = bool(_config().get("net_allow_private", False))
+
+    def _guard(ip_obj) -> None:
+        if not allow_private and _is_blocked_ip(ip_obj):
+            raise NetworkPolicyError(
+                f"'{host}' resolves to the non-public address {ip_obj}. "
+                "Requests to local/private networks are blocked "
+                "(set net_allow_private true to permit them).")
+
+    literal = _literal_ipv4(host)
+    if literal is not None:
+        _guard(literal)
+        return str(literal)
+    try:
+        ip_obj = ipaddress.ip_address(host)
+        _guard(ip_obj)
+        return str(ip_obj)
+    except ValueError:
+        pass
+
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except (socket.gaierror, ValueError, OSError):
+        return None
+    blocked = None
+    for info in infos:
+        try:
+            ip_obj = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            continue
+        if not allow_private and _is_blocked_ip(ip_obj):
+            blocked = ip_obj          # remember, keep scanning for a usable one
+            continue
+        return str(ip_obj)            # first usable (and now pinned) address
+    if blocked is not None:
+        raise NetworkPolicyError(
+            f"'{host}' resolves to the non-public address {blocked}. "
+            "Requests to local/private networks are blocked "
+            "(set net_allow_private true to permit them).")
+    return None
+
+
+def _host_header(parsed) -> str:
+    """The Host header value for a pinned request: the original hostname (so
+    virtual-host routing survives the IP pin), with the port only when it is
+    non-default for the scheme."""
+    host = parsed.hostname or ""
+    port = parsed.port
+    if port and not ((parsed.scheme == "http" and port == 80)
+                     or (parsed.scheme == "https" and port == 443)):
+        return f"{host}:{port}"
+    return host
+
+
+def _session_for(url: str):
+    """A ``requests.Session`` whose socket is pinned to *url*'s pre-validated IP
+    (SSRF-REBIND). ``check_url`` MUST already have passed on *url*. This is the
+    single network-transport seam: production pins here, tests double it here.
+    The caller sends ``_host_header(url)`` as the Host header and closes the
+    session (use it as a context manager).
+
+    Fails CLOSED when the host cannot be resolved to a validated address: we do
+    NOT fall back to a re-resolving session. Otherwise a host that is NXDOMAIN at
+    validation time (check_url lets unresolvable hosts through) but flips to a
+    private A record at connect time (TTL-0 DNS rebinding) would reach an internal
+    service unvalidated - the exact hole this closes. A genuinely unresolvable
+    host cannot be connected to anyway, so refusing costs nothing legitimate."""
+    from localm import netpin
+    parsed = urllib.parse.urlparse(url)
+    ip = _resolve_pinned(parsed.hostname or "")
+    if not ip:
+        raise NetworkPolicyError(
+            f"Could not resolve '{parsed.hostname}' to an address; refusing the "
+            "request rather than connecting through an unvalidated re-resolution.")
+    return netpin.pinned_session(ip)
+
+
 # ---------------------------------------------------------------------------
 #  Fetching
 # ---------------------------------------------------------------------------
@@ -277,37 +369,39 @@ def safe_fetch_bytes(
 
     Raises NetworkPolicyError (policy refusal) or requests exceptions.
     """
-    import requests
-
     current = url
     for _ in range(_MAX_REDIRECTS + 1):
         check_url(current)
-        resp = requests.get(
-            current,
-            timeout=timeout,
-            stream=True,
-            allow_redirects=False,
-            headers={"User-Agent": _USER_AGENT},
-        )
-        try:
-            if resp.is_redirect or resp.is_permanent_redirect:
-                location = resp.headers.get("Location", "")
-                if not location:
-                    raise NetworkPolicyError(
-                        f"Redirect from {current} without a Location header.")
-                current = urllib.parse.urljoin(current, location)
-                continue
-            resp.raise_for_status()
-            content_type = resp.headers.get("Content-Type", "")
-            chunks, size = [], 0
-            for chunk in resp.iter_content(chunk_size=65536):
-                chunks.append(chunk)
-                size += len(chunk)
-                if size >= max_bytes:
-                    break
-            return current, content_type, b"".join(chunks)[:max_bytes]
-        finally:
-            resp.close()
+        parsed = urllib.parse.urlparse(current)
+        # Pin the socket to the just-validated IP for this hop (SSRF-REBIND);
+        # each redirect target is independently re-checked and re-pinned.
+        with _session_for(current) as session:
+            resp = session.get(
+                current,
+                timeout=timeout,
+                stream=True,
+                allow_redirects=False,
+                headers={"User-Agent": _USER_AGENT, "Host": _host_header(parsed)},
+            )
+            try:
+                if resp.is_redirect or resp.is_permanent_redirect:
+                    location = resp.headers.get("Location", "")
+                    if not location:
+                        raise NetworkPolicyError(
+                            f"Redirect from {current} without a Location header.")
+                    current = urllib.parse.urljoin(current, location)
+                    continue
+                resp.raise_for_status()
+                content_type = resp.headers.get("Content-Type", "")
+                chunks, size = [], 0
+                for chunk in resp.iter_content(chunk_size=65536):
+                    chunks.append(chunk)
+                    size += len(chunk)
+                    if size >= max_bytes:
+                        break
+                return current, content_type, b"".join(chunks)[:max_bytes]
+            finally:
+                resp.close()
     raise NetworkPolicyError(
         f"Too many redirects (>{_MAX_REDIRECTS}) fetching {url}")
 
@@ -456,16 +550,18 @@ def _refuse_redirect(resp, backend: str) -> None:
 
 
 def _searxng_search(base: str, query: str, max_results: int) -> list[dict]:
-    import requests
-
     url = f"{base}/search?{urllib.parse.urlencode({'q': query, 'format': 'json'})}"
     check_url(url)
-    resp = requests.get(url, timeout=_DEFAULT_TIMEOUT, allow_redirects=False,
-                        headers={"User-Agent": _USER_AGENT})
-    _refuse_redirect(resp, "The SearXNG search backend")
-    resp.raise_for_status()
+    parsed = urllib.parse.urlparse(url)
+    with _session_for(url) as session:   # pinned to the validated IP (SSRF-REBIND)
+        resp = session.get(url, timeout=_DEFAULT_TIMEOUT, allow_redirects=False,
+                           headers={"User-Agent": _USER_AGENT,
+                                    "Host": _host_header(parsed)})
+        _refuse_redirect(resp, "The SearXNG search backend")
+        resp.raise_for_status()
+        items = resp.json().get("results", [])[:max_results]
     out = []
-    for item in resp.json().get("results", [])[:max_results]:
+    for item in items:
         out.append({
             "title": str(item.get("title", ""))[:300],
             "url": str(item.get("url", "")),
@@ -531,21 +627,23 @@ class _DDGParser(html.parser.HTMLParser):
 
 
 def _ddg_search(query: str, max_results: int) -> list[dict]:
-    import requests
-
-    check_url("https://html.duckduckgo.com/html/")
-    resp = requests.post(   # the HTML endpoint prefers POST for queries
-        "https://html.duckduckgo.com/html/",
-        data={"q": query},
-        timeout=_DEFAULT_TIMEOUT,
-        allow_redirects=False,
-        headers={"User-Agent": _USER_AGENT},
-    )
-    _refuse_redirect(resp, "The DuckDuckGo search backend")
-    resp.raise_for_status()
+    url = "https://html.duckduckgo.com/html/"
+    check_url(url)
+    parsed = urllib.parse.urlparse(url)
+    with _session_for(url) as session:   # pinned to the validated IP (SSRF-REBIND)
+        resp = session.post(   # the HTML endpoint prefers POST for queries
+            url,
+            data={"q": query},
+            timeout=_DEFAULT_TIMEOUT,
+            allow_redirects=False,
+            headers={"User-Agent": _USER_AGENT, "Host": _host_header(parsed)},
+        )
+        _refuse_redirect(resp, "The DuckDuckGo search backend")
+        resp.raise_for_status()
+        text = resp.text
     parser = _DDGParser()
     try:
-        parser.feed(resp.text)
+        parser.feed(text)
     except Exception:
         # Best-effort parse: if the results HTML is malformed, return whatever
         # results were parsed so far instead of failing the whole search. The HTTP
