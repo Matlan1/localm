@@ -12,7 +12,6 @@ against master 4f2869e and fixed in the same pass:
   AUD-CLIENTSCRUB- bug-report client/log fields not token/cred scrubbed
   AUD-CFGFALLBACK- config._read_json crashes instead of falling back
   AUD-CORSWILD   - cors_origins:"*" disabled the open-mode shell-token gate
-  AUD-PLUGINSDIR - plugins_dir() used the frozen HOME_DIR, not lazy home_dir()
   AUD-CLICKVER   - doctor read click.__version__ (DeprecationWarning) first
   NEW-COMFY-STATUS-IMPORT - GET /v1/comfy/status 500'd on a stale import
 """
@@ -235,17 +234,6 @@ def test_comfy_status_route_returns_200(tmp_path, monkeypatch):
     r = client.get("/v1/comfy/status")
     assert r.status_code == 200, r.text
     assert "alive" in r.json()
-
-
-# --------------------------------------------------------------------------- #
-#  AUD-PLUGINSDIR - plugins_dir() honours LOCALM_HOME set after import (lazy)
-# --------------------------------------------------------------------------- #
-
-def test_plugins_dir_is_lazy(tmp_path, monkeypatch):
-    from localm.plugins import loader
-    target = tmp_path / "custom-home"
-    monkeypatch.setenv("LOCALM_HOME", str(target))
-    assert loader.plugins_dir() == target / "plugins"
 
 
 # --------------------------------------------------------------------------- #

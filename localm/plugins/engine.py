@@ -613,6 +613,12 @@ class PluginManager:
         first time it is loaded (its first activation). Persisted in config so it
         does not re-fire on every server start. Previously ``on_first_use`` was
         reserved in the contract but never invoked - a dead promise (REC-ONFIRSTUSE)."""
+        # Only plugins that actually DEFINE on_first_use need first-use tracking.
+        # Skipping the rest avoids a config write on every plugin's first load -
+        # which would create files even in privacy mode (privacy = writes nothing).
+        entry = self._loaded.get(name)
+        if not entry or not callable(getattr(entry[1], "on_first_use", None)):
+            return
         from localm.config import load_config, update_config
         try:
             done = set(load_config().get("plugins_first_use_done", []))
