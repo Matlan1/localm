@@ -206,7 +206,9 @@ async def create_session(req: CreateSessionRequest, request: Request):
         gen_kwargs["max_tokens"] = req.max_tokens
 
     from localm.audit import effective_mode
-    session_mode = req.mode or effective_mode("coder").value
+    # Pass the session's project dir so a per-project .localcoder/config.toml mode
+    # is honored by the GUI coder, not just the global coder_mode (REC-CODER-MODE-TOML).
+    session_mode = req.mode or effective_mode("coder", cwd=cwd).value
 
     loop = asyncio.get_running_loop()
     # Agent construction scans the project (map build) - keep it off the loop

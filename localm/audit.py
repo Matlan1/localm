@@ -75,17 +75,31 @@ def parse_mode(value: str) -> SessionMode:
     return SessionMode(v)
 
 
-def effective_mode(surface: str) -> SessionMode:
+def effective_mode(surface: str, cwd=None) -> SessionMode:
     """
     Resolve the active session mode for *surface* ("chat" | "coder" | "server").
 
-    Precedence: LOCALM_MODE env (set by --mode flags) > per-surface config
-    key ("chat_mode" / "coder_mode") > global config "mode" > privacy.
+    Precedence: LOCALM_MODE env (set by --mode flags) > (coder only, when *cwd* is
+    given) a project-local ``.localcoder/config.toml`` ``mode`` > per-surface
+    config key ("chat_mode" / "coder_mode") > global config "mode" > privacy.
     Invalid values fall through to the next level rather than crashing.
     """
     env = os.environ.get(MODE_ENV_VAR, "").strip().lower()
     if env in _VALID_MODES:
         return SessionMode(env)
+
+    # A project-local .localcoder/config.toml mode overrides the global coder_mode
+    # for the coder surface (REC-CODER-MODE-TOML). It needs the project dir, so it
+    # only applies when the caller passes cwd (the GUI coder session does; the
+    # localcoder CLI reads the same file itself before it gets here).
+    if surface == "coder" and cwd is not None:
+        try:
+            from localm.plugins.coder.project_config import load_project_config
+            pmode = load_project_config(Path(cwd)).get("mode")
+            if isinstance(pmode, str) and pmode.strip().lower() in _VALID_MODES:
+                return SessionMode(pmode.strip().lower())
+        except Exception:
+            pass
 
     try:
         from localm.config import load_config

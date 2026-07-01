@@ -46,7 +46,10 @@ def detect_model_family(model_name: str) -> str:
     """
     n = model_name.lower()
 
-    if n.startswith("gemma"):
+    # Substring match (not just startswith) so a RESOLVED repo id like
+    # "hf:google/gemma-4-4b" - threaded in for an aliased model whose bare alias
+    # hides the family - is still classified correctly (REC-CODER-FAMILY).
+    if "gemma" in n:
         return "gemma"
 
     # Thinking / reasoning models (chain-of-thought fine-tunes). The marker set
@@ -55,8 +58,10 @@ def detect_model_family(model_name: str) -> str:
     if is_thinking_model(model_name):
         return "thinking"
 
-    # Small / resource-constrained models
-    if n.startswith("phi") or any(p in n for p in ("-tiny", "tiny-")):
+    # Small / resource-constrained models (phi / tiny), matched anywhere in the
+    # name or repo path (phi guarded so it does not catch an unrelated substring).
+    if (n.startswith("phi") or "/phi" in n or "phi-" in n
+            or "-tiny" in n or "tiny-" in n):
         return "small"
 
     return "default"
