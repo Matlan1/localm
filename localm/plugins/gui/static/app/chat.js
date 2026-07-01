@@ -190,6 +190,10 @@ export function hydrateChatToggles(cfg) {
   const savedWeb = chat.privacy ? null : lsGet("localm.webAccess");
   if (savedWeb !== null) webEl.checked = savedWeb === "1";
   else if (cfg && cfg.net_mode === "allow") webEl.checked = true;
+  // The brain toggle mirrors the server-side memory_enabled config (default on).
+  const memEl = $("p-memory");
+  if (memEl && cfg && typeof cfg.memory_enabled === "boolean")
+    memEl.checked = cfg.memory_enabled;
 }
 window.hydrateChatToggles = hydrateChatToggles;
 

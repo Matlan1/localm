@@ -206,55 +206,138 @@ async def conversation_delete(conv_id: str):
 
 
 # ------------------------------------------------------------------ #
-#  Assistant memory                                                   #
+#  Assistant memory (structured, via localm/memory)                   #
 # ------------------------------------------------------------------ #
-# A plain markdown file the user can read and edit, injected into the system
-# prompt when the drawer toggle is on. Privacy semantics: "no new traces", not
-# amnesia - READING memory from earlier non-privacy sessions is allowed, but
-# WRITES (which persist conversation-derived facts) return 403 under privacy.
+# The chat "memory" is a small structured store of durable facts about the user
+# (localm/memory), recalled by recency+importance+relevance and injected server-
+# side by the inlet hook below. It supersedes the old flat chat-memory.md blob;
+# that file is migrated in once (see _migrate_legacy) and then left alone.
+# Privacy semantics are unchanged: "no new traces", not amnesia - READING/recall
+# of memory from earlier non-privacy sessions is allowed, but every WRITE (add,
+# edit, delete, consolidation, migration) is gated on the chat session mode.
+#
+# Chat memory is OWNER-scoped in v1: the kernel chat pipeline carries no principal
+# and localm is single-user, so all chat turns share the "owner" namespace (this
+# matches the old global chat-memory.md - no regression). The memory library fully
+# supports (principal, agent, scope_key) isolation and is exercised there by the
+# coder (per project) and by the library tests.
 
-def _memory_file() -> Path:
+_OWNER = "owner"
+
+
+def _memory_root() -> Path:
+    return _home() / "memory"
+
+
+def _chat_store():
+    from localm import memory as _mem
+    return _mem.open_store(_OWNER, "chat", "", root=_memory_root())
+
+
+def _legacy_memory_file() -> Path:
     return _home() / "chat-memory.md"
 
 
 def _read_memory() -> str:
-    memory_file = _memory_file()
-    if memory_file.is_file():
+    """The legacy flat chat-memory.md text (migration source + privacy-mode read
+    fallback), or empty string."""
+    p = _legacy_memory_file()
+    if p.is_file():
         try:
-            return memory_file.read_text(encoding="utf-8")
+            return p.read_text(encoding="utf-8")
         except OSError:
             return ""
     return ""
 
 
-def _write_memory(text: str) -> None:
-    text = text.strip()
-    if len(text) > _MEMORY_MAX:
-        raise HTTPException(413, "Memory file too large (max 64k chars)")
-    memory_file = _memory_file()
-    memory_file.parent.mkdir(parents=True, exist_ok=True)
-    if not text:
-        memory_file.unlink(missing_ok=True)
+def _legacy_bullets() -> list:
+    """Bare fact lines parsed out of the legacy chat-memory.md (bullets stripped)."""
+    return [_strip_bullet(ln) for ln in _read_memory().splitlines()
+            if _strip_bullet(ln)]
+
+
+def _migrate_legacy(store) -> None:
+    """Import the legacy flat chat-memory.md into the structured store ONCE.
+
+    Gated on the chat session mode (privacy skips - a migration materialises new
+    durable records, which is a write) and on a per-namespace marker file so it
+    never re-imports. Best-effort: a failure is logged, never fatal, and never
+    reported as a success it did not perform (RULE 5)."""
+    marker = store.path.with_suffix(".legacy-imported")
+    if marker.exists() or not _persist_enabled():
         return
-    tmp = memory_file.with_name(memory_file.name + ".tmp")
-    tmp.write_text(text + "\n", encoding="utf-8")
-    tmp.replace(memory_file)
+    try:
+        from localm.memory import MemoryRecord
+        existing = {r.text.casefold() for r in store.all()}
+        added = False
+        for bullet in _legacy_bullets():
+            if bullet.casefold() in existing:
+                continue
+            store.add(MemoryRecord(text=bullet, kind="semantic",
+                                   source="import", importance=0.7), save=False)
+            existing.add(bullet.casefold())
+            added = True
+        if added:
+            store._save()                        # one batch write
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("1", encoding="utf-8")
+    except Exception as e:                        # never break chat on migration
+        from localm.debuglog import logger
+        logger.debug("chat memory legacy migration skipped: %s", e)
+
+
+class MemoryPatch(BaseModel):
+    text: str | None = None
+    importance: float | None = None
+
+
+def _item(rec) -> dict:
+    return {"id": rec.id, "text": rec.text, "importance": rec.importance,
+            "source": rec.source, "kind": rec.kind, "uses": rec.uses,
+            "updated": rec.updated}
+
+
+def _rendered_text(store) -> str:
+    """The store's facts as a markdown bullet list (what the existing memory modal
+    textarea shows). Falls back to the legacy flat file when the structured store
+    is still empty (e.g. privacy mode blocked migration) so existing memory stays
+    visible/read-only."""
+    recs = store.all()
+    if recs:
+        return "\n".join(f"- {r.text}" for r in recs)
+    legacy = _read_memory().strip()
+    return legacy
 
 
 @_router.get("/api/memory")
 async def memory_get():
-    return {"text": _read_memory(), "writable": _persist_enabled(),
-            "path": str(_memory_file())}
+    store = _chat_store()
+    if _persist_enabled():
+        _migrate_legacy(store)
+    return {"text": _rendered_text(store), "writable": _persist_enabled(),
+            "items": [_item(r) for r in store.all()],
+            "path": str(store.path)}
 
 
 @_router.put("/api/memory")
 async def memory_put(req: MemoryUpdate):
+    """Bulk-edit: the modal textarea is the authoritative user memory. Replaces the
+    store with the edited bullet lines as user-sourced facts (the old PUT
+    overwrote chat-memory.md wholesale; same intent, structured now)."""
     if not _persist_enabled():
         raise HTTPException(
             403, "Memory writes are off in privacy mode (no new traces). "
                  "Set mode/chat_mode to 'log' or 'full' to enable them.")
-    _write_memory(req.text)
-    return {"status": "saved", "chars": len(req.text.strip())}
+    from localm.memory import MAX_TEXT_LEN, MemoryRecord
+    if len(req.text) > _MEMORY_MAX:
+        raise HTTPException(413, "Memory too large (max 64k chars)")
+    store = _chat_store()
+    _migrate_legacy(store)
+    facts = [_strip_bullet(ln) for ln in req.text.splitlines() if _strip_bullet(ln)]
+    records = [MemoryRecord(text=f[:MAX_TEXT_LEN], kind="semantic",
+                            source="user", importance=0.8) for f in facts]
+    store.replace(records)
+    return {"status": "saved", "count": len(records)}
 
 
 @_router.post("/api/memory/append")
@@ -262,35 +345,67 @@ async def memory_append(req: MemoryAppend):
     if not _persist_enabled():
         raise HTTPException(
             403, "Memory writes are off in privacy mode (no new traces)")
-    fact = req.text.strip()
+    fact = _strip_bullet(req.text)
     if not fact:
         raise HTTPException(400, "Nothing to remember")
-    current = _read_memory().strip()
-    line = fact if fact.startswith("-") else f"- {fact}"
-    _write_memory((current + "\n" + line) if current else line)
-    return {"status": "appended"}
+    from localm.memory import MemoryRecord
+    store = _chat_store()
+    _migrate_legacy(store)
+    rec = store.add(MemoryRecord(text=fact, kind="semantic", source="user",
+                                 importance=0.8))
+    return {"status": "appended", "id": rec.id}
+
+
+@_router.patch("/api/memory/{mem_id}")
+async def memory_patch(mem_id: str, req: MemoryPatch):
+    if not _persist_enabled():
+        raise HTTPException(403, "Memory writes are off in privacy mode")
+    store = _chat_store()
+    fields = {}
+    if req.text is not None:
+        fields["text"] = req.text
+    if req.importance is not None:
+        fields["importance"] = req.importance
+    rec = store.update(mem_id, **fields) if fields else store.get(mem_id)
+    if rec is None:
+        raise HTTPException(404, "No such memory")
+    return {"status": "saved", "item": _item(rec)}
+
+
+@_router.delete("/api/memory/{mem_id}")
+async def memory_delete(mem_id: str):
+    if not _persist_enabled():
+        raise HTTPException(403, "Memory writes are off in privacy mode")
+    store = _chat_store()
+    return {"status": "deleted" if store.delete(mem_id) else "absent", "id": mem_id}
+
+
+@_router.post("/api/memory/consolidate")
+async def memory_consolidate():
+    """Manually distil durable facts from recent sessions into the store (the
+    opt-in consolidation trigger). Gated on privacy; needs a loaded model."""
+    if not _persist_enabled():
+        raise HTTPException(403, "Memory writes are off in privacy mode")
+    if _ENGINE is None or not getattr(_ENGINE, "loaded", False):
+        raise HTTPException(503, "Load a model first to consolidate memory")
+
+    def complete(prompt: str) -> str:
+        return "".join(_ENGINE.chat_stream(
+            [{"role": "user", "content": prompt}])).strip()
+
+    return synthesize_memory(complete)
 
 
 # ------------------------------------------------------------------ #
-#  Memory auto-synthesis (A2)                                         #
+#  Memory consolidation (distil durable facts from finished sessions) #
 # ------------------------------------------------------------------ #
-# Distil durable user facts from finished sessions into chat-memory.md so the
-# model "remembers" across chats without the user typing /remember. Runs on a
-# schedule as a jobs "memory" task (the jobs runner binds `complete` to the
-# model). Privacy: only log/full sessions exist to read, AND writes are gated on
+# Read recent session logs and fold durable user facts into the structured store
+# via the ADD/UPDATE/DELETE/NO_OP consolidation loop (localm/memory/consolidate).
+# Runs OUT OF BAND: as the jobs "memory" task (the runner binds `complete` to the
+# model) or the POST /api/memory/consolidate route - never in the chat hot path.
+# Privacy: only log/full sessions exist to read, AND the write path is gated on
 # _persist_enabled() - in privacy mode this SKIPS and says so (RULE 5: a
-# privacy-blocked write must never report success).
-
-_SYNTH_PREFIX = (
-    "You maintain a long-term memory of durable facts about a user, built from "
-    "their past conversations with an AI assistant. Below are recent exchanges.\n\n"
-    "Extract ONLY durable, reusable facts about the user: their name, role, "
-    "projects, tools, stable preferences, and recurring goals. IGNORE one-off "
-    "questions, transient details, and anything that will not matter next week.\n"
-    "Output one fact per line, each starting with '- '. Output nothing if there "
-    "is nothing worth remembering.\n\n=== recent conversations ===\n"
-)
-_SYNTH_SUFFIX = "\n=== end ===\n\nDurable facts:"
+# privacy-blocked write must never report success; the model is never called).
 
 
 def _recent_sessions_text(max_chars: int = 8000) -> str:
@@ -334,46 +449,41 @@ def _strip_bullet(line: str) -> str:
     return re.sub(r"^[\s\-*]+", "", line).strip()
 
 
-def _existing_memory_lines() -> set:
-    """Casefolded set of current memory fact lines (for dedupe)."""
-    return {_strip_bullet(ln).casefold()
-            for ln in _read_memory().splitlines() if ln.strip()}
-
-
 def synthesize_memory(complete, *, max_facts: int = 12,
                       max_chars: int = 8000) -> dict:
-    """Distil durable user facts from recent sessions into chat-memory.md.
+    """Distil durable user facts from recent sessions into the structured store.
 
     *complete* is an injected ``(prompt: str) -> str`` model call (the jobs runner
-    binds it to the engine; tests pass a fake), so the deterministic logic here is
-    unit-testable without a model.
+    binds it to the engine; tests pass a fake). Delegates to the memory
+    consolidation loop (ADD/UPDATE/DELETE/NO_OP + decay), so the store stays small
+    and non-contradictory rather than an ever-growing flat list.
 
-    Privacy: writes are gated on _persist_enabled(); in privacy mode this returns
-    ``{"status": "skipped", "reason": "privacy", "added": 0}`` - it never reports
-    a success it did not perform.
+    Privacy: gated on _persist_enabled(); in privacy mode returns
+    ``{"status": "skipped", "reason": "privacy", "added": 0}`` and NEVER calls the
+    model - it never reports a success it did not perform. Returns
+    ``{status, added, updated, deleted, facts}`` (facts = the texts newly added),
+    the shape the jobs "memory" runner consumes.
     """
     if not _persist_enabled():
         return {"status": "skipped", "reason": "privacy", "added": 0}
     sessions = _recent_sessions_text(max_chars=max_chars)
     if not sessions.strip():
         return {"status": "skipped", "reason": "no_sessions", "added": 0}
-    raw = complete(_SYNTH_PREFIX + sessions + _SYNTH_SUFFIX) or ""
-    have = _existing_memory_lines()
-    new_facts: list[str] = []
-    for line in str(raw).splitlines():
-        fact = _strip_bullet(line)
-        if not fact or fact.casefold() in have:
-            continue
-        have.add(fact.casefold())
-        new_facts.append(fact)
-        if len(new_facts) >= max_facts:
-            break
-    if not new_facts:
-        return {"status": "ok", "added": 0, "facts": []}
-    current = _read_memory().strip()
-    block = "\n".join(f"- {f}" for f in new_facts)
-    _write_memory((current + "\n" + block) if current else block)
-    return {"status": "ok", "added": len(new_facts), "facts": new_facts}
+    from localm.memory import run_consolidation
+    store = _chat_store()
+    _migrate_legacy(store)
+    # Report which facts were newly added by diffing record ids. Ids are stable
+    # across consolidation (store.replace reuses the same record objects and only
+    # (re)computes vectors keyed by id - it never mints new ids or duplicates a
+    # record), so an UPDATE reuses its id (not counted here) and only true ADDs
+    # appear. v1's chat path passes no embed_fn, so no vectors are involved at all.
+    before = {r.id for r in store.all()}
+    res = run_consolidation(store, sessions, complete, surface="chat",
+                            max_candidates=max_facts)
+    new_facts = [r.text for r in store.all() if r.id not in before]
+    return {"status": res.get("status", "ok"), "added": res.get("added", 0),
+            "updated": res.get("updated", 0), "deleted": res.get("deleted", 0),
+            "facts": new_facts}
 
 
 # ------------------------------------------------------------------ #
@@ -478,9 +588,88 @@ def _thinking_inlet(messages, ctx):
     return messages
 
 
+# ------------------------------------------------------------------ #
+#  Server-side memory injection (the single injection point)          #
+# ------------------------------------------------------------------ #
+# Recall the user's durable memories relevant to the latest message and inject
+# them, neutralised + fenced as data-not-instructions, into the system message.
+# Runs for EVERY /v1/chat/completions client (GUI, API, coder-via-localm), which
+# is why the SPA no longer prepends memory client-side (no double injection).
+
+# The inference engine handle, stashed at register() for the manual
+# POST /api/memory/consolidate route (which needs a model). None until wired.
+_ENGINE = None
+
+
+def _last_user_text(messages) -> str:
+    """The most recent user message's text, used only as the recall QUERY.
+
+    For multimodal content (a list of parts) the text parts are joined - this is a
+    best-effort query, not a reconstruction of what the model saw, so exact phrasing
+    does not matter; it only steers relevance ranking (and the recalled memories are
+    neutralised before injection regardless)."""
+    for m in reversed(messages):
+        if m.get("role") != "user":
+            continue
+        content = m.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return " ".join(
+                p.get("text", "") for p in content
+                if isinstance(p, dict) and p.get("type") == "text")
+    return ""
+
+
+def _memory_inlet(messages, ctx):
+    """Inject recalled memories into the system message. Gated on ``memory_enabled``
+    config; reinforcement (a write) only when the session mode allows it. In
+    privacy mode with an empty structured store, the legacy flat memory is still
+    injected READ-ONLY (recall is not amnesia). Best-effort: any failure is logged
+    at debug and skipped - never breaks the turn (the pipeline also isolates it)."""
+    try:
+        from localm.config import load_config
+        if not load_config().get("memory_enabled", True):
+            return None
+    except Exception:
+        pass                                       # config unreadable -> default on
+    try:
+        from localm import memory as _mem
+        query = _last_user_text(messages)
+        if not query.strip():
+            return None
+        store = _chat_store()
+        allow = _mem.writes_allowed("chat")
+        if allow:
+            _migrate_legacy(store)
+        block_records = store.recall(query, k=_mem.MAX_INJECT, reinforce=allow)
+        if not block_records and not allow:
+            block_records = [{"text": b}
+                             for b in _legacy_bullets()[:_mem.MAX_INJECT]]
+        block = _mem.render_memories(block_records)
+        if not block:
+            return None
+        for m in messages:
+            if m.get("role") == "system" and isinstance(m.get("content"), str):
+                m["content"] = block + "\n\n" + m["content"]
+                return messages
+        messages.insert(0, {"role": "system", "content": block})
+        return messages
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.debug("memory inlet skipped: %s", e)
+        return None
+
+
 def register(host) -> None:
+    global _ENGINE
     host.mount_router(_router)
     host.register_chat_hook("inlet", _thinking_inlet)
+    host.register_chat_hook("inlet", _memory_inlet)
+    try:
+        _ENGINE = host.engine()
+    except Exception:
+        _ENGINE = None
 
 
 def unregister() -> None:
