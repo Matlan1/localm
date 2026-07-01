@@ -43,6 +43,41 @@ _PUBLIC_DNS = [(2, 1, 6, "", ("93.184.216.34", 80))]
 _LOOPBACK_DNS = [(2, 1, 6, "", ("127.0.0.1", 8642))]
 
 
+class _FakeSession:
+    """Doubles netpolicy._session_for (the pinned-transport seam) so the fetch
+    path is exercised without a live socket. get may be a fixed response or a
+    responder callable (url, **kw)."""
+
+    def __init__(self, get=None):
+        self._get = get
+
+    def get(self, url, **kw):
+        if self._get is None:
+            raise AssertionError(f"unexpected GET to {url}")
+        return self._get(url, **kw) if callable(self._get) else self._get
+
+    def close(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _session(get=None):
+    """patch() context manager routing the pinned session to a fake response."""
+    return patch("localm.netpolicy._session_for",
+                 return_value=_FakeSession(get=get))
+
+
+def _raise(exc):
+    def _f(url, **kw):
+        raise exc
+    return _f
+
+
 @pytest.fixture(autouse=True)
 def _policy_env(monkeypatch):
     """Deterministic policy: mode allow, no domain rules, default SSRF guard."""
@@ -56,8 +91,7 @@ def _call(url: str = "http://example.com", max_chars: int = 8000, **kwargs):
 
 def _fetch(html: str, content_type="text/html", url="http://example.com"):
     with patch("socket.getaddrinfo", return_value=_PUBLIC_DNS), \
-         patch("requests.get",
-               return_value=_FakeResponse(html, content_type)):
+         _session(get=_FakeResponse(html, content_type)):
         return _call(url)
 
 
@@ -144,8 +178,7 @@ class TestPlainText:
 class TestTruncation:
     def test_long_content_truncated_at_max_chars(self):
         with patch("socket.getaddrinfo", return_value=_PUBLIC_DNS), \
-             patch("requests.get",
-                   return_value=_FakeResponse("<p>" + "x" * 20_000 + "</p>")):
+             _session(get=_FakeResponse("<p>" + "x" * 20_000 + "</p>")):
             result = tool_fetch_url(Path("/tmp"), "http://x.com", max_chars=100)
         assert result.ok
         assert result.truncated
@@ -157,8 +190,7 @@ class TestTruncation:
 
     def test_summary_mentions_truncation(self):
         with patch("socket.getaddrinfo", return_value=_PUBLIC_DNS), \
-             patch("requests.get",
-                   return_value=_FakeResponse("<p>" + "y" * 20_000 + "</p>")):
+             _session(get=_FakeResponse("<p>" + "y" * 20_000 + "</p>")):
             result = tool_fetch_url(Path("/tmp"), "http://x.com", max_chars=50)
         assert "truncated" in result.summary
 
@@ -170,21 +202,20 @@ class TestTruncation:
 class TestErrors:
     def test_connection_error_returns_error_result(self):
         with patch("socket.getaddrinfo", return_value=_PUBLIC_DNS), \
-             patch("requests.get",
-                   side_effect=ConnectionError("connection refused")):
+             _session(get=_raise(ConnectionError("connection refused"))):
             result = _call("http://unreachable.example")
         assert not result.ok
         assert "Could not fetch" in result.output
 
     def test_generic_exception_returns_error_result(self):
         with patch("socket.getaddrinfo", return_value=_PUBLIC_DNS), \
-             patch("requests.get", side_effect=Exception("boom")):
+             _session(get=_raise(Exception("boom"))):
             result = _call()
         assert not result.ok
 
     def test_error_result_not_truncated(self):
         with patch("socket.getaddrinfo", return_value=_PUBLIC_DNS), \
-             patch("requests.get", side_effect=Exception("nope")):
+             _session(get=_raise(Exception("nope"))):
             result = _call()
         assert not result.truncated
 
@@ -202,7 +233,7 @@ class TestUserAgent:
             return _FakeResponse("<p>ok</p>")
 
         with patch("socket.getaddrinfo", return_value=_PUBLIC_DNS), \
-             patch("requests.get", side_effect=fake_get):
+             _session(get=fake_get):
             _call()
         assert "localm" in sent.get("User-Agent", "").lower()
 
@@ -228,7 +259,7 @@ class TestSummary:
 class TestPrivacyAuditLog:
     def test_prints_url_to_stderr_in_privacy_mode(self, capsys):
         with patch("socket.getaddrinfo", return_value=_PUBLIC_DNS), \
-             patch("requests.get", return_value=_FakeResponse("<p>ok</p>")):
+             _session(get=_FakeResponse("<p>ok</p>")):
             result = tool_fetch_url(
                 Path("/tmp"), "http://example.com/secret",
                 _privacy=True,
@@ -240,7 +271,7 @@ class TestPrivacyAuditLog:
 
     def test_no_stderr_without_privacy_mode(self, capsys):
         with patch("socket.getaddrinfo", return_value=_PUBLIC_DNS), \
-             patch("requests.get", return_value=_FakeResponse("<p>ok</p>")):
+             _session(get=_FakeResponse("<p>ok</p>")):
             tool_fetch_url(Path("/tmp"), "http://example.com/page")
         err = capsys.readouterr().err
         assert "http://example.com/page" not in err
@@ -315,7 +346,7 @@ class TestPolicyEnforcement:
         monkeypatch.setattr("localm.config.load_config",
                             lambda: {"net_allow_private": True})
         with patch("socket.getaddrinfo", return_value=_LOOPBACK_DNS), \
-             patch("requests.get", return_value=_FakeResponse("<p>local</p>")):
+             _session(get=_FakeResponse("<p>local</p>")):
             r = _call("http://127.0.0.1:8642/health")
         assert r.ok
         assert "local" in r.output
