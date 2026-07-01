@@ -133,6 +133,52 @@ def test_search_empty_store(home, tmp_path):
     assert EpisodeStore(tmp_path).search("anything") == []
 
 
+def _kw_embed(texts):
+    """Deterministic keyword-bucket 'embedding' so cosine reflects topical
+    relatedness in-process (no model): [is-networking, is-ui, bias]."""
+    net = {"retry", "backoff", "http", "client", "api", "network", "connection",
+           "connections", "unreliable", "resilient", "server", "servers",
+           "request", "requests", "flaky", "gracefully", "upstream", "handle"}
+    ui = {"css", "flexbox", "layout", "navbar", "dropdown", "menu", "style",
+          "mobile", "screens", "grid", "gap", "media", "min-width"}
+    out = []
+    for t in texts:
+        w = set(t.lower().split())
+        out.append([1.0 if w & net else 0.0, 1.0 if w & ui else 0.0, 0.2])
+    return out
+
+
+def test_search_semantic_recall_beats_lexical(home, tmp_path, monkeypatch):
+    """With an embedder, a task phrased differently from a lesson is still
+    recalled (cosine), where BM25 alone finds nothing; unrelated stays silent."""
+    import localm.plugins.coder.episodes as em
+    monkeypatch.setattr(em, "_embed_fn", lambda: _kw_embed)
+    store = EpisodeStore(tmp_path)
+    store.add(Episode(task="add retry logic with exponential backoff", lesson="cap backoff"))
+    store.add(Episode(task="style the navbar dropdown", lesson="use flexbox gap"))
+    q = "handle unreliable upstream connections gracefully"   # no shared tokens w/ retry
+    sem = [e.lesson for e in store.search(q, k=2)]
+    assert any("backoff" in l for l in sem)                   # semantic finds it
+    # BM25-only (embedder off) misses it entirely
+    monkeypatch.setattr(em, "_embed_fn", lambda: None)
+    assert store.search(q, k=2) == []
+    # and an unrelated task stays silent even with the embedder
+    monkeypatch.setattr(em, "_embed_fn", lambda: _kw_embed)
+    assert store.search("bake a chocolate cake", k=2) == []
+
+
+def test_clear_removes_vector_sidecar(home, tmp_path, monkeypatch):
+    import localm.plugins.coder.episodes as em
+    monkeypatch.setattr(em, "_embed_fn", lambda: _kw_embed)
+    store = EpisodeStore(tmp_path)
+    store.add(Episode(task="add retry logic", lesson="backoff"))
+    store.search("network retry")                              # populates the sidecar
+    vec = store.path.with_suffix(".vec.json")
+    assert vec.is_file()
+    store.clear()
+    assert not vec.is_file() and not store.path.is_file()
+
+
 # --------------------------------------------------------------------------- #
 #  Reflection                                                                 #
 # --------------------------------------------------------------------------- #

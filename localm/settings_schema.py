@@ -176,6 +176,13 @@ CORE_FIELDS: list = [
                  "in privacy mode; turning this off just stops using the memory.",
                  group="Privacy"),
     # ---- Models ----
+    SettingField("embedding_model", Widget.TEXT, "Embedding model",
+                 "Small on-device model for semantic search in memory and RAG "
+                 "(loaded separately from the chat model). A known key "
+                 "(bge-small-en-v1.5, nomic-embed-text-v1.5), a registered model "
+                 "name, or a path to a GGUF. Run 'localm setup-embeddings' to fetch "
+                 "it; until then, memory/RAG use lexical search.",
+                 group="Models", applies=Applies.NEXT_LOAD),
     SettingField("confirm_remove", Widget.TOGGLE,
                  "Confirm before deleting models",
                  "Ask for confirmation before `localm rm` deletes a model's "

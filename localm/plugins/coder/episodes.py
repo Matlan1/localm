@@ -42,6 +42,25 @@ _MAX_EPISODES = 200
 # than dragging in an irrelevant past lesson.
 _MIN_SCORE = 0.10
 _RETRIEVE_K = 3
+# Absolute cosine floor for the SEMANTIC half of recall (when an on-device
+# embedding model is available). A past lesson is recalled when it matches the
+# task lexically (BM25 > _MIN_SCORE) OR semantically (cosine > _COS_MIN). Both are
+# ABSOLUTE gates (not max-normalised) so an unrelated task still injects nothing -
+# episodic recall must stay silent when there is no relevant lesson, which is why
+# this reuses the shared embedder but NOT the chat MemoryStore's "always surface
+# the top fact" retrieval policy.
+_COS_MIN = 0.55
+
+
+def _embed_fn():
+    """The shared on-device embedder (localm.inference.embedder), or None when no
+    embedding model is available - recall then uses BM25 lexical ranking only."""
+    try:
+        from localm.inference.embedder import get_embedder
+        emb = get_embedder()
+        return emb.embed if emb is not None else None
+    except Exception:
+        return None
 
 
 @dataclass
@@ -129,19 +148,74 @@ class EpisodeStore:
         tmp.replace(self._file)
         return ep
 
+    def _vectors(self, texts: list, ef) -> Optional[list]:
+        """Embeddings for the episode search-texts, cached in a ``.vec.json``
+        sidecar keyed by a content hash so they are recomputed only when the
+        episodes change (a new episode, or the cap dropping the oldest)."""
+        import hashlib
+        h = hashlib.sha1("\x00".join(texts).encode("utf-8")).hexdigest()
+        vf = self._file.with_suffix(".vec.json")
+        if vf.is_file():
+            try:
+                d = json.loads(vf.read_text(encoding="utf-8"))
+                if d.get("hash") == h and len(d.get("vectors", [])) == len(texts):
+                    return d["vectors"]
+            except (json.JSONDecodeError, OSError, ValueError):
+                pass
+        try:
+            vecs = ef(texts)
+        except Exception:
+            return None
+        if not vecs or len(vecs) != len(texts):
+            return None
+        try:
+            tmp = vf.with_name(vf.name + ".tmp")
+            tmp.write_text(json.dumps({"hash": h, "vectors": vecs}), encoding="utf-8")
+            tmp.replace(vf)
+        except OSError:
+            pass
+        return vecs
+
     def search(self, task: str, k: int = _RETRIEVE_K) -> list:
-        """The *k* most relevant past episodes for *task* by BM25, above the
-        relevance floor (so an unrelated task injects nothing)."""
+        """The *k* most relevant past episodes for *task*, above the relevance
+        floor (so an unrelated task injects nothing). Uses BM25 (lexical) blended
+        with cosine similarity (semantic) when an embedding model is available, so
+        a lesson phrased differently from the task is still recalled - both gated
+        ABSOLUTELY so silence-when-irrelevant holds."""
         eps = self.all()
         if not eps or not (task or "").strip():
             return []
         from localm.rag.bm25 import BM25
-        scores = BM25([e.search_text() for e in eps]).scores(task)
-        ranked = sorted(zip(eps, scores), key=lambda t: t[1], reverse=True)
-        return [e for e, s in ranked[:k] if s > _MIN_SCORE]
+        texts = [e.search_text() for e in eps]
+        bm = BM25(texts).scores(task)
+        bm_top = max(bm) if bm else 0.0
+
+        cos = None
+        ef = _embed_fn()
+        if ef is not None:
+            try:
+                qv = ef([task])[0]
+            except Exception:
+                qv = None
+            evs = self._vectors(texts, ef) if qv else None
+            if evs and all(len(v) == len(qv) for v in evs if v):
+                from localm.memory.store import _cosine
+                cos = [(_cosine(qv, v) if v else 0.0) for v in evs]
+
+        scored = []
+        for i, e in enumerate(eps):
+            b = bm[i]
+            c = cos[i] if cos else 0.0
+            # ABSOLUTE relevance gates: lexical OR semantic match, else drop it.
+            if b > _MIN_SCORE or c > _COS_MIN:
+                rel = 0.5 * (b / bm_top if bm_top > 0 else 0.0) + 0.5 * c
+                scored.append((rel, i, e))
+        scored.sort(key=lambda t: (-t[0], t[1]))
+        return [e for _s, _i, e in scored[:k]]
 
     def clear(self) -> None:
         self._file.unlink(missing_ok=True)
+        self._file.with_suffix(".vec.json").unlink(missing_ok=True)
 
 
 def render_for_prompt(episodes: list) -> str:

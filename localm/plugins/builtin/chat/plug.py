@@ -234,6 +234,19 @@ def _chat_store():
     return _mem.open_store(_OWNER, "chat", "", root=_memory_root())
 
 
+def _embed_fn():
+    """The embedding callable memory uses for semantic (vector) recall, or None
+    when no embedding model is available (recall + consolidation then fall back to
+    lexical BM25). Cheap after the first call - the embedder is a cached, shared
+    singleton (localm.inference.embedder)."""
+    try:
+        from localm.inference.embedder import get_embedder
+        emb = get_embedder()
+        return emb.embed if emb is not None else None
+    except Exception:
+        return None
+
+
 def _legacy_memory_file() -> Path:
     return _home() / "chat-memory.md"
 
@@ -268,13 +281,15 @@ def _migrate_legacy(store) -> None:
         return
     try:
         from localm.memory import MemoryRecord
+        ef = _embed_fn()
         existing = {r.text.casefold() for r in store.all()}
         added = False
         for bullet in _legacy_bullets():
             if bullet.casefold() in existing:
                 continue
             store.add(MemoryRecord(text=bullet, kind="semantic",
-                                   source="import", importance=0.7), save=False)
+                                   source="import", importance=0.7),
+                      embed_fn=ef, save=False)
             existing.add(bullet.casefold())
             added = True
         if added:
@@ -336,7 +351,7 @@ async def memory_put(req: MemoryUpdate):
     facts = [_strip_bullet(ln) for ln in req.text.splitlines() if _strip_bullet(ln)]
     records = [MemoryRecord(text=f[:MAX_TEXT_LEN], kind="semantic",
                             source="user", importance=0.8) for f in facts]
-    store.replace(records)
+    store.replace(records, embed_fn=_embed_fn())
     return {"status": "saved", "count": len(records)}
 
 
@@ -352,7 +367,7 @@ async def memory_append(req: MemoryAppend):
     store = _chat_store()
     _migrate_legacy(store)
     rec = store.add(MemoryRecord(text=fact, kind="semantic", source="user",
-                                 importance=0.8))
+                                 importance=0.8), embed_fn=_embed_fn())
     return {"status": "appended", "id": rec.id}
 
 
@@ -366,7 +381,8 @@ async def memory_patch(mem_id: str, req: MemoryPatch):
         fields["text"] = req.text
     if req.importance is not None:
         fields["importance"] = req.importance
-    rec = store.update(mem_id, **fields) if fields else store.get(mem_id)
+    rec = (store.update(mem_id, embed_fn=_embed_fn(), **fields)
+           if fields else store.get(mem_id))
     if rec is None:
         raise HTTPException(404, "No such memory")
     return {"status": "saved", "item": _item(rec)}
@@ -476,14 +492,41 @@ def synthesize_memory(complete, *, max_facts: int = 12,
     # across consolidation (store.replace reuses the same record objects and only
     # (re)computes vectors keyed by id - it never mints new ids or duplicates a
     # record), so an UPDATE reuses its id (not counted here) and only true ADDs
-    # appear. v1's chat path passes no embed_fn, so no vectors are involved at all.
+    # appear. When an embedding model is available, embed_fn stores a semantic
+    # vector per new/updated record so recall is semantic, not just lexical.
     before = {r.id for r in store.all()}
-    res = run_consolidation(store, sessions, complete, surface="chat",
-                            max_candidates=max_facts)
+    res = run_consolidation(store, sessions, complete, embed_fn=_embed_fn(),
+                            surface="chat", max_candidates=max_facts)
     new_facts = [r.text for r in store.all() if r.id not in before]
+    episodic = _store_episode(store, sessions, complete)
     return {"status": res.get("status", "ok"), "added": res.get("added", 0),
             "updated": res.get("updated", 0), "deleted": res.get("deleted", 0),
-            "facts": new_facts}
+            "episodic": episodic, "facts": new_facts}
+
+
+def _store_episode(store, sessions: str, complete) -> int:
+    """Store a one-line EPISODIC summary of the session (what was discussed) so
+    chat recalls past topics, not only durable facts. Deduped against existing
+    episodic records; best-effort. Returns 1 if one was stored, else 0. The caller
+    has already confirmed writes are allowed (privacy)."""
+    try:
+        from localm.memory import MemoryRecord, summarize_session
+        summ = summarize_session(complete, sessions)
+        if not summ:
+            return 0
+        from difflib import SequenceMatcher
+        lo = summ.lower()
+        for r in store.all():
+            if r.kind == "episodic" and \
+                    SequenceMatcher(None, lo, r.text.lower()).ratio() > 0.85:
+                return 0                         # already have this episode
+        store.add(MemoryRecord(text=summ, kind="episodic", source="synth",
+                               importance=0.4), embed_fn=_embed_fn())
+        return 1
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.debug("episodic summary skipped: %s", e)
+        return 0
 
 
 # ------------------------------------------------------------------ #
@@ -642,7 +685,8 @@ def _memory_inlet(messages, ctx):
         allow = _mem.writes_allowed("chat")
         if allow:
             _migrate_legacy(store)
-        block_records = store.recall(query, k=_mem.MAX_INJECT, reinforce=allow)
+        block_records = store.recall(query, k=_mem.MAX_INJECT,
+                                     embed_fn=_embed_fn(), reinforce=allow)
         if not block_records and not allow:
             block_records = [{"text": b}
                              for b in _legacy_bullets()[:_mem.MAX_INJECT]]
