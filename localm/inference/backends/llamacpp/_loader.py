@@ -28,6 +28,12 @@ from typing import List, Optional
 from localm.debuglog import logger
 
 _loaded_lib: Optional[ctypes.CDLL] = None
+# Whether load_lib() saw at least one ggml COMPUTE BACKEND registered. None until
+# load_lib() has run. A build can load cleanly yet register zero backends (the
+# "no backends are loaded" case), so this is tracked separately from _loaded_lib
+# and read by setup-llama's load-test: a runtime that loads but cannot compute is
+# a FAILED provision, not a silent success (AGENTS.md rule 5).
+_compute_backends_ok: Optional[bool] = None
 
 
 def lib_filename() -> str:
@@ -311,6 +317,14 @@ def _register_ggml_backends(binary_dir: Path, lib: ctypes.CDLL) -> bool:
                 continue
     except OSError:
         pass
+    # Trust the device REGISTRY over the raw load signal: ggml_backend_load
+    # returning a non-null reg handle does not prove a usable compute device
+    # actually registered. When the count symbol is queryable it is authoritative
+    # (so False here honestly means "no backend"); only an older build without the
+    # symbol falls back to "did any plugin load".
+    final = _ggml_dev_count(candidates)
+    if final is not None:
+        return final > 0
     return loaded_any
 
 
@@ -379,17 +393,22 @@ def load_lib() -> ctypes.CDLL:
     # statically-linked build) need nothing; only the upstream prebuilts that
     # ship separate backend plugins must be loaded ("no backends are loaded"
     # otherwise). _register_ggml_backends checks first and only acts when needed.
+    # Capture the result: False here means even the explicit-load fallback
+    # registered no compute backends, so record the root cause now (both as a
+    # warning AND in _compute_backends_ok that setup's load-test reads) instead
+    # of leaving only the opaque deferred native "no backends are loaded" error.
+    global _compute_backends_ok
     try:
-        # Capture the result: False here means even the explicit-load fallback
-        # registered no compute backends, so record the root cause now instead of
-        # leaving only the opaque deferred native "no backends are loaded" error.
-        if not _register_ggml_backends(binary_dir, _loaded_lib):
-            logger.warning(
-                'no ggml compute backends registered; model load will fail '
-                'with "no backends are loaded"'
-            )
+        _compute_backends_ok = bool(_register_ggml_backends(binary_dir, _loaded_lib))
     except Exception:
-        pass
+        # Registration itself faulted: a model load would fail, so record no
+        # backends (fail honest) rather than leaving the flag unknown.
+        _compute_backends_ok = False
+    if not _compute_backends_ok:
+        logger.warning(
+            'no ggml compute backends registered; model load will fail '
+            'with "no backends are loaded"'
+        )
 
     # Validate the runtime's struct layout BEFORE any by-value struct crosses the
     # FFI boundary. A layout that differs from this build's ctypes structs would
@@ -404,3 +423,16 @@ def load_lib() -> ctypes.CDLL:
         raise
 
     return _loaded_lib
+
+
+def compute_backends_available() -> bool:
+    """True when load_lib() registered at least one ggml compute backend.
+
+    Loads the library first (idempotent). A False result means model inference
+    will fail with "no backends are loaded", so setup-llama's load-test uses this
+    to reject a build that loads but cannot compute - otherwise a provision that
+    is actually broken would be reported as a success the user only discovers at
+    the first model load, with the real cause (no registered backend) already
+    lost. This is the AGENTS.md rule-5 gate for runtime provisioning."""
+    load_lib()
+    return bool(_compute_backends_ok)
