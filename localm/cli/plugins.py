@@ -245,7 +245,7 @@ def _parse_plugin_selection(raw, available):
 @click.option("--with-deps/--no-deps", "with_deps", default=None,
               help="Install pip extras for the chosen plugins (default: ask "
                    "interactively, else the auto_install_plugin_deps setting).")
-def plugin_setup(plugins_csv, install_all, install_defaults, with_deps):
+def plugin_setup(plugins_csv, install_all, install_defaults, with_deps=None):
     """Choose which first-party plugins to install.
 
     Out of the box only chat is active; this turns on the features you want
