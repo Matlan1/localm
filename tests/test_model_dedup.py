@@ -351,11 +351,13 @@ class TestPullDedup:
             def raise_for_status(self): pass
             def iter_content(self, n): yield content
 
-        import requests
-        monkeypatch.setattr(requests, "head",
-                            lambda *a, **k: FakeResp())
-        monkeypatch.setattr(requests, "get",
-                            lambda *a, **k: FakeResp())
+        # check_url resolves the host; pin it public so the SSRF guard passes, and
+        # double the pinned-transport seam the pull path now uses (SSRF-REBIND).
+        monkeypatch.setattr(
+            "socket.getaddrinfo",
+            lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))])
+        monkeypatch.setattr("localm.netpolicy.pinned_request",
+                            lambda method, url, **k: FakeResp())
         monkeypatch.setattr(mm, "_check_disk_space", lambda d, b: True)
 
         mm._pull_url("https://x.test/url-model.gguf", "urlm")
