@@ -228,9 +228,11 @@ localm plugin enable NAME       # enable an already-installed plugin
 localm plugin disable NAME      # disable but keep it installed
 localm plugin uninstall NAME    # remove it (add --delete-data to drop its data)
 localm plugin setup             # pick a starter set interactively
+localm plugin install-deps NAME # install a plugin's pip extras on this host
+localm plugin install-deps --all# fill in missing extras for every enabled plugin
 ```
 
-The store names are `coder`, `image`, `music`, `video`, `rag`, `web`, `voice`, `tts`, `jobs`, and `mcp` (plus the protected `chat`). For plugins with heavy Python dependencies, also install the matching pip extra; see [README](../README.md#install). A running GUI server picks up new HTTP routes and tabs at runtime, while stdio plugins like mcp take effect on the next `localm mcp`.
+The store names are `coder`, `image`, `music`, `video`, `rag`, `web`, `voice`, `tts`, `jobs`, and `mcp` (plus the protected `chat`). Plugins with heavy Python dependencies carry them in a pip extra: by default `install`/`enable`/`setup` install it for you on the host (the `auto_install_plugin_deps` setting; pass `--no-deps` to skip, or `--with-deps` to force). A remote client never triggers a server-side pip - it is told to install on the host, e.g. with `localm plugin install-deps`. A running GUI server picks up new HTTP routes and tabs at runtime, while stdio plugins like mcp take effect on the next `localm mcp`.
 
 Third-party plugins are folders containing a `plugin.toml` manifest and Python files. Install from a local path with `localm plugin install <path>` (the same command takes a store name or a directory); installation is a local directory copy, fully offline. See [docs/plugins.md](../docs/plugins.md) for the full authoring contract.
 

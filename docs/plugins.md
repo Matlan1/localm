@@ -63,8 +63,15 @@ your own directory (a third-party plugin, marked `source = "external"`) is never
 a refresh target and is never overwritten.
 
 Some plugins need heavy Python dependencies shipped as a pip extra (see
-[Dependencies](#dependencies)). Installing the plugin selects it; installing the
-extra provides its libraries - they are separate steps.
+[Dependencies](#dependencies)). Installing the plugin selects it; the extra
+provides its libraries. By default localm installs the extra for you on the host
+when you install or enable such a plugin (the `auto_install_plugin_deps` setting,
+which `localm plugin setup` asks about and remembers). This only ever runs on the
+machine running localm - a remote client that enables a plugin is told to install
+the packages on the host, never triggering a server-side pip. Turn it off to keep
+the two as separate manual steps, and run `localm plugin install-deps [<name>|--all]`
+(or the GUI Plugins page's **Install dependencies** button) to fill them in later.
+`localm doctor` reports any enabled plugin whose extras are missing.
 
 ## Anatomy of a plugin
 
@@ -247,9 +254,12 @@ Scope and limits:
 
 - **`requires_extras`** - pip extras carrying heavy Python deps. Declaring
   `requires_extras = ["voice"]` means the plugin needs `pip install "localm[voice]"`.
-  Installing the plugin does NOT auto-install the extra; the two are separate,
-  consent-gated steps. Plugins with no Python dependency (like `tts`, which runs
-  in the browser) declare no extra.
+  By default localm installs the extra for you on the host when the plugin is
+  installed or enabled (gated by the `auto_install_plugin_deps` setting, and only
+  ever on the local host - never triggered by a remote client). With the setting
+  off, or on a remote client, the two stay separate steps: install the plugin,
+  then `localm plugin install-deps <name>`. Plugins with no Python dependency
+  (like `tts`, which runs in the browser) declare no extra.
 - **`requires`** - other plugins that must be installed first. `missing_requires`
   surfaces these at install time.
 
