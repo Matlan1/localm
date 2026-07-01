@@ -185,6 +185,8 @@
         </div>
         <label for="setup-scope">Scope (optional glob - file tools are confined to matching paths)</label>
         <input type="text" id="setup-scope" placeholder="src/**/*.py" spellcheck="false">
+        <label for="setup-system" title="Extra guidance prepended to the agent's system prompt: conventions, style, constraints. Overrides this project's .localcoder/system.md for this session; leave blank to use that file if present.">Custom instructions (optional - conventions, style, constraints)</label>
+        <textarea id="setup-system" placeholder="e.g. Always run pytest before finishing. Prefer guard clauses." spellcheck="false" rows="2"></textarea>
         <div class="checks">
           <label><input type="checkbox" id="setup-auto"> Auto-approve destructive tools</label>
           <label title="Destructive tools report what they would do without touching anything"><input type="checkbox" id="setup-dry"> Dry run (nothing is written or executed)</label>

@@ -61,6 +61,7 @@ class CreateSessionRequest(BaseModel):
     temperature: float | None = None
     max_tokens: int | None = None
     resume: bool = False              # restore this cwd's saved conversation (CODER-2)
+    custom_instructions: str | None = None   # extra system-prompt guidance (rec#584)
 
 
 class MessageRequest(BaseModel):
@@ -221,6 +222,7 @@ async def create_session(req: CreateSessionRequest, request: Request):
         scope=req.scope,
         dry_run=req.dry_run,
         restricted=restricted,
+        custom_instructions=req.custom_instructions,
         **gen_kwargs,
     ))
     session.principal = principal      # who owns this session (None = the owner)
