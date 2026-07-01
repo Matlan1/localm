@@ -129,6 +129,19 @@ def test_search_returns_nothing_when_irrelevant(home, tmp_path):
     assert store.search("quantum chromodynamics lagrangian gluon") == []
 
 
+def test_search_silent_on_stopword_only_overlap(home, tmp_path):
+    # A shared STOPWORD ("the"/"to"/"for") must not clear the relevance floor. BM25
+    # has no stopword removal, so before the content-word filter an unrelated task
+    # that merely contained "the" recalled irrelevant lessons and injected them into
+    # the coder prompt. The lexical signal is now content-words-only, so this stays
+    # silent.
+    store = EpisodeStore(tmp_path)
+    store.add(Episode(task="fix the flaky file-upload integration test",
+                      lesson="raise the upload test timeout"))
+    assert store.search("configure the kubernetes ingress controller for the cluster") == []
+    assert store.search("update the billing invoice to the new tax rate") == []
+
+
 def test_search_empty_store(home, tmp_path):
     assert EpisodeStore(tmp_path).search("anything") == []
 
