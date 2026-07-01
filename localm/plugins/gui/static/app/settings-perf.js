@@ -816,10 +816,10 @@ export async function rememberFact(fact) {
 export function openMemoryModal() {
   openModal("Memory - what the model knows about you", (body) => {
     body.appendChild(el("div", "sub", memory.writable
-      ? "Injected into the system prompt while the 🧠 toggle is on. " +
-        "Edit freely - it's a plain markdown file in the localm data directory."
+      ? "Durable facts localm remembers about you, added to the prompt while the " +
+        "🧠 toggle is on. Edit freely - one fact per line; Save replaces the list."
       : "Read-only: privacy mode blocks memory writes (no new traces). " +
-        "Existing memory is still injected while the 🧠 toggle is on."));
+        "Existing memory is still recalled while the 🧠 toggle is on."));
     const ta = document.createElement("textarea");
     ta.value = memory.text;
     ta.rows = 14;
@@ -952,11 +952,10 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   const webEnabled = $("p-web").checked;
   const messages = [];
   let sysText = params.system || "";
-  if ($("p-memory").checked && memory.text.trim()) {
-    sysText = (sysText ? sysText + "\n\n" : "") +
-      "Long-term memory - things to remember about the user:\n" +
-      memory.text.trim();
-  }
+  // Long-term memory is now injected SERVER-SIDE by the chat plugin's inlet hook
+  // (query-aware, for every client), gated on the memory_enabled config that the
+  // brain toggle drives. We deliberately no longer prepend it here, so it is not
+  // injected twice.
   // Always give the model an honesty floor:
   //  - web ON  -> teach the tools so it searches instead of guessing.
   //  - results just injected (explicit /web, toggle off) -> tell it to use and
@@ -1402,6 +1401,16 @@ $("p-web").addEventListener("change", () => {
 });
 $("p-speak").addEventListener("change", () => {
   if (!chat.privacy) { try { localStorage.setItem("localm.speakAloud", $("p-speak").checked ? "1" : "0"); } catch (e) { /* storage full/blocked */ } }
+});
+// The brain toggle drives the server-side memory_enabled config (single-user), so
+// injection is decided server-side and applies to every client. Persisted via
+// PATCH /v1/config (needs config:write; the owner GUI has it). hydrateChatToggles
+// restores the checkbox from config on boot.
+$("p-memory").addEventListener("change", () => {
+  fetch("/v1/config", {
+    method: "PATCH", headers: authHeaders(),
+    body: JSON.stringify({ memory_enabled: $("p-memory").checked }),
+  }).catch(() => { /* best-effort; a failed save just keeps the old value */ });
 });
 $("toggle-params").onclick = () => $("params").classList.toggle("open");
 $("export-conv").onclick = exportConversation;

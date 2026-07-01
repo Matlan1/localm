@@ -159,6 +159,13 @@ DEFAULT_CONFIG: dict = {
     "mode": "privacy",
     "chat_mode": None,
     "coder_mode": None,
+    # Long-term chat memory: recall the user's durable facts/preferences and
+    # inject them (server-side) into the system prompt each turn. Recall is free
+    # (BM25 over a small structured store); the consolidation that grows the store
+    # is a separate, opt-in step (the jobs "memory" task or /api/memory/consolidate)
+    # and, like every memory write, is skipped in privacy mode. Set False to stop
+    # injecting remembered facts (existing memories are kept, just not used).
+    "memory_enabled": True,
     # Seconds a GUI coder approval card may sit unanswered before it is
     # auto-rejected and the agent moves on.
     "coder_confirm_timeout": 600,

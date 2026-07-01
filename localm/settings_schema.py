@@ -169,6 +169,12 @@ CORE_FIELDS: list = [
                  "Overrides the global persistence for the coder only. Blank "
                  "inherits the global mode.",
                  group="Privacy", owner="coder", options=_PRIVACY_INHERIT),
+    SettingField("memory_enabled", Widget.TOGGLE, "Chat memory",
+                 "Recall the durable facts localm has learned about you and add "
+                 "them to the system prompt each chat turn. Growing that memory "
+                 "(consolidation) is a separate opt-in step and is always blocked "
+                 "in privacy mode; turning this off just stops using the memory.",
+                 group="Privacy"),
     # ---- Models ----
     SettingField("confirm_remove", Widget.TOGGLE,
                  "Confirm before deleting models",
