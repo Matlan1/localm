@@ -242,6 +242,13 @@ DEFAULT_CONFIG: dict = {
     # instead of "unknown command". False silences the hint; a truly unknown
     # command always errors regardless.
     "suggest_plugins": True,
+    # When a plugin that declares pip extras (requires_extras) is installed or
+    # enabled by the local operator, auto-install those extras on the HOST. A
+    # remote client never triggers a server-side pip regardless of this flag;
+    # only the CLI or a loopback GUI request does. `localm plugin setup` asks and
+    # records the choice here. Default True. Read via .get(..., True) since a
+    # user config saved before this key existed will not contain it.
+    "auto_install_plugin_deps": True,
     # Bug-report upload endpoint. When set, the in-app "Send to maintainer" channel
     # POSTs the (user-reviewed) report to this URL, which files it as a GitHub issue
     # - so a tester needs no GitHub account and no token ships in the app. Intended

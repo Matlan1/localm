@@ -186,6 +186,13 @@ CORE_FIELDS: list = [
                  "When a command belongs to a known but inactive plugin, suggest "
                  "installing it instead of reporting an unknown command.",
                  group="Plugins"),
+    SettingField("auto_install_plugin_deps", Widget.TOGGLE,
+                 "Auto-install plugin dependencies",
+                 "When you install or enable a plugin that needs extra Python "
+                 "packages, install them automatically on this machine. Only the "
+                 "local operator triggers this; a remote client never causes a "
+                 "server-side install.",
+                 group="Plugins"),
     SettingField("plugins_enabled", Widget.HIDDEN, "Enabled plugins",
                  "Names of enabled engine plugins. Managed by the Plugins page "
                  "and `localm plugin enable/disable`, not edited here.",

@@ -937,6 +937,46 @@ class PluginManager:
         installed = self._installed_set()
         return [r for r in spec.requires if r not in installed]
 
+    # ---- pip-extra dependencies (host-side install) -------------------------
+    def _spec_for(self, name: str):
+        return self._specs.get(name) or self.store_catalog().get(name)
+
+    def plugin_requirements(self, name: str) -> list:
+        """Concrete requirement strings a plugin's ``requires_extras`` map to,
+        resolved from localm's installed metadata."""
+        spec = self._spec_for(name)
+        if not spec or not spec.requires_extras:
+            return []
+        from localm.plugins import deps
+        return deps.plugin_requirements(spec.requires_extras)
+
+    def plugin_missing_deps(self, name: str) -> list:
+        """The subset of a plugin's declared pip-extra requirements that are NOT
+        installed on this host. Empty when it declares none or all are present."""
+        from localm.plugins import deps
+        return deps.missing_requirements(self.plugin_requirements(name))
+
+    def all_missing_deps(self, *, enabled_only: bool = True) -> dict:
+        """``{plugin: [missing requirement strings]}`` across installed plugins
+        (enabled ones by default) that are missing a declared pip extra."""
+        self.discover()
+        names = self._enabled_set() if enabled_only else self._installed_set()
+        out = {}
+        for name in sorted(names):
+            miss = self.plugin_missing_deps(name)
+            if miss:
+                out[name] = miss
+        return out
+
+    def install_plugin_deps(self, name: str, *, on_progress=None):
+        """Install a plugin's declared pip extras on THIS host. HOST-ONLY: a
+        route must confirm the request is local before calling this. Returns a
+        ``deps.InstallResult`` (a no-op success when the plugin declares none)."""
+        from localm.plugins import deps
+        spec = self._spec_for(name)
+        extras = spec.requires_extras if spec else []
+        return deps.install_plugin_extras(extras, on_progress=on_progress)
+
     def set_installed_state(self, name: str, on: bool, *, enable: bool = True) -> None:
         """CLI/headless install/uninstall WITHOUT loading routes: copy store ->
         installed (or remove the installed dir); the GUI server reconciles via
@@ -1031,6 +1071,7 @@ class PluginManager:
         AVAILABLE to install (the bundled store + the static catalog, minus what
         is installed). Each entry carries installed/enabled/active/available."""
         from localm.plugins import catalog as _cat
+        from localm.plugins import deps as _deps
         self.discover()
         installed = self._installed_set()
         enabled = self._enabled_set()
@@ -1057,6 +1098,12 @@ class PluginManager:
                                 if spec and spec.surface and spec.surface.assets_dir
                                 else ""),
                 "requires_extras": spec.requires_extras if spec else [],
+                # Declared pip-extra requirements NOT installed on this host, so
+                # the GUI can offer a host-side "Install dependencies" action.
+                "missing_deps": (
+                    _deps.missing_requirements(
+                        _deps.plugin_requirements(spec.requires_extras))
+                    if spec and spec.requires_extras else []),
                 "requires": spec.requires if spec else [],
                 # Declared requirements that are not currently installed, so the
                 # GUI can warn "requires X (missing)" + offer one-click install.

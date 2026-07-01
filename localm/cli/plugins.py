@@ -83,19 +83,68 @@ def _warn_missing_requires(mgr, name):
             f"not installed. Install with:  {cmds}")
 
 
+# ---- pip-extra auto-install (host-side; the CLI always runs on the host) ---- #
+
+def _auto_deps_default() -> bool:
+    """The configured default for auto-installing plugin pip extras."""
+    from localm.config import load_config
+    return bool(load_config().get("auto_install_plugin_deps", True))
+
+
+def _set_auto_deps(value: bool) -> None:
+    from localm.config import load_config, save_config
+    cfg = load_config()
+    cfg["auto_install_plugin_deps"] = bool(value)
+    save_config(cfg)
+
+
+def _console_progress(line: str) -> None:
+    # pip output can contain "[" (e.g. localm[voice]); disable rich markup so it
+    # is printed verbatim rather than parsed as a style tag.
+    console.print(line, markup=False, highlight=False)
+
+
+def _install_deps(mgr, name) -> bool:
+    """Install *name*'s declared pip extras on this host. Returns True on success
+    (including the no-op case where the plugin declares none / all are present).
+    Surfaces the real installer error on failure (never a hollow success)."""
+    if not mgr.plugin_missing_deps(name):
+        return True                     # nothing declared, or already satisfied
+    console.print(f"[dim]Installing dependencies for {name}...[/dim]")
+    res = mgr.install_plugin_deps(name, on_progress=_console_progress)
+    if res.ok:
+        if res.installed:
+            console.print(f"[green]Installed dependencies[/green] for "
+                          f"[bold]{name}[/bold]: {', '.join(res.installed)}")
+        return True
+    console.print(f"[red]Dependency install failed for {name}:[/red] {res.error}")
+    console.print('[dim]Install manually, e.g.:  '
+                  'pip install "localm[<extra>]"[/dim]')
+    return False
+
+
+def _resolve_with_deps(flag) -> bool:
+    """The effective auto-install decision: an explicit --with-deps/--no-deps
+    wins, else the configured default."""
+    return _auto_deps_default() if flag is None else bool(flag)
+
+
 
 
 @plugin.command("install")
 @click.argument("target")
 @click.option("--force", is_flag=True,
               help="When installing from a directory, overwrite an existing install.")
-def plugin_install_engine(target, force):
+@click.option("--with-deps/--no-deps", "with_deps", default=None,
+              help="Also install the plugin's pip extras on this machine "
+                   "(default: the auto_install_plugin_deps setting).")
+def plugin_install_engine(target, force, with_deps):
     """Install a plugin and enable it.
 
     TARGET is either a first-party plugin NAME from the bundled store
     (e.g. ``localm plugin install coder``) or a path to a DIRECTORY containing a
-    plugin.toml (a third-party plugin). For plugins with extra dependencies, also
-    run the matching pip extra, e.g. pip install "localm[coder]".
+    plugin.toml (a third-party plugin). A first-party plugin's pip extras are
+    installed for you unless you pass --no-deps (or turn the setting off).
     """
     from localm import cli as _cli
     mgr = _cli._engine_manager()
@@ -109,6 +158,12 @@ def plugin_install_engine(target, force):
         console.print(f"[green]Installed[/green] plugin [bold]{spec.name}[/bold] "
                       f"v{spec.version}")
         _warn_missing_requires(mgr, spec.name)
+        # A third-party plugin's extras are its own (not localm's); we do not
+        # auto-resolve those here. Point the user at its own instructions.
+        if spec.requires_extras:
+            console.print(f"[dim]{spec.name} declares extra dependencies "
+                          f"({', '.join(spec.requires_extras)}); install per its "
+                          f"own instructions.[/dim]")
         return
     try:
         mgr.set_installed_state(target, True)
@@ -120,6 +175,11 @@ def plugin_install_engine(target, force):
         sys.exit(1)
     console.print(f"[green]Installed[/green] plugin [bold]{target}[/bold]")
     _warn_missing_requires(mgr, target)
+    if _resolve_with_deps(with_deps):
+        _install_deps(mgr, target)
+    elif mgr.plugin_missing_deps(target):
+        console.print('[dim]Needs pip extras; install them with:  '
+                      f'localm plugin install-deps {target}[/dim]')
 
 
 
@@ -182,19 +242,24 @@ def _parse_plugin_selection(raw, available):
               help="Install every first-party plugin.")
 @click.option("--defaults", "install_defaults", is_flag=True,
               help="Install the recommended set non-interactively (coder, rag, web, tts).")
-def plugin_setup(plugins_csv, install_all, install_defaults):
+@click.option("--with-deps/--no-deps", "with_deps", default=None,
+              help="Install pip extras for the chosen plugins (default: ask "
+                   "interactively, else the auto_install_plugin_deps setting).")
+def plugin_setup(plugins_csv, install_all, install_defaults, with_deps):
     """Choose which first-party plugins to install.
 
     Out of the box only chat is active; this turns on the features you want
     (coder, image/music/video, rag, web, voice, tts, mcp). Run by the installer
-    after dependencies are in place, and any time afterwards. Some plugins also
-    need a pip extra (e.g. pip install "localm[coder]").
+    after dependencies are in place, and any time afterwards. Plugins that need a
+    pip extra have it installed for you (you are asked once; --with-deps/--no-deps
+    or the auto_install_plugin_deps setting decide non-interactively).
     """
     from ..plugins import catalog
     from localm import cli as _cli
     mgr = _cli._engine_manager()
     installed = _installed_plugin_names(mgr)
     available = [e for e in catalog.CATALOG if not e.preinstalled]
+    interactive = False
 
     if install_all:
         chosen = [e.name for e in available]
@@ -219,6 +284,7 @@ def plugin_setup(plugins_csv, install_all, install_defaults):
             "--plugins/--all/--defaults.[/dim]")
         return
     else:
+        interactive = True
         console.print("Choose first-party plugins to install (chat is always on):\n")
         for i, e in enumerate(available, 1):
             mark = " [green](installed)[/green]" if e.name in installed else ""
@@ -258,6 +324,74 @@ def plugin_setup(plugins_csv, install_all, install_defaults):
         console.print(f"[green]Installed[/green] [bold]{name}[/bold]")
         _warn_missing_requires(mgr, name)
 
+    # Install pip extras for the chosen plugins. Interactively, ask once and
+    # remember the answer as the auto_install_plugin_deps setting; otherwise the
+    # --with-deps/--no-deps flag or the existing setting decides.
+    want = with_deps
+    if want is None and interactive:
+        need_any = any(mgr.plugin_missing_deps(n) for n in chosen)
+        if need_any:
+            want = click.confirm(
+                "Install the extra Python packages these plugins need?",
+                default=_auto_deps_default())
+            _set_auto_deps(want)
+    if want is None:
+        want = _auto_deps_default()
+    pending = [n for n in chosen if mgr.plugin_missing_deps(n)]
+    if pending and want:
+        console.print("\n[bold]Installing plugin dependencies...[/bold]")
+        for n in pending:
+            _install_deps(mgr, n)
+    elif pending:
+        console.print("\n[dim]Skipped dependencies for: "
+                      f"{', '.join(pending)}. Install later with:  "
+                      "localm plugin install-deps --all[/dim]")
+
+
+
+
+@plugin.command("install-deps")
+@click.argument("name", required=False)
+@click.option("--all", "do_all", is_flag=True,
+              help="Install missing pip extras for every enabled plugin.")
+def plugin_install_deps(name, do_all):
+    """Install missing pip extras for plugins on this machine (host repair).
+
+    With a NAME, installs that plugin's declared extras. With --all, scans every
+    enabled plugin and installs anything missing. With neither, just lists what
+    is missing. This runs pip locally, so it is a host-only operation.
+    """
+    from ..plugins import catalog
+    from localm import cli as _cli
+    mgr = _cli._engine_manager()
+    if name and do_all:
+        console.print("[red]Give a NAME or --all, not both.[/red]")
+        sys.exit(1)
+    if name:
+        known = set(catalog.names()) | _installed_plugin_names(mgr)
+        if name not in known:
+            console.print(f"[red]No such plugin: {name}[/red]")
+            sys.exit(1)
+        if not mgr.plugin_missing_deps(name):
+            console.print(f"[green]{name} has its dependencies "
+                          "(or declares none).[/green]")
+            return
+        sys.exit(0 if _install_deps(mgr, name) else 1)
+    missing = mgr.all_missing_deps(enabled_only=True)
+    if not missing:
+        console.print("[green]All enabled plugins have their dependencies.[/green]")
+        return
+    if not do_all:
+        console.print("[bold]Missing plugin dependencies:[/bold]")
+        for n, reqs in missing.items():
+            console.print(f"  [bold]{n}[/bold]: {', '.join(reqs)}")
+        console.print("\nInstall them with:  [bold]localm plugin install-deps --all[/bold]")
+        return
+    ok = True
+    for n in missing:
+        ok = _install_deps(mgr, n) and ok
+    sys.exit(0 if ok else 1)
+
 
 
 
@@ -287,7 +421,10 @@ def plugin_uninstall_engine(name, delete_data):
 
 @plugin.command("enable")
 @click.argument("name")
-def plugin_enable(name):
+@click.option("--with-deps/--no-deps", "with_deps", default=None,
+              help="Also install the plugin's pip extras on this machine "
+                   "(default: the auto_install_plugin_deps setting).")
+def plugin_enable(name, with_deps):
     """Enable an installed engine plugin (must be installed first)."""
     from localm import cli as _cli
     mgr = _cli._engine_manager()
@@ -301,6 +438,11 @@ def plugin_enable(name):
         sys.exit(1)
     console.print(f"[green]Enabled[/green] plugin [bold]{name}[/bold]")
     _warn_missing_requires(mgr, name)
+    if _resolve_with_deps(with_deps):
+        _install_deps(mgr, name)
+    elif mgr.plugin_missing_deps(name):
+        console.print('[dim]Needs pip extras; install them with:  '
+                      f'localm plugin install-deps {name}[/dim]')
 
 
 
