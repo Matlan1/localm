@@ -1471,14 +1471,17 @@ class TestAssistantMemory:
             assert client.put("/api/memory",
                               json={"text": "- likes terse answers"}).status_code == 200
             client.post("/api/memory/append", json={"text": "runs an RX 6800"})
-            text = client.get("/api/memory").json()["text"]
+            got = client.get("/api/memory").json()
+            text, items = got["text"], got["items"]
+            # memory is now a structured store rendered as bullets for the modal
             assert "- likes terse answers" in text
             assert "- runs an RX 6800" in text     # "- " prefix added
-            assert (tmp_path / ".localm" / "chat-memory.md").is_file()
+            assert {it["text"] for it in items} == {"likes terse answers",
+                                                    "runs an RX 6800"}
 
-            # clearing removes the file entirely
+            # clearing empties the store
             client.put("/api/memory", json={"text": ""})
-            assert not (tmp_path / ".localm" / "chat-memory.md").exists()
+            assert client.get("/api/memory").json()["items"] == []
 
     def test_privacy_blocks_writes_allows_reads(self, persist_app, tmp_path,
                                                 monkeypatch):
