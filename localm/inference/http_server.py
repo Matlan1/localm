@@ -1257,39 +1257,16 @@ def serve(engine: Engine, host: str = "127.0.0.1", port: int = 8642,
     app.state.bind_host = host
     scheme = "https" if ssl_certfile else "http"
 
-    # Task 2: Ctrl+C (Windows SIGINT). On Windows, signal.signal(SIGINT) is
-    # unreliable in async code (the Python signal handler runs on the main thread
-    # only at bytecode boundaries, and uvicorn's event loop often does not give it
-    # a chance). The Win32 SetConsoleCtrlHandler fires on a dedicated OS thread
-    # that the event loop does not block. We catch CTRL_C_EVENT (0) and
-    # CTRL_BREAK_EVENT (1) there and tell the running loop to stop, which causes
-    # uvicorn to wind down cleanly (model unload in _do_shutdown runs from the
-    # route or via atexit). No new third-party dependencies needed - ctypes is
-    # in the stdlib.
-    if sys.platform == "win32":
-        import ctypes
-        import threading
-
-        _ctrl_stop_event = threading.Event()
-
-        @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_ulong)
-        def _ctrl_handler(ctrl_type):
-            # CTRL_C_EVENT = 0, CTRL_BREAK_EVENT = 1
-            if ctrl_type in (0, 1):
-                _ctrl_stop_event.set()
-                try:
-                    # Find the running asyncio loop and ask it to stop from the
-                    # control-handler thread (which is NOT the event loop thread).
-                    import asyncio
-                    loop = asyncio.get_event_loop_policy().get_event_loop()
-                    if loop is not None and loop.is_running():
-                        loop.call_soon_threadsafe(loop.stop)
-                except Exception:
-                    pass
-                return True   # handled; suppress the default Ctrl+C handler
-            return False      # pass through other control events
-
-        ctypes.windll.kernel32.SetConsoleCtrlHandler(_ctrl_handler, True)
+    # SRV-CTRLC: no custom Win32 Ctrl+C handler here. A previous one resolved the
+    # loop with get_event_loop_policy().get_event_loop() on the control-handler OS
+    # thread - which is NOT the serving loop (portmux's asyncio.run makes a fresh
+    # loop with no set_event_loop), so loop.stop() never fired - yet it returned
+    # True, consuming the event and DEFEATING uvicorn's own SIGINT/KeyboardInterrupt
+    # shutdown too. Net effect: it ATE Ctrl+C and the server hung. Removing it lets
+    # Ctrl+C flow through uvicorn's standard signal handling (KeyboardInterrupt is
+    # caught in portmux.run_server), which portmux's SRV-6 loop-wakeup task keeps
+    # responsive on Windows. Verified live (Ctrl+Break) that the server now stops
+    # instead of no-opping; a graceful vs abrupt human Ctrl+C is uvicorn's own path.
 
     with instances.advertise(app, home_dir(), host=host, port=port, mode="api",
                              scheme=scheme, project=project, isolated=isolated):
