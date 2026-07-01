@@ -4,6 +4,13 @@ Claude Code loads this file automatically. The binding rules for every agent and
 contributor live in `AGENTS.md` and apply in full here. Read `AGENTS.md` before
 editing anything.
 
+Claude Code reads `CLAUDE.md`, not `AGENTS.md`, so the full authoritative text of
+`AGENTS.md` is imported here. This makes the complete rules load into every session
+and into every subagent that loads project memory (every custom and general-purpose
+subagent; only the built-in Explore and Plan agents skip it):
+
+@AGENTS.md
+
 The four rules, in short (see `AGENTS.md` for the full text and rationale):
 
 1. No absolute or machine-specific paths in defaults. Project-relative or
