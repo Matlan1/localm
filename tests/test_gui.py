@@ -90,6 +90,24 @@ class TestCoderSession:
         assert "All done" in final["text"]
         assert final["ok"] is True
 
+    def test_custom_instructions_thread_into_agent(self, tmp_path):
+        """rec#584 GUI field: a session created with custom_instructions injects
+        them into the agent's system prompt under '## User Instructions'."""
+        session = CoderSession(
+            tmp_path, ScriptedBackend(["ok"]), auto_approve=True,
+            custom_instructions="Always use guard clauses.")
+        assert session.agent._custom_instructions == "Always use guard clauses."
+        prompt = session.agent._system_prompt
+        assert "## User Instructions" in prompt
+        assert "Always use guard clauses." in prompt
+
+    def test_no_custom_instructions_falls_back_to_file(self, tmp_path):
+        """No field -> Agent reads .localcoder/system.md; empty here means no
+        User Instructions section (unchanged behaviour)."""
+        session = CoderSession(tmp_path, ScriptedBackend(["ok"]), auto_approve=True)
+        assert session.agent._custom_instructions == ""
+        assert "## User Instructions" not in session.agent._system_prompt
+
     def test_busy_queues_second_message(self, tmp_path):
         """Sending mid-task no longer bounces - the message is queued as a
         steering note and surfaced in the feed with queued=True."""
@@ -662,6 +680,20 @@ class TestCoderEndpoints:
 
             assert client.delete(f"/api/coder/sessions/{sid}").status_code == 200
             assert client.delete(f"/api/coder/sessions/{sid}").status_code == 404
+
+    def test_create_session_threads_custom_instructions(self, coder_app, tmp_path):
+        """rec#584: POST /api/coder/sessions with custom_instructions reaches the
+        session's agent (end-to-end request -> CreateSessionRequest -> CoderSession
+        -> Agent)."""
+        app, _ = coder_app
+        with TestClient(app) as client:
+            info = client.post("/api/coder/sessions",
+                               json={"cwd": str(tmp_path),
+                                     "custom_instructions": "Be terse."}).json()
+            sess = app.state.coder_sessions.get(info["id"])
+            assert sess is not None
+            assert sess.agent._custom_instructions == "Be terse."
+            assert "Be terse." in sess.agent._system_prompt
 
     def test_files_endpoints_and_dry_run_flag(self, coder_app, tmp_path):
         app, _ = coder_app
