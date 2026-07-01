@@ -448,6 +448,8 @@ export async function startCoderSession(opts = {}) {
     if (temp !== "") body.temperature = Number(temp);
     const scope = $("setup-scope").value.trim();
     if (scope) body.scope = scope;
+    const system = $("setup-system").value.trim();
+    if (system) body.custom_instructions = system;
 
     const r = await fetch("/api/coder/sessions", {
       method: "POST",
