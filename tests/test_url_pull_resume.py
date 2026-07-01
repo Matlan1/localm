@@ -159,6 +159,27 @@ class TestUrlPullResult:
         assert mm._pull_url("http://example.com/model.gguf", "m") is False
         assert "download failed" in capsys.readouterr().out.lower()
 
+    def test_size_head_policy_refusal_fails_closed(self, url_env, monkeypatch, capsys):
+        """A NetworkPolicyError at the size-HEAD stage must SURFACE and fail closed,
+        not be silently collapsed into total=0 (AGENTS.md rule 5: distinguish the
+        benign connect error from a policy refusal). Surfaced by the 2026-07-01
+        checkup's honesty-audit."""
+        from localm.netpolicy import NetworkPolicyError
+        calls = {"head": 0}
+
+        def fake_pinned(method, url, **kw):
+            if method == "HEAD":
+                calls["head"] += 1
+                if calls["head"] == 1:                 # redirect-resolver hop: ok
+                    return MagicMock(status_code=200,
+                                     headers={"content-length": "10"})
+                raise NetworkPolicyError("rebind blocked at the size HEAD")
+            raise AssertionError("GET must not run after a refused size HEAD")
+
+        monkeypatch.setattr("localm.netpolicy.pinned_request", fake_pinned)
+        assert mm._pull_url("http://example.com/model.gguf", "m") is False
+        assert "network policy" in capsys.readouterr().out.lower()
+
 
 class TestPullModelDispatch:
     def test_unknown_spec_returns_false(self, monkeypatch, capsys):

@@ -677,7 +677,16 @@ def _pull_url(
     try:
         head  = netpolicy.pinned_request("HEAD", dl_url, allow_redirects=False, timeout=10)
         total = int(head.headers.get("content-length", 0))
-    except Exception:
+    except NetworkPolicyError as e:
+        # A policy refusal is NOT the benign case: surface it and fail closed
+        # (like the GET below), rather than collapsing it into total=0 - do not
+        # let a rebind/deny slip through the size probe (AGENTS.md rule 5).
+        console.print(f"[red]Refused by network policy:[/red] {e}")
+        return False
+    except Exception as e:
+        # Benign: a HEAD connect error only costs us the disk-space pre-check; the
+        # GET still fails closed. Log at debug so the failure stays discoverable.
+        logger.debug("size HEAD failed for %s (non-fatal, size unknown): %s", dl_url, e)
         total = 0
 
     remaining = max(0, total - already_have)
