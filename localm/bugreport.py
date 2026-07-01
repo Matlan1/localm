@@ -549,7 +549,17 @@ def _ring_activity() -> list:
             pre_log = home_dir() / "logs" / "pre_restart.log"
             if pre_log.exists():
                 lines = pre_log.read_text(encoding="utf-8").splitlines() + ["--- RESTART ---"] + lines
-                pre_log.unlink(missing_ok=True)
+                try:
+                    pre_log.unlink(missing_ok=True)
+                except OSError as e:
+                    # Privacy cleanup: the plaintext pre-restart log is deleted
+                    # after being folded into the report. If the delete fails the
+                    # file PERSISTS on disk - surface it (do not swallow silently)
+                    # so the leftover is discoverable (AGENTS.md rule 5).
+                    from localm.debuglog import logger
+                    logger.warning(
+                        "bugreport: could not delete %s after reading it (%s); "
+                        "the plaintext log remains on disk", pre_log, e)
         except Exception:
             # Best-effort: prepending the pre-restart log tail is a nicety. If it
             # is missing or unreadable we just return the in-memory activity on its

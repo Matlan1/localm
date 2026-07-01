@@ -294,11 +294,24 @@ def _migrate_legacy(store) -> None:
             added = True
         if added:
             store._save()                        # one batch write
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text("1", encoding="utf-8")
     except Exception as e:                        # never break chat on migration
         from localm.debuglog import logger
-        logger.debug("chat memory legacy migration skipped: %s", e)
+        logger.debug("chat memory legacy migration failed: %s", e)
+        return                                    # do NOT mark done - retry next start
+    # The import ran (or there was nothing new). Mark it done so we do not re-scan
+    # every start. A marker-write failure must NOT be reported as 'skipped' when the
+    # records were actually imported (the false-success RULE 5 forbids, and which
+    # this function's own docstring promises against) - log it honestly; the
+    # casefold dedup above makes a re-run next start harmless until the marker sticks.
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("1", encoding="utf-8")
+    except OSError as e:
+        from localm.debuglog import logger
+        logger.debug(
+            "chat memory legacy migration %s but its completion marker could not "
+            "be written (%s); it will re-run harmlessly (dedup) until it persists",
+            "imported records" if added else "found nothing new", e)
 
 
 class MemoryPatch(BaseModel):

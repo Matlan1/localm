@@ -90,6 +90,25 @@ def test_store_atomic_write_leaves_no_tmp(home):
     assert leftover == []
 
 
+def test_record_result_survives_metadata_stamp_failure(home, monkeypatch):
+    """CHK-JOBS-META: if stamping the job metadata fails AFTER the result file is
+    written, record_result must still persist the result and return its id (not
+    orphan it or propagate) - the failure is surfaced via a warning, not silence."""
+    from localm.plugins.builtin.jobs.store import JobStore
+    store = JobStore()
+    job = store.add(_make_job(name="j"))
+
+    def boom(self, jobs):
+        raise OSError("disk full")
+    monkeypatch.setattr(JobStore, "_write_all", boom)
+
+    rid = store.record_result(job.id, {"status": "ok", "output": "hi",
+                                       "started": 1.0, "finished": 2.0})
+    assert rid                                              # returned, not propagated
+    # the result file is on disk despite the metadata-stamp failure (not orphaned)
+    assert list(store._result_dir(job.id).glob("*.json"))
+
+
 def test_job_validation_rejects_bad_defs(home):
     from localm.plugins.builtin.jobs.store import Job
     with pytest.raises(ValueError):
