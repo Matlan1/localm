@@ -292,6 +292,51 @@ def test_set_auto_deps_roundtrip(env):
     assert _auto_deps_default() is True
 
 
+def test_scope_deps_warnings(env, monkeypatch):
+    mgr = env.mk()
+    # Not installed -> warn that the plugin is missing entirely.
+    warns = mgr.scope_deps_warnings(["withdeps"])
+    assert len(warns) == 1 and "not installed" in warns[0]
+    # Installed but missing its pip extra -> warn about the packages.
+    mgr.set_installed_state("withdeps", True)
+    _all_missing(monkeypatch)
+    warns = mgr.scope_deps_warnings(["withdeps"])
+    assert len(warns) == 1 and "fakepkg>=1.0" in warns[0]
+    # Ready -> no warning; an unrelated non-plugin scope -> no warning.
+    _none_missing(monkeypatch)
+    assert mgr.scope_deps_warnings(["withdeps", "models:read"]) == []
+
+
+def test_key_create_warns_on_uninstalled_plugin_scope(env, monkeypatch):
+    # key_create builds its own PluginManager(None) over the real catalog; the
+    # 'voice' plugin is a known first-party plugin, not installed in this tmp home.
+    r = CliRunner().invoke(env.main, ["key", "create", "dash", "-s", "voice"])
+    assert r.exit_code == 0, r.output
+    assert "voice plugin is not installed" in r.output
+    assert "install-deps" in r.output           # exact wording may line-wrap
+
+
+def test_doctor_reports_missing_plugin_deps(env, monkeypatch, capsys):
+    import importlib
+    doc = importlib.import_module("localm.cli.doctor")
+    from localm.plugins.engine import PluginManager
+    monkeypatch.setattr(PluginManager, "all_missing_deps",
+                        lambda self, enabled_only=True: {"voice": ["faster-whisper>=1.0"]})
+    doc._check_plugin_deps()
+    out = capsys.readouterr().out
+    assert "voice" in out and "install-deps" in out
+
+
+def test_doctor_ok_when_no_missing_deps(env, monkeypatch, capsys):
+    import importlib
+    doc = importlib.import_module("localm.cli.doctor")
+    from localm.plugins.engine import PluginManager
+    monkeypatch.setattr(PluginManager, "all_missing_deps",
+                        lambda self, enabled_only=True: {})
+    doc._check_plugin_deps()
+    assert "have theirs" in capsys.readouterr().out
+
+
 def test_setup_interactive_prompt_records_and_installs(env, monkeypatch):
     """Drive the interactive branch directly (CliRunner's stdin is not a tty, so
     the no-flag path would skip). A faked tty stdin feeds the plugin pick and a

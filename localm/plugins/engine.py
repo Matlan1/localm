@@ -971,6 +971,37 @@ class PluginManager:
                 out[name] = miss
         return out
 
+    def scope_deps_warnings(self, granted_scopes) -> list:
+        """Warnings for minting a key: a granted capability scope that maps to a
+        first-party plugin which is not installed, or is installed but missing a
+        declared pip extra. Empty when every granted plugin scope is ready. This
+        is the 'catch at grant' check - a key that unlocks a feature the host
+        cannot actually serve yet."""
+        from localm.plugins import catalog as _cat
+        self.discover()
+        installed = self._installed_set()
+        by_scope = {}
+        for name, spec in self.store_catalog().items():
+            by_scope.setdefault(spec.scope or name, name)
+        for name, spec in self._specs.items():          # installed specs win
+            by_scope[spec.scope or name] = name
+        for e in _cat.CATALOG:                          # catalog scope == name
+            by_scope.setdefault(e.name, e.name)
+        warnings = []
+        for sc in dict.fromkeys(granted_scopes or ()):  # de-dup, keep order
+            pname = by_scope.get(sc)
+            if not pname or self._is_protected(pname):   # not a plugin, or chat
+                continue
+            if pname not in installed:
+                warnings.append(
+                    f"key grants '{sc}' but the {pname} plugin is not installed")
+                continue
+            miss = self.plugin_missing_deps(pname)
+            if miss:
+                warnings.append(
+                    f"key grants '{sc}' but {pname} is missing: {', '.join(miss)}")
+        return warnings
+
     def install_plugin_deps(self, name: str, *, on_progress=None):
         """Install a plugin's declared pip extras on THIS host. HOST-ONLY: a
         route must confirm the request is local before calling this. Returns a

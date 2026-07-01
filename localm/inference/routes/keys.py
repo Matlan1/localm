@@ -62,6 +62,16 @@ def register(app: FastAPI, ctx) -> None:
             raise HTTPException(403, str(e))
         except ValueError as e:
             raise HTTPException(400, str(e))
+        # Catch at grant: warn (do not block) when a granted scope unlocks a
+        # plugin the host cannot serve yet (not installed / missing pip extras).
+        mgr = getattr(app.state, "plugin_manager", None)
+        if mgr is not None:
+            try:
+                warns = mgr.scope_deps_warnings(scope_list)
+            except Exception:
+                warns = []
+            if warns:
+                created = {**created, "warnings": warns}
         # The plaintext key is returned exactly once - it is never recoverable.
         return created
 

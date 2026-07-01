@@ -165,6 +165,18 @@ def key_create(name, scopes):
     console.print(f"  [bold]{rec['key']}[/bold]")
     console.print(f"[dim]id {rec['id']}; revoke with: "
                   f"localm key rm {rec['id']}[/dim]")
+    # Catch at grant: if this key unlocks a plugin the host cannot serve yet
+    # (not installed, or missing its pip extras), say so right here.
+    try:
+        from localm.plugins.engine import PluginManager
+        warns = PluginManager(None).scope_deps_warnings(list(scopes))
+    except Exception:
+        warns = []
+    for w in warns:
+        console.print(f"[yellow]Note:[/yellow] {w}")
+    if warns:
+        console.print("[dim]Install missing plugin packages on the host with:  "
+                      "localm plugin install-deps --all[/dim]")
 
 
 
