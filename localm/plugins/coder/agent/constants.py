@@ -28,6 +28,18 @@ _SCOPED_TOOLS: frozenset[str] = frozenset({
     "edit_notebook_cell", "generate_image",
 })
 
+# File-touching tools deliberately NOT confined by the scope glob: git_diff /
+# git_log take a git PATHSPEC (repo history, not a filesystem path to confine),
+# and run_tests / run_shell EXECUTE a process (a path-arg check cannot
+# meaningfully confine arbitrary code). Any OTHER registry tool that exposes a
+# path-like argument MUST appear in _SCOPED_TOOLS above; the contract test
+# test_coder_scope_default_deny enforces this, so a newly-added file tool is a
+# test failure rather than "unconfined by omission" (AUD-CODERTOOLS: the scope
+# allowlist is default-deny at authoring time, not reliant on a human remembering).
+_INTENTIONALLY_UNSCOPED: frozenset[str] = frozenset({
+    "run_shell", "run_tests", "git_diff", "git_log",
+})
+
 # For each scoped tool, the argument names that name a path/glob to enforce the
 # scope against. Order matters only for which value is reported first; any
 # present arg that falls outside the scope rejects the call. Tools default to

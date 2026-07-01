@@ -606,6 +606,36 @@ class PluginManager:
         host.mount_surface_assets()
         self._loaded[spec.name] = (spec, module, host, uniq)
         self._errors.pop(spec.name, None)       # a successful load clears prior error
+        self._maybe_fire_first_use(spec.name)   # REC-ONFIRSTUSE
+
+    def _maybe_fire_first_use(self, name: str) -> None:
+        """Invoke the ``on_first_use`` lifecycle hook exactly once per plugin - the
+        first time it is loaded (its first activation). Persisted in config so it
+        does not re-fire on every server start. Previously ``on_first_use`` was
+        reserved in the contract but never invoked - a dead promise (REC-ONFIRSTUSE)."""
+        # Only plugins that actually DEFINE on_first_use need first-use tracking.
+        # Skipping the rest avoids a config write on every plugin's first load -
+        # which would create files even in privacy mode (privacy = writes nothing).
+        entry = self._loaded.get(name)
+        if not entry or not callable(getattr(entry[1], "on_first_use", None)):
+            return
+        from localm.config import load_config, update_config
+        try:
+            done = set(load_config().get("plugins_first_use_done", []))
+        except Exception:
+            return
+        if name in done:
+            return
+        self._invoke_hook(name, "on_first_use")
+
+        def _mutate(cfg: dict) -> None:
+            cur = set(cfg.get("plugins_first_use_done", []))
+            cur.add(name)
+            cfg["plugins_first_use_done"] = sorted(cur)
+        try:
+            update_config(_mutate)
+        except Exception:
+            pass  # best-effort: worst case on_first_use fires again next start
 
     def _unload(self, name: str) -> None:
         entry = self._loaded.pop(name, None)
@@ -907,11 +937,41 @@ class PluginManager:
             if _cat.get(name) or self._store_dir(name):
                 raise ValueError(f"plugin {name!r} is not installed; install it first")
             raise KeyError(f"no such plugin: {name}")
+        self._require_deps_installed(name)            # REC-PLUGIN-REQUIRES
         self._maybe_refresh_builtin(name)             # pick up an upgraded builtin
         self.discover()                               # re-read the refreshed spec
         if name not in self._loaded:
             self._load(self._specs[name])             # load first; surface errors
         self._set_enabled(name, True)
+
+    def _require_deps_installed(self, name: str) -> None:
+        """Refuse to enable a plugin whose declared ``requires`` are not installed.
+        Previously 'requires' was surfaced (a print/GUI warning) but never enforced,
+        so a plugin could load with an unmet dependency (REC-PLUGIN-REQUIRES)."""
+        missing = self.missing_requires(name)
+        if missing:
+            plural = "s" if len(missing) > 1 else ""
+            raise ValueError(
+                f"plugin {name!r} requires plugin{plural} "
+                f"{', '.join(sorted(missing))} which {'are' if plural else 'is'} "
+                f"not installed; install {'them' if plural else 'it'} first")
+
+    def _dependents(self, name: str) -> set:
+        """Installed plugins that (transitively) declare *name* in their requires."""
+        self.discover()
+        installed = self._installed_set()
+        result: set = set()
+        frontier = {name}
+        while frontier:
+            target = frontier.pop()
+            for other in installed:
+                if other == name or other in result:
+                    continue
+                spec = self._specs.get(other)
+                if spec and target in spec.requires:
+                    result.add(other)
+                    frontier.add(other)
+        return result
 
     def disable(self, name: str) -> None:
         if self._is_protected(name):
@@ -971,6 +1031,8 @@ class PluginManager:
             raise KeyError(f"no such plugin: {name}")
         if not on and self._is_protected(name):
             raise ValueError(f"plugin {name!r} is protected and cannot be disabled")
+        if on:
+            self._require_deps_installed(name)        # REC-PLUGIN-REQUIRES
         self._set_enabled(name, on)
 
     def uninstall(self, name: str, *, delete_data: bool = False) -> bool:
@@ -985,6 +1047,19 @@ class PluginManager:
             raise KeyError(f"no such plugin: {name}")
         if self._is_protected(name):
             raise ValueError(f"plugin {name!r} is protected and cannot be uninstalled")
+        # REC-PLUGIN-REQUIRES: cascade-unload dependents. A plugin that declares
+        # this one in `requires` must not keep running with the dependency gone;
+        # disable + unload each (transitively) and log it, so the state stays
+        # consistent instead of silently broken.
+        for dep in self._dependents(name):
+            if dep in self._enabled_set() or dep in self._loaded:
+                _log.warning("disabling plugin %s: it requires %s, which is being "
+                             "uninstalled", dep, name)
+                try:
+                    self._set_enabled(dep, False)
+                    self._unload(dep)
+                except Exception:
+                    pass
         entry = self._loaded.get(name)
         if entry:
             module = entry[1]

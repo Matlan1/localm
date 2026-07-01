@@ -152,6 +152,11 @@ export function renderMarkdown(target, text) {
           { left: "\\[", right: "\\]", display: true },
         ],
         throwOnError: false,
+        // Pin trust:false explicitly (R41-D4): KaTeX's \htmlData / \href etc.
+        // can emit raw HTML/URLs when trust is enabled; keep it off so the math
+        // renderer cannot become an HTML-injection sink, independent of any
+        // future KaTeX default change.
+        trust: false,
         ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code"],
       });
     } catch (e) { /* malformed TeX mid-stream - final render fixes it */ }
@@ -202,9 +207,14 @@ export function artifactSrcdoc(code, lang) {
       + "</head><body>" + code + "</body></html>";
   }
   if (/<!doctype\s+html/i.test(code) || /<html[\s>]/i.test(code)) {
-    // Full document: inject the CSP as early as possible so it governs all loads.
-    if (/<head[\s>]/i.test(code)) return code.replace(/<head([^>]*)>/i, "<head$1>" + csp);
+    // Full document: the CSP meta must be parsed BEFORE any executable node, or
+    // a <script> the artifact placed before its own <head> runs pre-CSP and can
+    // still hit the network (R41-D4). Anchor on <html> FIRST: inject our own
+    // <head> carrying the CSP immediately after the <html ...> tag, so the CSP
+    // precedes anything between <html> and the artifact's own <head>. Only fall
+    // back to splicing an existing <head> (no <html> tag) or prepending.
     if (/<html[^>]*>/i.test(code)) return code.replace(/<html([^>]*)>/i, "<html$1><head>" + csp + "</head>");
+    if (/<head[\s>]/i.test(code)) return code.replace(/<head([^>]*)>/i, "<head$1>" + csp);
     return csp + code;
   }
   // A fragment: wrap it in a minimal document.
