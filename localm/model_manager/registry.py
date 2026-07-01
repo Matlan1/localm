@@ -298,9 +298,61 @@ def list_models() -> None:
     if any(not Path(i["path"]).exists() for i in reg.values()):
         console.print(
             "[dim]Models marked [red]missing[/red] have no file on disk. "
-            "Set [bold]autoprune_missing_models true[/bold] to drop them "
+            "Re-point one you MOVED with [bold]localm relocate <name> <new-path>[/bold], "
+            "set [bold]autoprune_missing_models true[/bold] to drop them "
             "automatically, or re-add the file.[/dim]"
         )
+
+
+def is_external_path(path) -> bool:
+    """True if *path* points OUTSIDE the managed models dir - an external model the
+    user referenced from elsewhere (e.g. a shared drive), vs one localm downloaded
+    into MODELS_DIR. External models can go 'missing' when their real location moves,
+    and are the case `localm relocate` re-points (REC-EXTPATH-RELOCATE)."""
+    try:
+        Path(path).resolve().relative_to(_mm.MODELS_DIR.resolve())
+        return False
+    except (ValueError, OSError):
+        return True
+
+
+def model_is_external(name: str) -> bool:
+    """Whether the registered model *name* lives outside the managed models dir."""
+    info = _mm.load_registry().get(name)
+    return bool(info) and is_external_path(info.get("path", ""))
+
+
+def relocate_model(name: str, new_path: str) -> bool:
+    """Re-point a registered model to *new_path* - for an EXTERNAL model whose file
+    was MOVED (it shows 'missing' but is not gone, just relocated). Validates the new
+    path is a real GGUF file or HF dir, updates the registry, and clears the missing
+    flag. Returns True on success (REC-EXTPATH-RELOCATE)."""
+    from localm.model_manager.gguf import _has_gguf_magic
+    reg = _mm.load_registry()
+    if name not in reg:
+        console.print(f"[red]No such registered model:[/red] {name}")
+        return False
+    p = Path(new_path).expanduser()
+    if not p.exists():
+        console.print(f"[red]Path does not exist:[/red] {p}")
+        return False
+    if p.is_dir():
+        from localm.inference.engine import _is_hf_dir
+        if not _is_hf_dir(str(p)):
+            console.print(f"[red]Not a HuggingFace model directory:[/red] {p}")
+            return False
+    elif p.suffix.lower() != ".gguf" or not _has_gguf_magic(p):
+        console.print(f"[red]Not a GGUF model file:[/red] {p}")
+        return False
+    entry = reg[name]
+    if not isinstance(entry, dict):
+        console.print(f"[red]Corrupt registry entry for {name}[/red]")
+        return False
+    entry["path"] = str(p.resolve())
+    entry.pop("missing", None)              # it is present again at the new path
+    _mm.save_registry(reg)
+    console.print(f"[green]Relocated[/green] [bold]{name}[/bold] -> {p}")
+    return True
 
 
 
