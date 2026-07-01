@@ -94,7 +94,7 @@ rag = [
 # Speech-to-text for the GUI mic button (Whisper, CPU int8 - no torch).
 # Install with:  pip install "localm[voice]"
 voice = [
-    "faster-whisper>=1.0",
+    "faster-whisper>=1.2.1",
 ]
 # Live hardware monitor in the GUI status bar (CPU % + RAM). VRAM and NVIDIA
 # GPU % need no package. Optional: the monitor just omits CPU/RAM without it.
