@@ -514,11 +514,12 @@ def synthesize_memory(complete, *, max_facts: int = 12,
     store = _chat_store()
     _migrate_legacy(store)
     # Report which facts were newly added by diffing record ids. Ids are stable
-    # across consolidation (store.replace reuses the same record objects and only
-    # (re)computes vectors keyed by id - it never mints new ids or duplicates a
-    # record), so an UPDATE reuses its id (not counted here) and only true ADDs
-    # appear. When an embedding model is available, embed_fn stores a semantic
-    # vector per new/updated record so recall is semantic, not just lexical.
+    # across consolidation (store.replace reuses the same record objects - it
+    # never mints new ids or duplicates a record), so an UPDATE reuses its id
+    # (not counted here) and only true ADDs appear. Vectors: replace embeds ids
+    # that have none, and run_consolidation invalidates an UPDATEd record's old
+    # vector first so its embedding tracks the NEW text (it used to stay stale
+    # forever; memory-audit 2026-07-02).
     before = {r.id for r in store.all()}
     res = run_consolidation(store, sessions, complete, embed_fn=_embed_fn(),
                             surface="chat", max_candidates=max_facts)

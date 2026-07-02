@@ -280,6 +280,16 @@ class MemoryStore:
         self._dim = None
         self._save()
 
+    def invalidate_vectors(self, ids) -> None:
+        """Drop the cached vectors of *ids* so the next save/replace re-embeds
+        them. Needed when record TEXT is mutated outside :meth:`update` (the
+        consolidation batch): ``replace`` only embeds ids WITHOUT a vector, so
+        a text change would otherwise keep serving the old text's vector
+        forever (memory-audit 2026-07-02). No save here; the caller's
+        replace/save persists the result."""
+        for mem_id in ids:
+            self._vectors.pop(mem_id, None)
+
     def replace(self, records: list[MemoryRecord], *,
                 embed_fn: Optional[EmbedFn] = None) -> None:
         """Overwrite the whole namespace in ONE atomic save (used by the
