@@ -34,6 +34,8 @@ import time
 from difflib import SequenceMatcher
 from typing import Callable, Optional
 
+from localm.inference.textnorm import strip_think
+
 from .gating import writes_allowed
 from .record import MemoryRecord
 from .store import MAX_TEXT_LEN, MemoryStore
@@ -91,7 +93,11 @@ def _parse_json_object(raw: str) -> dict:
     prose or a ``` fence. Returns {} when nothing parseable is found (mirrors the
     coder's episodes._extract_json - small models are not airtight even under a
     grammar)."""
-    text = (raw or "").strip()
+    # Reasoning channels are stripped by the callers before parsing, but strip
+    # again here so no future caller can regress the C1 store-poisoning bug (a
+    # brace inside a <think> block broke the first-{-to-last-} scavenge below,
+    # and scratchpad text ended up stored as memory). Idempotent.
+    text = strip_think(raw).strip()
     if text.startswith("```"):
         text = text[3:]
         if text[:4].lower() == "json":
@@ -110,8 +116,41 @@ def _parse_json_object(raw: str) -> dict:
             obj = json.loads(text[i: j + 1])
             return obj if isinstance(obj, dict) else {}
         except json.JSONDecodeError:
-            return {}
+            pass
+    # First-{-to-last-} failed (prose containing extra braces around the JSON).
+    # Fall back to each balanced top-level {...} span, newest last: models put
+    # the answer at the END of a chatty reply, so try the last span first.
+    for cand in reversed(_balanced_spans(text)):
+        try:
+            obj = json.loads(cand)
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            continue
     return {}
+
+
+def _balanced_spans(text: str, limit: int = 16) -> list[str]:
+    """Top-level brace-balanced ``{...}`` substrings of *text*, in order, at
+    most *limit* (a hostile reply full of braces must not turn parsing into
+    O(n^2) json.loads attempts). Depth counting ignores string escapes, which
+    is fine for a best-effort fallback: a span that is not real JSON simply
+    fails json.loads and is skipped."""
+    spans: list[str] = []
+    depth, start = 0, -1
+    for i, ch in enumerate(text):
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}" and depth:
+            depth -= 1
+            if depth == 0 and start != -1:
+                spans.append(text[start: i + 1])
+                start = -1
+                if len(spans) >= limit:
+                    break
+    return spans
 
 
 def extract(complete: Complete, session_text: str, *,
@@ -126,7 +165,9 @@ def extract(complete: Complete, session_text: str, *,
         raw = complete(_EXTRACT_PROMPT + session_text[:8000] + "\n=== end ===\n") or ""
     except Exception:
         return []
-    obj = _parse_json_object(raw)
+    # Thinking models emit a <think> scratchpad before the JSON; stored raw it
+    # poisoned the store and broke parsing (audit C1). Strip it first.
+    obj = _parse_json_object(strip_think(raw))
     facts = obj.get("facts") if isinstance(obj, dict) else None
     if not isinstance(facts, list):
         return []
@@ -177,7 +218,11 @@ def summarize_session(complete: Complete, session_text: str) -> str:
         raw = complete(_EPISODE_PROMPT + session_text[:8000] + "\n=== end ===\n") or ""
     except Exception:
         return ""
-    for line in str(raw).strip().splitlines():
+    # Strip the reasoning channel BEFORE picking the first line: on a thinking
+    # model the first line of the raw reply is the <think> opener, and the audit
+    # caught exactly that stored as a durable episodic record (C1).
+    raw = strip_think(str(raw))
+    for line in raw.strip().splitlines():
         line = line.strip().lstrip("-*# ").strip()
         # Require a real sentence: some letters + a little length. Rejects a
         # degenerate reply ("{}", "[]", "", a stray token) so a weak model never

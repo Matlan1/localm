@@ -351,15 +351,21 @@ def reflect_and_store(
     """Ask the model to reflect on a finished session, then store one episode.
 
     Caller gates this on the privacy contract (privacy mode / restricted sessions
-    must not call it). Any model or parse failure degrades to a thin episode
-    (summary only) rather than raising - episodic memory is best-effort and must
-    never break a coder run.
+    must not call it). Any model or parse failure yields an EMPTY episode that is
+    NOT stored (a blank record would only dilute retrieval) - the skip is logged
+    so a silently non-learning setup is discoverable (rule 5); episodic memory
+    is best-effort and must never break a coder run.
     """
     prompt = _build_reflect_prompt(task, outcome, files, diff, max_diff_chars)
     try:
         raw = complete(prompt) or ""
     except Exception:
         raw = ""
+    # Strip the reasoning channel before parsing: a thinking model's scratchpad
+    # broke JSON extraction and could leak into stored lessons (audit C1).
+    # Idempotent when the caller already stripped.
+    from localm.inference.textnorm import strip_think
+    raw = strip_think(raw)
     data = _extract_json(raw)
     ep = Episode(
         task=(task or "").strip(),
@@ -374,8 +380,16 @@ def reflect_and_store(
     )
     # Don't store an empty episode: if the model produced nothing usable (a failed
     # call or unparseable reply), there is no lesson worth recalling, and writing a
-    # blank record would only dilute future retrieval.
+    # blank record would only dilute future retrieval. But say so: this exact
+    # silent drop hid the fact that thinking models NEVER stored an episode
+    # (memory-audit 2026-07-02), i.e. episodic memory was off without anyone
+    # knowing. A log line keeps the failure discoverable without breaking the run.
     if not (ep.summary or ep.what_worked or ep.what_failed or ep.lesson):
+        from localm.debuglog import logger
+        logger.warning(
+            "episodic memory: reflection produced no usable lesson "
+            "(empty or unparseable model reply%s); episode NOT stored",
+            "" if raw.strip() else ", reply empty after think-strip")
         return ep
     store.add(ep)
     return ep
