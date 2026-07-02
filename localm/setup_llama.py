@@ -1091,6 +1091,13 @@ def _ensure_importable() -> None:
     except Exception:
         if _install_runtime_wheel(_runtime_pkg_dir()):
             console.print("[green]OK[/green] localm-llama-runtime installed.")
+        else:
+            # Surface, do not swallow: the runtime is neither importable nor
+            # installable, so a later `localm run` will fail. Say so now.
+            console.print("[yellow]Warning:[/yellow] localm-llama-runtime is not "
+                          "importable and could not be installed. Re-run "
+                          "[bold]localm setup-llama[/bold] or check the network/log; "
+                          "[bold]localm doctor[/bold] will show what is missing.")
 
 
 def _verify() -> None:
@@ -1103,5 +1110,8 @@ def _verify() -> None:
         else:
             console.print("[yellow]Binaries placed but not yet resolvable - "
                           "restart your shell so the new package is importable.[/yellow]")
-    except Exception:
-        pass
+    except Exception as e:
+        # Surface a verify failure instead of exiting silently after "setup done":
+        # a swallowed error here is exactly the "looks fine, actually broken" trap.
+        console.print(f"[yellow]Warning:[/yellow] could not verify the native runtime "
+                      f"({e}); it may not load. Run [bold]localm doctor[/bold] to check.")

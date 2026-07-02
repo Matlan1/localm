@@ -68,6 +68,11 @@ Run `localm doctor` after installing to check Python, the native library, GPU dr
 
 ## Install
 
+> **Stable release:** to install a specific tagged version instead of the latest
+> `master`, clone that tag, for example:
+> `git clone --depth 1 --branch v0.1.0 https://github.com/Matlan1/localm.git`
+> then follow the setup below inside the clone.
+
 ### Recommended (Windows): self-contained setup
 
 Clone anywhere and double-click `setup.bat`. It creates a private `.venv` inside the clone (always Python 3.12), installs localm into it, detects your GPU and provisions the matching llama.cpp backend (Vulkan for any GPU, CUDA/ROCm for peak performance, or CPU), and asks where data should live:
