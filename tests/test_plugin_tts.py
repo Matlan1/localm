@@ -226,3 +226,30 @@ def test_tts_plugin_writes_no_traces(env):
         c.get("/api/tts/status")
         after = {p for p in (env / "plugins" / "tts").rglob("*")}
         assert before == after                 # config/status requests wrote nothing
+
+
+# ---------------- HONESTY-0702: template failures are surfaced ---------------- #
+
+def test_tts_defaults_warn_on_corrupt_template(tmp_path, monkeypatch, caplog):
+    """A malformed shipped template must degrade LOUDLY: {} is still served
+    (right altitude), but the parse failure lands in the log (rule 5:
+    missing != corrupt, neither is silent)."""
+    import logging
+    from localm.plugins.builtin.tts import plug
+    bad = tmp_path / "tts.example.json"
+    bad.write_text("{ not json", encoding="utf-8")
+    monkeypatch.setattr(plug, "_TEMPLATE", bad)
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        assert plug._defaults() == {}
+    assert "TTS defaults template" in caplog.text
+
+
+def test_tts_defaults_warn_on_missing_template(tmp_path, monkeypatch, caplog):
+    """The template is a SHIPPED file - absence is a broken install and is
+    warned too, not silently collapsed into the same quiet {} as corruption."""
+    import logging
+    from localm.plugins.builtin.tts import plug
+    monkeypatch.setattr(plug, "_TEMPLATE", tmp_path / "absent.json")
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        assert plug._defaults() == {}
+    assert "TTS defaults template" in caplog.text

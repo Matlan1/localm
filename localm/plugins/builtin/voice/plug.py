@@ -50,7 +50,11 @@ async def voice_transcribe(req: TranscribeRequest):
         text = await loop.run_in_executor(
             None, lambda: transcribe_bytes(data, language=req.language))
     except VoiceError as e:
-        status = 501 if "faster-whisper" in str(e) else 422
+        # 501 = the STT stack is not installed; anything else is a failed/bad
+        # recording or engine fault (422). Keyed on the structured code the
+        # worker protocol already carries, never on the message wording (a
+        # rewording must not silently change the API status).
+        status = 501 if e.code == "needs-faster-whisper" else 422
         raise HTTPException(status, str(e))
     return {"text": text}
 

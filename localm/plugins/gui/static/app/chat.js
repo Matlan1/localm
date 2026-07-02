@@ -228,7 +228,7 @@ export function pushConversation(conv) {
   _convPushTimers.set(conv.id, setTimeout(async () => {
     _convPushTimers.delete(conv.id);
     try {
-      await fetch("/api/conversations/" + encodeURIComponent(conv.id), {
+      const r = await fetch("/api/conversations/" + encodeURIComponent(conv.id), {
         method: "PUT",
         headers: authHeaders(),
         body: JSON.stringify({ title: conv.title,
@@ -238,7 +238,16 @@ export function pushConversation(conv) {
                                branches: conv.branches || [],
                                messages: conv.messages }),
       });
-    } catch (e) { /* offline - localStorage still has the copy */ }
+      // A resolved-but-FAILED save (500, 413 on a huge conversation) must not
+      // be silent: server-side persistence would quietly stop while the user
+      // believes it works. localStorage still holds the copy, so the client
+      // error log (console.error is captured there) is the right altitude -
+      // not a toast on every debounced push.
+      if (!r.ok) {
+        console.error("conversation push failed: HTTP " + r.status
+                      + " for " + conv.id);
+      }
+    } catch (e) { /* offline (network error) - localStorage still has the copy */ }
   }, 600));
 }
 
@@ -246,9 +255,23 @@ export function deleteConversationRemote(convId) {
   if (!chat.persist) return;
   clearTimeout(_convPushTimers.get(convId));
   _convPushTimers.delete(convId);
+  // Deleting is privacy-relevant: a failed server-side delete must not stay
+  // silent - the copy would quietly survive and resurrect on the next load
+  // while the user believes it is gone. Surface it (toast + client error log).
   fetch("/api/conversations/" + encodeURIComponent(convId), {
     method: "DELETE", headers: authHeaders(),
-  }).catch(() => {});
+  }).then((r) => {
+    if (!r.ok) {
+      toast("Could not delete the conversation on the server (HTTP "
+            + r.status + ") - it may reappear.", true);
+      console.error("conversation delete failed: HTTP " + r.status
+                    + " for " + convId);
+    }
+  }).catch((e) => {
+    toast("Could not delete the conversation on the server - it may reappear.",
+          true);
+    console.error("conversation delete failed for " + convId + ": " + e);
+  });
 }
 
 /** R40: fetch a full conversation's body on demand and replace its index-only
@@ -1009,7 +1032,9 @@ export async function attachDocument(file) {
     method: "POST", headers: authHeaders(),
     body: JSON.stringify({ filename: file.name, content_b64: b64 }),
   });
-  const data = await r.json();
+  // .catch: a non-JSON error body (a plain-text 500) still throws the clean
+  // statusText error below instead of a JSON-parse message.
+  const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.detail || r.statusText);
   chat.docs.push({ name: data.filename, text: data.text,
                    chars: data.chars, truncated: data.truncated });
@@ -1082,12 +1107,18 @@ export async function ingestSharedFiles() {
     }
   }
   renderAttachChips();
-  // We have the data client-side now; clear the server inbox.
+  // We have the data client-side now; clear the server inbox. Best-effort: on
+  // failure the items are re-ingested (and the clear retried) on the next
+  // open, so a devtools warning is the right altitude - but not total silence
+  // (the shared files would linger server-side past their use, and the retry
+  // duplicates the attachments).
   fetch("/api/share/clear", {
     method: "POST",
     headers: { ...authHeaders(), "Content-Type": "application/json" },
     body: JSON.stringify({ ids }),
-  }).catch(() => {});
+  }).then((r) => {
+    if (!r.ok) console.warn("share inbox clear failed: HTTP " + r.status);
+  }).catch((e) => { console.warn("share inbox clear failed: " + e); });
   if (imgs) toast(`${imgs} image${imgs > 1 ? "s" : ""} shared into chat`);
 }
 

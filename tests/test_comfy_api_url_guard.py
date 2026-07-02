@@ -82,3 +82,13 @@ def test_image_settings_keeps_lan_per_plugin_api_url(monkeypatch):
     lan = "http://192.168.1.50:8188"
     s = _image_backend.settings(_plugin_cfg("image", {"api_url": lan}))
     assert s["api_url"] == lan
+
+
+def test_sanitize_fails_closed_on_unparseable_url(caplog):
+    # HONESTY-0702: urlparse raises "Invalid IPv6 URL" on an unclosed bracket.
+    # The guard used to swallow that and return the URL UNCHECKED (silent fail
+    # open); it must refuse (fail closed) and say why in the log.
+    import logging
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        assert c.sanitize_comfy_url("http://[::1") == _LOOPBACK
+    assert "could not be validated" in caplog.text
