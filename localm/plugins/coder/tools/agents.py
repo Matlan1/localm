@@ -51,9 +51,21 @@ def tool_spawn_agent(
 
     preload_text = ""
     if files:
+        failed: list[str] = []
         for fp in files:
             r = tool_read_file(cwd, fp)
+            if not r.ok:
+                failed.append(f"{fp}: {r.output}")
+                continue
             preload_text += f"\n{r.output}\n"
+        if failed:
+            # Fail BEFORE spawning: silently feeding the read error to the
+            # child as "file content" poisons its context, and the parent is
+            # the one who can fix the path and retry.
+            return ToolResult.error(
+                "spawn_agent: could not pre-load file(s):\n  "
+                + "\n  ".join(failed)
+            )
 
     full_task = task
     if preload_text:
