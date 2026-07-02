@@ -17,6 +17,7 @@ from rich.progress import DownloadColumn
 from rich.progress import Progress
 from rich.progress import TextColumn
 from rich.progress import TimeRemainingColumn
+from ..debuglog import logger
 from ._shared import console
 
 
@@ -200,8 +201,17 @@ def _hash_with_progress(path: Path) -> Optional[str]:
 
 
 
+# Conservative size floor for a plausible GGUF. The fixed header alone (magic +
+# version + tensor count + KV count) is 24 bytes, and every real model carries a
+# metadata KV block (general.architecture, tokenizer, ...) plus tensor infos well
+# past 1 KiB before the first weight byte; even the tiniest test GGUFs are tens of
+# KB. Kept deliberately low so no legitimate model can ever be rejected.
+_GGUF_MIN_BYTES = 1024
+
+
 def _has_gguf_magic(path: Path) -> bool:
-    """True when *path* begins with the GGUF magic ``b"GGUF"``.
+    """True when *path* begins with the GGUF magic ``b"GGUF"`` and is at least
+    ``_GGUF_MIN_BYTES`` long.
 
     Auto-registration (sync_models_dir) keys on the ``.gguf`` extension alone, so
     a foreign file renamed ``.gguf``, a 0-byte placeholder, or a partial copy that
@@ -209,13 +219,26 @@ def _has_gguf_magic(path: Path) -> bool:
     load - in the worst case wedging the app if it became the active model (R45,
     "copying a file into models/ broke the whole app"). A real GGUF always starts
     with this 4-byte magic; an unreadable file is treated as not-a-GGUF and
-    skipped. (This cannot catch a mid-copy of a *valid* GGUF, whose header is
-    written first - that stays a best-effort gap.)"""
+    skipped. The size floor additionally rejects a header-only truncated copy or
+    placeholder that got just the magic, which would pass the magic check and then
+    fail a later load with an opaque ggml error. (A mid-copy of a *valid* GGUF that
+    already passed the floor stays a best-effort gap.)"""
+    floor = _mm._GGUF_MIN_BYTES
     try:
         with open(path, "rb") as fh:
-            return fh.read(4) == b"GGUF"
+            if fh.read(4) != b"GGUF":
+                return False
+        size = path.stat().st_size
     except OSError:
         return False
+    if size < floor:
+        logger.debug(
+            "skipping %s: GGUF magic but only %d bytes (< %d) - truncated or "
+            "placeholder, not a usable model",
+            path.name, size, floor,
+        )
+        return False
+    return True
 
 
 

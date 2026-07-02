@@ -25,7 +25,7 @@ def env(tmp_path, monkeypatch):
 
 def _gguf(p: Path) -> Path:
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_bytes(b"GGUF" + b"\x00" * 60)        # valid GGUF magic
+    p.write_bytes(b"GGUF" + b"\x00" * 2048)      # valid GGUF magic + past the size floor
     return p
 
 
