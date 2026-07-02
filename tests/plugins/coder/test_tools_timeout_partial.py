@@ -50,6 +50,33 @@ class TestHelper:
         assert len(s) < 20_000
 
 
+class TestErrorSummaryStaysOneLine:
+    def test_multiline_error_summary_is_first_line_only(self):
+        from localm.plugins.coder.tools.base import ToolResult
+        r = ToolResult.error("headline\n" + "x" * 9000)
+        assert r.summary == "ERROR: headline"
+        assert "x" * 9000 in r.output          # full detail stays in output
+
+    def test_long_single_line_summary_capped(self):
+        from localm.plugins.coder.tools.base import ToolResult
+        r = ToolResult.error("y" * 500)
+        assert len(r.summary) < 220
+        assert r.summary.endswith("...")
+        assert r.output == "y" * 500
+
+    def test_short_error_summary_unchanged(self):
+        from localm.plugins.coder.tools.base import ToolResult
+        r = ToolResult.error("it broke")
+        assert r.summary == "ERROR: it broke"
+
+    def test_timeout_partial_not_in_summary(self, tmp_path):
+        exc = _timeout_exc(output="blob " * 500)
+        with patch(_RUN, side_effect=exc):
+            r = tool_run_shell(tmp_path, "slow-command", timeout=30)
+        assert r.summary == "ERROR: Command timed out after 30s"
+        assert "blob" in r.output              # detail only in the output body
+
+
 class TestRunShellTimeout:
     def test_partial_output_included(self, tmp_path):
         exc = _timeout_exc(output="step 1 done\nstep 2 running", stderr="late warn")

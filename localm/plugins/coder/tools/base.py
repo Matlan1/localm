@@ -20,7 +20,14 @@ class ToolResult:
 
     @classmethod
     def error(cls, message: str) -> "ToolResult":
-        return cls(ok=False, output=message, summary=f"ERROR: {message}")
+        # summary is a ONE-LINE console display (see field comment). Keep the
+        # full message in output and only a capped first line here, so a long
+        # diagnostic (a timeout's partial output, git stderr) cannot flood the
+        # interactive console or the audit/event summary field.
+        head = message.splitlines()[0] if message else ""
+        if len(head) > 200:
+            head = head[:200] + "..."
+        return cls(ok=False, output=message, summary=f"ERROR: {head}")
 
     def to_xml(self, tool_name: str) -> str:
         status = "ok" if self.ok else "error"
