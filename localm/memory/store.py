@@ -294,6 +294,34 @@ class MemoryStore:
         for mem_id in ids:
             self._vectors.pop(mem_id, None)
 
+    def semantic_nearest(self, text: str, records: list,
+                         embed_fn: Optional[EmbedFn]) -> tuple:
+        """(index into *records*, cosine) of the record most semantically similar
+        to *text*, or (-1, 0.0) when no embedder, no stored vectors, or a dim
+        mismatch. Used by consolidation to catch PARAPHRASED contradictions that
+        share few tokens ('lives in Berlin' vs 'moved to Munich'), which the
+        lexical matcher misses, so they reach the ADD/UPDATE/DELETE decision
+        instead of blind-accumulating (memory-audit 2026-07-02 F9). Compares
+        against THIS store's cached vectors keyed by record id."""
+        if embed_fn is None or not self._vectors:
+            return -1, 0.0
+        try:
+            qvec = embed_fn([text])[0]
+        except Exception:
+            return -1, 0.0
+        if not qvec:
+            return -1, 0.0
+        qdim = len(qvec)
+        best_i, best_s = -1, 0.0
+        for i, r in enumerate(records):
+            vec = self._vectors.get(r.id)
+            if not vec or len(vec) != qdim:
+                continue
+            s = _cosine(qvec, vec)
+            if s > best_s:
+                best_i, best_s = i, s
+        return best_i, best_s
+
     def backfill_vectors(self, embed_fn: EmbedFn, *, limit: int = 64) -> int:
         """Embed records that have no vector yet, up to *limit* per call, and
         save. Returns the number embedded.
