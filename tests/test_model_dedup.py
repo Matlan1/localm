@@ -216,7 +216,7 @@ class TestAddLocalDedup:
         gone = tmp_path / "downloads" / "m.gguf"        # external path, file moved away
         store["first"] = {"path": str(gone.resolve()), "source": "local"}
         moved = models_dir / "m.gguf"
-        moved.write_bytes(b"GGUF" + b"\x00" * 16)       # the moved file, now in MODELS_DIR
+        moved.write_bytes(b"GGUF" + b"\x00" * 2048)     # the moved file, now in MODELS_DIR
 
         result = mm.sync_models_dir(prune=False)
 
@@ -393,7 +393,7 @@ class TestRegistryRmwAtomicity:
     def test_relocate_no_lost_update(self, fake_registry, tmp_path, monkeypatch):
         store, models_dir = fake_registry
         newf = models_dir / "m.gguf"
-        newf.write_bytes(b"GGUF" + b"\x00" * 16)
+        newf.write_bytes(b"GGUF" + b"\x00" * 2048)
         store["target"] = {"path": str(tmp_path / "gone.gguf"),
                            "source": "local", "missing": True}
         self._racy_load(mm, store, monkeypatch,
