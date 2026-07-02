@@ -892,3 +892,106 @@ def test_cli_coder_job_defaults_to_no_shell(home):
                                   "--cwd", str(home), "--every", "60"])
     assert r.exit_code == 0, r.output
     assert JobStore().list()[0].allow_shell is False
+
+
+# --------------------------------------------------------------------------- #
+#  C2 regression (memory-audit 2026-07-02): the scheduler must start on the   #
+#  REAL server path, where plugins register before the event loop exists.     #
+# --------------------------------------------------------------------------- #
+
+def _install_jobs_into(home):
+    """Copy+enable the jobs plugin into *home*'s installed folder using a
+    throwaway bootstrap manager (mirrors what a user install does)."""
+    from pathlib import Path
+
+    from fastapi import FastAPI
+    from localm.plugins.engine import PluginManager
+    store_root = Path(__file__).resolve().parents[1] / "localm" / "plugins" / "builtin"
+    boot = PluginManager(FastAPI(), store_root=store_root,
+                         installed_root=home / "plugins")
+    boot.install("jobs")
+
+
+def test_scheduler_starts_via_server_lifespan(home, monkeypatch):
+    """Build the app the way `localm serve` does (create_app -> attach_engine
+    inside it -> uvicorn lifespan) and assert the scheduler actually starts
+    and a due job actually RUNS. Pre-fix, register() ran before the loop
+    existed, start() no-opped, and no scheduled job ever fired on a stock
+    server (the audit's live 3.7-minute silence)."""
+    from fastapi.testclient import TestClient
+
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+
+    _install_jobs_into(home)
+
+    ran = []
+    import localm.plugins.builtin.jobs.runner as runner
+    monkeypatch.setattr(
+        runner, "run_job",
+        lambda job, engine=None: ran.append(job.id) or {
+            "status": "ok", "output": "TICKED", "error": None,
+            "started": 0.0, "finished": 0.0})
+
+    from localm.inference.http_server import create_app
+    app = create_app(None)
+    mgr = getattr(app.state, "plugin_manager", None)
+    assert mgr is not None, "plugin engine failed to attach"
+    assert "jobs" in mgr._loaded, "jobs plugin did not load"
+    module = mgr._loaded["jobs"][1]
+    sched = module._scheduler
+    assert sched is not None
+    # The real bug: before the loop exists the scheduler must NOT be running
+    # yet, and the start must be QUEUED for the lifespan (not lost).
+    assert not sched.running
+    assert mgr._startup_callbacks, "startup callback was not queued"
+
+    # A due job created before startup (interval jobs are due immediately).
+    from localm.plugins.builtin.jobs.store import JobStore
+    job = JobStore().add(_make_job(schedule=3600))
+    sched.poll_seconds = 0.05          # fast ticks for the test
+
+    with TestClient(app):              # runs the app lifespan = server startup
+        assert sched.running, "lifespan did not start the scheduler"
+        deadline = time.time() + 10
+        while not ran and time.time() < deadline:
+            time.sleep(0.05)
+    assert ran == [job.id], "a due job did not run on a stock server start"
+
+
+def test_on_startup_runs_immediately_when_loop_is_up(home):
+    """Runtime enable (management API, loop already running) must keep the old
+    behavior: the callback runs right away, nothing is queued."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI
+    from localm.plugins.engine import PluginHost, PluginManager
+
+    mgr = PluginManager(FastAPI(), store_root=None, installed_root=home / "p")
+    host = PluginHost(mgr.app, mgr, SimpleNamespace(name="x", surface=None))
+    fired = []
+
+    async def scenario():
+        host.on_startup(lambda: fired.append(True))
+
+    asyncio.run(scenario())
+    assert fired == [True]
+    assert mgr._startup_callbacks == []
+
+
+def test_unmount_discards_queued_startup_callbacks(home):
+    """A plugin disabled before the lifespan ran must not have its deferred
+    startup work fire later."""
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI
+    from localm.plugins.engine import PluginHost, PluginManager
+
+    mgr = PluginManager(FastAPI(), store_root=None, installed_root=home / "p")
+    host = PluginHost(mgr.app, mgr, SimpleNamespace(name="x", surface=None))
+    host.on_startup(lambda: (_ for _ in ()).throw(AssertionError("must not run")))
+    assert len(mgr._startup_callbacks) == 1
+    host.unmount()
+    assert mgr._startup_callbacks == []
+    mgr.run_startup_callbacks()        # nothing left; must not raise
