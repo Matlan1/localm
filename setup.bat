@@ -115,6 +115,7 @@ if "%VENDOR%"=="" set "VENDOR=none"
 if "%REC%"=="" set "REC=cpu"
 echo  Detected graphics vendor: %VENDOR%
 echo  Recommended inference backend: %REC%
+if /i "%VENDOR%"=="nvidia" echo  NVIDIA note: [1] vulkan works out of the box; pick [3] cuda for peak performance.
 
 rem ---- choose the llama.cpp backend (recommended pre-selected) ---------------
 echo.

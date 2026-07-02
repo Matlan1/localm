@@ -60,6 +60,8 @@ localm serve mymodel                        # OpenAI-compatible API server
 
 - **For GGUF GPU inference:** a compiled `llama.dll` + GPU runtime DLLs. `localm setup-llama` provisions these for you (see [GPU setup](#gpu-setup)). The installer detects your hardware and chooses the backend automatically.
 
+- **NVIDIA CUDA (optional, for peak performance):** a recent NVIDIA driver (new enough for CUDA >= 12.4). **No CUDA Toolkit needed** - localm fetches a self-contained CUDA runtime. An older driver still works: setup falls back to Vulkan and tells you how to enable CUDA later. The default install uses Vulkan (any GPU, driver-only); choose CUDA in the setup menu (or `localm setup-llama --backend cuda`) for peak NVIDIA performance.
+
 Run `localm doctor` after installing to check Python, the native library, GPU driver, VRAM, and optional packages in one shot.
 
 ---
@@ -80,11 +82,14 @@ It then offers an optional desktop shortcut and walks you through which plugins 
 
 ```bash
 uv venv --python 3.12 .venv
-uv pip install -p .venv -e ".[gpu,coder,voice]"   # AMD ROCm (Windows)
-uv pip install -p .venv -e ".[coder,voice]"       # base / CPU install
+uv pip install -p .venv -e ".[coder,voice]"       # base: NVIDIA / Intel / CPU (GGUF chat needs no torch)
+uv pip install -p .venv -e ".[gpu,coder,voice]"   # AMD RDNA2 ROCm ONLY - do NOT use on NVIDIA/Intel
+localm setup-llama                                 # provision the native llama.cpp backend (Vulkan/CUDA/CPU)
 ```
 
 (`voice` adds the GUI mic's Whisper speech-to-text; drop it if you do not want it.)
+
+The base line above works on NVIDIA, Intel, and CPU; only AMD RDNA2 users add `[gpu]` (the ROCm torch stack). `localm setup-llama` is required after a manual install to fetch the native backend (`setup.bat` does this for you). NVIDIA users who also want HuggingFace/torch models install CUDA torch separately: `uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu126`.
 
 A pip extra and a plugin install are two separate steps. The extra installs a plugin's heavy Python dependencies into the venv; `localm plugin install <name>` activates the plugin itself. The defined extras are:
 
@@ -251,6 +256,8 @@ localm setup-llama --from <build-dir>    # or copy your own llama.cpp build
 ```
 
 Vulkan runs on any GPU with just the vendor's normal driver; CUDA/ROCm give peak performance when their runtime is present; CPU always works. The AMD ROCm build is self-contained (it bundles its ROCm runtime via the `[gpu]` extra's `rocm-sdk` wheels). macOS/Metal is experimental. See [docs/phone.md](docs/phone.md) to reach the GUI from a phone.
+
+**NVIDIA users:** the installer recommends **Vulkan** by default (works with just your GPU driver, no CUDA Toolkit) - press Enter to accept it and your GPU is used. For **peak performance choose `cuda`** in the setup menu (or run `localm setup-llama --backend cuda`): it fetches a self-contained CUDA runtime (no Toolkit needed), verifies the build actually loads, and falls back to Vulkan with a clear message if your driver is too old for CUDA 12.4+.
 
 localm resolves the binary directory in order: `LLAMA_CPP_LIB` env > `binary_dir` config > the bundled runtime wheel. No absolute path is ever assumed as a default; an unprovisioned install resolves to nothing and points you at `localm setup-llama`. Before loading a model, localm checks free VRAM against the model size and warns when it will not fit, instead of crashing mid-load.
 
