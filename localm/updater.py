@@ -6,8 +6,11 @@ Checking is automatic (a quiet startup check + a manual button/command); APPLYIN
 never automatic - it runs only from ``localm update`` (confirmed) or the GUI "Update
 now" button. Most updates are code-only and need just a file swap + reboot (the
 install is editable, so new source is live on restart); ``deps``/``runtime`` escalate
-only when they actually change. The risky file-swap itself lives in
-``localm/_apply_update.py`` (a detached helper with backup + health-checked rollback).
+only when they actually change. The file-swap primitives live in
+``localm/_apply_update.py``; ``apply()`` below backs up first and rolls back on a
+failed swap or post-step. There is NO post-relaunch health check or auto-rollback
+for a build that misbehaves after the restart (see the LM-DA-011 note in
+``_apply_update.py``); recovery is ``localm update --rollback``.
 """
 
 from __future__ import annotations

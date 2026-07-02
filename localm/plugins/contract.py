@@ -24,6 +24,20 @@ from typing import Any, Optional, Protocol, runtime_checkable
 #: the api_version it targets and the engine refuses incompatible plugins.
 API_VERSION = 1
 
+#: Every key a plugin.toml [plugin] table may carry, across BOTH manifest
+#: formats: this engine contract (parsed by engine.parse_spec) and the legacy
+#: CLI format (parsed by loader.parse_manifest; its own keys are name/version/
+#: description/entry plus the separate [tools] table). Both formats share the
+#: installed dir, so each parser tolerates the other format's keys and warns
+#: only on a key known to NEITHER - typo protection without false alarms
+#: (LM-DA-007). Shared here so the two parsers cannot drift.
+KNOWN_PLUGIN_KEYS = frozenset({
+    "name", "version", "api_version", "description", "scope",
+    "requires_extras", "requires", "capabilities", "data_subdir",
+    "protected", "default_enabled", "cli", "register",
+    "entry",                                 # legacy CLI manifest key
+})
+
 
 @dataclass
 class Surface:
@@ -41,6 +55,12 @@ class Surface:
     group: str = ""             # nav category id (e.g. "studio"); the SPA collapses
                                 # tabs sharing a group under one parent when 2+ are
                                 # enabled, and shows a flat tab when exactly one is
+
+
+#: The keys a plugin.toml [surface] table understands. Derived from the Surface
+#: dataclass so it can never drift from what parse_spec actually reads; used to
+#: warn (never fail) on an unknown/misspelled key (LM-DA-007).
+KNOWN_SURFACE_KEYS = frozenset(Surface.__dataclass_fields__)
 
 
 @dataclass
@@ -88,8 +108,13 @@ class Host(Protocol):
     # (compartmentalisation). name is optional and defaults to the plugin's own.
     def plugin_config(self, name: Optional[str] = ...) -> dict: ...
     def save_plugin_config(self, name: Optional[str] = ..., cfg: Optional[dict] = ...) -> None: ...
+    # Host-side scope checks are NOT implemented: the host has no request
+    # context (scopes are enforced per-request on the routes mounted via
+    # mount_router). Both raise NotImplementedError so a plugin that builds a
+    # guard on them fails loudly at development time instead of shipping a
+    # check that silently always passes (LM-DA-008).
     def has_scope(self, scope: str) -> bool: ...
-    def require_scope(self, scope: str) -> None: ...      # raises if missing
+    def require_scope(self, scope: str) -> None: ...
     def engine(self) -> Any: ...                          # inference engine handle
     def audit(self, event: str, data: dict) -> None: ...
     def browse_dirs(self, path: str) -> dict: ...         # server-side folder picker

@@ -16,6 +16,7 @@ Stores are constructed with ``root=tmp_path`` so no test touches the real
 from __future__ import annotations
 
 import json
+import logging
 
 import pytest
 
@@ -23,8 +24,8 @@ import localm.memory as M
 from localm.memory.consolidate import (SYNTH_IMP_CAP, extract,
                                         run_consolidation)
 from localm.memory.record import MemoryRecord
-from localm.memory.store import (K_CAP, MAX_TEXT_LEN, TINY_CORPUS, MemoryStore,
-                                 namespace_file)
+from localm.memory.store import (FORMAT_VERSION, K_CAP, MAX_TEXT_LEN,
+                                 TINY_CORPUS, MemoryStore, namespace_file)
 
 NOW = 1_800_000_000.0        # a fixed "now" so recency is deterministic
 DAY = 86400.0
@@ -63,15 +64,68 @@ def test_persistence_round_trip(tmp_path):
     assert got.source == "user" and got.importance == 0.8
 
 
-def test_corrupt_jsonl_line_skipped(tmp_path):
+def test_corrupt_jsonl_line_skipped(tmp_path, caplog):
     s = _store(tmp_path)
     s.add(_rec("good fact one"))
     s.add(_rec("good fact two"))
     # append a garbage line + a blank line
     with open(s.path, "a", encoding="utf-8") as fh:
         fh.write("not json at all\n\n")
-    s2 = _store(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        s2 = _store(tmp_path)
     assert {r.text for r in s2.all()} == {"good fact one", "good fact two"}
+    # LM-DA-002: the skip is surfaced (the next save erases the line), never
+    # silent. The blank line is deliberate formatting, not counted.
+    assert "skipped 1 unparseable line" in caplog.text
+
+
+def test_non_object_json_line_skipped_with_warning(tmp_path, caplog):
+    """A line that is valid JSON but not a record object (e.g. a list) is as
+    unusable as garbage; it must be skipped WITH the warning, not crash load."""
+    s = _store(tmp_path)
+    s.add(_rec("keep me"))
+    with open(s.path, "a", encoding="utf-8") as fh:
+        fh.write("[1, 2, 3]\n")
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        s2 = _store(tmp_path)
+    assert [r.text for r in s2.all()] == ["keep me"]
+    assert "skipped 1 unparseable line" in caplog.text
+
+
+def test_clean_load_logs_no_skip_warning(tmp_path, caplog):
+    s = _store(tmp_path)
+    s.add(_rec("a perfectly good fact"))
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        _store(tmp_path)
+    assert "unparseable" not in caplog.text
+
+
+def test_save_stamps_format_version(tmp_path):
+    """LM-DA-002: every saved line carries the JSONL format version so a future
+    breaking schema change has a migration hook instead of a silent skip."""
+    s = _store(tmp_path)
+    s.add(_rec("alpha"))
+    s.add(_rec("beta"))
+    lines = [json.loads(ln) for ln in
+             s.path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(lines) == 2
+    assert all(ln.get("v") == FORMAT_VERSION for ln in lines)
+
+
+def test_unversioned_legacy_file_loads_and_upgrades(tmp_path):
+    """Files written before the per-line "v" tag load unchanged (backward
+    compat), and the next save stamps every line with the current version."""
+    s = _store(tmp_path)
+    s.path.parent.mkdir(parents=True, exist_ok=True)
+    s.path.write_text(json.dumps({"id": "abc1", "text": "legacy fact"}) + "\n",
+                      encoding="utf-8")
+    s2 = _store(tmp_path)
+    assert len(s2) == 1 and s2.all()[0].text == "legacy fact"
+    s2.add(_rec("new fact"))                    # first save under the new format
+    lines = [json.loads(ln) for ln in
+             s2.path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert {ln["text"] for ln in lines} == {"legacy fact", "new fact"}
+    assert all(ln.get("v") == FORMAT_VERSION for ln in lines)
 
 
 def test_delete_and_update(tmp_path):

@@ -1,17 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Apply a downloaded localm update: verify + extract the build zip, swap the source
-tree (with a backup), run any deps/runtime step, then relaunch - rolling back if the
-relaunched build fails its health check.
+"""Apply a downloaded localm update: verify + extract the build zip, then swap the
+source tree into the install with a backup, restoring that backup if the swap (or
+the post-swap deps/runtime step run by ``updater.apply``) fails partway.
 
 Runs ONLY from an explicit user action (``localm update`` / the GUI "Update now"
-button), NEVER automatically, and the file swap runs in a DETACHED helper process
-after the parent server has exited - so no live process is importing half-swapped
-files. Self-modifying, so every apply backs up first and restores on failure: no
-apply is reported as success unless the new VERSION is live afterwards.
+button), NEVER automatically. The swap runs in-process inside ``updater.apply()``
+and the caller restarts afterwards (the CLI tells the user; the server re-execs).
+KNOWN GAP (LM-DA-011): there is no detached helper process, no post-relaunch
+health check, and no automatic rollback for a build that swaps cleanly but
+misbehaves after the restart. Recovery from such a build is ``localm update
+--rollback`` - which lives inside the NEW build, so a build too broken to start
+means restoring the kept backup dir by hand. The health-checked detached
+relauncher must be built before the updater serves real releases.
 
-The file primitives here are pure and unit-tested; ``main()`` wires them to the real
-process orchestration (stop is implicit via the parent's exit; relaunch + health
-check are integration-level).
+The file primitives here are pure and unit-tested; ``updater.apply()`` wires them
+to download, signature verification, and the post-swap step.
 """
 
 from __future__ import annotations

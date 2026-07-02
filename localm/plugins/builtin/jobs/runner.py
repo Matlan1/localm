@@ -151,6 +151,13 @@ def _run_memory(job: Job, *, engine=None) -> str:
     file, using the model. The privacy gate lives inside synthesize_memory (it
     skips with a clear status in privacy mode, never a silent success). Returns a
     human-readable summary saved as the job result."""
+    # This absolute import executes the STORE-tree copy of chat's module: a
+    # SECOND module instance beside the live chat plugin, which the engine
+    # loads under the "_localm_plugin_chat" namespace with its own globals
+    # (_ENGINE, router, caches). That is safe ONLY while synthesize_memory
+    # stays module-level-stateless (fresh store per call; shared state lives
+    # on disk/config) - keep it that way, or route this call through the
+    # engine's loaded instance instead (LM-DA-005).
     from localm.plugins.builtin.chat.plug import synthesize_memory
     eng = engine
     if eng is None:

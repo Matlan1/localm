@@ -26,7 +26,8 @@ import tomllib
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from localm.plugins.contract import API_VERSION, PluginSpec, Surface
+from localm.plugins.contract import (API_VERSION, KNOWN_PLUGIN_KEYS,
+                                     KNOWN_SURFACE_KEYS, PluginSpec, Surface)
 
 # User-facing log of the sequential plugin load (one line per plugin). Distinct
 # from the debug-only debuglog so it shows in normal server logs (U2).
@@ -107,9 +108,13 @@ def _purge_plugin_modules(uniq: str) -> None:
 #  Manifest parsing (the richer contract; superset of loader.PluginManifest)  #
 # --------------------------------------------------------------------------- #
 
-def parse_spec(plugin_dir: Path, *, builtin: bool = False) -> PluginSpec:
+def parse_spec(plugin_dir: Path, *, builtin: bool = False,
+               warnings: Optional[list] = None) -> PluginSpec:
     """Parse a plugin.toml in *plugin_dir* into a PluginSpec. Raises ValueError
-    on an invalid manifest."""
+    on an invalid manifest. When *warnings* is given, non-fatal manifest
+    problems (unknown/misspelled keys in [plugin] or [surface]) are appended to
+    it as human-readable strings - surfaced, never escalated: a plugin with an
+    unknown key must still parse and load (LM-DA-007)."""
     manifest = plugin_dir / "plugin.toml"
     if not manifest.is_file():
         raise ValueError(f"no plugin.toml in {plugin_dir}")
@@ -126,6 +131,12 @@ def parse_spec(plugin_dir: Path, *, builtin: bool = False) -> PluginSpec:
         raise ValueError(f"{manifest}: invalid or missing plugin name")
 
     s = data.get("surface", {}) if isinstance(data.get("surface"), dict) else {}
+    if warnings is not None:
+        unknown = [f"[plugin] {k}" for k in sorted(set(p) - KNOWN_PLUGIN_KEYS)]
+        unknown += [f"[surface] {k}" for k in sorted(set(s) - KNOWN_SURFACE_KEYS)]
+        if unknown:
+            warnings.append(
+                "unknown manifest key(s) ignored: " + ", ".join(unknown))
     surface = Surface(
         tab_id=str(s.get("tab_id", "")),
         label=str(s.get("label", "")),
@@ -312,6 +323,8 @@ class PluginHost:
             try:
                 self._app.router.routes.remove(r)
             except ValueError:
+                # ValueError = the route is already gone, which is the desired
+                # end state; swallowing it keeps unmount idempotent (LM-DA-012).
                 pass
         self._routes = []
         self._static_prefixes = set()
@@ -359,13 +372,20 @@ class PluginHost:
         save_config(c)
 
     def has_scope(self, scope: str) -> bool:
-        # Per-request scope checks happen at the route dependency level
-        # (require_scope on the mounted routes). The host has no request context,
-        # so this convenience always allows; never use it as a security gate.
-        return True
+        # NOT implemented: the host has no request context - per-request scope
+        # checks happen at the route dependency level (require_scope on the
+        # routes mount_router adds). This used to return True unconditionally
+        # while the contract said "raises if missing", so an author's guard
+        # could never fire; raising makes that misuse fail loudly (LM-DA-008).
+        raise NotImplementedError(
+            "host-side scope checks are not implemented; scopes are enforced "
+            "per-request on the routes mounted via mount_router()")
 
     def require_scope(self, scope: str) -> None:
-        return None
+        # See has_scope: same contract-honesty rule (LM-DA-008).
+        raise NotImplementedError(
+            "host-side scope checks are not implemented; scopes are enforced "
+            "per-request on the routes mounted via mount_router()")
 
     def engine(self) -> Any:
         return self._manager.inference_engine
@@ -466,6 +486,7 @@ class PluginManager:
         """Discover INSTALLED plugins only (the installed folder). The store shelf
         is never discovered - it is just the source for install()."""
         self._specs = {}
+        prior = self._discover_errors        # for change-only warning logs below
         self._discover_errors = {}
         root = self._installed_root
         if root:
@@ -477,11 +498,25 @@ class PluginManager:
                 if not child.is_dir() or not (child / "plugin.toml").is_file():
                     continue
                 try:
-                    spec = parse_spec(child, builtin=False)
+                    warns: list = []
+                    spec = parse_spec(child, builtin=False, warnings=warns)
                     if not spec.compatible():
                         raise ValueError(
                             f"api_version {spec.api_version} != {API_VERSION}")
                     self._specs[spec.name] = spec
+                    if warns:
+                        # LM-DA-007, rule-5 altitude: surface, do not escalate.
+                        # A typoed key (client_entyr, default_enabld) means a
+                        # tab/module/dependency quietly never materialises, so
+                        # it is recorded per-plugin (shown in GUI/CLI via
+                        # api_state) while the plugin still parses and loads.
+                        # Logged only when new/changed: api_state re-discovers
+                        # on every fetch and would otherwise spam the log.
+                        msg = "warning: " + "; ".join(warns)
+                        self._discover_errors[spec.name] = msg
+                        if prior.get(spec.name) != msg:
+                            _log.warning("plugin %s: %s", spec.name,
+                                         "; ".join(warns))
                 except Exception as e:       # one bad manifest must not break discovery
                     self._discover_errors[child.name] = str(e)
         return self._specs

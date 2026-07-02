@@ -102,6 +102,46 @@ def test_discover_and_parse(env):
     assert specs["alpha"].version == "2.1.0"
     assert specs["alpha"].scope == "alpha"
     assert specs["alpha"].surface.tab_id == "alpha"
+    # a clean manifest produces no unknown-key warning (LM-DA-007)
+    assert "alpha" not in mgr._discover_errors
+
+
+def test_unknown_manifest_key_warned_but_plugin_loads(env):
+    """LM-DA-007: a misspelled/unknown key in [plugin] or [surface] must be
+    surfaced (it means a tab, client module, or flag quietly never
+    materialises) but must NOT block the plugin - surface, do not escalate."""
+    from localm.plugins.engine import PluginManager
+    plugins = env / "plugins"
+    _make_plugin(plugins, "alpha", _ping("alpha"),
+                 toml_extra='default_enabld = true\n[surface]\ntab_idd = "alpha"\n')
+    app = FastAPI()
+    mgr = PluginManager(app, external_root=plugins, builtin_root=None)
+    specs = mgr.discover()
+    assert "alpha" in specs                       # still parsed, not refused
+    warn = mgr._discover_errors.get("alpha", "")
+    assert warn.startswith("warning:")
+    assert "unknown manifest key" in warn
+    assert "[plugin] default_enabld" in warn and "[surface] tab_idd" in warn
+    mgr.enable("alpha")                           # and it genuinely loads
+    with TestClient(app) as c:
+        assert c.get("/api/alpha/ping").json() == {"pong": True}
+
+
+def test_host_scope_methods_fail_loudly(env):
+    """LM-DA-008: the host has no request context, so has_scope/require_scope
+    cannot actually check anything. They must raise instead of silently
+    allowing - a plugin guard built on a silent no-op can never fire."""
+    from unittest.mock import MagicMock
+
+    from localm.plugins.engine import PluginHost
+
+    spec = MagicMock()
+    spec.name = "alpha"
+    host = PluginHost(MagicMock(), MagicMock(), spec)
+    with pytest.raises(NotImplementedError):
+        host.has_scope("alpha")
+    with pytest.raises(NotImplementedError):
+        host.require_scope("alpha")
 
 
 def test_on_install_hook_fires(env):
