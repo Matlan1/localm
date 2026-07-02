@@ -177,6 +177,10 @@ class JobManager:
                     env.update(extra_env)
                 job._proc = subprocess.Popen(
                     job.argv,
+                    stdin=subprocess.DEVNULL,   # no inherited TTY: interactive
+                    # dedup/overwrite prompts (pull, imagine) must take their
+                    # safe non-interactive default (skip), never click.Abort on
+                    # an unfed terminal stdin and fail the job with "Aborted!".
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,

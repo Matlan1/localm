@@ -51,9 +51,19 @@ export async function refreshImageHistory() {
   refreshReloadToggle();
   try {
     const r = await fetch("/api/imagine/history", { headers: authHeaders() });
-    if (!r.ok) return;
+    if (!r.ok) {
+      // Show a visible message instead of a blank grid (mirrors music/video),
+      // so a transient non-200 does not look like a broken/half-loaded page.
+      $("img-history").replaceChildren(
+        el("div", "sub", `Could not load images (HTTP ${r.status}).`));
+      return;
+    }
     imgState.items = (await r.json()).images;
-  } catch (e) { return; /* server unreachable */ }
+  } catch (e) {
+    $("img-history").replaceChildren(
+      el("div", "sub", `Could not load images: ${(e && e.message) || e}`));
+    return;
+  }
   // Drop selections for images that no longer exist
   const names = new Set(imgState.items.map((i) => i.name));
   for (const n of imgState.selected) if (!names.has(n)) imgState.selected.delete(n);

@@ -94,7 +94,13 @@ export function register(ctx) {
       data = null;
     }
     if (!r.ok) {
-      const msg = (data && (data.detail || data.error)) || `HTTP ${r.status}`;
+      let msg = (data && (data.detail || data.error)) || `HTTP ${r.status}`;
+      // FastAPI validation errors give detail as a list of {loc,msg,...}; join
+      // them into something readable instead of falling back to "HTTP 422".
+      if (Array.isArray(msg)) {
+        msg = msg.map((d) => d && d.msg ? d.msg : "").filter(Boolean).join("; ")
+              || `HTTP ${r.status}`;
+      }
       throw new Error(typeof msg === "string" ? msg : `HTTP ${r.status}`);
     }
     return data;
@@ -142,7 +148,7 @@ export function register(ctx) {
     const run = el("button", "btn-secondary", "Run now");
     run.dataset.action = "run";
     run.dataset.id = job.id;
-    run.onclick = () => runNow(job);
+    run.onclick = (e) => runNow(job, e.currentTarget);
     actions.appendChild(run);
 
     const toggle = el("button", "btn-secondary", job.enabled ? "Disable" : "Enable");
@@ -167,7 +173,12 @@ export function register(ctx) {
     return row;
   }
 
-  async function runNow(job) {
+  async function runNow(job, btn) {
+    // A cold "Run now" can take 10-60s while the server loads the model. Disable
+    // the button and show progress so it never looks hung (which invites a
+    // second click -> a 409 "already in progress" that reads as a failure).
+    const prev = btn ? btn.textContent : "";
+    if (btn) { btn.disabled = true; btn.textContent = "Running..."; }
     try {
       const res = await api(`/${encodeURIComponent(job.id)}/run`, { method: "POST" });
       if (res && res.status === "error") {
@@ -177,8 +188,10 @@ export function register(ctx) {
       }
     } catch (e) {
       toast(`Run failed: ${e.message}`, true);
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = prev; }
+      refresh();
     }
-    refresh();
   }
 
   async function setEnabled(job, enabled) {
@@ -294,7 +307,18 @@ export function register(ctx) {
     add.onclick = async () => {
       const kind = schedKind.querySelector("select").value;
       let schedule = sched.querySelector("input").value.trim();
-      if (kind === "interval") schedule = parseInt(schedule, 10);
+      if (kind === "interval") {
+        // The "3600" in the field is a placeholder, not a value: an untouched
+        // field is empty -> parseInt("")=NaN -> JSON null -> a cryptic 422.
+        // Default the blank case to 3600 and reject a non-numeric interval
+        // (e.g. "1 hour") instead of silently coercing it to a 1-second job.
+        if (!/^\d+$/.test(schedule)) schedule = schedule === "" ? "3600" : "";
+        schedule = parseInt(schedule, 10);
+        if (Number.isNaN(schedule) || schedule < 1) {
+          toast("Interval must be a whole number of seconds (e.g. 3600).", true);
+          return;
+        }
+      }
       const payload = {
         name: name.querySelector("input").value.trim(),
         task_kind: taskKind.querySelector("select").value,
