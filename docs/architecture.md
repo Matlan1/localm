@@ -81,7 +81,7 @@ and `unregister()`.
 
 **Two locations.** The *store* is `localm/plugins/builtin/` (the bundled,
 read-only first-party plugins: coder, image, music, video, rag, web, voice,
-tts, mcp). *Installed* plugins live under `~/.localm/plugins/`. Installing
+tts, jobs, mcp). *Installed* plugins live under `~/.localm/plugins/`. Installing
 copies a plugin from the store into the installed location.
 
 **Four states.** A plugin is *installed* (present under `~/.localm/plugins/`),

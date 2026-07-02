@@ -134,20 +134,15 @@ The agent sees the tool description and calls it like a built-in tool (e.g. `mcp
 Run the coder in verbose mode to see MCP startup:
 
 ```bash
-localm coder --debug
+localm coder --verbose
 ```
 
-Look for messages like:
+A server that starts cleanly prints nothing here: its tools simply appear in the agent's tool list (named `mcp_<server>_<tool>` and listed in the system prompt). Confirm a server loaded by checking that its tools are offered, for example `mcp_fs_search`.
+
+If a server fails to start, the coder prints a warning and continues, for example:
 
 ```
-[localm-mcp] MCP server 'fs' started
-[localm-mcp] registered: mcp_fs_search, mcp_fs_read, ...
-```
-
-If a server fails to start, you will see a warning like:
-
-```
-[localm-mcp] MCP server 'search' failed to start: [command not found]
+MCP server 'search': command not found: npx
 ```
 
 The coder continues anyway - MCP problems never break the agent.
@@ -178,10 +173,10 @@ This spawns the official SQLite MCP server (downloaded by npx) and registers its
 
 ```bash
 localm plugin install mcp
-localm info
+localm plugin status
 ```
 
-Look for `mcp: enabled` in the output.
+Confirm `mcp` is listed as installed and enabled in the output.
 
 **Check 2: did you merge the config correctly?**
 
@@ -253,10 +248,10 @@ args = ["my_search_server.py", "--db-path", "app.db"]
 In verbose mode:
 
 ```bash
-localm coder --debug
+localm coder --verbose
 ```
 
-Look for `[localm-mcp]` lines. If the server failed to start, a warning appears (see "MCP server fails to start" above).
+If a server failed to start, a yellow warning line naming it appears at startup (see "MCP server fails to start" above). A server that started cleanly is silent, so confirm it with the tool-name and tool-list checks below.
 
 **Check the tool name:**
 
@@ -291,10 +286,10 @@ Then restart Claude Desktop to reload the MCP server. The `generate_image` tool 
 If ComfyUI runs on a different machine or port, set the environment variable before launching Claude:
 
 ```bash
-set COMFYUI_URL=http://192.168.1.100:8188
+set FLUX_API_URL=http://192.168.1.100:8188
 ```
 
-(on macOS/Linux, use `export` instead of `set`).
+(on macOS/Linux, use `export` instead of `set`). To set it persistently, run `localm config comfy_api_url http://192.168.1.100:8188`.
 
 ### Permission errors in MCP tools
 

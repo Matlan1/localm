@@ -50,26 +50,30 @@ Binary formats are refused rather than indexed as mojibake.
 
 ## How retrieval works (and why it's lexical-first)
 
-The built-in ctypes GGUF binding has **no embedding support**, so localm does
-not assume vectors exist:
+The built-in ctypes GGUF chat binding does not produce embeddings (a chat
+model's hidden states make poor vectors), so semantic vectors come from a small
+dedicated embedding model instead:
 
 - **BM25** over ~1200-character paragraph-aware chunks is the always-on
   baseline - pure stdlib, deterministic, fast at home scale.
-- **Embeddings** are added opportunistically: when you index from the GUI and
-  the active backend supports `/v1/embeddings` (HF-format models, or GGUF via
-  llama-cpp-python), chunk vectors are stored and queries score as an equal
-  blend of normalised BM25 and cosine similarity. The Knowledge page shows
-  `hybrid` vs `BM25` per collection.
+- **Embeddings** use a small dedicated on-device embedding model (default
+  `bge-small-en-v1.5`), loaded separately from the chat model, so semantic
+  search works on the default GGUF runtime. Install it with
+  `localm setup-embeddings`. When it is present and you index with vectors
+  enabled, chunk vectors are stored and queries score as an equal blend of
+  normalised BM25 and cosine similarity. The Knowledge page shows `hybrid` vs
+  `BM25` per collection.
 - Embedding failures **degrade, never break**: indexing falls back to
   lexical-only with a note in the job log; queries fall back silently.
 
-CLI indexing is lexical-only (there is no engine running); index from the GUI
-to get vectors.
+By default CLI indexing is lexical-only (no running engine); pass `--embed` to
+`localm rag add` / `localm rag query` to compute vectors via a running localm
+server, matching the GUI.
 
 ## Limits worth knowing
 
-- Retrieval quality is bounded by BM25 unless your backend embeds - exact
-  words matter more than synonyms in lexical mode.
+- Retrieval quality is bounded by BM25 unless an embedding model is installed
+  (`localm setup-embeddings`) - exact words matter more than synonyms in lexical mode.
 - Chunks are capped (4 × ~1200 chars injected per question) to fit small
   context windows; the dynamic context growth and auto-compaction handle the
   rest.
@@ -79,11 +83,11 @@ to get vectors.
 
 ## Troubleshooting
 
-- **No embeddings? It still works.** If the backend cannot embed (no embedding
-  model, or embedding fails), retrieval degrades to lexical-only (BM25)
-  automatically rather than failing - results are keyword-matched instead of
-  semantic. Load an embedding-capable model (or index from the GUI) to get
-  vectors blended back in.
+- **No embeddings? It still works.** If no embedding model is installed (or
+  embedding fails), retrieval degrades to lexical-only (BM25) automatically
+  rather than failing - results are keyword-matched instead of semantic. Run
+  `localm setup-embeddings` to install the on-device embedding model (default
+  `bge-small-en-v1.5`), then re-index to get vectors blended back in.
 - **A query returns nothing.** No chunk matched: broaden or rephrase the query
   (exact words matter in lexical mode), or confirm the collection actually
   indexed the files (re-index if a source changed).

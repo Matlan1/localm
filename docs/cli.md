@@ -129,6 +129,7 @@ localm alias mymodel short                   # second name for the same file
 localm list                     # registered models
 localm models                   # available shortcuts
 localm rm MODEL [--yes]         # alias-aware removal
+localm relocate MODEL NEW_PATH  # re-point a registered model after you moved its file
 ```
 
 `localm rm` only deletes the file when the last alias pointing at it is removed, and the confirmation prompt states exactly what will happen.
@@ -209,6 +210,25 @@ Long chats compact automatically before they collide with the ceiling: at 70% fi
 
 ---
 
+## API keys
+
+localm's HTTP surface is protected by a bearer key. Manage the owner key and mint named, scope-limited keys from the CLI:
+
+```bash
+localm key show                 # show the active owner key (masked) or "open mode"
+localm key generate             # generate a random owner key, persist it, print it once
+localm key set KEY              # persist a specific owner key you provide
+localm key clear                # remove the owner key, return to open mode
+localm key create NAME --scope chat --scope rag   # mint a named key limited to those scopes
+localm key list                 # list named keys (metadata only, never the secret)
+localm key rm KEY_ID            # revoke a named key by ID
+localm key recover              # recover owner access after a lockout (run locally on the server machine)
+```
+
+Privileged scopes (`config:write`, `plugins:admin`, `keys:admin`, `admin`, `coder:full`) are never minted into a named key; only the owner key carries them. See [SECURITY.md](../SECURITY.md) for the auth and scope model, and [docs/tls.md](../docs/tls.md) for serving over a LAN.
+
+---
+
 ## Shell completion
 
 ```bash
@@ -284,9 +304,28 @@ localm setup-llama                       # auto-detect the GPU, fetch the right 
 localm setup-llama --backend vulkan      # any GPU (AMD/NVIDIA/Intel), no vendor toolkit
 localm setup-llama --backend cuda        # NVIDIA  /  --backend amd-rocm (AMD)  /  --backend cpu
 localm setup-llama --from <build-dir>    # or copy your own llama.cpp build
+localm setup-embeddings                  # install the on-device embedding model (semantic memory + RAG)
 
 localm doctor                            # check Python, llama.dll, GPU driver, VRAM, packages
 localm info                              # data directory, config file, registry, registry file
+localm status                            # show the localm server serving this directory, if any
+localm ps                                # list running localm servers (per-directory instances)
 ```
 
+`localm setup-embeddings` fetches a small on-device embedding model (default `bge-small-en-v1.5`) so semantic memory and RAG retrieval work without a lexical-only fallback; pass `--model` to choose a known key, a registered model, or a GGUF path.
+
 See [docs/gpu-setup.md](../docs/gpu-setup.md) for the full GPU setup guide.
+
+---
+
+## Updates and reporting
+
+```bash
+localm update                   # check for and apply a newer localm build (you always initiate it)
+localm update --check           # only report whether an update is available; do not apply
+localm update --rollback        # restore the previous build from the last update backup
+localm bug-report -m "..."      # generate an editable bug report and offer to send it to the maintainer
+localm issues [NUMBER]          # list the project's issues, or show one by number
+```
+
+Updates are always user-initiated: localm never updates itself in the background.

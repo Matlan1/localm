@@ -53,8 +53,11 @@ non-streaming response carries the token counts and `tokens_per_sec` but no
 
 Multimodal input uses the standard multipart content format with base64
 data-URIs (`{"type": "image_url", "image_url": {"url": "data:image/..."}}`)
-and requires a HuggingFace-format vision model (the built-in GGUF backend is
-text-only and rejects an attached image with a clear error).
+and requires a vision-capable model. A GGUF model does vision when paired with
+a multimodal projector (mmproj) GGUF (see `localm run --mmproj` /
+`localm pull --mmproj`); a GGUF loaded without an mmproj is text-only and
+rejects an attached image with a clear error. A HuggingFace-format vision model
+also works.
 
 ### `POST /v1/completions`
 
@@ -97,9 +100,9 @@ next model load.
 
 ## Plugin management endpoints
 
-These are GUI/management routes under `/api`, served by `localm gui`. They
-are scope-gated: `GET` requires `PLUGINS_READ`, the mutations require
-`PLUGINS_ADMIN`.
+These endpoints are part of the base server app (present under `localm serve`
+too, since `create_app` attaches the plugin engine). They are scope-gated:
+`GET` requires `PLUGINS_READ`, the mutations require `PLUGINS_ADMIN`.
 
 ### `GET /api/plugins`
 
@@ -147,5 +150,6 @@ for chunk in stream:
 - **Context**: the window starts at `n_ctx` and grows on demand up to
   `n_ctx_max` (see the dynamic context section of the README). Conversations
   that outgrow the ceiling get a clear error instead of an OOM.
-- **GUI endpoints**: `localm gui` adds `/api/*` routes (coder sessions,
-  model switching, image jobs) on top of this API; see [gui.md](gui.md).
+- **GUI endpoints**: `localm gui` adds further `/api/*` routes (coder sessions,
+  model switching, image jobs) on top of this API; the `/api/plugins*`
+  management routes above are already part of the base server. See [gui.md](gui.md).

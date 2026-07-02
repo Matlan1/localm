@@ -43,12 +43,21 @@ binaries also ships their license text:
 
 localm declares its Python dependencies in `pyproject.toml`. They are installed
 from PyPI by pip or uv and are NOT redistributed inside this repository, so no
-license text is reproduced here. Every declared dependency is permissive
-(MIT / BSD / Apache-2.0 / HPND / ISC / PSF). A `pip-licenses` scan of the core
-dependency closure finds no strong copyleft (no GPL / LGPL / AGPL). The only weak
-copyleft present is MPL-2.0, in `certifi` (an unmodified CA-certificate bundle)
-and `tqdm` (dual-licensed MPL-2.0 / MIT); neither is modified, and neither imposes
-any obligation on localm.
+license text is reproduced here. The declared dependencies are permissive
+(MIT / BSD / Apache-2.0 / HPND / ISC / PSF) apart from two weak-copyleft
+exceptions; a `pip-licenses` scan of the core dependency closure finds no strong
+copyleft (no GPL / AGPL). The weak copyleft present is:
+
+- **MPL-2.0**, in `certifi` (an unmodified CA-certificate bundle) and `tqdm`
+  (dual-licensed MPL-2.0 / MIT).
+- **LGPL-2.1-or-later**, in `zeroconf` (the mDNS / DNS-SD service-discovery
+  library behind `localm.local` network naming).
+
+None of these are modified by localm: each is imported as an unmodified library
+installed from PyPI, at arm's length. LGPL-2.1-or-later and MPL-2.0 are both
+compatible with localm's AGPL-3.0 license and, used this way (unmodified,
+imported as a separate library), impose no obligation on localm beyond preserving
+the upstream license notices.
 
 ## Arm's-length tools (not bundled, linked, or redistributed)
 

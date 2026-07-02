@@ -134,8 +134,8 @@ If the server dies mid-generation, the native abort message at the end of that f
 ## Security notes
 
 - The server binds to 127.0.0.1 by default and CORS is locked to localhost, so other websites you visit cannot call your API from browser JS.
-- If `LOCALM_API_KEY` is set, the GUI prompts for the key once and stores it in localStorage.
-- Binding to 0.0.0.0 without an API key triggers a CLI warning. Do not expose the GUI to a network you do not trust: the coder agent can write files and run shell commands on this machine.
+- If `LOCALM_API_KEY` is set, the GUI prompts for the key once and exchanges it for an HttpOnly session cookie, so the key itself is never kept in browser-readable storage (localStorage or JS).
+- Binding past loopback (e.g. `-H 0.0.0.0`) without an API key is refused: localm exits rather than expose the unauthenticated coder agent to the network. Set `LOCALM_API_KEY` first, or pass `--insecure` to override on a trusted, isolated network. On a network bind, traffic is TLS-encrypted by default (a built-in local-CA certificate). Even so, do not expose the GUI to a network you do not trust: the coder agent can write files and run shell commands on this machine.
 
 ## How it fits together
 
