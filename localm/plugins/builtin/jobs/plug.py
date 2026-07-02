@@ -285,7 +285,10 @@ def register(host) -> None:
     # when the plugin is enabled at runtime with the loop already up.
     on_startup = getattr(host, "on_startup", None)
     if callable(on_startup):
-        on_startup(scheduler.start)
+        def _on_loop():
+            _publish_self_url(host)      # so scheduled coder jobs reach US
+            scheduler.start()
+        on_startup(_on_loop)
     else:
         # Minimal host (older embedder / unit-test fakes): keep the old
         # best-effort direct start, which works when a loop is running.
@@ -293,6 +296,24 @@ def register(host) -> None:
             scheduler.start()
         except Exception:
             pass
+
+
+def _publish_self_url(host) -> None:
+    """Publish the live server's OWN /v1 URL into LOCALM_SELF_URL so a scheduled
+    coder job talks to THIS server (the actual, possibly auto-bumped, port),
+    not a wrong hardcoded default. Only set when unset, so an explicit
+    LOCALM_SELF_URL from the environment always wins. Best-effort: a missing
+    app.state just leaves the runner's configured-port fallback in place."""
+    import os
+    if os.environ.get("LOCALM_SELF_URL"):
+        return
+    app = getattr(host, "_app", None)
+    state = getattr(app, "state", None)
+    port = getattr(state, "instance_port", None)
+    if not port:
+        return
+    scheme = getattr(state, "instance_scheme", "http")
+    os.environ["LOCALM_SELF_URL"] = f"{scheme}://127.0.0.1:{port}/v1"
 
 
 def unregister() -> None:

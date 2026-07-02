@@ -16,8 +16,11 @@ Three things to know up front:
 - **The scheduler lives inside a running server.** It only ticks while a
   `localm gui` or `localm serve` (with the jobs plugin active) is running. There
   is no background daemon; close the server and nothing fires until it is back
-  up. Jobs that came due while it was down run on the next tick after restart,
-  not retroactively for each missed slot.
+  up. A job that came due while the server was down runs ONCE on the next tick
+  after restart (a single catch-up, not one run per missed slot): an interval
+  job runs as soon as its interval has elapsed, and a cron job back-fires a slot
+  missed within the last 24 hours. A slot missed longer ago than that is skipped
+  (a machine off for a week does not suddenly run last Monday's briefing).
 - **The CLI, GUI, and API share one on-disk store.** `localm job ...`,
   the Jobs page, and the `/api/jobs` routes all read and write the same files
   under `<data dir>/jobs/`. A change made from the terminal is picked up by a
