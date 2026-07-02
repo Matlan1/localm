@@ -91,3 +91,39 @@ test("R44: a failed summary keeps the recent turns rather than nuking history", 
   assert.equal(JSON.stringify(conv.messages.slice(2).map((m) => m.content)),
     JSON.stringify(tail.slice(-kept).map((m) => m.content)));
 });
+
+
+test("F5: compaction archives (not silently deletes) branches anchored in the summarised-away region", async () => {
+  const { impl } = summFetch("A clean summary of the earlier turns.");
+  const { window } = loadApp({ fetchImpl: impl });
+  runScript(window, "chat.ctxMax = 160;");
+  const conv = makeConv(20);
+  // Give every message a stable id, then park an alternative timeline anchored
+  // at an OLD message (index 2) that compaction will summarise away.
+  conv.messages.forEach((m) => window.msgId(m));
+  conv.branches = [{
+    parent: conv.messages[1].id,
+    tails: [
+      [{ role: "user", content: "the kept live tail", id: "live-x" }],
+      [{ role: "user", content: "an alternative timeline I explored", id: "alt-1" }],
+    ],
+    current: 0,
+  }];
+  const ok = await window.compactConversation(conv);
+  assert.equal(ok, true);
+  // The unreachable fork record is gone from navigation...
+  assert.equal((conv.branches || []).length, 0, "dangling fork record dropped");
+  // ...but its alternative content is archived, not silently destroyed.
+  const archived = JSON.stringify(conv.droppedBranches || []);
+  assert.match(archived, /an alternative timeline I explored/,
+    "the summarised-away branch content was archived for recovery");
+});
+
+test("F5: pruneBranches returns 0 and archives nothing when every fork still reachable", () => {
+  const { window: w } = loadApp();
+  const conv = { id: "c", messages: [{ role: "user", content: "a", id: "m1" }] };
+  conv.branches = [{ parent: "root", tails: [[{ role: "user", content: "x", id: "m1" }]], current: 0 }];
+  const lost = w.pruneBranches(conv);
+  assert.equal(lost, 0);
+  assert.equal(conv.droppedBranches, undefined);
+});
