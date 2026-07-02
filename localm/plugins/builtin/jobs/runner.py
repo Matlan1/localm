@@ -271,4 +271,6 @@ def _coder_backend(job: Job):
         port = load_config().get("port", 8642)
         self_url = f"http://127.0.0.1:{port}/v1"
     api_key = os.environ.get("LOCALM_API_KEY") or "localm"
-    return HTTPBackend(self_url, model=job.model or "localm", api_key=api_key)
+    # self-connection: grammar sampling available
+    return HTTPBackend(self_url, model=job.model or "localm", api_key=api_key,
+                       localm_server=True)

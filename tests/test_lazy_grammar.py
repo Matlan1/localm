@@ -130,6 +130,29 @@ class TestCoderBodyForwardsLazyFields:
         assert body["grammar_triggers"] == [TOOL_CALL_TRIGGER]
 
 
+class TestSupportsGrammarIsLocalmOnly:
+    """Grammar kwargs are sent BY DEFAULT now, so supports_grammar must mean
+    what its comment always claimed: OUR server only. The old URL blacklist
+    mislabelled every third-party OpenAI-compatible server as grammar-capable
+    (unknown body fields can 400 there)."""
+
+    def test_localm_backend_supports_grammar(self):
+        from localm.plugins.coder.backends.http import make_localm_backend
+        assert make_localm_backend("m", port=8642).supports_grammar is True
+
+    def test_arbitrary_url_does_not(self):
+        from localm.plugins.coder.backends.http import HTTPBackend
+        # A hand-typed --backend URL (LM Studio, vLLM, a remote server) must
+        # not receive grammar kwargs it may reject.
+        assert HTTPBackend("http://127.0.0.1:1234/v1", "m").supports_grammar is False
+        assert HTTPBackend("https://my-remote.example/v1", "m").supports_grammar is False
+
+    def test_explicit_flag_enables(self):
+        from localm.plugins.coder.backends.http import HTTPBackend
+        b = HTTPBackend("https://my-remote.example/v1", "m", localm_server=True)
+        assert b.supports_grammar is True
+
+
 # --------------------------------------------------------------------------- #
 # Real-model proof (same gating as test_gguf_smoke_integration.py): force the
 # trigger into the generated stream, then the continuation MUST be a valid

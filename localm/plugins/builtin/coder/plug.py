@@ -198,6 +198,7 @@ async def create_session(req: CreateSessionRequest, request: Request):
         self_url,
         model=active_model(),
         api_key=os.environ.get("LOCALM_API_KEY") or "localm",
+        localm_server=True,   # self-connection: grammar sampling available
     )
 
     gen_kwargs = {}
