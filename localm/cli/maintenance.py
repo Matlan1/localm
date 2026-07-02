@@ -220,7 +220,7 @@ def update_cmd(check_only: bool, yes: bool, do_rollback: bool) -> None:
 
     console.print(f"[dim]Downloading and applying {latest} ...[/dim]")
     try:
-        res = updater.apply(asset["id"])
+        res = updater.apply(asset["id"], signature=info.get("signature"))
     except LocalmError as e:
         # apply() already rolled back; surface honestly, never a false success.
         console.print(f"[red]Update failed:[/red] {e.summary} ({e.reason}).")

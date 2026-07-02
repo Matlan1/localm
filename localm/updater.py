@@ -21,6 +21,102 @@ from localm import _version
 # Update classes, least -> most disruptive.
 _ORDER = ("reboot", "deps", "runtime", "setup")
 
+# ---------------------------------------------------------------------------
+#  CHK-UPDATER-INTEGRITY (signature half): pinned release-signing key(s)
+# ---------------------------------------------------------------------------
+# Applying an update EXTRACTS and EXECUTES the downloaded build (it swaps into the
+# editable install and reboots into the new code), so a forged build is arbitrary
+# code execution. The transport is HTTPS-pinned (see download()), but transport
+# alone does not prove AUTHENTICITY - a compromised proxy / release / token could
+# still serve a malicious, well-formed build, and a checksum from the same channel
+# proves nothing (the attacker controls both). So each release build.zip is signed
+# with an Ed25519 private key the maintainer keeps OFFLINE, and apply() verifies the
+# signature against the PUBLIC key(s) PINNED here before anything is extracted.
+#
+# This is a tuple of hex-encoded 32-byte Ed25519 PUBLIC keys. It is EMPTY by
+# default, which makes the updater FAIL CLOSED: with no pinned key it refuses to
+# apply any update (an unverifiable build must never be installed - AGENTS.md rule
+# 5: a security step that cannot do its job fails, it does not report success). To
+# enable self-update the maintainer:
+#   1. generates a keypair offline:  python scripts/sign_release.py --generate-key
+#   2. keeps the PRIVATE key offline (never in the repo / proxy / CI),
+#   3. pastes the printed PUBLIC key hex into this tuple,
+#   4. signs each release:  python scripts/sign_release.py sign build.zip --key ...
+#      and serves that signature from the update proxy's /update JSON.
+# It is a LIST so a new key can be added (rotation) before an old one is retired,
+# without a flag day. Embedding a PUBLIC key in source is correct: it is public
+# data, and pinning it in the shipped code is exactly what an attacker cannot forge.
+_UPDATE_PUBKEYS: tuple = ()
+
+
+def _load_update_pubkeys() -> list:
+    """The pinned Ed25519 public keys as verifier objects; [] when none/invalid.
+
+    A malformed pinned key is skipped (so a second, valid key still works) rather
+    than crashing the check - but if NO valid key results, verify_signature below
+    fails closed, so a bad pin can never weaken verification into a silent pass."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    keys = []
+    for hexkey in _UPDATE_PUBKEYS:
+        try:
+            keys.append(Ed25519PublicKey.from_public_bytes(bytes.fromhex(str(hexkey).strip())))
+        except Exception:
+            continue
+    return keys
+
+
+def verify_signature(data: bytes, signature_b64) -> None:
+    """Verify *signature_b64* (base64 Ed25519 signature) over *data* against the
+    pinned public key(s). Raises :class:`~localm.bugreport.LocalmError` unless a
+    pinned key validates it.
+
+    FAIL CLOSED: refuses when no key is pinned OR no signature is supplied OR the
+    signature does not match - applying an update executes its code, so an
+    unverifiable build must never be installed."""
+    import base64
+
+    from cryptography.exceptions import InvalidSignature
+    from localm.bugreport import LocalmError
+    keys = _load_update_pubkeys()
+    if not keys:
+        raise LocalmError(
+            "refusing to apply an update: no signing key is configured",
+            reason="update signature verification is not set up (no pinned public key)")
+    if not signature_b64:
+        raise LocalmError(
+            "refusing to apply an unsigned update",
+            reason="the release did not include a signature")
+    try:
+        sig = base64.b64decode(str(signature_b64), validate=True)
+    except Exception:
+        raise LocalmError("the update signature is malformed", reason="not valid base64")
+    for key in keys:
+        try:
+            key.verify(sig, data)
+            return   # a pinned key validated the build - authentic
+        except InvalidSignature:
+            continue
+    raise LocalmError(
+        "the update signature did not match the pinned key",
+        reason="the build may be tampered with, or signed with an unknown key")
+
+
+def _refuse_downgrade(new_version: str) -> None:
+    """Raise unless *new_version* is strictly newer than the running version.
+
+    Anti-rollback: a build.zip for an OLD release is still validly SIGNED, so a
+    MITM / compromised proxy could replay it to force a downgrade to a known-
+    vulnerable version. The signature proves authenticity, not freshness; this adds
+    freshness."""
+    from localm.bugreport import LocalmError
+    current = _version.read_version()
+    if not new_version:
+        raise LocalmError("the update has no VERSION", reason="cannot confirm it is newer")
+    if not _version.is_newer(new_version, current):
+        raise LocalmError(
+            f"refusing to 'update' to {new_version}: not newer than the installed {current}",
+            reason="anti-rollback blocked a downgrade or a replayed old build")
+
 
 def endpoint() -> tuple:
     """(base_url, token) for the update channel: ``update_url``/``update_token`` if
@@ -70,6 +166,9 @@ def check(*, opener=None) -> dict:
         "notes": (data.get("notes") or "") if isinstance(data, dict) else "",
         "published_at": data.get("published_at") if isinstance(data, dict) else None,
         "asset": data.get("asset") if isinstance(data, dict) else None,
+        # The proxy serves the release's Ed25519 signature (base64) alongside the
+        # asset; apply() verifies the downloaded build against the pinned key.
+        "signature": data.get("signature") if isinstance(data, dict) else None,
     }
 
 
@@ -232,9 +331,17 @@ def _updates_dir() -> Path:
     return d
 
 
-def apply(asset_id, *, installed=None, download_opener=None, runner=None) -> dict:
-    """Download, verify, and swap a build into the install, then run the class's
-    deps/runtime step. Returns ``{applied, version, klass, backup, restart_needed}``.
+def apply(asset_id, *, signature=None, installed=None, download_opener=None,
+          runner=None) -> dict:
+    """Download, VERIFY (signature + anti-rollback), and swap a build into the
+    install, then run the class's deps/runtime step. Returns
+    ``{applied, version, klass, backup, restart_needed}``.
+
+    *signature* is the base64 Ed25519 signature from :func:`check` (the proxy serves
+    it with the release). It is verified against the pinned public key(s) BEFORE the
+    build is extracted or any of its code can run; a missing/invalid signature, an
+    unconfigured key, or a downgrade all raise before anything is swapped (fail
+    closed - we never install an unverified build).
 
     Rolls back on a swap or post-step failure (never a half-applied tree). Does NOT
     restart - the caller does (the CLI tells the user; the server re-execs). The file
@@ -250,10 +357,15 @@ def apply(asset_id, *, installed=None, download_opener=None, runner=None) -> dic
     zip_path, staging, backup_dir = updir / "build.zip", updir / "staging", updir / "backup"
 
     download(asset_id, zip_path, opener=download_opener)
+    # SIGNATURE GATE - authenticity, before verify_zip/extract/swap, i.e. before any
+    # of the downloaded build's code can be extracted or executed. Fails closed.
+    verify_signature(zip_path.read_bytes(), signature)
     au.verify_zip(zip_path)
     root = au.extract(zip_path, staging)
     vf = root / "VERSION"
     new_version = vf.read_text(encoding="utf-8").strip() if vf.exists() else ""
+    # ANTI-ROLLBACK - a validly SIGNED but OLDER build must not be installable.
+    _refuse_downgrade(new_version)
     klass = classify(root, target, read_manifest(root))
     names = au.swap_with_backup(root, target, backup_dir)
 

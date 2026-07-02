@@ -119,3 +119,7 @@ runtime/build/
 
 # Node (GUI JS tests)
 node_modules/
+
+# self-updater signing key (private Ed25519 key; NEVER commit)
+update_signing_key.pem
+*_signing_key.pem

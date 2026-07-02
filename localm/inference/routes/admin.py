@@ -146,7 +146,8 @@ def register(app: FastAPI, ctx) -> None:
         if not asset.get("id"):
             raise HTTPException(400, "This release has no downloadable build attached.")
         try:
-            res = await asyncio.to_thread(updater.apply, asset["id"])
+            res = await asyncio.to_thread(
+                updater.apply, asset["id"], signature=info.get("signature"))
         except LocalmError as e:
             # apply() already rolled back; report the failure, do not fake success.
             return {"applied": False,
