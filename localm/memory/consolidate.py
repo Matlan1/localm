@@ -299,6 +299,7 @@ def run_consolidation(store: MemoryStore, session_text: str, complete: Complete,
 
     working = store.all()
     processed: set = set()
+    updated_ids: set = set()
     for cand in candidates:
         text, conf = cand["text"], cand["confidence"]
         key = text.lower()
@@ -334,6 +335,7 @@ def run_consolidation(store: MemoryStore, session_text: str, complete: Complete,
             matched.updated = now
             matched.importance = min(SYNTH_IMP_CAP,
                                      max(matched.importance, _synth_importance(conf)))
+            updated_ids.add(matched.id)
             counts["updated"] += 1
         elif decision == "DELETE":
             working = [r for r in working if r.id != matched.id]
@@ -341,6 +343,12 @@ def run_consolidation(store: MemoryStore, session_text: str, complete: Complete,
         else:
             counts["noop"] += 1
 
+    # replace() re-embeds only ids WITHOUT a vector, so an UPDATEd record would
+    # keep its old text's vector forever: semantic recall then keeps pointing
+    # at the contradicted content, on exactly the records consolidation just
+    # corrected (memory-audit 2026-07-02, high; repro showed the stale vector
+    # surviving every later save). Drop the stale vectors so replace re-embeds.
+    store.invalidate_vectors(updated_ids)
     store.replace(working, embed_fn=embed_fn)
     store.prune(now=now)
     return counts

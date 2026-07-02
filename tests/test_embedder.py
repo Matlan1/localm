@@ -148,3 +148,107 @@ def test_real_gguf_embeddings_are_semantic():
         assert abs(cos(e.embed(["a cat"])[0], V[0]) - 1.0) < 1e-4
     finally:
         e.close()
+
+
+# --------------------------------------------------------------------------- #
+#  Over-long input truncation (memory-audit 2026-07-02: every >n_ctx-token     #
+#  text embedded to ONE identical garbage vector because the DLL writes        #
+#  nothing on tokenize overflow and the zero buffer decoded as 512x token 0)   #
+# --------------------------------------------------------------------------- #
+
+class _OverflowApi:
+    """Stub reproducing the REAL llama.dll overflow contract (probe-verified in
+    the audit): llama_tokenize returns -(needed) and writes NOTHING when the
+    buffer is too small; a full-size buffer gets the tokens. One token per
+    input byte keeps token sequences content-dependent."""
+
+    def __init__(self):
+        self.decoded_tokens = None
+
+    def _tokens_for(self, raw):
+        return [(b % 250) + 1 for b in raw]
+
+    def llama_tokenize(self, vocab, raw, ln, buf, cap, add_special, parse_special):
+        toks = self._tokens_for(raw[:ln])
+        if len(toks) > cap:
+            return -len(toks)               # writes NOTHING, like the real DLL
+        for i, t in enumerate(toks):
+            buf[i] = t
+        return len(toks)
+
+    def llama_batch_get_one(self, arr, n):
+        self.decoded_tokens = list(arr[:n])
+        return ("batch", n)
+
+    def llama_decode(self, ctx, batch):
+        return 0
+
+    def llama_get_embeddings_seq(self, ctx, seq):
+        toks = self.decoded_tokens or []
+        # Content-dependent 4-dim "embedding": identical token sequences (the
+        # pre-fix zero buffer) give identical vectors, real sequences differ.
+        return [float(sum(toks) % 9973), float(toks[0] if toks else 0),
+                float(toks[-1] if toks else 0), float(len(toks))]
+
+
+def _stub_embedder(n_ctx=8):
+    import ctypes
+    import threading
+    e = emb.GGUFEmbedder.__new__(emb.GGUFEmbedder)
+    e._api = _OverflowApi()
+    e._llama_token = ctypes.c_int
+    e._lock = threading.RLock()
+    e._n_ctx = n_ctx
+    e._mem = None
+    e._vocab = None
+    e._ctx = object()                        # truthy: "loaded"
+    e.dim = 4
+    e.model_path = "<stub>"
+    return e
+
+
+def test_overlong_inputs_do_not_collide():
+    """Two DIFFERENT over-long texts must not embed identically (pre-fix they
+    all decoded the zero-filled buffer and returned one constant vector)."""
+    e = _stub_embedder(n_ctx=8)
+    v1 = e.embed(["alpha beta gamma delta epsilon zeta"])[0]
+    v2 = e.embed(["one two three four five six seven eight nine"])[0]
+    assert v1 != v2
+
+
+def test_overlong_truncation_keeps_final_token():
+    """Truncation keeps the full sequence's FINAL token in the last slot (the
+    BERT [SEP] with add_special=True) and exactly n_ctx tokens are decoded."""
+    e = _stub_embedder(n_ctx=8)
+    text = "abcdefghijklmnopqrstuvwxyz"       # 26 tokens in the stub
+    e.embed([text])
+    toks = e._api.decoded_tokens
+    full = e._api._tokens_for(text.encode("utf-8"))
+    assert len(toks) == 8
+    assert toks[-1] == full[-1]               # SEP preserved
+    assert toks[:7] == full[:7]               # head preserved
+
+
+def test_short_input_unchanged_by_overflow_fix():
+    e = _stub_embedder(n_ctx=8)
+    e.embed(["abc"])
+    assert e._api.decoded_tokens == e._api._tokens_for(b"abc")
+
+
+@pytest.mark.real_gguf
+@pytest.mark.skipif(not _EMBED_MODEL,
+                    reason="set LOCALM_TEST_EMBED_MODEL to a real embedding GGUF")
+def test_real_gguf_overlong_texts_not_identical():
+    """Audit repro against the real DLL: two different multi-thousand-token
+    texts had cosine 1.0 pre-fix."""
+    e = emb.GGUFEmbedder(_EMBED_MODEL)
+    try:
+        long_a = ("the greenhouse controller regulates temperature and "
+                  "humidity with a hysteresis loop ") * 120
+        long_b = ("quantum chromodynamics binds quarks through gluon "
+                  "exchange in the strong interaction ") * 120
+        va, vb = e.embed([long_a, long_b])
+        cos = sum(x * y for x, y in zip(va, vb))
+        assert cos < 0.999, f"over-long texts still collide (cos={cos})"
+    finally:
+        e.close()
