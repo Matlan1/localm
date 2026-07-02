@@ -408,6 +408,18 @@ def load_config() -> dict:
 
 def save_config(cfg: dict) -> None:
     ensure_dirs()
+    # Shallow top-level backfill: a dict built by hand (rather than via
+    # load_config(), which merges defaults) would otherwise drop any missing
+    # top-level DEFAULT_CONFIG key from disk on save; this also lets a newly
+    # added default persist on the next save. Only ABSENT keys are filled -
+    # an explicit user value (including None/False) is never overwritten, and
+    # nested user-owned blocks like "plugins" are never deep-merged. The
+    # deep copy keeps the written dict from aliasing DEFAULT_CONFIG's nested
+    # mutable defaults (same aliasing concern as load_config).
+    missing = {k: copy.deepcopy(v) for k, v in DEFAULT_CONFIG.items()
+               if k not in cfg}
+    if missing:
+        cfg = {**missing, **cfg}
     with _io_lock:
         _atomic_write_json(CONFIG_FILE, cfg)
 
