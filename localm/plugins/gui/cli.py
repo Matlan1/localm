@@ -65,22 +65,6 @@ def _mount_remote_gui(entry: dict) -> bool:
         return False
 
 
-def _lan_ip() -> str:
-    """Best-effort primary LAN IPv4 of this machine, or "" if undetermined.
-    Opens a UDP socket toward a TEST-NET address to learn the outbound interface;
-    no packets are actually sent. Used only to PRINT a reachable phone/LAN URL."""
-    import socket
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            s.connect(("192.0.2.1", 80))      # TEST-NET-1 (RFC 5737); no traffic
-            return s.getsockname()[0]
-        finally:
-            s.close()
-    except OSError:
-        return ""
-
-
 def _print_qr(url: str) -> None:
     """[PoC] Print a scannable QR of *url* to the console so a phone can open
     localm without typing the address. Experimental; needs the optional 'qrcode'
@@ -394,6 +378,17 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         console.print(f"  model: [cyan]{display_name or Path(str(model_path)).stem}[/cyan]")
     console.print("  Ctrl+C to stop")
 
+    # Reach-by-name (mDNS): advertise <mdns_name>.local on a network bind so a
+    # phone reaches the GUI by name. Started HERE, before printing, so the printed
+    # name reflects reality: we only recommend <name>.local when it is actually
+    # being advertised (not on a loopback / --isolated bind, not when mDNS is off,
+    # not when the name is taken). Closed in the finally below.
+    from localm import netname
+    mdns_advertiser = None
+    if host not in ("127.0.0.1", "localhost", "::1") and not isolated:
+        mdns_advertiser = netname.start_advertiser(chosen_port, tls=bool(ssl_certfile))
+    _adv_name = netname.mdns_fqdn() if mdns_advertiser is not None else None
+
     # Phone / LAN access. The GUI is an installable PWA, so a phone just opens
     # this URL and adds it to the home screen. Bound to loopback, it is only
     # reachable on this machine; bound to the network, print the address a phone
@@ -408,22 +403,43 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
                 "  [yellow][PoC][/yellow] [dim]--qr needs a network bind to be "
                 "scannable: [/dim][cyan]localm gui -H 0.0.0.0 --qr[/cyan]")
     else:
-        _ip = _lan_ip()
-        if _ip:
-            phone_url = f"{scheme}://{_ip}:{chosen_port}/"
+        # A network bind: print the reachable NAMES (localm.local when advertised,
+        # the Tailscale MagicDNS name) and IPs so a phone needs no address typed by
+        # hand.
+        targets = netname.network_targets(mdns_name=_adv_name)
+        primary_url = None
+        qr_url = None
+        for _label, _target in targets:
+            url = f"{scheme}://{_target}:{chosen_port}/"
+            suffix = "  [dim](open it, then Install as app)[/dim]" if primary_url is None else ""
+            console.print(f"  [dim]{_label}:[/dim] [cyan]{url}[/cyan]{suffix}")
+            if primary_url is None:
+                primary_url = url
+            # Prefer an IP for the scannable QR (resolves on any phone, even one
+            # without mDNS); fall back to the first target below.
+            if qr_url is None and "(IP)" in _label:
+                qr_url = url
+        if primary_url is None:
+            # No reachable network address detected (mDNS off, no LAN IPv4, no
+            # Tailscale). Do NOT print a dead wildcard URL (https://0.0.0.0/ is not
+            # connectable from anywhere) - say so honestly; the loopback URL above
+            # still works on this machine.
+            console.print("  [dim]no reachable network address detected - "
+                          "this machine only[/dim]")
+        if scheme == "https":
+            _ca_host = netname.ca_trust_host(_adv_name) or (
+                "127.0.0.1" if host in ("0.0.0.0", "::") else host)
             console.print(
-                f"  [dim]from a phone on this network:[/dim] "
-                f"[cyan]{phone_url}[/cyan] "
-                "[dim](open it, then Install as app)[/dim]")
-            if scheme == "https":
-                console.print(
-                    "  [dim]first visit shows a one-time certificate warning; tap "
-                    "[/dim][cyan]Install certificate[/cyan][dim] on the key screen "
-                    "(or open [/dim][cyan]" + f"{scheme}://{_ip}:{chosen_port}"
-                    "/localm-ca.crt[/cyan][dim]) to trust it once - then no warning "
-                    "and the app installs.[/dim]")
-            if show_qr:
-                _print_qr(phone_url)
+                "  [dim]first visit shows a one-time certificate warning; tap "
+                "[/dim][cyan]Install certificate[/cyan][dim] on the key screen "
+                "(or open [/dim][cyan]" + f"{scheme}://{_ca_host}:{chosen_port}"
+                "/localm-ca.crt[/cyan][dim]) to trust it once - then no warning "
+                "and the app installs.[/dim]")
+        _ts_hint = netname.tailscale_rename_hint()
+        if _ts_hint:
+            console.print(f"  [dim]{_ts_hint}[/dim]")
+        if show_qr and (qr_url or primary_url):
+            _print_qr(qr_url or primary_url)
 
     # Preload the model in the background so the first chat reply is fast.
     # Engine.load is lock-protected; a request arriving mid-load waits on it.
@@ -458,4 +474,6 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
             portmux.run_server(app, host=host, port=chosen_port, log_level="warning",
                                ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
     finally:
+        if mdns_advertiser is not None:
+            mdns_advertiser.close()
         manager.close_all()

@@ -257,6 +257,14 @@ DEFAULT_CONFIG: dict = {
     "net_deny": [],             # domains always refused (wins over allow)
     "net_allow_private": False, # True = permit loopback/private targets (SSRF guard off)
     "net_search_url": None,     # SearXNG base URL; None = DuckDuckGo (no key)
+    # Reach localm by NAME, not just IP, when bound to the network (see
+    # localm/netname.py and docs/naming.md). On a network bind, mDNS/Bonjour
+    # advertises "<mdns_name>.local" so a phone or laptop opens
+    # https://localm.local:PORT with no IP to type; the name is also folded into
+    # the TLS certificate, and the Tailscale MagicDNS name is detected +
+    # certified automatically. Loopback binds never advertise.
+    "mdns_name": "localm",      # the .local name; sanitized to a DNS label on use
+    "mdns_enabled": True,       # advertise the name over mDNS on network binds
     # Speech-to-text (GUI mic button; needs the [voice] extra).
     # Model sizes: tiny / base / small / medium - bigger = better + slower.
     "voice_stt_model": "base",
