@@ -1370,6 +1370,24 @@ export function exportConversation() {
     lines.push(`**${m.role === "user" ? "You" : (modelCache.active || "Model")}:**`, "", msgText(m), "");
     if (msgImages(m).length) lines.push(`*[${msgImages(m).length} image(s) attached]*`, "");
   }
+  // Include alternative branches that compaction summarised away and archived
+  // (chat.js pruneBranches -> conv.droppedBranches). This is what makes those
+  // branches genuinely RECOVERABLE rather than only retained-but-unreachable:
+  // the export is their one read path (memory-audit 2026-07-02 F5 follow-up).
+  const dropped = conv.droppedBranches || [];
+  if (dropped.length) {
+    lines.push("---", "",
+      `## Archived alternative branches (${dropped.length})`,
+      "*These alternative timelines were summarised away by context compaction "
+      + "and preserved here so they are not lost.*", "");
+    dropped.forEach((tail, i) => {
+      lines.push(`### Branch ${i + 1}`, "");
+      for (const m of (tail || [])) {
+        lines.push(`**${m.role === "user" ? "You" : (modelCache.active || "Model")}:**`,
+          "", msgText(m), "");
+      }
+    });
+  }
   const blob = new Blob([lines.join("\n")], { type: "text/markdown" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);

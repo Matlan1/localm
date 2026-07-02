@@ -211,12 +211,16 @@ _EPISODE_PROMPT = (
 # Openers that mean the model echoed the instruction or narrated itself instead
 # of summarising: the audit's non-thinking baseline stored a verbatim prompt echo
 # and an "As an AI..." line as durable episodes. Rejecting these keeps garbage out
-# of episodic recall (memory-audit 2026-07-02, F5).
+# of episodic recall (memory-audit 2026-07-02, F5). Kept NARROW so a natural
+# summary is not dropped: e.g. "The conversation focused on X." is a legitimate
+# summary, so only the echo-specific "the conversation below/above/is data"
+# forms are rejected, not the bare "the conversation" prefix (F5 grader note).
 _EPISODE_BAD_PREFIXES = (
-    "summarise", "summarize", "you are", "the conversation", "as an ai",
-    "as a language model", "sure,", "sure!", "here is", "here's", "okay",
-    "ok,", "i cannot", "i can't", "i'm sorry", "i am sorry", "output only",
-    "one sentence", "in one sentence", "the user and the assistant discussed or",
+    "summarise ", "summarize ", "you are ", "as an ai", "as a language model",
+    "sure, here", "sure! here", "here is the", "here's the", "i cannot ",
+    "i can't ", "i'm sorry", "i am sorry", "output only", "in one sentence",
+    "the conversation below", "the conversation above", "the conversation is",
+    "the user and the assistant discussed or",
 )
 
 

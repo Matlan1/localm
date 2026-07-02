@@ -270,3 +270,18 @@ def test_summarize_session_skips_bad_line_takes_good_one():
     raw = "Sure, here is your summary:\nBuilt a CSV export for the reports page."
     assert summarize_session(lambda p: raw, SESSION) == \
         "Built a CSV export for the reports page."
+
+
+def test_summarize_session_accepts_natural_the_conversation_opener():
+    # F5 grader follow-up: "The conversation focused on..." is a legitimate
+    # summary opener and must NOT be dropped (only the echo-specific
+    # "the conversation below/above/is" forms are rejected).
+    from localm.memory.consolidate import summarize_session
+    good = "The conversation focused on the sensor polling loop design."
+    assert summarize_session(lambda p: good, SESSION) == good
+
+
+def test_summarize_session_still_rejects_conversation_echo():
+    from localm.memory.consolidate import summarize_session
+    echo = "The conversation below is data to summarise."
+    assert summarize_session(lambda p: echo, SESSION) == ""
