@@ -377,11 +377,12 @@ def _host_is_link_local(host: str) -> bool:
 
 
 def sanitize_comfy_url(url: str) -> str:
-    """Return *url* unless its host is link-local / cloud-metadata, in which case
-    warn and fall back to the loopback default. Defense-in-depth so an ADMIN-set
-    comfy_api_url cannot turn the comfy control calls (free / interrupt / stop)
-    into an SSRF probe of cloud metadata (CHK-COMFY-APIURL). Loopback + LAN +
-    public are allowed - a real ComfyUI runs on any of those."""
+    """Return *url* unless its host is link-local / cloud-metadata (or the guard
+    itself cannot validate it), in which case warn and fall back to the loopback
+    default. Defense-in-depth so an ADMIN-set comfy_api_url cannot turn the comfy
+    control calls (free / interrupt / stop) into an SSRF probe of cloud metadata
+    (CHK-COMFY-APIURL). Loopback + LAN + public are allowed - a real ComfyUI runs
+    on any of those."""
     try:
         if _host_is_link_local(urllib.parse.urlparse(url).hostname or ""):
             from localm.debuglog import logger
@@ -389,8 +390,17 @@ def sanitize_comfy_url(url: str) -> str:
                 "comfy_api_url %r targets a link-local/metadata address; ignoring "
                 "it and using the loopback default (CHK-COMFY-APIURL)", url)
             return _COMFY_LOOPBACK_DEFAULT
-    except Exception:
-        pass
+    except Exception as e:
+        # FAIL CLOSED: if the guard itself cannot parse or verify the URL (e.g.
+        # urlparse raising "Invalid IPv6 URL"), refusing is the only honest
+        # outcome - returning the URL unchecked would silently approve exactly
+        # what this guard exists to refuse (AGENTS.md rule 5). A URL the guard
+        # cannot parse is not a working ComfyUI endpoint anyway.
+        from localm.debuglog import logger
+        logger.warning(
+            "comfy_api_url %r could not be validated (%s); ignoring it and "
+            "using the loopback default (CHK-COMFY-APIURL)", url, e)
+        return _COMFY_LOOPBACK_DEFAULT
     return url
 
 

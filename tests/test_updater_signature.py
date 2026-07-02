@@ -96,6 +96,29 @@ def test_malformed_pinned_key_does_not_open_a_pass(monkeypatch):
         updater.verify_signature(b"build", _sig(priv, b"build"))
 
 
+def test_all_pins_malformed_names_the_real_cause(monkeypatch, caplog):
+    # HONESTY-0702 (missing != corrupt): with a key PINNED but unparseable the
+    # refusal must name the broken pin - not claim verification "is not set up" -
+    # and the skipped pin is warned, never silent.
+    import logging
+    priv, _ = _keypair()
+    monkeypatch.setattr(updater, "_UPDATE_PUBKEYS", ("not-hex",))
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        with pytest.raises(LocalmError) as ei:
+            updater.verify_signature(b"build", _sig(priv, b"build"))
+    assert "no pinned signing key is usable" in ei.value.summary
+    assert "none parses" in ei.value.reason
+    assert "does not parse as an Ed25519" in caplog.text
+
+
+def test_unconfigured_refusal_still_says_not_set_up(monkeypatch):
+    # The genuinely-unconfigured case keeps its distinct "not set up" message.
+    monkeypatch.setattr(updater, "_UPDATE_PUBKEYS", ())
+    with pytest.raises(LocalmError) as ei:
+        updater.verify_signature(b"build", "c2ln")
+    assert "no signing key is configured" in ei.value.summary
+
+
 # --------------------------- anti-rollback ------------------------------
 
 def test_refuse_downgrade(monkeypatch):
