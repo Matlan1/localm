@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Iterator
+from typing import Iterator, Optional
 
 import requests
 
@@ -139,6 +139,30 @@ class HTTPBackend(BaseLLMBackend):
         # remote localm reached via a hand-typed --backend URL loses grammar
         # (conservative); the attach flow and self-connections pass the flag.
         self.supports_grammar = bool(localm_server) and not anthropic
+        self._ctx_capacity_cached = False
+        self._ctx_capacity: Optional[int] = None
+
+    def context_capacity(self) -> Optional[int]:
+        """The loaded model's RESOLVED context ceiling from the server's
+        /v1/config (VRAM-derived under ctx_auto), cached after the first
+        successful fetch. Lets the coder budget its history against the real
+        window instead of a static 4096 default (memory-audit 2026-07-02 F10).
+        Best-effort: None on any error (the caller falls back to its default),
+        and only a localm server exposes it, so non-localm backends stay None."""
+        if self._ctx_capacity_cached:
+            return self._ctx_capacity
+        self._ctx_capacity_cached = True
+        try:
+            resp = requests.get(f"{self._base_url}/config",
+                                headers=self._headers(), timeout=15,
+                                verify=self._verify)
+            if resp.ok:
+                v = resp.json().get("effective_ctx_max")
+                if isinstance(v, int) and v > 0:
+                    self._ctx_capacity = v
+        except Exception:
+            self._ctx_capacity = None
+        return self._ctx_capacity
 
     @property
     def model_id(self) -> str:

@@ -374,7 +374,12 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
         # collides with the context ceiling. Never fails - falls back to a
         # visible hard trim when summarisation is unavailable.
         from ..inference.compact import maybe_compact
-        limit = load_config().get("n_ctx_max", 16384) or 0
+        # Budget against the LOADED model's RESOLVED ceiling (VRAM-derived under
+        # ctx_auto), not the static config n_ctx_max: the config value both
+        # over-compacted a small-window model and under-protected a large one
+        # (memory-audit 2026-07-02 F10). Fall back to the config only when the
+        # engine cannot report a capacity (not loaded).
+        limit = engine.context_capacity() or load_config().get("n_ctx_max", 16384) or 0
         compacted_msgs, did_compact = maybe_compact(
             messages,
             limit_tokens=limit,
