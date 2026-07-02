@@ -316,8 +316,11 @@ ws     ::= [ \t\n\r]*
                         first_attempt = False
                     full = ""
                     try:
+                        # _llm_kwargs (not raw gen_kwargs): the terminal REPL is
+                        # the third dispatch branch and previously skipped the
+                        # lazy tool-call grammar the other two applied.
                         for piece, hidden in self._stream_hiding_tool_calls(
-                            self.backend.chat_stream(messages, **self.gen_kwargs)
+                            self.backend.chat_stream(messages, **self._llm_kwargs())
                         ):
                             full += piece
                             if not hidden:

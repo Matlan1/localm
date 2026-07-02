@@ -12,6 +12,8 @@ Tests for the agent loop guards added for foundation hardening:
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from localm.plugins.coder.tools import ToolResult
 
 
@@ -297,6 +299,35 @@ class TestLazyToolGrammar:
         monkeypatch.setattr("localm.config.load_config",
                             lambda: {"coder_tool_grammar": True})
         assert agent._tool_call_grammar() is None
+
+    @pytest.mark.parametrize("mode", ["event_sink", "interactive", "silent"])
+    def test_all_three_llm_dispatch_branches_apply_the_grammar(
+            self, tmp_path, monkeypatch, mode):
+        # Reviewer catch on the first version: the terminal-REPL (interactive)
+        # branch streamed with raw gen_kwargs and silently skipped the grammar
+        # the other two branches applied. Pin all three.
+        agent = _make_agent(tmp_path)
+        agent.backend.supports_grammar = True
+        monkeypatch.setattr("localm.config.load_config", lambda: {})
+        agent.backend.chat_stream.return_value = iter([])
+        agent.backend.chat.return_value = "done"
+
+        if mode == "event_sink":
+            agent.on_event = lambda *a, **k: None
+            agent._call_llm([{"role": "user", "content": "hi"}], interactive=False)
+            kw = agent.backend.chat_stream.call_args.kwargs
+        elif mode == "interactive":
+            agent.on_event = None
+            agent._call_llm([{"role": "user", "content": "hi"}], interactive=True)
+            kw = agent.backend.chat_stream.call_args.kwargs
+        else:
+            agent.on_event = None
+            agent._call_llm([{"role": "user", "content": "hi"}], interactive=False)
+            kw = agent.backend.chat.call_args.kwargs
+
+        assert kw.get("grammar_lazy") is True, f"{mode} branch must carry the grammar"
+        assert "tool_call" in kw.get("grammar", "")
+        assert kw.get("grammar_triggers")
 
 
 # ---------------------------------------------------------------------------
