@@ -18,7 +18,25 @@ from .constants import _COMPACT_AUTO_RATIO, _COMPACT_WARN_RATIO, _DEFAULT_CTX_TO
 
 class _ContextMixin:
     def _ctx_window_tokens(self) -> int:
-        """Estimated context window size in tokens."""
+        """The context window to budget history against, in tokens.
+
+        Prefers the server's RESOLVED ceiling (backend.context_capacity() reads
+        /v1/config's effective_ctx_max, VRAM-derived under ctx_auto). The old
+        code used the static config n_ctx - the INITIAL window (default 4096) -
+        so the coder measured fill against ~4096 while the model could actually
+        hold 64k, and over-compacted at roughly 5% of real capacity, throwing
+        away context the model had room for (memory-audit 2026-07-02 F10). Falls
+        back to the configured n_ctx, then the default, when no capacity is
+        reported (a non-localm backend / server not reachable)."""
+        cap = None
+        try:
+            get_cap = getattr(self.backend, "context_capacity", None)
+            if callable(get_cap):
+                cap = get_cap()
+        except Exception:
+            cap = None
+        if isinstance(cap, int) and cap > 0:
+            return cap
         try:
             from localm.config import load_config
             return load_config().get("n_ctx", _DEFAULT_CTX_TOKENS)

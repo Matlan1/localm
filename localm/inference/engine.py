@@ -211,10 +211,28 @@ class Engine:
         return self._backend.count_tokens(text)
 
     def context_capacity(self) -> Optional[int]:
-        """Return the maximum token capacity of the loaded model's context."""
+        """Maximum token capacity of the loaded model's context window.
+
+        Prefers the RESOLVED ceiling from the last load (VRAM-derived under
+        ctx_auto), then the configured ceiling, then the base window. The old
+        implementation read attributes the GGUF backend does not have
+        (``_n_ctx_max`` / ``_llm.n_ctx()``), so it ALWAYS returned None and the
+        server-side compaction safety net, the CLI budget, and the coder's fill
+        gauge all fell back to wrong ceilings (memory-audit 2026-07-02 F10).
+        Returns None only when nothing is loaded / resolvable."""
+        b = self._backend
+        eff = getattr(b, "effective_ctx_max", None)
+        if isinstance(eff, int) and eff > 0:
+            return eff
+        for attr in ("n_ctx_max", "_n_ctx_max", "n_ctx", "_n_ctx"):
+            v = getattr(b, attr, None)
+            if isinstance(v, int) and v > 0:
+                return v
+        llm = getattr(b, "_llm", None)
         try:
-            return getattr(self._backend, "_n_ctx_max", None) or self._backend._llm.n_ctx()
-        except AttributeError:
+            n = llm.n_ctx() if llm is not None else None
+            return int(n) if n else None
+        except Exception:
             return None
 
     def embed(self, texts: List[str]) -> List[List[float]]:
