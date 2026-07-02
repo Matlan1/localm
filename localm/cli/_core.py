@@ -76,9 +76,13 @@ def _resolve_tls(host, *, no_tls, tls_cert, tls_key):
         return str(tls_cert), str(tls_key)
     if no_tls or host in _LOOPBACK_HOSTS:
         return None, None
-    from localm import tls
+    from localm import netname, tls
     from localm.config import home_dir
-    return tls.ensure_cert(home_dir(), hostnames=[host])
+    # Cover the reachable NAMES too (localm.local, <hostname>.local, the Tailscale
+    # MagicDNS name) so name-based HTTPS has no cert-name-mismatch warning after
+    # the one-time CA trust - not just the bind IP. Best-effort; never blocks TLS.
+    extra_names = netname.cert_hostnames()
+    return tls.ensure_cert(home_dir(), hostnames=[host, *extra_names])
 
 
 
