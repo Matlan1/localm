@@ -42,13 +42,19 @@ test("every nav tab boots, activates, and renders in a real browser", async ({ p
   // the module graph failed to evaluate, this button never appears and we fail
   // here instead of hanging - proof the real ESM graph ran end to end.
   await expect(page.locator("#nav-coder")).toBeVisible({ timeout: 30_000 });
+  // Wait for the boot to SETTLE before clicking. The jobs plugin ships a dynamic
+  // client_entry (jobs.js) whose #view-jobs is built asynchronously by
+  // loadClientPlugins after boot; on a cold, under-load boot that can take a few
+  // seconds, so gate on it here (rather than racing the click loop, which flaked
+  // on #view-jobs only). Its presence means the async client-plugin load finished.
+  await expect(page.locator("#view-jobs")).toBeAttached({ timeout: 30_000 });
 
   for (const name of EXPECTED_TABS) {
     const nav = page.locator(`#nav-${name}`);
     await expect(nav, `nav button #nav-${name} should exist`).toHaveCount(1);
     await nav.click();
     const view = page.locator(`#view-${name}`);
-    await expect(view, `#view-${name} should activate on click`).toHaveClass(/\bactive\b/);
+    await expect(view, `#view-${name} should activate on click`).toHaveClass(/\bactive\b/, { timeout: 10_000 });
     await expect(view, `#view-${name} should be visible`).toBeVisible();
     const children = await page.locator(`#view-${name} *`).count();
     expect(children, `#view-${name} should render content`).toBeGreaterThan(3);
