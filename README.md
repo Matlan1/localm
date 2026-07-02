@@ -331,7 +331,7 @@ Each `builtin/<name>/` entry is a manifest (`plugin.toml`) plus its plugin code;
 - Any prebuilt `llama.dll` works: Ollama's DLL, a custom build, any binary
 - The struct layouts in `_structs.py` were derived by probing `llama_model_default_params()` / `llama_context_default_params()` against known default values and cross-referenced with `llama.h`
 
-The generation loop (`LlamaCpp._generate`) implements the full sampler chain: `top_k -> top_p -> min_p -> temperature -> dist (random draw)`, or `greedy` when `temperature=0`. Stop strings (`<|im_end|>`, `<end_of_turn>`, etc.) are filtered via a streaming buffer that watches for multi-token sequences across piece boundaries.
+The generation loop (`LlamaCpp._generate`) implements the full sampler chain: `top_k -> top_p -> min_p -> temperature -> dist (random draw)`, or `greedy` when `temperature <= 0`. Stop strings (`<|im_end|>`, `<end_of_turn>`, etc.) are filtered via a streaming buffer that watches for multi-token sequences across piece boundaries.
 
 ---
 

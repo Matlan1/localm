@@ -51,9 +51,11 @@ if 8642 was busy - use the address it prints). Under the hood:
   `<LOCALM_HOME>/tls/` (`ca.crt` + `ca.key`) and a server certificate signed by
   it. The certificate covers 127.0.0.1, your LAN IP, any Tailscale IP, and the
   hostname, so the same cert works however a device reaches you.
-- The certificate is reused across restarts and regenerated only when it expires
-  or your set of bind IPs changes. The CA is reused even then, so a device you
-  trusted once stays trusted after your IP changes.
+- The certificate is reused across restarts and regenerated only when it nears
+  expiry (about 30 days before) or the set of addresses and names it must cover
+  changes (a new bind IP, or a changed hostname, `.local`, or Tailscale name).
+  The CA is reused even then, so a device you trusted once stays trusted after
+  your address changes.
 - The CA private key never leaves your machine.
 
 ### The one-time "trust this certificate" step

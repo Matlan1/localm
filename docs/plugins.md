@@ -133,8 +133,7 @@ def unregister() -> None:
 # Optional lifecycle hooks, called if present:
 def on_install() -> None: ...                # called once when installed
 def on_uninstall(delete_data: bool = False) -> None: ...  # called at uninstall
-# on_first_use() is RESERVED - not yet invoked by the engine (no stable
-# "first use" point is defined); do not rely on it.
+def on_first_use() -> None: ...              # called once the first time the plugin is loaded/activated; persisted so it never re-fires on a later server start
 ```
 
 The engine hands `register` a `PluginHost`; everything the plugin attaches

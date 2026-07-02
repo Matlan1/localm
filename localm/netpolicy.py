@@ -32,9 +32,10 @@ on their own; the shell-command approval is the gate for those. Model pulls
 and online coder providers (OpenAI/Anthropic opt-ins) are explicit user
 choices outside this policy.
 
-Limits of the SSRF guard: the hostname is resolved and checked before the
-request, but the actual connection re-resolves (a determined DNS-rebinding
-attacker could race this). Redirects are re-validated hop by hop.
+SSRF guard: the hostname is resolved and validated once, then the socket is
+pinned to that IP (SSRF-REBIND, see netpin.py), so the connection cannot
+re-resolve to a rebound address and an unresolvable host fails closed.
+Redirects are re-validated hop by hop.
 """
 
 from __future__ import annotations
