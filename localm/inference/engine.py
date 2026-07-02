@@ -161,6 +161,13 @@ class Engine:
     def loaded(self) -> bool:
         return self._backend.loaded
 
+    def set_load_cancel(self, event) -> None:
+        """Install a cancel event on the backend so an in-flight load() can be
+        aborted mid-flight when a newer model selection supersedes it (preemptive
+        switching). Best-effort: backends that cannot abort a partial load ignore
+        it. ``None`` clears it."""
+        self._backend.set_load_cancel(event)
+
     def load(self) -> None:
         if not hasattr(self, "_load_lock"):
             self._load_lock = _LOAD_LOCK

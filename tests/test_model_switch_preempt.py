@@ -1,0 +1,174 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""Preemptive model switching (http_server.switch_engine).
+
+Selecting a new model while a previous selection is still loading must abort the
+in-flight load and load the new model immediately, instead of finishing the
+abandoned model first. These tests drive the coordinator with a fake Engine whose
+load blocks until either a gate is opened or its cancel event fires, so the
+preemption/coalescing logic is exercised deterministically without a real model.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import threading
+
+from localm.inference import http_server as hs
+from localm.inference.backends.base import ModelLoadCancelled
+
+
+class FakeEngine:
+    """Engine stand-in for switch_engine: its load() blocks until `load_gate` is
+    set OR the installed cancel event fires (then it raises ModelLoadCancelled,
+    exactly like the GGUF backend's aborted native load)."""
+
+    def __init__(self, name, *, load_gate=None, loaded_log=None):
+        self.display_name = name
+        self._loaded = False
+        self._cancel = None
+        self._gate = load_gate
+        self._log = loaded_log
+        self.load_started = threading.Event()
+
+    @property
+    def loaded(self):
+        return self._loaded
+
+    def set_load_cancel(self, event):
+        self._cancel = event
+
+    def load(self):
+        self.load_started.set()
+        # Poll for cancellation while waiting for the test to open the gate.
+        while True:
+            if self._cancel is not None and self._cancel.is_set():
+                raise ModelLoadCancelled(f"aborted: {self.display_name}")
+            if self._gate is None or self._gate.wait(0.01):
+                break
+        if self._cancel is not None and self._cancel.is_set():
+            raise ModelLoadCancelled(f"aborted: {self.display_name}")
+        self._loaded = True
+        if self._log is not None:
+            self._log.append(self.display_name)
+
+    def unload(self):
+        self._loaded = False
+
+
+def _reset_switch_state():
+    hs._inference_sem = asyncio.Semaphore(1)
+    hs._engine = None
+    hs._switch_desired = None
+    hs._switch_loading = None
+    hs._switch_cancel = None
+
+
+async def _await_started(engine, timeout=2.0):
+    """Block until `engine.load()` has actually begun on the executor thread."""
+    loop = asyncio.get_running_loop()
+    ok = await loop.run_in_executor(None, engine.load_started.wait, timeout)
+    assert ok, "load never started"
+
+
+def test_newer_switch_preempts_in_flight_load():
+    """A second selection aborts the first's in-flight load; only the second one
+    actually loads, and the first reports 'superseded' (not an error)."""
+
+    async def scenario():
+        _reset_switch_state()
+        log = []
+        never = threading.Event()          # A never finishes on its own
+        ready = threading.Event(); ready.set()   # B finishes as soon as it runs
+        engines = {
+            "A": FakeEngine("A", load_gate=never, loaded_log=log),
+            "B": FakeEngine("B", load_gate=ready, loaded_log=log),
+        }
+        make = lambda n: engines[n]
+
+        task_a = asyncio.create_task(hs.switch_engine("A", make))
+        await _await_started(engines["A"])
+        task_b = asyncio.create_task(hs.switch_engine("B", make))
+        res_a, res_b = await asyncio.gather(task_a, task_b)
+        return res_a, res_b, log
+
+    res_a, res_b, log = asyncio.run(scenario())
+    assert res_a["status"] == "superseded"
+    assert res_a["by"] == "B"
+    assert res_b["status"] == "loaded"
+    assert log == ["B"]                    # A never finished loading
+    assert hs._engine.display_name == "B"
+    assert hs._engine.loaded
+
+
+def test_rapid_switches_coalesce_to_latest():
+    """Three quick selections: the abandoned two never load, the last one wins.
+    The queued-but-not-started middle switch is dropped without loading."""
+
+    async def scenario():
+        _reset_switch_state()
+        log = []
+        never = threading.Event()
+        ready = threading.Event(); ready.set()
+        engines = {
+            "A": FakeEngine("A", load_gate=never, loaded_log=log),
+            "B": FakeEngine("B", load_gate=never, loaded_log=log),
+            "C": FakeEngine("C", load_gate=ready, loaded_log=log),
+        }
+        make = lambda n: engines[n]
+
+        task_a = asyncio.create_task(hs.switch_engine("A", make))
+        await _await_started(engines["A"])
+        task_b = asyncio.create_task(hs.switch_engine("B", make))
+        task_c = asyncio.create_task(hs.switch_engine("C", make))
+        res_a, res_b, res_c = await asyncio.gather(task_a, task_b, task_c)
+        return res_a, res_b, res_c, log
+
+    res_a, res_b, res_c, log = asyncio.run(scenario())
+    assert res_a["status"] == "superseded"
+    assert res_b["status"] == "superseded"   # coalesced away, never loaded
+    assert res_c["status"] == "loaded"
+    assert log == ["C"]                        # only the final model loaded
+    assert hs._engine.display_name == "C"
+
+
+def test_reselecting_the_loading_model_does_not_restart_it():
+    """Re-selecting the SAME model that is still loading must let it finish (not
+    cancel and reload it); the second request resolves to 'already_active'."""
+
+    async def scenario():
+        _reset_switch_state()
+        log = []
+        gate = threading.Event()           # opened by the test to finish A's load
+        engine = FakeEngine("A", load_gate=gate, loaded_log=log)
+        make = lambda n: engine
+
+        task1 = asyncio.create_task(hs.switch_engine("A", make))
+        await _await_started(engine)
+        task2 = asyncio.create_task(hs.switch_engine("A", make))
+        await asyncio.sleep(0.05)          # let task2 register desired + queue
+        assert not hs._switch_cancel.is_set(), "re-select must not cancel the load"
+        gate.set()                         # now let A finish loading
+        res1, res2 = await asyncio.gather(task1, task2)
+        return res1, res2, log
+
+    res1, res2, log = asyncio.run(scenario())
+    assert res1["status"] == "loaded"
+    assert res2["status"] == "already_active"
+    assert log == ["A"]                    # loaded exactly once
+
+
+def test_single_switch_loads_normally():
+    """No contention: a lone switch just loads and reports 'loaded'."""
+
+    async def scenario():
+        _reset_switch_state()
+        log = []
+        ready = threading.Event(); ready.set()
+        engine = FakeEngine("solo", load_gate=ready, loaded_log=log)
+        res = await hs.switch_engine("solo", lambda n: engine)
+        return res, log
+
+    res, log = asyncio.run(scenario())
+    assert res["status"] == "loaded"
+    assert log == ["solo"]
+    assert hs._engine.display_name == "solo"
