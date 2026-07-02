@@ -10,11 +10,12 @@ terminal.) So the only real questions are *how the phone reaches your server* an
 ## The short version
 
 - **Same Wi-Fi:** run `localm gui -H 0.0.0.0` (set an API key first); open the
-  `https://<your-ip>:<port>/` it prints on your phone; trust the certificate once
-  (one tap on the key screen); enter your key; choose *Install app*.
+  `https://localm.local:<port>/` it prints on your phone (or the `https://<your-ip>:<port>/`
+  it prints next to it); trust the certificate once (one tap on the key screen);
+  enter your key; choose *Install app*.
 - **Anywhere else:** put the machine and the phone on a
   [Tailscale](https://tailscale.com) network and open the machine's Tailscale
-  address - localm serves HTTPS there too.
+  address - localm serves HTTPS there too, by name.
 
 ## On the same Wi-Fi (LAN)
 
@@ -29,10 +30,17 @@ terminal.) So the only real questions are *how the phone reaches your server* an
    localm now serves **HTTPS automatically** on a network bind, so the key and
    your prompts are encrypted in transit. No reverse proxy, no extra tools.
 2. **Open the printed address on the phone.** On startup the console prints the
-   address to use, e.g. `https://192.168.1.50:8642/` (the port may differ if 8642
-   was busy - use what it prints). Type that into the phone browser.
+   addresses to use. The friendliest is the **name**, `https://localm.local:8642/`
+   (the port may differ if 8642 was busy - use what it prints); it works because
+   localm advertises `localm.local` over mDNS/Bonjour, which phones resolve with no
+   setup. The `https://192.168.1.50:8642/` IP address is printed right below it as a
+   fallback (some restrictive networks block mDNS). Type either into the phone
+   browser.
+   - *Rename it:* the name is `localm` by default. Change it with
+     `localm config mdns_name studio` (then it is `studio.local`), or turn the whole
+     advertisement off with `localm config mdns_enabled false`.
    - *Tip (experimental PoC):* `localm gui -H 0.0.0.0 --qr` prints a scannable QR
-     of that address so you can point the phone camera at the terminal instead of
+     of the address so you can point the phone camera at the terminal instead of
      typing it. Needs `pip install "localm[qr]"` and a terminal that renders block
      glyphs (Windows Terminal is fine). This is a proof-of-concept and may change.
 3. **Trust the certificate once.** Because localm signs its certificate with its
@@ -63,10 +71,18 @@ port-forwarding, no domain, and no certificate wrangling is
 
 1. Install Tailscale on the machine running localm **and** on your phone; sign in
    to the same account on both. They are now on one private network.
-2. Run `localm gui -H 0.0.0.0` (with `LOCALM_API_KEY` set). localm's certificate
-   already covers your Tailscale IP, so it serves HTTPS there too.
-3. Open the machine's Tailscale address on the phone, e.g.
-   `https://100.x.y.z:8642/`, and trust the certificate once (step 3 above).
+2. Run `localm gui -H 0.0.0.0` (with `LOCALM_API_KEY` set). localm detects your
+   Tailscale node name and Tailscale IP, covers both in its certificate, and prints
+   the reachable URL - so it serves HTTPS there too, by name.
+3. Open the machine's Tailscale address on the phone. localm prints the **name**,
+   e.g. `https://mybox.tailnet.ts.net:8642/` (Tailscale MagicDNS resolves it on any
+   device in your tailnet), with the `https://100.x.y.z:8642/` IP as a fallback.
+   Trust the certificate once (step 3 above).
+   - *Reach it as `localm` on Tailscale:* Tailscale names the node after your
+     machine's hostname. To make it literally `localm.<tailnet>.ts.net`, rename the
+     node once with `tailscale up --hostname=localm`. localm prints this exact hint
+     at startup when the node is not already named to match; it never renames your
+     node for you.
 4. **Optional, for a public-CA cert with no trust step:** run `tailscale serve` in
    front of localm; your phone then opens `https://<machine>.<tailnet>.ts.net/`
    with a certificate browsers already trust, so there is no warning to clear.

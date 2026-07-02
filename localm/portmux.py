@@ -70,6 +70,11 @@ def run_server(
     With TLS it serves HTTPS and also catches a plain-HTTP request on the same
     port with an https redirect (issue 8), falling back to a direct TLS bind if
     the demultiplexer cannot start.
+
+    Pure transport: mDNS name advertising lives in the CLI that also prints the
+    reachable URLs (``localm serve`` / ``localm gui``), so the advertised name and
+    the printed name can never disagree - see ``localm/netname.py`` and the
+    ``start_advertiser`` callers.
     """
     import uvicorn
 
@@ -81,34 +86,6 @@ def run_server(
     bugreport.check_and_report_prior_crash()
     bugreport.arm_crash_guard(context={"host": host, "port": port,
                                         "tls": bool(ssl_certfile)})
-    zeroconf = None
-    info = None
-    if host not in ("127.0.0.1", "localhost", "::1"):
-        try:
-            from zeroconf import Zeroconf, ServiceInfo
-            import socket
-            hostname = socket.gethostname()
-            
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-                    s.connect(("8.8.8.8", 80))
-                    ip = s.getsockname()[0]
-            except Exception:
-                ip = socket.gethostbyname(hostname)
-                
-            info = ServiceInfo(
-                "_localm._tcp.local.",
-                f"{hostname}._localm._tcp.local.",
-                addresses=[socket.inet_aton(ip)],
-                port=port,
-                properties={'tls': str(bool(ssl_certfile)).lower()},
-                server=f"{hostname}.local.",
-            )
-            zeroconf = Zeroconf()
-            zeroconf.register_service(info)
-        except Exception as e:
-            from localm.debuglog import logger as _dbg
-            _dbg.warning("mDNS broadcast failed: %s", e)
 
     try:
         if not ssl_certfile:
@@ -147,13 +124,6 @@ def run_server(
             uvicorn.run(app, host=host, port=port, log_level=log_level,
                         ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
     finally:
-        if zeroconf and info:
-            try:
-                zeroconf.unregister_service(info)
-            except Exception:
-                pass
-            finally:
-                zeroconf.close()
         bugreport.disarm_crash_guard()
 
 

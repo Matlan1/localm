@@ -161,28 +161,39 @@ def serve(model, host, port, ctx, gpu_layers, mmproj, device, no_tls, tls_cert,
     )
 
     engine.load()
+
+    # Reach-by-name (mDNS): advertise <mdns_name>.local on a network bind so other
+    # devices reach this server by name. Started HERE, before printing, so the
+    # printed name reflects reality: we only recommend <name>.local when it is
+    # actually being advertised (not on a loopback / --isolated bind, not when mDNS
+    # is off, and not when the name is already taken - start_advertiser returns None
+    # in each case). The handle is closed in the finally below.
+    from localm import netname
+    mdns_advertiser = None
+    if host not in ("127.0.0.1", "localhost", "::1") and not isolated:
+        mdns_advertiser = netname.start_advertiser(port, tls=bool(ssl_certfile))
+    _adv_name = netname.mdns_fqdn() if mdns_advertiser is not None else None
+
     # 0.0.0.0 / :: are bind wildcards, not connectable addresses - print the
-    # addresses a client can actually reach (loopback here, plus the LAN /
-    # Tailscale IP for other devices) instead of a dead 0.0.0.0 URL.
-    if host in ("0.0.0.0", "::"):
-        console.print(
-            f"[green]✓[/green] Serving at "
-            f"[bold]{scheme}://127.0.0.1:{port}/v1/chat/completions[/bold]"
-        )
-        from localm import tls as _tls
-        _addrs = _tls.companion_addresses()
-        for _label, _ip in (("on this network", _addrs.get("lan")),
-                            ("via Tailscale", _addrs.get("tailscale"))):
-            if _ip:
-                console.print(
-                    f"[dim]  {_label}:[/dim] "
-                    f"[bold]{scheme}://{_ip}:{port}/v1/chat/completions[/bold]"
-                )
-    else:
-        console.print(
-            f"[green]✓[/green] Serving at "
-            f"[bold]{scheme}://{host}:{port}/v1/chat/completions[/bold]"
-        )
+    # address a client can actually reach (loopback for a wildcard bind, else the
+    # bind host itself) instead of a dead 0.0.0.0 URL.
+    _primary = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+    console.print(
+        f"[green]✓[/green] Serving at "
+        f"[bold]{scheme}://{_primary}:{port}/v1/chat/completions[/bold]"
+    )
+    # On a network bind, print the reachable NAMES (localm.local when advertised,
+    # the Tailscale MagicDNS name) and IPs so other devices need no address typed
+    # by hand.
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        for _label, _target in netname.network_targets(mdns_name=_adv_name):
+            console.print(
+                f"[dim]  {_label}:[/dim] "
+                f"[bold]{scheme}://{_target}:{port}/v1/chat/completions[/bold]"
+            )
+        _ts_hint = netname.tailscale_rename_hint()
+        if _ts_hint:
+            console.print(f"[dim]  {_ts_hint}[/dim]")
     if scheme == "https":
         console.print("[dim]Built-in TLS (self-signed via localm's local CA). "
                       "First connection from a device shows a one-time trust "
@@ -211,4 +222,6 @@ def serve(model, host, port, ctx, gpu_layers, mmproj, device, no_tls, tls_cert,
     except KeyboardInterrupt:
         pass
     finally:
+        if mdns_advertiser is not None:
+            mdns_advertiser.close()
         engine.unload()

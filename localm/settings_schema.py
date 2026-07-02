@@ -144,6 +144,17 @@ CORE_FIELDS: list = [
                  "Browser origins allowed to call the API. Blank = localhost "
                  'only; comma-separated list; or "*" for any.',
                  group="Server", applies=Applies.RESTART),
+    SettingField("mdns_name", Widget.TEXT, "Network name (mDNS)",
+                 "The name other devices use to reach this server on your LAN. "
+                 "Sets <name>.local (e.g. localm -> https://localm.local:PORT), so "
+                 "there is no IP to type. Letters, digits and hyphens only; also "
+                 "added to the HTTPS certificate.",
+                 group="Server", applies=Applies.RESTART),
+    SettingField("mdns_enabled", Widget.TOGGLE, "Advertise on the network (mDNS)",
+                 "Broadcast <name>.local over mDNS/Bonjour when bound past loopback "
+                 "so devices can reach localm by name. Off = reachable by IP "
+                 "address only. Loopback binds never advertise.",
+                 group="Server", applies=Applies.RESTART),
     # ---- Security ----
     SettingField("require_auth", Widget.TOGGLE, "Require an API key",
                  "Refuse all requests until an API key is set (fail closed). "
@@ -517,6 +528,24 @@ def _validate_one(key: str, val, field: "SettingField", default):
         return val
 
     # TEXT / FOLDER / PATH / SECRET
+    if key == "mdns_name":
+        # Store the sanitized DNS label, not the raw input, so config.json always
+        # holds a valid mDNS name (ASCII letters/digits/hyphens) whatever was typed.
+        # Gate on what actually SANITIZES to a usable label - not str.isalnum(),
+        # which is Unicode-aware and would let a non-ASCII name (e.g. Greek/CJK)
+        # pass the guard and then silently strip to the "localm" default. A name
+        # that reduces to nothing is a clear error, not a silent fall back to the
+        # default (which would hide the typo).
+        from localm.netname import normalize_label
+        s = "" if val is None else str(val).strip()
+        if not s:
+            raise ValueError("mdns_name: a name is required (letters, digits, hyphens)")
+        label = normalize_label(s)
+        if not label:
+            raise ValueError(
+                f"mdns_name: {val!r} has no usable characters "
+                f"(need ASCII letters, digits, or hyphens)")
+        return label
     if key == "cors_origins":
         # None | "*" | list of origins; a comma string becomes a list so the
         # server's CORS handling (which only honours "*"/list) actually applies.
