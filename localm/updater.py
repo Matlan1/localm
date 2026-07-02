@@ -54,13 +54,19 @@ def _load_update_pubkeys() -> list:
 
     A malformed pinned key is skipped (so a second, valid key still works) rather
     than crashing the check - but if NO valid key results, verify_signature below
-    fails closed, so a bad pin can never weaken verification into a silent pass."""
+    fails closed, so a bad pin can never weaken verification into a silent pass.
+    The skip is WARNED, never silent: a typo'd pin would otherwise surface as the
+    misleading "not set up" refusal (missing != corrupt, AGENTS.md rule 5)."""
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    from localm.debuglog import logger
     keys = []
     for hexkey in _UPDATE_PUBKEYS:
         try:
             keys.append(Ed25519PublicKey.from_public_bytes(bytes.fromhex(str(hexkey).strip())))
-        except Exception:
+        except Exception as e:
+            logger.warning(
+                "pinned update key %.16s... does not parse as an Ed25519 public "
+                "key hex (%s); skipping it", str(hexkey), e)
             continue
     return keys
 
@@ -79,6 +85,14 @@ def verify_signature(data: bytes, signature_b64) -> None:
     from localm.bugreport import LocalmError
     keys = _load_update_pubkeys()
     if not keys:
+        # Distinguish "never set up" from "set up but broken": both fail closed,
+        # but pointing a typo'd pin at "not set up" wastes the maintainer's
+        # debugging time on the wrong cause (missing != corrupt).
+        if _UPDATE_PUBKEYS:
+            raise LocalmError(
+                "refusing to apply an update: no pinned signing key is usable",
+                reason=f"{len(_UPDATE_PUBKEYS)} key(s) are pinned in _UPDATE_PUBKEYS "
+                       "but none parses as an Ed25519 public key hex")
         raise LocalmError(
             "refusing to apply an update: no signing key is configured",
             reason="update signature verification is not set up (no pinned public key)")
