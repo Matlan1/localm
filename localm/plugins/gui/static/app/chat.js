@@ -217,6 +217,7 @@ export function saveConversations(changed) {
 /* ---- server-side conversation store (non-privacy modes only) ---- */
 
 export const _convPushTimers = new Map();
+let _convPushWarned = false;   // one warning per breakage, re-armed on success
 
 /** Debounced upsert of one conversation to the server store. */
 export function pushConversation(conv) {
@@ -228,7 +229,7 @@ export function pushConversation(conv) {
   _convPushTimers.set(conv.id, setTimeout(async () => {
     _convPushTimers.delete(conv.id);
     try {
-      await fetch("/api/conversations/" + encodeURIComponent(conv.id), {
+      const r = await fetch("/api/conversations/" + encodeURIComponent(conv.id), {
         method: "PUT",
         headers: authHeaders(),
         body: JSON.stringify({ title: conv.title,
@@ -238,7 +239,20 @@ export function pushConversation(conv) {
                                branches: conv.branches || [],
                                messages: conv.messages }),
       });
-    } catch (e) { /* offline - localStorage still has the copy */ }
+      // A resolved-but-failed save (500, 413 on a huge conversation) means
+      // server-side persistence quietly stopped; localStorage still holds the
+      // copy, so surface it ONCE per breakage (this runs on every debounce
+      // tick), re-arming after the next successful save.
+      if (!r.ok && !_convPushWarned) {
+        _convPushWarned = true;
+        console.error("conversation save failed (HTTP " + r.status +
+                      ") - server-side persistence may be stale; the local copy is intact");
+      } else if (r.ok) {
+        _convPushWarned = false;
+      }
+    } catch (e) { /* offline - localStorage still has the copy; a reachable
+                     server that ANSWERS with an error is the r.ok branch
+                     above, not this one */ }
   }, 600));
 }
 
@@ -248,7 +262,15 @@ export function deleteConversationRemote(convId) {
   _convPushTimers.delete(convId);
   fetch("/api/conversations/" + encodeURIComponent(convId), {
     method: "DELETE", headers: authHeaders(),
-  }).catch(() => {});
+  }).then((r) => {
+    if (!r.ok) throw new Error("HTTP " + r.status);
+  }).catch((e) => {
+    // Deleting is privacy-relevant and the UI copy is already gone: a failed
+    // server delete must not pass silently - the server copy would resurrect
+    // on the next load while the user believes it was deleted.
+    toast("Could not delete the conversation on the server - it may reappear", true);
+    console.error("conversation delete failed: " + (e && e.message ? e.message : e));
+  });
 }
 
 /** R40: fetch a full conversation's body on demand and replace its index-only
@@ -1009,7 +1031,9 @@ export async function attachDocument(file) {
     method: "POST", headers: authHeaders(),
     body: JSON.stringify({ filename: file.name, content_b64: b64 }),
   });
-  const data = await r.json();
+  // A plain-text 500 body is not JSON; fall back to {} so the error message
+  // below is the clean statusText, not a JSON parse error.
+  const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.detail || r.statusText);
   chat.docs.push({ name: data.filename, text: data.text,
                    chars: data.chars, truncated: data.truncated });
@@ -1082,12 +1106,20 @@ export async function ingestSharedFiles() {
     }
   }
   renderAttachChips();
-  // We have the data client-side now; clear the server inbox.
+  // We have the data client-side now; clear the server inbox. Best-effort: on
+  // failure the items stay stashed server-side and the NEXT ingest re-clears
+  // them (the ids are re-sent), so this self-heals - but leave a trace so a
+  // persistent failure is diagnosable from the client log.
   fetch("/api/share/clear", {
     method: "POST",
     headers: { ...authHeaders(), "Content-Type": "application/json" },
     body: JSON.stringify({ ids }),
-  }).catch(() => {});
+  }).then((r) => {
+    if (!r.ok) console.error("share-inbox clear failed (HTTP " + r.status +
+                             ") - will retry on the next share ingest");
+  }).catch((e) => {
+    console.error("share-inbox clear failed: " + (e && e.message ? e.message : e));
+  });
   if (imgs) toast(`${imgs} image${imgs > 1 ? "s" : ""} shared into chat`);
 }
 
