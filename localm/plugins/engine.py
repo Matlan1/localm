@@ -315,8 +315,18 @@ class PluginHost:
             return None
         try:
             return self.mount_static(surface.assets_dir)
-        except ValueError:
-            return None                      # declared but missing on disk
+        except ValueError as e:
+            # Best-effort: keep serving the rest of the plugin. mount_static
+            # raises for BOTH an absent assets_dir AND one that escapes the
+            # plugin dir (a manifest typo like '../x'); either way it is not
+            # mounted, but api_state still advertises assets_base, so the SPA
+            # import() 404s. Log the REAL cause at debug so that otherwise-silent
+            # 404 is diagnosable instead of a mystery, and so a boundary-escape
+            # is not misread as a plain missing dir (rule 5: surface, do not hide;
+            # the exception message distinguishes 'not found' from 'escapes').
+            _log.debug("plugin %s: assets_dir %r not mounted (%s); its client "
+                       "entry will 404", self._spec.name, surface.assets_dir, e)
+            return None
 
     def unmount(self) -> None:
         for r in self._routes:
@@ -1217,8 +1227,15 @@ class PluginManager:
                 try:
                     self._set_enabled(dep, False)
                     self._unload(dep)
-                except Exception:
-                    pass
+                except Exception as e:
+                    # Best-effort teardown: the primary uninstall proceeds
+                    # regardless. But do not stay silent (the comment above
+                    # promises the state change is logged, not silently broken):
+                    # a failed disable leaves dep enabled-with-missing-dependency,
+                    # which the enable guard (_require_deps_installed) and
+                    # api_state's missing_requires surface on the next start.
+                    _log.debug("could not fully disable dependent plugin %s during "
+                               "cascade uninstall of %s: %s", dep, name, e)
         entry = self._loaded.get(name)
         if entry:
             module = entry[1]
