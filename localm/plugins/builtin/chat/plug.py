@@ -546,10 +546,23 @@ def synthesize_memory(complete, *, max_facts: int = 12,
     # vector first so its embedding tracks the NEW text (it used to stay stale
     # forever; memory-audit 2026-07-02).
     before = {r.id for r in store.all()}
-    res = run_consolidation(store, sessions, complete, embed_fn=_embed_fn(),
+    embed_fn = _embed_fn()
+    res = run_consolidation(store, sessions, complete, embed_fn=embed_fn,
                             surface="chat", max_candidates=max_facts)
     new_facts = [r.text for r in store.all() if r.id not in before]
     episodic = _store_episode(store, sessions, complete)
+    # Backfill vectors for records stored before an embedder was available, so
+    # semantic recall turns on RETROACTIVELY after 'localm setup-embeddings'
+    # (memory-audit 2026-07-02 F8). Bounded per pass; a large store fills over
+    # several background passes. No-op when no embedder or all records embedded.
+    if embed_fn is not None:
+        try:
+            filled = store.backfill_vectors(embed_fn)
+            if filled:
+                res["backfilled"] = filled
+        except Exception as e:
+            from localm.debuglog import logger
+            logger.debug("memory vector backfill skipped: %s", e)
     return {"status": res.get("status", "ok"), "added": res.get("added", 0),
             "updated": res.get("updated", 0), "deleted": res.get("deleted", 0),
             "episodic": episodic, "facts": new_facts}
