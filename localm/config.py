@@ -164,11 +164,17 @@ DEFAULT_CONFIG: dict = {
     "coder_mode": None,
     # Long-term chat memory: recall the user's durable facts/preferences and
     # inject them (server-side) into the system prompt each turn. Recall is free
-    # (BM25 over a small structured store); the consolidation that grows the store
-    # is a separate, opt-in step (the jobs "memory" task or /api/memory/consolidate)
-    # and, like every memory write, is skipped in privacy mode. Set False to stop
-    # injecting remembered facts (existing memories are kept, just not used).
+    # (BM25 over a small structured store). Set False to stop injecting remembered
+    # facts (existing memories are kept, just not used).
     "memory_enabled": True,
+    # Grow the memory automatically: after a chat turn (in log/full mode, never
+    # privacy), if enough time has passed since the last run, distil durable
+    # facts from the recent conversation into the store IN THE BACKGROUND, so
+    # memory accumulates with no manual step. Debounced to at most once per
+    # MEMORY_AUTO_MIN_INTERVAL (see the chat plugin). Still skipped entirely in
+    # privacy mode (no new traces). Set False to require the manual "Synthesize
+    # now" button / the jobs "memory" task / POST /api/memory/consolidate.
+    "memory_auto_consolidate": True,
     # On-device embedding model for semantic search (RAG hybrid retrieval + agent
     # memory). A small dedicated GGUF (loaded separately from the chat model) so
     # embeddings work on the default runtime. Value is a known key
