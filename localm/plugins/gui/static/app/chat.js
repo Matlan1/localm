@@ -120,11 +120,18 @@ export async function compactConversation(conv) {
        { role: "assistant", content: "Understood." }];
 
   conv.messages = [...bridge, ...recent];
-  pruneBranches(conv);   // forks anchored in the summarised-away region die
+  // Forks anchored in the summarised-away region can no longer be reached by
+  // the ‹ › navigation; archive their content and DISCLOSE the count instead
+  // of deleting them silently (memory-audit 2026-07-02).
+  const lostBranches = pruneBranches(conv);
   saveConversations(conv);
   renderChat();
-  toast(summary ? "Older messages summarised to free context"
-                : "Older messages trimmed (summarisation unavailable)");
+  const base = summary ? "Older messages summarised to free context"
+                       : "Older messages trimmed (summarisation unavailable)";
+  toast(lostBranches
+    ? `${base} (${lostBranches} alternative branch${lostBranches > 1 ? "es" : ""} `
+      + "from the older messages were archived)"
+    : base);
   return true;
 }
 
@@ -875,9 +882,12 @@ export function switchBranch(conv, index, dir) {
 
 /** Drop fork records whose parent message no longer exists anywhere
  *  (active branch or any parked tail) - called after compaction rewrites
- *  old history. */
+ *  old history. Returns the number of ALTERNATIVE (non-current) parked
+ *  timelines that were dropped, and archives their content to
+ *  conv.droppedBranches so a summarised-away fork is recoverable via export,
+ *  never a silent hard delete (memory-audit 2026-07-02). */
 export function pruneBranches(conv) {
-  if (!conv.branches || !conv.branches.length) return;
+  if (!conv.branches || !conv.branches.length) return 0;
   const ids = new Set(["root"]);
   for (const m of conv.messages) if (m.id) ids.add(m.id);
   for (const rec of conv.branches) {
@@ -885,7 +895,23 @@ export function pruneBranches(conv) {
       for (const m of tail || []) if (m.id) ids.add(m.id);
     }
   }
-  conv.branches = conv.branches.filter((b) => ids.has(b.parent));
+  const kept = conv.branches.filter((b) => ids.has(b.parent));
+  const dropped = conv.branches.filter((b) => !ids.has(b.parent));
+  let lost = 0;
+  for (const rec of dropped) {
+    const alts = rec.tails.filter((t, ti) => ti !== rec.current && t && t.length);
+    if (alts.length) {
+      conv.droppedBranches = conv.droppedBranches || [];
+      for (const tail of alts) conv.droppedBranches.push(tail);
+      // Cap the archive so a long session cannot grow it without bound.
+      if (conv.droppedBranches.length > 50) {
+        conv.droppedBranches = conv.droppedBranches.slice(-50);
+      }
+      lost += alts.length;
+    }
+  }
+  conv.branches = kept;
+  return lost;
 }
 
 export function editMessage(conv, index) {
