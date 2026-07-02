@@ -208,10 +208,23 @@ _EPISODE_PROMPT = (
 )
 
 
+# Openers that mean the model echoed the instruction or narrated itself instead
+# of summarising: the audit's non-thinking baseline stored a verbatim prompt echo
+# and an "As an AI..." line as durable episodes. Rejecting these keeps garbage out
+# of episodic recall (memory-audit 2026-07-02, F5).
+_EPISODE_BAD_PREFIXES = (
+    "summarise", "summarize", "you are", "the conversation", "as an ai",
+    "as a language model", "sure,", "sure!", "here is", "here's", "okay",
+    "ok,", "i cannot", "i can't", "i'm sorry", "i am sorry", "output only",
+    "one sentence", "in one sentence", "the user and the assistant discussed or",
+)
+
+
 def summarize_session(complete: Complete, session_text: str) -> str:
     """A one-sentence episodic summary of a session ('what we talked about'), for
     episodic recall. Never raises; returns '' on any model/parse failure. Hardened
-    against instruction-laundering (the conversation is data, not commands)."""
+    against instruction-laundering (the conversation is data, not commands) and
+    against a weak model echoing the prompt or narrating itself as a 'summary'."""
     if not (session_text or "").strip():
         return ""
     try:
@@ -223,13 +236,28 @@ def summarize_session(complete: Complete, session_text: str) -> str:
     # caught exactly that stored as a durable episodic record (C1).
     raw = strip_think(str(raw))
     for line in raw.strip().splitlines():
-        line = line.strip().lstrip("-*# ").strip()
-        # Require a real sentence: some letters + a little length. Rejects a
-        # degenerate reply ("{}", "[]", "", a stray token) so a weak model never
-        # plants a garbage episodic record.
-        if line and len(line) >= 8 and any(c.isalpha() for c in line):
-            return line[:MAX_TEXT_LEN]
+        line = line.strip().lstrip("-*#> ").strip().strip('"').strip()
+        if not _is_usable_summary(line):
+            continue
+        return line[:MAX_TEXT_LEN]
     return ""
+
+
+def _is_usable_summary(line: str) -> bool:
+    """A stored episodic line must be a real summary sentence, not an empty
+    token, a prompt echo, or the model narrating the task. Cheap and
+    deterministic (no model call)."""
+    if not line or len(line) < 8 or not any(c.isalpha() for c in line):
+        return False                         # degenerate: "{}", "[]", a stray token
+    lo = line.lower()
+    if any(lo.startswith(p) for p in _EPISODE_BAD_PREFIXES):
+        return False                         # instruction echo / self-narration
+    # Reject a line that quotes the prompt's own example verbatim (the model
+    # parroted the few-shot rather than describing the session).
+    if "migrating the database to postgres 16" in lo or \
+            "debugged a flaky upload test" in lo:
+        return False
+    return True
 
 
 # --------------------------------------------------------------------------- #

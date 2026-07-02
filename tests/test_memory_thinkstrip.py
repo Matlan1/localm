@@ -235,3 +235,38 @@ def test_recent_sessions_text_strips_assistant_think(tmp_path, monkeypatch):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+# ---------------------------------------------------- F5 episodic quality gate #
+
+def test_summarize_session_rejects_prompt_echo():
+    # The audit's non-thinking baseline stored a verbatim prompt echo as an
+    # episode; the gate must drop it.
+    from localm.memory.consolidate import summarize_session
+    echo = "Summarise in ONE short sentence what the user and the assistant did"
+    assert summarize_session(lambda p: echo, SESSION) == ""
+
+
+def test_summarize_session_rejects_self_narration():
+    from localm.memory.consolidate import summarize_session
+    assert summarize_session(
+        lambda p: "As an AI language model, I discussed things.", SESSION) == ""
+
+
+def test_summarize_session_rejects_few_shot_parrot():
+    from localm.memory.consolidate import summarize_session
+    parrot = "Discussed migrating the database to Postgres 16"
+    assert summarize_session(lambda p: parrot, SESSION) == ""
+
+
+def test_summarize_session_accepts_real_summary():
+    from localm.memory.consolidate import summarize_session
+    good = "Planned the greenhouse controller's sensor polling loop."
+    assert summarize_session(lambda p: good, SESSION) == good
+
+
+def test_summarize_session_skips_bad_line_takes_good_one():
+    from localm.memory.consolidate import summarize_session
+    raw = "Sure, here is your summary:\nBuilt a CSV export for the reports page."
+    assert summarize_session(lambda p: raw, SESSION) == \
+        "Built a CSV export for the reports page."
