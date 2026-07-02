@@ -171,9 +171,15 @@ CORE_FIELDS: list = [
                  group="Privacy", owner="coder", options=_PRIVACY_INHERIT),
     SettingField("memory_enabled", Widget.TOGGLE, "Chat memory",
                  "Recall the durable facts localm has learned about you and add "
-                 "them to the system prompt each chat turn. Growing that memory "
-                 "(consolidation) is a separate opt-in step and is always blocked "
-                 "in privacy mode; turning this off just stops using the memory.",
+                 "them to the system prompt each chat turn. Turning this off "
+                 "stops using the memory (existing facts are kept).",
+                 group="Privacy"),
+    SettingField("memory_auto_consolidate", Widget.TOGGLE, "Grow memory automatically",
+                 "After a chat turn, quietly distil durable facts from the "
+                 "conversation into memory in the background, so it accumulates "
+                 "with no manual step. Always blocked in privacy mode (no new "
+                 "traces). Turn this off to grow memory only via the 'Synthesize "
+                 "now' button or a scheduled memory job.",
                  group="Privacy"),
     # ---- Models ----
     SettingField("embedding_model", Widget.TEXT, "Embedding model",

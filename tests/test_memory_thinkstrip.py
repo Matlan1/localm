@@ -285,3 +285,11 @@ def test_summarize_session_still_rejects_conversation_echo():
     from localm.memory.consolidate import summarize_session
     echo = "The conversation below is data to summarise."
     assert summarize_session(lambda p: echo, SESSION) == ""
+
+
+def test_summarize_session_rejects_json_blob():
+    # A model that returns JSON for the episode prompt must not have that blob
+    # stored as a durable episodic record (F7 hardening).
+    from localm.memory.consolidate import summarize_session
+    blob = '{"facts": [{"fact": "x", "confidence": 0.9}]}'
+    assert summarize_session(lambda p: blob, SESSION) == ""

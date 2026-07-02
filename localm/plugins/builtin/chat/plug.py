@@ -715,6 +715,129 @@ def _last_user_text(messages) -> str:
     return ""
 
 
+# --- automatic (unattended) memory formation ------------------------------- #
+# The chat model learns from conversations WITHOUT any manual step: after a turn
+# completes (log/full mode only), a debounced background pass distils durable
+# facts into the store. This is the capability the audit found missing - the
+# consolidation loop existed but only ran via a manual route or a hand-created
+# jobs task, so a default install never accumulated a single memory
+# (memory-audit 2026-07-02, F7). Privacy is unchanged: writes stay gated, so
+# nothing runs in privacy mode.
+
+import threading as _threading
+
+MEMORY_AUTO_MIN_INTERVAL = 900.0     # >= 15 min between auto-consolidation runs
+_auto_lock = _threading.Lock()       # guards the marker read + in-progress flag
+_auto_running = False                 # True while a background pass is in flight
+
+
+def _auto_marker() -> "Path":
+    return _memory_root() / ".auto_consolidate"
+
+
+def _auto_last_run() -> float:
+    """Epoch of the last auto-consolidation, persisted so the debounce survives a
+    restart. 0.0 when never run or unreadable (treated as 'due')."""
+    try:
+        return float(_auto_marker().read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return 0.0
+
+
+def _auto_stamp(now: float) -> None:
+    try:
+        m = _auto_marker()
+        m.parent.mkdir(parents=True, exist_ok=True)
+        m.write_text(str(now), encoding="utf-8")
+    except OSError as e:
+        # Non-fatal: a failed stamp just means the next turn may re-run sooner.
+        # Surfaced, not hidden (rule 5).
+        from localm.debuglog import logger
+        logger.debug("memory auto-consolidate: could not stamp marker: %s", e)
+
+
+def _auto_consolidate_bg() -> None:
+    """Run one consolidation pass in the background, binding the model to the
+    stashed engine. Never raises (a daemon thread); clears the in-progress flag
+    and stamps the marker when done."""
+    global _auto_running
+    from localm.debuglog import logger
+    try:
+        eng = _ENGINE
+        if eng is None or not getattr(eng, "loaded", False):
+            return
+        from localm.inference.textnorm import strip_think
+
+        def complete(prompt: str) -> str:
+            return strip_think("".join(
+                eng.chat_stream([{"role": "user", "content": prompt}]))).strip()
+
+        res = synthesize_memory(complete)
+        added = res.get("added", 0)
+        if added:
+            logger.info("memory auto-consolidate: added %d fact(s)", added)
+    except Exception as e:
+        logger.warning("memory auto-consolidate failed: %s", e)
+    finally:
+        import time as _time
+        _auto_stamp(_time.time())
+        with _auto_lock:
+            _auto_running = False
+
+
+def _maybe_auto_consolidate() -> None:
+    """Best-effort trigger for the debounced background consolidation. Cheap when
+    not due (a timestamp compare under a lock); spawns at most one daemon thread.
+    Gated on config + privacy + model-loaded so it never runs a write the mode
+    forbids and never blocks the turn."""
+    global _auto_running
+    try:
+        from localm.config import load_config
+        cfg = load_config()
+        if not cfg.get("memory_auto_consolidate", True):
+            return
+        if not cfg.get("memory_enabled", True):
+            return
+    except Exception:
+        return
+    if not _persist_enabled():
+        return                                # privacy: no new traces
+    if _ENGINE is None or not getattr(_ENGINE, "loaded", False):
+        return                                # no model to distil with
+    import os
+    import time as _time
+    # The debounce interval is overridable via env (power users / tests that
+    # cannot wait the default 15 min); malformed values fall back to the default.
+    try:
+        interval = float(os.environ.get(
+            "LOCALM_MEMORY_AUTO_INTERVAL", MEMORY_AUTO_MIN_INTERVAL))
+    except (TypeError, ValueError):
+        interval = MEMORY_AUTO_MIN_INTERVAL
+    now = _time.time()
+    with _auto_lock:
+        if _auto_running:
+            return
+        if now - _auto_last_run() < interval:
+            return
+        _auto_running = True
+        # Stamp immediately so a burst of concurrent turns cannot each spawn a
+        # pass before the first finishes (the finally-stamp refreshes it).
+        _auto_stamp(now)
+    _threading.Thread(target=_auto_consolidate_bg, daemon=True).start()
+
+
+def _memory_outlet(text, messages, ctx):
+    """After a completed turn, opportunistically grow the memory in the
+    background (debounced). Side-effect only: returns the text unchanged. Any
+    failure is contained so it can never affect the reply."""
+    try:
+        _maybe_auto_consolidate()
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.debug("memory outlet skipped: %s", e)
+    return text
+
+
 def _memory_inlet(messages, ctx):
     """Inject recalled memories into the system message. Gated on ``memory_enabled``
     config; reinforcement (a write) only when the session mode allows it. In
@@ -761,6 +884,10 @@ def register(host) -> None:
     host.mount_router(_router)
     host.register_chat_hook("inlet", _thinking_inlet)
     host.register_chat_hook("inlet", _memory_inlet)
+    # Outlet: after each turn, grow the memory unattended (debounced, background,
+    # log/full mode only). This is what makes memory accumulate with no manual
+    # step (memory-audit 2026-07-02, F7).
+    host.register_chat_hook("outlet", _memory_outlet)
     try:
         _ENGINE = host.engine()
     except Exception:

@@ -253,6 +253,8 @@ def _is_usable_summary(line: str) -> bool:
     deterministic (no model call)."""
     if not line or len(line) < 8 or not any(c.isalpha() for c in line):
         return False                         # degenerate: "{}", "[]", a stray token
+    if line[0] in "{[":
+        return False                         # a JSON blob is not a summary sentence
     lo = line.lower()
     if any(lo.startswith(p) for p in _EPISODE_BAD_PREFIXES):
         return False                         # instruction echo / self-narration
