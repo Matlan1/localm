@@ -36,6 +36,7 @@ from ..config import (
 )
 from ._shared import PROGRESS_SENTINEL, console
 from .gguf import (
+    _GGUF_MIN_BYTES,
     _HASH_PROGRESS_MIN_BYTES,
     _gguf_first_parts,
     _has_gguf_magic,
@@ -106,7 +107,7 @@ __all__ = [
     "_SPLIT_GGUF_RE", "split_gguf_parts", "first_split_part", "missing_split_parts",
     "_sha256_file", "_sha256_file_bytes", "_safe_models_filename",
     "_HASH_PROGRESS_MIN_BYTES", "_hash_with_progress", "_has_gguf_magic",
-    "_gguf_first_parts",
+    "_gguf_first_parts", "_GGUF_MIN_BYTES",
     # registry
     "MODEL_SHORTCUTS", "_SHORTCUT_SIZES", "resolve_spec", "get_model_path",
     "get_model_info", "find_sibling_mmproj", "get_model_mmproj", "_hf_is_vision",
