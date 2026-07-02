@@ -58,9 +58,10 @@ test("a resolved-but-failed conversation save is logged once, not per save", asy
                       branches: [], messages: [{ role: "user", content: "hi" }] };
     pushConversation(window.__conv);
   `);
-  await new Promise((r) => setTimeout(r, 750));   // ride out the 600ms debounce
+  // Ride out the real 600ms debounce with generous margin for a loaded machine.
+  await new Promise((r) => setTimeout(r, 1000));
   runScript(window, "pushConversation(window.__conv);");
-  await new Promise((r) => setTimeout(r, 750));
+  await new Promise((r) => setTimeout(r, 1000));
   assert.equal(puts, 2, "both saves reached the server");
   const lines = (window.__localmClientLog || []).filter((l) => l.includes("conversation save failed"));
   assert.equal(lines.length, 1, "the breakage is logged once, not per debounce tick");
