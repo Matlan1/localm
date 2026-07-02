@@ -75,9 +75,11 @@ class _ExecutionMixin:
         this for tools whose primary target is a ``glob`` or ``output_path``
         arg (and may add ``path`` alongside it).
         """
-        # MCP tools have unknown arg schemas: check a broad set of common path-arg
-        # names so an owner's --scope still confines their file ops (CHK-MCP-SCOPE).
-        if call.name.startswith("mcp_"):
+        # MCP and PLUGIN tools are registered dynamically with unknown arg schemas,
+        # so an owner's --scope confines their file ops via a broad set of common
+        # path-arg names (CHK-MCP-SCOPE / CHK-SCOPE-PLUGIN). Best-effort: an unusual
+        # path-arg name is not caught (the tool's author is the owner's own config).
+        if call.name.startswith(("mcp_", "plugin_")):
             arg_names = _MCP_SCOPE_PATH_ARGS
         else:
             arg_names = _SCOPE_PATH_ARGS.get(call.name, ("path",))
@@ -141,8 +143,12 @@ class _ExecutionMixin:
             return result
 
         # Scope check - reject file operations that fall outside the active glob.
-        # MCP tools (mcp_*) are included so an owner's --scope confines them too.
-        if self.scope and (call.name in _SCOPED_TOOLS or call.name.startswith("mcp_")):
+        # MCP (mcp_*) AND plugin (plugin_*) tools are included so an owner's --scope
+        # confines those dynamically-registered file tools too - built-in file tools
+        # are default-denied at authoring time (_SCOPED_TOOLS), but the dynamic
+        # families are not in the registry then, so they are gated here by prefix.
+        if self.scope and (call.name in _SCOPED_TOOLS
+                           or call.name.startswith(("mcp_", "plugin_"))):
             offending = self._scope_violation(call)
             if offending is not None:
                 result = ToolResult.error(
