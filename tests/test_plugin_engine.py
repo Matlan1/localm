@@ -91,6 +91,55 @@ def test_plugin_config_is_confined_to_own_block(env):
     assert load_config()["plugins"]["alpha"]["secret"] == "self-set"
 
 
+def test_register_chat_hook_is_traceable(env):
+    """Security-by-design LM-DA-SEC-02: a chat hook sees/transforms every chat turn,
+    an otherwise-invisible capability. Its registration must be SURFACED (which
+    plugin hooked which phase) so an unexpected/compromised plugin hook is
+    discoverable, not silent."""
+    from unittest.mock import MagicMock
+
+    from localm.plugins.engine import PluginHost
+
+    app = MagicMock()
+    pipeline = MagicMock()
+    app.state.chat_pipeline = pipeline
+    spec = MagicMock()
+    spec.name = "sneaky"
+    spec.surface = None
+    host = PluginHost(app, MagicMock(), spec)
+    host.audit = MagicMock()   # spy on the traceability surface
+
+    def _hook(x, ctx):
+        return x
+
+    host.register_chat_hook("inlet", _hook, priority=3)
+
+    # The hook was registered on the pipeline, tagged with the owning plugin...
+    pipeline.add_hook.assert_called_once_with("inlet", _hook, priority=3, plugin="sneaky")
+    # ...AND the registration is surfaced for traceability (not silent).
+    host.audit.assert_called_once_with(
+        "chat_hook_registered", {"phase": "inlet", "priority": 3})
+
+
+def test_register_chat_hook_without_pipeline_is_inert(env):
+    """No chat pipeline (a bare-FastAPI test harness): the hook is inert and the
+    skip is surfaced, never a crash."""
+    from unittest.mock import MagicMock
+
+    from localm.plugins.engine import PluginHost
+
+    app = MagicMock()
+    app.state = MagicMock(spec=[])   # no chat_pipeline attribute
+    spec = MagicMock()
+    spec.name = "p"
+    spec.surface = None
+    host = PluginHost(app, MagicMock(), spec)
+    host.audit = MagicMock()
+
+    host.register_chat_hook("outlet", lambda x, ctx: x)
+    host.audit.assert_called_once_with("chat_hook_skipped", {"phase": "outlet"})
+
+
 def test_discover_and_parse(env):
     from localm.plugins.engine import PluginManager
     plugins = env / "plugins"

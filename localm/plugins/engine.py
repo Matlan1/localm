@@ -422,6 +422,14 @@ class PluginHost:
             self.audit("chat_hook_skipped", {"phase": phase})
             return
         pipeline.add_hook(phase, fn, priority=priority, plugin=self._spec.name)
+        # A chat hook is a powerful, otherwise-INVISIBLE capability: it sees and can
+        # transform EVERY chat turn (message content, the model's reply), so a
+        # compromised or unexpected plugin hook is a real injection / exfiltration
+        # vector. Surface each registration (which plugin hooked which phase) so it
+        # is discoverable, not silent - LM-DA-SEC-02, defense-in-depth traceability.
+        # Debug altitude: legitimate first-party hooks (thinking / memory inlets)
+        # register too, so this records rather than alarms.
+        self.audit("chat_hook_registered", {"phase": phase, "priority": priority})
         if phase not in self._chat_phases:
             self._chat_phases.append(phase)
 
