@@ -29,6 +29,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
+from localm.plugins.contract import KNOWN_PLUGIN_KEYS
+
 
 def plugins_dir() -> Path:
     """Root directory scanned for external plugins."""
@@ -70,8 +72,12 @@ _RESERVED_NAMES = {
 }
 
 
-def parse_manifest(plugin_dir: Path) -> PluginManifest:
-    """Parse and validate ``plugin.toml`` in *plugin_dir*."""
+def parse_manifest(plugin_dir: Path, *,
+                   warnings: Optional[List[str]] = None) -> PluginManifest:
+    """Parse and validate ``plugin.toml`` in *plugin_dir*. When *warnings* is
+    given, non-fatal manifest problems (unknown/misspelled [plugin] keys) are
+    appended to it as human-readable strings - surfaced, never escalated: a
+    plugin with an unknown key must still load (LM-DA-007)."""
     manifest_path = plugin_dir / "plugin.toml"
     if not manifest_path.is_file():
         raise PluginError(f"No plugin.toml in {plugin_dir}")
@@ -101,6 +107,16 @@ def parse_manifest(plugin_dir: Path) -> PluginManifest:
     if not (isinstance(exports, list) and all(isinstance(t, str) for t in exports)):
         raise PluginError(f"{manifest_path}: [tools] exports must be a list of strings")
 
+    if warnings is not None:
+        # KNOWN_PLUGIN_KEYS spans both manifest formats (see contract.py), so a
+        # key valid for the engine contract never false-alarms here; only a key
+        # known to neither format (a typo) warns.
+        unknown = sorted(set(plugin) - KNOWN_PLUGIN_KEYS)
+        if unknown:
+            warnings.append(
+                f"{manifest_path}: unknown [plugin] key(s) ignored: "
+                + ", ".join(unknown))
+
     return PluginManifest(
         name=name,
         version=str(plugin.get("version", "0.0.0")),
@@ -122,14 +138,22 @@ def discover_plugins(root: Optional[Path] = None) -> List[PluginManifest]:
     Invalid plugins are skipped silently here - use :func:`discover_errors`
     when you want the reasons (e.g. for ``localm plugin list``).
     """
-    manifests, _ = _scan(root)
+    manifests, _, _ = _scan(root)
     return manifests
 
 
 def discover_errors(root: Optional[Path] = None) -> List[str]:
     """Return human-readable errors for plugins that failed validation."""
-    _, errors = _scan(root)
+    _, errors, _ = _scan(root)
     return errors
+
+
+def discover_warnings(root: Optional[Path] = None) -> List[str]:
+    """Non-fatal manifest warnings (unknown/misspelled keys, LM-DA-007) for
+    plugins that still parse and load; surfaced by ``localm plugin list`` and
+    ``/v1/plugins`` so a typo does not degrade silently."""
+    _, _, warns = _scan(root)
+    return warns
 
 
 def _is_engine_plugin(plugin_dir: Path) -> bool:
@@ -148,22 +172,23 @@ def _is_engine_plugin(plugin_dir: Path) -> bool:
     return bool(plugin.get("register")) and not plugin.get("entry")
 
 
-def _scan(root: Optional[Path]) -> tuple[List[PluginManifest], List[str]]:
+def _scan(root: Optional[Path]) -> tuple[List[PluginManifest], List[str], List[str]]:
     root = root or plugins_dir()
     manifests: List[PluginManifest] = []
     errors: List[str] = []
+    warns: List[str] = []
     if not root.is_dir():
-        return manifests, errors
+        return manifests, errors, warns
     for child in sorted(root.iterdir()):
         if not child.is_dir() or not (child / "plugin.toml").is_file():
             continue
         if _is_engine_plugin(child):
             continue   # owned by the plugin engine, not a legacy CLI plugin
         try:
-            manifests.append(parse_manifest(child))
+            manifests.append(parse_manifest(child, warnings=warns))
         except PluginError as e:
             errors.append(str(e))
-    return manifests, errors
+    return manifests, errors, warns
 
 
 def import_plugin_module(manifest: PluginManifest):

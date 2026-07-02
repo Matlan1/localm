@@ -11,6 +11,7 @@ from localm.plugins.loader import (
     PluginError,
     discover_errors,
     discover_plugins,
+    discover_warnings,
     install_plugin,
     load_entry,
     parse_manifest,
@@ -145,6 +146,42 @@ class TestDiscover:
         errs = discover_errors(tmp_path)
         assert len(errs) == 1
         assert "name is required" in errs[0]
+
+    def test_unknown_manifest_key_warned_not_fatal(self, tmp_path):
+        """LM-DA-007: a typoed [plugin] key must not fail the plugin (it still
+        parses and loads) but must be surfaced via discover_warnings, not
+        silently ignored."""
+        toml = textwrap.dedent("""\
+            [plugin]
+            name = "demo"
+            version = "1.0.0"
+            descriptoin = "typo"
+            entry = "demo_cli:main"
+        """)
+        d = _make_plugin(tmp_path, "demo", toml=toml)
+        warns = []
+        m = parse_manifest(d, warnings=warns)
+        assert m.name == "demo"                          # parse still succeeds
+        assert len(warns) == 1 and "descriptoin" in warns[0]
+        assert [x.name for x in discover_plugins(tmp_path)] == ["demo"]
+        assert discover_errors(tmp_path) == []           # a warning, not an error
+        ws = discover_warnings(tmp_path)
+        assert len(ws) == 1
+        assert "unknown [plugin] key(s) ignored" in ws[0]
+
+    def test_engine_contract_key_not_warned(self, tmp_path):
+        """A key valid in the ENGINE manifest format (e.g. ``register``) must
+        not false-alarm here: both formats share the installed dir."""
+        toml = textwrap.dedent("""\
+            [plugin]
+            name = "demo"
+            entry = "demo_cli:main"
+            register = "plug"
+        """)
+        d = _make_plugin(tmp_path, "demo", toml=toml)
+        warns = []
+        parse_manifest(d, warnings=warns)
+        assert warns == []
 
     def test_engine_plugin_ignored_not_errored(self, tmp_path):
         """An engine-contract plugin (register=, no entry=) shares the installed
