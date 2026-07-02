@@ -104,6 +104,7 @@ class HTTPBackend(BaseLLMBackend):
         timeout: int = 300,
         native_tools: bool = False,
         anthropic: bool = False,
+        localm_server: bool = False,
         verify=None,
         **extra_params,
     ) -> None:
@@ -129,12 +130,15 @@ class HTTPBackend(BaseLLMBackend):
         self.anthropic     = anthropic
         self._tool_defs: list = []   # OpenAI-format tool definitions
 
-        # GBNF grammar sampling is only supported by our own local server.
-        # Passing grammar= to external APIs (OpenAI, Anthropic) causes errors.
-        _external_prefixes = ("https://api.openai.com", "https://api.anthropic.com")
-        self.supports_grammar = not (anthropic or any(
-            base_url.startswith(p) for p in _external_prefixes
-        ))
+        # GBNF grammar sampling is only supported by our own local server, so
+        # only a backend EXPLICITLY constructed for one advertises it. The old
+        # blacklist (not api.openai.com/api.anthropic.com) mislabelled every
+        # third-party OpenAI-compatible server (LM Studio, vLLM, a remote URL)
+        # as grammar-capable, which mattered once the coder started sending
+        # grammar kwargs BY DEFAULT - unknown body fields can 400 there. A
+        # remote localm reached via a hand-typed --backend URL loses grammar
+        # (conservative); the attach flow and self-connections pass the flag.
+        self.supports_grammar = bool(localm_server) and not anthropic
 
     @property
     def model_id(self) -> str:
@@ -468,7 +472,8 @@ def make_localm_backend(model: str, port: int = 8642, *,
     accept any non-empty string). A hardcoded ``"localm"`` would 401 against a
     ``require_auth`` server - the C1 keystone bug this resolves."""
     key = api_key or os.environ.get("LOCALM_API_KEY") or "localm"
-    return HTTPBackend(f"http://127.0.0.1:{port}/v1", model, api_key=key, **kw)
+    return HTTPBackend(f"http://127.0.0.1:{port}/v1", model, api_key=key,
+                       localm_server=True, **kw)
 
 
 def make_openai_backend(model: str = "gpt-4o", **kw) -> HTTPBackend:

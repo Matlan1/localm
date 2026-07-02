@@ -107,6 +107,10 @@ class CompletionRequest(BaseModel):
     top_k: Optional[int] = None
     repeat_penalty: Optional[float] = None
     grammar: Optional[str] = None
+    # Lazy grammar: unconstrained until the output matches a trigger pattern,
+    # then the grammar enforces (text-or-tool). Requires grammar_triggers.
+    grammar_lazy: bool = False
+    grammar_triggers: Optional[List[str]] = None
     seed: Optional[int] = None
 
 
@@ -120,6 +124,10 @@ class ChatRequest(BaseModel):
     top_k: Optional[int] = None
     repeat_penalty: Optional[float] = None
     grammar: Optional[str] = None  # GBNF grammar string for constrained sampling
+    # Lazy grammar: unconstrained until the output matches a trigger pattern,
+    # then the grammar enforces (text-or-tool). Requires grammar_triggers.
+    grammar_lazy: bool = False
+    grammar_triggers: Optional[List[str]] = None
     seed: Optional[int] = None     # RNG seed for reproducible generation
 
 

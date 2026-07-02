@@ -101,6 +101,14 @@ def register(app: FastAPI, ctx) -> None:
         )
         # Strip None so Engine uses its config defaults
         gen_kwargs = {k: v for k, v in gen_kwargs.items() if v is not None}
+        if req.grammar_lazy:
+            # Reject the half-formed request instead of silently degrading: a
+            # lazy grammar without its trigger patterns can never engage.
+            if not req.grammar or not req.grammar_triggers:
+                raise HTTPException(
+                    400, "grammar_lazy requires both grammar and grammar_triggers")
+            gen_kwargs["grammar_lazy"] = True
+            gen_kwargs["grammar_triggers"] = req.grammar_triggers
 
         if req.stream:
             return StreamingResponse(
@@ -204,6 +212,13 @@ def register(app: FastAPI, ctx) -> None:
             seed=req.seed,
         )
         gen_kwargs = {k: v for k, v in gen_kwargs.items() if v is not None}
+        if req.grammar_lazy:
+            # Same contract as /v1/chat/completions: lazy needs its triggers.
+            if not req.grammar or not req.grammar_triggers:
+                raise HTTPException(
+                    400, "grammar_lazy requires both grammar and grammar_triggers")
+            gen_kwargs["grammar_lazy"] = True
+            gen_kwargs["grammar_triggers"] = req.grammar_triggers
 
         if req.stream:
             return StreamingResponse(

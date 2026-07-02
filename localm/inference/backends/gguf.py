@@ -348,6 +348,8 @@ class GgufBackend(BaseBackend):
         top_k: int = 40,
         repeat_penalty: float = 1.1,
         grammar: Optional[str] = None,
+        grammar_lazy: bool = False,
+        grammar_triggers: Optional[list] = None,
         seed: Optional[int] = None,
     ) -> Iterator[str]:
         # Image input: when an mmproj is loaded (mtmd vision, C1) it flows through
@@ -383,6 +385,8 @@ class GgufBackend(BaseBackend):
                 top_k=top_k,
                 repeat_penalty=repeat_penalty,
                 grammar=g,
+                grammar_lazy=grammar_lazy,
+                grammar_triggers=grammar_triggers,
                 stream=True,
             )
             if seed is not None:

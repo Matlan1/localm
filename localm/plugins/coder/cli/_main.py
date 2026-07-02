@@ -486,7 +486,8 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
                 # registry token as a keyless local-attach credential is a
                 # follow-up - it needs the server to accept it as a bearer.)
                 attached = HTTPBackend(_tgt["base_url"], model, api_key=api_key,
-                                       native_tools=native_tools)
+                                       native_tools=native_tools,
+                                       localm_server=True)   # discovered localm instance
                 console.print(
                     f"[dim]Using the localm already running for[/dim] "
                     f"[cyan]{_root}[/cyan] [dim](port {_tgt['port']}, "
