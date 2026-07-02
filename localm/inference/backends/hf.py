@@ -396,8 +396,19 @@ class HFBackend(BaseBackend):
         top_k: int = 40,
         repeat_penalty: float = 1.1,
         grammar: Optional[str] = None,   # GBNF/EBNF; masks output via xgrammar ([grammar] extra)
+        grammar_lazy: bool = False,
+        grammar_triggers: Optional[List[str]] = None,
         seed: Optional[int] = None,
     ) -> Iterator[str]:
+        # xgrammar has no trigger/lazy mode: a lazy request must not silently
+        # become a STRICT constraint (a strict grammar stalls thinking models),
+        # so drop the grammar with a trace and generate unconstrained - the
+        # same soft-degrade contract as everywhere else on this backend.
+        if grammar and grammar_lazy:
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("lazy grammar is not supported on the HF backend; "
+                       "generating unconstrained")
+            grammar = None
         # Refuse images on a text-only checkpoint instead of silently dropping
         # them (a processor-less model would otherwise ignore the picture and
         # answer from the text alone). Checked before importing transformers so

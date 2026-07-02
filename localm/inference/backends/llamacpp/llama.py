@@ -393,6 +393,8 @@ def _build_sampler(
     repeat_penalty: float = 1.0,
     seed: int = _DEFAULT_SEED,
     grammar: Optional[str] = None,
+    grammar_lazy: bool = False,
+    grammar_triggers: Optional[List[str]] = None,
 ) -> int:
     """
     Construct a sampler chain:
@@ -413,13 +415,35 @@ def _build_sampler(
         GBNF grammar string.  When supplied, only token sequences that match
         this grammar at the current parse position are eligible for sampling.
         Pass ``None`` (the default) to skip grammar-constrained sampling.
+    grammar_lazy:
+        With *grammar_triggers*, generation stays UNCONSTRAINED until the
+        output matches a trigger pattern; the grammar enforces from there
+        (text-or-tool). When the runtime lacks the lazy export, or no
+        triggers are given, the grammar is skipped entirely - a lazy request
+        must never silently become a strict constraint (a strict grammar
+        stalls thinking models, live-verified 2026-07-02).
     """
     chain_params = api.llama_sampler_chain_default_params()
     chain_params.no_perf = True
     chain = api.llama_sampler_chain_init(chain_params)
 
     # Grammar sampler masks logits before any scoring stage touches them
-    if grammar:
+    if grammar and grammar_lazy:
+        if grammar_triggers and api.has_lazy_grammar():
+            api.llama_sampler_chain_add(
+                chain,
+                api.llama_sampler_init_grammar_lazy_patterns(
+                    vocab, grammar.encode(), b"root",
+                    [t.encode() for t in grammar_triggers],
+                ),
+            )
+        else:
+            from localm.debuglog import logger as _dbg
+            _dbg.debug(
+                "lazy grammar requested but %s; generating unconstrained",
+                "no trigger patterns were given" if not grammar_triggers
+                else "this llama build lacks llama_sampler_init_grammar_lazy_patterns")
+    elif grammar:
         api.llama_sampler_chain_add(
             chain,
             api.llama_sampler_init_grammar(vocab, grammar.encode(), b"root"),
@@ -649,6 +673,8 @@ class LlamaCpp:
         top_p: float,
         repeat_penalty: float,
         grammar: Optional[str] = None,
+        grammar_lazy: bool = False,
+        grammar_triggers: Optional[List[str]] = None,
         seed: Optional[int] = None,
     ) -> Iterator[int]:
         """
@@ -706,6 +732,8 @@ class LlamaCpp:
             # llama_sampler_init_dist's c_uint32 binding.
             seed=self._seed if seed is None else (seed & 0xFFFFFFFF),
             grammar=grammar,
+            grammar_lazy=grammar_lazy,
+            grammar_triggers=grammar_triggers,
         )
 
         pos = n_prompt
@@ -1059,6 +1087,8 @@ class LlamaCpp:
         repeat_penalty: float = 1.1,
         stream: bool = False,
         grammar: Optional[str] = None,
+        grammar_lazy: bool = False,
+        grammar_triggers: Optional[List[str]] = None,
         seed: Optional[int] = None,
         **_ignored,
     ):
@@ -1105,6 +1135,8 @@ class LlamaCpp:
                 top_p=top_p,
                 repeat_penalty=repeat_penalty,
                 grammar=grammar,
+                grammar_lazy=grammar_lazy,
+                grammar_triggers=grammar_triggers,
                 seed=seed,
             )
 

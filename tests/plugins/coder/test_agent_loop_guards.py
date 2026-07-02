@@ -263,24 +263,33 @@ class TestNoProgressBreaker:
         assert agent._global_error_streak == 0
 
 
-class TestDormantToolGrammar:
-    """The TOOL_CALLS_ONLY grammar is WIRED but dormant: off unless the config flag
-    is set AND the backend supports grammar."""
+class TestLazyToolGrammar:
+    """The LAZY tool-call grammar is ON by default (2026-07-02): free text and
+    thinking flow, a started <tool_call> must be valid. Off when the user
+    disables the flag or the backend cannot enforce grammar."""
 
-    def test_dormant_by_default(self, tmp_path):
+    def test_on_by_default_when_supported(self, tmp_path, monkeypatch):
         agent = _make_agent(tmp_path)
         agent.backend.supports_grammar = True
-        assert agent._tool_call_grammar() is None        # flag off by default
-        assert "grammar" not in agent._llm_kwargs()
+        monkeypatch.setattr("localm.config.load_config", lambda: {})
+        pair = agent._tool_call_grammar()
+        assert pair is not None
+        grammar, triggers = pair
+        assert "tool_call" in grammar
+        assert triggers and "<tool_call>" in triggers[0]
+        kw = agent._llm_kwargs()
+        assert kw.get("grammar") == grammar
+        assert kw.get("grammar_lazy") is True
+        assert kw.get("grammar_triggers") == triggers
 
-    def test_active_when_flag_on_and_supported(self, tmp_path, monkeypatch):
+    def test_off_when_flag_disabled(self, tmp_path, monkeypatch):
         agent = _make_agent(tmp_path)
         agent.backend.supports_grammar = True
         monkeypatch.setattr("localm.config.load_config",
-                            lambda: {"coder_tool_grammar": True})
-        g = agent._tool_call_grammar()
-        assert g is not None and "tool_call" in g
-        assert agent._llm_kwargs().get("grammar") == g
+                            lambda: {"coder_tool_grammar": False})
+        assert agent._tool_call_grammar() is None
+        kw = agent._llm_kwargs()
+        assert "grammar" not in kw and "grammar_lazy" not in kw
 
     def test_off_when_backend_unsupported(self, tmp_path, monkeypatch):
         agent = _make_agent(tmp_path)

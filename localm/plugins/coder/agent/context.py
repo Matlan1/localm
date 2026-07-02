@@ -258,34 +258,35 @@ ws     ::= [ \t\n\r]*
         if buf:
             yield buf, in_call   # unclosed tag at stream end - display as-is
 
-    def _tool_call_grammar(self) -> Optional[str]:
-        """The GBNF grammar to constrain tool-call output, or None (dormant default).
+    def _tool_call_grammar(self) -> Optional[tuple]:
+        """(grammar, trigger_patterns) for LAZY tool-call enforcement, or None.
 
-        Returns ``gbnf.TOOL_CALLS_ONLY`` only when the ``coder_tool_grammar`` config
-        flag is set AND the backend can enforce grammar. OFF by default: grammar
-        sampling itself WORKS on the bundled runtime (the long-standing "sampler
-        faults" was a double-accept in our generation loop, fixed 2026-07-02 in
-        llama.py), but TOOL_CALLS_ONLY forces tool-only output (no free-text final
-        answer), so the flag stays opt-in until a text-or-tool grammar is designed
-        (REC-CODER-GRAMMAR). See dev-notes/coder-local-ux-improvement-2026-06-21."""
+        Returns ``(gbnf.TOOL_CALLS_ONLY, [gbnf.TOOL_CALL_TRIGGER])`` when the
+        ``coder_tool_grammar`` config flag is on (the default since 2026-07-02,
+        REC-CODER-GRAMMAR) AND the backend can enforce grammar. LAZY semantics:
+        thinking and prose flow unconstrained; the grammar engages only when the
+        model itself starts a <tool_call>, from which point the call must be
+        structurally valid JSON. Live-verified on the bundled runtime. External
+        API backends report supports_grammar=False and are unaffected."""
         if not getattr(self.backend, "supports_grammar", False):
             return None
         try:
             from localm.config import load_config
-            if not load_config().get("coder_tool_grammar", False):
+            if not load_config().get("coder_tool_grammar", True):
                 return None
-            from localm.inference.gbnf import TOOL_CALLS_ONLY
-            return TOOL_CALLS_ONLY
+            from localm.inference.gbnf import TOOL_CALL_TRIGGER, TOOL_CALLS_ONLY
+            return TOOL_CALLS_ONLY, [TOOL_CALL_TRIGGER]
         except Exception:
             return None
 
     def _llm_kwargs(self) -> dict:
-        """gen_kwargs for an LLM call, adding the tool-call grammar when enabled
-        (dormant by default - see :meth:`_tool_call_grammar`)."""
+        """gen_kwargs for an LLM call, adding the lazy tool-call grammar when
+        enabled (see :meth:`_tool_call_grammar`)."""
         kw = dict(self.gen_kwargs)
-        grammar = self._tool_call_grammar()
-        if grammar and "grammar" not in kw:
-            kw["grammar"] = grammar
+        pair = self._tool_call_grammar()
+        if pair and "grammar" not in kw:
+            kw["grammar"], kw["grammar_triggers"] = pair
+            kw["grammar_lazy"] = True
         return kw
 
     def _call_llm(self, messages: list[dict], interactive: bool) -> str:

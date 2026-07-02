@@ -253,6 +253,8 @@ class Engine:
         top_k: Optional[int] = None,
         repeat_penalty: Optional[float] = None,
         grammar: Optional[str] = None,
+        grammar_lazy: bool = False,
+        grammar_triggers: Optional[List[str]] = None,
         seed: Optional[int] = None,
     ) -> Iterator[str]:
         # Auto-reload if the model was unloaded (e.g. to free VRAM for image gen).
@@ -280,6 +282,8 @@ class Engine:
             top_k=top_k if top_k is not None else cfg["top_k"],
             repeat_penalty=repeat_penalty if repeat_penalty is not None else cfg["repeat_penalty"],
             grammar=grammar,
+            grammar_lazy=grammar_lazy,
+            grammar_triggers=grammar_triggers,
             seed=seed,
         ))
 

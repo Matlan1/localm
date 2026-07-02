@@ -511,6 +511,55 @@ def llama_sampler_init_grammar(
     )(vocab, grammar_str, grammar_root)
 
 
+def has_lazy_grammar() -> bool:
+    """True when this llama.dll exports llama_sampler_init_grammar_lazy_patterns."""
+    try:
+        getattr(load_lib(), "llama_sampler_init_grammar_lazy_patterns")
+        return True
+    except AttributeError:
+        return False
+
+
+def llama_sampler_init_grammar_lazy_patterns(
+    vocab: ctypes.c_void_p,
+    grammar_str: bytes,
+    grammar_root: bytes,
+    trigger_patterns: list,
+) -> ctypes.c_void_p:
+    """
+    Create a LAZY grammar sampler: generation is unconstrained until the
+    accumulated output matches one of *trigger_patterns* (regex, full-match
+    against the generated text; the grammar is fed from capture group 1),
+    then the GBNF grammar enforces from that point on.
+
+    This is the "text-or-tool" mechanism: thinking and prose flow freely, a
+    started structured block must be valid.
+
+    Parameters
+    ----------
+    vocab:
+        Vocabulary pointer from ``llama_model_get_vocab()``.
+    grammar_str:
+        GBNF grammar source, UTF-8 encoded.
+    grammar_root:
+        Name of the root rule, e.g. ``b"root"``.
+    trigger_patterns:
+        Regex patterns as ``bytes``, e.g. ``[rb"[\\s\\S]*?(<tool_call>[\\s\\S]*)"]``.
+    """
+    pats = (ctypes.c_char_p * len(trigger_patterns))(*trigger_patterns)
+    return _bind(
+        "llama_sampler_init_grammar_lazy_patterns",
+        LlamaSampler,
+        LlamaVocab,
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        ctypes.POINTER(ctypes.c_char_p),
+        ctypes.c_size_t,
+        ctypes.POINTER(llama_token),
+        ctypes.c_size_t,
+    )(vocab, grammar_str, grammar_root, pats, len(trigger_patterns), None, 0)
+
+
 # ---------------------------------------------------------------------------
 #  KV cache / memory management (newer builds only - probe before use)
 # ---------------------------------------------------------------------------
