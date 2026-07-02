@@ -189,7 +189,7 @@ localm config heretic_path "D:\path\to\heretic"
 localm config autoprune_missing_models true
 ```
 
-Config lives at `~/.localm/config.json` and only known keys are settable (both the CLI and the GUI validate against the schema). Auth: configure an API key (`LOCALM_API_KEY` env var, the launcher's Auth card / `auth.key` file, or a named key) to require bearer auth on the HTTP API; auth is recommended before binding to anything other than 127.0.0.1, and the CLI warns about exposed unauthenticated binds. Set `require_auth true` (or `LOCALM_REQUIRE_AUTH=1`) to fail closed and refuse requests until a key exists. CORS is locked to localhost by default and can be widened with `cors_origins`. See [docs/tls.md](../docs/tls.md) for LAN serving.
+Config lives at `~/.localm/config.json` and only known keys are settable (both the CLI and the GUI validate against the schema). Only the settings you actually changed are stored in the file; everything else follows the current built-in defaults, so a new localm version's improved defaults apply automatically unless you overrode them. Auth: configure an API key (`LOCALM_API_KEY` env var, the launcher's Auth card / `auth.key` file, or a named key) to require bearer auth on the HTTP API; auth is recommended before binding to anything other than 127.0.0.1, and the CLI warns about exposed unauthenticated binds. Set `require_auth true` (or `LOCALM_REQUIRE_AUTH=1`) to fail closed and refuse requests until a key exists. CORS is locked to localhost by default and can be widened with `cors_origins`. See [docs/tls.md](../docs/tls.md) for LAN serving.
 
 ### Dynamic context window
 

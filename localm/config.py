@@ -62,6 +62,9 @@ REGISTRY_FILE = HOME_DIR / "registry.json"
 CONFIG_FILE = HOME_DIR / "config.json"
 
 
+# Only the keys the user actually changed are persisted to config.json; a key
+# absent on disk follows this table at load time, so editing a default value
+# here reaches every existing install (see save_config / _user_delta).
 DEFAULT_CONFIG: dict = {
     "binary_dir": None,    # None = auto-detect (runtime wheel, then legacy dirs)
     "n_ctx": 4096,         # initial context window (grows on demand)
@@ -406,22 +409,46 @@ def load_config() -> dict:
     return cfg
 
 
+def _user_delta(cfg: dict) -> dict:
+    """Reduce *cfg* to the keys that need persisting: values that differ from
+    the CURRENT DEFAULT_CONFIG, plus keys DEFAULT_CONFIG does not know (a
+    config written by a newer version, or version-scoped state such as
+    plugins_first_use_done).
+
+    Persisting only this user-set delta is what lets a later change to a
+    DEFAULT_CONFIG value reach existing installs (LM-DA-001): an absent key
+    means "follow the default" and load_config() reconstructs it at read
+    time. The old scheme wrote the full merged dict, freezing every default
+    at its then-current value on the user's first save - commit cfa25d5's
+    max_tokens 1024 -> 4096 fix never reached a config saved before it.
+
+    Two documented consequences of delta persistence:
+      - A value set EQUAL to the current default is indistinguishable from
+        "follow the default" and is dropped, so it tracks future default
+        changes (the usual user-settings-file semantics).
+      - One-time migration ambiguity for config.json files written under the
+        old full-dump scheme: a stored key equal to the CURRENT default is
+        safely dropped on the next save, but a stored value that differs
+        (for example a frozen OLD default such as max_tokens 1024) cannot be
+        told apart from a deliberate user choice - provenance was destroyed
+        at the original save - so it is KEPT, preserving the user-choice
+        reading rather than silently changing a value the user may have set.
+    """
+    return {k: v for k, v in cfg.items()
+            if k not in DEFAULT_CONFIG or v != DEFAULT_CONFIG[k]}
+
+
 def save_config(cfg: dict) -> None:
+    """Persist *cfg* atomically, writing ONLY the user-set delta.
+
+    Callers keep passing the full defaults-merged dict (usually from
+    load_config()); keys whose value equals the current default are not
+    written to disk and are reconstructed by load_config(), so a shipped
+    default-value fix applies to existing installs. See _user_delta for the
+    exact rules and the migration of old full-dump files."""
     ensure_dirs()
-    # Shallow top-level backfill: a dict built by hand (rather than via
-    # load_config(), which merges defaults) would otherwise drop any missing
-    # top-level DEFAULT_CONFIG key from disk on save; this also lets a newly
-    # added default persist on the next save. Only ABSENT keys are filled -
-    # an explicit user value (including None/False) is never overwritten, and
-    # nested user-owned blocks like "plugins" are never deep-merged. The
-    # deep copy keeps the written dict from aliasing DEFAULT_CONFIG's nested
-    # mutable defaults (same aliasing concern as load_config).
-    missing = {k: copy.deepcopy(v) for k, v in DEFAULT_CONFIG.items()
-               if k not in cfg}
-    if missing:
-        cfg = {**missing, **cfg}
     with _io_lock:
-        _atomic_write_json(CONFIG_FILE, cfg)
+        _atomic_write_json(CONFIG_FILE, _user_delta(cfg))
 
 
 def update_config(mutator: Callable[[dict], None]) -> dict:
@@ -438,7 +465,9 @@ def update_config(mutator: Callable[[dict], None]) -> dict:
         if isinstance(stored, dict):
             cfg.update(stored)
         mutator(cfg)
-        _atomic_write_json(CONFIG_FILE, cfg)
+        # The mutator and the return value see the full merged dict; only the
+        # user-set delta hits the disk (see _user_delta / save_config).
+        _atomic_write_json(CONFIG_FILE, _user_delta(cfg))
         return cfg
 
 
