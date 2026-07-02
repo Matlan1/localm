@@ -34,7 +34,7 @@ The default poll timeout is 60 minutes; very long/large clips on slow cards can 
 - 5 s = 121 frames (native)
 - 10 s = 241 frames
 
-**Render at the native resolution (1280x704).** The 5B was trained at 720p. Resolution is not a speed dial - well below native, output collapses into washed-out smears rather than a "faster preview". Verified on real hardware: the same prompt and seed that produce a crisp, on-prompt clip at 1280x704 produce unrecognisable mush at 640x368. Iterate by shortening the clip and lowering steps instead, then re-render the keeper at full length with the same `--seed`. Supported preset sizes (multiples of 16):
+**Render at the native resolution (1280x704).** The 5B was trained at 720p. Resolution is not a speed dial - well below native, output collapses into washed-out smears rather than a "faster preview". Verified on real hardware: the same prompt and seed that produce a crisp, on-prompt clip at 1280x704 produce unrecognisable mush at 640x368. Iterate by shortening the clip and lowering steps instead, then re-render the keeper at full length with the same `--seed`. Width and height are free integers (any multiple of 16 works and nothing is enforced); these are illustrative, not a fixed preset list:
 
 - **1280x704** (recommended - native)
 - 1024x576 (not recommended - quality drops sharply)
@@ -115,7 +115,9 @@ Same lifecycle as image and music generation: the chat model is unloaded before 
 
 ## Using your own workflow
 
-Drop a `wan_workflow_local.json` next to `localm/video_gen/wan_workflow.json` (it is gitignored - which models you run stays private). The local graph must keep the template's node ids so parameter injection still works:
+Drop a `wan_workflow_local.json` next to `localm/video_gen/wan_workflow.json` (it is gitignored - which models you run stays private). Parameters are injected by role, not by node id: the sampler is found by class (`KSampler`), and the positive / negative / latent / `CreateVideo` nodes by following its input edges. So a local or exported Wan graph works with any node ids, as long as it wires a `KSampler` with `positive` / `negative` / `latent_image` inputs (and a `CreateVideo` node for fps). You can just export a Wan 2.2 workflow from ComfyUI (Save -> API format) and select it, no renumbering needed.
+
+The committed template uses these node ids and roles (yours may differ):
 
 | Node id | Role |
 |---|---|

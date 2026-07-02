@@ -66,6 +66,7 @@ localm job remove <job_id>      # delete the job and its stored results
 | `--coder` | Run a coder agent task instead of a chat prompt. |
 | `--cwd DIR` | Working directory for a coder job. |
 | `--scope GLOB` | File-access glob for a coder job. |
+| `--allow-shell` | Coder jobs only: allow full shell execution. Off by default; a scheduled coder job runs restricted (read plus confined edits, no shell) unless you pass this. |
 | `--model M` | Model to run the job with (otherwise the server's active model). |
 | `--disabled` | Create the job disabled; it will not run until you enable it. |
 
@@ -95,7 +96,9 @@ same as the rest of the management API; see [server-api.md](server-api.md)).
 A create/update body carries: `name`, `task_kind` (`chat` or `coder`),
 `prompt`, `schedule_kind` (`interval` or `cron`), `schedule` (seconds as an
 integer, or a 5-field cron string), and the optional `model`, `cwd`, `scope`,
-and `enabled` fields.
+`allow_shell`, and `enabled` fields. `allow_shell` (coder jobs only) is
+privileged: setting it requires the owner key or a `coder:full` key, so a
+plain `jobs`-scoped client cannot schedule a shell-capable job.
 
 ## How scheduling works
 

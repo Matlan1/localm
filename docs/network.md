@@ -65,10 +65,12 @@ If the coder legitimately needs to talk to a local dev server
 localm config net_allow_private true
 ```
 
-Known limit: the hostname is resolved and checked before the request, but the
-actual connection re-resolves - a determined DNS-rebinding attacker could race
-this. The domain deny/allow lists are the stronger control if that is in your
-threat model.
+The hostname is resolved and validated once, then the connection is pinned to
+that exact IP (see `localm/netpin.py`), so the connect cannot re-resolve to a
+different address. This closes the check-and-connect DNS-rebinding race: a host
+that flips to a private address at connect time is refused on the dialled IP,
+and an unresolvable host is refused rather than connected through a fresh lookup.
+The domain deny/allow lists remain an additional control.
 
 ## Web search
 

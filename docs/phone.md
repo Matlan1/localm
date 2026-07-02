@@ -41,8 +41,9 @@ terminal.) So the only real questions are *how the phone reaches your server* an
      advertisement off with `localm config mdns_enabled false`.
    - *Tip (experimental PoC):* `localm gui -H 0.0.0.0 --qr` prints a scannable QR
      of the address so you can point the phone camera at the terminal instead of
-     typing it. Needs `pip install "localm[qr]"` and a terminal that renders block
-     glyphs (Windows Terminal is fine). This is a proof-of-concept and may change.
+     typing it. Needs only a terminal that renders block glyphs (Windows Terminal
+     is fine); the `qrcode` dependency ships with the base install, so no extra is
+     required. This is a proof-of-concept and may change.
 3. **Trust the certificate once.** Because localm signs its certificate with its
    own local CA (not a public one), the first visit shows a one-time "not secure"
    warning - this is a browser rule for any private certificate on a raw IP, not a

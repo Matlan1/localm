@@ -277,7 +277,7 @@ Stop strings checked: `<|im_end|>`, `<end_of_turn>`, `<turn|>`, `<|eot_id|>`, `<
   grammar string is supplied.
 - The repetition-penalty stage is added when `repeat_penalty != 1.0` and
   the DLL exports `llama_sampler_init_penalties`.
-- For `temperature == 0` the stochastic stages are replaced by `greedy`
+- For `temperature <= 0` the stochastic stages are replaced by `greedy`
   (grammar and penalties still apply).
 
 ### Output filtering
