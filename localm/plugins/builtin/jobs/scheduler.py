@@ -23,6 +23,11 @@ from localm.plugins.builtin.jobs.store import Job, JobStore
 # How often the loop wakes to look for due jobs.
 DEFAULT_POLL_SECONDS = 30
 
+# How far back a restarted server will catch up a missed cron slot. A slot
+# older than this is considered too stale to be worth back-firing (a machine
+# off for a week should not suddenly run last Monday's briefing). One day.
+_CATCHUP_WINDOW_SECONDS = 24 * 60 * 60
+
 
 # --------------------------------------------------------------------------- #
 #  Cron matcher (minute hour day-of-month month day-of-week)                  #
@@ -186,17 +191,44 @@ class JobScheduler:
                 return True
             return (now - job.last_run) >= interval
         if job.schedule_kind == "cron":
+            minute = int(now // 60) * 60
+            already = self._cron_fired.get(job.id) == minute
             try:
-                if not cron_match(str(job.schedule), now):
-                    return False
+                matches_now = cron_match(str(job.schedule), now)
             except ValueError:
                 return False
-            # Avoid double-firing within the same matching minute on a sub-minute
-            # poll: only fire once per cron-minute per job.
-            minute = int(now // 60) * 60
-            if self._cron_fired.get(job.id) == minute:
+            if matches_now:
+                # Avoid double-firing within the same matching minute on a
+                # sub-minute poll: only fire once per cron-minute per job.
+                return not already
+            # Catch-up: a slot that came due while the server was DOWN must run
+            # on the next tick, which the docs promise but cron silently skipped
+            # (memory-audit 2026-07-02). Fire ONCE for any missed matching minute
+            # strictly after last_run. Only for jobs that have run before (a
+            # freshly-created cron job waits for its next real slot, never
+            # back-fires history), and bounded so a long downtime cannot make the
+            # scan expensive. record_result stamps last_run, so the caught-up
+            # slot is not re-fired next tick.
+            if job.last_run is None or already:
                 return False
-            return True
+            return self._missed_cron_slot(job, now)
+        return False
+
+    def _missed_cron_slot(self, job: Job, now: float) -> bool:
+        """True if a cron-matching minute lies in ``(last_run, now)`` within the
+        bounded catch-up window. Scans minute-by-minute from just after now back
+        to the window floor, short-circuiting on the first match."""
+        try:
+            expr = str(job.schedule)
+            floor = max(float(job.last_run), now - _CATCHUP_WINDOW_SECONDS)
+            m = int(now // 60) * 60 - 60          # the minute before "now"
+            while m > floor:
+                if cron_match(expr, m):
+                    return True
+                m -= 60
+        except (ValueError, TypeError):
+            return False
+        return False
         return False
 
     def _resolve_run(self) -> Callable:
