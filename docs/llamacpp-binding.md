@@ -244,11 +244,17 @@ family):
 ```
 loop:
     token = llama_sampler_sample(chain, ctx, -1)
-    llama_sampler_accept(chain, token)
     if llama_vocab_is_eog(vocab, token): break
     yield token
     feed token back (llama_batch_get_one + llama_decode)
 ```
+
+Do NOT call `llama_sampler_accept` after `llama_sampler_sample`: sample()
+already accepts the token into every stateful sampler in the chain. A second
+accept advances the grammar sampler's parse state twice per token (it throws
+`std::runtime_error` across the C ABI once its stacks empty - WinError
+0xe06d7363) and double-counts the repetition-penalty window. Fixed 2026-07-02
+after being misdiagnosed as a native grammar-sampler fault.
 
 ### Stop-string filter (`_filtered_stream`)
 

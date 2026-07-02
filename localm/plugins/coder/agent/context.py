@@ -262,11 +262,12 @@ ws     ::= [ \t\n\r]*
         """The GBNF grammar to constrain tool-call output, or None (dormant default).
 
         Returns ``gbnf.TOOL_CALLS_ONLY`` only when the ``coder_tool_grammar`` config
-        flag is set AND the backend can enforce grammar. OFF by default: the bundled
-        GGUF runtime's grammar sampler faults and soft-degrades (a no-op), and
-        TOOL_CALLS_ONLY forces tool-only output (no free-text final answer), so this
-        is wired-but-dormant until a grammar-capable runtime + a text-or-tool grammar
-        exist. See dev-notes/coder-local-ux-improvement-2026-06-21."""
+        flag is set AND the backend can enforce grammar. OFF by default: grammar
+        sampling itself WORKS on the bundled runtime (the long-standing "sampler
+        faults" was a double-accept in our generation loop, fixed 2026-07-02 in
+        llama.py), but TOOL_CALLS_ONLY forces tool-only output (no free-text final
+        answer), so the flag stays opt-in until a text-or-tool grammar is designed
+        (REC-CODER-GRAMMAR). See dev-notes/coder-local-ux-improvement-2026-06-21."""
         if not getattr(self.backend, "supports_grammar", False):
             return None
         try:
