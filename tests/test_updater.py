@@ -3,9 +3,12 @@
 classification (reboot/deps/runtime/setup), and the build download. Apply is NOT
 exercised here (it has its own detached-helper tests)."""
 
+import base64
 import json
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from localm import _version, updater
 
@@ -198,20 +201,50 @@ def test_download_refuses_non_https_endpoint(tmp_path, monkeypatch):
 
 
 # ------------------------- apply / rollback -----------------------------
+#
+# apply() verifies an Ed25519 signature over the downloaded build against a pinned
+# public key BEFORE extracting/swapping, and refuses a non-newer build (anti-
+# rollback). These tests pin a THROWAWAY keypair and sign the fixture build, so they
+# exercise the real gate rather than disabling it (see test_updater_signature.py for
+# the negative cases: tampered / unsigned / no-key / downgrade).
 
-def _build_zip_opener(version, deps):
-    """A download opener that writes a build zip with the given VERSION + deps."""
+_TEST_PRIV = Ed25519PrivateKey.generate()
+_TEST_PUB_HEX = _TEST_PRIV.public_key().public_bytes(
+    encoding=serialization.Encoding.Raw,
+    format=serialization.PublicFormat.Raw).hex()
+
+
+def _pyproject_str(deps):
+    return ('[project]\nname = "localm"\ndependencies = ['
+            + ", ".join(f'"{d}"' for d in deps) + ']\n')
+
+
+def _signed_build(version, deps):
+    """A deterministic build zip (bytes) + its base64 Ed25519 signature under the
+    test key. Returns ``(download_opener, signature_b64)``; the opener writes the
+    exact bytes that were signed, so the gate verifies them."""
+    import io
     import zipfile
-    pyproject = '[project]\nname = "localm"\ndependencies = [' \
-        + ", ".join(f'"{d}"' for d in deps) + ']\n'
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("VERSION", version)
+        z.writestr("pyproject.toml", _pyproject_str(deps))
+        z.writestr("localm/__init__.py", f"# {version}")
+    data = buf.getvalue()
+    sig = base64.b64encode(_TEST_PRIV.sign(data)).decode("ascii")
 
-    def dl(url, headers, timeout, dest):
+    def opener(url, headers, timeout, dest):
         dest.parent.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(dest, "w") as z:
-            z.writestr("VERSION", version)
-            z.writestr("pyproject.toml", pyproject)
-            z.writestr("localm/__init__.py", f"# {version}")
-    return dl
+        dest.write_bytes(data)
+    return opener, sig
+
+
+@pytest.fixture
+def sig_env(monkeypatch):
+    """Pin the test signing key and an OLDER running version so apply()'s signature
+    gate and anti-rollback accept the 0.2.0 fixture builds."""
+    monkeypatch.setattr(updater, "_UPDATE_PUBKEYS", (_TEST_PUB_HEX,))
+    monkeypatch.setattr(_version, "read_version", lambda: "0.1.0")
 
 
 def _fake_install(tmp_path, deps=("click",)):
@@ -219,61 +252,61 @@ def _fake_install(tmp_path, deps=("click",)):
     (inst / "localm").mkdir(parents=True)
     (inst / "localm" / "__init__.py").write_text("# 0.1.0", encoding="utf-8")
     (inst / "VERSION").write_text("0.1.0", encoding="utf-8")
-    (inst / "pyproject.toml").write_text(
-        '[project]\nname = "localm"\ndependencies = ['
-        + ", ".join(f'"{d}"' for d in deps) + ']\n', encoding="utf-8")
+    (inst / "pyproject.toml").write_text(_pyproject_str(deps), encoding="utf-8")
     return inst
 
 
-def test_apply_reboot_swaps_and_reports(tmp_path, monkeypatch):
+def test_apply_reboot_swaps_and_reports(tmp_path, monkeypatch, sig_env):
     monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
     inst = _fake_install(tmp_path, deps=("click",))
-    res = updater.apply(5, installed=inst, download_opener=_build_zip_opener("0.2.0", ["click"]))
+    op, sig = _signed_build("0.2.0", ["click"])
+    res = updater.apply(5, installed=inst, signature=sig, download_opener=op)
     assert res["applied"] is True and res["version"] == "0.2.0"
     assert res["klass"] == "reboot"  # deps unchanged
     assert (inst / "VERSION").read_text().strip() == "0.2.0"
     assert (inst / "localm" / "__init__.py").read_text() == "# 0.2.0"
 
 
-def test_apply_deps_runs_post_command(tmp_path, monkeypatch):
+def test_apply_deps_runs_post_command(tmp_path, monkeypatch, sig_env):
     monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
     inst = _fake_install(tmp_path, deps=("click",))
     ran = []
-    res = updater.apply(5, installed=inst,
-                        download_opener=_build_zip_opener("0.2.0", ["click", "httpx"]),
+    op, sig = _signed_build("0.2.0", ["click", "httpx"])
+    res = updater.apply(5, installed=inst, signature=sig, download_opener=op,
                         runner=lambda c: ran.append(c) or 0)
     assert res["klass"] == "deps"
     assert ran and ran[0][:3] == ["uv", "pip", "install"]
 
 
-def test_apply_rolls_back_on_post_command_failure(tmp_path, monkeypatch):
+def test_apply_rolls_back_on_post_command_failure(tmp_path, monkeypatch, sig_env):
     monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
     inst = _fake_install(tmp_path, deps=("click",))
+    op, sig = _signed_build("0.2.0", ["click", "httpx"])
     from localm.bugreport import LocalmError
     with pytest.raises(LocalmError):
-        updater.apply(5, installed=inst,
-                      download_opener=_build_zip_opener("0.2.0", ["click", "httpx"]),
+        updater.apply(5, installed=inst, signature=sig, download_opener=op,
                       runner=lambda c: 1)  # post step fails -> rollback
     # Rolled back to the pre-apply state.
     assert (inst / "VERSION").read_text().strip() == "0.1.0"
     assert (inst / "localm" / "__init__.py").read_text() == "# 0.1.0"
 
 
-def test_rollback_last_restores(tmp_path, monkeypatch):
+def test_rollback_last_restores(tmp_path, monkeypatch, sig_env):
     monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
     inst = _fake_install(tmp_path, deps=("click",))
-    updater.apply(5, installed=inst, download_opener=_build_zip_opener("0.2.0", ["click"]))
+    op, sig = _signed_build("0.2.0", ["click"])
+    updater.apply(5, installed=inst, signature=sig, download_opener=op)
     assert (inst / "VERSION").read_text().strip() == "0.2.0"
     updater.rollback_last(installed=inst)
     assert (inst / "VERSION").read_text().strip() == "0.1.0"
     assert (inst / "localm" / "__init__.py").read_text() == "# 0.1.0"
 
 
-def test_apply_surfaces_rollback_failure(tmp_path, monkeypatch):
+def test_apply_surfaces_rollback_failure(tmp_path, monkeypatch, sig_env):
     """If the post-update step fails AND rollback also fails, apply() must say so
     (manual recovery needed) - never report a clean rollback over a broken install."""
     monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
@@ -286,9 +319,9 @@ def test_apply_surfaces_rollback_failure(tmp_path, monkeypatch):
         raise OSError("rollback boom")
 
     monkeypatch.setattr(au, "rollback", rb_fail)
+    op, sig = _signed_build("0.2.0", ["click", "httpx"])   # deps -> post cmd
     with pytest.raises(LocalmError, match="rollback failed"):
-        updater.apply(5, installed=inst,
-                      download_opener=_build_zip_opener("0.2.0", ["click", "httpx"]),  # deps -> post cmd
+        updater.apply(5, installed=inst, signature=sig, download_opener=op,
                       runner=lambda c: 1)  # post step fails -> rollback attempted -> also fails
 
 

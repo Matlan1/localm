@@ -41,7 +41,7 @@ def test_update_applies_with_yes(monkeypatch):
         "current": "0.1.0", "latest": "v0.2.0", "newer": True, "notes": "", "asset": {"id": 3}})
     captured = {}
 
-    def fake_apply(aid):
+    def fake_apply(aid, **kw):
         captured["aid"] = aid
         return {"applied": True, "version": "0.2.0", "klass": "reboot", "backup": "b"}
 
@@ -58,7 +58,7 @@ def test_update_apply_failure_is_surfaced(monkeypatch):
     monkeypatch.setattr(updater, "check", lambda: {
         "current": "0.1.0", "latest": "v0.2.0", "newer": True, "notes": "", "asset": {"id": 3}})
 
-    def boom(aid):
+    def boom(aid, **kw):
         raise LocalmError("the post-update step failed; rolled back", reason="uv exited 1")
 
     monkeypatch.setattr(updater, "apply", boom)
@@ -70,7 +70,7 @@ def test_update_setup_class_warns_to_run_setup(monkeypatch):
     monkeypatch.setattr(updater, "available", lambda: True)
     monkeypatch.setattr(updater, "check", lambda: {
         "current": "0.1.0", "latest": "v0.2.0", "newer": True, "notes": "", "asset": {"id": 3}})
-    monkeypatch.setattr(updater, "apply", lambda aid: {
+    monkeypatch.setattr(updater, "apply", lambda aid, **kw: {
         "applied": True, "version": "0.2.0", "klass": "setup", "backup": "b"})
     r = CliRunner().invoke(main, ["update", "--yes"])
     assert "setup.bat" in r.output

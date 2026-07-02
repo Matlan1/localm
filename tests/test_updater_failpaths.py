@@ -6,12 +6,23 @@ recovery path is exactly the costly kind: these tests cover the post-step CRASH
 the backend-detection fallback. Everything uses the apply()/download injectables so
 no test ever touches the real install or the network."""
 
+import base64
+import io
 import zipfile
 
 import pytest
+from cryptography.hazmat.primitives import serialization as _ser
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from localm import updater
+from localm import _version, updater
 from localm.bugreport import LocalmError
+
+# A throwaway signing key so the apply() crash-path tests pass the signature gate
+# and exercise the ROLLBACK logic they are about (not the gate itself, which
+# test_updater_signature.py covers).
+_PRIV = Ed25519PrivateKey.generate()
+_PUB_HEX = _PRIV.public_key().public_bytes(
+    encoding=_ser.Encoding.Raw, format=_ser.PublicFormat.Raw).hex()
 
 
 # --------------------------- read_manifest --------------------------------
@@ -38,17 +49,28 @@ def test_read_manifest_valid(tmp_path):
 
 # --------------------------- apply(): crash path --------------------------
 
-def _build_zip_opener(version, deps):
+def _signed_build(version, deps):
+    """A build zip (bytes) + its base64 signature under the test key; returns
+    ``(download_opener, signature_b64)`` so apply()'s signature gate accepts it."""
+    buf = io.BytesIO()
     pyproject = ('[project]\nname = "localm"\ndependencies = ['
                  + ", ".join(f'"{d}"' for d in deps) + ']\n')
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("VERSION", version)
+        z.writestr("pyproject.toml", pyproject)
+        z.writestr("localm/__init__.py", f"# {version}")
+    data = buf.getvalue()
+    sig = base64.b64encode(_PRIV.sign(data)).decode("ascii")
 
     def dl(url, headers, timeout, dest):
         dest.parent.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(dest, "w") as z:
-            z.writestr("VERSION", version)
-            z.writestr("pyproject.toml", pyproject)
-            z.writestr("localm/__init__.py", f"# {version}")
-    return dl
+        dest.write_bytes(data)
+    return dl, sig
+
+
+def _pin_sig_env(monkeypatch):
+    monkeypatch.setattr(updater, "_UPDATE_PUBKEYS", (_PUB_HEX,))
+    monkeypatch.setattr(_version, "read_version", lambda: "0.1.0")
 
 
 def _fake_install(tmp_path, deps=("click",)):
@@ -67,15 +89,16 @@ def test_apply_rolls_back_when_post_step_raises(tmp_path, monkeypatch):
     still roll back and surface a 'crashed' LocalmError, never a half-applied tree."""
     monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
+    _pin_sig_env(monkeypatch)
     inst = _fake_install(tmp_path, deps=("click",))
 
     def crashing_runner(cmd):
         raise RuntimeError("uv exploded")
 
+    op, sig = _signed_build("0.2.0", ["click", "httpx"])   # deps -> post cmd
     with pytest.raises(LocalmError, match="crashed"):
-        updater.apply(5, installed=inst,
-                      download_opener=_build_zip_opener("0.2.0", ["click", "httpx"]),  # deps -> post cmd
-                      runner=crashing_runner)
+        updater.apply(5, installed=inst, signature=sig,
+                      download_opener=op, runner=crashing_runner)
     # Rolled back to the pre-apply state on the crash path too.
     assert (inst / "VERSION").read_text().strip() == "0.1.0"
     assert (inst / "localm" / "__init__.py").read_text() == "# 0.1.0"
@@ -86,6 +109,7 @@ def test_apply_crash_then_rollback_failure_demands_manual_recovery(tmp_path, mon
     manual recovery is needed - never hide a broken install behind a clean message."""
     monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": "https://w"})
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
+    _pin_sig_env(monkeypatch)
     inst = _fake_install(tmp_path, deps=("click",))
     from localm import _apply_update as au
     monkeypatch.setattr(au, "rollback", lambda *a, **k: (_ for _ in ()).throw(OSError("rb boom")))
@@ -93,10 +117,10 @@ def test_apply_crash_then_rollback_failure_demands_manual_recovery(tmp_path, mon
     def crashing_runner(cmd):
         raise RuntimeError("uv exploded")
 
+    op, sig = _signed_build("0.2.0", ["click", "httpx"])
     with pytest.raises(LocalmError, match="rollback failed"):
-        updater.apply(5, installed=inst,
-                      download_opener=_build_zip_opener("0.2.0", ["click", "httpx"]),
-                      runner=crashing_runner)
+        updater.apply(5, installed=inst, signature=sig,
+                      download_opener=op, runner=crashing_runner)
 
 
 # --------------------------- _installed_backend ---------------------------

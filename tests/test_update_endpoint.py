@@ -95,7 +95,7 @@ def test_update_apply_endpoint(monkeypatch):
         "current": "0.1.0", "latest": "v0.2.0", "newer": True, "notes": "", "asset": {"id": 3}})
     applied = {}
 
-    def fake_apply(aid):
+    def fake_apply(aid, **kw):
         applied["aid"] = aid
         return {"applied": True, "version": "0.2.0", "klass": "reboot", "backup": "b"}
 
@@ -120,7 +120,7 @@ def test_update_apply_failure_is_surfaced(monkeypatch):
     monkeypatch.setattr(updater, "check", lambda: {
         "current": "0.1.0", "latest": "v0.2.0", "newer": True, "asset": {"id": 3}})
 
-    def boom(aid):
+    def boom(aid, **kw):
         raise LocalmError("the post-update step failed; rolled back", reason="uv exited 1")
 
     monkeypatch.setattr(updater, "apply", boom)
@@ -136,7 +136,7 @@ def test_update_apply_setup_class_does_not_restart(monkeypatch):
     monkeypatch.setattr(updater, "available", lambda: True)
     monkeypatch.setattr(updater, "check", lambda: {
         "current": "0.1.0", "latest": "v0.2.0", "newer": True, "asset": {"id": 3}})
-    monkeypatch.setattr(updater, "apply", lambda aid: {
+    monkeypatch.setattr(updater, "apply", lambda aid, **kw: {
         "applied": True, "version": "0.2.0", "klass": "setup", "backup": "b"})
     data = _post(create_app(_engine()), "/api/update/apply").json()
     assert data["applied"] is True and not data.get("restarting")
