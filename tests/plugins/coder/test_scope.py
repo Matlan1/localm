@@ -75,6 +75,41 @@ class TestScopeEnforcement:
             result = agent._execute_tool(call, interactive=False)
         assert "outside the active scope" in result.output
 
+    def test_plugin_tool_path_confined_by_scope(self, tmp_path):
+        """CHK-SCOPE-PLUGIN: a plugin_* tool's path arg is confined by the active
+        scope, same as an mcp_* tool. Plugin tools are dynamically registered (not
+        in _SCOPED_TOOLS), so, like MCP tools, they are gated by their name prefix -
+        previously they were the one dynamic file-tool family the scope check missed."""
+        from localm.plugins.coder import agent as _agent
+        agent = _make_agent(tmp_path, scope="src/**")
+        call = _make_tool_call("plugin_fs_read_file", path="/etc/passwd")   # outside scope
+        with patch.dict(_agent.TOOL_REGISTRY,
+                        {"plugin_fs_read_file": MagicMock(destructive=False)}, clear=False):
+            result = agent._execute_tool(call, interactive=False)
+        assert "outside the active scope" in result.output
+
+    def test_plugin_tool_uncommon_path_arg_confined(self, tmp_path):
+        """A path under an uncommon plugin arg name (source_path) is still scoped."""
+        from localm.plugins.coder import agent as _agent
+        agent = _make_agent(tmp_path, scope="src/**")
+        call = _make_tool_call("plugin_disk_copy", source_path="/etc/shadow")
+        with patch.dict(_agent.TOOL_REGISTRY,
+                        {"plugin_disk_copy": MagicMock(destructive=False)}, clear=False):
+            result = agent._execute_tool(call, interactive=False)
+        assert "outside the active scope" in result.output
+
+    def test_plugin_tool_in_scope_path_allowed(self, tmp_path):
+        """A plugin_* tool whose path IS inside the scope is not scope-rejected."""
+        from localm.plugins.coder import agent as _agent
+        agent = _make_agent(tmp_path, scope="src/**")
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "main.py").write_text("pass\n")
+        call = _make_tool_call("plugin_fs_read_file", path="src/main.py")
+        with patch.dict(_agent.TOOL_REGISTRY,
+                        {"plugin_fs_read_file": MagicMock(destructive=False)}, clear=False):
+            result = agent._execute_tool(call, interactive=False)
+        assert "outside the active scope" not in result.output
+
     def test_scope_allows_matching_path(self, tmp_path):
         agent = _make_agent(tmp_path, scope="src/*.py")
         call = _make_tool_call("read_file", path="src/main.py")

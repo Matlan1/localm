@@ -51,12 +51,16 @@ _SCOPE_PATH_ARGS: dict[str, tuple[str, ...]] = {
     "generate_image": ("output_path", "input_image"),
 }
 
-# MCP tools (mcp_<server>_<tool>) are registered dynamically with unknown arg
-# schemas, so they are not in _SCOPED_TOOLS / _SCOPE_PATH_ARGS. When a scope is
-# active we still apply it to an MCP tool's common path-like args, so an owner's
-# declared --scope is honoured by MCP file tools too (CHK-MCP-SCOPE, defense-in-
-# depth). Best-effort: an MCP tool using an unusual path-arg name is not caught
-# (its author is the owner's own MCP config).
+# MCP tools (mcp_<server>_<tool>) AND plugin tools (plugin_<plugin>_<export>) are
+# registered dynamically with unknown arg schemas, so they are not in
+# _SCOPED_TOOLS / _SCOPE_PATH_ARGS (the default-deny contract test cannot see them
+# at authoring time). When a scope is active we still apply it to their common
+# path-like args, so an owner's declared --scope is honoured by these dynamic file
+# tools too (CHK-MCP-SCOPE + CHK-SCOPE-PLUGIN, defense-in-depth). Best-effort: a
+# tool using an unusual path-arg name is not caught (its author is the owner's own
+# MCP / plugin config). Restricted, shareable keys cannot reach either family at
+# all (both are disabled for a restricted session), so this only tightens an
+# owner's self-imposed --scope, never a cross-trust boundary.
 _MCP_SCOPE_PATH_ARGS: tuple[str, ...] = (
     "path", "file", "filename", "filepath", "file_path", "source", "source_path",
     "src", "target", "target_path", "dest", "destination", "dir", "directory",
