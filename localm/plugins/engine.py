@@ -329,14 +329,33 @@ class PluginHost:
     def register_tab(self, surface: Surface) -> None:
         self.surface = surface
 
+    def _own_config_key(self, name: Optional[str]) -> str:
+        """Confine plugin config r/w to the plugin's OWN block.
+
+        A plugin must not read or tamper with ANOTHER plugin's persisted settings
+        through the Host API, even under the install=owner-trust model: cross-plugin
+        config access is a compartmentalisation / least-privilege break (a buggy or
+        supply-chain-compromised plugin could corrupt or exfiltrate a sibling's
+        config). ``name`` is accepted for backward compatibility (a plugin passing
+        its own name is fine) but a DIFFERENT name is refused - it resolves to this
+        plugin's own name, and the attempt is surfaced (we do not hide it)."""
+        if name is not None and name != self._spec.name:
+            from localm.debuglog import logger as _dbg
+            _dbg.warning(
+                "plugin %r tried to access plugin %r config via the Host API; "
+                "confining to its own config (cross-plugin config access is denied)",
+                self._spec.name, name)
+        return self._spec.name
+
     def plugin_config(self, name: Optional[str] = None) -> dict:
         from localm.config import load_config
-        return dict(load_config().get("plugins", {}).get(name or self._spec.name, {}))
+        return dict(load_config().get("plugins", {}).get(self._own_config_key(name), {}))
 
-    def save_plugin_config(self, name: str, cfg: dict) -> None:
+    def save_plugin_config(self, name: Optional[str] = None, cfg: Optional[dict] = None) -> None:
         from localm.config import load_config, save_config
+        key = self._own_config_key(name)
         c = load_config()
-        c.setdefault("plugins", {})[name] = cfg
+        c.setdefault("plugins", {})[key] = cfg if cfg is not None else {}
         save_config(c)
 
     def has_scope(self, scope: str) -> bool:
