@@ -26,6 +26,8 @@ from pathlib import Path
 
 from fastapi import APIRouter
 
+from localm.debuglog import logger
+
 _PLUGIN_DIR = Path(__file__).resolve().parent
 _TEMPLATE = _PLUGIN_DIR / "tts.example.json"
 
@@ -37,7 +39,13 @@ def _defaults() -> dict:
     """Shipped defaults from the tracked template (sans documentation keys)."""
     try:
         data = json.loads(_TEMPLATE.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError) as e:
+        # The template is a TRACKED shipped file: absent is as abnormal as
+        # corrupt here, and silently returning {} would hide a broken install
+        # behind the frontend's hardcoded fallbacks. Surface it, keep serving.
+        logger.warning("tts: could not read the shipped template %s (%s); "
+                       "falling back to the frontend's built-in defaults",
+                       _TEMPLATE.name, e)
         return {}
     return {k: v for k, v in data.items() if not k.startswith("_")}
 
@@ -49,7 +57,12 @@ def _resolved() -> dict:
     if _host is not None:
         try:
             override = _host.plugin_config("tts")
-        except Exception:
+        except Exception as e:
+            # Best-effort by design: a config-layer hiccup must not break TTS,
+            # but the user's overrides silently reverting to the template
+            # defaults needs a trace to be diagnosable.
+            logger.debug("tts: plugin_config('tts') failed (%s); "
+                         "using template defaults for this request", e)
             override = {}
         cfg.update({k: v for k, v in override.items() if v is not None})
     return cfg

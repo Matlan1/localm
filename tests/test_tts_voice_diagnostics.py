@@ -1,0 +1,97 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""TTS/voice diagnostics gaps from the 2026-07-02 honesty audit.
+
+- tts/plug.py silently returned {} for a corrupt or unreadable SHIPPED template
+  and silently dropped the user's overrides on a config-layer failure - both
+  now leave a log trace (behaviour unchanged: TTS keeps serving).
+- voice/plug.py picked the HTTP status (501 vs 422) by substring-matching
+  "faster-whisper" in the human error MESSAGE; it now branches on the
+  structured VoiceError.code, so rewording a message cannot flip the status."""
+
+import logging
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+import localm.plugins.builtin.tts.plug as tts_plug
+from localm.voice import VoiceError
+
+
+class TestTtsTemplateDiagnostics:
+    def test_corrupt_template_logs_and_falls_back(self, tmp_path, monkeypatch, caplog):
+        bad = tmp_path / "tts.example.json"
+        bad.write_text("{ not json", encoding="utf-8")
+        monkeypatch.setattr(tts_plug, "_TEMPLATE", bad)
+        with caplog.at_level(logging.WARNING, logger="localm"):
+            assert tts_plug._defaults() == {}
+        assert any("tts.example.json" in r.message for r in caplog.records), \
+            "the corrupt shipped template leaves a warning naming the file"
+
+    def test_missing_template_logs_and_falls_back(self, tmp_path, monkeypatch, caplog):
+        monkeypatch.setattr(tts_plug, "_TEMPLATE", tmp_path / "absent.json")
+        with caplog.at_level(logging.WARNING, logger="localm"):
+            assert tts_plug._defaults() == {}
+        assert any("absent.json" in r.message for r in caplog.records)
+
+    def test_healthy_template_stays_silent(self, caplog):
+        # The real shipped template parses; no warning on the happy path.
+        with caplog.at_level(logging.WARNING, logger="localm"):
+            cfg = tts_plug._defaults()
+        assert cfg, "the real shipped template parses to a non-empty dict"
+        assert not any("tts" in r.message for r in caplog.records)
+
+    def test_config_layer_failure_logs_and_keeps_defaults(self, monkeypatch, caplog):
+        class _Host:
+            def plugin_config(self, name):
+                raise RuntimeError("config layer hiccup")
+        monkeypatch.setattr(tts_plug, "_host", _Host())
+        with caplog.at_level(logging.DEBUG, logger="localm"):
+            cfg = tts_plug._resolved()
+        assert cfg == tts_plug._defaults(), "falls back to the template defaults"
+        assert any("plugin_config('tts') failed" in r.message for r in caplog.records)
+
+
+class TestVoiceStatusByCode:
+    def _client(self, exc: VoiceError, monkeypatch):
+        import localm.plugins.builtin.voice.plug as voice_plug
+        import localm.voice as voice_mod
+
+        def _boom(data, language=None):
+            raise exc
+        monkeypatch.setattr(voice_mod, "transcribe_bytes", _boom)
+        app = FastAPI()
+        app.include_router(voice_plug._router)
+        return TestClient(app)
+
+    def test_missing_dependency_is_501_via_code(self, monkeypatch):
+        # Message deliberately does NOT contain "faster-whisper": pre-fix the
+        # substring match would have mis-picked 422 for this failure class.
+        c = self._client(VoiceError("speech engine not installed",
+                                    code="needs-faster-whisper"), monkeypatch)
+        r = c.post("/api/voice/transcribe", json={"audio_b64": "aGk="})
+        assert r.status_code == 501
+
+    def test_decode_error_is_422_even_if_message_mentions_the_package(self, monkeypatch):
+        # Pre-fix, "faster-whisper" appearing in a DECODE message flipped the
+        # status to 501; the class tag must win over the wording.
+        c = self._client(VoiceError("could not decode (hint: faster-whisper "
+                                    "supports wav/webm)", code="decode"), monkeypatch)
+        r = c.post("/api/voice/transcribe", json={"audio_b64": "aGk="})
+        assert r.status_code == 422
+
+    def test_codeless_error_defaults_to_422(self, monkeypatch):
+        c = self._client(VoiceError("some other failure"), monkeypatch)
+        r = c.post("/api/voice/transcribe", json={"audio_b64": "aGk="})
+        assert r.status_code == 422
+
+
+class TestVoiceErrorCodes:
+    def test_pure_python_guards_carry_codes(self):
+        from localm.voice import transcribe_bytes
+        with pytest.raises(VoiceError) as ei:
+            transcribe_bytes(b"")
+        assert ei.value.code == "empty"
+
+    def test_default_code_is_empty_string(self):
+        assert VoiceError("plain").code == ""
