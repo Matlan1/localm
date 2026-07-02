@@ -1013,8 +1013,9 @@ def test_coder_backend_uses_configured_port_not_8080(home, monkeypatch):
     captured = {}
 
     class _FakeBackend:
-        def __init__(self, url, model=None, api_key=None):
+        def __init__(self, url, model=None, api_key=None, **kwargs):
             captured["url"] = url
+            captured["kwargs"] = kwargs
 
     monkeypatch.setattr(
         "localm.plugins.coder.backends.http.HTTPBackend", _FakeBackend)
@@ -1022,6 +1023,8 @@ def test_coder_backend_uses_configured_port_not_8080(home, monkeypatch):
     runner._coder_backend(_make_job(task_kind="coder", cwd=str(home)))
     assert captured["url"] == "http://127.0.0.1:8642/v1"
     assert ":8080" not in captured["url"]
+    # A self-connection is a localm server, so grammar sampling is available.
+    assert captured["kwargs"].get("localm_server") is True
 
 
 def test_coder_backend_honours_explicit_self_url(home, monkeypatch):
@@ -1029,14 +1032,16 @@ def test_coder_backend_honours_explicit_self_url(home, monkeypatch):
     captured = {}
 
     class _FakeBackend:
-        def __init__(self, url, model=None, api_key=None):
+        def __init__(self, url, model=None, api_key=None, **kwargs):
             captured["url"] = url
+            captured["kwargs"] = kwargs
 
     monkeypatch.setattr(
         "localm.plugins.coder.backends.http.HTTPBackend", _FakeBackend)
     from localm.plugins.builtin.jobs import runner
     runner._coder_backend(_make_job(task_kind="coder", cwd=str(home)))
     assert captured["url"] == "http://127.0.0.1:8677/v1"
+    assert captured["kwargs"].get("localm_server") is True
 
 
 def test_publish_self_url_from_app_state(monkeypatch):

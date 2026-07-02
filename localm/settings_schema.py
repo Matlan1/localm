@@ -245,10 +245,10 @@ CORE_FIELDS: list = [
                  "auto-rejected and the agent moves on (0 = wait forever).",
                  group="Coder", owner="coder", min=0, step=10),
     SettingField("coder_tool_grammar", Widget.TOGGLE,
-                 "Grammar-constrain coder tool calls (experimental)",
-                 "Force valid tool-call JSON via a GBNF grammar (grammar-capable "
-                 "backend only). Experimental: forces tool-only output, so leave "
-                 "off unless you want that.",
+                 "Grammar-constrain coder tool calls",
+                 "Once the model starts a <tool_call>, force it to be valid "
+                 "tool-call JSON (lazy GBNF grammar; local grammar-capable "
+                 "backends only). Free text and thinking are unaffected.",
                  group="Coder", owner="coder", applies=Applies.NEXT_LOAD),
     SettingField("coder_episodic_memory", Widget.TOGGLE,
                  "Coder episodic memory",

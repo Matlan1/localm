@@ -209,16 +209,16 @@ DEFAULT_CONFIG: dict = {
     # Model name (or path) for a heterogeneous reviewer ("local"/cloud/URL); blank
     # uses a sensible provider default or the agent's own model name.
     "coder_reviewer_model": "",
-    # EXPERIMENTAL + dormant: constrain coder tool-call output with a GBNF grammar
-    # (localm.inference.gbnf.TOOL_CALLS_ONLY) so the model cannot emit malformed
-    # tool JSON. Grammar sampling itself WORKS on the bundled GGUF runtime (the
-    # old "sampler faults" was a double-accept in our generation loop, fixed
-    # 2026-07-02; HF still needs the [grammar] extra). OFF by default because
-    # TOOL_CALLS_ONLY forces tool-only output (no free-text final answer), so it
-    # suits a "must call a tool" sub-mode, not the general loop yet. Activates
-    # the moment a text-or-tool grammar lands (REC-CODER-GRAMMAR). See
-    # dev-notes/coder-local-ux-improvement-2026-06-21.
-    "coder_tool_grammar": False,
+    # Constrain coder tool calls with a LAZY GBNF grammar: thinking and prose
+    # flow unconstrained, but once the model starts a <tool_call> the call is
+    # forced to be structurally valid JSON (no more malformed tool calls to
+    # repair). ON by default for grammar-capable local backends since
+    # 2026-07-02 (REC-CODER-GRAMMAR; the old "runtime sampler faults" blocker
+    # was our own double-accept bug). External API backends and grammar-less
+    # builds are unaffected (supports_grammar gate + runtime soft-degrade).
+    # NOTE: a config.json written before the flip carries the old dumped False
+    # and keeps it (saved values win over this default) - flip it in Settings.
+    "coder_tool_grammar": True,
     # After an image is generated, ask ComfyUI to release its VRAM and reload
     # the chat model so the next reply is instant. Turn off when generating
     # many images in a row - the chat model then reloads lazily on the next
