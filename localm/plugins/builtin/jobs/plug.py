@@ -277,13 +277,22 @@ def register(host) -> None:
     scheduler = JobScheduler(JobStore(),
                              run_job=_run_job,
                              engine=_engine_resolver)
-    # start() is a safe no-op when there is no running event loop (tests /
-    # headless import), so a missing loop never breaks loading the plugin.
-    try:
-        scheduler.start()
-    except Exception:
-        pass
     _scheduler = scheduler
+    # Start via the host's startup hook: on a stock server, register() runs
+    # BEFORE uvicorn creates the event loop, so a direct start() no-opped and
+    # NO scheduled job ever fired (memory-audit 2026-07-02, critical C2). The
+    # hook runs the start once the loop exists (app lifespan), or immediately
+    # when the plugin is enabled at runtime with the loop already up.
+    on_startup = getattr(host, "on_startup", None)
+    if callable(on_startup):
+        on_startup(scheduler.start)
+    else:
+        # Minimal host (older embedder / unit-test fakes): keep the old
+        # best-effort direct start, which works when a loop is running.
+        try:
+            scheduler.start()
+        except Exception:
+            pass
 
 
 def unregister() -> None:
