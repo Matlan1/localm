@@ -349,21 +349,40 @@ async def memory_get():
 
 @_router.put("/api/memory")
 async def memory_put(req: MemoryUpdate):
-    """Bulk-edit: the modal textarea is the authoritative user memory. Replaces the
-    store with the edited bullet lines as user-sourced facts (the old PUT
-    overwrote chat-memory.md wholesale; same intent, structured now)."""
+    """Bulk-edit: the modal textarea is the authoritative user memory. The old
+    PUT re-minted EVERY line as a fresh user record, destroying the id, kind,
+    source, importance, reinforcement, and timestamps of untouched records (so
+    editing one line reset the whole store and made every fact immortal;
+    memory-audit 2026-07-02). This is now DIFF-AWARE: a line matching an
+    existing record's text keeps that record as-is; only genuinely new lines
+    become new user records; omitted lines are deletes."""
     if not _persist_enabled():
         raise HTTPException(
             403, "Memory writes are off in privacy mode (no new traces). "
                  "Set mode/chat_mode to 'log' or 'full' to enable them.")
-    from localm.memory import MAX_TEXT_LEN, MemoryRecord
+    from localm.memory import MAX_TEXT_LEN, N_MAX, MemoryRecord
     if len(req.text) > _MEMORY_MAX:
         raise HTTPException(413, "Memory too large (max 64k chars)")
+    facts = [_strip_bullet(ln)[:MAX_TEXT_LEN]
+             for ln in req.text.splitlines() if _strip_bullet(ln)]
+    # Reject over-cap writes at the door instead of accepting facts that the
+    # next prune would silently hard-delete (audit F4). N_MAX is generous.
+    if len(facts) > N_MAX:
+        raise HTTPException(
+            413, f"Too many memory records ({len(facts)}); the store keeps at "
+                 f"most {N_MAX}. Trim the list before saving.")
     store = _chat_store()
     _migrate_legacy(store)
-    facts = [_strip_bullet(ln) for ln in req.text.splitlines() if _strip_bullet(ln)]
-    records = [MemoryRecord(text=f[:MAX_TEXT_LEN], kind="semantic",
-                            source="user", importance=0.8) for f in facts]
+    existing = {r.text: r for r in store.all()}
+    seen: set = set()
+    records: list = []
+    for f in facts:
+        if f in seen:
+            continue                          # collapse duplicate lines
+        seen.add(f)
+        keep = existing.get(f)
+        records.append(keep if keep is not None else MemoryRecord(
+            text=f, kind="semantic", source="user", importance=0.8))
     store.replace(records, embed_fn=_embed_fn())
     return {"status": "saved", "count": len(records)}
 
@@ -376,9 +395,15 @@ async def memory_append(req: MemoryAppend):
     fact = _strip_bullet(req.text)
     if not fact:
         raise HTTPException(400, "Nothing to remember")
-    from localm.memory import MemoryRecord
+    from localm.memory import N_MAX, MemoryRecord
     store = _chat_store()
     _migrate_legacy(store)
+    # Refuse to append past the cap rather than accept a fact the next prune
+    # would silently evict (audit F4).
+    if len(store) >= N_MAX:
+        raise HTTPException(
+            413, f"Memory is at its {N_MAX}-record cap; delete a fact before "
+                 "adding another.")
     rec = store.add(MemoryRecord(text=fact, kind="semantic", source="user",
                                  importance=0.8), embed_fn=_embed_fn())
     return {"status": "appended", "id": rec.id}
