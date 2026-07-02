@@ -364,8 +364,15 @@ def gui_app(tmp_path):
     app = FastAPI()
     switched = []
 
+    # Mirrors the production coordinator (http_server.switch_engine): it is the
+    # authority for the load status the /api/models/load route returns, and
+    # re-selecting the already-active model is a no-op ("already_active").
     async def switch_model(name):
+        current = switched[-1] if switched else "model-a"
+        if name == current:
+            return {"status": "already_active", "model": name}
         switched.append(name)
+        return {"status": "loaded", "model": name}
 
     attach_gui(
         app,

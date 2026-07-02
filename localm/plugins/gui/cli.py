@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import sys
 import threading
 import webbrowser
@@ -342,17 +341,13 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
 
     state = {"model": "" if model_less else model}
 
-    async def switch_model(name: str) -> None:
-        """Swap engines under the inference semaphore so no request is mid-flight."""
-        loop = asyncio.get_running_loop()
-        new_engine = _make_engine(name)
-        async with hs._inference_sem:
-            old = hs._engine
-            if old is not None and old.loaded:
-                await loop.run_in_executor(None, old.unload)
-            await loop.run_in_executor(None, new_engine.load)
-            hs._engine = new_engine
-            state["model"] = name
+    async def switch_model(name: str) -> dict:
+        """Swap engines, PREEMPTING any in-flight load so the latest selection
+        wins immediately instead of waiting for an abandoned model to finish
+        loading (see http_server.switch_engine). Serialised on the inference
+        semaphore so no generation is mid-flight."""
+        return await hs.switch_engine(
+            name, _make_engine, on_active=lambda n: state.__setitem__("model", n))
 
     manager = attach_gui(
         app,

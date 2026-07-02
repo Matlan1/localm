@@ -491,6 +491,7 @@ class LlamaCpp:
         n_ctx_max: Optional[int] = None,
         n_ctx_grow: int = 4096,
         mmproj_path: Optional[str] = None,
+        cancel_event: Optional["threading.Event"] = None,
         **_ignored,
     ) -> None:
         self._n_ctx       = n_ctx
@@ -530,6 +531,28 @@ class LlamaCpp:
         mp = api.llama_model_default_params()
         mp.n_gpu_layers = n_gpu_layers
 
+        # Preemptive model switching: wire llama.cpp's native load-progress
+        # callback so a load can be ABORTED mid-flight. The callback returns false
+        # once `cancel_event` is set, at which point llama_load_model_from_file
+        # stops and returns NULL - so a model the user has already switched away
+        # from does not run its (slow) load to completion. Keep the CFUNCTYPE
+        # object alive on self for the whole load span; ctypes would otherwise GC
+        # it and the native side would call freed memory. The callback must NEVER
+        # raise: a Python exception inside a ctypes callback is reported as a
+        # false return, which would abort a load we did not mean to cancel - so it
+        # is fully guarded and defaults to "continue" (return True).
+        self._cancel_event = cancel_event
+        self._load_progress_cb = None   # keep-alive ref for the native callback
+        if cancel_event is not None:
+            @ctypes.CFUNCTYPE(ctypes.c_bool, ctypes.c_float, ctypes.c_void_p)
+            def _load_progress(_progress, _user_data, _ev=cancel_event):
+                try:
+                    return not _ev.is_set()
+                except Exception:
+                    return True
+            self._load_progress_cb = _load_progress
+            mp.progress_callback = ctypes.cast(_load_progress, ctypes.c_void_p)
+
         # Capture native stderr for the load span (non-verbose only) so a NULL
         # return still carries its cause (OOM / no-backends / bad-quant); without
         # this the only native diagnostic is discarded to devnull and the error is
@@ -540,6 +563,13 @@ class LlamaCpp:
         with _load_ctx() as captured:
             self._model_ptr = api.llama_load_model_from_file(model_path, mp)
         if not self._model_ptr:
+            # A NULL return when we asked to cancel is an ABORT, not a failure:
+            # the load was superseded by a newer model selection. Report it as
+            # such so the caller does not surface it as a load error.
+            if cancel_event is not None and cancel_event.is_set():
+                from localm.inference.backends.base import ModelLoadCancelled
+                raise ModelLoadCancelled(
+                    f"Model load aborted (superseded): {model_path}")
             detail = captured.tail() if captured is not None else ""
             hint = ("" if detail
                     else " (run with LOCALM_DEBUG=1 for the native load log)")
