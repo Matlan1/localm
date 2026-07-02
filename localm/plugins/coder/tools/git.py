@@ -8,7 +8,7 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-from .base import ToolResult, _truncate
+from .base import ToolResult, _partial_on_timeout, _truncate
 
 def _git(cwd: Path, *args: str, timeout: int = 10) -> tuple[str, bool]:
     """Run a git command and return (output, ok)."""
@@ -23,8 +23,8 @@ def _git(cwd: Path, *args: str, timeout: int = 10) -> tuple[str, bool]:
         return out, proc.returncode == 0
     except FileNotFoundError:
         return "git not found in PATH", False
-    except subprocess.TimeoutExpired:
-        return f"git {args[0]} timed out", False
+    except subprocess.TimeoutExpired as e:
+        return f"git {args[0]} timed out{_partial_on_timeout(e)}", False
     except Exception as e:
         return str(e), False
 

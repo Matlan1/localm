@@ -45,6 +45,31 @@ def _truncate(text: str, max_chars: int = _MAX_OUTPUT) -> tuple[str, bool]:
     )
 
 
+def _partial_on_timeout(exc) -> str:
+    """Format any output a timed-out subprocess produced before it was killed.
+
+    ``subprocess.TimeoutExpired`` carries the stdout/stderr captured up to the
+    kill; dropping it hides exactly the diagnostics the model needs (the test
+    progress or last log line before the hang). On POSIX the attributes can be
+    bytes even in text mode (a CPython quirk), so decode defensively. Returns
+    '' when nothing was captured.
+    """
+    parts = []
+    for label, data in (("", getattr(exc, "stdout", None)),
+                        ("STDERR:\n", getattr(exc, "stderr", None))):
+        if not data:
+            continue
+        if isinstance(data, (bytes, bytearray)):
+            data = data.decode("utf-8", errors="replace")
+        data = data.strip()
+        if data:
+            parts.append(label + data)
+    if not parts:
+        return ""
+    text, _ = _truncate("\n".join(parts))
+    return "\n[partial output captured before the timeout]\n" + text
+
+
 def _confine(cwd: Path, path: str) -> Path:
     """
     Resolve *path* against *cwd* and verify it stays inside *cwd*.
