@@ -71,8 +71,8 @@ export async function refreshModelsPage() {
         method: "POST", headers: authHeaders(),
         body: JSON.stringify({ model: m.name, alias: name.trim() }),
       });
-      // .catch: a non-JSON error body (a plain-text 500) must still reach the
-      // failure toast below, not die as an unhandled rejection with no UI.
+      // .catch: a plain-text 500 body would otherwise throw here and kill the
+      // error toast entirely (the failure would land only in the client log).
       const data = await r.json().catch(() => ({}));
       if (r.ok) { toast(`Aliased as '${name.trim()}'`); refreshModelsPage(); }
       else toast(data.detail || "Alias failed", true);
@@ -86,7 +86,8 @@ export async function refreshModelsPage() {
           method: "POST", headers: authHeaders(),
           body: JSON.stringify({ model: m.name }),
         });
-        const data = await r.json().catch(() => ({}));   // non-JSON 500 -> toast below
+        // .catch: keep the error toast alive on a non-JSON (plain-text 500) body.
+        const data = await r.json().catch(() => ({}));
         if (!r.ok) { toast(data.detail || "Remove failed", true); return; }
         const end = await streamJob(data.job_id, null);
         toast(end.status === "done" ? `Removed '${m.name}'` : "Remove failed",
@@ -105,7 +106,8 @@ export async function refreshModelsPage() {
 export async function showModelDetail(name) {
   const r = await fetch(`/v1/models/${encodeURIComponent(name)}`, {
     headers: authHeaders() });
-  const data = await r.json().catch(() => ({}));   // non-JSON 500 -> toast below
+  // .catch: keep the error toast alive on a non-JSON (plain-text 500) body.
+  const data = await r.json().catch(() => ({}));
   if (!r.ok) { toast(data.detail || "Lookup failed", true); return; }
   openModal("Model - " + name, (body) => {
     const rows = [

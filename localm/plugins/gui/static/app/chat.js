@@ -217,6 +217,7 @@ export function saveConversations(changed) {
 /* ---- server-side conversation store (non-privacy modes only) ---- */
 
 export const _convPushTimers = new Map();
+let _convPushWarned = false;   // one warning per breakage, re-armed on success
 
 /** Debounced upsert of one conversation to the server store. */
 export function pushConversation(conv) {
@@ -238,16 +239,20 @@ export function pushConversation(conv) {
                                branches: conv.branches || [],
                                messages: conv.messages }),
       });
-      // A resolved-but-FAILED save (500, 413 on a huge conversation) must not
-      // be silent: server-side persistence would quietly stop while the user
-      // believes it works. localStorage still holds the copy, so the client
-      // error log (console.error is captured there) is the right altitude -
-      // not a toast on every debounced push.
-      if (!r.ok) {
-        console.error("conversation push failed: HTTP " + r.status
-                      + " for " + conv.id);
+      // A resolved-but-failed save (500, 413 on a huge conversation) means
+      // server-side persistence quietly stopped; localStorage still holds the
+      // copy, so surface it ONCE per breakage (this runs on every debounce
+      // tick), re-arming after the next successful save.
+      if (!r.ok && !_convPushWarned) {
+        _convPushWarned = true;
+        console.error("conversation save failed (HTTP " + r.status +
+                      ") - server-side persistence may be stale; the local copy is intact");
+      } else if (r.ok) {
+        _convPushWarned = false;
       }
-    } catch (e) { /* offline (network error) - localStorage still has the copy */ }
+    } catch (e) { /* offline - localStorage still has the copy; a reachable
+                     server that ANSWERS with an error is the r.ok branch
+                     above, not this one */ }
   }, 600));
 }
 
@@ -255,22 +260,16 @@ export function deleteConversationRemote(convId) {
   if (!chat.persist) return;
   clearTimeout(_convPushTimers.get(convId));
   _convPushTimers.delete(convId);
-  // Deleting is privacy-relevant: a failed server-side delete must not stay
-  // silent - the copy would quietly survive and resurrect on the next load
-  // while the user believes it is gone. Surface it (toast + client error log).
   fetch("/api/conversations/" + encodeURIComponent(convId), {
     method: "DELETE", headers: authHeaders(),
   }).then((r) => {
-    if (!r.ok) {
-      toast("Could not delete the conversation on the server (HTTP "
-            + r.status + ") - it may reappear.", true);
-      console.error("conversation delete failed: HTTP " + r.status
-                    + " for " + convId);
-    }
+    if (!r.ok) throw new Error("HTTP " + r.status);
   }).catch((e) => {
-    toast("Could not delete the conversation on the server - it may reappear.",
-          true);
-    console.error("conversation delete failed for " + convId + ": " + e);
+    // Deleting is privacy-relevant and the UI copy is already gone: a failed
+    // server delete must not pass silently - the server copy would resurrect
+    // on the next load while the user believes it was deleted.
+    toast("Could not delete the conversation on the server - it may reappear", true);
+    console.error("conversation delete failed: " + (e && e.message ? e.message : e));
   });
 }
 
@@ -1032,8 +1031,8 @@ export async function attachDocument(file) {
     method: "POST", headers: authHeaders(),
     body: JSON.stringify({ filename: file.name, content_b64: b64 }),
   });
-  // .catch: a non-JSON error body (a plain-text 500) still throws the clean
-  // statusText error below instead of a JSON-parse message.
+  // A plain-text 500 body is not JSON; fall back to {} so the error message
+  // below is the clean statusText, not a JSON parse error.
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.detail || r.statusText);
   chat.docs.push({ name: data.filename, text: data.text,
@@ -1108,17 +1107,19 @@ export async function ingestSharedFiles() {
   }
   renderAttachChips();
   // We have the data client-side now; clear the server inbox. Best-effort: on
-  // failure the items are re-ingested (and the clear retried) on the next
-  // open, so a devtools warning is the right altitude - but not total silence
-  // (the shared files would linger server-side past their use, and the retry
-  // duplicates the attachments).
+  // failure the items stay stashed server-side and the NEXT ingest re-clears
+  // them (the ids are re-sent), so this self-heals - but leave a trace so a
+  // persistent failure is diagnosable from the client log.
   fetch("/api/share/clear", {
     method: "POST",
     headers: { ...authHeaders(), "Content-Type": "application/json" },
     body: JSON.stringify({ ids }),
   }).then((r) => {
-    if (!r.ok) console.warn("share inbox clear failed: HTTP " + r.status);
-  }).catch((e) => { console.warn("share inbox clear failed: " + e); });
+    if (!r.ok) console.error("share-inbox clear failed (HTTP " + r.status +
+                             ") - will retry on the next share ingest");
+  }).catch((e) => {
+    console.error("share-inbox clear failed: " + (e && e.message ? e.message : e));
+  });
   if (imgs) toast(`${imgs} image${imgs > 1 ? "s" : ""} shared into chat`);
 }
 

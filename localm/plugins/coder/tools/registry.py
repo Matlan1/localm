@@ -238,7 +238,7 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
         params={
             "task":      {"type": "string", "description": "What the sub-agent should do",     "required": True},
             "name":      {"type": "string", "description": "Short name for this sub-agent",     "required": False},
-            "files":     {"type": "array",  "description": "Files to pre-load into sub-agent", "required": False},
+            "files":     {"type": "array",  "description": "Files to pre-load into sub-agent (the call fails if one cannot be read)", "required": False},
             "model":     {"type": "string", "description": "Override model for sub-agent",      "required": False},
             "max_turns": {"type": "int",    "description": "Max iterations (default 10)",       "required": False},
         },
