@@ -36,6 +36,15 @@ from .record import MemoryRecord
 
 EmbedFn = Callable[[list[str]], list[list[float]]]
 
+# ---- on-disk format -------------------------------------------------------- #
+# Stamped on every JSONL line at save ("v"). Load tolerates lines without it
+# (files written before versioning are format 1), so existing stores keep
+# working. Bump this on a breaking MemoryRecord schema change and branch on the
+# stored value in _load() - the migration hook this store previously lacked
+# (LM-DA-002): _save() rewrites the whole file, so an unrecognized line that is
+# merely skipped is erased by the next write.
+FORMAT_VERSION = 1
+
 # ---- bounds (DoS / poisoning / bloat) ------------------------------------- #
 MAX_TEXT_LEN = 500          # per-record text cap (truncate on store)
 N_MAX = 256                 # records per namespace; prune evicts the weakest
@@ -129,15 +138,28 @@ class MemoryStore:
 
     def _load(self) -> None:
         self._records = []
+        skipped = 0
         if self._file.is_file():
             for line in self._file.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
                 if not line:
                     continue
                 try:
-                    self._records.append(MemoryRecord.from_dict(json.loads(line)))
+                    data = json.loads(line)
+                    if not isinstance(data, dict):
+                        raise ValueError("memory record line is not a JSON object")
+                    self._records.append(MemoryRecord.from_dict(data))
                 except (json.JSONDecodeError, TypeError, ValueError):
-                    continue      # a partial/corrupt line must not break recall
+                    # A partial/corrupt line must not break recall, but it may
+                    # not vanish silently either: _save() rewrites the whole
+                    # file, so every skipped line is erased by the next write
+                    # (warned about below, LM-DA-002).
+                    skipped += 1
+        if skipped:
+            from localm.debuglog import logger as _dbg
+            _dbg.warning(
+                "memory store %s: skipped %d unparseable line(s) on load; "
+                "the next save will drop them permanently", self._file, skipped)
         self._vectors = {}
         self._dim = None
         vf = self._vec_file()
@@ -156,7 +178,10 @@ class MemoryStore:
 
     def _save(self) -> None:
         self._file.parent.mkdir(parents=True, exist_ok=True)
-        body = "\n".join(json.dumps(r.to_dict(), ensure_ascii=False)
+        # Each line carries the format version so a future breaking schema
+        # change can migrate instead of silently skipping (see FORMAT_VERSION).
+        body = "\n".join(json.dumps({"v": FORMAT_VERSION, **r.to_dict()},
+                                    ensure_ascii=False)
                          for r in self._records)
         self._atomic_write(self._file, body + ("\n" if body else ""))
         vf = self._vec_file()

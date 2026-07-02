@@ -6,6 +6,10 @@ scope = "jobs"
 register = "plug"
 cli = "cli:main"
 data_subdir = "jobs"
+# The memory-synthesis job calls chat's synthesize_memory (see runner.py), so
+# declare the dependency honestly; chat is protected + preinstalled, so this
+# never actually blocks an enable (LM-DA-005).
+requires = ["chat"]
 
 [surface]
 tab_id = "jobs"

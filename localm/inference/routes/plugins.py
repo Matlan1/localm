@@ -17,7 +17,8 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.get("/v1/plugins", dependencies=[Depends(require_scope(scopes.PLUGINS_READ))])
     async def list_plugins():
-        from localm.plugins.loader import discover_errors, discover_plugins
+        from localm.plugins.loader import (discover_errors, discover_plugins,
+                                           discover_warnings)
         return {
             "plugins": [
                 {
@@ -31,6 +32,9 @@ def register(app: FastAPI, ctx) -> None:
                 for m in discover_plugins()
             ],
             "errors": discover_errors(),
+            # Non-fatal manifest warnings (unknown keys, LM-DA-007): the plugin
+            # loads, but a typoed key silently does nothing, so say so.
+            "warnings": discover_warnings(),
         }
 
     @app.post("/v1/plugins/install", dependencies=[Depends(require_scope(scopes.PLUGINS_ADMIN))])

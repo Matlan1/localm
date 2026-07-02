@@ -21,10 +21,12 @@ def plugin() -> None:
 @plugin.command("list")
 def plugin_list():
     """List installed external plugins."""
-    from ..plugins.loader import discover_errors, discover_plugins, plugins_dir
+    from ..plugins.loader import (discover_errors, discover_plugins,
+                                  discover_warnings, plugins_dir)
 
     manifests = discover_plugins()
     errors = discover_errors()
+    warnings = discover_warnings()
     if not manifests and not errors:
         console.print(f"[dim]No external plugins installed ({plugins_dir()})[/dim]")
         return
@@ -35,6 +37,8 @@ def plugin_list():
             console.print(f"    [dim]tools: {', '.join(m.tool_exports)}[/dim]")
     for err in errors:
         console.print(f"  [yellow]invalid:[/yellow] {err}")
+    for warn in warnings:
+        console.print(f"  [yellow]warning:[/yellow] {warn}")
 
 
 
