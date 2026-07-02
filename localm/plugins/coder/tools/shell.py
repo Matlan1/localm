@@ -8,7 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .base import ToolResult, _truncate
+from .base import ToolResult, _partial_on_timeout, _truncate
 
 def _needs_shell(command: str) -> bool:
     """Return True when the command uses shell operators that require a real shell."""
@@ -88,8 +88,9 @@ def tool_run_shell(
             errors="replace",
             env=env,
         )
-    except subprocess.TimeoutExpired:
-        return ToolResult.error(f"Command timed out after {timeout}s")
+    except subprocess.TimeoutExpired as e:
+        return ToolResult.error(
+            f"Command timed out after {timeout}s{_partial_on_timeout(e)}")
     except Exception as e:
         return ToolResult.error(str(e))
 
@@ -183,8 +184,9 @@ def tool_run_tests(
             f"Test runner not found: {cmd[0]}. "
             "Make sure it is installed and on PATH."
         )
-    except subprocess.TimeoutExpired:
-        return ToolResult.error("Test run timed out after 120s")
+    except subprocess.TimeoutExpired as e:
+        return ToolResult.error(
+            f"Test run timed out after 120s{_partial_on_timeout(e)}")
     except Exception as e:
         return ToolResult.error(str(e))
 
