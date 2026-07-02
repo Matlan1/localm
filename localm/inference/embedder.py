@@ -177,8 +177,32 @@ class GGUFEmbedder:
         buf = (self._llama_token * self._n_ctx)()
         n = api.llama_tokenize(self._vocab, raw, len(raw), buf, self._n_ctx,
                                True, True)   # add_special (BERT CLS/SEP), parse_special
-        if n < 0:                            # buffer too small -> truncate to n_ctx
+        if n < 0:
+            # Over-long input: llama_tokenize returns -(tokens needed) and, on
+            # this DLL, writes NOTHING into the short buffer (probe-verified),
+            # so treating the zero-filled buffer as tokens embedded EVERY
+            # over-long text to one identical garbage vector (all token 0;
+            # memory-audit 2026-07-02, high). Retokenize into a right-sized
+            # buffer and truncate explicitly to the context window.
+            needed = -n
+            full = (self._llama_token * needed)()
+            n2 = api.llama_tokenize(self._vocab, raw, len(raw), full, needed,
+                                    True, True)
+            if n2 <= 0:                      # should not happen; fail visibly
+                logger.warning(
+                    "embedder: retokenize of an over-long text failed (%d)", n2)
+                return [0.0] * self.dim
+            # Keep the first n_ctx tokens but preserve the FINAL token of the
+            # full sequence: with add_special=True on the BERT-family models
+            # this embedder serves (bge/nomic), that is the [SEP] the pooled
+            # encoding expects; dropping it degrades the embedding.
+            for i in range(self._n_ctx):
+                buf[i] = full[i]
+            buf[self._n_ctx - 1] = full[n2 - 1]
             n = self._n_ctx
+            logger.debug(
+                "embedder: input of %d tokens truncated to the %d-token window",
+                n2, self._n_ctx)
         if n <= 0:
             return [0.0] * self.dim
         arr = (self._llama_token * n)(*buf[:n])
