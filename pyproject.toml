@@ -157,6 +157,12 @@ localm    = "localm.cli:console_main"
 localcoder = "localm.plugins.coder.cli:console_main"
 localabliterate = "localm.plugins.abliterate.cli:main"
 
+[project.urls]
+Homepage = "https://github.com/Matlan1/localm"
+Repository = "https://github.com/Matlan1/localm"
+Issues = "https://github.com/Matlan1/localm/issues"
+Changelog = "https://github.com/Matlan1/localm/blob/master/CHANGELOG.md"
+
 [tool.uv]
 exclude-newer-package = { rocm = false, rocm-sdk-core = false, rocm-sdk-libraries-gfx103x-all = false, torch = false, torchvision = false, transformers = false }
 
