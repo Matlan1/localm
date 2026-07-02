@@ -188,22 +188,59 @@ class JobStore:
 
     def _read_all(self) -> dict:
         if not self._defs_file.is_file():
-            return {}
+            return {}            # genuinely absent: an empty store is correct
+        raw = None
         try:
-            data = json.loads(self._defs_file.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+            raw = self._defs_file.read_text(encoding="utf-8")
+            data = json.loads(raw)
+        except OSError as e:
+            # Unreadable (locked / IO error): do NOT collapse to empty, or the
+            # next write would overwrite a file that may be intact (audit F4:
+            # a corrupt/unreadable load followed by a write permanently erased
+            # every scheduled job). Raise so the caller cannot silently wipe.
+            raise RuntimeError(
+                f"jobs store unreadable ({self._defs_file}): {e}") from e
+        except json.JSONDecodeError as e:
+            # Corrupt JSON: back it up so a subsequent write cannot destroy it,
+            # warn loudly, and start empty (distinguished from the absent case).
+            self._quarantine_corrupt(raw, e)
             return {}
         jobs = data.get("jobs", []) if isinstance(data, dict) else []
         out: dict = {}
+        skipped = 0
         for entry in jobs:
             if not isinstance(entry, dict):
+                skipped += 1
                 continue
             try:
                 job = Job.from_dict(entry)
             except (ValueError, TypeError):
-                continue        # skip a corrupt entry rather than fail the load
+                skipped += 1    # skip a corrupt entry rather than fail the load
+                continue
             out[job.id] = job
+        if skipped:
+            from localm.debuglog import logger
+            logger.warning("jobs store: skipped %d unreadable job entr%s",
+                           skipped, "y" if skipped == 1 else "ies")
         return out
+
+    def _quarantine_corrupt(self, raw, err) -> None:
+        """Copy a corrupt defs file aside before anything overwrites it, and
+        warn (rule 5: a data-loss risk must be visible, never silent)."""
+        from localm.debuglog import logger
+        try:
+            stamp = int(time.time())
+            backup = self._defs_file.with_name(
+                f"{self._defs_file.name}.corrupt-{stamp}")
+            if raw is not None:
+                backup.write_text(raw, encoding="utf-8")
+            logger.warning(
+                "jobs store %s is corrupt (%s); backed up to %s and starting "
+                "with an empty job list - your scheduled jobs are preserved in "
+                "the backup, not lost", self._defs_file, err, backup.name)
+        except OSError as e:
+            logger.warning("jobs store: corrupt defs file could not be backed "
+                           "up (%s); refusing to silently discard it", e)
 
     def _write_all(self, jobs: dict) -> None:
         """Atomically write the whole defs file (temp + os.replace)."""

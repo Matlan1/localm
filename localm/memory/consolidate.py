@@ -38,7 +38,7 @@ from localm.inference.textnorm import strip_think
 
 from .gating import writes_allowed
 from .record import MemoryRecord
-from .store import MAX_TEXT_LEN, MemoryStore
+from .store import MAX_TEXT_LEN, N_MAX, MemoryStore
 
 Complete = Callable[[str], str]
 EmbedFn = Callable[[list[str]], list[list[float]]]
@@ -351,4 +351,13 @@ def run_consolidation(store: MemoryStore, session_text: str, complete: Complete,
     store.invalidate_vectors(updated_ids)
     store.replace(working, embed_fn=embed_fn)
     store.prune(now=now)
+    # Surface any user-typed facts the size cap evicted: silently hard-deleting
+    # a fact the user themselves entered is exactly the data loss the audit
+    # flagged (rule 5). They are archived to .forgotten.jsonl and reported here.
+    evicted_user = getattr(store, "last_evicted_user", [])
+    if evicted_user:
+        counts["evicted_user"] = len(evicted_user)
+        counts["warning"] = (
+            "%d user-typed memory record(s) were evicted at the %d-record cap "
+            "and archived to the forgotten sidecar" % (len(evicted_user), N_MAX))
     return counts

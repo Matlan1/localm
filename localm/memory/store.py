@@ -65,6 +65,7 @@ VEC_COVERAGE = 0.8         # blend cosine only when >= this fraction have vector
 
 # ---- forgetting ----------------------------------------------------------- #
 PRUNE_FLOOR = 0.02         # decayed(importance*recency) below this is forgettable
+_FORGOTTEN_MAX = 1000      # cap on the recoverable-forgotten archive sidecar
 _DAY = 86400.0
 
 _AGENTS = ("chat", "coder")
@@ -126,6 +127,9 @@ class MemoryStore:
         self._vectors: dict = {}        # id -> vector (present only when embedded)
         self._dim: Optional[int] = None
         self._bm25: Optional[BM25] = None
+        # User/import records evicted by the most recent prune (size cap), so a
+        # caller can surface an otherwise-silent user-fact loss. See prune().
+        self.last_evicted_user: list[MemoryRecord] = []
         self._load()
 
     # ----------------------------------------------------------------- IO -- #
@@ -397,11 +401,40 @@ class MemoryStore:
         eff_imp = min(1.0, rec.importance + 0.05 * rec.uses)
         return eff_imp * recency
 
+    def _forgotten_file(self) -> Path:
+        return self._file.with_suffix(".forgotten.jsonl")
+
+    def _archive_forgotten(self, records: list[MemoryRecord]) -> None:
+        """Append evicted records to a ``.forgotten.jsonl`` sidecar so forgetting
+        is RECOVERABLE, not a silent hard delete (memory-audit 2026-07-02: the
+        size cap could evict user-typed facts irreversibly). Best-effort: an
+        archival failure must not block the prune, but it is logged, not hidden
+        (AGENTS.md rule 5). The archive is capped so it cannot grow unbounded."""
+        if not records:
+            return
+        try:
+            ff = self._forgotten_file()
+            prior = []
+            if ff.is_file():
+                prior = [ln for ln in ff.read_text(encoding="utf-8").splitlines()
+                         if ln.strip()]
+            new = [json.dumps({**r.to_dict(), "forgotten_at": time.time()},
+                              ensure_ascii=False) for r in records]
+            lines = (prior + new)[-_FORGOTTEN_MAX:]
+            self._atomic_write(ff, "\n".join(lines) + "\n")
+        except OSError as e:
+            from localm.debuglog import logger
+            logger.warning("memory: could not archive %d forgotten record(s): %s",
+                           len(records), e)
+
     def prune(self, *, now: Optional[float] = None, n_max: int = N_MAX) -> int:
         """Forget decayed, low-value memories and enforce the size cap. User- and
         import-sourced records are never auto-dropped by decay (only the size cap
         may evict them, weakest first); synth memories below ``PRUNE_FLOOR`` are
-        forgotten. Returns the number removed."""
+        forgotten. Evicted records are archived to a ``.forgotten.jsonl`` sidecar
+        (recoverable, not a silent hard delete) and the user-sourced evictions are
+        exposed on ``last_evicted_user`` so a caller can surface them. Returns the
+        number removed."""
         now = time.time() if now is None else now
         kept = [
             r for r in self._records
@@ -410,10 +443,15 @@ class MemoryStore:
         if len(kept) > n_max:
             kept.sort(key=lambda r: self._decayed(r, now), reverse=True)
             kept = kept[:n_max]
-        removed = len(self._records) - len(kept)
-        if removed:
+        kept_ids = {r.id for r in kept}
+        evicted = [r for r in self._records if r.id not in kept_ids]
+        # Exposed for callers (consolidation surfaces user-fact evictions in its
+        # result); reset every prune so it reflects THIS run only.
+        self.last_evicted_user = [r for r in evicted if r.source in ("user", "import")]
+        if evicted:
+            self._archive_forgotten(evicted)
             self.replace(kept)
-        return removed
+        return len(evicted)
 
 
 def _first_dim(vectors: dict) -> Optional[int]:
