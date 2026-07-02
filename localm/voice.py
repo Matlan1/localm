@@ -59,7 +59,18 @@ _FAULT_ENV = "LOCALM_VOICE_FAULT_FOR_TEST"
 
 
 class VoiceError(Exception):
-    """Transcription failed; the message says why and what to install."""
+    """Transcription failed; the message says why and what to install.
+
+    ``code`` carries the failure CLASS as a stable machine-readable tag (the
+    worker's own structured tags - "needs-faster-whisper", "decode", "empty",
+    "load", "transcribe" - plus the manager-side "spawn", "timeout", "crash",
+    "no-speech"), so an HTTP endpoint can pick a status by class instead of
+    substring-matching the human message: rewording a message must never flip
+    a status code."""
+
+    def __init__(self, message: str, code: str = "") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def stt_available() -> tuple[bool, str]:
@@ -305,13 +316,15 @@ def _run_in_worker(data: bytes, name: str, language, timeout: float) -> str:
             _ensure_worker()                     # spawn failures must not escape raw
         except Exception as e:
             _kill_worker()
-            raise VoiceError(f"Could not start the speech-to-text worker: {e}")
+            raise VoiceError(f"Could not start the speech-to-text worker: {e}",
+                             code="spawn")
         proc, req_q, resp_q = _proc, _req_q, _resp_q
         try:
             req_q.put((data, name, language))
         except Exception as e:
             _kill_worker()
-            raise VoiceError(f"Could not dispatch transcription to the STT worker: {e}")
+            raise VoiceError(f"Could not dispatch transcription to the STT worker: {e}",
+                             code="spawn")
 
         deadline = time.monotonic() + timeout
         result = None
@@ -323,7 +336,7 @@ def _run_in_worker(data: bytes, name: str, language, timeout: float) -> str:
                     "Transcription timed out: the speech-to-text engine stopped "
                     "responding and was restarted. The server stayed up - please "
                     "try again, or use a smaller model (localm config "
-                    "voice_stt_model tiny).")
+                    "voice_stt_model tiny).", code="timeout")
             try:
                 result = resp_q.get(timeout=min(0.5, remaining))
                 break
@@ -334,14 +347,14 @@ def _run_in_worker(data: bytes, name: str, language, timeout: float) -> str:
                     raise VoiceError(
                         f"The speech-to-text engine crashed (worker exit {code}) "
                         "on this recording. The server stayed up and STT was "
-                        "restarted - please try again.")
+                        "restarted - please try again.", code="crash")
                 continue
 
     kind = result[0]
     if kind == "ok":
         text = result[1]
         if not text:
-            raise VoiceError("No speech detected in the recording")
+            raise VoiceError("No speech detected in the recording", code="no-speech")
         return text
 
     tag = result[1]
@@ -349,20 +362,23 @@ def _run_in_worker(data: bytes, name: str, language, timeout: float) -> str:
     if tag == "needs-faster-whisper":
         raise VoiceError(
             "Speech-to-text needs the faster-whisper package. Install it with: "
-            f"pip install \"localm[voice]\"  (worker import failed: {detail})")
+            f"pip install \"localm[voice]\"  (worker import failed: {detail})",
+            code=tag)
     if tag == "decode":
         raise VoiceError(
-            f"Could not decode the recording (corrupt or unsupported audio): {detail}")
+            f"Could not decode the recording (corrupt or unsupported audio): {detail}",
+            code=tag)
     if tag == "empty":
-        raise VoiceError("No audio in the recording (it was empty or zero-length).")
+        raise VoiceError("No audio in the recording (it was empty or zero-length).",
+                         code=tag)
     if tag == "load":
         raise VoiceError(
             f"Could not load Whisper model '{name}': {detail}. The first use "
             "downloads it from HuggingFace - check the network, or set a "
-            "different model: localm config voice_stt_model tiny")
+            "different model: localm config voice_stt_model tiny", code=tag)
     if tag == "transcribe":
-        raise VoiceError(f"Transcription failed: {detail}")
-    raise VoiceError("Transcription failed.")
+        raise VoiceError(f"Transcription failed: {detail}", code=tag)
+    raise VoiceError("Transcription failed.", code="transcribe")
 
 
 def transcribe_bytes(data: bytes, language: Optional[str] = None) -> str:
@@ -375,7 +391,7 @@ def transcribe_bytes(data: bytes, language: Optional[str] = None) -> str:
     # Reject an empty recording up front (pure Python, no native, no worker
     # spawn): a 0-byte blob (a mic that captured nothing) is a clean client error.
     if not data:
-        raise VoiceError("Empty recording (no audio was captured).")
+        raise VoiceError("Empty recording (no audio was captured).", code="empty")
 
     # Cheap availability check without importing the native lib (find_spec does
     # not load ctranslate2), so a missing dependency is reported instantly
@@ -383,7 +399,7 @@ def transcribe_bytes(data: bytes, language: Optional[str] = None) -> str:
     if importlib.util.find_spec("faster_whisper") is None:
         raise VoiceError(
             "Speech-to-text needs the faster-whisper package. Install it "
-            "with: pip install \"localm[voice]\"")
+            "with: pip install \"localm[voice]\"", code="needs-faster-whisper")
 
     from localm.config import load_config
     cfg = load_config()
