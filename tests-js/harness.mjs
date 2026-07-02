@@ -90,7 +90,7 @@ const APP_SCRIPTS = [
  * Build a jsdom window with the app scripts loaded but the DOMContentLoaded init
  * NOT run. Returns { dom, window }. Pass fetchImpl to control network.
  */
-export function loadApp({ fetchImpl, url } = {}) {
+export function loadApp({ fetchImpl, url, shellToken } = {}) {
   const html = read("index.html");
   const dom = new JSDOM(html, {
     // Pass url: "https://..." to exercise the HTTPS-only paths (e.g. the
@@ -102,6 +102,10 @@ export function loadApp({ fetchImpl, url } = {}) {
   const win = dom.window;
   _openWindows.add(win);   // closed in the after-hook so the process can exit
   installStubs(win, { fetchImpl });
+  // Seed the open-mode shell token BEFORE the app scripts run, since helpers.js
+  // reads window.__LOCALM_SHELL_TOKEN__ into a const at load. Pass shellToken to
+  // exercise the open-mode (loopback shell) auth path.
+  if (shellToken) win.__LOCALM_SHELL_TOKEN__ = shellToken;
 
   // app.js was split per section into app/<name>.js (same load order). Inject
   // each as a classic script in order: jsdom executes them in the window context;

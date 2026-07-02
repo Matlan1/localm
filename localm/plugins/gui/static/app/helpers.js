@@ -55,9 +55,19 @@ export function readCookie(name) {
 
 export function authHeaders(extra = {}) {
   const h = { "Content-Type": "application/json", ...extra };
-  if (SHELL_TOKEN) h["Authorization"] = "Bearer " + SHELL_TOKEN;
   const csrf = readCookie("localm_csrf");
-  if (csrf) h["X-CSRF-Token"] = csrf;
+  if (csrf) {
+    // Session (cookie) mode: authenticate via the HttpOnly session cookie
+    // (auto-sent same-origin) + the double-submit CSRF header. Do NOT also send
+    // the shell-token bearer: the Authorization header wins over the cookie
+    // server-side, and the open-mode shell token is rejected once auth is on -
+    // so sending it would 401 despite a valid session (e.g. right after minting
+    // the first key turns auth on).
+    h["X-CSRF-Token"] = csrf;
+  } else if (SHELL_TOKEN) {
+    // Open mode: the per-process loopback shell token authorises local management.
+    h["Authorization"] = "Bearer " + SHELL_TOKEN;
+  }
   return h;
 }
 
