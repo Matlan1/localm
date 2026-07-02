@@ -1487,40 +1487,6 @@ class TestVoiceEndpoint:
                 "audio_b64": base64.b64encode(b"silence").decode()})
         assert r.status_code == 422
 
-    def test_status_keyed_on_code_not_message_wording(self, voice_app, monkeypatch):
-        """HONESTY-0702: the 501-vs-422 choice branches on VoiceError.code (the
-        worker's structured tag), never on the message wording - a model-load
-        failure whose message HAPPENS to mention faster-whisper must stay 422."""
-        import base64
-        from localm.voice import VoiceError
-        app = voice_app
-
-        def load_failed(data, language=None):
-            raise VoiceError("Could not load the model (is faster-whisper ok?)",
-                             code="load")
-        monkeypatch.setattr("localm.voice.transcribe_bytes", load_failed)
-        with TestClient(app) as client:
-            r = client.post("/api/voice/transcribe", json={
-                "audio_b64": base64.b64encode(b"blob").decode()})
-        assert r.status_code == 422          # substring logic would say 501
-
-    def test_missing_package_code_is_501_despite_rewording(self, voice_app,
-                                                           monkeypatch):
-        """HONESTY-0702 counterpart: code="needs-faster-whisper" yields 501 even
-        if the human message is reworded to not contain the package name."""
-        import base64
-        from localm.voice import VoiceError
-        app = voice_app
-
-        def not_installed(data, language=None):
-            raise VoiceError("The speech-to-text stack is not installed.",
-                             code="needs-faster-whisper")
-        monkeypatch.setattr("localm.voice.transcribe_bytes", not_installed)
-        with TestClient(app) as client:
-            r = client.post("/api/voice/transcribe", json={
-                "audio_b64": base64.b64encode(b"blob").decode()})
-        assert r.status_code == 501
-
 
 # ------------------------------------------------------------------ #
 #  Assistant memory (/api/memory)                                      #

@@ -61,13 +61,14 @@ _FAULT_ENV = "LOCALM_VOICE_FAULT_FOR_TEST"
 class VoiceError(Exception):
     """Transcription failed; the message says why and what to install.
 
-    ``code`` is the machine-readable failure class - the worker's structured tag
-    ("needs-faster-whisper", "decode", "empty", "load", "transcribe") or a
-    server-side class ("worker", "timeout", "crash", "no-speech"). The HTTP
-    endpoint keys its status code off this, never off the human-readable message
-    wording (which is free to change without silently breaking the API)."""
+    ``code`` carries the failure CLASS as a stable machine-readable tag (the
+    worker's own structured tags - "needs-faster-whisper", "decode", "empty",
+    "load", "transcribe" - plus the manager-side "spawn", "timeout", "crash",
+    "no-speech"), so an HTTP endpoint can pick a status by class instead of
+    substring-matching the human message: rewording a message must never flip
+    a status code."""
 
-    def __init__(self, message: str, code: str = ""):
+    def __init__(self, message: str, code: str = "") -> None:
         super().__init__(message)
         self.code = code
 
@@ -316,14 +317,14 @@ def _run_in_worker(data: bytes, name: str, language, timeout: float) -> str:
         except Exception as e:
             _kill_worker()
             raise VoiceError(f"Could not start the speech-to-text worker: {e}",
-                             code="worker")
+                             code="spawn")
         proc, req_q, resp_q = _proc, _req_q, _resp_q
         try:
             req_q.put((data, name, language))
         except Exception as e:
             _kill_worker()
             raise VoiceError(f"Could not dispatch transcription to the STT worker: {e}",
-                             code="worker")
+                             code="spawn")
 
         deadline = time.monotonic() + timeout
         result = None
@@ -356,8 +357,6 @@ def _run_in_worker(data: bytes, name: str, language, timeout: float) -> str:
             raise VoiceError("No speech detected in the recording", code="no-speech")
         return text
 
-    # The worker's structured tag rides along as VoiceError.code so callers (the
-    # HTTP endpoint's status choice) branch on the class, not the message wording.
     tag = result[1]
     detail = result[2] if len(result) > 2 else ""
     if tag == "needs-faster-whisper":
@@ -379,7 +378,7 @@ def _run_in_worker(data: bytes, name: str, language, timeout: float) -> str:
             "different model: localm config voice_stt_model tiny", code=tag)
     if tag == "transcribe":
         raise VoiceError(f"Transcription failed: {detail}", code=tag)
-    raise VoiceError("Transcription failed.", code="unknown")
+    raise VoiceError("Transcription failed.", code="transcribe")
 
 
 def transcribe_bytes(data: bytes, language: Optional[str] = None) -> str:

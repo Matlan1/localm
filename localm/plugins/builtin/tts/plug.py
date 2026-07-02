@@ -40,11 +40,11 @@ def _defaults() -> dict:
     try:
         data = json.loads(_TEMPLATE.read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
-        # The template is a SHIPPED tracked file: missing or malformed both mean
-        # a broken install, and the config endpoints silently degrade to the
-        # frontend's hardcoded fallbacks. Keep serving (right altitude) but warn
-        # so the broken template is discoverable (AGENTS.md rule 5).
-        logger.warning("could not read the TTS defaults template %s: %s",
+        # The template is a TRACKED shipped file: absent is as abnormal as
+        # corrupt here, and silently returning {} would hide a broken install
+        # behind the frontend's hardcoded fallbacks. Surface it, keep serving.
+        logger.warning("tts: could not read the shipped template %s (%s); "
+                       "falling back to the frontend's built-in defaults",
                        _TEMPLATE.name, e)
         return {}
     return {k: v for k, v in data.items() if not k.startswith("_")}
@@ -58,10 +58,11 @@ def _resolved() -> dict:
         try:
             override = _host.plugin_config("tts")
         except Exception as e:
-            # Defensive: plugin_config is not expected to raise, but if it ever
-            # does, the user's TTS overrides silently reverting to the shipped
-            # defaults would be a hidden behaviour change - log the fallback.
-            logger.debug("TTS plugin config unavailable, serving defaults: %s", e)
+            # Best-effort by design: a config-layer hiccup must not break TTS,
+            # but the user's overrides silently reverting to the template
+            # defaults needs a trace to be diagnosable.
+            logger.debug("tts: plugin_config('tts') failed (%s); "
+                         "using template defaults for this request", e)
             override = {}
         cfg.update({k: v for k, v in override.items() if v is not None})
     return cfg
