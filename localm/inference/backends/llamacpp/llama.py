@@ -725,8 +725,16 @@ class LlamaCpp:
                         # into the native library, which crashes the driver.
                         self.last_finish_reason = "error"
                         break
+                    # llama_sampler_sample() already ACCEPTS the sampled token
+                    # into every stateful sampler in the chain (documented
+                    # upstream as "sample and accept"). A second explicit
+                    # accept here advanced the grammar parser twice per token,
+                    # emptying its parse stacks and throwing std::runtime_error
+                    # across the C ABI (WinError 0xe06d7363) - the "grammar
+                    # sampler fault" that kept grammar enforcement dormant. It
+                    # also double-counted tokens in the repetition-penalty
+                    # window. Do NOT re-add an accept after sample.
                     token = api.llama_sampler_sample(sampler, self._ctx_ptr, -1)
-                    api.llama_sampler_accept(sampler, token)
                     eog = self._tokenizer.is_eog(token)
 
                 # Stop when the model signals end-of-generation via the vocabulary
@@ -857,8 +865,9 @@ class LlamaCpp:
                     if self._stop.is_set() or self._ctx_ptr is None:
                         self.last_finish_reason = "error"
                         break
+                    # No explicit accept: llama_sampler_sample() accepts
+                    # internally (see the why-comment in _generate).
                     token = api.llama_sampler_sample(sampler, self._ctx_ptr, -1)
-                    api.llama_sampler_accept(sampler, token)
                     eog = self._tokenizer.is_eog(token)
                 if eog:
                     break
