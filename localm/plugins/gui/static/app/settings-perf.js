@@ -830,11 +830,41 @@ export async function rememberFact(fact) {
   }
 }
 
+export async function synthesizeMemoryNow(statusEl) {
+  // Manual trigger of the same consolidation the background pass runs, for
+  // immediate feedback (a tester can chat, then click this and watch facts
+  // appear). Needs a loaded model; the route 503s otherwise.
+  if (statusEl) statusEl.textContent = "Distilling facts from recent chats...";
+  try {
+    const r = await fetch("/api/memory/consolidate", {
+      method: "POST", headers: authHeaders(),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    await refreshMemory();
+    const n = data.added || 0;
+    const msg = data.status === "skipped"
+      ? (data.reason === "privacy"
+          ? "Memory writes are off in privacy mode."
+          : "Nothing new to remember yet.")
+      : (n ? `Added ${n} new fact${n === 1 ? "" : "s"}.`
+           : "No new durable facts found.");
+    if (statusEl) statusEl.textContent = msg;
+    toast(msg);
+    return data;
+  } catch (e) {
+    const msg = "Synthesize failed: " + e.message;
+    if (statusEl) statusEl.textContent = msg;
+    toast(msg, true);
+  }
+}
+
 export function openMemoryModal() {
   openModal("Memory - what the model knows about you", (body) => {
     body.appendChild(el("div", "sub", memory.writable
       ? "Durable facts localm remembers about you, added to the prompt while the " +
-        "🧠 toggle is on. Edit freely - one fact per line; Save replaces the list."
+        "🧠 toggle is on. Memory grows automatically as you chat; edit freely - " +
+        "one fact per line; Save replaces the list."
       : "Read-only: privacy mode blocks memory writes (no new traces). " +
         "Existing memory is still recalled while the 🧠 toggle is on."));
     const ta = document.createElement("textarea");
@@ -844,8 +874,11 @@ export function openMemoryModal() {
     ta.readOnly = !memory.writable;
     body.appendChild(ta);
     if (memory.writable) {
+      const status = el("div", "sub", "");
+      status.style.marginTop = "8px";
+      const row = el("div");
+      row.style.cssText = "margin-top:10px;display:flex;gap:8px;align-items:center";
       const save = el("button", "btn-primary", "Save");
-      save.style.marginTop = "10px";
       save.onclick = async () => {
         try {
           const r = await fetch("/api/memory", {
@@ -861,7 +894,18 @@ export function openMemoryModal() {
           toast("Save failed: " + e.message, true);
         }
       };
-      body.appendChild(save);
+      const synth = el("button", "btn", "Synthesize now");
+      synth.title = "Distil durable facts from your recent chats into memory now";
+      synth.onclick = async () => {
+        synth.disabled = true;
+        await synthesizeMemoryNow(status);
+        ta.value = memory.text;              // reflect any newly-added facts
+        synth.disabled = false;
+      };
+      row.appendChild(save);
+      row.appendChild(synth);
+      body.appendChild(row);
+      body.appendChild(status);
     }
   });
 }
