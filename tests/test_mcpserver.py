@@ -389,3 +389,31 @@ class TestGenerateImageSafety:
         captured = capsys.readouterr()
         assert "PROGRESS_NOISE_ON_STDOUT" not in captured.out
         assert "PROGRESS_NOISE_ON_STDOUT" in captured.err
+
+
+class TestMcpCliWiring:
+    """Regression guard: `localm mcp` must resolve to the real plugin command
+    (plugins/mcpserver/cli.py), not a broken hand-rolled duplicate. A duplicate
+    in localm/cli/maintenance.py once shadowed it and made `localm mcp` crash
+    with an ImportError before it could even print its 'not enabled' message.
+    """
+
+    def test_mcp_command_is_the_plugin_command(self):
+        from localm.cli import main
+        cmd = main.commands.get("mcp")
+        assert cmd is not None, "`localm mcp` is not registered"
+        # The real command lives in the mcpserver plugin, not in cli.maintenance.
+        assert cmd.callback.__module__ == "localm.plugins.mcpserver.cli"
+
+    def test_print_config_works_and_needs_no_active_plugin(self):
+        # --print-config is exempt from the active-plugin check, so it works on a
+        # fresh install and proves the real (option-bearing) command is wired.
+        from click.testing import CliRunner
+
+        from localm.cli import main
+        r = CliRunner().invoke(main, ["mcp", "--print-config"])
+        assert r.exit_code == 0, r.output
+        assert "mcpServers" in r.output and "localm" in r.output
+        # the broken duplicate had no such option and never touched winconsole
+        assert "winconsole" not in r.output
+        assert "unexpected error" not in r.output.lower()

@@ -358,7 +358,18 @@ export const voice = { rec: null, chunks: [], available: true, reason: "",
 export async function refreshVoiceStatus() {
   try {
     const r = await fetch("/api/voice/status", { headers: authHeaders() });
-    if (!r.ok) return;   // old server without the endpoint - leave enabled
+    if (!r.ok) {
+      // 404 = the voice plugin is not installed/active (its routes are
+      // unmounted). Grey the mic with an actionable hint instead of leaving it
+      // enabled so the user records and dead-ends at "Transcription failed:
+      // Not Found" from the missing /api/voice/transcribe route.
+      voice.available = false;
+      voice.reason = "Speech-to-text is not installed. Enable the 'voice' "
+                   + "plugin on the Plugins page (needs the [voice] extra).";
+      const mic = $("chat-mic");
+      if (mic) { mic.classList.add("unavailable"); mic.title = voice.reason; }
+      return;
+    }
     const data = await r.json();
     voice.available = data.available;
     voice.reason = data.reason || "";
@@ -640,7 +651,11 @@ export function maybeAutoUpdateCheck() {
  *  plugin that is not active, else null (handle it normally). */
 export function pluginSuggestion(cmd) {
   if (!pluginCommands.suggest) return null;
-  const hit = pluginCommands.map[cmd];
+  // Some composer slash commands differ from the plugin's declared command name
+  // (the menu offers /web, but the web plugin declares "search-web"). Alias them
+  // so an inactive plugin still gets the "install it" hint instead of a raw 404.
+  const ALIAS = { web: "search-web" };
+  const hit = pluginCommands.map[cmd] || pluginCommands.map[ALIAS[cmd]];
   if (!hit || hit.active) return null;
   return `/${cmd} needs the ${hit.plugin} plugin - install or enable it on the Plugins page.`;
 }

@@ -106,37 +106,10 @@ def setup_embeddings(model):
         console.print(
             "[red]Could not install the embedding model.[/red] It must be a known "
             f"key {tuple(KNOWN_EMBEDDING_MODELS)}, a registered model, or a GGUF "
-            "path, and network must be enabled (net_mode is not 'off').", stderr=True)
+            "path, and network must be enabled (net_mode is not 'off').")
         sys.exit(1)
     console.print(f"[green]Embedding model ready:[/green] {path}\n"
                   "Memory and RAG will now use semantic search.")
-
-
-@main.command("mcp")
-def mcp():
-    """Start the MCP server over STDIO.
-    
-    Provides tools for external MCP clients to interact with localm.
-    Requires the mcp plugin to be enabled.
-    """
-    from ..config import load_config
-    plugins = load_config().get("plugins", {})
-    if not plugins.get("mcp", {}).get("enabled"):
-        import sys
-        from ..winconsole import console
-        console.print("[red]Error: MCP plugin is not enabled.[/red] Run 'localm plugin enable mcp' first.", stderr=True)
-        sys.exit(1)
-        
-    try:
-        from ..plugins.mcpserver import main as mcp_main
-    except ImportError as e:
-        import sys
-        from ..winconsole import console
-        console.print(f"[red]Error loading MCP server:[/red] {e}")
-        sys.exit(1)
-        
-    mcp_main()
-
 
 
 @main.command("bug-report")
