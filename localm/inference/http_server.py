@@ -436,15 +436,28 @@ def _do_restart() -> None:
 
     try:
         from localm.debuglog import dump_ring_buffer, flush_log_handlers, recent_activity
-        dump_ring_buffer()
-        # Also write a clear text log for the bug reporter to ingest directly,
-        # in case the JSON buffer fails to load back into memory.
-        from localm.config import home_dir
-        pre_log = home_dir() / "logs" / "pre_restart.log"
-        pre_log.parent.mkdir(parents=True, exist_ok=True)
-        pre_log.write_text("\n".join(recent_activity()), encoding="utf-8")
+        # Privacy mode opts out of ALL automatic disk traces, so skip the
+        # crash-recovery breadcrumb dumps (ring buffer + pre_restart.log): they are
+        # session-derived INFO breadcrumbs written without the user asking. If the
+        # mode cannot be resolved, fail toward privacy (skip) - matching audit.py's
+        # fail-safe-to-privacy default - rather than write a trace the user may have
+        # opted out of.
+        try:
+            from localm.audit import SessionMode, effective_mode
+            _privacy = effective_mode("server") == SessionMode.PRIVACY
+        except Exception:
+            _privacy = True
+        if not _privacy:
+            dump_ring_buffer()
+            # Also write a clear text log for the bug reporter to ingest directly,
+            # in case the JSON buffer fails to load back into memory.
+            from localm.config import home_dir
+            pre_log = home_dir() / "logs" / "pre_restart.log"
+            pre_log.parent.mkdir(parents=True, exist_ok=True)
+            pre_log.write_text("\n".join(recent_activity()), encoding="utf-8")
         # Flush all log handlers before os.execv so no buffered lines are lost
-        # (Task 1: log durability / save-bug).
+        # (Task 1: log durability / save-bug). This flushes already-open handlers;
+        # it creates no new trace file, so it is safe in privacy mode too.
         flush_log_handlers()
     except Exception:
         pass

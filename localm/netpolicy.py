@@ -120,8 +120,8 @@ def check_url(url: str) -> None:
     """
     if network_mode() == "off":
         raise NetworkPolicyError(
-            "Network access is disabled (net_mode=off). Enable it in "
-            "Settings > Network (or: localm config net_mode ask).")
+            "Network access is disabled (net_mode=off). Enable it with:  "
+            "localm config net_mode ask")
 
     # Parser-differential SSRF guard. urllib.parse and the HTTP client
     # (requests/urllib3) disagree on backslashes and raw control characters in
@@ -157,9 +157,9 @@ def check_url(url: str) -> None:
     allow = _domain_list(cfg.get("net_allow"))
     if allow and not any(_host_matches(host, p) for p in allow):
         raise NetworkPolicyError(
-            f"'{host}' is not on the allow list (net_allow). Add it in "
-            f"Settings > Network (or: localm config net_allow "
-            f"\"{', '.join(allow + [host])}\").")
+            f"'{host}' is not on the allow list (net_allow). Add it with:  "
+            f"localm config net_allow "
+            f"\"{', '.join(allow + [host])}\"")
 
     if not cfg.get("net_allow_private", False):
         _check_public_address(host)
@@ -545,8 +545,8 @@ def web_search(query: str, max_results: int = 5) -> list[dict]:
     if not results:
         raise RuntimeError(
             "The search backend returned no parseable results. It may be "
-            "rate-limiting; try again, or set a Search backend URL (SearXNG) in "
-            "Settings > Network (or: localm config net_search_url http://...).")
+            "rate-limiting; try again, or set a Search backend URL (SearXNG) with:  "
+            "localm config net_search_url http://...")
     return results
 
 
