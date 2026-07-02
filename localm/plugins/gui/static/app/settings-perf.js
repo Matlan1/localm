@@ -92,6 +92,12 @@ export const WEB_MAX_ROUNDS = 3;
 // true = allow all this session; false = deny all this session. In-memory only
 // (so it resets on reload = a new session) and leaves no persisted trace.
 export let webAskSession = null;
+// Setter so OTHER modules can reset the choice: webAskSession is an ES module
+// import for them (read-only), and `webAskSession = null` from another module
+// throws "Assignment to constant variable" in the real browser (the jsdom test
+// harness strips imports into one shared scope, so it never catches this). This
+// module reassigns its OWN local binding here, which is allowed.
+export function setWebAskSession(v) { webAskSession = v; }
 
 // net_mode = ask means the GUI must APPROVE each model-initiated web request
 // before it runs (the settings promise: "ask = approve each request"). Read it
@@ -758,7 +764,18 @@ export function rebuildViews() {
   const tabs = pluginState
     .filter((p) => p.active && p.tab && !CORE_VIEWS.includes(p.tab))
     .map((p) => p.tab);
-  VIEWS = ["chat", ...tabs, "models", "plugins", "settings"];
+  // MUTATE the shared VIEWS array in place - do NOT reassign it. VIEWS is an ES
+  // module IMPORT from tabs.js (a read-only binding), so `VIEWS = [...]` throws
+  // "TypeError: Assignment to constant variable" in the real browser, which
+  // aborted renderNav() right after the nav buttons were appended: VIEWS stayed
+  // at CORE_VIEWS, so _applyActiveClasses (which iterates VIEWS) could never
+  // toggle a plugin view (coder/images/music/video/knowledge/jobs) active -
+  // clicking those tabs silently did nothing. (The jsdom test harness STRIPS
+  // import/export into one shared scope, where the reassignment worked, so the
+  // suite never caught this - only the real ESM browser did.) Mutating the array
+  // contents is allowed on an imported binding and is seen by every importer.
+  VIEWS.length = 0;
+  VIEWS.push("chat", ...tabs, "models", "plugins", "settings");
 }
 
 // After the rail is rebuilt, keep the shown view reachable: if its plugin was
