@@ -8,7 +8,7 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { $, authHeaders, autoGrow, confirmDanger, el, fetchImageURL, renderMarkdown, scrubMarkers, stripThink, toast } from "./helpers.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
-import { runCompletion, speak, webAskSession } from "./settings-perf.js";
+import { runCompletion, speak, setWebAskSession } from "./settings-perf.js";
 import { showView } from "./tabs.js";
 
 /* ================================================================ */
@@ -159,7 +159,7 @@ export async function refreshCtxLimit() {
         localStorage.removeItem("localm.onboarded");
         localStorage.removeItem("localm.webAccess");   // R34: no trace in privacy
         localStorage.removeItem("localm.speakAloud");
-        webAskSession = null;                          // R27: forget the session choice
+        setWebAskSession(null);                        // R27: forget the session choice
         const h = document.querySelector("#conversations h3");
         if (h && !document.getElementById("privacy-hint")) {
           const hint = document.createElement("div");
