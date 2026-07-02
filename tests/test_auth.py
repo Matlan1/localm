@@ -356,3 +356,53 @@ def test_model_detail_does_not_leak_absolute_path(auth, monkeypatch):
         body = r.json()
         assert body["path"] == "m1.gguf"          # basename only
         assert "Secret" not in body["path"]
+
+
+def test_first_key_from_loopback_gui_seeds_owner_session(auth):
+    """S3 lockout guard: minting the FIRST key from the loopback GUI in open mode
+    must NOT lock the owner out. It seeds a persistent owner key and sets the
+    session cookies, so the browser stays authenticated (as owner) and a
+    follow-up request via the cookie - now that auth is on - is authorized."""
+    from fastapi.testclient import TestClient
+    from localm import scopes as S
+    from localm.inference.http_server import (CSRF_COOKIE, SESSION_COOKIE,
+                                              create_app)
+
+    assert not auth.any_key_configured()          # starts open/keyless
+    app = create_app(None)                         # bind_host unset -> loopback default
+    with TestClient(app) as client:
+        shell = app.state.shell_token
+        # open-mode management (minting the first key) needs the loopback shell token
+        r = client.post("/v1/keys", json={"name": "phone", "scopes": [S.CHAT]},
+                        headers={"Authorization": f"Bearer {shell}"})
+        assert r.status_code == 200
+        assert r.json()["scopes"] == [S.CHAT]      # the phone key stays scoped
+        # a persistent OWNER key was seeded so the local owner keeps full access
+        owner = auth.get_api_key()
+        assert owner is not None and auth.verify(owner) == {S.ADMIN}
+        # the response established the browser session (both cookies)
+        set_cookies = " ".join(r.headers.get_list("set-cookie"))
+        assert SESSION_COOKIE in set_cookies and CSRF_COOKIE in set_cookies
+        # auth is now on; the follow-up rides the session cookie from the jar
+        # (NOT the now-dead shell token) and is authorized -> no lockout.
+        assert auth.any_key_configured()
+        assert client.get("/v1/keys").status_code == 200
+
+
+def test_second_key_does_not_reseed_owner_or_session(auth, monkeypatch):
+    """The S3 guard fires ONLY on the open->protected transition: with a key
+    already configured, creating another key seeds no owner key and sets no
+    session cookie (was_open is False)."""
+    from fastapi.testclient import TestClient
+    from localm import scopes as S
+    from localm.inference.http_server import create_app
+
+    monkeypatch.setenv("LOCALM_API_KEY", "ownersecret")   # already protected
+    app = create_app(None)
+    with TestClient(app) as client:
+        r = client.post("/v1/keys", json={"name": "phone", "scopes": [S.CHAT]},
+                        headers={"Authorization": "Bearer ownersecret"})
+        assert r.status_code == 200
+        assert not r.headers.get_list("set-cookie")   # no session seeded
+        # the env owner key is untouched; no auth.key was written
+        assert auth._read_key_file() is None
