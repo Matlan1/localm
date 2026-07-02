@@ -294,6 +294,34 @@ class MemoryStore:
         for mem_id in ids:
             self._vectors.pop(mem_id, None)
 
+    def backfill_vectors(self, embed_fn: EmbedFn, *, limit: int = 64) -> int:
+        """Embed records that have no vector yet, up to *limit* per call, and
+        save. Returns the number embedded.
+
+        This is how semantic recall turns on RETROACTIVELY: a user who chats
+        before installing an embedding model has memories with no vectors, and
+        nothing re-embedded them, so recall stayed lexical forever even after
+        'localm setup-embeddings' (memory-audit 2026-07-02 F8). A regular
+        background pass calls this so coverage climbs to the point where the
+        cosine signal kicks in. Bounded per call so a large store backfills
+        over several passes instead of one long stall. Best-effort: an embed
+        failure for one record is skipped, not fatal."""
+        if embed_fn is None:
+            return 0
+        done = 0
+        for r in self._records:
+            if done >= limit:
+                break
+            if r.id in self._vectors:
+                continue
+            vec = self._embed_one(r.text, embed_fn)
+            if vec is not None:
+                self._vectors[r.id] = vec
+                done += 1
+        if done:
+            self._save()
+        return done
+
     def replace(self, records: list[MemoryRecord], *,
                 embed_fn: Optional[EmbedFn] = None) -> None:
         """Overwrite the whole namespace in ONE atomic save (used by the
@@ -315,14 +343,18 @@ class MemoryStore:
     def _relevance(self, query: str,
                    embed_fn: Optional[EmbedFn]) -> list[float]:
         n = len(self._records)
+        vec_rel = self._vector_relevance(query, embed_fn)
         if n < TINY_CORPUS:
-            # BM25 idf is unstable on a handful of records; skip the relevance
-            # signal and let recency+importance rank. (Transparent to callers.)
-            return [0.0] * n
+            # BM25 idf is unstable on a handful of records, so the LEXICAL signal
+            # is skipped here - but the SEMANTIC (cosine) signal is not noisy on a
+            # tiny corpus, so use it when an embedder is present (a young store
+            # used to rank query-blind by recency+importance alone even with
+            # embeddings; memory-audit 2026-07-02 F8). No vectors -> no relevance
+            # signal, rank by recency+importance (transparent to callers).
+            return vec_rel if vec_rel is not None else [0.0] * n
         if self._bm25 is None:
             self._bm25 = BM25([r.text for r in self._records])
         rel = _maxnorm(self._bm25.scores(query))
-        vec_rel = self._vector_relevance(query, embed_fn)
         if vec_rel is not None:
             rel = [REL_LEX_SHARE * a + (1.0 - REL_LEX_SHARE) * b
                    for a, b in zip(rel, vec_rel)]

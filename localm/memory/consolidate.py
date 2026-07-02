@@ -329,7 +329,12 @@ def run_consolidation(store: MemoryStore, session_text: str, complete: Complete,
     now = time.time() if now is None else now
     candidates = extract(complete, session_text, max_candidates=max_candidates)
     if not candidates:
-        return counts
+        # No new facts, but STILL prune: decay-based forgetting and the size cap
+        # used to be reachable only through a fact-producing run, so a store that
+        # kept extracting nothing never forgot anything (memory-audit 2026-07-02
+        # F8). Prune is a no-op when nothing is decayed, so this is cheap.
+        store.prune(now=now)
+        return _with_eviction_note(counts, store)
 
     working = store.all()
     processed: set = set()
@@ -385,9 +390,15 @@ def run_consolidation(store: MemoryStore, session_text: str, complete: Complete,
     store.invalidate_vectors(updated_ids)
     store.replace(working, embed_fn=embed_fn)
     store.prune(now=now)
-    # Surface any user-typed facts the size cap evicted: silently hard-deleting
-    # a fact the user themselves entered is exactly the data loss the audit
-    # flagged (rule 5). They are archived to .forgotten.jsonl and reported here.
+    return _with_eviction_note(counts, store)
+
+
+def _with_eviction_note(counts: dict, store: MemoryStore) -> dict:
+    """Fold any user-typed facts the last prune evicted (size cap) into the
+    result. Silently hard-deleting a fact the user themselves entered is exactly
+    the data loss the audit flagged (rule 5); they are archived to
+    .forgotten.jsonl and reported here. Runs for BOTH the fact-producing and the
+    no-fact prune paths (F8 decoupling)."""
     evicted_user = getattr(store, "last_evicted_user", [])
     if evicted_user:
         counts["evicted_user"] = len(evicted_user)
