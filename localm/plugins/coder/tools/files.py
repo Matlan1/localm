@@ -156,7 +156,10 @@ def tool_read_file(cwd: Path, path: str, offset: int = 0, limit: int = 0) -> Too
             return ToolResult.error(
                 f"offset {start} is past the end of {rel} ({total_lines} lines)")
         count = int(limit) if limit else total_lines
-        all_lines = raw.splitlines(keepends=True)
+        # An empty file is 1 (empty) line per _line_count, but splitlines()
+        # gives []; without the fallback the slice is empty and the range
+        # label comes out backwards ("1-0 of 1").
+        all_lines = raw.splitlines(keepends=True) or [""]
         sliced = all_lines[start - 1:start - 1 + count]
         end = start + len(sliced) - 1
         output, trunc = _truncate("".join(sliced))
@@ -220,6 +223,15 @@ def tool_edit_file(cwd: Path, path: str, old: str, new: str) -> ToolResult:
         text = p.read_text(encoding="utf-8", errors="replace")
     except Exception as e:
         return ToolResult.error(str(e))
+
+    # '' is "in" every string, so an empty `old` would silently prepend `new`
+    # to the file and report a bogus occurrence count - reject it instead.
+    if not old:
+        return ToolResult.error(
+            "`old` is empty - pass the exact text to replace (read the file "
+            "first and copy the snippet). To replace the whole file, use "
+            "write_file."
+        )
 
     if old not in text:
         wanted = textwrap.shorten(repr(old[:120]), width=120)
@@ -701,11 +713,24 @@ def tool_search_replace(
             summary=f"[dry-run] {total} replacement(s) in {len(changes)} file(s)",
         )
 
+    written: list[str] = []
     for fp, rel, new_text, _ in changes:
         try:
             fp.write_text(new_text, encoding="utf-8")
         except Exception as e:
-            return ToolResult.error(f"Failed to write {rel}: {e}")
+            # Honesty on a mid-loop write failure: the files written before this
+            # one ARE modified on disk. A bare error would read as "nothing
+            # changed" - say exactly what was and was not applied.
+            pending = [str(r) for _, r, _, _ in changes
+                       if str(r) not in written]
+            return ToolResult.error(
+                f"Failed to write {rel}: {e}\n"
+                f"[PARTIAL APPLY: {len(written)} of {len(changes)} file(s) were "
+                f"already modified before this failure]\n"
+                + (f"Modified: {', '.join(written)}\n" if written else "")
+                + f"NOT modified: {', '.join(pending)}"
+            )
+        written.append(str(rel))
 
     return ToolResult.success(
         f"Replaced {total} match(es) in {len(changes)} file(s):\n{report}{unreadable_note}",
