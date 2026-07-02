@@ -6,13 +6,29 @@ Extracted verbatim from create_app(); behavior unchanged.
 
 from __future__ import annotations
 
+import ipaddress
+import secrets
 import time
 from typing import Optional
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 
 import localm.inference.http_server as _hs
 from localm import scopes
+
+
+def _is_loopback(host: str) -> bool:
+    """True for a loopback bind host (127.0.0.0/8, ::1, localhost). Mirrors the
+    GUI's own check; kept local so this core route does not import the gui
+    package."""
+    if not host:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def register(app: FastAPI, ctx) -> None:
@@ -31,8 +47,13 @@ def register(app: FastAPI, ctx) -> None:
         return {"keys": list_keys(), "is_owner": is_owner, "presets": presets}
 
     @app.post("/v1/keys", dependencies=[Depends(require_scope(scopes.KEYS_ADMIN))])
-    async def create_key_ep(body: dict, caller: Optional[set] = Depends(caller_scopes)):
+    async def create_key_ep(request: Request, response: Response, body: dict,
+                            caller: Optional[set] = Depends(caller_scopes)):
+        from localm import auth
         from localm.auth import create_key
+        # Capture BEFORE minting: True only when this is the very first key on an
+        # otherwise-keyless install (the open -> protected transition).
+        was_open = not auth.any_key_configured()
         scope_list = body.get("scopes", [])
         if not isinstance(scope_list, list):
             raise HTTPException(400, "'scopes' must be a list of scope strings")
@@ -72,6 +93,26 @@ def register(app: FastAPI, ctx) -> None:
                 warns = []
             if warns:
                 created = {**created, "warnings": warns}
+        # Lockout guard (S3): in open mode the loopback GUI is trusted via the
+        # per-process shell token, which the server STOPS honouring the instant
+        # auth turns on (a key now exists). Without this, minting your first key
+        # from the local GUI orphans the browser session and can lock the owner
+        # out of their own install. So when the FIRST key is minted from a
+        # loopback bind, seed a persistent owner key and hand THIS browser an
+        # owner session cookie, so the local owner keeps full access and future
+        # `localm gui` loads re-establish the session automatically (web.py).
+        # Loopback + open-mode only: a network bind already requires a key up
+        # front, so this never fires there and grants no authority the local user
+        # did not already hold via the shell token.
+        if was_open and _is_loopback(getattr(app.state, "bind_host", "127.0.0.1")):
+            owner = auth.get_api_key() or auth.regenerate_key()
+            secure = request.url.scheme == "https"
+            response.set_cookie(_hs.SESSION_COOKIE, owner, httponly=True,
+                                secure=secure, samesite="strict", path="/",
+                                max_age=_hs.SESSION_MAX_AGE)
+            response.set_cookie(_hs.CSRF_COOKIE, secrets.token_urlsafe(32),
+                                httponly=False, secure=secure, samesite="strict",
+                                path="/", max_age=_hs.SESSION_MAX_AGE)
         # The plaintext key is returned exactly once - it is never recoverable.
         return created
 

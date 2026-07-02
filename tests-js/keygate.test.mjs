@@ -204,6 +204,23 @@ test("S2: authHeaders sends the CSRF token from the cookie and no localStorage b
   assert.ok(!("Authorization" in h), "no bearer header (cookie auth; no localStorage key)");
 });
 
+test("S3: once a session cookie exists, authHeaders drops the shell-token bearer", async () => {
+  // Open mode (loopback shell token, no session cookie): the shell token is the
+  // management credential and rides the Authorization header.
+  const { window } = loadApp({ fetchImpl: allOk, shellToken: "SHELLXYZ" });
+  await tick();
+  const open = window.authHeaders();
+  assert.equal(open["Authorization"], "Bearer SHELLXYZ", "open mode sends the shell bearer");
+  assert.ok(!("X-CSRF-Token" in open), "no CSRF token before a session exists");
+  // Session established (e.g. right after minting the first key sets the cookies):
+  // the header MUST NOT carry the now-dead shell token, which would win over the
+  // cookie server-side and 401. Cookie auth (CSRF header) only.
+  window.document.cookie = "localm_csrf=tok999";
+  const authed = window.authHeaders();
+  assert.equal(authed["X-CSRF-Token"], "tok999", "session mode echoes the CSRF token");
+  assert.ok(!("Authorization" in authed), "shell-token bearer suppressed once a session cookie exists");
+});
+
 test("AUTH-2: both API-key inputs get a show/hide reveal toggle", async () => {
   const { window } = loadApp({ fetchImpl: allOk });
   await tick();
