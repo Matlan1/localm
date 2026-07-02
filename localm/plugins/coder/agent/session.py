@@ -155,8 +155,15 @@ class _SessionMixin:
             outcome = "ok" if self._last_run_ok else "incomplete"
 
             def _complete(prompt: str) -> str:
-                return self.backend.chat(
-                    [{"role": "user", "content": prompt}], max_tokens=400) or ""
+                # 1024 tokens, not 400: thinking models spend the first
+                # hundreds of tokens on their reasoning channel, and with the
+                # old cap the JSON never arrived, so NO episode was ever
+                # stored on those models (memory-audit 2026-07-02, live).
+                # strip_think keeps the scratchpad out of the stored lesson.
+                from localm.inference.textnorm import strip_think
+                return strip_think(self.backend.chat(
+                    [{"role": "user", "content": prompt}],
+                    max_tokens=1024) or "")
 
             reflect_and_store(
                 self._episode_store, task=task, diff=self.session_diff(),
