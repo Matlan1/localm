@@ -15,15 +15,19 @@ def _online(monkeypatch):
     monkeypatch.setenv("LOCALM_NET_MODE", "ask")
 
 
-class _R:
-    def __init__(self, payload):
-        self._payload = payload
+def _mock_fetch(monkeypatch, payload, seen=None):
+    """Patch netpolicy.safe_fetch_bytes (discover now routes through it for SSRF
+    pinning + redirect re-validation) to return *payload* as JSON bytes. When
+    *seen* is given, capture the request's query params (now encoded into the URL)
+    so the param-asserting tests keep working."""
+    import json as _json
+    import urllib.parse
 
-    def raise_for_status(self):
-        pass
-
-    def json(self):
-        return self._payload
+    def fake(url, **kw):
+        if seen is not None:
+            seen.update(dict(urllib.parse.parse_qsl(urllib.parse.urlparse(url).query)))
+        return url, "application/json", _json.dumps(payload).encode("utf-8")
+    monkeypatch.setattr("localm.netpolicy.safe_fetch_bytes", fake)
 
 
 # ------------------------------------------------------------------ #
@@ -52,15 +56,11 @@ class TestQuantParsing:
 class TestSearch:
     def test_search_parses_and_sends_gguf_filter(self, monkeypatch):
         seen = {}
-
-        def fake_get(url, params=None, **kw):
-            seen.update(params or {})
-            return _R([
-                {"id": "org/model-GGUF", "downloads": 5, "likes": 2,
-                 "lastModified": "2026-01-01"},
-                {"modelId": "org/other"},
-            ])
-        monkeypatch.setattr("requests.get", fake_get)
+        _mock_fetch(monkeypatch, [
+            {"id": "org/model-GGUF", "downloads": 5, "likes": 2,
+             "lastModified": "2026-01-01"},
+            {"modelId": "org/other"},
+        ], seen)
         results = hf_search("qwen 7b", limit=5)
         assert seen["filter"] == "gguf"
         assert seen["search"] == "qwen 7b"
@@ -71,11 +71,7 @@ class TestSearch:
 
     def test_empty_query_is_popular_list(self, monkeypatch):
         seen = {}
-
-        def fake_get(url, params=None, **kw):
-            seen.update(params or {})
-            return _R([])
-        monkeypatch.setattr("requests.get", fake_get)
+        _mock_fetch(monkeypatch, [], seen)
         hf_search("", limit=3)
         assert "search" not in seen        # no query → most-downloaded view
         assert seen["limit"] == "3"
@@ -88,7 +84,18 @@ class TestSearch:
     def test_network_failure_wrapped(self, monkeypatch):
         def boom(url, **kw):
             raise ConnectionError("refused")
-        monkeypatch.setattr("requests.get", boom)
+        monkeypatch.setattr("localm.netpolicy.safe_fetch_bytes", boom)
+        with pytest.raises(DiscoverError, match="request failed"):
+            hf_search("x")
+
+    def test_ssrf_policy_refusal_wrapped(self, monkeypatch):
+        """A netpolicy refusal (e.g. a rebind to a private address) surfaces as a
+        DiscoverError, proving discovery now goes through the SSRF-checked path."""
+        from localm.netpolicy import NetworkPolicyError
+
+        def refuse(url, **kw):
+            raise NetworkPolicyError("resolves to a private address")
+        monkeypatch.setattr("localm.netpolicy.safe_fetch_bytes", refuse)
         with pytest.raises(DiscoverError, match="request failed"):
             hf_search("x")
 
@@ -109,7 +116,7 @@ _TREE = [
 
 class TestFiles:
     def test_parse_group_and_sort(self, monkeypatch):
-        monkeypatch.setattr("requests.get", lambda url, **kw: _R(_TREE))
+        _mock_fetch(monkeypatch, _TREE)
         files = hf_gguf_files("org/repo")
         assert [f["file"] for f in files] == [
             "model-Q4_K_M.gguf",            # 4k
@@ -123,14 +130,13 @@ class TestFiles:
         assert files[1]["size_bytes"] == 8_000
 
     def test_no_gguf_files_hints_full_pull(self, monkeypatch):
-        monkeypatch.setattr("requests.get",
-                            lambda url, **kw: _R([{"path": "config.json"}]))
+        _mock_fetch(monkeypatch, [{"path": "config.json"}])
         with pytest.raises(DiscoverError, match="pull it whole"):
             hf_gguf_files("org/transformers-repo")
 
     @pytest.mark.parametrize("bad", ["", "no-slash", "a/b/c", "a b/c"])
     def test_invalid_repo_id_rejected(self, monkeypatch, bad):
-        monkeypatch.setattr("requests.get", lambda url, **kw: _R([]))
+        _mock_fetch(monkeypatch, [])
         with pytest.raises(DiscoverError, match="repo id"):
             hf_gguf_files(bad)
 

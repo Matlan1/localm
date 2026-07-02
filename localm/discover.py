@@ -54,12 +54,24 @@ def _ensure_online() -> None:
 
 
 def _get(url: str, params: Optional[dict] = None) -> object:
-    import requests
+    """Policy-checked GET returning parsed JSON.
+
+    Routes through ``netpolicy.safe_fetch_bytes`` so the request is pinned to the
+    validated IP and EVERY redirect hop is re-checked against the network policy
+    (SSRF-REBIND): a DNS-rebind of the HF host, or a redirect from the HF API,
+    cannot bounce discovery into a loopback / link-local / private address. This
+    is the same protection the model-pull path already uses; a raw ``requests.get``
+    here previously bypassed it (an owner-initiated fetch, so low severity, but the
+    inconsistency is closed)."""
+    import json as _json
+    import urllib.parse
+
+    from localm import netpolicy
+    full = url + ("?" + urllib.parse.urlencode(params) if params else "")
     try:
-        r = requests.get(url, params=params, timeout=_TIMEOUT,
-                         headers={"User-Agent": "localm/0.1 (model discovery)"})
-        r.raise_for_status()
-        return r.json()
+        _final, _ctype, body = netpolicy.safe_fetch_bytes(
+            full, max_bytes=32 * 1024 * 1024, timeout=int(_TIMEOUT))
+        return _json.loads(body.decode("utf-8"))
     except Exception as e:
         raise DiscoverError(f"HuggingFace request failed: {e}")
 
