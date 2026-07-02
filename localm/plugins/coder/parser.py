@@ -209,7 +209,10 @@ def _try_parse_body(body: str, name_attr: Optional[str]) -> Optional[tuple[str, 
         args = obj.get("args")
         if args is None:
             args = obj.get("arguments", {})
-        if not isinstance(args, dict):
+        # A non-string name is a malformed call, treated like malformed JSON.
+        # An unhashable one (dict/list) would even raise TypeError at the set/
+        # dict lookups downstream ("in tool_names", "in disabled_tools").
+        if not isinstance(name, str) or not isinstance(args, dict):
             return None
         return name, args
 

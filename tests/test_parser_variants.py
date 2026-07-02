@@ -263,3 +263,34 @@ class TestRecoveredMalformations:
         calls = parse_tool_calls(text, tool_names={"write_file"})
         assert len(calls) == 1
         assert calls[0].args["content"] == "x = 1"
+
+
+class TestNonStringName:
+    """A tool call whose "name" is not a string is malformed, same as broken
+    JSON. Without the guard an unhashable name (dict/list) raised TypeError at
+    the parser's own `parsed[0] in tool_names` check and at execution's
+    `call.name in self.disabled_tools` (2026-07-02 coder tool sweep)."""
+
+    def test_numeric_name_rejected(self):
+        text = '<tool_call>\n{"name": 123, "args": {"path": "x.py"}}\n</tool_call>'
+        assert parse_tool_calls(text) == []
+
+    def test_dict_name_rejected_without_typeerror(self):
+        # The unhashable case. Pre-guard, the bare-JSON form crashed with
+        # TypeError at `parsed[0] in tool_names`; the explicit fenced form
+        # was accepted outright and crashed later at execution's
+        # `call.name in self.disabled_tools`. Both must now parse to [].
+        bare = 'some text {"name": {"x": 1}, "args": {}} more text'
+        assert parse_tool_calls(bare, tool_names={"read_file"}) == []
+        fenced = '```tool_call\n{"name": {"x": 1}, "args": {}}\n```'
+        assert parse_tool_calls(fenced, tool_names={"read_file"}) == []
+
+    def test_null_name_rejected(self):
+        text = '<tool_call>\n{"name": null, "args": {}}\n</tool_call>'
+        assert parse_tool_calls(text) == []
+
+    def test_string_name_still_parses(self):
+        text = '<tool_call>\n{"name": "read_file", "args": {"path": "x.py"}}\n</tool_call>'
+        calls = parse_tool_calls(text)
+        assert len(calls) == 1
+        assert calls[0].name == "read_file"
