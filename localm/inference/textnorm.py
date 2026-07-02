@@ -113,6 +113,22 @@ def split_think(text: str) -> tuple[str, str]:
     return "".join(content), "".join(reasoning)
 
 
+def strip_think(text: str) -> str:
+    """Visible content of *text* with every reasoning channel removed.
+
+    Scrubs dialect markers to canonical ``<think>`` tags first (idempotent on
+    already-scrubbed text), then drops the think channel, including an UNCLOSED
+    trailing block (a truncated thinking reply must never leak scratchpad).
+
+    This is the one helper every INTERNAL consumer of model output must run
+    before storing or parsing a reply (memory consolidation, episodic
+    summaries, job results, compaction summaries, coder reflection). The /v1
+    routes already split reasoning for clients; this covers everything that
+    never passes through them. See dev-notes/memory-audit-2026-07-02.md C1:
+    raw ``<think>`` scratchpad was stored verbatim as durable memory."""
+    return split_think(scrub_text(text or ""))[0]
+
+
 def _held_tag_suffix(s: str, tag: str) -> int:
     """Length of the longest proper prefix of *tag* that is a suffix of *s* -
     how much of the tail must be held back because it might begin *tag*."""

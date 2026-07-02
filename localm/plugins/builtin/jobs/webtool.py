@@ -210,6 +210,22 @@ def _complete(engine, messages: list) -> str:
     return "".join(engine.chat_stream(messages)).strip()
 
 
+def _final_answer(reply: str) -> str:
+    """The visible answer of *reply* for storage as a job result. Thinking
+    models prepend a reasoning channel; stored raw it made job results
+    unreadable scratchpad (memory-audit 2026-07-02). Uses the shared
+    textnorm strip (handles UNCLOSED think blocks, unlike _THINK_RE above,
+    which stays closed-tag-only for in-loop tool-call parsing)."""
+    from localm.inference.textnorm import strip_think
+    text = strip_think(reply).strip()
+    if reply.strip() and not text:
+        # All reasoning, no answer (usually truncation). Say so rather than
+        # storing an empty result that reads as success (rule 5).
+        return ("(The model produced only reasoning output and no final "
+                "answer; the reply was likely truncated.)")
+    return text
+
+
 def run_chat_with_web(engine, prompt: str, *, max_rounds: int = _MAX_ROUNDS) -> str:
     """Run a scheduled chat *prompt* against *engine*, giving it the web tool when
     network access is on. Returns the model's final answer.
@@ -220,7 +236,7 @@ def run_chat_with_web(engine, prompt: str, *, max_rounds: int = _MAX_ROUNDS) -> 
     if not web_enabled():
         messages = [{"role": "system", "content": OFFLINE_SYSTEM},
                     {"role": "user", "content": prompt}]
-        return _complete(engine, messages)
+        return _final_answer(_complete(engine, messages))
 
     messages = [{"role": "system", "content": WEB_TOOL_SYSTEM},
                 {"role": "user", "content": prompt}]
@@ -228,7 +244,7 @@ def run_chat_with_web(engine, prompt: str, *, max_rounds: int = _MAX_ROUNDS) -> 
         reply = _complete(engine, messages)
         call = parse_web_call(reply)
         if call is None:
-            return reply                       # the model answered
+            return _final_answer(reply)        # the model answered
         logger.debug("jobs web tool: %s %s", call.get("name"), call.get("args"))
         messages.append({"role": "assistant", "content": reply})
         messages.append({"role": "user", "content": run_web_call(call)})
@@ -243,4 +259,4 @@ def run_chat_with_web(engine, prompt: str, *, max_rounds: int = _MAX_ROUNDS) -> 
         # raw tool-call block as the job's "answer".
         return ("(Could not complete the web lookup within the "
                 f"{max_rounds}-round limit.)")
-    return final
+    return _final_answer(final)

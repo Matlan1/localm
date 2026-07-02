@@ -419,8 +419,12 @@ async def memory_consolidate():
         raise HTTPException(503, "Load a model first to consolidate memory")
 
     def complete(prompt: str) -> str:
-        return "".join(_ENGINE.chat_stream(
-            [{"role": "user", "content": prompt}])).strip()
+        # strip_think: memory must never ingest the reasoning channel (audit C1
+        # store-poisoning; the /v1 routes strip it for clients, internal
+        # consumers must do the same).
+        from localm.inference.textnorm import strip_think
+        return strip_think("".join(_ENGINE.chat_stream(
+            [{"role": "user", "content": prompt}]))).strip()
 
     return synthesize_memory(complete)
 
@@ -464,6 +468,14 @@ def _recent_sessions_text(max_chars: int = 8000) -> str:
             if not isinstance(content, str) or not content.strip():
                 continue
             who = "User" if rec.get("type") == "user" else "Assistant"
+            if who == "Assistant":
+                # Session logs keep the assistant's reasoning channel; the fact
+                # extractor must see only the visible answer, or scratchpad text
+                # pollutes the extraction prompt (audit C1).
+                from localm.inference.textnorm import strip_think
+                content = strip_think(content)
+                if not content.strip():
+                    continue
             piece = f"{who}: {content.strip()}"
             out.append(piece)
             total += len(piece)

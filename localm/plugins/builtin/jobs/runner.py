@@ -157,15 +157,32 @@ def _run_memory(job: Job, *, engine=None) -> str:
         raise RuntimeError(
             "no inference engine available (pass one, or register a model)")
 
+    from localm.inference.textnorm import strip_think
+
+    # Track when a reply was ALL reasoning (empty after the strip): "no facts
+    # found" then needs a caveat, or a truncated thinking model reads as a
+    # clean no-op (rule 5: a degraded run must not report unqualified success).
+    state = {"empty_replies": 0}
+
     def complete(prompt: str) -> str:
-        return "".join(
+        raw = "".join(
             eng.chat_stream([{"role": "user", "content": prompt}])).strip()
+        # strip_think: memory must never ingest the reasoning channel (audit C1).
+        text = strip_think(raw).strip()
+        if raw and not text:
+            state["empty_replies"] += 1
+        return text
 
     result = synthesize_memory(complete)
     if result.get("status") == "skipped":
         return f"memory synthesis skipped ({result.get('reason')})"
     facts = result.get("facts") or []
     if not facts:
+        if state["empty_replies"]:
+            return ("memory synthesis: no facts extracted - the model produced "
+                    "only reasoning output (%d reply/replies were empty after "
+                    "removing the think channel; likely truncated by the "
+                    "completion limit)" % state["empty_replies"])
         return "memory synthesis: no new durable facts found"
     return ("memory synthesis: added %d fact(s):\n" % result["added"]) + \
            "\n".join(f"- {f}" for f in facts)
