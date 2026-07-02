@@ -120,6 +120,14 @@ runtime/build/
 # Node (GUI JS tests)
 node_modules/
 
+# Playwright (GUI end-to-end tests) - run artifacts + installed browsers. The
+# committed source is playwright.config.mjs + tests-e2e/; browsers install to a
+# machine cache via `npx playwright install chromium`, not under the repo.
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+
 # self-updater signing key (private Ed25519 key; NEVER commit)
 update_signing_key.pem
 *_signing_key.pem

@@ -4,9 +4,11 @@
   "private": true,
   "description": "jsdom test harness for the localm GUI (localm/plugins/gui/static). Python is the product; this only tests the vanilla-JS frontend.",
   "scripts": {
-    "test": "node --test --test-force-exit tests-js/*.test.mjs"
+    "test": "node --test --test-force-exit tests-js/*.test.mjs",
+    "test:e2e": "playwright test"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "jsdom": "^25.0.1"
   }
 }
