@@ -311,7 +311,8 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
         name="search_replace",
         fn=tool_search_replace,
         description=(
-            "Search for a regex pattern across multiple files and replace all matches atomically. "
+            "Search for a regex pattern across multiple files and replace all matches "
+            "(file by file; a mid-way failure reports which files were already modified). "
             "Use dry_run=true to preview changes before committing."
         ),
         params={
