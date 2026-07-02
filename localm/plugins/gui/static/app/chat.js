@@ -130,7 +130,7 @@ export async function compactConversation(conv) {
                        : "Older messages trimmed (summarisation unavailable)";
   toast(lostBranches
     ? `${base} (${lostBranches} alternative branch${lostBranches > 1 ? "es" : ""} `
-      + "from the older messages were archived)"
+      + `from the older messages ${lostBranches > 1 ? "were" : "was"} archived)`
     : base);
   return true;
 }
