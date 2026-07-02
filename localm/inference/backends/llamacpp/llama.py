@@ -154,6 +154,14 @@ class _Tokenizer:
         if n < 0:
             buf = ctypes.create_string_buffer(-n + 4)
             n = api.llama_token_to_piece(self._vocab, token, buf, len(buf), 0, True)
+            if n < 0:
+                # The retry buffer is sized from the first call's answer, so a
+                # correct runtime cannot land here; a still-negative n means the
+                # decode genuinely failed. Slicing buf.raw[:n] with a negative n
+                # would silently return garbage bytes instead (rule 5).
+                raise RuntimeError(
+                    f"llama_token_to_piece failed for token {token} (returned {n})"
+                )
         return buf.raw[:n]
 
     def token_to_piece(self, token: int) -> str:
@@ -240,15 +248,17 @@ def _apply_model_template(model_ptr: int, messages: List[Dict]) -> str:
     buf = ctypes.create_string_buffer(buf_size)
     needed = api.llama_chat_apply_template(tmpl_bytes, chat_arr, n, True, buf, buf_size)
 
-    if needed < 0:
-        # Template not supported - fall back
+    if needed <= 0:
+        # Template not supported (< 0) or it rendered nothing (== 0): an empty
+        # prompt would silently generate from thin air - fall back
         return _format_chatml(messages)
 
     if needed > buf_size:
         # Reallocate and retry
         buf = ctypes.create_string_buffer(needed + 64)
         needed = api.llama_chat_apply_template(tmpl_bytes, chat_arr, n, True, buf, len(buf))
-        if needed < 0:
+        if needed <= 0:
+            # Same guard as above: a failed or empty render falls back
             return _format_chatml(messages)
 
     return buf.raw[:needed].decode("utf-8", errors="replace")
