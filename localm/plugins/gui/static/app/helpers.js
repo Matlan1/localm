@@ -11,6 +11,28 @@
 
 export const $ = (id) => document.getElementById(id);
 
+// Read a JSON value from localStorage without letting a CORRUPT entry crash the
+// caller. A plain `JSON.parse(localStorage.getItem(k) || "[]")` collapses two
+// different cases into one: a MISSING key (normal first run) and a PRESENT-but-
+// malformed value (partial/truncated write, quota loss, a manual/extension edit).
+// The `|| "[]"` only covers the missing case; a corrupt value still throws
+// SyntaxError. When that parse runs at module top level (chat.js state init), the
+// throw aborts the whole ES-module graph and the app boots to a blank shell with
+// no in-app way to recover. Branch the two cases and surface corruption (rule 5:
+// warn, do not silently swallow) instead of failing the boot.
+export function readStoredJSON(key, fallback) {
+  let raw;
+  try { raw = localStorage.getItem(key); }
+  catch (e) { console.warn(`localm: localStorage unavailable for "${key}":`, e); return fallback; }
+  if (raw === null) return fallback;                 // absent - the normal case
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    console.warn(`localm: ignoring corrupt localStorage["${key}"] (kept a blank default):`, e);
+    return fallback;
+  }
+}
+
 // S2: the API key is no longer kept in JS-readable localStorage. Open-mode
 // management uses the per-process shell token (injected as a global, sent as a
 // bearer HEADER); protected mode rides the HttpOnly session cookie set at login
