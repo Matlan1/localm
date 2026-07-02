@@ -54,9 +54,13 @@ export async function refreshModelsPage() {
       use.onclick = async () => {
         use.disabled = true;
         try {
-          await switchModel(m.name);
-          toast("Model switched to " + m.name);
-          refreshModelsPage();
+          const res = await switchModel(m.name);
+          // Superseded: another model was picked while this was loading - the
+          // newer request owns the outcome, so skip the success toast/refresh here.
+          if (!res || res.status !== "superseded") {
+            toast("Model switched to " + m.name);
+            refreshModelsPage();
+          }
         } catch (e) {
           toast("Load failed: " + e.message, true);
         } finally { use.disabled = false; }

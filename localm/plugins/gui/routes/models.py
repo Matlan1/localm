@@ -55,13 +55,19 @@ def register(app: FastAPI, ctx) -> None:
         from localm.config import load_registry
         if req.model not in load_registry():
             raise HTTPException(404, f"Model not registered: {req.model}")
-        if req.model == active_model():
-            return {"status": "already_active", "model": req.model}
+        # Route every switch through the coordinator (switch_engine) so a new
+        # selection PREEMPTS an in-flight load instead of queuing behind it. The
+        # coordinator returns the authoritative status: loaded, already_active, or
+        # superseded (a newer selection took over - not an error). The old early
+        # "== active_model()" shortcut is dropped so a re-select mid-switch cannot
+        # report already_active for a model that is actually being replaced.
         try:
-            await switch_model(req.model)
+            result = await switch_model(req.model)
         except Exception as e:
             raise HTTPException(500, f"Failed to load {req.model}: {e}")
-        return {"status": "loaded", "model": req.model}
+        # A switch_model that does not report a status (a minimal/legacy callable)
+        # still counts as a successful load of the requested model.
+        return result if result is not None else {"status": "loaded", "model": req.model}
 
     @app.get("/api/vram-estimate", dependencies=[Depends(require_scope(scopes.MODELS_READ))])
     async def vram_estimate(model: str = "", n_ctx: int = 4096, n_gpu_layers: int = 99):

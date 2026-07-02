@@ -13,7 +13,7 @@ from typing import Iterator, List, Optional
 
 from rich.console import Console
 
-from .base import BaseBackend
+from .base import BaseBackend, ModelLoadCancelled
 
 console = Console()
 
@@ -48,6 +48,13 @@ class GgufBackend(BaseBackend):
         self.effective_ctx_max: Optional[int] = None   # resolved ceiling of the last load
         self._llm = None
         self._loaded = False
+        self._load_cancel = None         # threading.Event to abort a load mid-flight
+
+    def set_load_cancel(self, event) -> None:
+        """Install (or clear with None) the cancel event honoured by load() via
+        llama.cpp's native load-progress callback, so a superseded switch aborts
+        the load instead of running it to completion."""
+        self._load_cancel = event
 
     @property
     def can_be_multimodal(self) -> bool:
@@ -208,6 +215,11 @@ class GgufBackend(BaseBackend):
         self._check_vram()
         try:
             self._load_native()
+        except ModelLoadCancelled:
+            # Deliberate abort (a newer model selection superseded this load).
+            # Not a failure - propagate as-is so the caller reports "superseded",
+            # never the "native runtime failed to load" error below.
+            raise
         except Exception as exc:
             free = self._free_vram_bytes()
             vram_hint = ""
@@ -257,6 +269,7 @@ class GgufBackend(BaseBackend):
                 n_ctx_max=ctx_max,
                 n_ctx_grow=self.n_ctx_grow,
                 mmproj_path=self.mmproj_path,   # C1: in-process vision via mtmd
+                cancel_event=self._load_cancel,  # abort mid-load if superseded
                 verbose=False,
             )
 

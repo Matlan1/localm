@@ -438,6 +438,12 @@ export async function refreshModels() {
   }
 }
 
+// Switch the active model. Returns the server's status object
+// ({status: "loaded" | "already_active" | "superseded", model, ...}).
+// A "superseded" result means the user selected another model while this one was
+// still loading: the server aborted this load and the newer selection now owns
+// the UI, so we do NOT claim success or reset the status here (that would flash
+// the abandoned model's name). Callers should skip their success toast for it.
 export async function switchModel(model) {
   setStatus("busy", "loading " + model + "…");
   const r = await fetch("/api/models/load", {
@@ -446,14 +452,19 @@ export async function switchModel(model) {
     body: JSON.stringify({ model }),
   });
   if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
-  setStatus("ok", model);
+  const data = await r.json().catch(() => ({ status: "loaded", model }));
+  if (data.status === "superseded") return data;
+  setStatus("ok", data.model || model);
+  return data;
 }
 
 modelSelect.onchange = async () => {
   const model = modelSelect.value;
   try {
-    await switchModel(model);
-    toast("Model switched to " + model);
+    const res = await switchModel(model);
+    // Superseded: a newer selection is now loading - stay quiet and let its own
+    // handler report when it lands, instead of toasting a model we abandoned.
+    if (!res || res.status !== "superseded") toast("Model switched to " + model);
   } catch (e) {
     setStatus("err", "load failed");
     toast("Model load failed: " + e.message, true);

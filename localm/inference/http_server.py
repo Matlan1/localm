@@ -19,6 +19,7 @@ import hmac
 import json
 import secrets
 import sys
+import threading
 import time
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, List, Optional
@@ -32,6 +33,7 @@ from fastapi.responses import (
 from fastapi.security import HTTPBearer
 
 from localm import scopes
+from localm.inference.backends.base import ModelLoadCancelled
 from localm.inference.chat_pipeline import ChatPipeline
 from localm.inference.engine import Engine
 from localm.inference.protocol import (
@@ -45,6 +47,84 @@ _engine: Engine | None = None
 # Inference serialisation - only one request runs inference at a time.
 # Additional requests queue behind this semaphore.
 _inference_sem: asyncio.Semaphore | None = None
+
+# Preemptive model switching (see switch_engine). `_switch_desired` is the model
+# name of the MOST RECENT switch request; `_switch_loading` is the model whose
+# load is currently in flight; `_switch_cancel` aborts that in-flight load. These
+# are read/written only on the event-loop thread inside switch_engine, except the
+# cancel event, which the native load-progress callback reads from the loader
+# thread (threading.Event is thread-safe).
+_switch_desired: Optional[str] = None
+_switch_loading: Optional[str] = None
+_switch_cancel: Optional["threading.Event"] = None
+
+
+async def switch_engine(name: str, make_engine, *, on_active=None) -> dict:
+    """Swap the shared ``_engine`` to *name*, PREEMPTING any in-flight or queued
+    load so the user's latest selection wins immediately.
+
+    Selecting a new model while a previous selection is still loading used to make
+    the server finish loading the abandoned model before even starting the new one
+    (both queued behind the inference semaphore). Here, a newer request instead:
+
+      * records itself as the desired model, and
+      * aborts the in-flight load mid-flight (its native model load stops and
+        returns, instead of running to completion) when it targets a DIFFERENT
+        model, and
+      * drops a queued-but-not-yet-started switch whose target is now stale.
+
+    Still serialised on ``_inference_sem`` so a switch never races a generation
+    onto the GPU. ``make_engine(name)`` builds (does NOT load) the target Engine;
+    ``on_active(name)`` optionally syncs external active-model state when *name*
+    becomes active.
+
+    Returns a status dict:
+      ``{"status": "loaded", "model": name}``          - this call loaded it,
+      ``{"status": "already_active", "model": name}``  - it was already loaded,
+      ``{"status": "superseded", "model": name, "by": <newer>}`` - abandoned; a
+        newer selection owns the load (NOT an error).
+    """
+    global _engine, _switch_desired, _switch_loading, _switch_cancel
+    _switch_desired = name
+    # A newer target arrived: abort the in-flight load, unless it is already
+    # loading THIS same model (then let it finish rather than restart it).
+    if _switch_cancel is not None and _switch_loading != name:
+        _switch_cancel.set()
+
+    loop = asyncio.get_running_loop()
+    async with _inference_sem:
+        # Coalesce: an even-newer request may have superseded us while we waited
+        # for the semaphore - don't load a stale target; let the newest win.
+        if _switch_desired != name:
+            return {"status": "superseded", "model": name, "by": _switch_desired}
+        if _engine is not None and _engine.display_name == name and _engine.loaded:
+            if on_active is not None:
+                on_active(name)
+            return {"status": "already_active", "model": name}
+
+        new_engine = make_engine(name)
+        cancel = threading.Event()
+        _switch_cancel = cancel
+        _switch_loading = name
+        new_engine.set_load_cancel(cancel)   # make the native load abortable
+        try:
+            old = _engine
+            if old is not None and old.loaded:
+                await loop.run_in_executor(None, old.unload)
+            await loop.run_in_executor(None, new_engine.load)
+        except ModelLoadCancelled:
+            # A newer switch aborted us mid-load. Report superseded, not an error.
+            return {"status": "superseded", "model": name, "by": _switch_desired}
+        finally:
+            # Clear the in-flight markers only if they are still OURS (a later
+            # switch may already have installed its own before we got here).
+            if _switch_cancel is cancel:
+                _switch_cancel = None
+                _switch_loading = None
+        _engine = new_engine
+        if on_active is not None:
+            on_active(name)
+        return {"status": "loaded", "model": name}
 
 # Monotonic timestamp of the last inference request, for the optional idle-unload
 # loop (config "idle_unload_seconds"). Touched at the start of each inference
@@ -307,8 +387,7 @@ def mount_gui_surface(app) -> bool:
     def active_model() -> str:
         return _engine.display_name if _engine is not None else ""
 
-    async def switch_model(name: str) -> None:
-        global _engine
+    def _build_engine(name: str) -> Engine:
         from localm.config import load_registry
         from localm.model_manager import get_model_info, get_model_mmproj
         info = get_model_info(name)
@@ -320,18 +399,16 @@ def mount_gui_surface(app) -> bool:
         # next to the GGUF) into the new Engine, the same way the CLI --mmproj flag
         # does - otherwise switching models silently loses image support.
         mmproj = get_model_mmproj(name)
-        new_engine = Engine(
+        return Engine(
             str(m_path),
             display_name=name if name in load_registry() else m_hint,
             mmproj_path=mmproj,
         )
-        loop = asyncio.get_running_loop()
-        async with _inference_sem:
-            old = _engine
-            if old is not None and old.loaded:
-                await loop.run_in_executor(None, old.unload)
-            await loop.run_in_executor(None, new_engine.load)
-            _engine = new_engine
+
+    async def switch_model(name: str) -> dict:
+        # Preemptive switch: a newer selection aborts an in-flight load rather
+        # than waiting for the abandoned model to finish (see switch_engine).
+        return await switch_engine(name, _build_engine)
 
     from localm.plugins.gui.web import attach_gui
     # Claim the mount BEFORE attaching so a re-entrant (or, after some future

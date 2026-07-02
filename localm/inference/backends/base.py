@@ -17,6 +17,17 @@ class UnsupportedInputError(ValueError):
     """
 
 
+class ModelLoadCancelled(Exception):
+    """Raised by ``load()`` when an in-flight model load was deliberately aborted
+    because a newer model selection superseded it (preemptive model switching).
+
+    This is NOT a failure: the user picked a different model while this one was
+    still loading, so the native load is stopped mid-flight to avoid wasting time
+    finishing a model nobody wants. Callers distinguish it from a real load error
+    and report "superseded", not an error.
+    """
+
+
 # Shown to the user when an image is attached to a model that cannot see images.
 # Accurate whether the active model is GGUF (always text-only) or a text-only
 # HuggingFace checkpoint.
@@ -58,7 +69,20 @@ class BaseBackend(ABC):
 
     @abstractmethod
     def load(self) -> None:
-        """Load the model into memory (possibly onto GPU)."""
+        """Load the model into memory (possibly onto GPU).
+
+        May raise :class:`ModelLoadCancelled` if a cancel event installed via
+        :meth:`set_load_cancel` is set during the load (preemptive switching).
+        """
+
+    def set_load_cancel(self, event) -> None:
+        """Install a ``threading.Event`` that, when set during ``load()``, aborts
+        the load mid-flight (raising :class:`ModelLoadCancelled`).
+
+        Best-effort: the default is a no-op, so a backend that cannot abort a
+        partial load simply runs to completion. The GGUF backend honours it via
+        llama.cpp's native load progress callback. ``None`` clears it.
+        """
 
     @abstractmethod
     def unload(self) -> None:
