@@ -524,6 +524,14 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
                 bugreport.install_asyncio_handler(asyncio.get_running_loop())
             except Exception:
                 pass
+        # Plugins register() before this loop existed, so loop-dependent plugin
+        # work (the jobs scheduler) is queued on the manager; run it now that
+        # the loop is up. Without this, no scheduled job ever fired on a stock
+        # server start (memory-audit 2026-07-02, critical C2). attach_engine
+        # runs after create_app, so the manager is resolved at lifespan time.
+        _pm = getattr(app.state, "plugin_manager", None)
+        if _pm is not None:
+            _pm.run_startup_callbacks()
         # Optional idle-unload background task (config "idle_unload_seconds"); it
         # is a cheap no-op while disabled. Cancelled on shutdown so it never
         # outlives the app.

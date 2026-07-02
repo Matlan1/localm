@@ -318,7 +318,33 @@ class PluginHost:
         except ValueError:
             return None                      # declared but missing on disk
 
+    def on_startup(self, callback) -> None:
+        """Run *callback* once the server's event loop is running.
+
+        On a stock server start, plugins register() before uvicorn creates the
+        loop, so loop-dependent work started here (e.g. the jobs scheduler)
+        used to no-op silently and never run (memory-audit 2026-07-02 C2).
+        With no running loop the callback is queued and the app lifespan runs
+        it; with a running loop (plugin enabled at runtime via the management
+        API) it runs immediately, so runtime toggling behaves as before.
+        Failures are logged, never raised (a bad plugin must not take the
+        server down)."""
+        import asyncio
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            self._manager.add_startup_callback(self._spec.name, callback)
+            return
+        try:
+            callback()
+        except Exception as e:
+            _log.warning("plugin %s: on_startup callback failed: %s",
+                         self._spec.name, e)
+
     def unmount(self) -> None:
+        # A plugin disabled before the lifespan ran must not have its deferred
+        # startup work fire later.
+        self._manager.discard_startup_callbacks(self._spec.name)
         for r in self._routes:
             try:
                 self._app.router.routes.remove(r)
@@ -488,8 +514,42 @@ class PluginManager:
         self._discover_errors: dict[str, str] = {}   # bad manifests (reset each discover)
         self._dep_tasks: dict = {}                   # name -> DepInstallTask (GUI installs)
         self._dep_tasks_lock = threading.Lock()
+        # (plugin name, callback) queued by Host.on_startup before the server's
+        # event loop exists; drained once by the app lifespan. See on_startup.
+        self._startup_callbacks: list = []
 
     # ---- discovery (INSTALLED folder only) ---------------------------------
+    # ---- deferred startup work (loop-dependent plugin init) ---------------- #
+    # On a stock `localm serve`/`localm gui`, plugins register() BEFORE uvicorn
+    # creates the event loop, so anything a plugin starts that needs a running
+    # loop (the jobs scheduler) silently never ran (memory-audit 2026-07-02,
+    # critical C2: no scheduled job ever fired on a normally-started server).
+    # Host.on_startup queues such work here; the server lifespan drains it once
+    # the loop exists. Runtime enable (loop already running) executes directly
+    # in Host.on_startup and never lands here.
+
+    def add_startup_callback(self, name: str, callback) -> None:
+        self._startup_callbacks.append((name, callback))
+
+    def discard_startup_callbacks(self, name: str) -> None:
+        """Drop queued callbacks of *name* (plugin unloaded before the lifespan
+        ran) so a disabled plugin's work can never fire later."""
+        self._startup_callbacks = [
+            (n, cb) for n, cb in self._startup_callbacks if n != name]
+
+    def run_startup_callbacks(self) -> None:
+        """Run every queued startup callback once. Called by the app lifespan
+        with the event loop running. Best-effort per callback: one plugin's
+        failure is logged (rule 5: discoverable, not silent) and must not stop
+        the others or the server."""
+        callbacks, self._startup_callbacks = self._startup_callbacks, []
+        for name, cb in callbacks:
+            try:
+                cb()
+            except Exception as e:
+                _log.warning(
+                    "plugin %s: deferred startup callback failed: %s", name, e)
+
     def discover(self) -> dict[str, PluginSpec]:
         """Discover INSTALLED plugins only (the installed folder). The store shelf
         is never discovered - it is just the source for install()."""
