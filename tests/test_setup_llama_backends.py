@@ -139,3 +139,44 @@ def test_resolve_offline_falls_back_to_pinned_tag(monkeypatch):
     assert sl._FALLBACK_TAG in url
     assert backend.replace("amd-rocm", "rocm") in url or "macos" in url
     assert url.startswith(f"https://github.com/{sl._UPSTREAM_REPO}/releases/download/")
+
+
+def test_download_stall_raises_and_restores_timeout(monkeypatch, tmp_path):
+    """A stalled transfer must become a loud ArtifactError, not an infinite
+    hang, and the global socket default timeout must be restored afterward."""
+    import socket
+
+    sentinel = object()
+    monkeypatch.setattr(socket, "getdefaulttimeout", lambda: sentinel)
+    restored = []
+    monkeypatch.setattr(socket, "setdefaulttimeout", lambda v: restored.append(v))
+
+    def _stall(url, dest, hook):
+        # the timeout must be armed to the stall value while the fetch runs
+        assert restored and restored[-1] == sl._DOWNLOAD_STALL_TIMEOUT
+        raise socket.timeout("timed out")
+
+    monkeypatch.setattr(sl.urllib.request, "urlretrieve", _stall)
+
+    with pytest.raises(sl.ArtifactError, match="stalled"):
+        sl._download("https://example.invalid/big.zip", tmp_path / "a.zip")
+
+    # last action was to restore the previous default timeout (the sentinel)
+    assert restored[-1] is sentinel
+
+
+def test_download_restores_timeout_on_success(monkeypatch, tmp_path):
+    """On a normal download the previous socket timeout is still restored."""
+    import socket
+
+    sentinel = object()
+    monkeypatch.setattr(socket, "getdefaulttimeout", lambda: sentinel)
+    restored = []
+    monkeypatch.setattr(socket, "setdefaulttimeout", lambda v: restored.append(v))
+    monkeypatch.setattr(sl.urllib.request, "urlretrieve",
+                        lambda url, dest, hook: None)
+
+    sl._download("https://example.invalid/big.zip", tmp_path / "a.zip")
+
+    assert restored[0] == sl._DOWNLOAD_STALL_TIMEOUT
+    assert restored[-1] is sentinel

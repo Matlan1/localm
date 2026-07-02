@@ -37,6 +37,7 @@ import hashlib
 import json
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tarfile
@@ -102,6 +103,14 @@ _UPSTREAM_BACKENDS = ("vulkan", "cuda", "sycl", "hip", "cpu", "metal")
 # sha256 is the opt-in third guard (we do not hardcode a brittle hash for the
 # live URLs, which move with every upstream release).
 _MIN_ARTIFACT_BYTES = 256 * 1024   # 256 KiB
+
+# Per-read socket timeout for the archive download. urlretrieve honours the
+# default socket timeout as an idle (between-reads) deadline, NOT a total-
+# transfer cap, so a large-but-progressing download is never killed; only a
+# genuinely stalled connection (no bytes for this many seconds) trips it. This
+# turns an indefinite hang on a dropped/throttled transfer into a clear, loud
+# error the caller reports, instead of a frozen progress line with no diagnostic.
+_DOWNLOAD_STALL_TIMEOUT = 60   # seconds
 
 
 class ArtifactError(Exception):
@@ -313,7 +322,19 @@ def _download(url: str, dest: Path) -> None:
             mb = total / 1024 ** 2
             console.print(f"[dim]  {pct:3d}%  ({mb:.0f} MB)[/dim]", end="\r")
 
-    urllib.request.urlretrieve(url, dest, _hook)
+    prev_timeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(_DOWNLOAD_STALL_TIMEOUT)
+    try:
+        urllib.request.urlretrieve(url, dest, _hook)
+    except (socket.timeout, TimeoutError) as e:
+        raise ArtifactError(
+            f"download stalled (no data for {_DOWNLOAD_STALL_TIMEOUT}s) - the "
+            "connection was interrupted or throttled. Retry on a stable network, "
+            "or provision from a local build with 'localm setup-llama --from "
+            "<build-dir>' / '--url <archive-url>'."
+        ) from e
+    finally:
+        socket.setdefaulttimeout(prev_timeout)
     console.print()
 
 
