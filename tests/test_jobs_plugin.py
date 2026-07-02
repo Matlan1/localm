@@ -995,3 +995,140 @@ def test_unmount_discards_queued_startup_callbacks(home):
     host.unmount()
     assert mgr._startup_callbacks == []
     mgr.run_startup_callbacks()        # nothing left; must not raise
+
+
+# --------------------------------------------------------------------------- #
+#  F6 (memory-audit 2026-07-02): scheduled coder job endpoint + cron catch-up #
+# --------------------------------------------------------------------------- #
+
+def test_coder_backend_uses_configured_port_not_8080(home, monkeypatch):
+    """The old hardcoded :8080 never matched the default :8642 bind, so a
+    shipped coder job could not reach the server. With no LOCALM_SELF_URL the
+    backend must target the configured port."""
+    monkeypatch.delenv("LOCALM_SELF_URL", raising=False)
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    import localm.config as cfg
+    monkeypatch.setattr(cfg, "load_config", lambda: {"port": 8642})
+
+    captured = {}
+
+    class _FakeBackend:
+        def __init__(self, url, model=None, api_key=None):
+            captured["url"] = url
+
+    monkeypatch.setattr(
+        "localm.plugins.coder.backends.http.HTTPBackend", _FakeBackend)
+    from localm.plugins.builtin.jobs import runner
+    runner._coder_backend(_make_job(task_kind="coder", cwd=str(home)))
+    assert captured["url"] == "http://127.0.0.1:8642/v1"
+    assert ":8080" not in captured["url"]
+
+
+def test_coder_backend_honours_explicit_self_url(home, monkeypatch):
+    monkeypatch.setenv("LOCALM_SELF_URL", "http://127.0.0.1:8677/v1")
+    captured = {}
+
+    class _FakeBackend:
+        def __init__(self, url, model=None, api_key=None):
+            captured["url"] = url
+
+    monkeypatch.setattr(
+        "localm.plugins.coder.backends.http.HTTPBackend", _FakeBackend)
+    from localm.plugins.builtin.jobs import runner
+    runner._coder_backend(_make_job(task_kind="coder", cwd=str(home)))
+    assert captured["url"] == "http://127.0.0.1:8677/v1"
+
+
+def test_publish_self_url_from_app_state(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.delenv("LOCALM_SELF_URL", raising=False)
+    from localm.plugins.builtin.jobs import plug
+    host = SimpleNamespace(_app=SimpleNamespace(
+        state=SimpleNamespace(instance_port=8699, instance_scheme="http")))
+    plug._publish_self_url(host)
+    import os
+    assert os.environ["LOCALM_SELF_URL"] == "http://127.0.0.1:8699/v1"
+
+
+def test_publish_self_url_does_not_override_env(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("LOCALM_SELF_URL", "http://127.0.0.1:1234/v1")
+    from localm.plugins.builtin.jobs import plug
+    host = SimpleNamespace(_app=SimpleNamespace(
+        state=SimpleNamespace(instance_port=8699, instance_scheme="http")))
+    plug._publish_self_url(host)
+    import os
+    assert os.environ["LOCALM_SELF_URL"] == "http://127.0.0.1:1234/v1"
+
+
+def test_cron_catch_up_fires_a_slot_missed_while_down(home):
+    """A cron slot that passed while the server was down runs ONCE on restart
+    (the docs promise it; cron used to silently skip it)."""
+    from localm.plugins.builtin.jobs.scheduler import JobScheduler
+    from localm.plugins.builtin.jobs.store import JobStore
+    sched = JobScheduler(JobStore())
+    # Daily 09:00 job that last ran yesterday 09:00; "now" is today 09:05, so
+    # today's 09:00 slot was missed while the server was down.
+    job = _make_job(schedule_kind="cron", schedule="0 9 * * *",
+                    last_run=_at(2026, 6, 16, 9, 0))
+    now = _at(2026, 6, 17, 9, 5)
+    assert sched.due(job, now) is True
+
+
+def test_cron_no_catch_up_for_never_run_job(home):
+    """A freshly created cron job never back-fires history: it waits for its
+    next real slot."""
+    from localm.plugins.builtin.jobs.scheduler import JobScheduler
+    from localm.plugins.builtin.jobs.store import JobStore
+    sched = JobScheduler(JobStore())
+    job = _make_job(schedule_kind="cron", schedule="0 9 * * *", last_run=None)
+    now = _at(2026, 6, 17, 15, 0)          # 3pm, past today's 9am slot
+    assert sched.due(job, now) is False
+
+
+def test_cron_no_catch_up_beyond_window(home):
+    """A cron slot whose most recent occurrence is more than 24h before now is
+    too stale to back-fire (a weekly job on a machine off for days)."""
+    import datetime as _dt
+
+    from localm.plugins.builtin.jobs.scheduler import JobScheduler
+    from localm.plugins.builtin.jobs.store import JobStore
+    sched = JobScheduler(JobStore())
+    # Find a Monday, then set "now" to the Wednesday 3 days later at noon, so the
+    # most recent "Monday 09:00" slot is ~2.1 days before now (> the 24h window).
+    d = _dt.date(2026, 6, 15)
+    while d.weekday() != 0:                 # 0 = Monday
+        d += _dt.timedelta(days=1)
+    monday_9 = _at(d.year, d.month, d.day, 9, 0)
+    now = _at(d.year, d.month, d.day, 9, 0) + 2 * 86400 + 3 * 3600   # +2d3h = Wed 12:00
+    job = _make_job(schedule_kind="cron", schedule="0 9 * * 1",
+                    last_run=monday_9 - 7 * 86400)      # last ran the prior Monday
+    assert sched.due(job, now) is False
+
+
+def test_cron_no_catch_up_when_no_slot_missed(home):
+    """No spurious catch-up: a daily job whose next slot is still in the future
+    (now is before today's slot) must not fire."""
+    from localm.plugins.builtin.jobs.scheduler import JobScheduler
+    from localm.plugins.builtin.jobs.store import JobStore
+    sched = JobScheduler(JobStore())
+    job = _make_job(schedule_kind="cron", schedule="0 9 * * *",
+                    last_run=_at(2026, 6, 16, 9, 0))    # yesterday 09:00
+    now = _at(2026, 6, 17, 8, 0)           # today 08:00, before the 09:00 slot
+    assert sched.due(job, now) is False
+
+
+def test_cron_current_minute_still_fires_once(home):
+    """The normal same-minute cron path is unchanged: fires once, then the
+    per-minute dedup blocks a second sub-minute poll."""
+    from localm.plugins.builtin.jobs.scheduler import JobScheduler
+    from localm.plugins.builtin.jobs.store import JobStore
+    sched = JobScheduler(JobStore())
+    job = _make_job(schedule_kind="cron", schedule="0 9 * * *",
+                    last_run=_at(2026, 6, 16, 9, 0))
+    now = _at(2026, 6, 17, 9, 0)
+    assert sched.due(job, now) is True
+    sched._cron_fired[job.id] = int(now // 60) * 60     # mark fired this minute
+    assert sched.due(job, now) is False

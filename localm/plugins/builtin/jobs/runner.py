@@ -252,12 +252,23 @@ def _run_coder(job: Job, *, engine=None) -> str:
 
 def _coder_backend(job: Job):
     """Build the HTTP backend the coder Agent talks to. Points at this machine's
-    localm server (LOCALM_SELF_URL or the default local address)."""
+    localm server.
+
+    URL resolution, most-authoritative first: LOCALM_SELF_URL (the live server
+    publishes its OWN bind coordinates here at scheduler start, so an
+    auto-bumped port is honoured), else the configured port. The old hardcoded
+    :8080 was simply wrong - the default server binds 8642 - so a shipped coder
+    job never reached the server on a stock install (memory-audit 2026-07-02).
+    In open mode any api_key is accepted; in keyed mode the launcher injects
+    LOCALM_API_KEY, so that is preferred over the open-mode placeholder."""
     import os
 
     from localm.plugins.coder.backends.http import HTTPBackend
 
-    self_url = (os.environ.get("LOCALM_SELF_URL")
-                or "http://127.0.0.1:8080/v1")
+    self_url = os.environ.get("LOCALM_SELF_URL")
+    if not self_url:
+        from localm.config import load_config
+        port = load_config().get("port", 8642)
+        self_url = f"http://127.0.0.1:{port}/v1"
     api_key = os.environ.get("LOCALM_API_KEY") or "localm"
     return HTTPBackend(self_url, model=job.model or "localm", api_key=api_key)
