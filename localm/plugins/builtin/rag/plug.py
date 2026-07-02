@@ -31,7 +31,28 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from localm.textguard import neutralise
+
 _router = APIRouter()
+
+
+def _neutralise_hits(hits: list) -> list:
+    """Defang chat control / frame tokens in each retrieved chunk's text before it
+    leaves the retrieval boundary (LM-DA-SEC-03, indirect prompt injection).
+
+    A retrieved chunk is UNTRUSTED content: the owner indexed the file, but its
+    CONTENT is not trusted - a crafted or malicious document could embed control
+    tokens (``<|im_start|>system ...``) or frame markers to forge a role or inject
+    instructions when the chunk is spliced into the chat prompt. Untrusted tool
+    output (fetch_url / web_search / MCP) is already neutralised via the coder
+    provenance layer; RAG retrieval had no equivalent gate. Neutralising here means
+    EVERY consumer (the GUI's chat injection, the KB search view, any future tool)
+    gets defanged content by construction. Non-text fields (source / pos / score)
+    are metadata and left untouched."""
+    for h in hits:
+        if isinstance(h, dict) and isinstance(h.get("text"), str):
+            h["text"] = neutralise(h["text"])
+    return hits
 
 
 class RagCreateRequest(BaseModel):
@@ -189,7 +210,9 @@ async def rag_query(name: str, req: RagQueryRequest, request: Request):
     loop = asyncio.get_running_loop()
     hits = await loop.run_in_executor(
         None, lambda: coll.query(req.query, k=k, embed_fn=self_embed))
-    return {"collection": name, "query": req.query, "hits": hits}
+    # Defang control/frame tokens in the untrusted chunk text before it can be
+    # spliced into a chat prompt (indirect prompt injection - LM-DA-SEC-03).
+    return {"collection": name, "query": req.query, "hits": _neutralise_hits(hits)}
 
 
 @_router.post("/api/rag/collections/{name}/remove-doc")
