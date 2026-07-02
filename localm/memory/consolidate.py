@@ -55,6 +55,14 @@ NEAR_DUP_RATIO = 0.90       # candidate ~= existing -> NO_OP without an LLM call
 MATCH_THRESHOLD = 0.7
 UPDATE_MIN_CONF = 0.7       # below this, an UPDATE is downgraded to ADD (keep both)
 SYNTH_IMP_CAP = 0.85        # synth memories never reach user-confirmed importance
+# Semantic-match gate (F9): when the lexical ratio is below MATCH_THRESHOLD but
+# an embedder is present, a candidate whose cosine to an existing record clears
+# this still goes to the ADD/UPDATE/DELETE decision, so a PARAPHRASED
+# contradiction ('lives in Berlin' vs 'moved to Munich') is resolved instead of
+# accumulating. Set high enough that only genuinely related facts reach the LLM
+# (an unrelated fact scores well below this), mirroring the coder episode recall
+# cosine floor.
+SEMANTIC_MATCH_THRESHOLD = 0.60
 
 _EXTRACT_PROMPT = (
     "You maintain a long-term memory of DURABLE, reusable facts about a user, "
@@ -348,7 +356,18 @@ def run_consolidation(store: MemoryStore, session_text: str, complete: Complete,
 
         idx, ratio = _nearest(text, working)
         matched = working[idx] if idx >= 0 else None
-        if matched is None or ratio < MATCH_THRESHOLD:
+        # When the LEXICAL matcher finds nothing close, ask the SEMANTIC matcher:
+        # a paraphrased contradiction shares few tokens (low ratio) but is
+        # cosine-near an existing fact, so it must reach the decide step rather
+        # than blind-ADD a second, conflicting record (F9). Only used when an
+        # embedder is present; falls back to the lexical-only behavior otherwise.
+        semantic_hit = False
+        if (matched is None or ratio < MATCH_THRESHOLD) and embed_fn is not None:
+            sidx, sscore = store.semantic_nearest(text, working, embed_fn)
+            if sidx >= 0 and sscore >= SEMANTIC_MATCH_THRESHOLD:
+                matched = working[sidx]
+                semantic_hit = True
+        if matched is None or (ratio < MATCH_THRESHOLD and not semantic_hit):
             decision = "ADD"
         elif ratio > NEAR_DUP_RATIO:
             decision = "NO_OP"                    # deterministic dedupe, no LLM
