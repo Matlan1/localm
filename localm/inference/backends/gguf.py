@@ -358,11 +358,15 @@ class GgufBackend(BaseBackend):
         if messages_contain_image(messages) and not self.supports_images:
             raise UnsupportedInputError(IMAGE_UNSUPPORTED_MESSAGE)
 
-        # Some native llama.dll builds ship a grammar sampler that faults at
-        # sample time (a C++ exception across the C ABI) without harming the
-        # loaded model. Once we have seen that on this build, skip grammar
-        # up-front and generate unconstrained - the same soft-degrade contract
-        # the HF backend offers - so a grammar request never breaks chat.
+        # Safety net for a native build whose grammar sampler genuinely faults
+        # at sample time (a C++ exception across the C ABI) without harming
+        # the loaded model: skip grammar up-front once seen and generate
+        # unconstrained - the same soft-degrade contract the HF backend
+        # offers - so a grammar request never breaks chat. NOTE: the fault
+        # this path was originally written for turned out to be OUR bug (a
+        # redundant llama_sampler_accept after llama_sampler_sample, fixed in
+        # llama.py's _generate) - grammar works on the bundled build now; this
+        # stays as a fallback for truly grammar-less builds.
         if grammar and getattr(self, "_grammar_unsupported", False):
             console.print(
                 "[yellow]grammar is not supported by this native llama build; "
