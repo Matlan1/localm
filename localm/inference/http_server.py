@@ -220,23 +220,23 @@ async def _idle_unload_loop() -> None:
 # Optional bearer-token auth - enabled when LOCALM_API_KEY is set.
 _bearer_scheme = HTTPBearer(auto_error=False)
 
-# S2: the browser GUI authenticates with an HttpOnly session cookie (the API key
-# the page JS can no longer read) instead of localStorage. Cookie-sourced auth on
-# a state-changing method must echo the readable CSRF cookie in this header
-# (double-submit); the Authorization-header path (CLI / SDK / coder) cannot be
-# forged cross-site and is therefore CSRF-exempt.
+# S2: the browser GUI authenticates with an HttpOnly session cookie whose value is
+# an OPAQUE session id (localm.sessions), NOT the API key - the page JS can never
+# read it, and rolling the key does not invalidate it. Cookie-sourced auth on a
+# state-changing method must additionally carry a CSRF token in this header; the
+# token is an HMAC DERIVED from the session (csrf_token_for / _csrf_ok), fetched by
+# the client from GET /api/session, so it is always in lockstep with the session and
+# cannot desync (there is NO separate CSRF cookie). The Authorization-header path
+# (CLI / SDK / coder) cannot be forged cross-site and is therefore CSRF-exempt.
 SESSION_COOKIE = "localm_session"
-CSRF_COOKIE = "localm_csrf"
 CSRF_HEADER = "X-CSRF-Token"
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
-# SEAMLESS: the auth cookies PERSIST so the user stays signed in across a browser
-# or PWA restart, instead of being session cookies the browser drops on close
+# SEAMLESS: the session cookie PERSISTS so the user stays signed in across a browser
+# or PWA restart, instead of being a session cookie the browser drops on close
 # (which made the key gate - and its "Install certificate" step - reappear every
-# time, the "install a new cert / re-enter the key every restart" report).
-# Browsers clamp cookie lifetime to ~400 days, so we ask for that ceiling; the
-# escape hatch is the existing /api/session/logout (Settings: leave the key blank
-# and Save). Both cookies MUST share this lifetime, or the readable CSRF token
-# would expire before the session and bounce the user mid-use.
+# time, the "install a new cert / re-enter the key every restart" report). Browsers
+# clamp cookie lifetime to ~400 days, so we ask for that ceiling; the escape hatch is
+# /api/session/logout (Settings: leave the key blank and Save).
 SESSION_MAX_AGE = 400 * 24 * 3600  # ~400 days (the browser cap)
 
 
@@ -342,7 +342,7 @@ def _enforce_request(request: Request, scope: Optional[str]) -> None:
     key is required - from the Authorization header OR the session cookie - and
     *scope* (None = 'any valid key') must be granted (the owner key implies every
     scope). Cookie-sourced auth on an unsafe method additionally requires a valid
-    double-submit CSRF token."""
+    CSRF token (an HMAC derived from the session)."""
     from localm.auth import any_key_configured, require_auth_enabled
     if not any_key_configured():
         if require_auth_enabled():
