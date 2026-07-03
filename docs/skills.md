@@ -3,9 +3,8 @@
 The coder agent can discover and use **Agent Skills** - folders containing a
 `SKILL.md` file (the same format used by Claude/Agent skills). A skill is a piece
 of reusable, on-demand know-how: a markdown instruction body plus optional bundled
-scripts and reference files. This is localm's first third-party plugin-ecosystem
-importer (see [docs/plugin-interop.md](plugin-interop.md)); it needs no new server
-surface and rides the coder agent's existing tools.
+scripts and reference files. It is localm's first third-party plugin-ecosystem
+importer (see [docs/plugin-interop.md](plugin-interop.md)).
 
 ## Where skills live
 
@@ -28,8 +27,7 @@ Skills are something you provide; localm ships no built-in catalog. Write your
 own (just a `SKILL.md` plus any helper files), or get one from a colleague or a
 public repo. To install a skill, drop its folder into the global skills dir
 (reusable everywhere) or a project's `.localcoder/skills/`; to share one, copy
-the folder out. Review any skill from an unknown source first (see the security
-note below).
+the folder out. Review any skill from an unknown source first (see [Security](#security)).
 
 ## The `SKILL.md` format
 
@@ -50,8 +48,6 @@ To fill a PDF form:
 3. ...
 ```
 
-(localm parses the simple flat frontmatter itself, so no YAML dependency is added.)
-
 ## How the agent uses skills
 
 When at least one skill is present, the coder agent gains two read-only tools and
@@ -63,8 +59,7 @@ follows **progressive disclosure** - it only pulls in what a task needs:
   skill folder (confined to that folder).
 
 The agent runs bundled scripts with its normal `run_shell` using the folder path
-the skill reports. When no skills exist, neither tool is registered, so the feature
-has zero footprint until you add one.
+the skill reports. With no skills present, the feature is inactive until you add one.
 
 ## Security
 

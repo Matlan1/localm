@@ -30,7 +30,7 @@ localm mcp --model NAME      # default model (else LOCALM_MODEL env, else first 
 localm mcp --no-images       # hide the image tool
 ```
 
-The model loads lazily on the first tool call, so client startup stays instant. All logging goes to stderr; stdout carries only protocol frames.
+The model loads on the first tool call, so client startup stays instant. All logging goes to stderr; stdout carries only protocol frames.
 
 ## Quick start: expose localm to Claude Desktop
 
@@ -67,20 +67,7 @@ The output looks like:
 
 ### Step 3: Paste into Claude Desktop config
 
-Open the config file in your editor and merge the `mcpServers` block into the existing config (if the file is new, paste the entire block). Example config after setup:
-
-```json
-{
-  "mcpServers": {
-    "localm": {
-      "command": "localm",
-      "args": ["mcp"]
-    }
-  }
-}
-```
-
-If you have other MCP servers configured, add localm as another entry under `mcpServers`.
+Open the config file in your editor and paste the block from Step 2 (if the file is new, paste it whole). If you have other MCP servers configured, add localm as another entry under `mcpServers`.
 
 ### Step 4: Restart Claude Desktop
 
@@ -97,7 +84,7 @@ The tool appears in the tool call panel with the model's response.
 
 ## Coder + external MCP servers
 
-The coder agent (localm coder) can load external MCP servers alongside localm's tools. This lets you use specialized tools (file search, database query, API calls) without writing Python.
+The coder agent (localm coder) can load external MCP servers alongside localm's tools, adding specialized tools (file search, database query, API calls).
 
 ### Add a server to the project config
 
@@ -137,15 +124,13 @@ Run the coder in verbose mode to see MCP startup:
 localm coder --verbose
 ```
 
-A server that starts cleanly prints nothing here: its tools simply appear in the agent's tool list (named `mcp_<server>_<tool>` and listed in the system prompt). Confirm a server loaded by checking that its tools are offered, for example `mcp_fs_search`.
+A server that starts cleanly prints nothing here: its tools simply appear in the agent's tool list (named `mcp_<server>_<tool>` and listed in the system prompt). Confirm it loaded by checking its tools are offered, for example `mcp_fs_search`.
 
-If a server fails to start, the coder prints a warning and continues, for example:
+If a server fails to start, the coder prints a warning and continues - MCP problems never break the agent. For example:
 
 ```
 MCP server 'search': command not found: npx
 ```
-
-The coder continues anyway - MCP problems never break the agent.
 
 ### Security: trusted vs. untrusted
 
@@ -223,13 +208,7 @@ If the server is a Python script, verify it can run standalone:
 python my_search_server.py
 ```
 
-It should print nothing and wait for JSON-RPC input (then hang - kill it with Ctrl+C).
-
-If it errors, install missing packages:
-
-```bash
-pip install -r requirements.txt
-```
+A healthy server waits for input (no output); if it errors instead, install its missing packages.
 
 **Check the args:**
 
@@ -251,17 +230,11 @@ In verbose mode:
 localm coder --verbose
 ```
 
-If a server failed to start, a yellow warning line naming it appears at startup (see "MCP server fails to start" above). A server that started cleanly is silent, so confirm it with the tool-name and tool-list checks below.
+If a server failed to start, a yellow warning line naming it appears at startup (see "MCP server fails to start" above). A clean server is silent (see "Verify tools loaded"), so confirm it with the tool-name check below.
 
 **Check the tool name:**
 
-The registered name is `mcp_<server>_<tool>`, where `<tool>` is the tool's name from the server (not your invention). Run the server directly to see its tool list:
-
-```bash
-python my_search_server.py
-```
-
-It prints JSON-RPC messages. Send an `initialize` request (you may have to script this; see the localm source at `localm/plugins/coder/mcp.py` for an example).
+The registered name is `mcp_<server>_<tool>`, where `<tool>` is the tool's name from the server (not your invention). Consult the server's own docs for its tool names.
 
 **Is the tool marked destructive?**
 

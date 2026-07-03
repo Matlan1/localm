@@ -22,12 +22,8 @@ localm's HTTPS certificate, so once you have trusted its local CA
 
 ### Why `.local` and not a bare `localm`
 
-A bare, suffix-less `localm` is **not** reliably resolvable from another machine:
-single-label name resolution depends on each device's DNS search suffix or on
-Windows-only protocols (LLMNR / NetBIOS), and even then it points at the
-*machine's* hostname, not an app-chosen name. The `.local` (mDNS) name is the
-portable, cross-platform mechanism that works the same everywhere, which is why
-that is what localm guarantees.
+A bare, suffix-less `localm` is **not** reliably resolvable from another machine,
+so localm guarantees the portable, cross-platform `.local` (mDNS) name instead.
 
 ### Renaming or turning it off
 
@@ -65,8 +61,8 @@ tailscale up --hostname=localm
 ```
 
 localm prints this exact command as a hint at startup when the node is not
-already named to match your `mdns_name`. It never runs it for you: your Tailscale
-node name is your choice, and changing it affects how every device addresses this
+already named to match your `mdns_name`. It never runs it for you, since the node
+name is your choice and changing it affects how every device addresses this
 machine.
 
 ## Security notes

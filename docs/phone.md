@@ -2,10 +2,9 @@
 
 localm's web GUI is an installable PWA, so your phone can run it as an app. There
 is **no app-store download and no localm cloud**: the app is served by *your*
-localm server, and the phone talks straight to your machine. (This is how every
-self-hosted app works - the good model stays on your box, the phone is just the
-terminal.) So the only real questions are *how the phone reaches your server* and
-*how you open the right address*.
+localm server, and the phone talks straight to your machine. So the only real
+questions are *how the phone reaches your server* and *how you open the right
+address*.
 
 ## The short version
 
@@ -41,9 +40,8 @@ terminal.) So the only real questions are *how the phone reaches your server* an
      advertisement off with `localm config mdns_enabled false`.
    - *Tip (experimental PoC):* `localm gui -H 0.0.0.0 --qr` prints a scannable QR
      of the address so you can point the phone camera at the terminal instead of
-     typing it. Needs only a terminal that renders block glyphs (Windows Terminal
-     is fine); the `qrcode` dependency ships with the base install, so no extra is
-     required. This is a proof-of-concept and may change.
+     typing it. Needs a terminal that renders block glyphs (Windows Terminal is
+     fine).
 3. **Trust the certificate once.** Because localm signs its certificate with its
    own local CA (not a public one), the first visit shows a one-time "not secure"
    warning - this is a browser rule for any private certificate on a raw IP, not a
@@ -57,16 +55,12 @@ terminal.) So the only real questions are *how the phone reaches your server* an
    gets its own icon.
 
 > **Why the trust step exists.** A *true* installed PWA (offline app shell, real
-> app icon) needs a "secure context" - HTTPS or `localhost`. localm gives you the
-> HTTPS automatically; the only manual part is trusting its certificate once per
-> device, because no public certificate authority will issue a cert for a private
-> LAN IP. After the one-time trust, the full install works.
+> app icon) needs a "secure context" - HTTPS or `localhost`. localm serves the
+> HTTPS automatically; the one manual part is the one-time certificate trust above.
 
 ## From anywhere (remote): Tailscale (recommended)
 
-Reaching a home server from *outside* your network is the genuinely hard part,
-and it is the same for every self-hosted app - no project solves it for casual
-users without running a paid cloud relay. The cleanest path that needs no
+Remote access needs a private network. The cleanest path that needs no
 port-forwarding, no domain, and no certificate wrangling is
 [Tailscale](https://tailscale.com) (free for personal use):
 
@@ -95,20 +89,18 @@ port-forwarding** - it is the classic way to expose a machine you did not mean t
 ## Security
 
 Binding past loopback exposes the coder agent (shell + file edits) and the API.
-Always set `LOCALM_API_KEY` before `-H 0.0.0.0`; localm refuses to bind to the
-network without a key unless you pass `--insecure`. Traffic itself is encrypted by
-built-in TLS by default (`--no-tls` turns it off for a trusted, isolated LAN). On
-a trusted home LAN a key plus the built-in TLS is enough; for anything reachable
-from the internet use Tailscale or a TLS reverse proxy with a real certificate.
-See [network.md](network.md) and [tls.md](tls.md).
+Set `LOCALM_API_KEY` before `-H 0.0.0.0`; localm refuses to bind to the network
+without a key unless you pass `--insecure`. Traffic is encrypted by built-in TLS
+by default (`--no-tls` turns it off for a trusted, isolated LAN). On a trusted
+home LAN a key plus built-in TLS is enough; for anything reachable from the
+internet use Tailscale or a TLS reverse proxy with a real certificate. See
+[network.md](network.md).
 
 ## What localm does NOT do (on purpose)
 
 - **No native app-store app.** The PWA covers the phone experience without an
-  app-store account or a second codebase to maintain. Most local-LLM tools have
-  no phone story at all; the closest peer that does (Open WebUI) also ships a PWA.
-- **No localm cloud relay.** Vendor relays (Home Assistant's Nabu Casa, Plex,
-  Synology QuickConnect) make remote access one-click, but they require running
-  paid infrastructure and routing your traffic through a third party. localm stays
-  local-first; Tailscale gives you the same "works from anywhere" without anyone
-  else in the data path.
+  app-store account or a second codebase to maintain.
+- **No localm cloud relay.** A vendor relay makes remote access one-click, but it
+  requires paid infrastructure and routes your traffic through a third party.
+  localm stays local-first; Tailscale gives you the same "works from anywhere"
+  without anyone else in the data path.

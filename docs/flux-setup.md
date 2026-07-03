@@ -2,12 +2,10 @@
 
 localm generates images through a local ComfyUI instance running a FLUX
 GGUF workflow. Everything runs on your own GPU; nothing leaves the machine.
-This guide covers the setup for a 16 GB VRAM card and how localm drives it.
-
-localm drives ComfyUI over HTTP; you do not need to learn the ComfyUI UI.
-The integration handles VRAM handoff, model loading, and output retrieval
-automatically - you just ask for images through localm's chat, CLI, or MCP
-interface.
+localm drives ComfyUI over HTTP (VRAM handoff, model loading, and output
+retrieval are automatic); you do not need to learn the ComfyUI UI, just ask
+for images through localm's chat, CLI, or MCP interface. This guide covers the
+setup for a 16 GB VRAM card and how localm drives it.
 
 ## ComfyUI setup
 
@@ -27,9 +25,7 @@ this and manages plugins.
 ### 2. Install the ComfyUI-GGUF extension
 
 Add support for GGUF quantized models (FLUX with lower VRAM overhead) by
-installing the ComfyUI-GGUF extension. This extension enables GGUF model
-loading and dequantization in ComfyUI workflows, letting FLUX run on consumer
-GPUs.
+installing the ComfyUI-GGUF extension.
 
 ```bash
 git clone https://github.com/city96/ComfyUI-GGUF ComfyUI/custom_nodes/ComfyUI-GGUF
@@ -96,6 +92,10 @@ localm config comfy_workdir "D:\path\to\ComfyUI"
 localm respects the `FLUX_API_URL` environment variable if you need to override
 the default `http://127.0.0.1:8188`. Otherwise it auto-detects ComfyUI's URL.
 
+To have localm clean up ComfyUI's duplicate output copy after each generation,
+set the `comfy_output_dir` config key (or `COMFY_OUTPUT_DIR` env var) to
+ComfyUI's own output folder.
+
 ## Performance notes
 
 Quantized FLUX dev (Q8_0) generates in roughly 30 to 60 seconds on a 16 GB
@@ -105,15 +105,13 @@ NVIDIA card with CUDA. Performance varies by hardware:
 - **AMD (ROCm):** 60-120 seconds (cold start compiles GPU kernels; subsequent runs faster)
 - **Vulkan (universal):** varies by GPU model
 
-These numbers are typical but not guaranteed; actual time depends on your
-specific hardware, driver, and system load. For AMD hardware, see the
-ROCm/HIP setup notes in [gpu-setup.md](gpu-setup.md).
+These numbers are typical, not guaranteed. For AMD hardware, see the ROCm/HIP
+setup notes in [gpu-setup.md](gpu-setup.md).
 
 ## How localm drives it
 
-Each frontend is provided by a plugin and shares the same pipeline
-(`localm/image_gen/comfy.py`); a frontend appears only when its plugin is
-installed and enabled:
+Each frontend is provided by a plugin and shares the same pipeline; a frontend
+appears only when its plugin is installed and enabled:
 
 - The `image` plugin: its Images page in the GUI (`localm gui`) and the
   image-generation chat slash command
@@ -123,12 +121,8 @@ installed and enabled:
 
 Features handled for you:
 
-- **VRAM handover**: before generation, localm unloads the LLM
-  (`POST /v1/models/unload`, waiting for any in-flight reply to finish) so
-  FLUX gets the full VRAM budget. After generation, ComfyUI is asked to
-  release its models (`POST /free`) and the LLM reloads immediately; on
-  older ComfyUI builds without `/free`, the reload stays lazy and happens
-  on the next chat request instead.
+- **VRAM handover**: before generation, localm unloads the LLM so FLUX gets
+  the full VRAM budget, then reloads it after ComfyUI releases its models.
 - **Fail-fast probe**: ComfyUI is probed before the LLM is unloaded, so an
   unreachable server costs nothing. With `comfy_launch_cmd` set, localm
   starts ComfyUI itself and waits for it to come up.
@@ -137,9 +131,8 @@ Features handled for you:
   settings is written next to every output image.
 - **img2img**: pass an input image and a denoise strength; output
   dimensions match the input.
-- Optional negative prompts (a real negative branch via classifier-free
-  guidance / `CFGGuider`, not conditioning concat), LoRA injection, and
-  encoder overrides are supported as tool parameters.
+- Optional negative prompts, LoRA injection, and encoder overrides are
+  supported as tool parameters.
 
 ## Safety filtering
 
@@ -154,9 +147,7 @@ the vanilla public FLUX stack (`flux1-dev-Q8_0.gguf`, `clip_l`,
 node graph, export your workflow from ComfyUI (Save -> API format) as
 `localm/image_gen/flux_workflow.json` - it takes precedence automatically
 and is **gitignored**, so which models you actually run never leaves your
-machine. The same applies to ComfyUI's own output folder: set the
-`comfy_output_dir` config key (or `COMFY_OUTPUT_DIR` env var) if you want
-localm to clean up ComfyUI's duplicate copy after each generation.
+machine.
 
 Suggested host stack: Stability Matrix managing ComfyUI - on RDNA2 (RX 6xxx)
 combine it with the ROCm/HIP fixes described in the GPU setup section of the

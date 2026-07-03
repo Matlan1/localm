@@ -6,13 +6,15 @@ The installer detects your GPU and provisions the matching llama.cpp backend; yo
 can also do it (or change it) directly:
 
 ```bash
-localm setup-llama                      # auto-detect and pick the right backend
-localm setup-llama --backend vulkan     # any GPU (AMD/NVIDIA/Intel), no toolkit
-localm setup-llama --backend cuda       # NVIDIA, peak perf (Windows: fetches the runtime for you)
-localm setup-llama --backend amd-rocm   # AMD RX 6000 (gfx103X), self-contained
+localm setup-llama                      # auto-detect
+localm setup-llama --backend vulkan     # any GPU
+localm setup-llama --backend cuda       # NVIDIA
+localm setup-llama --backend amd-rocm   # AMD RX 6000 (gfx103X)
 localm setup-llama --backend cpu        # no GPU
-localm setup-llama --from <build dir>   # your own llama.cpp build (any backend)
+localm setup-llama --from <build dir>   # your own llama.cpp build
 ```
+
+See the table below for what each backend needs and when to pick it.
 
 | Backend | Runs on | Notes |
 |---|---|---|
@@ -68,9 +70,9 @@ cmake --build build --config Release -j8
 Output: `build\bin\Release\llama.dll` and sibling `ggml*.dll` files.
 
 > `-DAMDGPU_TARGETS=gfx1030` targets RX 6000 (RDNA2). For another AMD GPU set it to
-> your card's gfx arch (e.g. `gfx1100` for RX 7000 / RDNA3, `gfx1010` for RX 5000 /
-> RDNA1). On Linux, `localm setup-llama --backend hip` builds against the installed
-> ROCm/HIP runtime instead of bundling one.
+> your card's gfx arch (e.g. `gfx1100` for RX 7000 / RDNA3). On Linux,
+> `localm setup-llama --backend hip` builds against the installed ROCm/HIP runtime
+> instead of bundling one.
 
 ### Verify GPU is being used
 
@@ -96,16 +98,10 @@ recommends.
 For peak performance pick `--backend cuda`. On **Windows** this is a guided,
 self-contained path: setup checks your driver, then fetches BOTH the CUDA
 `llama` build and the matching `cudart` runtime bundle from the same llama.cpp
-release, so **you do not need to install the CUDA Toolkit**. The dialogue covers:
-
-- **Driver new enough** (supports CUDA >= 12.4): it offers to download the build
-  + runtime (a few hundred MB) and sets it up.
-- **Driver too old**: the GPU driver is the one piece setup cannot fetch for you
-  (it needs admin + a reboot). Setup points you at NVIDIA's driver download and
-  uses Vulkan for now so you are not stuck; re-run
-  `localm setup-llama --backend cuda --force` after updating.
-- **No NVIDIA detected** but you chose CUDA anyway: it proceeds at your request
-  (a one-time heads-up), or you can take Vulkan.
+release, so **you do not need to install the CUDA Toolkit** (needs CUDA >= 12.4).
+Setup checks your driver and, if it is too old or no NVIDIA is found, uses Vulkan
+for now and tells you what to do; after updating a driver, re-run
+`localm setup-llama --backend cuda --force`.
 
 After provisioning, setup **load-tests** the library exactly as `localm run`
 will. If the CUDA build cannot load on your machine it automatically falls back
@@ -113,9 +109,8 @@ to Vulkan, then CPU, so setup never leaves you with a broken runtime. (On Linux,
 `--backend cuda` uses the upstream CUDA build and expects the CUDA runtime
 present; the same load-test + fallback applies.)
 
-> `--sha256 <hex>` pins the **CUDA build** archive only. The separate cudart
-> runtime bundle has no per-release published hash, so it is validated by size +
-> archive shape rather than the pin; both come from the same upstream release.
+> `--sha256 <hex>` pins the **CUDA build** archive only; both it and the cudart
+> runtime bundle come from the same upstream release.
 
 ## Intel (Arc)
 
@@ -139,10 +134,8 @@ localm run mymodel --gpu-layers 0 --prompt "hello"
 ## HuggingFace Transformers (PyTorch)
 
 GGUF inference needs no PyTorch - this section is only for HF-format models. The
-installer auto-detects your GPU and installs the matching torch wheels (it asks
-`localm.hwdetect torch-args <backend>`, the single source of truth both `setup.bat`
-and `setup.sh` consult, so the right packages are picked for your hardware+OS). To
-do it by hand, use the line for your hardware:
+installer auto-detects your GPU and installs the matching torch wheels. To do it
+by hand, use the line for your hardware:
 
 ```bash
 # NVIDIA (CUDA), any OS:
@@ -172,16 +165,15 @@ with `--device cuda` / `--device xpu` / `--device cpu`.
 
 ## When something goes wrong
 
-localm tries to fail like a good citizen: it tells you *what* broke and *why*,
-and (for an unexpected error) offers to save a prefilled, editable bug report you
-can read before anything is sent. You can also create one any time:
+If setup or a run fails, localm tells you what broke and why, and (for an
+unexpected error) offers to save a prefilled, editable bug report you can read
+before anything is sent. You can also create one any time:
 
 ```bash
 localm bug-report -m "short description of the problem"
 ```
 
-It collects a safe snapshot - OS, GPU vendor, driver / CUDA capability, the
-chosen backend, and the names of the provisioned libraries - and never your API
-key, config, or chat data. The report is saved under your data dir
-(`bug-reports/`); you can edit it, then email it to the maintainer, open a GitHub
-issue (once you have repo access), or send the file however you like.
+It collects a safe hardware/backend snapshot and never your API key, config, or
+chat data. The report is saved under your data dir (`bug-reports/`); you can edit
+it, then email it to the maintainer, open a GitHub issue (once you have repo
+access), or send the file however you like.

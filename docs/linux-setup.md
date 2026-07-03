@@ -96,8 +96,6 @@ uv pip install -p .venv torch torchvision --index-url https://download.pytorch.o
 # or .../whl/cu126  (CUDA)  or  .../whl/cpu  (CPU)
 ```
 
-The GGUF (llama.cpp) backend does not need PyTorch at all.
-
 ### `pip install "localm[gpu]"` is Windows-only
 
 The `[gpu]` pip extra pins AMD ROCm torch wheels and can only resolve them on
@@ -109,7 +107,7 @@ Windows. A pip extra cannot carry a custom package index, so on Linux
 ### WSL2 and virtual machines
 
 - **WSL2**: NVIDIA CUDA works well (CUDA-on-WSL is supported); AMD ROCm under
-  WSL2 is experimental and not recommended for real use yet.
+  WSL2 is experimental.
 - **Plain VMs** (VMware / VirtualBox / default Hyper-V): only a virtual display
   adapter is exposed, so localm runs CPU-only. Real GPU acceleration in a VM
   needs PCI passthrough (VFIO/IOMMU, or Hyper-V DDA - usually a second GPU).

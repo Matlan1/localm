@@ -45,25 +45,23 @@ localm declares its Python dependencies in `pyproject.toml`. They are installed
 from PyPI by pip or uv and are NOT redistributed inside this repository, so no
 license text is reproduced here. The declared dependencies are permissive
 (MIT / BSD / Apache-2.0 / HPND / ISC / PSF) apart from two weak-copyleft
-exceptions; a `pip-licenses` scan of the core dependency closure finds no strong
-copyleft (no GPL / AGPL). The weak copyleft present is:
+exceptions; there is no strong copyleft (no GPL / AGPL). The weak copyleft
+present is:
 
 - **MPL-2.0**, in `certifi` (an unmodified CA-certificate bundle) and `tqdm`
   (dual-licensed MPL-2.0 / MIT).
 - **LGPL-2.1-or-later**, in `zeroconf` (the mDNS / DNS-SD service-discovery
   library behind `localm.local` network naming).
 
-None of these are modified by localm: each is imported as an unmodified library
-installed from PyPI, at arm's length. LGPL-2.1-or-later and MPL-2.0 are both
-compatible with localm's AGPL-3.0 license and, used this way (unmodified,
-imported as a separate library), impose no obligation on localm beyond preserving
-the upstream license notices.
+Each is imported unmodified as a separate library installed from PyPI, at arm's
+length. LGPL-2.1-or-later and MPL-2.0 are both compatible with localm's AGPL-3.0
+license and, used this way, impose no obligation on localm beyond preserving the
+upstream license notices.
 
 ## Arm's-length tools (not bundled, linked, or redistributed)
 
 localm interoperates with some external programs by invoking them over HTTP or as
 separate subprocesses, for example ComfyUI (image / music / video generation) and
-Heretic (model abliteration). These are independent programs the user installs
-themselves. They are not bundled, statically or dynamically linked, or
-redistributed by localm, so their licenses (including GPL / AGPL) do not extend to
-localm or its users.
+Heretic (model abliteration). These independent programs the user installs are
+not bundled, statically or dynamically linked, or redistributed by localm, so
+their licenses (including GPL / AGPL) do not extend to localm or its users.
