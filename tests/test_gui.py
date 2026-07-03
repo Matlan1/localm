@@ -1150,7 +1150,12 @@ def persist_app(tmp_path, monkeypatch):
     monkeypatch.setattr(_cfg, "REGISTRY_FILE", home / "registry.json")
     from localm.plugins.engine import PluginManager
     app = FastAPI()
-    PluginManager(app, external_root=tmp_path / "noplugins").install("chat")
+    _mgr = PluginManager(app, external_root=tmp_path / "noplugins")
+    _mgr.install("chat")
+    # Memory is its own opt-in plugin now: install + enable it so /api/memory
+    # mounts for the memory tests (chat itself no longer owns those routes).
+    _mgr.install("memory")
+    _mgr.enable("memory")
 
     async def switch_model(name):
         pass

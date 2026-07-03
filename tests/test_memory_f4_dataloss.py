@@ -80,7 +80,7 @@ def test_consolidation_surfaces_user_eviction(tmp_path, monkeypatch):
 def _put(store_root, text, monkeypatch, home):
     import asyncio
 
-    import localm.plugins.builtin.chat.plug as plug
+    import localm.plugins.builtin.memory.plug as plug
     monkeypatch.setattr(plug, "_home", lambda: home)
     monkeypatch.setattr(plug, "_memory_root", lambda: store_root)
     monkeypatch.setattr(plug, "_embed_fn", lambda: None)
@@ -132,7 +132,7 @@ def test_append_rejects_at_cap(tmp_path, monkeypatch):
 
     from fastapi import HTTPException
 
-    import localm.plugins.builtin.chat.plug as plug
+    import localm.plugins.builtin.memory.plug as plug
     from localm.memory.store import N_MAX
     home = tmp_path / "home"
     home.mkdir()

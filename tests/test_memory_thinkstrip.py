@@ -141,7 +141,7 @@ def test_run_memory_reports_reasoning_only_replies(monkeypatch):
         complete("extract prompt")           # exercises the wrapper's counter
         return {"status": "ok", "added": 0, "facts": []}
 
-    import localm.plugins.builtin.chat.plug as chat_plug
+    import localm.plugins.builtin.memory.plug as chat_plug
     monkeypatch.setattr(chat_plug, "synthesize_memory", fake_synthesize)
 
     class _Eng:
@@ -216,7 +216,7 @@ def test_reflect_and_store_empty_after_think_warns_and_skips(tmp_path, caplog):
 # --------------------------------------------------- session-text hygiene #
 
 def test_recent_sessions_text_strips_assistant_think(tmp_path, monkeypatch):
-    import localm.plugins.builtin.chat.plug as chat_plug
+    import localm.plugins.builtin.memory.plug as chat_plug
     monkeypatch.setattr(chat_plug, "_home", lambda: tmp_path)
     sdir = tmp_path / "sessions"
     sdir.mkdir()
