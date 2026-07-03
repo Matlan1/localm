@@ -46,6 +46,22 @@ jobs:
       - name: Verify uv.lock matches pyproject (DEP-1, no silent drift)
         run: uv lock --check
 
+      # localm is meant to run from its PROJECT VENV: a venv guard (NEW-J) refuses
+      # a bare global interpreter so a stray global install fails loudly instead of
+      # with a cryptic missing-runtime-dep error. Create a venv and put it on PATH
+      # so every step below - pip, pytest, ruff, hygiene, AND the `python -m localm`
+      # SUBPROCESSES the job-streaming tests spawn - runs from it, matching real
+      # usage. (bash is present on the Windows runner too, so one step covers both.)
+      - name: Create the project venv
+        shell: bash
+        run: |
+          python -m venv .venv
+          if [ -d .venv/bin ]; then
+            echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+          else
+            echo "$PWD/.venv/Scripts" >> "$GITHUB_PATH"
+          fi
+
       # Light extras only ([rag] = pypdf, pure-Python). The [gpu]/[gguf] extras
       # pull torch / ROCm / llama-cpp wheels from a custom AMD index and are
       # GPU-bound, so they are never installed in CI; tests needing those extras
