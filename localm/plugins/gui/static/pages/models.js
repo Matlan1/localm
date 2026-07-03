@@ -39,7 +39,8 @@ export async function refreshModelsPage() {
   const tbody = el("tbody");
   for (const m of modelCache.models) {
     const tr = el("tr");
-    const nameTd = el("td");
+    const nameTd = el("td", "name-cell");
+    nameTd.appendChild(iconEl("models", "ic ic-model"));
     nameTd.appendChild(el("span", "name", m.name));
     if (m.active) nameTd.appendChild(el("span", "active-tag", "active"));
     tr.appendChild(nameTd);
@@ -166,10 +167,16 @@ export async function discoverSearch() {
     for (const m of data.results) {
       const row = el("div", "disc-repo");
       const head = el("div", "head");
+      head.appendChild(iconEl("models", "ic ic-model"));
       head.appendChild(el("span", "name", m.id));
-      head.appendChild(el("span", "meta",
-        `⬇ ${fmtCount(m.downloads)}  ♥ ${fmtCount(m.likes)}`));
-      const btn = el("button", "", "files");
+      // Downloads + likes as inline SVGs (no emoji glyphs on the shipping surface).
+      const meta = el("span", "meta disc-stats");
+      meta.appendChild(iconEl("download", "meta-ic"));
+      meta.appendChild(el("span", "", fmtCount(m.downloads)));
+      meta.appendChild(iconEl("heart", "meta-ic"));
+      meta.appendChild(el("span", "", fmtCount(m.likes)));
+      head.appendChild(meta);
+      const btn = el("button", "btn-secondary", "files");
       const filesBox = el("div", "files");
       btn.onclick = () => discoverFiles(m.id, filesBox, btn);
       head.appendChild(btn);
@@ -212,7 +219,7 @@ export async function discoverFiles(repo, filesBox, btn) {
       row.appendChild(el("span", "mono", desc));
       if (f.fit) row.appendChild(el("span", "fit " + f.fit, FIT_TEXT[f.fit]));
       row.appendChild(el("span", "fname", f.file));
-      const pull = el("button", "", "pull");
+      const pull = el("button", "btn-secondary", "pull");
       pull.onclick = () => {
         // Prefill the pull form - the user confirms (and can set an alias)
         // before anything downloads. The suggested alias mirrors the

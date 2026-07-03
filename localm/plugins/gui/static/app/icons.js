@@ -69,6 +69,7 @@ const APP_ICONS = {
   folder:   iconMarkup('<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>'),
   file:     iconMarkup('<path d="M14 3v5h5"/><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/>'),
   key:      iconMarkup('<path d="M14 7a4 4 0 1 0 0 8 4 4 0 0 0-3.9-3H4v3H2"/><path d="M10 12H8v2"/>'),
+  heart:    iconMarkup('<path d="M12 20l-6.8-6.8a4 4 0 0 1 5.7-5.7l1.1 1.1 1.1-1.1a4 4 0 0 1 5.7 5.7z"/>'),
 };
 
 /** The raw SVG string for `name` (falls back to a generic file icon). */

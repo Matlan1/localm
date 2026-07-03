@@ -56,7 +56,8 @@ export async function refreshKnowledgePage() {
   const tbody = el("tbody");
   for (const c of data.collections) {
     const tr = el("tr");
-    const nameTd = el("td");
+    const nameTd = el("td", "name-cell");
+    nameTd.appendChild(iconEl("book", "ic ic-doc"));
     nameTd.appendChild(el("span", "name", c.name));
     tr.appendChild(nameTd);
     tr.appendChild(el("td", "mono", String(c.n_docs)));
@@ -188,6 +189,7 @@ export async function kbInfoModal(name) {
     }
     for (const d of data.docs) {
       const row = el("div", "log-entry");
+      row.appendChild(iconEl("file", "ic ic-doc log-ic"));
       row.appendChild(el("span", "t", `${d.chunks} chunks`));
       row.appendChild(document.createTextNode(d.path + " "));
       const rm = el("button", "action", "remove");

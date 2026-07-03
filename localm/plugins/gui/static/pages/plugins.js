@@ -29,7 +29,8 @@ export let _autoInstallDeps = true;
 
 export function _catalogRow(p) {
   const tr = el("tr");
-  const nameTd = el("td");
+  const nameTd = el("td", "name-cell");
+  nameTd.appendChild(iconEl("plugins", "ic ic-plugin"));
   nameTd.appendChild(el("span", "name", p.label || p.name));
   tr.appendChild(nameTd);
   const status = p.protected ? "protected"
@@ -300,7 +301,8 @@ export async function refreshPluginsPage() {
       const tbody = el("tbody");
       for (const p of data.plugins) {
         const tr = el("tr");
-        const nameTd = el("td");
+        const nameTd = el("td", "name-cell");
+        nameTd.appendChild(iconEl("plugins", "ic ic-plugin"));
         nameTd.appendChild(el("span", "name", p.name));
         tr.appendChild(nameTd);
         tr.appendChild(el("td", "mono", p.version));

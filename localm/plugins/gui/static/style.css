@@ -33,6 +33,16 @@
   --cat-violet: #a98bfb;
   --cat-amber:  #e0a44f;
   --cat-slate:  #8fa3c2;
+  /* Content-type icon hues (muted): color CONTENT by kind (a model reads blue, a folder amber,
+     a doc slate) on page rows/grids - the color lever for content, distinct from the category
+     NAV hues above. Chrome/nav = category; content = type. */
+  --ic-folder:  #e0a458;
+  --ic-doc:     #8fa3b8;
+  --ic-media:   #c98bd0;
+  --ic-audio:   #6bbf8a;
+  --ic-video:   #6ba3e0;
+  --ic-code:    #d4915d;
+  --ic-model:   #7fb0e6;
   /* Depth: dark UIs read flat without a shadow. Cards/modals float on this so
      a surface reads as a surface, not a same-color rectangle (the picker gets
      this for free from its modal backdrop; the settings cards did not). */
@@ -69,6 +79,13 @@
   --cat-violet: #7c53e6;
   --cat-amber:  #b5791f;
   --cat-slate:  #586a86;
+  --ic-folder:  #b9822f;
+  --ic-doc:     #5f7488;
+  --ic-media:   #9c5aa8;
+  --ic-audio:   #3d8f5f;
+  --ic-video:   #3f74ad;
+  --ic-code:    #b06a34;
+  --ic-model:   #4a7fbf;
 }
 
 * { box-sizing: border-box; }
@@ -182,6 +199,7 @@ span[data-icon], .ic, .nav-ic, .btn-ic, .lbl-ic { display: inline-flex; align-it
 .composer .attach, .composer .send { display: flex; align-items: center; justify-content: center; }
 .composer .attach svg, .composer .send svg { width: 19px; height: 19px; }
 #nav-toggle svg { width: 22px; height: 22px; }
+#mtb-new svg { width: 22px; height: 22px; }
 /* Category-colored nav icons (color = which area, not decoration). The icon takes
    its area's hue via data-icon (static markup) or data-icon-name (JS-built), so
    the sidebar reads as organized zones instead of a grey column. Labels/surfaces
@@ -977,6 +995,57 @@ pre:hover .canvas-btn { opacity: 1; }
 .card .actions { margin-top: 14px; display: flex; gap: 10px; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 14px; }
 
+/* ---- content coherence (direction A): content-type icons + card headers + motion ---- */
+/* Content icons take the TYPE hue on page rows/grids (distinct from the category-hued NAV
+   icons). Apply alongside the icon span: <span class="ic ic-model">. */
+.ic-model  { color: var(--ic-model); }
+.ic-folder { color: var(--ic-folder); }
+.ic-doc    { color: var(--ic-doc); }
+.ic-media  { color: var(--ic-media); }
+.ic-audio  { color: var(--ic-audio); }
+.ic-video  { color: var(--ic-video); }
+.ic-code   { color: var(--ic-code); }
+/* a data-table name cell that leads with a colored content icon */
+.data-table .name-cell { display: flex; align-items: center; gap: 9px; }
+.data-table .name-cell .ic { flex: 0 0 auto; }
+.data-table .name-cell .ic svg { width: 16px; height: 16px; }
+/* A real section header inside a card: leading icon + title + one-line description, so no page
+   shows a bare grey h3. Use .card-head { icon + .card-head-text { h3 + .card-desc } }. */
+.card-head { display: flex; align-items: center; gap: 10px; margin: 0 0 14px;
+  padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+.card-head > .ic, .card-head > .nav-ic { flex: 0 0 auto; }
+.card-head > .ic svg, .card-head > .nav-ic svg { width: 18px; height: 18px; }
+.card-head-text { min-width: 0; }
+.card-head h3, .card-head .card-title { margin: 0; font-size: 15px; font-weight: 600; }
+.card-desc { font-size: 12px; color: var(--text-dim); margin-top: 1px; }
+/* Category-hued icon for a card-head / section header (color = which area, matching the
+   category NAV hues). Pair with an icon: <span class="ic cat-ic cat-slate" data-icon="...">. */
+.cat-ic.cat-blue   { color: var(--cat-blue); }
+.cat-ic.cat-cyan   { color: var(--cat-cyan); }
+.cat-ic.cat-green  { color: var(--cat-green); }
+.cat-ic.cat-teal   { color: var(--cat-teal); }
+.cat-ic.cat-violet { color: var(--cat-violet); }
+.cat-ic.cat-amber  { color: var(--cat-amber); }
+.cat-ic.cat-slate  { color: var(--cat-slate); }
+/* A schema-driven settings section head (.settings-section-head) sits INSIDE a .card-head
+   now; drop its own divider so the card-head's single border wins (no double rule). */
+.card-head .settings-section-head { border: 0; padding: 0; margin: 0; }
+/* Plugin rows: content icon takes the plugins category hue (violet). */
+.ic-plugin { color: var(--cat-violet); }
+/* Leading content icon inside a mono .log-entry (e.g. the Knowledge doc list). */
+.log-entry .log-ic { margin-right: 6px; vertical-align: -0.15em; }
+/* Quiet motion on interactive rows/buttons; reduced-motion fully respected. */
+.list-row, nav button, .settings-nav-link, .btn-primary, .btn-secondary, .btn-danger,
+.data-table tbody tr, .conv-item, .coder-session-item {
+  transition: background 90ms ease, color 90ms ease, border-color 90ms ease, box-shadow 90ms ease;
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+/* One visible keyboard-focus treatment for buttons + a real disabled state. */
+.btn-primary:focus-visible, .btn-secondary:focus-visible, .btn-danger:focus-visible {
+  outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.btn-secondary:disabled { opacity: 0.5; cursor: default; color: var(--text-dim); border-color: var(--border); }
+
 /* Settings: a left section nav + a content area that shows one section (tab) at
    a time. Each core group and each plugin is its own section with its own Save. */
 .settings-layout { display: flex; gap: 20px; align-items: flex-start; }
@@ -1134,6 +1203,23 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
   color: var(--text-dim);
 }
 .job-state.on { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+/* Run-status pills (a job's last_status, or a result row's status). Backgrounds are
+   color-mixed from the theme tokens so both themes follow the palette (no raw hex). */
+.job-state.st-ok, .job-state.st-done {
+  color: var(--green); border-color: var(--green);
+  background: color-mix(in srgb, var(--green) 15%, transparent);
+}
+.job-state.st-error, .job-state.st-failed {
+  color: var(--red); border-color: var(--red);
+  background: color-mix(in srgb, var(--red) 15%, transparent);
+}
+.job-state.st-skipped {
+  color: var(--yellow); border-color: var(--yellow);
+  background: color-mix(in srgb, var(--yellow) 15%, transparent);
+}
+.job-state.st-running { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+/* pending / paused: quiet neutral (base pill look), named so the vocabulary is complete. */
+.job-state.st-pending, .job-state.st-paused { color: var(--text-dim); }
 .job-meta {
   display: flex;
   flex-wrap: wrap;
@@ -1233,7 +1319,9 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
   background: rgba(0, 0, 0, 0.55); color: #fff;
   border: none; border-radius: 6px;
   width: 26px; height: 26px; cursor: pointer; font-size: 13px;
+  display: inline-flex; align-items: center; justify-content: center;
 }
+.thumb-acts button .ic svg { width: 15px; height: 15px; }
 .thumb-acts button:hover { background: var(--accent); }
 .thumb-acts button.danger:hover { background: var(--red); }
 
@@ -1646,9 +1734,14 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
 
 /* model discovery */
 .disc-repo { border-bottom: 1px solid var(--border); padding: 8px 0; }
-.disc-repo .head { display: flex; align-items: center; gap: 12px; }
+.disc-repo .head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
+.disc-repo .head > .ic { flex: 0 0 auto; }
 .disc-repo .name { font-family: var(--mono); font-size: 13px; flex: 1; }
 .disc-repo .meta { color: var(--text-dim); font-size: 12px; white-space: nowrap; }
+/* download + like counts as small inline icons instead of emoji glyphs */
+.disc-stats { display: inline-flex; align-items: center; gap: 5px; }
+.disc-stats .meta-ic { flex: 0 0 auto; }
+.disc-stats .meta-ic svg { width: 13px; height: 13px; }
 .disc-file {
   display: flex; align-items: center; gap: 10px;
   padding: 5px 0 5px 14px; font-size: 12.5px;
