@@ -1301,7 +1301,9 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
   background: rgba(0, 0, 0, 0.55); color: #fff;
   border: none; border-radius: 6px;
   width: 26px; height: 26px; cursor: pointer; font-size: 13px;
+  display: inline-flex; align-items: center; justify-content: center;
 }
+.thumb-acts button .ic svg { width: 15px; height: 15px; }
 .thumb-acts button:hover { background: var(--accent); }
 .thumb-acts button.danger:hover { background: var(--red); }
 
@@ -1714,7 +1716,8 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
 
 /* model discovery */
 .disc-repo { border-bottom: 1px solid var(--border); padding: 8px 0; }
-.disc-repo .head { display: flex; align-items: center; gap: 12px; }
+.disc-repo .head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
+.disc-repo .head > .ic { flex: 0 0 auto; }
 .disc-repo .name { font-family: var(--mono); font-size: 13px; flex: 1; }
 .disc-repo .meta { color: var(--text-dim); font-size: 12px; white-space: nowrap; }
 .disc-file {

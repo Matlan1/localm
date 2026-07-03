@@ -9,6 +9,7 @@
 import { chat, renderAttachChips } from "../app/chat.js";
 import { pickDirectory } from "../app/picker.js";
 import { $, authHeaders, cancelJob, el, fetchImageURL, openModal, streamJob, toast } from "../app/helpers.js";
+import { emptyState } from "../app/icons.js";
 import { showView } from "../app/tabs.js";
 
 /* ================================================================ */
@@ -75,7 +76,8 @@ export function renderImageGrid() {
   grid.replaceChildren();
   renderImgBulkBar();
   if (!imgState.items.length) {
-    grid.appendChild(el("div", "sub", "No generated images yet."));
+    grid.appendChild(emptyState("image", "No images yet",
+      "Generate one above; your results appear here."));
     return;
   }
   const shown = imgState.showAll
@@ -103,15 +105,17 @@ export function renderImageGrid() {
     };
     thumb.appendChild(sel);
 
-    // hover quick actions (top-right)
+    // hover quick actions (top-right) - inline SVG icons (no emoji glyphs)
     const acts = el("div", "thumb-acts");
-    const dl = el("button", "", "⤓");
+    const dl = el("button");
+    dl.appendChild(iconEl("download"));
     dl.title = "Download";
     dl.onclick = (e) => {
       e.stopPropagation();
       imgDownload(item.name).catch((err) => toast("Download failed: " + err.message, true));
     };
-    const del = el("button", "danger", "🗑");
+    const del = el("button", "danger");
+    del.appendChild(iconEl("trash"));
     del.title = "Delete from disk";
     del.onclick = async (e) => {
       e.stopPropagation();

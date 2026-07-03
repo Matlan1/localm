@@ -8,6 +8,7 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { chat } from "../app/chat.js";
 import { $, MIB, authHeaders, el, fetchImageURL, streamJob, toast } from "../app/helpers.js";
+import { emptyState } from "../app/icons.js";
 import { hideStop, showStop } from "./images.js";
 import { pickDirectory } from "../app/picker.js";
 
@@ -81,12 +82,14 @@ export async function refreshVideoHistory() {
     return;
   }
   if (!data.videos.length) {
-    box.appendChild(el("div", "sub", "No clips yet - generate one above."));
+    box.appendChild(emptyState("video", "No clips yet",
+      "Generate one above; your clips appear here."));
     return;
   }
   for (const item of data.videos) {
     const row = el("div", "disc-repo");
     const head = el("div", "head");
+    head.appendChild(iconEl("video", "ic ic-video"));
     head.appendChild(el("span", "name", item.name));
     const bits = [];
     if (item.meta?.prompt) bits.push(item.meta.prompt.slice(0, 60));
@@ -94,7 +97,7 @@ export async function refreshVideoHistory() {
     bits.push(`${(item.size_bytes / MIB).toFixed(1)} MB`);
     head.appendChild(el("span", "meta", bits.join(" · ")));
 
-    const play = el("button", "", "play");
+    const play = el("button", "btn-secondary", "play");
     let player = null;
     play.onclick = async () => {
       if (player) { player.remove(); player = null; play.textContent = "play"; return; }
@@ -117,7 +120,7 @@ export async function refreshVideoHistory() {
     };
     head.appendChild(play);
 
-    const move = el("button", "", "move…");
+    const move = el("button", "btn-secondary", "move…");
     move.onclick = async () => {
       // pickDirectory (in-page browser modal) instead of prompt(): mobile/PWA
       // browsers suppress window.prompt(), which left the move button dead there
@@ -141,7 +144,7 @@ export async function refreshVideoHistory() {
     };
     head.appendChild(move);
 
-    const del = el("button", "danger", "delete");
+    const del = el("button", "btn-secondary btn-danger", "delete");
     del.onclick = async () => {
       if (!confirm(`Delete ${item.name}?`)) return;
       const r = await fetch("/api/video/file/" + encodeURIComponent(item.name),
@@ -169,12 +172,14 @@ export async function refreshMusicHistory() {
     return;
   }
   if (!data.tracks.length) {
-    box.appendChild(el("div", "sub", "No tracks yet - generate one above."));
+    box.appendChild(emptyState("music", "No tracks yet",
+      "Generate one above; your tracks appear here."));
     return;
   }
   for (const item of data.tracks) {
     const row = el("div", "disc-repo");
     const head = el("div", "head");
+    head.appendChild(iconEl("music", "ic ic-audio"));
     head.appendChild(el("span", "name", item.name));
     const bits = [];
     if (item.meta?.tags) bits.push(item.meta.tags.slice(0, 60));
@@ -182,7 +187,7 @@ export async function refreshMusicHistory() {
     bits.push(`${(item.size_bytes / MIB).toFixed(1)} MB`);
     head.appendChild(el("span", "meta", bits.join(" · ")));
 
-    const play = el("button", "", "play");
+    const play = el("button", "btn-secondary", "play");
     let player = null;
     play.onclick = async () => {
       if (player) { player.remove(); player = null; play.textContent = "play"; return; }
@@ -205,7 +210,7 @@ export async function refreshMusicHistory() {
     };
     head.appendChild(play);
 
-    const move = el("button", "", "move…");
+    const move = el("button", "btn-secondary", "move…");
     move.onclick = async () => {
       // pickDirectory (in-page browser modal) instead of prompt(): mobile/PWA
       // browsers suppress window.prompt(), which left the move button dead there
@@ -229,7 +234,7 @@ export async function refreshMusicHistory() {
     };
     head.appendChild(move);
 
-    const del = el("button", "danger", "delete");
+    const del = el("button", "btn-secondary btn-danger", "delete");
     del.onclick = async () => {
       if (!confirm(`Delete ${item.name}?`)) return;
       const r = await fetch("/api/music/file/" + encodeURIComponent(item.name),
