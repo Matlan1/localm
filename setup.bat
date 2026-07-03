@@ -3,9 +3,10 @@ rem ===========================================================================
 rem  localm self-contained setup - double-click after cloning, anywhere.
 rem
 rem  Creates a private .venv in THIS folder and (optionally) keeps all data
-rem  (models, config, logs, generated images) in THIS folder too.  Multiple
-rem  clones on one machine never see or affect each other.  Nothing is
-rem  installed globally and PATH is not modified.
+rem  (models, config, logs, generated images) - and the Python runtime itself -
+rem  in THIS folder too.  Multiple clones on one machine never see or affect each
+rem  other.  Nothing is installed globally, and your PATH is left unchanged unless
+rem  you opt into the global `localm` command near the end.
 rem
 rem  Detects your GPU and provisions the matching llama.cpp backend, so an
 rem  NVIDIA, Intel, AMD, or CPU-only machine all get a working install. Vulkan
@@ -37,6 +38,33 @@ if errorlevel 1 (
     exit /b 1
 )
 
+rem ---- portable vs shared: where the Python runtime + downloads live --------
+rem  Portable pulls uv's managed Python AND its wheel cache INTO this folder, so
+rem  the clone is truly self-contained (delete it and nothing is left behind) at
+rem  the cost of a per-clone re-download. Shared reuses uv's per-user Python +
+rem  cache (one download, less disk) but lives in your user profile. The UV_* vars
+rem  are set for THIS setup process only (not setx / not global), so they never
+rem  touch any other uv project. --python-preference only-managed forces the
+rem  contained download instead of reusing a system Python.
+echo.
+echo  Keep localm's Python runtime + downloads inside this folder?
+echo    [1] Portable - everything in this folder (self-contained; re-downloads per clone)
+echo    [2] Shared   - reuse uv's per-user Python + cache (faster; lives in your user profile)
+set "STOREPICK="
+set /p "STOREPICK=  Pick 1 or 2 [1]: "
+if not defined STOREPICK set "STOREPICK=1"
+set "CONTAINED=0"
+set "PYPREF="
+if "%STOREPICK%"=="1" (
+    set "CONTAINED=1"
+    set "UV_PYTHON_INSTALL_DIR=%CD%\.python"
+    set "UV_CACHE_DIR=%CD%\.cache"
+    set "PYPREF=--python-preference only-managed"
+    echo  Portable: Python under .\.python and downloads under .\.cache
+) else (
+    echo  Shared: reusing uv's per-user Python + cache ^(outside this folder^).
+)
+
 rem ---- create the venv in the repo root -------------------------------------
 rem  An existing .venv is reused unless the user opts to replace it, so a
 rem  re-run never ejects with a misleading "could not create" error (uv refuses
@@ -65,7 +93,7 @@ if errorlevel 2 (
 :venv_create
 echo.
 echo  Creating .venv (Python %PYVER%) ...
-uv venv --python %PYVER% --clear .venv
+uv venv --python %PYVER% %PYPREF% --clear .venv
 if errorlevel 1 (
     echo  [!] Could not create the environment. Install Python %PYVER%.
     pause
@@ -274,6 +302,32 @@ if "%SCPICK%"=="2" (
 )
 if "%SCPICK%"=="3" echo  No shortcut created.
 
+rem ---- optional: make `localm` runnable from any terminal --------------------
+rem  Adds a small `localm` shim in .\bin and appends ONLY .\bin to your USER PATH
+rem  via the registry (never setx, which truncates + corrupts PATH; never the venv
+rem  Scripts dir, which would shadow your own python/pip). Fully reversible by the
+rem  uninstaller. Default No - the CLI already works via .venv\Scripts\localm.
+echo.
+echo  Make 'localm' runnable from any terminal? (adds .\bin to your PATH)
+set "GLOBALPICK="
+set /p "GLOBALPICK=  [y/N]: "
+if not defined GLOBALPICK set "GLOBALPICK=N"
+set "PATHDIR="
+set "CMDSHIM="
+set "PATHMOD="
+set "GCRC=99"
+if /i "%GLOBALPICK%"=="y" .venv\Scripts\python -m localm.globalcmd install --root .
+if /i "%GLOBALPICK%"=="y" set "GCRC=!errorlevel!"
+rem  globalcmd exit code: 0 = installed + PATH modified; 20 = installed but PATH was
+rem  already set (record the command but NOT --path-modified, so the manifest never
+rem  claims a change it did not make); anything else = failed (record nothing). Flat
+rem  single-line ifs, not a paren block, to dodge cmd.exe's nested-paren parser.
+if "!GCRC!"=="0" set "PATHMOD=--path-modified"
+if "!GCRC!"=="0" set "PATHDIR=%CD%\bin"
+if "!GCRC!"=="0" set "CMDSHIM=%CD%\bin\localm.cmd"
+if "!GCRC!"=="20" set "PATHDIR=%CD%\bin"
+if "!GCRC!"=="20" set "CMDSHIM=%CD%\bin\localm.cmd"
+
 rem ---- choose which plugins to enable ---------------------------------------
 rem  `localm plugin setup` prints its own header (it states chat is always on),
 rem  so this is just a section divider - do not repeat that line here.
@@ -284,7 +338,15 @@ echo  Optional features (plugins):
 rem ---- record what we installed (uninstall removes ONLY what we created) -----
 set "CRD="
 if "%DATACREATED%"=="1" set "CRD=--data-created"
-.venv\Scripts\python -m localm.install_manifest record --root . --venv "%CD%\.venv" --lib-dir "%CD%\runtime\localm_llama_runtime\lib" --data-dir "%DATADIR%" %CRD% --shortcut "%SCPATH%" >nul 2>nul
+set "RCFLAG="
+set "PYDIR="
+set "CACHEDIR="
+if "%CONTAINED%"=="1" (
+    set "RCFLAG=--runtime-contained"
+    set "PYDIR=%CD%\.python"
+    set "CACHEDIR=%CD%\.cache"
+)
+.venv\Scripts\python -m localm.install_manifest record --root . --venv "%CD%\.venv" --lib-dir "%CD%\runtime\localm_llama_runtime\lib" --data-dir "%DATADIR%" %CRD% --shortcut "%SCPATH%" %RCFLAG% --python-dir "%PYDIR%" --cache-dir "%CACHEDIR%" --path-dir "%PATHDIR%" --command-shim "%CMDSHIM%" %PATHMOD% >nul 2>nul
 if errorlevel 1 echo  [!] Could not record the install manifest (uninstall will be conservative).
 
 rem ---- done ------------------------------------------------------------------

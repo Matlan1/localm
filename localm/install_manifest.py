@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Optional
 
 MANIFEST_NAME = ".localm-install.json"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _BIN_SUFFIXES = (".dll", ".so", ".dylib", ".exe", ".pyd")
 
 
@@ -57,9 +57,20 @@ def _abs(p) -> str:
 
 
 def record(root, *, venv="", lib_dir="", home_cfg="", data_dir="",
-           data_created=False, shortcut="", stamp="") -> Path:
+           data_created=False, shortcut="", stamp="",
+           runtime_contained=False, python_dir="", cache_dir="",
+           path_dir="", command_shim="", path_modified=False) -> Path:
     """Write the install manifest under *root*. Paths are stored absolute; the
-    binary list is snapshotted from *lib_dir* at call time."""
+    binary list is snapshotted from *lib_dir* at call time.
+
+    Schema v2 also records:
+      * the Contained-install runtime (the in-clone Python + uv cache dirs) -
+        removed on uninstall ONLY when ``runtime_contained`` (a SHARED runtime
+        lives in the user's global uv dir and is reused by other clones, so it is
+        reported but never deleted); and
+      * the optional global ``localm`` command (the bin dir added to PATH + its
+        shim), reversed via the same safe method that added it.
+    """
     data = {
         "schema": SCHEMA_VERSION,
         "stamp": stamp,
@@ -70,6 +81,14 @@ def record(root, *, venv="", lib_dir="", home_cfg="", data_dir="",
         "data_dir": _abs(data_dir),
         "data_created": bool(data_created),
         "shortcut": _abs(shortcut),
+        # v2: Contained install runtime (in-clone Python + uv cache).
+        "runtime_contained": bool(runtime_contained),
+        "python_dir": _abs(python_dir),
+        "cache_dir": _abs(cache_dir),
+        # v2: optional global `localm` command.
+        "path_dir": _abs(path_dir),
+        "command_shim": _abs(command_shim),
+        "path_modified": bool(path_modified),
     }
     p = manifest_path(root)
     p.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
@@ -140,9 +159,13 @@ def uninstall(root, *, purge_data=False, dry_run=False, force=False, log=print) 
             actions.append((str(default_lib / name), "binary", "warn",
                             "no install record - not certain we created this"))
         report["venv"] = str(root / ".venv")
-    elif m.get("schema") != SCHEMA_VERSION:
-        log(f"[uninstall] Unrecognised manifest schema {m.get('schema')!r} - "
-            "aborting for safety. Nothing removed.")
+    elif (m.get("schema") or 0) > SCHEMA_VERSION:
+        # Refuse a manifest NEWER than this installer understands (its fields may
+        # mean something we do not know). An OLDER schema is processed normally -
+        # missing v2 keys just read as absent - so an upgrade never strands a v1
+        # install's uninstall.
+        log(f"[uninstall] Manifest schema {m.get('schema')!r} is newer than this "
+            "installer understands - aborting for safety. Nothing removed.")
         report["ok"] = False
         return report
     else:
@@ -172,6 +195,24 @@ def uninstall(root, *, purge_data=False, dry_run=False, force=False, log=print) 
         elif data_dir:
             report["skipped"].append(
                 (data_dir, "data kept (pass --purge-data to remove)"))
+        # v2: the Contained-install runtime dirs (in-clone Python + uv cache).
+        # Removed ONLY when we pulled them into the clone; a SHARED runtime lives in
+        # the user's global uv dir and is reused by other clones, so report but
+        # NEVER delete it.
+        if m.get("runtime_contained"):
+            for key in ("python_dir", "cache_dir"):
+                d = m.get(key, "")
+                if not d:
+                    continue
+                reason = _unsafe_data_dir(d, root)
+                actions.append((d, "runtime", "refuse" if reason else "recorded",
+                                reason or ""))
+        else:
+            for key in ("python_dir", "cache_dir"):
+                d = m.get(key, "")
+                if d:
+                    report["skipped"].append(
+                        (d, "shared runtime kept (used by other clones)"))
         report["venv"] = m.get("venv", "")
 
     def _remove(path: str, kind: str) -> None:
@@ -183,7 +224,7 @@ def uninstall(root, *, purge_data=False, dry_run=False, force=False, log=print) 
             report["removed"].append(path)
             return
         try:
-            if p.is_dir() and kind == "data":
+            if p.is_dir() and kind in ("data", "runtime"):
                 shutil.rmtree(path)
             elif p.is_dir():
                 report["refused"].append((path, f"{kind} is unexpectedly a directory"))
@@ -205,6 +246,32 @@ def uninstall(root, *, purge_data=False, dry_run=False, force=False, log=print) 
             if dry_run:
                 continue                      # listed under 'warned', don't double-list
         _remove(path, kind)
+
+    # v2: reverse the optional global `localm` command (its shim + our one PATH
+    # entry), via the same safe registry method that added it - never setx, and
+    # only ever removing OUR entry, every other PATH entry left untouched.
+    if m is not None and (m.get("command_shim") or m.get("path_modified")):
+        shim = m.get("command_shim", "")
+        # Take our dir back OFF PATH ONLY if WE put it there (path_modified).
+        # Otherwise remove just our shim and leave PATH exactly as we found it -
+        # so a re-run (where the dir was already present) or a manually pre-added
+        # entry is never stripped by our uninstall.
+        path_dir = m.get("path_dir", "") if m.get("path_modified") else ""
+        if dry_run:
+            if shim:
+                report["removed"].append(shim)
+            if path_dir:
+                report["removed"].append(f"PATH entry {path_dir}")
+        else:
+            try:
+                from localm import globalcmd
+                gc = globalcmd.uninstall_command(path_dir, shim)
+                report["removed"].extend(gc.get("removed", []))
+                for n in gc.get("notes", []):
+                    report["skipped"].append((n, "global command"))
+            except Exception as e:
+                report["warned"].append(
+                    (shim, f"could not remove the global command: {e}"))
 
     if not dry_run and m is not None:
         try:
@@ -250,6 +317,13 @@ def main(argv=None) -> int:
     r.add_argument("--data-created", action="store_true")
     r.add_argument("--shortcut", default="")
     r.add_argument("--stamp", default="")
+    # v2: Contained runtime + optional global command.
+    r.add_argument("--runtime-contained", action="store_true")
+    r.add_argument("--python-dir", default="")
+    r.add_argument("--cache-dir", default="")
+    r.add_argument("--path-dir", default="")
+    r.add_argument("--command-shim", default="")
+    r.add_argument("--path-modified", action="store_true")
 
     u = sub.add_parser("uninstall", help="remove what the manifest recorded")
     u.add_argument("--root", default=".")
@@ -265,7 +339,10 @@ def main(argv=None) -> int:
         p = record(args.root, venv=args.venv, lib_dir=args.lib_dir,
                    home_cfg=args.home_cfg, data_dir=args.data_dir,
                    data_created=args.data_created, shortcut=args.shortcut,
-                   stamp=args.stamp)
+                   stamp=args.stamp, runtime_contained=args.runtime_contained,
+                   python_dir=args.python_dir, cache_dir=args.cache_dir,
+                   path_dir=args.path_dir, command_shim=args.command_shim,
+                   path_modified=args.path_modified)
         print(f"[install] recorded manifest at {p}")
         return 0
     rep = uninstall(args.root, purge_data=args.purge_data,

@@ -2,8 +2,10 @@
 # =============================================================================
 #  localm setup - Linux / macOS.  Run after cloning:  bash setup.sh
 #
-#  Self-contained: creates a private .venv in THIS folder and keeps data here
-#  (./home) or in ~/.localm. Nothing is installed globally; PATH is not changed.
+#  Self-contained: creates a private .venv (and optionally its Python runtime)
+#  in THIS folder and keeps data here (./home) or in ~/.localm. Nothing is
+#  installed globally; your PATH is left unchanged unless you opt into the global
+#  `localm` command.
 #  Pass --yes for a non-interactive install with sensible defaults (used by the
 #  one-click install.sh).
 # =============================================================================
@@ -106,6 +108,29 @@ if [ "$YES" != 1 ] && [ "$GPU" != cpu ]; then
   case "$pick" in [Nn]*) GPU=cpu ;; esac
 fi
 
+# ---- portable vs shared: where the Python runtime + downloads live ----------
+# Portable pulls uv's managed Python AND its wheel cache INTO this folder, so the
+# clone is truly self-contained (delete it and nothing is left behind) at the cost
+# of a per-clone re-download. Shared reuses uv's per-user Python + cache. The UV_*
+# vars are exported for THIS setup process only (not persisted / not global), so
+# they never touch any other uv project. --python-preference only-managed forces
+# the contained download instead of reusing a system Python.
+say ""
+say "  Keep localm's Python runtime + downloads inside this folder?"
+say "    [1] Portable - everything in this folder (self-contained; re-downloads per clone)"
+say "    [2] Shared   - reuse uv's per-user Python + cache (faster; lives in ~/.local)"
+spick="$(ask "  Pick 1 or 2 [1]: " 1)"
+CONTAINED=0; PYPREF=""
+if [ "$spick" = 1 ]; then
+  CONTAINED=1
+  export UV_PYTHON_INSTALL_DIR="$(pwd)/.python"
+  export UV_CACHE_DIR="$(pwd)/.cache"
+  PYPREF="--python-preference only-managed"
+  say "  Portable: Python under ./.python and downloads under ./.cache"
+else
+  say "  Shared: reusing uv's per-user Python + cache (outside this folder)."
+fi
+
 # ---- create the venv --------------------------------------------------------
 # An existing .venv is reused unless the user chooses to replace it, so a
 # re-run never aborts mid-setup. uv refuses to clobber an existing environment
@@ -116,7 +141,10 @@ is_our_venv() {  # a venv we created carries the marker / the localm console scr
 create_venv() {
   say ""
   say "  Creating .venv (Python 3.12) ..."
-  uv venv --python 3.12 --clear .venv
+  # PYPREF is empty (shared) or "--python-preference only-managed" (portable);
+  # left unquoted on purpose so an empty value expands to no argument.
+  # shellcheck disable=SC2086
+  uv venv --python 3.12 $PYPREF --clear .venv
   : > .venv/.localm-venv   # marker: this venv was created by localm setup
 }
 
@@ -301,6 +329,27 @@ EOF
     ;;
 esac
 
+# ---- optional: make `localm` runnable from any terminal --------------------
+# Symlinks `localm` into ~/.local/bin (already on PATH by convention; pip/pipx/uv
+# use it) - never the venv bin dir, which would shadow your python/pip. Reversible
+# by the uninstaller. Default No: the CLI already works via ./localm.sh or
+# .venv/bin/localm.
+PATH_DIR=""; CMD_SHIM=""; PATH_MOD=""
+gmk="$(ask "  Make 'localm' runnable from any terminal? (symlink into ~/.local/bin) [y/N]: " N)"
+case "$gmk" in
+  [Yy]*)
+    # globalcmd exit code: 0 = installed + PATH modified; 20 = installed but PATH
+    # was already set (record the command but NOT --path-modified); other = failed
+    # (record nothing). || gcrc=$? keeps set -e from aborting on the 20/failure code.
+    gcrc=0
+    .venv/bin/python -m localm.globalcmd install --root . || gcrc=$?
+    if [ "$gcrc" = 0 ] || [ "$gcrc" = 20 ]; then
+      PATH_DIR="$HOME/.local/bin"; CMD_SHIM="$HOME/.local/bin/localm"
+      if [ "$gcrc" = 0 ]; then PATH_MOD="--path-modified"; fi
+    fi
+    ;;
+esac
+
 say ""
 # `localm plugin setup` prints its own header (it states chat is always on), so
 # this is just a section divider - do not repeat that line here.
@@ -310,11 +359,19 @@ say "  Optional features (plugins):"
 
 # ---- record what we installed (so uninstall removes ONLY what we created) ----
 crd=""; if [ "${DATA_CREATED:-0}" = 1 ]; then crd="--data-created"; fi
+rcflag=""; pydir=""; cachedir=""
+if [ "${CONTAINED:-0}" = 1 ]; then
+  rcflag="--runtime-contained"; pydir="$(pwd)/.python"; cachedir="$(pwd)/.cache"
+fi
+# $crd / $rcflag are flags or empty; left unquoted on purpose (empty -> no arg).
+# shellcheck disable=SC2086
 .venv/bin/python -m localm.install_manifest record --root . \
   --venv "$(pwd)/.venv" \
   --lib-dir "$(pwd)/runtime/localm_llama_runtime/lib" \
   --data-dir "${DATA_DIR:-}" $crd \
   --shortcut "${SHORTCUT:-}" \
+  $rcflag --python-dir "$pydir" --cache-dir "$cachedir" \
+  --path-dir "${PATH_DIR:-}" --command-shim "${CMD_SHIM:-}" ${PATH_MOD:-} \
   --stamp "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")" \
   >/dev/null 2>&1 || say "  [!] Could not record the install manifest (uninstall will be conservative)."
 
@@ -324,6 +381,8 @@ say "    ./localm-launcher.sh    graphical launcher (GUI / chat / server / coder
 say "    ./localm.sh <args>      the localm CLI, e.g.:  ./localm.sh gui"
 say "    .venv/bin/localm ...    CLI directly"
 say ""
-say "  Note: the GUI launcher needs Tk (sudo apt install python3-tk, or your"
-say "  distro's equivalent). The web GUI itself needs only a browser."
+say "  The GUI launcher uses Tk; localm's bundled Python includes it, so it"
+say "  normally works out of the box. If the launcher ever reports Tk missing"
+say "  (e.g. a system Python without it), install your distro's python3-tk."
+say "  The web GUI itself needs only a browser."
 say ""
