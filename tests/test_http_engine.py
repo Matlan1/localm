@@ -8,7 +8,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from localm.inference.backends.base import UnsupportedInputError
-from localm.inference.http_engine import HttpEngine, remote_active_model
+from localm.inference.http_engine import (
+    HttpEngine, remote_active_model, remote_model_status)
 
 
 def _sse(*chunks):
@@ -113,3 +114,36 @@ def test_remote_active_model(monkeypatch):
 
     monkeypatch.setattr("requests.get", boom)
     assert remote_active_model("http://x/v1") is None              # unreachable
+
+
+def test_remote_model_status_distinguishes_no_model_from_cannot_read(monkeypatch):
+    """The bug: `localm run` attaching to a live, model-loaded server printed
+    'no model loaded' because /v1/models needs the models scope and a chat-scoped
+    attach token gets a 403 - which the old code (returning None) could not tell
+    apart from a genuinely model-less server. remote_model_status must distinguish
+    'empty' (server says none) from 'unknown' (we could not read it)."""
+    def _resp(status, payload):
+        m = MagicMock()
+        m.status_code = status
+        m.json = lambda: payload
+        return m
+
+    # A model is loaded -> ("loaded", id)
+    monkeypatch.setattr("requests.get",
+                        lambda *a, **k: _resp(200, {"data": [{"id": "gemma-4"}]}))
+    assert remote_model_status("http://x/v1", "tok") == ("loaded", "gemma-4")
+
+    # Server ANSWERS but has no model -> ("empty", None): the honest "no model" case.
+    monkeypatch.setattr("requests.get", lambda *a, **k: _resp(200, {"data": []}))
+    assert remote_model_status("http://x/v1") == ("empty", None)
+
+    # 403 (attach token lacks the models scope) -> ("unknown", None): NOT "no model".
+    monkeypatch.setattr("requests.get", lambda *a, **k: _resp(403, {"detail": "scope"}))
+    assert remote_model_status("http://x/v1", "chat-scoped") == ("unknown", None)
+
+    # Unreachable -> ("unknown", None), never a false "no model".
+    def boom(*a, **k):
+        raise Exception("down")
+
+    monkeypatch.setattr("requests.get", boom)
+    assert remote_model_status("http://x/v1") == ("unknown", None)

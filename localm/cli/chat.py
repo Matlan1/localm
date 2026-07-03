@@ -124,19 +124,24 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
             attach_error = e
             target = None
         if target:
-            from ..inference.http_engine import HttpEngine, remote_active_model
-            active = remote_active_model(target["base_url"], target.get("token"))
+            from ..inference.http_engine import HttpEngine, remote_model_status
+            state, active = remote_model_status(
+                target["base_url"], target.get("token"))
             if active and active != model:
                 console.print(
                     f"[yellow]Note:[/yellow] attaching to the localm server already "
                     f"running for this directory; it serves [bold]{active}[/bold], so "
                     f"the requested [bold]{model}[/bold] is not loaded. Use "
                     f"[bold]--no-server[/bold] to run it in a separate process.")
-            elif active is None:
+            elif state == "empty":
                 console.print(
                     "[yellow]Note:[/yellow] a localm server is running for this "
                     "directory but has no model loaded; load one (its GUI / API) or "
                     "use [bold]--no-server[/bold] to run in a separate process.")
+            # state == "unknown": the server answered our attach but we could not
+            # read /v1/models (it needs the models scope, so a chat-scoped attach
+            # token gets a 403). Do NOT claim it has no model - it very likely does;
+            # attach quietly and let the reply come from whatever it serves.
             engine = HttpEngine(
                 target["base_url"], token=target.get("token"),
                 model=active or model, display_name=active or model)
