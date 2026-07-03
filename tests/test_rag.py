@@ -586,3 +586,33 @@ def test_rag_query_neutralise_handles_missing_or_nonstring_text():
     hits = [{"source": "x", "score": 1.0}, {"text": None}, "not-a-dict"]
     assert _neutralise_hits(hits) == [{"source": "x", "score": 1.0}, {"text": None},
                                       "not-a-dict"]
+
+
+def test_rag_embedding_status_endpoint(monkeypatch):
+    """GET /api/rag/embedding reports the configured model, its install state, the
+    internal options, and the last error - the data the Knowledge page's embedding
+    picker renders. Cheap: it never loads a model."""
+    import asyncio
+
+    from localm.inference import embedder as emb
+    from localm.plugins.builtin.rag import plug
+
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"embedding_model": "bge-small-en-v1.5"})
+    monkeypatch.setattr(emb, "resolve_embedding_model_path",
+                        lambda *, allow_download=None: None)
+    monkeypatch.setattr(emb, "loaded_dim", lambda: None)
+    monkeypatch.setattr(emb, "last_error", lambda: None)
+
+    out = asyncio.run(plug.rag_embedding_status())
+    assert out["status"] == "not_installed" and out["installed"] is False
+    assert out["default"] == "bge-small-en-v1.5"
+    assert "bge-small-en-v1.5" in out["internal"]
+    assert out["dim"] is None
+
+    # Once a model resolves on disk (and one is loaded) -> ready, with its dim.
+    monkeypatch.setattr(emb, "resolve_embedding_model_path",
+                        lambda *, allow_download=None: "/models/embeddings/bge.gguf")
+    monkeypatch.setattr(emb, "loaded_dim", lambda: 384)
+    out2 = asyncio.run(plug.rag_embedding_status())
+    assert out2["status"] == "ready" and out2["installed"] is True and out2["dim"] == 384
