@@ -91,7 +91,7 @@ def _index_html_with_shell_token(token: str) -> str:
     return snippet + html
 
 
-def mint_launch_grant(app, ttl: float = 120.0) -> str:
+def mint_launch_grant(app, ttl: float = 300.0) -> str:
     """Mint a single-use, short-lived grant that the launcher/CLI puts in the
     browser URL (``/?localm_token=<grant>``) so a just-launched loopback browser
     lands AUTHENTICATED via a real navigation, instead of relying on the implicit
@@ -437,13 +437,19 @@ def attach_gui(
         # app.js / index.html is then picked up without the user clearing caches).
         headers = {"Cache-Control": "no-cache"}
         # One-time launch handoff: the launcher/CLI opens /?localm_token=<grant>.
-        # A valid single-use grant (loopback + key configured) establishes a session
-        # and 303-redirects to the clean path (token stripped from URL/history), so
-        # the browser lands authenticated via a REAL navigation that a stale tab or a
-        # warm SW cannot short-circuit. A bad/used/expired grant just falls through to
-        # the normal shell (no error, nothing leaked).
+        # A valid single-use grant establishes a session and 303-redirects to the
+        # clean path (token stripped from URL/history), so the browser lands
+        # authenticated via a REAL navigation that a stale tab or a warm SW cannot
+        # short-circuit. This is redeemed on ANY bind (loopback OR network): the grant
+        # is a 256-bit single-use secret only the launcher knows and only ever places
+        # in the URL it opens on THIS machine, so possessing it IS the authorization -
+        # a network client never receives it and cannot guess it. (This is exactly why
+        # the grant works where the keyless auto-seed below cannot: the auto-seed has
+        # no secret and so must stay loopback-bind-only, but the grant carries its own
+        # proof.) A bad/used/expired grant just falls through to the normal shell (no
+        # error, nothing leaked).
         grant = request.query_params.get("localm_token")
-        if grant and loopback and key and _consume_launch_grant(request.app, grant):
+        if grant and key and _consume_launch_grant(request.app, grant):
             from urllib.parse import urlencode
             from fastapi.responses import RedirectResponse
             q = {k: v for k, v in request.query_params.items() if k != "localm_token"}
