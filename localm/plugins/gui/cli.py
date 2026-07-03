@@ -466,6 +466,15 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     # surface (API + GUI) so a future launch in the same dir can discover and
     # attach to it. --isolated keeps it invisible to discovery.
     from localm import portmux
+    from localm import appface
+    # Tray control surface (Windows): Open / Copy address / View logs / Restart /
+    # Stop, so the running server is a real background app, not just a console.
+    # Best-effort and fully guarded - it never blocks the server. Restart/Stop are
+    # wired to the server's existing hooks. (Linux gets a styled Tk control window
+    # next; see appface.)
+    app_face = appface.start_app_face(
+        name="LocaLM", url=base_url, logfile=None,
+        on_restart=hs._do_restart, on_stop=hs._do_shutdown)
     try:
         with instances.advertise(app, home_dir(), host=host, port=chosen_port,
                                  mode="full", scheme=scheme, project=project,
@@ -476,6 +485,8 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
             portmux.run_server(app, host=host, port=chosen_port, log_level="warning",
                                ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
     finally:
+        if app_face is not None:
+            app_face.close()
         if mdns_advertiser is not None:
             mdns_advertiser.close()
         manager.close_all()
