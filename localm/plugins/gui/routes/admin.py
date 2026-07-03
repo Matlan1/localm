@@ -15,8 +15,15 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, HTTPException
 
 from localm import scopes
-from localm.inference.http_server import require_scope
+from localm.inference.http_server import require_fs_host, require_scope
 from localm.plugins.gui.web import LogExportRequest
+
+# Cap a single /api/fs/dirs listing so pointing the browser at a directory with an
+# enormous number of entries cannot spike CPU/IO/memory (one stat() per child with
+# meta=true). The picker surfaces `truncated` so the omission is visible (AGENTS
+# rule 5), not silently hidden; filtering/navigating narrows it. Module-level so a
+# test can lower it without creating thousands of files.
+_FS_LIST_CAP = 5000
 
 
 def register(app: FastAPI, ctx) -> None:
@@ -132,21 +139,23 @@ def register(app: FastAPI, ctx) -> None:
 
         return {"status": "ok"}
 
-    @app.get("/api/fs/dirs", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
+    @app.get("/api/fs/dirs", dependencies=[Depends(require_fs_host)])
     async def fs_dirs(path: str = "", include_files: bool = False,
                       meta: bool = False):
         """Directory listing for the GUI file/folder picker.
 
+        Requires HOST filesystem access (owner / open mode / a key granted
+        fs_access=host) - a merely config-reading key cannot enumerate the disk.
+
         An empty path lists drive roots on Windows (filesystem root
         elsewhere). Only names (and, with ``meta=true``, each child's size +
-        modification time) leave the server - never file contents. The GUI is
-        localhost + bearer-auth, and the coder agent this picker feeds can read
-        those directories anyway.
+        modification time) leave the server - never file contents.
 
         ``include_files=true`` lists files too (folder-only pickers leave it
         off). ``meta=true`` additionally returns an ``entries`` list of
         ``{name, is_dir, size, mtime}`` so the picker can show sizes and dates;
-        the flat ``dirs``/``files`` arrays stay for older callers.
+        the flat ``dirs``/``files`` arrays stay for older callers. A listing over
+        ``_FS_LIST_CAP`` entries is truncated with ``truncated: true``.
         """
         if not path:
             if os.name == "nt":
@@ -169,11 +178,20 @@ def register(app: FastAPI, ctx) -> None:
         dirs = []
         files = []
         entries = []
+        truncated = False
+        scanned = 0
         try:
             for child in sorted(p.iterdir(), key=lambda c: c.name.lower()):
                 try:
                     if child.name.startswith("."):
                         continue
+                    # Bound the per-child stat() work by number of children
+                    # EXAMINED, not just those returned - else a folder of a
+                    # million non-indexable files would still stat each one.
+                    scanned += 1
+                    if scanned > _FS_LIST_CAP:
+                        truncated = True
+                        break
                     is_dir = child.is_dir()
                     if not is_dir and not (include_files and child.is_file()):
                         # A file when only dirs were requested, or a non-file
@@ -183,7 +201,10 @@ def register(app: FastAPI, ctx) -> None:
                     if meta:
                         size = mtime = None
                         try:
-                            st = child.stat()
+                            # follow_symlinks=False: report the link's OWN size/
+                            # mtime, never the target's (a symlink can point
+                            # outside this dir - do not leak target metadata).
+                            st = child.stat(follow_symlinks=False)
                             mtime = st.st_mtime
                             if not is_dir:
                                 size = st.st_size
@@ -202,16 +223,18 @@ def register(app: FastAPI, ctx) -> None:
         result = {"path": str(p),
                   "parent": "" if at_root else str(p.parent),
                   "dirs": dirs,
-                  "files": files}
+                  "files": files,
+                  "truncated": truncated}
         if meta:
             result["entries"] = entries
         return result
 
-    @app.get("/api/fs/places", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
+    @app.get("/api/fs/places", dependencies=[Depends(require_fs_host)])
     async def fs_places():
         """Quick-access locations for the picker's Places rail: the user's home
         and its standard subfolders (only the ones that exist), plus drive roots
-        on Windows (the filesystem root elsewhere).
+        on Windows (the filesystem root elsewhere). Requires HOST filesystem
+        access, same as /api/fs/dirs.
 
         Every path is derived from ``Path.home()`` - never hardcoded - so a
         relocated profile still resolves, and a subfolder that is absent (a

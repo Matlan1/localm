@@ -12,12 +12,12 @@ from __future__ import annotations
 import asyncio
 from typing import Optional
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
 
 import localm.plugins.gui.web as _web
 from localm import scopes
 from localm.inference.http_server import (_require_auth, caller_scopes,
-                                          require_scope)
+                                          effective_fs_access, require_scope)
 
 
 def register(app: FastAPI, ctx) -> None:
@@ -53,7 +53,8 @@ def register(app: FastAPI, ctx) -> None:
         }
 
     @app.get("/api/capabilities", dependencies=[Depends(_require_auth)])
-    async def gui_capabilities(caller: Optional[set] = Depends(caller_scopes)):
+    async def gui_capabilities(request: Request,
+                               caller: Optional[set] = Depends(caller_scopes)):
         """Effective navigation entitlements for the CURRENT key, so the GUI shows
         ONLY the tabs this key can actually use - a capability the key's scopes do
         not grant is never rendered (no show-then-'no access').
@@ -102,4 +103,8 @@ def register(app: FastAPI, ctx) -> None:
         return {"scopes": sorted(held) if held else [], "open": held is None,
                 "core": core, "plugins": plugins, "suggest_plugins": suggest,
                 "bugreport_upload": bug_upload,
-                "issues_available": issues_avail, "update_available": update_avail}
+                "issues_available": issues_avail, "update_available": update_avail,
+                # Host-filesystem reach for this caller ("none"|"shared"|"host"),
+                # so the GUI hides host-path config fields and the host file
+                # browser from a key that lacks it (server still enforces).
+                "fs_access": effective_fs_access(request)}

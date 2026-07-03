@@ -160,9 +160,11 @@ def key_list():
     table.add_column("ID", style="bold")
     table.add_column("Name")
     table.add_column("Scopes")
+    table.add_column("FS access")
     for k in keys:
         table.add_row(str(k.get("id", "")), str(k.get("name", "")),
-                      ", ".join(k.get("scopes", [])))
+                      ", ".join(k.get("scopes", [])),
+                      str(k.get("fs_access", "none")))
     console.print(table)
 
 
@@ -172,21 +174,32 @@ def key_list():
 @click.argument("name")
 @click.option("-s", "--scope", "scopes", multiple=True, required=True,
               help="A capability scope to grant (repeatable).")
-def key_create(name, scopes):
+@click.option("--fs-access", "fs_access",
+              type=click.Choice(["none", "shared", "host"]), default="none",
+              show_default=True,
+              help="Host filesystem reach: none (device upload only), shared "
+                   "(owner-designated folders), or host (the whole server disk). "
+                   "Defaults to none so a shared key cannot browse your disk.")
+def key_create(name, scopes, fs_access):
     """Mint a named key limited to SCOPES; print the secret once.
 
     Privileged scopes (admin, keys:admin, plugins:admin, config:write) are
     refused here - only the owner key carries those, so a minted key can never
     escalate itself.
+
+    --fs-access grants host filesystem reach (default none). The owner key always
+    has full host access; this is how you'd let (or deny) a shared/scoped key.
     """
     from localm import auth
     try:
-        rec = auth.create_key(name, list(scopes), allow_privileged=False)
+        rec = auth.create_key(name, list(scopes), allow_privileged=False,
+                              fs_access=fs_access)
     except (ValueError, PermissionError) as e:
         console.print(f"[red]{e}[/red]")
         sys.exit(1)
     console.print(f"[green]New key '{rec['name']}' "
-                  f"({', '.join(rec['scopes'])}) - shown once:[/green]")
+                  f"({', '.join(rec['scopes'])}; fs-access {rec['fs_access']}) "
+                  f"- shown once:[/green]")
     console.print(f"  [bold]{rec['key']}[/bold]")
     console.print(f"[dim]id {rec['id']}; revoke with: "
                   f"localm key rm {rec['id']}[/dim]")

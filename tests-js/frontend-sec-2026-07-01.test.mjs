@@ -52,7 +52,10 @@ test("accepts_path / accepts_dir force a Browse button regardless of key/label (
              json: async () => ({ models: [], active: "", conversations: [], plugins: [] }) };
   };
   const { window: win } = loadAppWithPages({ fetchImpl });
-  runScript(win, "refreshSettingsPage();");
+  // Browse buttons live on host-path fields, which render only for a host-access
+  // caller. Let init.js's capabilities fetch settle, then pin host.
+  await new Promise((r) => setTimeout(r, 0));
+  runScript(win, `caps.fsAccess = "host"; refreshSettingsPage();`);
   await new Promise((r) => setTimeout(r, 0));
   const doc = win.document;
   assert.ok(doc.querySelector('button[data-browse="source"]'),

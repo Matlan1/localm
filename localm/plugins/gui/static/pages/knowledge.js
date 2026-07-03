@@ -9,7 +9,7 @@
 import { chat } from "../app/chat.js";
 import { $, authHeaders, el, openModal, streamJob, toast } from "../app/helpers.js";
 import { pickPath } from "../app/picker.js";
-import { refreshKbSelect } from "../app/settings-perf.js";
+import { caps, refreshKbSelect } from "../app/settings-perf.js";
 
 // Selectable file types, kept in step with rag/extract.py EXTRACTABLE_SUFFIXES:
 // files outside this set are shown greyed in the picker (the server would refuse
@@ -109,6 +109,15 @@ $("kb-create").onclick = async () => {
 };
 
 export async function kbAddDocs(name) {
+  // Adding docs by host path needs host filesystem access (the picker hits
+  // /api/fs/*, which is host-gated). A caller without it cannot browse the
+  // server disk; per-device upload is the coming path (PR B). Guard here so the
+  // button gives a clear message instead of a 403 inside the picker.
+  if (caps.fsAccess !== "host") {
+    toast("Adding documents from the server needs host file access. "
+          + "Uploading from your device is coming soon.", true);
+    return;
+  }
   // In-page file/folder picker (multi-select) instead of prompt(): mobile/PWA
   // browsers suppress prompt(), and typing a full path by hand was the worst of
   // the old flow. The server's /add takes a paths[] array, so several files and

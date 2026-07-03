@@ -106,12 +106,17 @@ class TestModelRoutesAreScoped:
 
 
 class TestConfigTierRoutes:
-    def test_config_read_reaches_fs_and_companion_not_logs(self, scoped_app):
+    def test_config_read_reaches_companion_but_not_fs_or_logs(self, scoped_app):
+        # The host file browser (/api/fs/dirs) is NO LONGER config:read-gated: it
+        # requires HOST filesystem access (owner / a key with fs_access=host), so a
+        # plain config:read key can view settings + companion but cannot enumerate
+        # the server disk. Log export stays config:WRITE.
         from localm import auth
         reader = auth.create_key("cfgread", [S.CONFIG_READ])["key"]
         with TestClient(scoped_app) as c:
-            assert c.get("/api/fs/dirs", headers=_hdr(reader)).status_code != 403
             assert c.get("/api/companion", headers=_hdr(reader)).status_code != 403
+            assert c.get("/api/fs/dirs", headers=_hdr(reader)).status_code == 403, \
+                "config:read alone must NOT reach the host file browser anymore"
             # log export is config:WRITE (parity with bug-report) -> denied
             r = c.post("/api/logs/export", headers=_hdr(reader), json={"dest": ""})
             assert r.status_code == 403
