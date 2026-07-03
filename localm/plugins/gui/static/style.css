@@ -1,14 +1,18 @@
 /* localm GUI - dark, quiet, professional */
 
 :root {
-  --bg:        #0f1115;
-  --bg-raised: #161a21;
-  --bg-input:  #1c212b;
-  --border:    #262c38;
-  --text:      #d7dde7;
-  --text-dim:  #8b94a5;
-  --accent:    #4f9cf9;
-  --accent-soft: rgba(79, 156, 249, 0.12);
+  --bg:        #0e1014;
+  --bg-raised: #171c26;
+  --bg-input:  #1e242f;
+  --border:    #2c3341;
+  --text:      #dce2ec;
+  --text-dim:  #98a2b4;
+  --accent:    #5aa2fb;
+  --accent-soft: rgba(90, 162, 251, 0.15);
+  /* Depth: dark UIs read flat without a shadow. Cards/modals float on this so
+     a surface reads as a surface, not a same-color rectangle (the picker gets
+     this for free from its modal backdrop; the settings cards did not). */
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.34), 0 6px 20px rgba(0, 0, 0, 0.22);
   --green:     #3fb68b;
   --red:       #e25d5d;
   --yellow:    #d9a741;
@@ -33,6 +37,7 @@
   --red:       #c2410c;
   --yellow:    #a16207;
   --code-bg:   #f0f1f4;
+  --shadow-card: 0 1px 2px rgba(30, 41, 59, 0.05), 0 4px 14px rgba(30, 41, 59, 0.06);
 }
 
 * { box-sizing: border-box; }
@@ -894,6 +899,7 @@ pre:hover .canvas-btn { opacity: 1; }
   border-radius: 12px;
   padding: 18px;
   margin-bottom: 18px;
+  box-shadow: var(--shadow-card);
 }
 .card h3 { margin: 0 0 12px; font-size: 15px; }
 .card label { display: block; font-size: 12.5px; color: var(--text-dim); margin: 10px 0 4px; }
@@ -929,6 +935,7 @@ pre:hover .canvas-btn { opacity: 1; }
 .settings-nav-link:hover { background: var(--bg-input); color: var(--text); }
 .settings-nav-link.active {
   background: var(--accent-soft); color: var(--accent); font-weight: 600;
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 .settings-content { flex: 1 1 auto; min-width: 0; }
 #config-form { display: block; }
