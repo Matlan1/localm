@@ -111,3 +111,57 @@ def disable_quickedit() -> None:
         )
     except Exception:
         pass  # cosmetic hardening must never block startup
+
+
+def _sanitize_title(title: str) -> str:
+    """A safe console-title string: printable characters only (so a model name or
+    path can never inject a control / escape sequence into the terminal), trimmed,
+    capped, and never empty."""
+    text = "".join(ch for ch in (title or "") if ch.isprintable())
+    text = text.strip()[:200]
+    return text or "LocaLM"
+
+
+def set_console_title(title: str) -> bool:
+    """Set the console / terminal window title, so the server window reads
+    'LocaLM ...' instead of a python.exe path.
+
+    Windows uses SetConsoleTitleW; other platforms emit an OSC title escape, but
+    ONLY when stdout is a real terminal (never into a redirected file, a pipe, or
+    a service log). Best-effort and fully guarded: the title is purely cosmetic,
+    so a failure never blocks startup. Returns True if a title was set.
+    """
+    text = _sanitize_title(title)
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            return bool(ctypes.windll.kernel32.SetConsoleTitleW(text))
+        out = sys.stdout
+        if out is not None and hasattr(out, "isatty") and out.isatty():
+            out.write(f"\033]0;{text}\007")
+            out.flush()
+            return True
+        return False
+    except Exception:
+        return False  # cosmetic hardening must never block startup
+
+
+def hide_console() -> bool:
+    """Hide THIS process's own console window (Windows), so a launcher-spawned
+    server runs like a background app - just its tray + status window, no raw
+    console. Only the caller knows it is safe (the console is ours, not a user's
+    interactive terminal), so this is opt-in via that caller. No-op off Windows or
+    when there is no console. Best-effort; returns True if a window was hidden."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+
+        hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+        if not hwnd:
+            return False
+        SW_HIDE = 0
+        ctypes.windll.user32.ShowWindow(hwnd, SW_HIDE)
+        return True
+    except Exception:
+        return False

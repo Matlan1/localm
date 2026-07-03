@@ -6,6 +6,7 @@ Steam/Pop!_OS class of disaster (root, $HOME, repo, ancestors, symlinks).
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -151,3 +152,104 @@ def test_uninstall_refuses_when_data_dir_is_unsafe(tmp_path):
     rep = im.uninstall(tmp_path, purge_data=True, force=True)  # NOT overridable
     assert (tmp_path / "keepme.txt").exists()                 # repo not nuked even forced
     assert any("repository root" in why for _, why in rep["refused"])
+
+
+# ------------------------------ schema v2 --------------------------------- #
+
+def _v2_lib(root: Path) -> Path:
+    lib = root / "runtime" / "lib"
+    lib.mkdir(parents=True)
+    return lib
+
+
+def test_record_v2_fields_roundtrip(tmp_path):
+    lib = _v2_lib(tmp_path)
+    pydir = tmp_path / ".python"; pydir.mkdir()
+    im.record(tmp_path, venv=str(tmp_path / ".venv"), lib_dir=str(lib),
+              runtime_contained=True, python_dir=str(pydir),
+              cache_dir=str(tmp_path / ".cache"),
+              path_dir=str(tmp_path / "bin"),
+              command_shim=str(tmp_path / "bin" / "localm.cmd"),
+              path_modified=True)
+    m = im.load(tmp_path)
+    assert m["schema"] == 2
+    assert m["runtime_contained"] is True
+    assert Path(m["python_dir"]) == pydir.resolve()
+    assert m["path_modified"] is True
+
+
+def test_uninstall_removes_contained_runtime(tmp_path):
+    lib = _v2_lib(tmp_path)
+    pydir = tmp_path / ".python"; pydir.mkdir()
+    (pydir / "python").write_text("x", encoding="utf-8")
+    cachedir = tmp_path / ".cache"; cachedir.mkdir()
+    im.record(tmp_path, venv=str(tmp_path / ".venv"), lib_dir=str(lib),
+              runtime_contained=True, python_dir=str(pydir), cache_dir=str(cachedir))
+    rep = im.uninstall(tmp_path)
+    assert not pydir.exists()                          # contained -> removed
+    assert not cachedir.exists()
+    assert str(pydir.resolve()) in rep["removed"]
+
+
+def test_uninstall_keeps_shared_runtime(tmp_path):
+    # A SHARED runtime lives outside the clone and is reused by other clones: it
+    # must be reported, NEVER deleted.
+    lib = _v2_lib(tmp_path)
+    shared = tmp_path / "elsewhere" / "uvpython"; shared.mkdir(parents=True)
+    im.record(tmp_path, venv=str(tmp_path / ".venv"), lib_dir=str(lib),
+              runtime_contained=False, python_dir=str(shared))
+    rep = im.uninstall(tmp_path)
+    assert shared.exists()                             # never deleted
+    assert any("shared runtime kept" in why for _, why in rep["skipped"])
+
+
+def test_uninstall_reverses_global_command(tmp_path, monkeypatch):
+    import localm.globalcmd as gc
+    calls = {}
+
+    def fake_uninstall_command(path_dir, shim):
+        calls["args"] = (path_dir, shim)
+        return {"removed": [shim, f"PATH entry {path_dir}"], "notes": []}
+
+    monkeypatch.setattr(gc, "uninstall_command", fake_uninstall_command)
+    lib = _v2_lib(tmp_path)
+    im.record(tmp_path, venv=str(tmp_path / ".venv"), lib_dir=str(lib),
+              path_dir=str(tmp_path / "bin"),
+              command_shim=str(tmp_path / "bin" / "localm.cmd"), path_modified=True)
+    rep = im.uninstall(tmp_path)
+    assert calls["args"][0] == str((tmp_path / "bin").resolve())
+    assert any("PATH entry" in x for x in rep["removed"])
+
+
+def test_v1_manifest_still_uninstalls(tmp_path):
+    # An OLD schema-1 manifest (no v2 keys) must still uninstall cleanly (missing
+    # keys read as absent), so upgrading the installer never strands a v1 install.
+    lib = _v2_lib(tmp_path)
+    (lib / "llama.dll").write_text("x", encoding="utf-8")
+    im.manifest_path(tmp_path).write_text(json.dumps({
+        "schema": 1, "venv": str(tmp_path / ".venv"), "lib_dir": str(lib),
+        "binaries": ["llama.dll"], "home_cfg": "", "data_dir": "",
+        "data_created": False, "shortcut": "",
+    }), encoding="utf-8")
+    rep = im.uninstall(tmp_path)
+    assert rep["ok"]
+    assert not (lib / "llama.dll").exists()
+
+
+def test_uninstall_skips_path_when_not_modified(tmp_path, monkeypatch):
+    # path_modified=False (we installed the shim but PATH was already set): uninstall
+    # must remove our shim but NOT strip a PATH dir we did not add ourselves.
+    import localm.globalcmd as gc
+    seen = {}
+
+    def fake_uninstall_command(path_dir, shim):
+        seen["path_dir"] = path_dir
+        return {"removed": [shim] if shim else [], "notes": []}
+
+    monkeypatch.setattr(gc, "uninstall_command", fake_uninstall_command)
+    lib = _v2_lib(tmp_path)
+    im.record(tmp_path, venv=str(tmp_path / ".venv"), lib_dir=str(lib),
+              path_dir=str(tmp_path / "bin"),
+              command_shim=str(tmp_path / "bin" / "localm.cmd"), path_modified=False)
+    im.uninstall(tmp_path)
+    assert seen["path_dir"] == ""            # PATH we did not change is left alone

@@ -9,6 +9,23 @@ from pathlib import Path
 from typing import Callable, Optional
 
 
+_warned_unconfigured_home = False
+
+
+def _warn_unconfigured_home(path: Path) -> None:
+    """Surface (once) that no data dir was configured, so a missing / lost config
+    is VISIBLE instead of silently masked (do-not-hide-problems). stderr, not the
+    logger: this runs at import time before logging is wired."""
+    global _warned_unconfigured_home
+    if _warned_unconfigured_home:
+        return
+    _warned_unconfigured_home = True
+    print("[localm] WARNING: no data directory is configured (no LOCALM_HOME, no "
+          "localm-home.cfg, no ./home). Setup may not have run, or the config was "
+          f"lost. Using a contained default inside this install: {path}. Run setup "
+          "or set LOCALM_HOME to choose where data lives.", file=sys.stderr)
+
+
 def _detect_home() -> Path:
     """
     Resolve the localm data directory (config, registry, models, logs,
@@ -21,7 +38,11 @@ def _detect_home() -> Path:
          ``localm-home.cfg`` (one line: the data path) or a ``home``
          directory, that wins.  Created by setup.bat's "keep data in this
          folder" option.
-      3. Shared per-user default: ~/.localm
+      3. Contained fallback: ``./home`` INSIDE the install, with a stderr
+         warning, when NOTHING is configured. Reaching here is a special case
+         (setup never ran, or the config/marker was lost), not a normal default -
+         so it is surfaced, and it NEVER silently falls back to a shared
+         ~/.localm outside the install.
     """
     env = os.environ.get("LOCALM_HOME", "").strip()
     if env:
@@ -48,7 +69,16 @@ def _detect_home() -> Path:
         if portable.is_dir():
             return portable
 
-    return Path.home() / ".localm"
+    # No data dir configured: no LOCALM_HOME, no localm-home.cfg, no ./home. In a
+    # real install this never happens (setup records a choice), so reaching here
+    # means setup was never run OR the config/marker was lost - a special case, not
+    # a normal default. Per rule 1 (never guess an absolute path outside the
+    # install) and do-not-hide-problems: default to the instance's OWN root (a
+    # contained ./home) and SAY SO on stderr, never a silent shared ~/.localm
+    # outside the install.
+    fallback = repo_root / "home"
+    _warn_unconfigured_home(fallback)
+    return fallback
 
 
 def home_dir() -> Path:
