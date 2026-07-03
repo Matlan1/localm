@@ -72,7 +72,12 @@ async function fileReport(request, env) {
     const ip = request.headers.get("cf-connecting-ip") || "unknown";
     const { success } = await env.RATE_LIMIT.limit({ key: `report:${ip}` });
     if (!success) {
-      return json({ error: "rate limited: too many bug reports from your network, wait a minute" }, 429);
+      // Sliding window: ~30s frees enough tokens for a legitimate retry. The client
+      // reads retry_after (body) / Retry-After (header) to count down and retry once.
+      const retryAfter = 30;
+      const resp = json({ error: "rate limited: too many bug reports from your network, please wait", retry_after: retryAfter }, 429);
+      resp.headers.set("Retry-After", String(retryAfter));
+      return resp;
     }
   }
   if (!env.GITHUB_TOKEN || !env.TARGET_REPO) {

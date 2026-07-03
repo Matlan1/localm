@@ -80,6 +80,9 @@ test("report: rate limited -> 429 and NO GitHub call", async () => {
     assert.equal(r.status, 429);
     assert.equal(called, false);                  // throttled BEFORE the GitHub call
     assert.ok(limiter.key.includes("1.2.3.4"));   // keyed per client IP, not global
+    const body = await r.json();
+    assert.ok(body.retry_after > 0);              // client reads this to count down
+    assert.ok(Number(r.headers.get("Retry-After")) > 0);
   } finally { restore(); }
 });
 

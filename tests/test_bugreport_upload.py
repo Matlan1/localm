@@ -97,6 +97,18 @@ def test_upload_report_non_2xx_raises():
     assert "502" in (ei.value.reason or "")
 
 
+def test_upload_report_429_raises_rate_limited():
+    # A 429 raises the distinct RateLimitedError carrying retry_after (parsed from the
+    # body), so callers can count down and retry instead of failing outright.
+    def opener(url, data, headers, timeout):
+        return 429, '{"error":"rate limited","retry_after":30}'
+
+    with pytest.raises(bugreport.RateLimitedError) as ei:
+        bugreport.upload_report("t", "b", url="https://proxy.example", token="x", opener=opener)
+    assert ei.value.retry_after == 30
+    assert isinstance(ei.value, bugreport.LocalmError)   # still a LocalmError subclass
+
+
 def test_upload_report_omits_token_header_when_none(monkeypatch):
     # Opt-out build (no token configured): with no configured token and token=None,
     # NO X-Localm-Token header is sent. Must simulate the empty config explicitly now
