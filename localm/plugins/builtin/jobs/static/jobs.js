@@ -29,6 +29,33 @@ function clear(node) {
   node.replaceChildren();
 }
 
+// A colored run-status pill (.job-state st-<status>). Unknown statuses fall back to
+// the neutral base pill. Real backend statuses are ok / error / skipped; running is
+// a transient UI state, pending / paused round out the vocabulary.
+const JOB_STATUS_CLASS = {
+  ok: "st-ok", done: "st-done", error: "st-error", failed: "st-failed",
+  skipped: "st-skipped", running: "st-running", pending: "st-pending", paused: "st-paused",
+};
+function statusPill(status) {
+  const key = String(status || "").toLowerCase();
+  const cls = JOB_STATUS_CLASS[key];
+  return el("span", "job-state" + (cls ? " " + cls : ""), status);
+}
+
+// A designed empty state, reusing the GUI's shared window.emptyState (icon + text +
+// hint) when present. The isolated jsdom unit test imports this module without the
+// GUI shell, so window.emptyState is absent there; fall back to a text-only
+// .empty-state so both paths render something intentional rather than a bare line.
+function emptyStateEl(iconName, text, hint) {
+  if (typeof window !== "undefined" && typeof window.emptyState === "function") {
+    return window.emptyState(iconName, text, hint);
+  }
+  const box = el("div", "empty-state");
+  box.appendChild(el("div", "empty-state-text", text));
+  if (hint) box.appendChild(el("div", "empty-state-hint", hint));
+  return box;
+}
+
 // --- schedule / time formatting -------------------------------------------
 function fmtSchedule(job) {
   if (job.schedule_kind === "cron") return `cron: ${job.schedule}`;
@@ -119,7 +146,8 @@ export function register(ctx) {
   function renderList(jobs) {
     clear(listEl);
     if (!jobs.length) {
-      listEl.appendChild(el("div", "sub", "No jobs yet. Add one above."));
+      listEl.appendChild(emptyStateEl("clock", "No jobs yet",
+        "Add one above to schedule a recurring task."));
       return;
     }
     for (const job of jobs) listEl.appendChild(renderJob(job));
@@ -130,17 +158,17 @@ export function register(ctx) {
 
     const head = el("div", "job-head");
     head.appendChild(el("span", "job-name", job.name));
-    const state = el("span", "job-state " + (job.enabled ? "on" : "off"),
-      job.enabled ? "enabled" : "disabled");
-    head.appendChild(state);
+    head.appendChild(el("span", "job-state " + (job.enabled ? "on" : "off"),
+      job.enabled ? "enabled" : "disabled"));
+    // The last run's outcome as a colored pill (green ok / red error / amber skipped)
+    // instead of a parenthetical in the meta line.
+    if (job.last_status) head.appendChild(statusPill(job.last_status));
     row.appendChild(head);
 
     const meta = el("div", "job-meta sub");
     meta.appendChild(el("span", null, fmtSchedule(job)));
     meta.appendChild(el("span", null, "task: " + job.task_kind));
-    meta.appendChild(el("span", null,
-      "last run: " + fmtTime(job.last_run) +
-      (job.last_status ? ` (${job.last_status})` : "")));
+    meta.appendChild(el("span", null, "last run: " + fmtTime(job.last_run)));
     row.appendChild(meta);
 
     const actions = el("div", "job-actions");
@@ -244,7 +272,7 @@ export function register(ctx) {
         const item = el("div", "job-result");
         const line = el("div", "job-meta sub");
         line.appendChild(el("span", null, fmtTime(r.finished || r.started)));
-        line.appendChild(el("span", null, "status: " + (r.status || "?")));
+        line.appendChild(statusPill(r.status || "?"));
         item.appendChild(line);
         const pre = el("pre", "job-log");
         pre.textContent = r.status === "error"

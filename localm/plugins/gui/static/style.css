@@ -1202,6 +1202,23 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
   color: var(--text-dim);
 }
 .job-state.on { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+/* Run-status pills (a job's last_status, or a result row's status). Backgrounds are
+   color-mixed from the theme tokens so both themes follow the palette (no raw hex). */
+.job-state.st-ok, .job-state.st-done {
+  color: var(--green); border-color: var(--green);
+  background: color-mix(in srgb, var(--green) 15%, transparent);
+}
+.job-state.st-error, .job-state.st-failed {
+  color: var(--red); border-color: var(--red);
+  background: color-mix(in srgb, var(--red) 15%, transparent);
+}
+.job-state.st-skipped {
+  color: var(--yellow); border-color: var(--yellow);
+  background: color-mix(in srgb, var(--yellow) 15%, transparent);
+}
+.job-state.st-running { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+/* pending / paused: quiet neutral (base pill look), named so the vocabulary is complete. */
+.job-state.st-pending, .job-state.st-paused { color: var(--text-dim); }
 .job-meta {
   display: flex;
   flex-wrap: wrap;
