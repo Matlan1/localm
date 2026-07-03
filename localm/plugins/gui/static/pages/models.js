@@ -167,9 +167,15 @@ export async function discoverSearch() {
     for (const m of data.results) {
       const row = el("div", "disc-repo");
       const head = el("div", "head");
+      head.appendChild(iconEl("models", "ic ic-model"));
       head.appendChild(el("span", "name", m.id));
-      head.appendChild(el("span", "meta",
-        `⬇ ${fmtCount(m.downloads)}  ♥ ${fmtCount(m.likes)}`));
+      // Downloads + likes as inline SVGs (no emoji glyphs on the shipping surface).
+      const meta = el("span", "meta disc-stats");
+      meta.appendChild(iconEl("download", "meta-ic"));
+      meta.appendChild(el("span", "", fmtCount(m.downloads)));
+      meta.appendChild(iconEl("heart", "meta-ic"));
+      meta.appendChild(el("span", "", fmtCount(m.likes)));
+      head.appendChild(meta);
       const btn = el("button", "btn-secondary", "files");
       const filesBox = el("div", "files");
       btn.onclick = () => discoverFiles(m.id, filesBox, btn);

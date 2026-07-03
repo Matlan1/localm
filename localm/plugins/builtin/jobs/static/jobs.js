@@ -265,7 +265,8 @@ export function register(ctx) {
       const results = (data && data.results) || [];
       clear(body);
       if (!results.length) {
-        body.appendChild(el("div", "sub", "No runs yet."));
+        body.appendChild(emptyStateEl("clock", "No runs yet",
+          "This job has not run yet - use Run now to trigger it."));
         return;
       }
       for (const r of results) {
