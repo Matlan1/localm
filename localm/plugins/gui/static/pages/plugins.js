@@ -54,11 +54,11 @@ export function _catalogRow(p) {
   actions.style.textAlign = "right";
   if (!p.protected) {
     if (!p.installed) {
-      actions.appendChild(_catalogBtn("install", p.name, "btn-primary", "Install"));
+      actions.appendChild(_catalogBtn("install", p.name, "primary", "Install"));
     } else {
       actions.appendChild(p.enabled
         ? _catalogBtn("disable", p.name, "", "Disable")
-        : _catalogBtn("enable", p.name, "btn-primary", "Enable"));
+        : _catalogBtn("enable", p.name, "primary", "Enable"));
       // Re-copy this builtin from the bundled store if a localm upgrade shipped
       // newer code (the installed copy would otherwise keep shadowing it). Only
       // builtins refresh from the store; a third-party install is never a target.

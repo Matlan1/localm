@@ -9,12 +9,12 @@
 // Bump this whenever the cached shell assets (style.css, app/*.js, pages/*.js,
 // index.html, icons) change, so an installed PWA drops the old cache on activate
 // and re-precaches the new files instead of serving stale cache-first assets.
-const CACHE = "localm-shell-v28";
+const CACHE = "localm-shell-v29";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).
   "/app/main.js",
-  "/app/client-log.js", "/app/helpers.js", "/app/picker.js", "/app/theme.js",
+  "/app/client-log.js", "/app/helpers.js", "/app/icons.js", "/app/picker.js", "/app/theme.js",
   "/app/logo.js", "/app/tabs.js", "/app/models-sidebar.js", "/app/chat.js",
   "/app/cmdk.js", "/app/settings-perf.js", "/app/coder.js", "/app/slash.js",
   "/app/init.js",

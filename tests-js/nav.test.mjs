@@ -38,14 +38,18 @@ test("LGAP-1: a studio plugin with an unknown tab is still rendered as a child",
     "an unknown-tab studio plugin must still be rendered, not silently dropped");
 });
 
-test("jobs plugin gets its clock icon, not the bullet fallback", () => {
+test("jobs plugin gets its clock SVG icon, not the generic fallback", () => {
   const win = renderWith([
     { name: "jobs", active: true, tab: "jobs", group: "", icon: "clock", label: "Jobs" },
   ]);
   const node = win.document.getElementById("nav-jobs");
   assert.ok(node, "jobs nav node rendered");
-  assert.ok(node.textContent.includes("⏰"), "clock icon shown");
-  assert.ok(!node.textContent.includes("•"), "no bullet fallback");
+  assert.ok(node.querySelector('.nav-ic[data-icon-name="clock"] svg'),
+    "the clock SVG icon is shown");
+  assert.ok(!node.querySelector('[data-icon-name="plugins"]'),
+    "not the generic plugins fallback");
+  assert.ok(node.textContent.includes("Jobs"), "label shown");
+  assert.ok(!node.textContent.includes("•"), "no bullet fallback text");
 });
 
 test("renderNav still renders ordinary flat + studio tabs", () => {
