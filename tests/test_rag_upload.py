@@ -9,7 +9,6 @@ Size caps + the extractor's zip-bomb guard are the protections that apply.
 """
 
 import base64
-from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
