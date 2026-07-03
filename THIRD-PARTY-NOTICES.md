@@ -16,6 +16,7 @@ CDN. Each keeps its own license:
 | DOMPurify (`purify`) | HTML sanitizing | Apache-2.0 OR MPL-2.0 | (c) Cure53 and contributors |
 | highlight.js (`highlight` + `github-dark` theme) | Code highlighting | BSD-3-Clause | (c) 2006 Ivan Sagalaev and contributors |
 | KaTeX (`katex`, `auto-render`, `KaTeX_*` fonts) | Math rendering | MIT | (c) 2013-2024 Khan Academy and contributors |
+| Inter (`vendor/inter`, Latin woff2 + `OFL.txt`) | UI typeface | SIL OFL 1.1 | (c) 2016 The Inter Project Authors |
 
 The TTS plugin vendors a separate browser bundle. Its components and licenses are
 documented in

@@ -50,6 +50,18 @@ export const SETTINGS_GROUPS = [
   { id: "system",   label: "System" },
 ];
 
+// Per-section icon + category-colour class for the settings nav (icon names from
+// app/icons.js; the `cat-*` class drives the hue via --nav-cat in style.css). Color
+// tells you which area at a glance, matching the planning mockup.
+export const SETTINGS_NAV_META = {
+  model:    { icon: "sliders",  cat: "cat-blue" },
+  server:   { icon: "web",      cat: "cat-cyan" },
+  security: { icon: "key",      cat: "cat-amber" },
+  plugins:  { icon: "plugins",  cat: "cat-violet" },
+  privacy:  { icon: "memory",   cat: "cat-green" },
+  system:   { icon: "settings", cat: "cat-slate" },
+};
+
 // Which top-level group a core schema `group` string belongs to. Plugin (owner)
 // sections and the Media section always go to "plugins". Anything unmapped falls
 // back to "system" (the residual app drawer), so a new core group never vanishes.
@@ -693,8 +705,11 @@ export function buildSettingsNav() {
   const present = SETTINGS_GROUPS.filter((g) => groupHasVisibleSection(content, g.id));
   nav.replaceChildren();
   for (const g of present) {
-    const link = el("button", "settings-nav-link", g.label);
+    const meta = SETTINGS_NAV_META[g.id] || {};
+    const link = el("button", "settings-nav-link" + (meta.cat ? " " + meta.cat : ""));
     link.dataset.target = g.id;
+    link.appendChild(iconEl(meta.icon || "settings", "nav-ic"));
+    link.appendChild(document.createTextNode(g.label));
     link.onclick = () => { _activeSettingsGroup = g.id; showSettingsGroup(g.id); };
     nav.appendChild(link);
   }
