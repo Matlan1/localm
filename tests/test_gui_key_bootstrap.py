@@ -108,3 +108,61 @@ class TestShellRoute:
         assert "REALKEY123" not in r.text
         assert "localm_session=" not in _set_cookies(r)
         assert SHELL_GLOBAL not in r.text
+
+
+class TestLaunchGrantHandoff:
+    """One-time ?localm_token= handoff: the launcher opens the browser at a fresh
+    URL that forces a real navigation (a stale tab / warm SW cannot short-circuit
+    it); the server redeems the single-use grant, establishes a session, and 303s
+    to the clean path. Each test carries its negative case."""
+
+    def _grant(self, app):
+        from localm.plugins.gui.web import mint_launch_grant
+        return mint_launch_grant(app)
+
+    def test_valid_grant_redirects_and_sets_opaque_session(self, monkeypatch):
+        monkeypatch.setenv("LOCALM_API_KEY", "REALKEY123")
+        app = _app("127.0.0.1")
+        grant = self._grant(app)
+        r = TestClient(app).get(f"/?localm_token={grant}", follow_redirects=False)
+        assert r.status_code == 303
+        assert r.headers["location"] == "/"          # token stripped from the URL
+        cookies = _set_cookies(r)                     # joined "set-cookie" string
+        assert "localm_session=" in cookies
+        assert "REALKEY123" not in cookies            # opaque id, never the key
+
+    def test_grant_is_single_use(self, monkeypatch):
+        monkeypatch.setenv("LOCALM_API_KEY", "REALKEY123")
+        app = _app("127.0.0.1")
+        grant = self._grant(app)
+        c = TestClient(app)
+        assert c.get(f"/?localm_token={grant}",
+                     follow_redirects=False).status_code == 303
+        # Reused grant: NOT redeemed again -> no redirect, just the normal shell.
+        assert c.get(f"/?localm_token={grant}",
+                     follow_redirects=False).status_code == 200
+
+    def test_unknown_grant_falls_through_no_error(self, monkeypatch):
+        monkeypatch.setenv("LOCALM_API_KEY", "REALKEY123")
+        r = TestClient(_app("127.0.0.1")).get(
+            "/?localm_token=bogus-never-minted", follow_redirects=False)
+        assert r.status_code == 200                  # normal shell, no leak
+
+    def test_redirect_preserves_other_query_params(self, monkeypatch):
+        monkeypatch.setenv("LOCALM_API_KEY", "REALKEY123")
+        app = _app("127.0.0.1")
+        grant = self._grant(app)
+        r = TestClient(app).get(f"/?view=models&localm_token={grant}",
+                                follow_redirects=False)
+        assert r.status_code == 303
+        assert r.headers["location"] == "/?view=models"
+
+    def test_grant_not_redeemed_on_lan_bind(self, monkeypatch):
+        # A LAN bind seeds nothing and must not redeem a grant either (only a
+        # loopback bind auto-authenticates a browser).
+        monkeypatch.setenv("LOCALM_API_KEY", "REALKEY123")
+        app = _app("0.0.0.0")
+        grant = self._grant(app)
+        r = TestClient(app).get(f"/?localm_token={grant}", follow_redirects=False)
+        assert r.status_code == 200
+        assert "localm_session=" not in _set_cookies(r)

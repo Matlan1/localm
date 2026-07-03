@@ -365,6 +365,19 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         open_url = f"{base_url}?view=models&pull={quote(pull_spec, safe='')}"
     elif model_less:
         open_url = f"{base_url}?view=models"
+    # One-time launch handoff: when auth is on and this is a loopback bind, hand the
+    # auto-opened browser a single-use grant in the URL so it lands AUTHENTICATED via
+    # a real navigation (a fresh query string a warm SW cannot serve from cache and
+    # that forces a load even if a tab is already open), instead of depending on the
+    # implicit GET / cookie auto-seed that a focused-but-not-reloaded tab can skip.
+    from localm import auth as _auth
+    from .web import _is_loopback_host, mint_launch_grant
+    if _auth.get_api_key() and _is_loopback_host(host):
+        from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+        _p = urlparse(open_url)
+        _q = dict(parse_qsl(_p.query))
+        _q["localm_token"] = mint_launch_grant(app)
+        open_url = urlunparse(_p._replace(query=urlencode(_q)))
 
     console.print(f"[bold green]localm GUI[/bold green] → {base_url}")
     if model_less:

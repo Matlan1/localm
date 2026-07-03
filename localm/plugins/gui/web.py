@@ -91,6 +91,39 @@ def _index_html_with_shell_token(token: str) -> str:
     return snippet + html
 
 
+def mint_launch_grant(app, ttl: float = 120.0) -> str:
+    """Mint a single-use, short-lived grant that the launcher/CLI puts in the
+    browser URL (``/?localm_token=<grant>``) so a just-launched loopback browser
+    lands AUTHENTICATED via a real navigation, instead of relying on the implicit
+    GET / cookie auto-seed (which a focused-but-not-reloaded tab or a warm service-
+    worker cache can skip). Stored in-process on ``app.state.launch_grants`` (dies on
+    restart); expired grants are pruned on each mint so the dict cannot grow."""
+    import secrets as _secrets
+    import time as _time
+    grants = getattr(app.state, "launch_grants", None)
+    if grants is None:
+        grants = {}
+        app.state.launch_grants = grants
+    now = _time.time()
+    for k in [k for k, exp in grants.items() if exp <= now]:
+        grants.pop(k, None)
+    token = _secrets.token_urlsafe(32)
+    grants[token] = now + float(ttl)
+    return token
+
+
+def _consume_launch_grant(app, token: str) -> bool:
+    """Redeem a launch grant: SINGLE-USE (popped) and not expired. False for an
+    unknown/used/expired token (so a replayed or guessed token simply falls through
+    to the normal key gate, never an error that would confirm anything)."""
+    import time as _time
+    if not token:
+        return False
+    grants = getattr(app.state, "launch_grants", None) or {}
+    exp = grants.pop(token, None)      # single use: remove on redeem
+    return exp is not None and _time.time() <= float(exp)
+
+
 def _set_session_cookies(response, key: str, *, secure: bool) -> None:
     """Establish the S2 auth cookie on *response* for a loopback owner: mint an
     OPAQUE server-side session for the current owner *key* and set the HttpOnly
@@ -311,6 +344,11 @@ def attach_gui(
     # (headless / no GUI). The manager is also returned for close_all().
     app.state.switch_model = switch_model
     app.state.coder_sessions = manager
+    # One-time launcher -> browser handoff grants (see mint_launch_grant): a small
+    # in-process dict of token -> expiry. Created here so both the auto-opened
+    # loopback browser and a later remote mint have somewhere to store them.
+    if not hasattr(app.state, "launch_grants"):
+        app.state.launch_grants = {}
 
     # Route groups (extracted to localm/plugins/gui/routes/*.py). The active-model
     # accessor, the model-switch callable, and the job manager are the only locals
@@ -386,6 +424,21 @@ def attach_gui(
         # token and references the current assets, so always revalidate (a new
         # app.js / index.html is then picked up without the user clearing caches).
         headers = {"Cache-Control": "no-cache"}
+        # One-time launch handoff: the launcher/CLI opens /?localm_token=<grant>.
+        # A valid single-use grant (loopback + key configured) establishes a session
+        # and 303-redirects to the clean path (token stripped from URL/history), so
+        # the browser lands authenticated via a REAL navigation that a stale tab or a
+        # warm SW cannot short-circuit. A bad/used/expired grant just falls through to
+        # the normal shell (no error, nothing leaked).
+        grant = request.query_params.get("localm_token")
+        if grant and loopback and key and _consume_launch_grant(request.app, grant):
+            from urllib.parse import urlencode
+            from fastapi.responses import RedirectResponse
+            q = {k: v for k, v in request.query_params.items() if k != "localm_token"}
+            clean = request.url.path + (("?" + urlencode(q)) if q else "")
+            resp = RedirectResponse(url=clean, status_code=303, headers=headers)
+            _set_session_cookies(resp, key, secure=request.url.scheme == "https")
+            return resp
         if key and loopback:
             # Protected mode on loopback: establish an HttpOnly session cookie so
             # the key never touches page JS / localStorage (S2). Only MINT a new
