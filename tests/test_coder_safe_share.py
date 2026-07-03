@@ -427,6 +427,11 @@ def test_pairing_qr_renders_for_a_scoped_key(tmp_path, monkeypatch):
         body = r.text
         assert body.startswith("<svg") and "<svg:" not in body   # DOMPurify-safe
         assert "viewBox" in body
+        # The QR must be dark-on-light regardless of the GUI theme or it will not
+        # scan: the modules are pinned to fill="#000000" over a fill="#ffffff"
+        # background rect, never currentColor / a theme variable (a light-grey
+        # module on white in the dark theme would be unscannable).
+        assert 'fill="#000000"' in body and 'fill="#ffffff"' in body
         # A non-owner (scoped) key cannot render pairing QRs - owner-gated.
         r2 = client.post("/api/pairing/qr",
                          headers={"Authorization": f"Bearer {scoped['key']}"},
