@@ -82,7 +82,7 @@ function installStubs(win, { fetchImpl } = {}) {
 // this exact order to preserve the original top-level execution order; they share
 // one global lexical environment so cross-section references resolve as before.
 const APP_SCRIPTS = [
-  "client-log", "helpers", "picker", "theme", "logo", "tabs", "models-sidebar",
+  "client-log", "helpers", "icons", "picker", "theme", "logo", "tabs", "models-sidebar",
   "chat", "cmdk", "settings-perf", "coder", "slash", "init",
 ];
 

@@ -107,7 +107,12 @@ nav button {
   text-align: left;
 }
 nav button:hover { background: var(--bg-input); color: var(--text); }
-nav button.active { background: var(--accent-soft); color: var(--accent); }
+/* Active tab: the picker-row / settings-nav treatment - accent fill, bold, and
+   the inset accent bar so the current view reads at a glance. */
+nav button.active {
+  background: var(--accent-soft); color: var(--accent);
+  font-weight: 600; box-shadow: inset 2px 0 0 var(--accent);
+}
 
 /* Studio group: a parent button with a disclosure chevron, and its child tabs
    indented beneath it (the media plugins when 2+ are active). */
@@ -120,6 +125,23 @@ nav button.active { background: var(--accent-soft); color: var(--accent); }
 }
 .nav-group-parent.open::after { transform: rotate(90deg); }
 .nav-child { padding-left: 30px; font-size: 13px; }
+
+/* ---------------- icons (app/icons.js) ---------------- */
+/* Inline SVGs (currentColor) replace emoji everywhere; sized per context. Base
+   16px; nav 17px; small inline (button/label) 15px; composer buttons 19px. */
+span[data-icon], .ic, .nav-ic, .btn-ic, .lbl-ic { display: inline-flex; align-items: center; }
+[data-icon] svg, .ic svg { display: block; width: 16px; height: 16px; }
+.nav-ic svg { width: 17px; height: 17px; }
+.btn-ic { margin-right: 6px; vertical-align: -0.2em; }
+.btn-ic svg { width: 15px; height: 15px; }
+.lbl-ic { margin: 0 4px; vertical-align: -0.2em; }
+.lbl-ic svg { width: 15px; height: 15px; }
+.composer .attach, .composer .send { display: flex; align-items: center; justify-content: center; }
+.composer .attach svg, .composer .send svg { width: 19px; height: 19px; }
+#nav-toggle svg { width: 22px; height: 22px; }
+/* Every dynamically-built checkbox/radio inherits the accent (matches the picker
+   checkboxes) instead of the browser default. */
+input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); cursor: pointer; }
 
 #conversations {
   flex: 1;
@@ -205,10 +227,11 @@ nav button.active { background: var(--accent-soft); color: var(--accent); }
   background: var(--bg-input);
   color: var(--text);
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: 8px;
   padding: 7px 8px;
   font-size: 13px;
 }
+#model-select:focus { outline: none; border-color: var(--accent); }
 #model-status {
   margin-top: 7px;
   font-size: 12px;
@@ -826,6 +849,8 @@ pre:hover .canvas-btn { opacity: 1; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
 ::-webkit-scrollbar-track { background: transparent; }
+/* Firefox has no ::-webkit-scrollbar; give it the same thin, quiet scrollbar. */
+* { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
 
 /* ---------------- pages (models / images / plugins / settings) -------- */
 
@@ -1049,6 +1074,12 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
 }
 .data-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); }
 .data-table tr:last-child td { border-bottom: none; }
+/* Row hover + the active model's row highlighted with the inset accent bar, like
+   the picker rows - so the table reads as interactive, not a static grid. */
+.data-table tbody tr:hover { background: var(--bg-input); }
+.data-table tbody tr:has(.active-tag) {
+  background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent);
+}
 .data-table .mono { font-family: var(--mono); font-size: 12px; color: var(--text-dim); }
 .data-table .name { font-weight: 600; }
 .data-table .active-tag {
@@ -1061,7 +1092,11 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
   margin-left: 6px;
 }
 .data-table button:hover { color: var(--text); border-color: var(--text-dim); }
-.data-table button.danger:hover { color: var(--red); border-color: var(--red); }
+.data-table button.danger:hover { color: #fff; background: var(--red); border-color: var(--red); }
+/* Primary row action (use / install / enable): accent outline that fills on
+   hover, staying compact - the two-tier button vocabulary inside a dense table. */
+.data-table button.primary { color: var(--accent); border-color: var(--accent); }
+.data-table button.primary:hover { color: #fff; background: var(--accent); border-color: var(--accent); }
 
 /* image generation */
 

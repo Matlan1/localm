@@ -6,6 +6,7 @@
 "use strict";
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
+import { iconEl } from "./icons.js";
 import { COMPACT_KEEP, addMessageRow, chat, chatParams, compactConversation, currentConv, maybeCompactConversation, msgImages, msgText, newConversation, renderAttachChips, renderChat, renderConvList, saveConversations, stripUserImages } from "./chat.js";
 import { $, GIB, authHeaders, autoGrow, el, nearBottom, openModal, readSSE, renderMarkdown, stripThink, toast } from "./helpers.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
@@ -664,16 +665,19 @@ export function pluginSuggestion(cmd) {
 // The most recent /api/plugins entries, refreshed alongside the command cache.
 export let pluginState = [];
 
-// Each plugin's manifest icon name -> the nav emoji. Kernel buttons keep their
-// own emoji in index.html; "studio" is the media parent.
-export const NAV_ICON = { chat: "💬", code: "⚙️", image: "🖼️", music: "🎵", video: "🎬", book: "📚", clock: "⏰" };
+// Each plugin's manifest icon name -> a shared SVG icon name (see app/icons.js).
+// Kernel nav buttons carry their own data-icon in index.html; "studio" is the
+// media parent. An unknown manifest icon falls back to the generic "plugins" glyph.
+export const NAV_ICON = { chat: "chat", code: "coder", image: "image", music: "music", video: "video", book: "book", clock: "clock" };
 // Canonical rail order of first-party plugin tabs (stable so the rail does not
 // reshuffle as plugins toggle); "studio" is the media slot (image/music/video).
 export const NAV_TAB_ORDER = ["coder", "studio", "knowledge"];
 
-export function _navButton(id, icon, label, onClick, cls) {
-  const b = el("button", cls || "", `${icon} ${label}`);
+export function _navButton(id, iconName, label, onClick, cls) {
+  const b = el("button", cls || "");
   b.id = id;
+  b.appendChild(iconEl(iconName || "plugins", "nav-ic"));
+  b.appendChild(document.createTextNode(label));
   b.onclick = onClick;
   return b;
 }
@@ -716,7 +720,7 @@ export function renderNav() {
   for (const p of flat) byTab[p.tab] = p;
 
   const renderFlat = (p) => slot.appendChild(_navButton(
-    "nav-" + p.tab, NAV_ICON[p.icon] || "•", p.label || p.name, () => showView(p.tab)));
+    "nav-" + p.tab, NAV_ICON[p.icon] || "plugins", p.label || p.name, () => showView(p.tab)));
 
   const done = new Set();
   for (const key of NAV_TAB_ORDER) {
@@ -740,7 +744,7 @@ export function renderStudioGroup(slot, studio) {
   if (studio.length === 1) {
     const p = studio[0];
     slot.appendChild(_navButton(
-      "nav-" + p.tab, NAV_ICON[p.icon] || "•", p.label || p.name, () => showView(p.tab)));
+      "nav-" + p.tab, NAV_ICON[p.icon] || "plugins", p.label || p.name, () => showView(p.tab)));
     return;
   }
   const order = ["images", "music", "video"];
@@ -756,7 +760,9 @@ export function renderStudioGroup(slot, studio) {
     (chat.privacy ? true : localStorage.getItem("localm.studioOpen") !== "0");
 
   const wrap = el("div", "nav-group");
-  const parent = el("button", "nav-group-parent" + (open ? " open" : ""), "🎨 Studio");
+  const parent = el("button", "nav-group-parent" + (open ? " open" : ""));
+  parent.appendChild(iconEl("studio", "nav-ic"));
+  parent.appendChild(document.createTextNode("Studio"));
   const children = el("div", "nav-children");
   children.style.display = open ? "block" : "none";
   parent.onclick = () => {
@@ -767,7 +773,7 @@ export function renderStudioGroup(slot, studio) {
   };
   for (const p of kids) {
     children.appendChild(_navButton(
-      "nav-" + p.tab, NAV_ICON[p.icon] || "•", p.label || p.name,
+      "nav-" + p.tab, NAV_ICON[p.icon] || "plugins", p.label || p.name,
       () => showView(p.tab), "nav-child"));
   }
   wrap.appendChild(parent);
