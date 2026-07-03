@@ -57,23 +57,6 @@ except ImportError:
 
 
 
-# Abliterate plugin - decensor a model with Heretic (run as a separate program)
-# and register the result. Gated behind ``pip install "localm[abliterate]"``.
-try:
-    from ..plugins.abliterate.cli import main as _abliterate_main
-    main.add_command(_abliterate_main, name="abliterate")
-except ImportError:
-    @main.command("abliterate", context_settings={"ignore_unknown_options": True})
-    def _abliterate_stub(**_):
-        """Decensor a model with Heretic (run: pip install "localm[abliterate]" to enable)."""
-        console.print(
-            '[yellow]The abliterate plugin is not installed.[/yellow]\n'
-            'Enable it with:  [bold]pip install "localm[abliterate]"[/bold]\n'
-            '  or (editable):  [bold]pip install -e ".[abliterate]"[/bold]'
-        )
-
-
-
 # Provision the native llama.cpp binaries into localm's own venv (self-contained).
 from ..setup_llama import main as _setup_llama_main
 

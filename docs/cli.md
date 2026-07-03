@@ -12,7 +12,6 @@ localm benchmark MODEL [opts]    # TTFT and tok/s at increasing prompt sizes
 localm coder [TASK] [opts]       # AI coding agent (coder plugin)
 localm job ... [opts]            # scheduled recurring jobs (jobs plugin)
 localm mcp [opts]                # MCP stdio server (mcp plugin)
-localm abliterate --model M      # decensor M with Heretic, then register it
 localm doctor                    # check Python, llama.dll, GPU driver, VRAM, packages
 localm info                      # paths + current config
 localm setup-llama [opts]        # provision native llama.cpp binaries
@@ -186,7 +185,6 @@ localm config n_ctx 8192
 localm config port 8650
 localm config confirm_remove false
 localm config comfy_launch_cmd "D:\path\to\comfyui.bat"
-localm config heretic_path "D:\path\to\heretic"
 localm config autoprune_missing_models true
 ```
 
@@ -283,19 +281,6 @@ localm mcp [--stdio]          # stdio transport (default)
 ```
 
 Exposes your local models (chat, list_models, embed, generate_image) to Claude Desktop and other MCP clients. See [docs/mcp.md](../docs/mcp.md) for both directions: localm as an MCP server, and the coder consuming external MCP tool servers.
-
----
-
-## Abliteration (decensor)
-
-```bash
-localm abliterate --model Qwen/Qwen3-4B-Instruct-2507        # HF repo or local path
-localm abliterate --model ./model.gguf --export-gguf q5_k_m  # also emit a GGUF
-localm abliterate --model <id> --name decensored             # custom registry name
-localm abliterate --model <id> --print-command               # preview, don't launch
-```
-
-Hands a model off to [Heretic](https://github.com/Matlan1/heretic-win-AMD) to remove refusals ("safety alignment"), then registers the result so you can run it like any other model. Heretic is a **separate program** (AGPL-3.0): localm never bundles or imports it, only runs it. If it is not found, localm offers to clone the fork into a gitignored `.heretic/` under your data dir; point at an existing checkout with the `heretic_path` config key (or the `LOCALM_HERETIC_PATH` env var). Enable with `pip install "localm[abliterate]"`.
 
 ---
 

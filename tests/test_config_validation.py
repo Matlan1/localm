@@ -77,7 +77,6 @@ class TestValidateUpdate:
 
     def test_nullable_text_blank_becomes_none(self):
         assert ss.validate_update({"comfy_output_dir": ""}) == {"comfy_output_dir": None}
-        assert ss.validate_update({"heretic_path": "  "}) == {"heretic_path": None}
 
     def test_cors_origins_forms(self):
         assert ss.validate_update({"cors_origins": ""}) == {"cors_origins": None}
