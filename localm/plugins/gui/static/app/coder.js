@@ -9,6 +9,7 @@
 import { addMessageRow, chat } from "./chat.js";
 import { $, authHeaders, autoGrow, el, nearBottom, openModal, readSSE, renderMarkdown, toast } from "./helpers.js";
 import { modelCache, refreshModels } from "./models-sidebar.js";
+import { pickDirectory } from "./picker.js";
 import { composerEnterToSend } from "./settings-perf.js";
 import { execCoderCommand, handleSlashSubmit } from "./slash.js";
 
@@ -667,152 +668,9 @@ $("setup-cancel").onclick = () => {
   if (id) activateSession(id);
 };
 
-/* ---- directory picker (browse… on the setup form) ---- */
-
-export async function fetchDirs(path, includeFiles = false) {
-  let url = "/api/fs/dirs?path=" + encodeURIComponent(path || "");
-  if (includeFiles) url += "&include_files=true";
-  const r = await fetch(url, { headers: authHeaders() });
-  const data = await r.json();
-  if (!r.ok) throw new Error(data.detail || r.statusText);
-  return data;
-}
-
-/** Modal directory browser. Resolves with the chosen path, or null when the
- *  modal is dismissed. Used by the coder setup form and the media pages. */
-export function pickDirectory(title, startPath = "") {
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = (value) => {
-      if (settled) return;
-      settled = true;
-      $("modal").style.display = "none";
-      resolve(value);
-    };
-    openModal(title || "Pick a directory", (body) => {
-      const pathEl = el("div", "dir-picker-path");
-      const listEl = el("div", "dir-picker-list");
-      const actions = el("div", "actions");
-      const useBtn = el("button", "btn-primary", "Use this directory");
-      actions.appendChild(useBtn);
-      body.append(pathEl, listEl, actions);
-      let current = "";
-
-      useBtn.onclick = () => { if (current) finish(current); };
-      // Dismissing the modal (×, backdrop) resolves null - poll visibility
-      // since the close handlers are owned by the shared modal chrome.
-      const watch = setInterval(() => {
-        if ($("modal").style.display === "none") {
-          clearInterval(watch);
-          finish(null);
-        }
-      }, 200);
-
-      async function show(path) {
-        let data;
-        try {
-          data = await fetchDirs(path);
-        } catch (e) {
-          toast("Cannot open: " + e.message, true);
-          if (path) { show(""); return; }   // fall back to the drive list
-          throw e;
-        }
-        current = data.path;
-        pathEl.textContent = current || "Drives";
-        useBtn.disabled = !current;
-        listEl.replaceChildren();
-        if (data.parent !== null && current) {
-          const up = el("div", "dir-picker-item up", "↑ ..");
-          up.onclick = () => show(data.parent);
-          listEl.appendChild(up);
-        }
-        for (const name of data.dirs) {
-          const item = el("div", "dir-picker-item", "📁 " + name);
-          // "/" joins fine on Windows too (Python Path accepts both
-          // separators); the server resolves and echoes the native form.
-          item.onclick = () =>
-            show(current ? current.replace(/[\\/]+$/, "") + "/" + name : name);
-          listEl.appendChild(item);
-        }
-        if (!data.dirs.length) {
-          listEl.appendChild(el("div", "dir-picker-empty", "no subdirectories"));
-        }
-      }
-      show(startPath).catch(() => {});
-    });
-  });
-}
-
-/** Modal file browser. Resolves with the chosen file path, or null when the
- *  modal is dismissed. */
-export function pickFile(title, startPath = "") {
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = (value) => {
-      if (settled) return;
-      settled = true;
-      $("modal").style.display = "none";
-      resolve(value);
-    };
-    openModal(title || "Pick a file", (body) => {
-      const pathEl = el("div", "dir-picker-path");
-      const listEl = el("div", "dir-picker-list");
-      body.append(pathEl, listEl);
-      let current = "";
-
-      const watch = setInterval(() => {
-        if ($("modal").style.display === "none") {
-          clearInterval(watch);
-          finish(null);
-        }
-      }, 200);
-
-      async function show(path) {
-        let data;
-        try {
-          data = await fetchDirs(path, true);
-        } catch (e) {
-          toast("Cannot open: " + e.message, true);
-          if (path) { show(""); return; }
-          throw e;
-        }
-        current = data.path;
-        pathEl.textContent = current || "This PC";
-        listEl.innerHTML = "";
-        
-        if (data.parent !== null) {
-          const up = el("div", "item parent", "↑ Parent directory");
-          up.onclick = () => show(data.parent);
-          listEl.appendChild(up);
-        }
-        
-        if (data.dirs && data.dirs.length) {
-          for (const d of data.dirs) {
-            const row = el("div", "item dir", d + "/");
-            // Windows: roots have trailing slash, else join with slash
-            const next = current ? (current.endsWith("/") || current.endsWith("\\") ? current + d : current + "/" + d) : d;
-            row.onclick = () => show(next);
-            listEl.appendChild(row);
-          }
-        }
-        
-        if (data.files && data.files.length) {
-          for (const f of data.files) {
-            const row = el("div", "item file", f);
-            const fullPath = current ? (current.endsWith("/") || current.endsWith("\\") ? current + f : current + "/" + f) : f;
-            row.onclick = () => finish(fullPath);
-            listEl.appendChild(row);
-          }
-        }
-        
-        if (!data.dirs?.length && !data.files?.length) {
-          listEl.appendChild(el("div", "empty", "No items here."));
-        }
-      }
-      show(startPath);
-    });
-  });
-}
+/* ---- directory picker (browse… on the setup form) ----
+   pickDirectory / pickFile / pickPath now live in app/picker.js; the coder setup
+   form imports pickDirectory from there. */
 
 $("setup-browse").onclick = async () => {
   const dir = await pickDirectory("Pick a project directory",

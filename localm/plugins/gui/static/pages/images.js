@@ -7,7 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { chat, renderAttachChips } from "../app/chat.js";
-import { pickDirectory } from "../app/coder.js";
+import { pickDirectory } from "../app/picker.js";
 import { $, authHeaders, cancelJob, el, fetchImageURL, openModal, streamJob, toast } from "../app/helpers.js";
 import { showView } from "../app/tabs.js";
 

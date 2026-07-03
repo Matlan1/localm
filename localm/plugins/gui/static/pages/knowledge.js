@@ -8,7 +8,19 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { chat } from "../app/chat.js";
 import { $, authHeaders, el, openModal, streamJob, toast } from "../app/helpers.js";
+import { pickPath } from "../app/picker.js";
 import { refreshKbSelect } from "../app/settings-perf.js";
+
+// Selectable file types, kept in step with rag/extract.py EXTRACTABLE_SUFFIXES:
+// files outside this set are shown greyed in the picker (the server would refuse
+// them anyway). Folders are indexed recursively, picking up any of these.
+const RAG_EXTS = [
+  ".txt", ".md", ".markdown", ".rst", ".log", ".csv", ".tsv", ".json", ".jsonl",
+  ".yaml", ".yml", ".toml", ".ini", ".cfg", ".py", ".js", ".ts", ".jsx", ".tsx",
+  ".java", ".c", ".h", ".cpp", ".hpp", ".cs", ".go", ".rs", ".rb", ".php",
+  ".swift", ".kt", ".sh", ".ps1", ".bat", ".sql", ".r", ".lua", ".xml", ".css",
+  ".pdf", ".docx", ".html", ".htm", ".ipynb",
+];
 
 /* ================================================================ */
 /*  Knowledge page                                                   */
@@ -97,25 +109,38 @@ $("kb-create").onclick = async () => {
 };
 
 export async function kbAddDocs(name) {
-  const path = prompt(
-    `Add documents to '${name}' - file or folder path on this machine\n` +
-    "(folders are indexed recursively; txt/md/pdf/docx/html/code):",
-    localStorage.getItem("localm.kbAddPath") || "");
-  if (!path || !path.trim()) return;
-  if (!chat.privacy) localStorage.setItem("localm.kbAddPath", path.trim());
+  // In-page file/folder picker (multi-select) instead of prompt(): mobile/PWA
+  // browsers suppress prompt(), and typing a full path by hand was the worst of
+  // the old flow. The server's /add takes a paths[] array, so several files and
+  // folders can be indexed in one job.
+  const paths = await pickPath({
+    mode: "multi",
+    title: `Add documents to '${name}'`,
+    startPath: localStorage.getItem("localm.kbAddPath") || "",
+    exts: RAG_EXTS,
+    hint: "Folders are indexed recursively. Supported: txt, md, pdf, docx, html, code.",
+    confirmLabel: "Add",
+  });
+  if (!paths || !paths.length) return;
+  // Reopen near the last add next time (the containing folder of the first pick).
+  if (!chat.privacy) {
+    const m = paths[0].match(/^(.*)[\\/][^\\/]+[\\/]?$/);
+    localStorage.setItem("localm.kbAddPath", m ? m[1] : paths[0]);
+  }
   // Embeddings are opt-out here: the server defaults embed=true and degrades to
   // BM25-only when unchecked (no embedding-capable model needed). The checkbox
   // lets a user index lexical-only on purpose.
   const embed = $("kb-embed") ? $("kb-embed").checked : true;
   const log = $("kb-log");
   log.style.display = "block";
-  log.textContent = `Indexing ${path.trim()} into '${name}'`
+  const label = paths.length === 1 ? paths[0] : `${paths.length} items`;
+  log.textContent = `Indexing ${label} into '${name}'`
     + (embed ? "" : " (BM25 only)") + "…\n";
   try {
     const r = await fetch(
       `/api/rag/collections/${encodeURIComponent(name)}/add`, {
         method: "POST", headers: authHeaders(),
-        body: JSON.stringify({ paths: [path.trim()], embed }),
+        body: JSON.stringify({ paths, embed }),
       });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
