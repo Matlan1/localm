@@ -82,3 +82,37 @@ def test_new_comfy_fields_present_and_owned_by_image():
         assert key in by_key, f"{key} missing from the schema"
         assert by_key[key].owner == "image"
         assert by_key[key].group == "Media"
+
+
+# --- owner-only RAG indexing settings (admin_only) -------------------------- #
+
+RAG_OWNER_KEYS = {"rag_indexing_mode", "rag_allowed_roots", "rag_denied_roots"}
+
+
+def test_rag_indexing_fields_are_owner_only():
+    by_key = {f.key: f for f in ss.CORE_FIELDS}
+    assert by_key["rag_indexing_mode"].widget == ss.Widget.SELECT
+    assert by_key["rag_indexing_mode"].options == ["whitelist", "blacklist"]
+    assert by_key["rag_allowed_roots"].widget == ss.Widget.PATHLIST
+    assert by_key["rag_denied_roots"].widget == ss.Widget.PATHLIST
+    for key in RAG_OWNER_KEYS:
+        assert by_key[key].owner == "rag"
+        assert by_key[key].admin_only is True, f"{key} must be owner-only"
+
+
+def test_admin_only_keys_lists_the_rag_settings():
+    assert ss.admin_only_keys() == RAG_OWNER_KEYS
+
+
+def test_schema_json_hides_admin_only_for_non_owner():
+    owner = {f["key"] for f in ss.schema_json(is_owner=True)}
+    guest = {f["key"] for f in ss.schema_json(is_owner=False)}
+    assert RAG_OWNER_KEYS <= owner, "owner must see the owner-only fields"
+    assert not (RAG_OWNER_KEYS & guest), "non-owner must NOT see any of them"
+    # A normal (non-admin_only) field is unaffected by the owner filter.
+    assert "mode" in owner and "mode" in guest
+    # The owner view advertises the admin_only flag so the client/UI can label it.
+    by_key = {f["key"]: f for f in ss.schema_json(is_owner=True)}
+    assert by_key["rag_indexing_mode"].get("admin_only") is True
+    # Default (no is_owner arg) behaves as owner, for the CLI and tests.
+    assert RAG_OWNER_KEYS <= {f["key"] for f in ss.schema_json()}

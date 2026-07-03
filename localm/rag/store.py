@@ -103,70 +103,125 @@ def _path_within(child: Path, parent: Path) -> bool:
         return False
 
 
-def indexing_roots(extra: Optional[list] = None) -> list[Path]:
-    """Default-allowed roots for API-driven indexing.
+class ConfinementError(ValueError):
+    """A path may not be indexed. ``reason`` tells the caller WHY, so the API can
+    offer 'add and continue' for a fixable whitelist miss (``outside_allowed``)
+    but hard-refuse the rest (``data_dir`` / ``credential`` / ``denied`` /
+    ``invalid``). Subclasses ``ValueError`` so existing ``except ValueError``
+    sites keep catching it."""
 
-    The user's home folder and the working directory cover legitimate document
-    libraries while excluding system paths (``C:/Windows``, ``/etc``). Power
-    users can widen this with the ``rag_indexing_roots`` config key. The localm
-    data dir and credential folders are still denied by ``confine_index_path``
-    even though they sit under home.
+    def __init__(self, message: str, *, path: Path, reason: str):
+        super().__init__(message)
+        self.path = path
+        self.reason = reason
+
+
+_INDEX_MODES = ("whitelist", "blacklist")
+
+
+def indexing_policy(cfg: Optional[dict] = None) -> dict:
+    """The current RAG indexing confinement policy, read from config.
+
+    ``mode`` is ``whitelist`` (index only your home folder, the working directory,
+    and the ``rag_allowed_roots`` you added) or ``blacklist`` (index anywhere
+    EXCEPT the ``rag_denied_roots`` you listed). In BOTH modes the localm data dir
+    and credential folders are still refused - a hard floor that
+    ``confine_index_path`` enforces separately and no mode can turn off. Returns
+    resolved ``Path`` lists so callers compare like-for-like.
     """
-    roots: list[Path] = [Path.home(), Path.cwd()]
-    try:
-        from localm.config import load_config
-        for r in load_config().get("rag_indexing_roots", []) or []:
-            roots.append(Path(r).expanduser())
-    except Exception:
-        pass
-    for r in (extra or []):
-        roots.append(Path(r).expanduser())
-    out: list[Path] = []
-    for r in roots:
+    if cfg is None:
         try:
-            out.append(r.resolve())
-        except (OSError, ValueError):
-            continue
-    return out
+            from localm.config import load_config
+            cfg = load_config()
+        except Exception:
+            cfg = {}
+    mode = cfg.get("rag_indexing_mode", "whitelist")
+    if mode not in _INDEX_MODES:
+        mode = "whitelist"
+
+    def _resolve(key: str) -> list[Path]:
+        out: list[Path] = []
+        for r in cfg.get(key, []) or []:
+            try:
+                out.append(Path(r).expanduser().resolve())
+            except (OSError, ValueError):
+                continue
+        return out
+
+    return {"mode": mode,
+            "allowed": _resolve("rag_allowed_roots"),
+            "denied": _resolve("rag_denied_roots")}
 
 
-def confine_index_path(p, allowed_roots: Optional[list] = None) -> Path:
-    """Resolve *p* and verify it is safe for API-driven indexing.
+def confine_index_path(p, policy: Optional[dict] = None) -> Path:
+    """Resolve *p* and verify it may be indexed, raising ``ConfinementError`` (a
+    ``ValueError``) otherwise.
 
-    Always rejects the localm data directory (it holds the API key, registry and
-    config) and well-known credential folders. When *allowed_roots* is given,
-    also require the path to live under one of them, so an API caller - a browser
-    page on the loopback port, or a remote client - cannot read arbitrary files
-    like ``C:/Windows/win.ini`` or ``/etc/passwd`` and serve them back (C2).
-    Raises ``ValueError`` on an out-of-bounds path. CLI callers pass no roots and
-    are not confined (a local user can already read their own files).
+    The HARD FLOOR is enforced ALWAYS, even when *policy* is None: the localm data
+    directory (it holds the API key, registry and config) and well-known
+    credential folders (``.ssh``, ``.aws``, ...) are never indexable - wherever
+    they appear in the resolved path, so a nested ``~/proj/.ssh`` or a symlink
+    into one is caught too.
+
+    With a *policy* (the HTTP API passes ``indexing_policy()``):
+      - ``whitelist``: *p* must be within your home folder, the working directory,
+        or a ``rag_allowed_roots`` entry, else ``reason='outside_allowed'`` (the
+        route may offer the owner to add it and continue);
+      - ``blacklist``: *p* is allowed unless it is within a ``rag_denied_roots``
+        entry, then ``reason='denied'``.
+
+    ``policy=None`` means hard-floor only: the local CLI operator, who can already
+    read their own files, is otherwise unconfined.
     """
     from localm.config import home_dir
     try:
         rp = Path(p).expanduser().resolve()
     except (OSError, ValueError):
-        raise ValueError(f"Invalid path: {p}")
+        raise ConfinementError(f"Invalid path: {p}",
+                               path=Path(str(p)), reason="invalid")
 
+    # --- hard floor: always, in every mode and for the CLI ---
     if _path_within(rp, home_dir()):
-        raise ValueError(
+        raise ConfinementError(
             f"Refusing to index the localm data directory "
-            f"(it holds the API key and registry): {p}")
+            f"(it holds the API key and registry): {p}",
+            path=rp, reason="data_dir")
     # Credential folders are denied wherever they appear in the resolved path,
     # not only at the home root: ~/proj/.ssh and <cwd>/sub/.aws are as sensitive
     # as ~/.ssh. rp is already resolved, so this also catches a symlink that
     # points into a credential dir. Tradeoff: a folder literally named one of
     # these (a real ./.docker you wanted to index) is refused too - acceptable
-    # for a credential denylist. The real confinement is allowed_roots (plus the
-    # same-origin guard on the route); this is defense in depth.
+    # for a credential denylist.
     if any(part.lower() in _SENSITIVE_NAMES for part in rp.parts):
-        raise ValueError(f"Refusing to index a credential directory: {p}")
+        raise ConfinementError(f"Refusing to index a credential directory: {p}",
+                               path=rp, reason="credential")
 
-    if allowed_roots is not None and not any(
-            _path_within(rp, r) for r in allowed_roots):
-        raise ValueError(
-            f"Path is outside the allowed indexing roots "
-            f"(your home folder / the working directory): {p}")
-    return rp
+    if policy is None:
+        return rp
+
+    if policy.get("mode") == "blacklist":
+        # Allow anything not explicitly denied (the hard floor above still holds).
+        for d in policy.get("denied", []):
+            if _path_within(rp, d):
+                raise ConfinementError(
+                    f"This folder is on your denied list, so it is not indexed: {p}",
+                    path=rp, reason="denied")
+        return rp
+
+    # whitelist: your home folder + the working dir are always allowed, plus the
+    # roots you added. Anything else is a fixable miss (the owner can widen).
+    roots: list[Path] = []
+    for r in [Path.home(), Path.cwd(), *policy.get("allowed", [])]:
+        try:
+            roots.append(r.resolve())
+        except (OSError, ValueError):
+            continue
+    if any(_path_within(rp, r) for r in roots):
+        return rp
+    raise ConfinementError(
+        f"This folder is outside the folders localm may index. Add it to your "
+        f"allowed folders in Settings to index it: {p}",
+        path=rp, reason="outside_allowed")
 
 
 def _check_name(name: str) -> str:
@@ -334,13 +389,13 @@ class Collection:
 
     @staticmethod
     def _expand(paths: list,
-                allowed_roots: Optional[list] = None) -> list[Path]:
+                policy: Optional[dict] = None) -> list[Path]:
         """Resolve files + recursive folder contents to indexable files.
 
-        When *allowed_roots* is given, files resolving outside the confinement
-        (system paths, credential dirs, or symlinks escaping an allowed folder)
-        are silently dropped - add_paths already validated the top-level inputs,
-        so this only catches sneaky nested escapes."""
+        When *policy* is given, files resolving outside the confinement (system
+        paths, credential dirs, denied roots, or symlinks escaping an allowed
+        folder) are silently dropped - add_paths already validated the top-level
+        inputs, so this only catches sneaky nested escapes."""
         out: list[Path] = []
         for p in paths:
             p = Path(p).expanduser()
@@ -355,20 +410,20 @@ class Collection:
         # de-dup, keep order
         seen: set = set()
         deduped = [p for p in out if not (p in seen or seen.add(p))]
-        if allowed_roots is None:
+        if policy is None:
             return deduped
         kept: list[Path] = []
         for p in deduped:
             try:
-                confine_index_path(p, allowed_roots)
+                confine_index_path(p, policy)
             except ValueError:
-                continue   # nested escape (symlink / credential dir) -> skip
+                continue   # nested escape (symlink / credential / denied) -> skip
             kept.append(p)
         return kept
 
     def add_paths(self, paths: list, *, embed_fn: Optional[EmbedFn] = None,
                   on_progress: Optional[ProgressFn] = None,
-                  allowed_roots: Optional[list] = None,
+                  policy: Optional[dict] = None,
                   force: bool = False) -> dict:
         """
         Index files/folders. Unchanged files (same mtime+size+content hash) are
@@ -377,12 +432,12 @@ class Collection:
         Returns counters plus per-file failures. embed_fn failures degrade to
         lexical-only, never abort.
 
-        When *allowed_roots* is given (the HTTP API passes the user's home + the
-        working dir), an out-of-bounds top-level path raises ``ValueError`` and
-        nested escapes are dropped (C2). CLI callers omit it and stay unconfined.
-        Indexing with an embedding model whose dimensionality differs from the
-        collection's also raises ``ValueError`` rather than corrupting the
-        vectors with mixed dimensions (C3).
+        When *policy* is given (the HTTP API passes ``indexing_policy()``), an
+        out-of-bounds top-level path raises ``ValueError`` and nested escapes are
+        dropped (C2). CLI callers omit it and stay unconfined. Indexing with an
+        embedding model whose dimensionality differs from the collection's also
+        raises ``ValueError`` rather than corrupting the vectors with mixed
+        dimensions (C3).
         """
         # Serialise the whole read-modify-write per collection AND re-sync with the
         # latest committed state under the lock, so a concurrent add_paths() that
@@ -391,19 +446,19 @@ class Collection:
             self._load()
             return self._add_paths_locked(
                 paths, embed_fn=embed_fn, on_progress=on_progress,
-                allowed_roots=allowed_roots, force=force)
+                policy=policy, force=force)
 
     def _add_paths_locked(self, paths: list, *, embed_fn: Optional[EmbedFn] = None,
                           on_progress: Optional[ProgressFn] = None,
-                          allowed_roots: Optional[list] = None,
+                          policy: Optional[dict] = None,
                           force: bool = False) -> dict:
         """The add_paths read-modify-write body. MUST run under
         _collection_lock(self.name) after a fresh _load() (see add_paths)."""
         say = on_progress or (lambda _t: None)
-        if allowed_roots is not None:
+        if policy is not None:
             for p in paths:
-                confine_index_path(p, allowed_roots)   # raises ValueError
-        files = self._expand(paths, allowed_roots)
+                confine_index_path(p, policy)   # raises ValueError
+        files = self._expand(paths, policy)
         if not files:
             return {"added": 0, "updated": 0, "skipped": 0, "failed": [],
                     "chunks": len(self._chunks)}

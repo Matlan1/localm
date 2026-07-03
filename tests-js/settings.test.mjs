@@ -138,6 +138,109 @@ test("group nav shows all of a group's sections; require_auth + keys live in Sec
   assert.ok(!webSec.classList.contains("active"), "and hides the Plugins group");
 });
 
+test("pathlist renders a folder-row editor and reads back an array", async () => {
+  // The owner-only rag_allowed_roots field: a stack of folder rows (each with a
+  // Browse + remove) rather than the flat comma LIST. Host FS access is required
+  // (like FOLDER/PATH controls), so grant it before rendering.
+  const PATHLIST_SCHEMA = { fields: [
+    { key: "rag_allowed_roots", widget: "pathlist",
+      label: "Folders allowed for indexing", help: "extra folders",
+      group: "Knowledge", owner: "rag", admin_only: true,
+      default: ["F:\\docs", "F:\\more"] },
+  ]};
+  const patches = [];
+  const fetchImpl = async (url, opts = {}) => {
+    if (url === "/v1/config/schema")
+      return { ok: true, status: 200, json: async () => PATHLIST_SCHEMA, text: async () => "" };
+    if (url === "/v1/config" && (opts.method || "GET") === "PATCH") {
+      patches.push(JSON.parse(opts.body));
+      return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+    }
+    // Everything else (incl. /api/capabilities) grants host FS, so caps.fsAccess
+    // resolves to "host" the way it does for an owner on the loopback GUI - the
+    // folder editor only renders for a host-FS caller.
+    return { ok: true, status: 200, text: async () => "",
+             json: async () => ({ models: [], active: "", conversations: [],
+                                  plugins: [], fs_access: "host" }) };
+  };
+  const { window: win } = loadAppWithPages({ fetchImpl });
+  await drain();          // let init's /api/capabilities set caps.fsAccess = host
+  await render(win);
+  await drain();
+  const doc = win.document;
+
+  const rows = [...doc.querySelectorAll(".pathlist-row input")];
+  assert.equal(rows.length, 2, "one row per saved folder");
+  assert.deepEqual(rows.map((i) => i.value), ["F:\\docs", "F:\\more"]);
+  const firstRow = doc.querySelector(".pathlist-row");
+  assert.ok(firstRow.querySelector(".dir-picker-btn"), "each row has a Browse button");
+  assert.ok(firstRow.querySelector(".pathlist-rm"), "each row has a remove button");
+
+  // Remove the first folder, then save -> the PATCH carries only what remains.
+  firstRow.querySelector(".pathlist-rm").click();
+  const save = doc.querySelector(".settings-section .settings-section-save");
+  save.click();
+  await drain();
+  assert.equal(patches.length, 1, "one PATCH for the Knowledge section");
+  assert.ok(Array.isArray(patches[0].rag_allowed_roots), "sent as an array");
+  assert.deepEqual(patches[0].rag_allowed_roots, ["F:\\more"], "removed folder dropped");
+});
+
+test("pathlist is hidden without host filesystem access", async () => {
+  // A non-host caller must not get the folder editor at all (server also enforces).
+  const PATHLIST_SCHEMA = { fields: [
+    { key: "rag_allowed_roots", widget: "pathlist", label: "Folders", help: "h",
+      group: "Knowledge", owner: "rag", admin_only: true, default: ["F:\\docs"] },
+  ]};
+  const fetchImpl = async (url) => {
+    if (url === "/v1/config/schema")
+      return { ok: true, status: 200, json: async () => PATHLIST_SCHEMA, text: async () => "" };
+    return { ok: true, status: 200, text: async () => "",
+             json: async () => ({ models: [], active: "", conversations: [], plugins: [] }) };
+  };
+  const { window: win } = loadAppWithPages({ fetchImpl });
+  // caps.fsAccess defaults to "none" - do not grant host access.
+  await render(win);
+  assert.equal(win.document.querySelector(".pathlist-row"), null,
+    "no folder rows render without host FS access");
+});
+
+test("indexing mode toggle shows the active folder list", async () => {
+  const SCHEMA = { fields: [
+    { key: "rag_indexing_mode", widget: "select", label: "Indexing folder rule",
+      help: "h", group: "Knowledge", owner: "rag", admin_only: true,
+      options: ["whitelist", "blacklist"], default: "whitelist" },
+    { key: "rag_allowed_roots", widget: "pathlist", label: "Allowed folders",
+      help: "h", group: "Knowledge", owner: "rag", admin_only: true, default: [] },
+    { key: "rag_denied_roots", widget: "pathlist", label: "Denied folders",
+      help: "h", group: "Knowledge", owner: "rag", admin_only: true, default: [] },
+  ]};
+  const fetchImpl = async (url) => {
+    if (url === "/v1/config/schema")
+      return { ok: true, status: 200, json: async () => SCHEMA, text: async () => "" };
+    return { ok: true, status: 200, text: async () => "",
+             json: async () => ({ models: [], active: "", conversations: [],
+                                  plugins: [], fs_access: "host" }) };
+  };
+  const { window: win } = loadAppWithPages({ fetchImpl });
+  await drain();
+  await render(win);
+  await drain();
+  const doc = win.document;
+  const allow = doc.querySelector('[data-field-key="rag_allowed_roots"]');
+  const deny = doc.querySelector('[data-field-key="rag_denied_roots"]');
+  const sel = doc.querySelector('select[data-key="rag_indexing_mode"]');
+  assert.ok(allow && deny && sel, "all three RAG controls render for the owner");
+  // whitelist (default): Allowed shown, Denied hidden.
+  assert.notEqual(allow.style.display, "none", "Allowed shows in whitelist mode");
+  assert.equal(deny.style.display, "none", "Denied hidden in whitelist mode");
+  // flip to blacklist -> Denied shown, Allowed hidden.
+  sel.value = "blacklist";
+  sel.dispatchEvent(new win.Event("change", { bubbles: true }));
+  assert.equal(allow.style.display, "none", "Allowed hidden in blacklist mode");
+  assert.notEqual(deny.style.display, "none", "Denied shows in blacklist mode");
+});
+
 test("each section saves only its own keys (per-section PATCH)", async () => {
   const patches = [];
   const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(patches) });

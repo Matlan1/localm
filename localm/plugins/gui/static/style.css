@@ -1602,6 +1602,10 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
 .dir-picker-row { display: flex; gap: 6px; align-items: stretch; }
 .dir-picker-row input { flex: 1 1 auto; }
 .dir-picker-btn { flex: 0 0 auto; white-space: nowrap; }
+/* Settings PATHLIST field: a stack of folder rows + an "Add folder" button. */
+.pathlist { display: flex; flex-direction: column; gap: 6px; }
+.pathlist-rm { flex: 0 0 auto; padding: 0 9px; display: inline-flex; align-items: center; }
+.pathlist-add { margin-top: 6px; align-self: flex-start; display: inline-flex; align-items: center; gap: 5px; }
 /* Plugin catalog: "requires X (missing)" warning under a plugin's description. */
 .plugin-missing-req { color: var(--danger, #d9534f); }
 

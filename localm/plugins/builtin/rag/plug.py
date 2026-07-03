@@ -158,16 +158,43 @@ async def rag_add(name: str, req: RagAddRequest, request: Request):
     missing = [str(p) for p in paths if not p.exists()]
     if missing:
         raise HTTPException(400, f"Not found: {', '.join(missing[:5])}")
-    # Confine API-driven indexing to the user's home / working dir so a request
-    # from a loopback browser page or a remote client cannot read system files
-    # or credentials and serve them back (C2).
-    from localm.rag.store import confine_index_path, indexing_roots
-    roots = indexing_roots()
-    try:
-        for p in paths:
-            confine_index_path(p, roots)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
+    # Confine API-driven indexing under the owner's policy (whitelist/blacklist,
+    # plus the always-denied localm data dir + credential folders), so a request
+    # from a loopback browser page or a remote client cannot read system files or
+    # credentials and serve them back (C2). A whitelist MISS is offered back to the
+    # owner as "add these folders and continue" (409) instead of a dead-end error;
+    # a hard denial (credential / data dir / an explicit deny-list entry) is always
+    # refused (400). Only the owner may widen the allow-list, so a non-owner shared
+    # key gets a plain 403 for a miss.
+    from localm.rag.store import (confine_index_path, indexing_policy,
+                                  ConfinementError)
+    policy = indexing_policy()
+    addable: list[str] = []
+    blocked: list[str] = []
+    for p in paths:
+        try:
+            confine_index_path(p, policy)
+        except ConfinementError as e:
+            (addable if e.reason == "outside_allowed" else blocked).append(
+                str(e.path) if e.reason == "outside_allowed" else str(e))
+    if blocked:
+        raise HTTPException(400, "; ".join(blocked[:5]))
+    if addable:
+        import localm.inference.http_server as _hs
+        from localm import scopes
+        held = _hs.caller_scopes(request)
+        if held is None or scopes.ADMIN in held:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=409, content={
+                "needs_consent": True,
+                "reason": "outside_allowed",
+                "addable": sorted(set(addable)),
+                "detail": "These folders are outside your allowed indexing "
+                          "folders. Add them and index?"})
+        raise HTTPException(
+            403, "These folders are outside the allowed indexing folders, and "
+            "only the owner can widen the list: "
+            + ", ".join(sorted(set(addable))[:5]))
     embed = req.embed
     jobs = request.app.state.jobs
     self_embed = _make_self_embed(request.app.state.self_url,
@@ -177,7 +204,7 @@ async def rag_add(name: str, req: RagAddRequest, request: Request):
         embed_fn = self_embed if embed else None
         try:
             result = coll.add_paths(
-                paths, embed_fn=embed_fn, allowed_roots=roots, force=req.reindex,
+                paths, embed_fn=embed_fn, policy=policy, force=req.reindex,
                 on_progress=lambda t: job.push({"type": "line", "text": t}))
         except ValueError as e:
             # e.g. an embedding-model dimension change (C3) - report, don't crash.
