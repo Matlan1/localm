@@ -49,7 +49,8 @@ _DISCLOSURE = [
     re.compile(r"[A-Za-z]:[\\/]Users[\\/]" + _MAINT_USER + r"\b", re.I),  # user dir
     re.compile(r"[\\/]Users[\\/]" + _MAINT_USER + r"\b"),                 # unix-style
     # actual secrets
-    re.compile(r"\bghp_[A-Za-z0-9]{20,}"),
+    re.compile(r"\bghp_[A-Za-z0-9]{20,}"),                 # classic GitHub PAT
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}"),         # fine-grained GitHub PAT
     re.compile(r"\bsk-[A-Za-z0-9]{20,}"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
     re.compile(r"-----BEGIN (?:RSA |OPENSSH |EC )?PRIVATE KEY-----"),
