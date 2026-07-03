@@ -425,9 +425,22 @@
         <h2>Knowledge</h2>
         <div class="sub">Index folders or files into collections, then pick a collection in
         the chat parameters drawer - replies get grounded in the most relevant excerpts,
-        with citations. Retrieval is BM25 (always works offline); embeddings are blended
-        in automatically when the active model supports them. Collections live in the
+        with citations. Retrieval is BM25 (always works offline); when an embedding model is
+        set up, semantic (vector) search is blended in. Collections live in the
         localm data directory under <code>rag/</code>.</div>
+        <div class="card">
+          <div class="card-head"><span class="ic cat-ic cat-amber" data-icon="book"></span>
+            <div class="card-head-text"><h3>Embedding model</h3></div></div>
+          <div class="sub">Semantic search uses a small embedding model, loaded separately from
+          your chat model. Choose the built-in one (downloaded once, on this machine) or any
+          model from your list. BM25 lexical search always works without one.</div>
+          <div id="kb-embed-status" class="sub">Checking…</div>
+          <div class="row" style="align-items:center;flex-wrap:wrap;gap:8px">
+            <select id="kb-embed-model" style="max-width:340px"></select>
+            <button class="btn-primary" id="kb-embed-apply">Set up / apply</button>
+          </div>
+          <pre id="kb-embed-log" class="job-log" style="display:none"></pre>
+        </div>
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-amber" data-icon="book"></span>
             <div class="card-head-text"><h3>New collection</h3></div></div>
@@ -439,7 +452,7 @@
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-amber" data-icon="book"></span>
             <div class="card-head-text"><h3>Collections</h3></div></div>
-          <div class="check-row"><label title="Compute embeddings for semantic (vector) search in addition to BM25, when you add documents. Needs an embedding-capable active model; BM25 lexical retrieval always works without it. Uncheck to index BM25-only (faster, no model needed)."><input type="checkbox" id="kb-embed" checked> Compute embeddings when indexing (semantic search)</label></div>
+          <div class="check-row"><label title="Compute embeddings for semantic (vector) search in addition to BM25, when you add documents. Uses the embedding model set up above; BM25 lexical retrieval always works without one. Uncheck to index BM25-only (faster, no embedding model needed)."><input type="checkbox" id="kb-embed" checked> Compute embeddings when indexing (semantic search)</label></div>
           <div id="kb-table"></div>
           <pre id="kb-log" class="job-log" style="display:none"></pre>
         </div>

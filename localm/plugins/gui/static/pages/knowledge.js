@@ -29,6 +29,7 @@ const RAG_EXTS = [
 
 export async function refreshKnowledgePage() {
   refreshKbSelect();   // keep the chat drawer selector in sync
+  refreshEmbeddingPanel();   // embedding-model status + picker
   const box = $("kb-table");
   box.replaceChildren();
   let data;
@@ -94,6 +95,134 @@ export async function refreshKnowledgePage() {
   }
   table.appendChild(tbody);
   box.appendChild(table);
+}
+
+/* ---- Embedding model: status + one-click setup / model picker ---------- *
+ * Semantic search needs a small embedding model, loaded separately from the
+ * chat model. This panel lets the user pick the built-in one (downloaded once)
+ * or any model from their list, sets it up without a terminal, and reports a
+ * clear result - the dimension when it works, or a specific reason it did not
+ * (so a wrong pick is understood, not silently swapped). */
+const INTERNAL_DEFAULT = "bge-small-en-v1.5";
+const EMBED_LABELS = {
+  "bge-small-en-v1.5": "Internal - bge-small-en-v1.5 (recommended, ~24 MB)",
+  "nomic-embed-text-v1.5": "Internal - nomic-embed-text-v1.5 (~140 MB)",
+};
+
+export async function refreshEmbeddingPanel() {
+  const statusEl = $("kb-embed-status");
+  const sel = $("kb-embed-model");
+  if (!statusEl || !sel) return;
+  let st;
+  try {
+    const r = await fetch("/api/rag/embedding", { headers: authHeaders() });
+    st = await r.json();
+    if (!r.ok) throw new Error(st.detail || r.statusText);
+  } catch (e) {
+    statusEl.textContent = "Could not load embedding status: " + e.message;
+    return;
+  }
+  if (st.status === "ready") {
+    statusEl.textContent = st.dim
+      ? `Ready: ${st.model} (${st.dim}-dim) - semantic search is on.`
+      : `Ready: ${st.model} is installed - semantic search is on.`;
+    statusEl.style.color = "var(--green)";
+  } else {
+    statusEl.textContent =
+      `Not set up: '${st.model}' is not installed - indexing is BM25 (lexical) ` +
+      `only. Pick a model below and click "Set up / apply".`;
+    statusEl.style.color = "var(--yellow)";
+  }
+  if (st.error) {
+    statusEl.textContent += "  Last error: " + st.error;
+    statusEl.style.color = "var(--yellow)";
+  }
+  // Options: the internal keys, then the user's registered models.
+  const opts = [];
+  for (const key of st.internal || []) {
+    opts.push([key, EMBED_LABELS[key] || ("Internal - " + key)]);
+  }
+  try {
+    const md = await (await fetch("/api/models", { headers: authHeaders() })).json();
+    for (const m of (md.models || [])) {
+      if ((st.internal || []).includes(m.name)) continue;   // already listed
+      opts.push([m.name, "From your models - " + m.name]);
+    }
+  } catch (e) { /* model list is optional for the picker */ }
+  // A current custom path/name not otherwise listed still shows (and stays selected).
+  if (st.model && !opts.some(([v]) => v === st.model)) {
+    opts.unshift([st.model, st.model + " (current)"]);
+  }
+  sel.replaceChildren();
+  for (const [val, label] of opts) {
+    const o = document.createElement("option");
+    o.value = val;
+    o.textContent = label;
+    if (val === st.model) o.selected = true;
+    sel.appendChild(o);
+  }
+}
+
+async function applyEmbeddingModel(model) {
+  const log = $("kb-embed-log");
+  const btn = $("kb-embed-apply");
+  log.style.display = "block";
+  log.textContent = `Setting up '${model}'…\n`;
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch("/api/rag/embedding", {
+      method: "POST", headers: authHeaders(),
+      body: JSON.stringify({ model }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    const end = await streamJob(data.job_id, (line) => {
+      log.textContent += line + "\n";
+      log.scrollTop = log.scrollHeight;
+    });
+    // The job's own lines carry the outcome (a leading "error:" means it failed).
+    const failed = /(^|\n)error:/i.test(log.textContent) || end.status !== "done";
+    toast(failed ? "Embedding setup did not complete - see the log below"
+                 : "Embedding model ready", failed);
+    // Q3: never silently swap the user's pick. On failure, offer a one-click
+    // switch to the internal default instead (unless that IS what they tried).
+    if (failed && model !== INTERNAL_DEFAULT) offerInternalFallback();
+    else clearInternalFallback();
+    refreshEmbeddingPanel();
+  } catch (e) {
+    log.textContent += "failed: " + e.message + "\n";
+    toast("Setup failed: " + e.message, true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function offerInternalFallback() {
+  if ($("kb-embed-fallback")) return;
+  const btn = el("button", "", `Use internal instead (${INTERNAL_DEFAULT})`);
+  btn.id = "kb-embed-fallback";
+  btn.style.marginTop = "8px";
+  btn.onclick = () => {
+    const sel = $("kb-embed-model");
+    if (sel) sel.value = INTERNAL_DEFAULT;
+    clearInternalFallback();
+    applyEmbeddingModel(INTERNAL_DEFAULT);
+  };
+  $("kb-embed-log").insertAdjacentElement("afterend", btn);
+}
+
+function clearInternalFallback() {
+  const b = $("kb-embed-fallback");
+  if (b) b.remove();
+}
+
+if ($("kb-embed-apply")) {
+  $("kb-embed-apply").onclick = () => {
+    const sel = $("kb-embed-model");
+    const model = sel && sel.value;
+    if (!model) { toast("Pick an embedding model", true); return; }
+    applyEmbeddingModel(model);
+  };
 }
 
 $("kb-create").onclick = async () => {

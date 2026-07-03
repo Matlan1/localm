@@ -161,6 +161,42 @@ def test_get_embedder_picks_up_model_installed_mid_session(monkeypatch):
     assert e is not None and e.model_path.endswith("bge-small.gguf")
 
 
+def test_loaded_dim_and_last_error_track_state(monkeypatch):
+    """loaded_dim()/last_error() power the GUI picker: a load FAILURE records why
+    (so the user learns a wrong pick is not an embedding model) and reports no dim;
+    a success clears the error and reports the dimension."""
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"embedding_model": "x", "n_gpu_layers": 99,
+                                 "net_mode": "off"})
+    monkeypatch.setattr(emb, "resolve_embedding_model_path",
+                        lambda *, allow_download=None: "/models/not-an-embedder.gguf")
+    assert emb.loaded_dim() is None and emb.last_error() is None
+
+    class _Boom:
+        def __init__(self, *a, **k):
+            raise RuntimeError("this llama.dll build does not expose the embeddings API")
+
+    monkeypatch.setattr(emb, "GGUFEmbedder", _Boom)
+    assert emb.get_embedder() is None
+    assert "embeddings API" in (emb.last_error() or "")
+    assert emb.loaded_dim() is None                 # no dim on failure
+
+    class _Ok:
+        dim = 7
+
+        def __init__(self, *a, **k):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(emb, "GGUFEmbedder", _Ok)
+    emb.reset_embedder()                            # clears the recorded error
+    assert emb.last_error() is None
+    assert emb.get_embedder() is not None
+    assert emb.loaded_dim() == 7 and emb.last_error() is None
+
+
 # --------------------------------------------------------------------------- #
 #  Native embedder (real model) - gated                                        #
 # --------------------------------------------------------------------------- #

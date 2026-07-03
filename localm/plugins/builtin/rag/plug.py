@@ -80,6 +80,10 @@ class RagExtractRequest(BaseModel):
     max_chars: int = 24_000
 
 
+class EmbeddingModelRequest(BaseModel):
+    model: str                    # an internal key, a registered model name, or a GGUF path
+
+
 def _make_self_embed(self_url: str, active_model):
     """Embed via this server's own /v1/embeddings - the endpoint holds the
     inference semaphore, so indexing never races a chat reply. Raises when the
@@ -225,6 +229,101 @@ async def rag_query(name: str, req: RagQueryRequest, request: Request):
     # Defang control/frame tokens in the untrusted chunk text before it can be
     # spliced into a chat prompt (indirect prompt injection - LM-DA-SEC-03).
     return {"collection": name, "query": req.query, "hits": _neutralise_hits(hits)}
+
+
+@_router.get("/api/rag/embedding")
+async def rag_embedding_status():
+    """Current embedding-model config + availability, for the Knowledge page's
+    embedding picker. Cheap: it never loads a model - `dim` is reported only if one
+    is already loaded, and `error` carries why the last load failed (if any)."""
+    from localm.config import load_config
+    from localm.inference.embedder import (
+        DEFAULT_EMBEDDING_MODEL, KNOWN_EMBEDDING_MODELS, last_error, loaded_dim,
+        resolve_embedding_model_path)
+    model = str(load_config().get("embedding_model") or DEFAULT_EMBEDDING_MODEL)
+    installed = bool(resolve_embedding_model_path(allow_download=False))
+    return {
+        "model": model,
+        "default": DEFAULT_EMBEDDING_MODEL,
+        "internal": list(KNOWN_EMBEDDING_MODELS),
+        "installed": installed,
+        "dim": loaded_dim(),
+        "error": last_error(),
+        "status": "ready" if installed else "not_installed",
+    }
+
+
+@_router.post("/api/rag/embedding")
+async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
+    """Select the embedding model, install it if it is an internal key not yet on
+    disk (one-click setup - no terminal), then load-and-probe it so the user gets a
+    clear answer: ready with its dimension, or a SPECIFIC reason it failed (e.g. it
+    is not an embedding model). Runs as a job so a download shows progress. Never
+    silently swaps the user's choice - on failure the selection stands and the UI
+    offers the internal default."""
+    model = req.model.strip()
+    if not model:
+        raise HTTPException(400, "No model given")
+    jobs = request.app.state.jobs
+
+    def _setup(job):
+        from localm.config import update_config
+        from localm.inference.embedder import (
+            get_embedder, last_error, reset_embedder, resolve_embedding_model_path)
+
+        def line(t):
+            job.push({"type": "line", "text": t})
+
+        # Persist the choice and drop any cached embedder so the running server
+        # switches to the new model without a restart.
+        update_config(lambda c: c.__setitem__("embedding_model", model))
+        reset_embedder()
+        line(f"Selected embedding model: {model}")
+        # Resolve, downloading an internal key if it is not on disk yet (the
+        # one-click setup). A registered model / path already present is a no-op.
+        line("Resolving (downloading if needed)…")
+        try:
+            path = resolve_embedding_model_path(allow_download=True)
+        except Exception as e:                      # network / HF error
+            line(f"error: could not fetch '{model}' ({e}). Check your network "
+                 "settings, or switch to the internal default (bge-small-en-v1.5).")
+            return False
+        if not path:
+            line(f"error: '{model}' is not a known embedding key, a registered "
+                 "model, or a GGUF path - or the download was blocked by the "
+                 "network policy (net_mode). Pick a model from the list, or the "
+                 "internal default (bge-small-en-v1.5).")
+            return False
+        # Load + probe via the shared embedder (so it stays loaded for real use).
+        # get_embedder swallows the load error but records it; surface it verbatim
+        # so the user learns exactly why a wrong pick failed.
+        line("Loading and testing the model…")
+        emb = get_embedder()
+        if emb is None:
+            why = last_error() or "the model could not be loaded"
+            line(f"error: '{model}' could not produce embeddings ({why}). It may "
+                 "not be an embedding model - pick an embedding model from the "
+                 "list, or switch to the internal default (bge-small-en-v1.5).")
+            return False
+        try:
+            vecs = emb.embed(["localm embedding self-test"])
+            dim = len(vecs[0]) if vecs and vecs[0] else 0
+        except Exception as ex:
+            line(f"error: '{model}' failed to embed a test string ({ex}). Switch "
+                 "to the internal default (bge-small-en-v1.5).")
+            return False
+        if dim <= 0:
+            line(f"error: '{model}' returned empty vectors - it is likely not an "
+                 "embedding model. Switch to the internal default "
+                 "(bge-small-en-v1.5).")
+            return False
+        line(f"Ready: {model} ({dim}-dim). Semantic search is on. Re-index a "
+             "collection (add its docs again) to add vectors to existing documents.")
+        return True
+
+    from localm.inference.http_server import principal_id
+    job = jobs.start_fn("embed-setup", _setup, owner=principal_id(request))
+    return {"job_id": job.id}
 
 
 @_router.post("/api/rag/collections/{name}/remove-doc")
