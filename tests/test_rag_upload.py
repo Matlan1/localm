@@ -125,6 +125,19 @@ class TestUploadRoute:
                 "embed": False})
             assert r.status_code == 413
 
+    def test_oversized_rejected_before_decode(self, upload_app):
+        # SEC (CWE-400): the per-file cap is checked on the base64 STRING length
+        # BEFORE decoding, so an oversized payload is never materialized. A valid
+        # base64-alphabet string over the char cap is refused with 413 (a length
+        # check), not decoded.
+        with TestClient(upload_app) as c:
+            c.post("/api/rag/collections", json={"name": "kb"})
+            over = "A" * 40_000_001         # valid alphabet, one char over the cap
+            r = c.post("/api/rag/collections/kb/upload", json={
+                "files": [{"filename": "a.txt", "content_b64": over}],
+                "embed": False})
+            assert r.status_code == 413, r.text
+
     def test_non_host_scoped_key_can_upload(self, tmp_path, monkeypatch):
         # THE POINT: a scoped rag key with NO host filesystem access can still
         # upload from its own device (no fs gate, no path confinement).
@@ -157,3 +170,34 @@ class TestUploadRoute:
                 "files": [{"filename": "a.md", "content_b64": _b64(b"hi there")}],
                 "embed": False}, headers=sc)
             assert r.status_code == 200, r.text
+
+
+class TestBodySizeGuard:
+    """The global request-body cap (Content-Length rejected before the body is
+    buffered) that backstops the upload/extract decode-time OOM DoS."""
+
+    def test_oversized_body_rejected_before_parsing(self, tmp_path, monkeypatch):
+        import localm.inference.http_server as hs
+        import localm.config as cfg
+        localm = tmp_path / ".localm"
+        localm.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("LOCALM_HOME", str(localm))
+        monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+        monkeypatch.setattr(cfg, "HOME_DIR", localm)
+        monkeypatch.setattr(cfg, "MODELS_DIR", localm / "models")
+        monkeypatch.setattr(cfg, "CONFIG_FILE", localm / "config.json")
+        monkeypatch.setattr(cfg, "REGISTRY_FILE", localm / "registry.json")
+        # Tiny cap so the test needs no giant payload.
+        monkeypatch.setattr(hs, "MAX_REQUEST_BODY_BYTES", 1000)
+        app = hs.create_app(None)
+        with TestClient(
+                app,
+                headers={"Authorization": f"Bearer {app.state.shell_token}"}) as c:
+            big = b"x" * 5000                       # Content-Length 5000 > 1000
+            r = c.patch("/v1/config", content=big,
+                        headers={"Content-Type": "application/json"})
+            assert r.status_code == 413, r.text
+            assert "too large" in r.text.lower()
+            # A normal small request is NOT blocked by the size guard.
+            ok = c.patch("/v1/config", json={"n_ctx": 8192})
+            assert ok.status_code != 413, ok.text

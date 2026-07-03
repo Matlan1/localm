@@ -246,27 +246,35 @@ async def rag_upload(name: str, req: RagUploadRequest, request: Request):
     needs no host filesystem access and no path confinement (whitelist/blacklist
     does not apply to the caller's own files). This is the per-device path for a
     client (a phone, a scoped key) that cannot browse the server disk. Held to the
-    rag scope like the rest of the plugin. Per-file and per-request size caps guard
-    against a memory-exhaustion upload; a zip bomb is caught during extraction."""
+    rag scope like the rest of the plugin. The whole request body is bounded up
+    front (MAX_REQUEST_BODY_BYTES, from Content-Length before buffering); per-file
+    and per-request caps are then checked on the base64 STRING length BEFORE
+    decoding, so no oversized payload is ever materialized in memory; a zip bomb is
+    caught during extraction."""
     coll = _get_collection(name)
     if not req.files:
         raise HTTPException(400, "No files given")
     if len(req.files) > 50:
         raise HTTPException(400, "Too many files in one upload (max 50)")
+    # base64 is ~4/3 of the decoded size, so checking the STRING length bounds the
+    # decoded size WITHOUT decoding first - that is what stops b64decode from
+    # doubling peak memory (the whole request body is already bounded upstream by
+    # MAX_REQUEST_BODY_BYTES; this bounds each file WITHIN it). validate=True means
+    # the string is pure base64 alphabet, so the 4/3 ratio holds exactly.
+    _B64_PER_FILE = 40_000_000      # ~30 MB decoded
+    _B64_PER_REQUEST = 134_000_000  # ~100 MB decoded
     uploads: list = []
-    total = 0
+    b64_total = 0
     for item in req.files:
+        b64_total += len(item.content_b64)
+        if len(item.content_b64) > _B64_PER_FILE:
+            raise HTTPException(413, f"File too large (max 30 MB): {item.filename}")
+        if b64_total > _B64_PER_REQUEST:
+            raise HTTPException(413, "Upload too large (max 100 MB per request)")
         try:
             data = base64.b64decode(item.content_b64, validate=True)
         except Exception:
             raise HTTPException(400, f"content_b64 is not valid base64: {item.filename}")
-        total += len(data)
-        # Cap the DECODED bytes (per file and per request) so a huge upload cannot
-        # exhaust memory; the zip-bomb amplification guard lives in extract_bytes.
-        if len(data) > 30_000_000:
-            raise HTTPException(413, f"File too large (max 30 MB): {item.filename}")
-        if total > 100_000_000:
-            raise HTTPException(413, "Upload too large (max 100 MB per request)")
         uploads.append({"filename": item.filename, "data": data})
 
     embed = req.embed
@@ -328,6 +336,10 @@ async def rag_remove_doc(name: str, req: RagRemoveDocRequest):
 async def rag_extract(req: RagExtractRequest):
     """Uploaded chat attachment -> plain text, entirely in memory."""
     from localm.rag import ExtractError, extract_bytes
+    # Reject from the base64 STRING length before decoding, so a huge attachment
+    # cannot double peak memory during b64decode (see rag_upload).
+    if len(req.content_b64) > 40_000_000:      # ~30 MB decoded
+        raise HTTPException(413, "Attachment too large (max 30 MB)")
     try:
         data = base64.b64decode(req.content_b64, validate=True)
     except Exception:
