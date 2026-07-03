@@ -15,10 +15,13 @@ import pytest
 #  NEW-J - the venv guard, and its console-script wiring
 # --------------------------------------------------------------------------- #
 
-def test_require_venv_exits_outside_venv(monkeypatch):
+def test_require_venv_exits_when_deps_absent(monkeypatch):
+    # A bare interpreter: not a venv AND the runtime deps are not importable ->
+    # the one case the guard exists for (pre-empt the cryptic ModuleNotFoundError).
     import localm._venvguard as vg
     monkeypatch.setattr(vg.sys, "prefix", "/usr")
     monkeypatch.setattr(vg.sys, "base_prefix", "/usr")     # prefix == base -> not a venv
+    monkeypatch.setattr(vg, "_runtime_deps_present", lambda: False)
     with pytest.raises(SystemExit):
         vg.require_venv()
 
@@ -28,6 +31,23 @@ def test_require_venv_passes_inside_venv(monkeypatch):
     monkeypatch.setattr(vg.sys, "prefix", "/proj/.venv")
     monkeypatch.setattr(vg.sys, "base_prefix", "/usr")     # differ -> a venv
     vg.require_venv()   # must not raise
+
+
+def test_require_venv_passes_outside_venv_when_deps_present(monkeypatch):
+    # The fix: a NON-.venv interpreter that DOES have the deps (pipx / container /
+    # system-wide / cold install / CI editable) must run, not be falsely blocked.
+    import localm._venvguard as vg
+    monkeypatch.setattr(vg.sys, "prefix", "/usr")
+    monkeypatch.setattr(vg.sys, "base_prefix", "/usr")     # prefix == base -> not a venv
+    monkeypatch.setattr(vg, "_runtime_deps_present", lambda: True)
+    vg.require_venv()   # must not raise
+
+
+def test_runtime_deps_present_true_in_this_env():
+    # This test process has localm installed with its deps, so the probe is True -
+    # i.e. the guard would let this interpreter run even outside a .venv.
+    import localm._venvguard as vg
+    assert vg._runtime_deps_present() is True
 
 
 def test_console_main_entrypoints_import():
