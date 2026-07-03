@@ -152,7 +152,19 @@ export function scrubMarkers(text) {
     .replace(/<\|?\s*channel\s*\|?>|<\s*channel\s*\|>|<\|?\s*message\s*\|?>|<\|start\|>(assistant|user|system)?|<\|return\|>|<\|turn>(user|model|assistant|system)?\n?|<turn\|>|<\|tool>|<tool\|>|<\|think\|>|<think\|>|<unused\d+>?/g, "");
 }
 
-export function renderMarkdown(target, text) {
+/** True if the main reply body rendered to something the user can actually see.
+ *  A reply can be a non-empty STRING yet render to nothing: a tiny model that
+ *  emits only an unterminated / empty ```code fence produces an empty <pre><code>
+ *  (blank box) - text-content is whitespace and there is no media. Whitespace-only
+ *  and empty code fences count as NOT visible; text, images, tables, rules, math
+ *  source etc. count as visible. Runs BEFORE KaTeX, so math is caught via its
+ *  source ($x$ has non-empty text) rather than a rendered .katex node. */
+function mainHasVisibleContent(main) {
+  if ((main.textContent || "").trim() !== "") return true;
+  return main.querySelector("img, svg, canvas, video, audio, iframe, table, hr, input") !== null;
+}
+
+export function renderMarkdown(target, text, opts = {}) {
   const { think, open, rest: rawRest } = splitThink(scrubMarkers(text));
   const rest = formatToolCalls(rawRest);
 
@@ -190,6 +202,15 @@ export function renderMarkdown(target, text) {
     target.appendChild(main);
   }
   main.innerHTML = DOMPurify.sanitize(marked.parse(rest || ""));
+  // Never leave a blank reply bubble. On a SETTLED render (opts.final - a reload
+  // or the post-stream renderChat, never a mid-stream shell) a body that rendered
+  // to nothing visible gets a plain note instead of an empty box, so "no matter
+  // how small the model, it does not just break" (the real case: a 1B model whose
+  // <think> works but whose answer is a bare empty ```code fence). Gated on final
+  // so a slow model is never flashed a false "no reply" before its first token.
+  if (opts.final && !mainHasVisibleContent(main)) {
+    main.replaceChildren(el("div", "md-empty", "(no reply text)"));
+  }
   // LaTeX math: $...$, $$...$$, \(...\), \[...\]. KaTeX only rewrites text
   // nodes after sanitisation, so this stays XSS-safe.
   if (typeof renderMathInElement !== "undefined") {
