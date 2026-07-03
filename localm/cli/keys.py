@@ -175,11 +175,12 @@ def key_list():
 @click.option("-s", "--scope", "scopes", multiple=True, required=True,
               help="A capability scope to grant (repeatable).")
 @click.option("--fs-access", "fs_access",
-              type=click.Choice(["none", "shared", "host"]), default="none",
+              type=click.Choice(["none", "host"]), default="none",
               show_default=True,
-              help="Host filesystem reach: none (device upload only), shared "
-                   "(owner-designated folders), or host (the whole server disk). "
-                   "Defaults to none so a shared key cannot browse your disk.")
+              help="Host filesystem reach: none (device upload only) or host (the "
+                   "whole server disk). Defaults to none so a shared key cannot "
+                   "browse your disk. (A confined 'shared'/designated-roots tier "
+                   "is reserved but not yet enforced.)")
 def key_create(name, scopes, fs_access):
     """Mint a named key limited to SCOPES; print the secret once.
 
@@ -188,7 +189,8 @@ def key_create(name, scopes, fs_access):
     escalate itself.
 
     --fs-access grants host filesystem reach (default none). The owner key always
-    has full host access; this is how you'd let (or deny) a shared/scoped key.
+    has full host access; this is how you let (or deny) a shared device key browse
+    the server disk.
     """
     from localm import auth
     try:
