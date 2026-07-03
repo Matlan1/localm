@@ -223,8 +223,17 @@ def _save_keystore(records: list) -> None:
 # Filesystem-access level a credential may reach on the SERVER HOST. A single
 # graded dial (nested: host > shared > none), NOT a scope, so it can be set below
 # host even on an owner's own device (the device just carries a key with a lower
-# level). "none" = no host FS at all (device upload only); "shared" = confined to
-# owner-designated shared roots; "host" = the whole server filesystem.
+# level). "none" = no host FS at all (device upload only); "host" = the whole
+# server filesystem.
+#
+# "shared" is RESERVED scaffolding for a future "confined to owner-designated
+# shared roots" tier. It is a recognised level (so a stored value normalises and
+# fails safe) but is NOT enforced anywhere yet: require_fs_host() grants only
+# "host", so a "shared" key currently reaches no more host FS than "none". It is
+# deliberately kept OUT of the user-facing `localm key create --fs-access` choices
+# until that confinement is built, so we never advertise a tier that does nothing
+# (AGENTS rule 5: do not hide problems). Implement the confinement, then re-expose
+# it in the CLI choice.
 FS_ACCESS_LEVELS = ("none", "shared", "host")
 
 
