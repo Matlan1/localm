@@ -142,6 +142,10 @@ span[data-icon], .ic, .nav-ic, .btn-ic, .lbl-ic { display: inline-flex; align-it
 /* Every dynamically-built checkbox/radio inherits the accent (matches the picker
    checkboxes) instead of the browser default. */
 input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); cursor: pointer; }
+/* One focus treatment for every field (design standard rule 5): the accent border
+   the app already uses on #conv-search / #model-select / .card inputs, applied
+   everywhere so the pull, plugin-install, and params inputs get it too. */
+input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
 
 #conversations {
   flex: 1;
@@ -844,6 +848,17 @@ pre:hover .canvas-btn { opacity: 1; }
   font-size: 15px;
 }
 .empty-hint .big { font-size: 26px; margin-bottom: 10px; }
+
+/* Designed empty state (emptyState() in app/icons.js): a centred icon + a line +
+   an optional 'do this next' hint, so an empty list never reads as a blank gap. */
+.empty-state {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 6px; padding: 40px 20px; text-align: center;
+}
+.empty-state-ic { color: var(--text-dim); opacity: 0.6; }
+.empty-state-ic svg { width: 32px; height: 32px; }
+.empty-state-text { font-size: 14px; color: var(--text); }
+.empty-state-hint { font-size: 12.5px; color: var(--text-dim); max-width: 34ch; }
 
 ::-webkit-scrollbar { width: 9px; height: 9px; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; }

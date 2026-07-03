@@ -8,6 +8,7 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { chat } from "../app/chat.js";
 import { $, authHeaders, el, openModal, streamJob, toast } from "../app/helpers.js";
+import { emptyState } from "../app/icons.js";
 import { pickPath } from "../app/picker.js";
 import { caps, refreshKbSelect } from "../app/settings-perf.js";
 
@@ -40,8 +41,8 @@ export async function refreshKnowledgePage() {
     return;
   }
   if (!data.collections.length) {
-    box.appendChild(el("div", "sub",
-      "No collections yet - create one above, then add files or folders to it."));
+    box.appendChild(emptyState("book", "No collections yet",
+      "Create one above, then add files or folders to it."));
     return;
   }
   const table = el("table", "data-table");
