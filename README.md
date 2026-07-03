@@ -77,11 +77,10 @@ Run `localm doctor` after installing to check Python, the native library, GPU dr
 
 Clone anywhere and double-click `setup.bat`. It creates a private `.venv` inside the clone (always Python 3.12), installs localm into it, detects your GPU and provisions the matching llama.cpp backend (see [GPU setup](#gpu-setup)), and asks where data should live:
 
-- **inside the clone** (`.\home`) - fully portable; multiple clones on one machine are completely independent,
-- **shared** (`~/.localm`) - clones share models and settings, or
-- **a custom path** (recorded in `localm-home.cfg`).
+- **inside the clone** (`.\home`) - fully portable and self-contained; multiple clones on one machine are completely independent (this is the default), or
+- **a custom path** (recorded in `localm-home.cfg`) - e.g. a shared models drive.
 
-It then offers an optional desktop shortcut and walks you through which plugins to enable (`localm plugin setup`). Nothing is installed globally and PATH is untouched. The `LOCALM_HOME` environment variable overrides the data location at any time.
+There is no silent per-user fallback: if nothing is configured, localm keeps its data in a contained `.\home` inside the install and says so, never a shared `~/.localm` outside it. It then offers an optional desktop shortcut, an optional global `localm` command, and walks you through which plugins to enable (`localm plugin setup`). Nothing is installed globally, and your PATH is left untouched unless you opt into the global `localm` command. The `LOCALM_HOME` environment variable overrides the data location at any time.
 
 ### Manual (any OS)
 
