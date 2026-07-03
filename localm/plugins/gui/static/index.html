@@ -74,7 +74,7 @@
     </nav>
 
     <div id="conversations">
-      <h3>Conversations <button id="new-conv" title="New conversation">+</button></h3>
+      <h3>Conversations <button id="new-conv" data-icon="plus" title="New conversation"></button></h3>
       <input type="text" id="conv-search" placeholder="search chats…" spellcheck="false">
       <div id="conv-list"></div>
     </div>
@@ -102,7 +102,7 @@
       <div class="mtb-title">local<span>m</span></div>
       <!-- New-chat compose button: on a phone the sidebar (with its + button) is
            a closed drawer, so surface "new chat" right in the top bar. -->
-      <button id="mtb-new" aria-label="New chat" title="New chat">&#43;</button>
+      <button id="mtb-new" aria-label="New chat" data-icon="plus" title="New chat"></button>
     </div>
 
     <!-- ============ CHAT ============ -->
@@ -228,10 +228,10 @@
       <div class="composer-wrap" id="coder-composer" style="display:none">
         <div id="coder-attach-chips"></div>
         <div class="composer">
-          <button class="attach" id="coder-attach" title="Attach text files - their content is added to your message">&#128206;</button>
+          <button class="attach" id="coder-attach" data-icon="attach" title="Attach text files - their content is added to your message"></button>
           <input type="file" id="coder-file" accept=".pdf,.docx,.txt,.md,.markdown,.rst,.html,.htm,.ipynb,.json,.jsonl,.yaml,.yml,.toml,.csv,.tsv,.log,.py,.js,.ts,.java,.c,.h,.cpp,.cs,.go,.rs,.rb,.sh,.ps1,.sql,.xml,.css" multiple style="display:none">
           <textarea id="coder-input" rows="1" placeholder="Describe a task for the agent…" title="Enter to send · Shift+Enter for a new line"></textarea>
-          <button class="send" id="coder-send" title="Send">&#10148;</button>
+          <button class="send" id="coder-send" data-icon="send" title="Send"></button>
         </div>
         <div class="composer-row">
           <span></span>
@@ -240,7 +240,7 @@
       </div>
       </div>
       <aside id="coder-sessions">
-        <h3>Open sessions <button id="coder-new-session" title="Start a new coder session">+</button></h3>
+        <h3>Open sessions <button id="coder-new-session" data-icon="plus" title="Start a new coder session"></button></h3>
         <div id="coder-session-list"></div>
       </aside>
     </section>

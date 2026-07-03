@@ -199,6 +199,7 @@ span[data-icon], .ic, .nav-ic, .btn-ic, .lbl-ic { display: inline-flex; align-it
 .composer .attach, .composer .send { display: flex; align-items: center; justify-content: center; }
 .composer .attach svg, .composer .send svg { width: 19px; height: 19px; }
 #nav-toggle svg { width: 22px; height: 22px; }
+#mtb-new svg { width: 22px; height: 22px; }
 /* Category-colored nav icons (color = which area, not decoration). The icon takes
    its area's hue via data-icon (static markup) or data-icon-name (JS-built), so
    the sidebar reads as organized zones instead of a grey column. Labels/surfaces
