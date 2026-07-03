@@ -63,6 +63,18 @@ function updateGateOrError(request, env) {
 
 async function fileReport(request, env) {
   if (!secretOk(request, env)) return json({ error: "unauthorized" }, 401);
+  // Spam control: the report endpoint ships ENABLED in every localm install and its
+  // client token is public, so throttle issue creation PER CLIENT IP. The binding is
+  // optional: absent (local `wrangler dev`, or before it is provisioned) means no
+  // limiting and the Worker still works. Only enforced when deployed. See the
+  // [[ratelimits]] block in wrangler.toml.
+  if (env.RATE_LIMIT) {
+    const ip = request.headers.get("cf-connecting-ip") || "unknown";
+    const { success } = await env.RATE_LIMIT.limit({ key: `report:${ip}` });
+    if (!success) {
+      return json({ error: "rate limited: too many bug reports from your network, wait a minute" }, 429);
+    }
+  }
   if (!env.GITHUB_TOKEN || !env.TARGET_REPO) {
     return json({ error: "proxy misconfigured: set GITHUB_TOKEN and TARGET_REPO" }, 500);
   }

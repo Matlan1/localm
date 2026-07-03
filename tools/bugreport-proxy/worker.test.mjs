@@ -69,6 +69,31 @@ test("report: wrong shared secret -> 401 and NO GitHub call", async () => {
   } finally { restore(); }
 });
 
+test("report: rate limited -> 429 and NO GitHub call", async () => {
+  let called = false;
+  const restore = stubFetch(async () => { called = true; return new Response("{}", { status: 201 }); });
+  const limiter = { limit: async ({ key }) => { limiter.key = key; return { success: false }; } };
+  try {
+    const r = await worker.fetch(
+      req({ title: "t", body: "b" }, { headers: { "cf-connecting-ip": "1.2.3.4" } }),
+      { ...ENV, RATE_LIMIT: limiter });
+    assert.equal(r.status, 429);
+    assert.equal(called, false);                  // throttled BEFORE the GitHub call
+    assert.ok(limiter.key.includes("1.2.3.4"));   // keyed per client IP, not global
+  } finally { restore(); }
+});
+
+test("report: under the rate limit proceeds to file the issue", async () => {
+  const restore = stubFetch(async () => new Response(
+    JSON.stringify({ html_url: "https://github.com/Matlan1/localm/issues/1", number: 1 }),
+    { status: 201 }));
+  const limiter = { limit: async () => ({ success: true }) };
+  try {
+    const r = await worker.fetch(req({ title: "t", body: "b" }), { ...ENV, RATE_LIMIT: limiter });
+    assert.equal(r.status, 201);
+  } finally { restore(); }
+});
+
 test("report: happy path creates the issue with the ISSUE token", async () => {
   const seen = {};
   const restore = stubFetch(async (url, opts) => {
