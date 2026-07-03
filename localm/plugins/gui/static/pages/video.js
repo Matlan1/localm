@@ -9,7 +9,7 @@
 import { chat } from "../app/chat.js";
 import { $, MIB, authHeaders, el, fetchImageURL, streamJob, toast } from "../app/helpers.js";
 import { hideStop, showStop } from "./images.js";
-import { pickDirectory } from "../app/coder.js";
+import { pickDirectory } from "../app/picker.js";
 
 /* ================================================================ */
 /*  Video page                                                       */

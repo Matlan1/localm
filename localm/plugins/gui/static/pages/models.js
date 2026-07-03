@@ -6,7 +6,7 @@
 "use strict";
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
-import { pickDirectory } from "../app/coder.js";
+import { pickDirectory } from "../app/picker.js";
 import { $, GIB, authHeaders, confirmDanger, downloadRate, el, fmtBytes, fmtDuration, openModal, streamJob, toast } from "../app/helpers.js";
 import { onServerUnreachable } from "../app/init.js";
 import { modelCache, refreshModels, switchModel } from "../app/models-sidebar.js";

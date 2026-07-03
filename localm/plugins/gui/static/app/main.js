@@ -6,6 +6,7 @@
  * window.X, as the pre-module global functions were reachable. */
 import * as m0 from "./client-log.js";
 import * as m1 from "./helpers.js";
+import * as mPk from "./picker.js";
 import * as m2 from "./theme.js";
 import * as m3 from "./logo.js";
 import * as m4 from "./tabs.js";
@@ -26,7 +27,7 @@ import * as m18 from "../pages/music.js";
 import * as m19 from "../pages/video.js";
 import * as m20 from "../pages/knowledge.js";
 
-for (const mod of [m0, m1, m2, m3, m4, m5, m6, m7, m8, m9, m10, m11, m12, m13, m14, m15, m16, m17, m18, m19, m20]) {
+for (const mod of [m0, m1, mPk, m2, m3, m4, m5, m6, m7, m8, m9, m10, m11, m12, m13, m14, m15, m16, m17, m18, m19, m20]) {
   for (const name of Object.keys(mod)) {
     try { window[name] = mod[name]; } catch (_) { /* read-only global; skip */ }
   }

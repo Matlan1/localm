@@ -1,0 +1,159 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Tests for the shared file/folder picker (app/picker.js): pickPath() plus the
+// pickDirectory()/pickFile() back-compat wrappers. Drives the real module in
+// jsdom against a fake /api/fs/dirs + /api/fs/places filesystem.
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { loadApp, runScript } from "./harness.mjs";
+
+const FS = {
+  "/root": {
+    path: "/root", parent: "/", entries: [
+      { name: "sub", is_dir: true, size: null, mtime: 1700000000 },
+      { name: "apple.md", is_dir: false, size: 1234, mtime: 1700000000 },
+      { name: "photo.png", is_dir: false, size: 5000, mtime: 1700000000 },
+    ],
+  },
+  "/root/sub": {
+    path: "/root/sub", parent: "/root", entries: [
+      { name: "note.txt", is_dir: false, size: 10, mtime: 1700000000 },
+    ],
+  },
+  "": { path: "", parent: null, entries: [
+    { name: "/", is_dir: true, size: null, mtime: null },
+  ] },
+};
+
+function json(obj) {
+  return { ok: true, status: 200, json: async () => obj, text: async () => "" };
+}
+function fetchImpl(url) {
+  const u = String(url);
+  if (u.includes("/api/fs/places")) {
+    return Promise.resolve(json({
+      places: [{ label: "Home", path: "/home/me", icon: "home" }],
+      drives: [{ label: "/", path: "/", icon: "drive" }],
+    }));
+  }
+  if (u.includes("/api/fs/dirs")) {
+    const m = u.match(/[?&]path=([^&]*)/);
+    const p = decodeURIComponent(m ? m[1] : "");
+    const d = FS[p] || FS["/root"];
+    return Promise.resolve(json(d));
+  }
+  return Promise.resolve(json({}));
+}
+
+const ticks = async (n = 4) => { for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 0)); };
+const body = (win) => win.document.getElementById("modal-body");
+const rows = (win) => [...body(win).querySelectorAll(".picker-row")];
+const rowNamed = (win, name) => rows(win).find(
+  (r) => r.querySelector(".picker-name") && r.querySelector(".picker-name").textContent === name);
+const okBtn = (win) => body(win).querySelector(".picker-foot .btn-primary");
+const cancelBtn = (win) => body(win).querySelector(".picker-foot .btn-secondary");
+
+function start(win, exprOpts) {
+  runScript(win, `
+    globalThis.__res = undefined; globalThis.__done = false;
+    pickPath(${exprOpts}).then((v) => { globalThis.__res = v; globalThis.__done = true; });
+  `);
+}
+
+test("dir mode lists a folder and 'Use this folder' resolves the current path", async () => {
+  const { window: win } = loadApp({ fetchImpl });
+  start(win, `{ mode: "dir", startPath: "/root" }`);
+  await ticks();
+  assert.ok(rowNamed(win, "sub"), "folder row shown");
+  assert.ok(rowNamed(win, "apple.md"), "file row shown for context");
+  const ok = okBtn(win);
+  assert.equal(ok.textContent, "Use this folder");
+  assert.equal(ok.disabled, false, "enabled once a directory is loaded");
+  ok.click();
+  await ticks();
+  assert.equal(win.__res, "/root", "resolves the browsed directory");
+});
+
+test("clicking a folder navigates into it", async () => {
+  const { window: win } = loadApp({ fetchImpl });
+  start(win, `{ mode: "dir", startPath: "/root" }`);
+  await ticks();
+  rowNamed(win, "sub").click();
+  await ticks();
+  assert.ok(rowNamed(win, "note.txt"), "now showing the subfolder contents");
+  okBtn(win).click();
+  await ticks();
+  assert.equal(win.__res, "/root/sub");
+});
+
+test("file mode resolves the clicked file", async () => {
+  const { window: win } = loadApp({ fetchImpl });
+  start(win, `{ mode: "file", startPath: "/root" }`);
+  await ticks();
+  // No confirm button in file mode - you click a file.
+  assert.equal(okBtn(win).style.display, "none");
+  rowNamed(win, "apple.md").click();
+  await ticks();
+  assert.equal(win.__res, "/root/apple.md");
+});
+
+test("multi mode: exts gate selection, checked files+folders resolve as an array", async () => {
+  const { window: win } = loadApp({ fetchImpl });
+  start(win, `{ mode: "multi", startPath: "/root", exts: [".md", ".txt", ".pdf"] }`);
+  await ticks();
+  // photo.png is unsupported -> greyed, no checkbox.
+  const png = rowNamed(win, "photo.png");
+  assert.ok(png.classList.contains("unselectable"), "unsupported file is not selectable");
+  assert.equal(png.querySelector(".picker-cb"), null, "unsupported file has no checkbox");
+  // apple.md (supported) and sub (a folder, selectable in multi) both have checkboxes.
+  rowNamed(win, "apple.md").querySelector(".picker-cb").click();
+  rowNamed(win, "sub").querySelector(".picker-cb").click();
+  await ticks(1);
+  const ok = okBtn(win);
+  assert.equal(ok.textContent, "Add 2 items");
+  ok.click();
+  await ticks();
+  assert.deepEqual([...win.__res].sort(), ["/root/apple.md", "/root/sub"].sort());
+});
+
+test("filter narrows the visible rows", async () => {
+  const { window: win } = loadApp({ fetchImpl });
+  start(win, `{ mode: "dir", startPath: "/root" }`);
+  await ticks();
+  const filter = body(win).querySelector(".picker-filter input");
+  filter.value = "apple";
+  filter.dispatchEvent(new win.Event("input"));
+  await ticks(1);
+  const names = rows(win).map((r) => r.querySelector(".picker-name").textContent);
+  assert.deepEqual(names, ["apple.md"], "only the matching row remains");
+});
+
+test("dismissing the modal resolves null", async () => {
+  const { window: win } = loadApp({ fetchImpl });
+  start(win, `{ mode: "dir", startPath: "/root" }`);
+  await ticks();
+  cancelBtn(win).click();
+  await ticks();
+  assert.equal(win.__res, null);
+});
+
+test("pickDirectory / pickFile keep their string|null contract", async () => {
+  const { window: win } = loadApp({ fetchImpl });
+  runScript(win, `
+    globalThis.__d = undefined;
+    pickDirectory("Pick", "/root").then((v) => { globalThis.__d = v; });
+  `);
+  await ticks();
+  okBtn(win).click();
+  await ticks();
+  assert.equal(win.__d, "/root", "pickDirectory resolves a path string");
+
+  runScript(win, `
+    globalThis.__f = undefined;
+    pickFile("Pick a file", "/root").then((v) => { globalThis.__f = v; });
+  `);
+  await ticks();
+  rowNamed(win, "apple.md").click();
+  await ticks();
+  assert.equal(win.__f, "/root/apple.md", "pickFile resolves the clicked file");
+});

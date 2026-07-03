@@ -14,9 +14,10 @@ const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).
   "/app/main.js",
-  "/app/client-log.js", "/app/helpers.js", "/app/theme.js", "/app/logo.js",
-  "/app/tabs.js", "/app/models-sidebar.js", "/app/chat.js", "/app/cmdk.js",
-  "/app/settings-perf.js", "/app/coder.js", "/app/slash.js", "/app/init.js",
+  "/app/client-log.js", "/app/helpers.js", "/app/picker.js", "/app/theme.js",
+  "/app/logo.js", "/app/tabs.js", "/app/models-sidebar.js", "/app/chat.js",
+  "/app/cmdk.js", "/app/settings-perf.js", "/app/coder.js", "/app/slash.js",
+  "/app/init.js",
   // pages.js was split per page (same load order); precache each part.
   "/pages/dispatch.js", "/pages/models.js", "/pages/images.js",
   "/pages/plugins.js", "/pages/settings.js", "/pages/workflow.js",
