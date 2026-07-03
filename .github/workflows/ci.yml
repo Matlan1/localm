@@ -1,7 +1,11 @@
 name: CI
 
 on:
+  # Push runs only on master (post-merge verification). Branch work is covered by
+  # the pull_request trigger, so a PR gets ONE run, not two (push + PR) - half the
+  # Actions spend. workflow_dispatch + the weekly schedule are unaffected.
   push:
+    branches: [master]
   pull_request:
   workflow_dispatch:
   schedule:
@@ -41,6 +45,24 @@ jobs:
         uses: astral-sh/setup-uv@v6
       - name: Verify uv.lock matches pyproject (DEP-1, no silent drift)
         run: uv lock --check
+
+      # localm is meant to run from its PROJECT VENV: a venv guard (NEW-J) refuses
+      # a bare global interpreter so a stray global install fails loudly instead of
+      # with a cryptic missing-runtime-dep error. Create a venv and prepend it to
+      # PATH so every step below - pip, pytest, ruff, hygiene, AND the
+      # `python -m localm` SUBPROCESSES the job-streaming tests spawn - runs from
+      # it, matching real usage. Per-OS steps use each runner's NATIVE shell +
+      # $GITHUB_WORKSPACE (a native path on both); a single Git-Bash step would put
+      # an MSYS path like /d/a/... on PATH that the Windows steps cannot resolve.
+      - name: Create the project venv
+        run: python -m venv .venv
+      - name: Put the venv on PATH (POSIX)
+        if: runner.os != 'Windows'
+        run: echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+      - name: Put the venv on PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_PATH -Value "$env:GITHUB_WORKSPACE\.venv\Scripts"
 
       # Light extras only ([rag] = pypdf, pure-Python). The [gpu]/[gguf] extras
       # pull torch / ROCm / llama-cpp wheels from a custom AMD index and are
