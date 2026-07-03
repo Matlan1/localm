@@ -369,8 +369,10 @@ export async function submitBugReport(upload, isRetry = false) {
     });
     const data = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(data.detail || r.statusText);
-    // Rate limited: keep the user's text, count down, and auto-retry the send ONCE.
-    if (upload && data.rate_limited && !isRetry) {
+    // Rate limited: if auto-retry is on (default), keep the user's text, count down,
+    // and retry the send ONCE; if the toggle is off, fall through to a plain notice.
+    const autoRetry = !$("bug-autoretry") || $("bug-autoretry").checked;
+    if (upload && data.rate_limited && !isRetry && autoRetry) {
       const secs = Math.max(1, parseInt(data.retry_after, 10) || 30);
       await countdownRetryBugReport(secs, out);
       return;   // the retry (and the finally below) re-enable the buttons
@@ -384,7 +386,7 @@ export async function submitBugReport(upload, isRetry = false) {
           (data.issue_url ? " Tracking issue: " + data.issue_url : "");
       } else if (data.rate_limited) {
         out.textContent = "Saved: " + where +
-          "  -  still rate limited; wait a minute and click Send again.";
+          "  -  rate limited; wait a bit and click Send again.";
       } else if (uploadFailed) {
         out.textContent = "Saved: " + where + "  -  could not send (" +
           data.upload_error + "); email it to " + (data.maintainer || "the maintainer");
@@ -396,7 +398,7 @@ export async function submitBugReport(upload, isRetry = false) {
     // Keep the description if a rate-limited send might still be retried by hand.
     if (!data.rate_limited) $("bug-desc").value = "";
     if (upload && data.uploaded) toast("Bug report sent");
-    else if (data.rate_limited) toast("Still rate limited; wait a minute and click Send again", true);
+    else if (data.rate_limited) toast("Rate limited; wait a bit and click Send again", true);
     else if (uploadFailed) toast("Saved, but could not send: " + data.upload_error, true);
     else toast("Bug report saved");
   } catch (e) {
