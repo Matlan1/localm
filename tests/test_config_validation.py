@@ -96,6 +96,42 @@ class TestValidateUpdate:
         with pytest.raises(ValueError, match="expected a list"):
             ss.validate_update({"plugins_enabled": "chat"})
 
+    # --- PATHLIST (rag_allowed_roots): coerce, resolve, confine ----------- #
+
+    def test_pathlist_coerces_list_and_resolves(self, tmp_path):
+        from pathlib import Path
+        a = tmp_path / "docs"
+        a.mkdir()
+        out = ss.validate_update({"rag_allowed_roots": [str(a)]})
+        assert [Path(p) for p in out["rag_allowed_roots"]] == [a.resolve()]
+
+    def test_pathlist_accepts_comma_string_and_dedups(self, tmp_path):
+        a = tmp_path / "docs"
+        a.mkdir()
+        out = ss.validate_update({"rag_allowed_roots": f"{a}, {a}"})
+        assert len(out["rag_allowed_roots"]) == 1, "duplicate roots collapse to one"
+
+    def test_pathlist_rejects_credential_dir(self, tmp_path):
+        # A folder whose path contains a credential dir name (.ssh) can never be
+        # indexed, so it is refused at save time with a clear error (not silently
+        # stored then ignored at index time).
+        bad = tmp_path / ".ssh" / "keys"
+        with pytest.raises(ValueError, match="credential"):
+            ss.validate_update({"rag_allowed_roots": [str(bad)]})
+
+    def test_pathlist_null_rejected_not_wiped(self):
+        # Like the LIST keys (SEC-2): null must not silently blank the list.
+        with pytest.raises(ValueError, match="a value is required"):
+            ss.validate_update({"rag_allowed_roots": None})
+
+    def test_indexing_mode_select_validated(self):
+        assert ss.validate_update({"rag_indexing_mode": "blacklist"}) == {
+            "rag_indexing_mode": "blacklist"}
+        assert ss.validate_update({"rag_indexing_mode": "whitelist"}) == {
+            "rag_indexing_mode": "whitelist"}
+        with pytest.raises(ValueError, match="is not one of"):
+            ss.validate_update({"rag_indexing_mode": "everything"})
+
 
 def test_plugins_key_is_in_default_config_and_schema():
     # FAC-1: per-plugin config namespace now has a documented home

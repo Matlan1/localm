@@ -19,10 +19,19 @@ def register(app: FastAPI, ctx) -> None:
     require_scope = _hs.require_scope
 
     @app.get("/v1/config", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
-    async def get_config():
+    async def get_config(request: Request):
         from localm.config import load_config
         from localm.audit import effective_mode
+        from localm.settings_schema import admin_only_keys
         cfg = load_config()
+        # REC-OWNER-SETTINGS: owner-only keys (e.g. the rag_* indexing settings)
+        # widen a trust boundary, so their VALUES are not exposed to a non-owner
+        # config:read caller (the schema hides the control too). The owner (open
+        # mode -> caller_scopes None, or an ADMIN key) sees everything.
+        held = _hs.caller_scopes(request)
+        if held is not None and scopes.ADMIN not in held:
+            for k in admin_only_keys():
+                cfg.pop(k, None)
         # Read-only extras for the frontend (skipped by the settings form).
         # The server mode is fixed at startup (the audit log is opened then);
         # the coder default is resolved per new session.
@@ -36,26 +45,46 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.get("/v1/config/schema",
              dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
-    async def get_config_schema():
+    async def get_config_schema(request: Request):
         """The typed settings schema (widget/label/help/group/owner/options/
         min/max) with each non-secret field's CURRENT value injected as its
         `default`, so the GUI can render the right control pre-filled. Secret
-        fields never carry a value (schema_json omits secret defaults)."""
+        fields never carry a value (schema_json omits secret defaults).
+
+        Owner-only fields (admin_only) are omitted for a non-owner caller so the
+        GUI never renders a control they cannot use; the write is refused
+        server-side regardless (see patch_config)."""
         from localm.config import load_config
         from localm.settings_schema import schema_json
-        return {"fields": schema_json(values=load_config())}
+        held = _hs.caller_scopes(request)
+        is_owner = held is None or scopes.ADMIN in held
+        return {"fields": schema_json(values=load_config(), is_owner=is_owner)}
 
     @app.patch("/v1/config", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
-    async def patch_config(body: dict):
+    async def patch_config(body: dict, request: Request):
         """Update known config keys and persist. Unknown keys are rejected.
 
         The read-only extras the GET handler injects (effective_mode etc.) are
         dropped first, so a client that round-trips the whole config object is
         not rejected for echoing back values it never edited."""
         from localm.config import load_config, save_config
-        from localm.settings_schema import validate_update
+        from localm.settings_schema import validate_update, admin_only_keys
         readonly = {"effective_mode", "effective_coder_mode", "effective_ctx_max"}
         body = {k: v for k, v in body.items() if k not in readonly}
+        # REC-OWNER-SETTINGS: an owner-only key widens a trust boundary (the rag_*
+        # indexing settings define which host folders the indexer may read), so
+        # a non-owner config:write key must not set it. Mirrors the media
+        # launch_cmd/api_url guard: require an ADMIN principal; open mode (the
+        # trusted local owner) has caller_scopes None and passes. Checked on the
+        # RAW body before validation, so an unauthorized caller is refused up front
+        # (a 403, not a 400 for a bad value it was never allowed to set anyway).
+        locked = admin_only_keys() & set(body)
+        if locked:
+            held = _hs.caller_scopes(request)
+            if held is not None and scopes.ADMIN not in held:
+                raise HTTPException(
+                    403, "Changing " + ", ".join(sorted(locked)) + " requires an "
+                    "owner (admin) key: it widens which folders the server may read.")
         try:
             validated = validate_update(body)
         except ValueError as e:

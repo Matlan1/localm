@@ -145,6 +145,7 @@ export function buildSettingControl(field) {
   const value = field.default;     // current value (omitted for secrets)
 
   const wrap = el("div");
+  wrap.dataset.fieldKey = field.key;   // so cross-field wiring can find a control
   const label = el("label", "", field.label || field.key);
   label.title = field.key;
   wrap.appendChild(label);
@@ -200,6 +201,66 @@ export function buildSettingControl(field) {
       input.placeholder = "comma-separated";
       read = () => input.value.split(",").map((s) => s.trim()).filter(Boolean);
       break;
+    }
+    case "pathlist": {
+      // A list of server-disk FOLDERS, edited as add/remove rows each with a
+      // Browse button (the shared folder picker). Like the FOLDER/PATH controls,
+      // it is hidden from a caller without host filesystem access - they cannot
+      // browse or set server paths; the server still enforces on write.
+      if (caps.fsAccess !== "host") return null;
+      const list = el("div", "pathlist");
+      // The list container is the dirty anchor: a removed row's <input> is
+      // disconnected (so settingsDirty ignores it), but `list` stays in the DOM,
+      // so marking IT keeps the unsaved-changes signal honest across add/remove.
+      const dirty = () => markSettingDirty(list);
+      const addRow = (path = "") => {
+        const row = el("div", "dir-picker-row pathlist-row");
+        const inp = document.createElement("input");
+        inp.type = "text";
+        inp.value = path;
+        inp.placeholder = "folder path";
+        inp.dataset.key = field.key;
+        inp.addEventListener("input", dirty);
+        inp.addEventListener("change", dirty);
+        const browse = el("button", "btn-secondary dir-picker-btn", "Browse...");
+        browse.type = "button";
+        browse.onclick = async () => {
+          const picked = await pickDirectory("Pick a folder to allow", inp.value.trim());
+          if (picked) { inp.value = picked; dirty(); }
+        };
+        const rm = el("button", "btn-secondary pathlist-rm");
+        rm.type = "button";
+        rm.title = "Remove this folder";
+        rm.appendChild(iconEl("trash", "ic"));
+        rm.onclick = () => { row.remove(); dirty(); };
+        row.append(inp, browse, rm);
+        list.appendChild(row);
+        return inp;
+      };
+      const initial = Array.isArray(value) ? value : [];
+      for (const p of initial) addRow(p);
+      const add = el("button", "btn-secondary pathlist-add");
+      add.type = "button";
+      add.appendChild(iconEl("plus", "ic"));
+      add.appendChild(document.createTextNode("Add folder"));
+      add.onclick = async () => {
+        // Open the picker straight away (the common case); if the user cancels,
+        // still add an empty row they can type into.
+        const picked = await pickDirectory("Pick a folder to allow", "");
+        addRow(picked || "");
+        dirty();
+      };
+      read = () => [...list.querySelectorAll("input")]
+        .map((i) => i.value.trim()).filter(Boolean);
+      const write = (v) => {
+        list.replaceChildren();
+        (Array.isArray(v) ? v : []).forEach((p) => addRow(p));
+        dirty();
+      };
+      wrap.appendChild(list);
+      wrap.appendChild(add);
+      if (field.help) wrap.appendChild(el("div", "sub", field.help));
+      return { field, node: wrap, read, write };
     }
     default: {   // text / folder / path
       input = document.createElement("input");
@@ -839,9 +900,30 @@ export async function refreshSettingsPage() {
   // section (not a static card) is the default tab. The owner-gated panels then
   // refresh: each may rebuild the nav, but they preserve the active section.
   buildSettingsNav();
+  syncRagIndexingModeVisibility();
   refreshPairingQR();
   refreshCompanion();
   refreshKeysPanel();
+}
+
+/** Show only the folder list that the current RAG indexing MODE uses: the Allowed
+ *  list in whitelist mode, the Denied list in blacklist mode. Both are stored
+ *  separately (so flipping the mode never reinterprets your entries); this just
+ *  hides the one that is not in effect. A hidden list still saves its value
+ *  unchanged. No-op when the owner-only Knowledge fields are not present (a
+ *  non-owner never receives them). */
+export function syncRagIndexingModeVisibility() {
+  const sel = document.querySelector('select[data-key="rag_indexing_mode"]');
+  const allow = document.querySelector('[data-field-key="rag_allowed_roots"]');
+  const deny = document.querySelector('[data-field-key="rag_denied_roots"]');
+  if (!sel || !allow || !deny) return;
+  const apply = () => {
+    const whitelist = sel.value !== "blacklist";
+    allow.style.display = whitelist ? "" : "none";
+    deny.style.display = whitelist ? "none" : "";
+  };
+  sel.addEventListener("change", apply);
+  apply();
 }
 
 // Media plugins, in display order, that the Media section configures.
