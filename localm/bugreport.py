@@ -610,7 +610,9 @@ def save_report(text: str, when: Optional[str] = None) -> Optional[Path]:
         from localm.config import home_dir
         base = home_dir() / "bug-reports"
     except Exception:
-        base = Path.home() / ".localm" / "bug-reports"
+        # Last-resort fallback (config import failed): stay CONTAINED inside the
+        # install, never a shared ~/.localm outside it.
+        base = Path(__file__).resolve().parents[1] / "home" / "bug-reports"
     try:
         base.mkdir(parents=True, exist_ok=True)
         if when is None:

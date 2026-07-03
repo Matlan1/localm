@@ -221,21 +221,23 @@ if /i "%BACKEND%"=="own" (
 )
 
 rem ---- choose where data lives ----------------------------------------------
+rem  Default is CONTAINED (.\home): there is NO silent ~/.localm fallback. Anyone
+rem  who wants a shared / other location picks Custom, and it is recorded
+rem  explicitly in localm-home.cfg (asked + recorded, never guessed).
 echo.
-echo  Where should localm keep its data?
-echo    [1] Portable (.\home)
-echo    [2] Shared (%USERPROFILE%\.localm)
-echo    [3] Custom path
+echo  Where should localm keep its data (models, config, logs, images)?
+echo    [1] Portable (.\home) - self-contained; delete this folder and it is all gone
+echo    [2] Custom path       - a folder you choose (e.g. a shared models drive)
 rem  set /p (type a number, then Enter), NOT `choice`: `choice` returns on a single
 rem  keypress, so the user's habitual confirming Enter used to leak into the custom
 rem  path's set /p below and be read as an empty path (SETUP-2). With set /p the
 rem  Enter belongs to THIS prompt, so the path prompt starts clean.
 set "DATAPICK="
-set /p "DATAPICK=  Pick 1, 2 or 3 [1]: "
+set /p "DATAPICK=  Pick 1 or 2 [1]: "
 if not defined DATAPICK set "DATAPICK=1"
 rem DATADIR + DATACREATED feed the install manifest (DATACREATED=1 only when WE
 rem made the dir, so uninstall --purge-data never removes a pre-existing folder).
-set "DATADIR=%USERPROFILE%\.localm"
+set "DATADIR=%CD%\home"
 set "DATACREATED=0"
 if "%DATAPICK%"=="1" (
     if not exist "home" mkdir "home"
@@ -244,27 +246,11 @@ if "%DATAPICK%"=="1" (
     set "DATACREATED=1"
     echo  Data directory: %CD%\home
 )
-if "%DATAPICK%"=="2" (
-    if exist "localm-home.cfg" del "localm-home.cfg"
-    rem an empty/no marker + no home\ dir = shared default; remove a stale
-    rem portable dir only if it is empty
-    if exist "home" rd "home" 2>nul
-    if exist "home" (
-        rem A non-empty ./home survived: localm prefers a portable ./home, so
-        rem shared mode would be silently ignored. Warn loudly and record the
-        rem dir localm will actually use, rather than printing a false "shared".
-        echo  [!] ./home is not empty - shared mode will NOT take effect; LocalM
-        echo      will continue using ./home. To use shared mode, remove ./home and re-run setup.
-        set "DATADIR=%CD%\home"
-    ) else (
-        echo  Data directory: %USERPROFILE%\.localm  ^(shared^)
-    )
-)
 rem  Single-line `if ... call` into a goto/label subroutine (defined at the end):
 rem  a `call` plus nested if/else INSIDE this `if (...)` block trips cmd.exe's
 rem  parenthesis parser ("The syntax of the command is incorrect."), so keep the
 rem  custom-path flow out of the block entirely.
-if "%DATAPICK%"=="3" call :do_custom_home
+if "%DATAPICK%"=="2" call :do_custom_home
 
 rem ---- optional desktop shortcut ----------------------------------------------
 echo.
@@ -410,7 +396,7 @@ rem  default when left blank.
 rem ===========================================================================
 :do_custom_home
 set "CUSTOMHOME="
-set /p "CUSTOMHOME=  Enter the data directory path, or leave blank for the shared default: "
+set /p "CUSTOMHOME=  Enter the data directory path, or leave blank for the portable .\home: "
 if not defined CUSTOMHOME goto custom_home_blank
 set "OKHOME="
 set /p "OKHOME=  Use '!CUSTOMHOME!'? [Y/n]: "
@@ -423,6 +409,9 @@ set "DATACREATED=1"
 echo  Data directory: !CUSTOMHOME!  ^(recorded in localm-home.cfg^)
 exit /b 0
 :custom_home_blank
-echo  [!] No path given - falling back to shared %USERPROFILE%\.localm
+echo  [!] No path given - using the portable .\home instead.
 if exist "localm-home.cfg" del "localm-home.cfg"
+if not exist "home" mkdir "home"
+set "DATADIR=%CD%\home"
+set "DATACREATED=1"
 exit /b 0

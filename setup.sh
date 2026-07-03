@@ -3,7 +3,7 @@
 #  localm setup - Linux / macOS.  Run after cloning:  bash setup.sh
 #
 #  Self-contained: creates a private .venv (and optionally its Python runtime)
-#  in THIS folder and keeps data here (./home) or in ~/.localm. Nothing is
+#  in THIS folder and keeps data here (./home, or a custom path you pick). Nothing
 #  installed globally; your PATH is left unchanged unless you opt into the global
 #  `localm` command.
 #  Pass --yes for a non-interactive install with sensible defaults (used by the
@@ -253,32 +253,29 @@ else
 fi
 
 # ---- data directory ---------------------------------------------------------
+# Default is CONTAINED (./home): NO silent ~/.localm fallback. A shared / other
+# location is an explicit Custom choice, recorded in localm-home.cfg.
 say ""
 say "  Where should localm keep its data (models, config, logs, images)?"
-say "    [1] Inside this folder (./home) - portable, isolated per clone"
-say "    [2] Shared per-user (~/.localm) - clones share models and settings"
-say "    [3] Custom path"
-dpick="$(ask "  Pick 1, 2 or 3 [2]: " 2)"
-if [ "$dpick" = 1 ]; then
-  mkdir -p home; rm -f localm-home.cfg
-  DATA_DIR="$(pwd)/home"; DATA_CREATED=1        # we created ./home
-  say "  Data directory: $DATA_DIR"
-elif [ "$dpick" = 3 ]; then
-  # Custom path: ask, then confirm (re-ask until confirmed). In --yes mode there
-  # is no prompt, so an unconfirmed path is never recorded - fall back to shared.
+say "    [1] Portable (./home) - self-contained; delete this folder and it is all gone"
+say "    [2] Custom path       - a folder you choose (e.g. a shared models drive)"
+dpick="$(ask "  Pick 1 or 2 [1]: " 1)"
+if [ "$dpick" = 2 ]; then
+  # Custom path: ask, then confirm (re-ask until confirmed). In --yes mode there is
+  # no prompt, so an unconfirmed path is never recorded - fall back to portable.
   CUSTOMHOME=""
   if [ "$YES" != 1 ]; then
     while : ; do
-      CUSTOMHOME="$(ask "  Enter the data directory path (blank = shared default): " "")"
+      CUSTOMHOME="$(ask "  Enter the data directory path (blank = portable ./home): " "")"
       if [ -z "$CUSTOMHOME" ]; then break; fi
       ok="$(ask "  Use '$CUSTOMHOME'? [Y/n]: " Y)"
       case "$ok" in [Nn]*) continue ;; *) break ;; esac
     done
   fi
   if [ -z "$CUSTOMHOME" ]; then
-    say "  No path given - using the shared default ~/.localm"
-    rm -f localm-home.cfg
-    DATA_DIR="$HOME/.localm"; DATA_CREATED=0
+    say "  No path given - using the portable ./home."
+    mkdir -p home; rm -f localm-home.cfg
+    DATA_DIR="$(pwd)/home"; DATA_CREATED=1
   else
     printf '%s\n' "$CUSTOMHOME" > localm-home.cfg
     mkdir -p "$CUSTOMHOME"
@@ -286,21 +283,9 @@ elif [ "$dpick" = 3 ]; then
     say "  Data directory: $CUSTOMHOME (recorded in localm-home.cfg)"
   fi
 else
-  rm -f localm-home.cfg
-  [ -d home ] && rmdir home 2>/dev/null || true
-  if [ -d home ]; then
-    # A non-empty ./home survived: localm prefers a portable ./home, so shared
-    # mode would be silently ignored. Warn loudly and record the dir localm will
-    # actually use, rather than printing a false "shared".
-    say "  [!] ./home is not empty - shared mode will NOT take effect while it"
-    say "      exists (localm keeps using the portable ./home). It may hold your"
-    say "      models/config, so it was left in place. Remove it manually and"
-    say "      re-run setup to switch to the shared dir."
-    DATA_DIR="$(pwd)/home"; DATA_CREATED=1
-  else
-    DATA_DIR="$HOME/.localm"; DATA_CREATED=0       # localm creates it on first run, not us
-    say "  Data directory: $DATA_DIR (shared)"
-  fi
+  mkdir -p home; rm -f localm-home.cfg
+  DATA_DIR="$(pwd)/home"; DATA_CREATED=1        # we created ./home
+  say "  Data directory: $DATA_DIR"
 fi
 
 # ---- application menu entry --------------------------------------------------
