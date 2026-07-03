@@ -72,6 +72,8 @@ def serve(model, host, port, ctx, gpu_layers, mmproj, device, no_tls, tls_cert,
     from ..winconsole import disable_quickedit, set_console_title
     disable_quickedit()
     set_console_title("LocaLM")
+    # Light branding: a single wordmark line (the M in accent blue), no noise.
+    console.print("[bold]LocaL[/bold][bold #4f9cf9]M[/bold #4f9cf9]  [dim]local AI, offline[/dim]")
 
     if debug:
         from ..debuglog import enable_debug

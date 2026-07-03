@@ -180,6 +180,8 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     # Brand the window right away so it never reads as a python.exe path; a richer
     # title (with the port) is set once the port is chosen below.
     set_console_title("LocaLM")
+    # Light branding: a single wordmark line (the M in accent blue), no noise.
+    console.print("[bold]LocaL[/bold][bold #4f9cf9]M[/bold #4f9cf9]  [dim]local AI, offline[/dim]")
 
     if debug:
         from localm.debuglog import enable_debug
@@ -466,14 +468,17 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     # surface (API + GUI) so a future launch in the same dir can discover and
     # attach to it. --isolated keeps it invisible to discovery.
     from localm import portmux
-    from localm import appface
+    from localm import appface, debuglog
+    from localm.config import home_dir as _home_dir
     # Tray control surface (Windows): Open / Copy address / View logs / Restart /
     # Stop, so the running server is a real background app, not just a console.
     # Best-effort and fully guarded - it never blocks the server. Restart/Stop are
-    # wired to the server's existing hooks. (Linux gets a styled Tk control window
-    # next; see appface.)
+    # wired to the server's existing hooks; "View logs" dumps the always-on activity
+    # buffer (INFO+, no chat content) to a readable file. (Linux gets a styled Tk
+    # control window next; see appface.)
     app_face = appface.start_app_face(
-        name="LocaLM", url=base_url, logfile=None,
+        name="LocaLM", url=base_url, logfile=_home_dir() / "logs" / "recent.log",
+        get_log_lines=debuglog.recent_activity,
         on_restart=hs._do_restart, on_stop=hs._do_shutdown)
     try:
         with instances.advertise(app, home_dir(), host=host, port=chosen_port,

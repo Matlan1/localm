@@ -81,14 +81,21 @@ class AppFace:
 
 
 def start_app_face(*, name: str = "LocaLM", url: str, logfile=None,
+                   get_log_lines: Optional[Callable] = None,
                    on_restart: Optional[Callable] = None,
                    on_stop: Optional[Callable] = None) -> Optional[AppFace]:
     """Start the control surface for the running server. Returns a handle with
     .close(), or None if unavailable (unsupported platform, no session). NEVER
-    raises - a control-surface failure must not take down the server."""
+    raises - a control-surface failure must not take down the server.
+
+    *get_log_lines* is an optional callable returning the current log lines (e.g.
+    the always-on in-memory activity buffer); "View logs" writes them to *logfile*
+    and opens it, so the log is re-readable instead of flashing past in a console.
+    """
     try:
         if sys.platform == "win32":
             tray = _WinTray(name=name, url=url, logfile=logfile,
+                            get_log_lines=get_log_lines,
                             on_restart=on_restart, on_stop=on_stop)
             if tray.start():
                 return tray
@@ -110,10 +117,11 @@ class _WinTray(AppFace):
     _ID_RESTART = 1004
     _ID_STOP = 1005
 
-    def __init__(self, *, name, url, logfile, on_restart, on_stop):
+    def __init__(self, *, name, url, logfile, on_restart, on_stop, get_log_lines=None):
         self.name = name
         self.url = url
         self.logfile = logfile
+        self.get_log_lines = get_log_lines
         self.on_restart = on_restart
         self.on_stop = on_stop
         self._hwnd = None
@@ -152,7 +160,20 @@ class _WinTray(AppFace):
         copy_to_clipboard(self.url)
 
     def _logs(self):
-        open_logs(self.logfile)
+        # Refresh the readable log from the current activity buffer (INFO+, no chat
+        # content), then open it. If no buffer source, just open whatever logfile
+        # exists (e.g. a --debug log). Best-effort; never raises into the menu.
+        try:
+            lf = Path(self.logfile) if self.logfile else None
+            if lf is not None and self.get_log_lines is not None:
+                lines = self.get_log_lines() or []
+                lf.parent.mkdir(parents=True, exist_ok=True)
+                header = f"LocaLM server log  -  {self.url}\n" + ("=" * 48) + "\n"
+                body = "\n".join(lines) if lines else "(no activity logged yet)"
+                lf.write_text(header + body + "\n", encoding="utf-8")
+            open_logs(lf)
+        except Exception:
+            pass
 
     def _restart(self):
         if self.on_restart:
