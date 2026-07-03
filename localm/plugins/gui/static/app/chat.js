@@ -22,6 +22,7 @@ export const chat = {
   attachments: [],   // image attachments: {name, dataUri}
   docs: [],          // document attachments: {name, text, chars, truncated}
   ctxMax: 16384,     // context ceiling - refreshed from /v1/config
+  systemDefault: "", // default system prompt from Settings; a blank drawer inherits it
   privacy: false,    // server in privacy mode → conversations not persisted
   persist: false,    // non-privacy: conversations sync to the server store
   stick: true,       // R31: follow the stream to the bottom until the user scrolls up
@@ -151,6 +152,9 @@ export async function refreshCtxLimit() {
       // static config value - compaction should track what the model can
       // actually hold.
       chat.ctxMax = cfg.effective_ctx_max ?? cfg.n_ctx_max ?? 16384;
+      // The Settings "Default system prompt": a chat with a blank System prompt
+      // field inherits this (the per-chat drawer overrides it).
+      chat.systemDefault = (cfg.chat_system_prompt || "").trim();
       // Privacy mode: conversations live in memory only - wipe anything a
       // previous non-privacy session left behind and show the hint.
       chat.privacy = cfg.effective_mode === "privacy";
