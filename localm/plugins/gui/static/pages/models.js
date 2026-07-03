@@ -198,7 +198,6 @@ export async function discoverFiles(repo, filesBox, btn) {
     if (!r.ok) throw new Error(data.detail || r.statusText);
     filesBox.replaceChildren();
     
-    // Check settings for whether to show mmproj files in the list
     const showMmproj = localStorage.getItem("localm.showMmprojFiles") === "true";
     let filesToShow = data.files;
     if (showMmproj && data.mmprojs && data.mmprojs.length > 0) {
@@ -231,8 +230,7 @@ export async function discoverFiles(repo, filesBox, btn) {
         if (data.mmprojs && data.mmprojs.length > 0) {
           mmprojSelect.style.display = "inline-block";
           
-          // Try to guess the best mmproj based on quant or stem
-          // E.g. if model is model-f16.gguf and mmproj is mmproj-model-f16.gguf
+          // Guess the best mmproj by filename-token overlap.
           let bestMatch = "";
           let bestScore = 0;
           
@@ -241,7 +239,6 @@ export async function discoverFiles(repo, filesBox, btn) {
             opt.value = `${repo}:${m.file}`;
             mmprojSelect.appendChild(opt);
             
-            // Simple scoring: count matching tokens separated by -
             const fTokens = f.file.toLowerCase().replace(".gguf", "").split("-");
             const mTokens = m.file.toLowerCase().replace(".gguf", "").split("-");
             let score = 0;
@@ -416,7 +413,7 @@ async function countdownRetryBugReport(secs, out) {
   for (let s = secs; s > 0; s--) {
     if (out) {
       out.hidden = false;
-      out.textContent = "Rate limited by the server - retrying automatically in " + s + "s...";
+      out.textContent = "Rate limited - retrying in " + s + "s...";
     }
     await new Promise((res) => setTimeout(res, 1000));
   }

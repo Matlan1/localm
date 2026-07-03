@@ -16,7 +16,7 @@ localm gui --pull bartowski/Qwen2.5-7B-Instruct-GGUF:Qwen2.5-7B-Instruct-Q4_K_M.
 
 1. **Launch.** Running `localm gui` starts the server and opens your default browser to http://127.0.0.1:8642 (or your configured port).
 2. **Pick a model.** If a model is already registered, it loads in the background so the first reply is instant. Otherwise, land on the Models page to download or import one. You can also use `--pull <spec>` to begin downloading a HuggingFace model immediately with progress shown on the Models page.
-3. **Type and reply.** Once a model is loaded, click in the composer and start typing. The model replies with streaming text, markdown rendering, and syntax highlighting on code blocks. Use `/` to see available commands and access slash features like `/web` (search and cite sources) and `/generate-image` (if the image plugin is enabled).
+3. **Type and reply.** Once a model is loaded, click in the composer and start typing. The model replies with streaming text, markdown rendering, and syntax highlighting on code blocks. Use `/` to see available commands and access slash features like `/web` (search and cite sources) and `/generate-image` (requires the image plugin).
 
 **On your phone.** The GUI is a PWA: open your server's address on a phone and tap "Add to Home screen" to use localm as an installable app. See [phone.md](phone.md) for same-Wi-Fi and remote (Tailscale) setup.
 

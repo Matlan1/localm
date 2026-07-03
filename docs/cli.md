@@ -49,7 +49,7 @@ localm run D:\hf-models\gemma-3-4b-it
 localm gui                       # picks the first registered model, opens browser
 localm gui mymodel               # or name one
 localm gui --no-model            # open model-less, straight to the Models page
-localm gui --no-browser          # just start the server, open the URL yourself
+localm gui --no-browser          # start the server, open the URL yourself
 localm gui --pull <spec>         # start a download immediately
 localm gui -H 0.0.0.0            # bind to all interfaces (requires auth key)
 localm gui --qr                  # [PoC] scannable QR of LAN URL for phones
