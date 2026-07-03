@@ -262,6 +262,15 @@ export function buildSettingControl(field) {
       if (field.help) wrap.appendChild(el("div", "sub", field.help));
       return { field, node: wrap, read, write };
     }
+    case "textarea": {   // free-form multi-line (e.g. the default system prompt)
+      input = document.createElement("textarea");
+      input.rows = 4;
+      input.spellcheck = false;
+      input.value = value ?? "";
+      // Preserve the text's own line breaks; blank -> null (leave unchanged).
+      read = () => (input.value.trim() === "" ? null : input.value);
+      break;
+    }
     default: {   // text / folder / path
       input = document.createElement("input");
       input.type = "text";

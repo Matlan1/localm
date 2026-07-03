@@ -105,6 +105,9 @@ DEFAULT_CONFIG: dict = {
     # to false to use the fixed n_ctx_max instead.
     "ctx_auto": True,
     "n_gpu_layers": 99,    # 99 = offload everything to GPU
+    # Default system prompt for chat. The GUI's per-chat System prompt field
+    # OVERRIDES this when set; a blank field inherits this. Empty by default.
+    "chat_system_prompt": "",
     "temperature": 0.8,
     "top_p": 0.95,
     "top_k": 40,
