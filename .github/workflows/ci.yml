@@ -48,19 +48,21 @@ jobs:
 
       # localm is meant to run from its PROJECT VENV: a venv guard (NEW-J) refuses
       # a bare global interpreter so a stray global install fails loudly instead of
-      # with a cryptic missing-runtime-dep error. Create a venv and put it on PATH
-      # so every step below - pip, pytest, ruff, hygiene, AND the `python -m localm`
-      # SUBPROCESSES the job-streaming tests spawn - runs from it, matching real
-      # usage. (bash is present on the Windows runner too, so one step covers both.)
+      # with a cryptic missing-runtime-dep error. Create a venv and prepend it to
+      # PATH so every step below - pip, pytest, ruff, hygiene, AND the
+      # `python -m localm` SUBPROCESSES the job-streaming tests spawn - runs from
+      # it, matching real usage. Per-OS steps use each runner's NATIVE shell +
+      # $GITHUB_WORKSPACE (a native path on both); a single Git-Bash step would put
+      # an MSYS path like /d/a/... on PATH that the Windows steps cannot resolve.
       - name: Create the project venv
-        shell: bash
-        run: |
-          python -m venv .venv
-          if [ -d .venv/bin ]; then
-            echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
-          else
-            echo "$PWD/.venv/Scripts" >> "$GITHUB_PATH"
-          fi
+        run: python -m venv .venv
+      - name: Put the venv on PATH (POSIX)
+        if: runner.os != 'Windows'
+        run: echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+      - name: Put the venv on PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_PATH -Value "$env:GITHUB_WORKSPACE\.venv\Scripts"
 
       # Light extras only ([rag] = pypdf, pure-Python). The [gpu]/[gguf] extras
       # pull torch / ROCm / llama-cpp wheels from a custom AMD index and are
