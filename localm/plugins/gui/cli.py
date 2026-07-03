@@ -223,7 +223,18 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
                         "instance?); opening its address anyway.[/yellow]")
             console.print(f"  [dim]Opening[/dim] [cyan]{url}[/cyan]")
             if not no_browser:
-                webbrowser.open(url)
+                # Force a FRESH navigation with a unique cache-buster so the browser
+                # actually reloads (instead of silently focusing an already-open tab
+                # at the same URL) and cannot serve the shell from a warm service-
+                # worker cache. That fresh loopback GET / makes the remote re-run its
+                # own session auto-seed, so a relaunch lands authenticated even after
+                # a key roll. We do NOT mint a launch grant here: the running instance
+                # may be an OLDER localm that has no grant endpoint, whereas the
+                # loopback auto-seed exists in every version. The app ignores the
+                # stray param.
+                import secrets as _secrets
+                sep = "&" if "?" in url else "?"
+                webbrowser.open(f"{url}{sep}lm={_secrets.token_hex(3)}")
             return
 
     from localm.config import load_registry, pick_port
