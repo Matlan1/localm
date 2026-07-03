@@ -603,7 +603,7 @@ requires-dist = [
     { name = "xgrammar", marker = "extra == 'grammar'", specifier = ">=0.2.2" },
     { name = "zeroconf", specifier = ">=0.150.0" },
 ]
-provides-extras = ["coder", "gpu", "gguf", "audio", "rag", "voice", "monitor", "grammar", "cpu", "qr", "abliterate", "dev"]
+provides-extras = ["coder", "gpu", "gguf", "audio", "rag", "voice", "monitor", "grammar", "cpu", "qr", "dev"]
 
 [[package]]
 name = "markdown-it-py"

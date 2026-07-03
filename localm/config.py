@@ -269,9 +269,6 @@ DEFAULT_CONFIG: dict = {
     # Model sizes: tiny / base / small / medium - bigger = better + slower.
     "voice_stt_model": "base",
     "voice_stt_language": None,  # None = auto-detect; or "en", "de", …
-    # Path to a Heretic checkout for the `abliterate` plugin (a separate AGPL
-    # program, run via subprocess). None = auto-detect / offer to clone.
-    "heretic_path": None,
     # When a registered model's file has gone missing, False (default) flags the
     # entry as "missing" (kept, shown in the list); True deletes the entry.
     # Only files under the models folder are ever auto-deleted.
