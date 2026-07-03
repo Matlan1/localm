@@ -18,17 +18,16 @@ Three things to know up front:
   is no background daemon; close the server and nothing fires until it is back
   up. A job that came due while the server was down runs ONCE on the next tick
   after restart (a single catch-up, not one run per missed slot): an interval
-  job runs as soon as its interval has elapsed, and a cron job back-fires a slot
-  missed within the last 24 hours. A slot missed longer ago than that is skipped
-  (a machine off for a week does not suddenly run last Monday's briefing).
+  job runs as soon as its interval has elapsed, and a cron job back-fires only a
+  slot missed within the last 24 hours; a slot missed longer ago is skipped.
 - **The CLI, GUI, and API share one on-disk store.** `localm job ...`,
   the Jobs page, and the `/api/jobs` routes all read and write the same files
   under `<data dir>/jobs/`. A change made from the terminal is picked up by a
-  running server on its next tick (about every 30 seconds).
+  running server on its next tick.
 - **Run results are explicit user data.** Like generated images, a job's
-  recorded results are saved in every session mode, including privacy. The
-  *prompt run itself* (the underlying chat or coder turn) still honours the
-  effective session mode, so it leaves no extra transcript in privacy mode.
+  recorded results are saved in every session mode, including privacy; the
+  underlying chat or coder turn still honours the effective session mode, so it
+  leaves no extra transcript in privacy mode.
 
 ## From the terminal
 
@@ -102,16 +101,12 @@ plain `jobs`-scoped client cannot schedule a shell-capable job.
 
 ## How scheduling works
 
-Schedules are one of two kinds:
-
-- **interval**: a number of seconds between runs.
-- **cron**: a self-contained 5-field matcher, `minute hour day-of-month month
-  day-of-week`, with `0` meaning Sunday in the day-of-week field. Ranges
-  (`1-5`), lists (`1,3,5`), and `*` are supported.
+A schedule is either an **interval** (seconds between runs) or a **cron**
+expression (see the `--every` / `--cron` rows above). The 5-field cron matcher
+supports ranges (`1-5`), lists (`1,3,5`), and `*`.
 
 The scheduler polls about every 30 seconds, so a job fires at the first tick at
-or after its due time, not to the exact second. Because it runs inside the
-server process, schedules are evaluated only while that process is alive.
+or after its due time, not to the exact second.
 
 ## Troubleshooting
 

@@ -10,7 +10,7 @@ disclosure timeline.
 ## Authentication model
 
 localm is a local-first, single-owner application. API access is gated by a
-**bearer key** (see `localm/inference/http_server.py`):
+**bearer key**:
 
 - When **no key is configured**, reads and the inference API are **fail-open by
   design** - the server binds to localhost and serves them without auth, for
@@ -74,9 +74,9 @@ localm process's own permissions rather than a sandbox:
 - **`config:write` / `plugins:admin` / `keys:admin`** are privileged and are never
   granted implicitly - only the owner key may mint keys carrying them.
 
-localm is single-owner and local-first: these are deliberate grants to *you*. Treat a
-scoped key (or an exposed GUI) as granting the holder that capability on your machine,
-and only issue keys to - or expose the GUI to - clients you trust.
+These are deliberate grants to *you*: a scoped key (or an exposed GUI) grants its
+holder that capability on your machine, so only issue keys to - or expose the GUI to -
+clients you trust.
 
 ## Supported versions
 

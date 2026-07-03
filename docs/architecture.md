@@ -47,8 +47,7 @@ unloaded it (e.g. image generation borrowing the VRAM).
 - **VRAM pre-flight**: free VRAM is checked against model size before load,
   with a warning rather than a block.
 - No fallback by design: if the DLL cannot be loaded, `load()` raises a clear
-  error pointing at `localm setup-llama` rather than degrading to a slower,
-  lower-fidelity `llama-cli.exe` subprocess.
+  error pointing at `localm setup-llama`.
 
 ## HTTP server
 
@@ -67,10 +66,7 @@ conversation reaches 70% of the context ceiling, keeping the system prompt
 and the last two exchanges verbatim, with a hard-trim fallback that never
 raises. Used by `localm run` interactive chat; the GUI (itself a plugin
 surface now) implements the same protocol client-side. The coder agent has
-its own compaction in the `localm/plugins/coder/agent/` package (GBNF-structured
-summaries); coder is the builtin `coder` plugin (store dir
-`localm/plugins/builtin/coder/` wrapping `localm/plugins/coder/`, which is split
-into `agent/`, `tools/`, `cli/`, and `backends/` packages).
+its own GBNF-structured compaction in the `localm/plugins/coder/agent/` package.
 
 ## Plugin engine
 
@@ -80,14 +76,14 @@ Everything above bare chat is a plugin, managed by `PluginManager` in
 and `unregister()`.
 
 **Two locations.** The *store* is `localm/plugins/builtin/` (the bundled,
-read-only first-party plugins: coder, image, music, video, rag, web, voice,
-tts, jobs, mcp). *Installed* plugins live under `~/.localm/plugins/`. Installing
-copies a plugin from the store into the installed location.
+read-only first-party plugins listed above). *Installed* plugins live under
+`~/.localm/plugins/`. Installing copies a plugin from the store into the
+installed location.
 
-**Four states.** A plugin is *installed* (present under `~/.localm/plugins/`),
-*enabled* (listed in `config["plugins_enabled"]`), and *active* only when it
-is both installed AND enabled. The store also tracks what is *available* (in
-the catalog but not yet installed). By default only chat is active.
+**States.** A plugin is *active* only when it is both installed (present under
+`~/.localm/plugins/`) and enabled (listed in `config["plugins_enabled"]`); the
+store also tracks what is *available* (in the catalog but not yet installed).
+By default only chat is active. See [plugins.md](plugins.md) for the full model.
 
 **Chat is plugin #0.** CHAT is protected and preinstalled; it cannot be
 disabled or uninstalled.
@@ -97,8 +93,7 @@ sees: `Surface` and `PluginSpec` (manifest shape) and `Host` (the API the
 engine hands to `register`). The host exposes `mount_router`, `mount_static`,
 `add_settings`, `register_tab`, `plugin_config`, `save_plugin_config`,
 `engine`, `audit`, and `browse_dirs`. `catalog.py` holds the static
-first-party catalog; `loader.py` is the legacy external/CLI loader;
-`media_config.py` resolves shared media-plugin config.
+first-party catalog.
 
 **Lifecycle.** `PluginManager` discovers installed plugins, then
 `load_enabled` mounts each active plugin at runtime through `PluginHost`

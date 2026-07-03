@@ -18,8 +18,7 @@ tools, and the chat's web access, all use it. There is no second path.
 
 Things a *user* triggers directly (`localm pull`, the `/web` chat command,
 online coder providers you explicitly configured) are consent by definition -
-but `net_mode off` still kills them, so one switch really does disable
-everything routed through the policy.
+but `net_mode off` still kills them.
 
 ## Modes
 
@@ -37,7 +36,7 @@ localm config net_mode allow   # no confirmation
 
 The `LOCALM_NET_MODE` env var overrides the config (like `LOCALM_MODE` for
 privacy). In the coder, sessions started with auto-approve also auto-approve
-network requests in `ask` mode - auto-approve means "I trust this task".
+network requests in `ask` mode.
 
 ## Domain rules
 
@@ -66,11 +65,10 @@ localm config net_allow_private true
 ```
 
 The hostname is resolved and validated once, then the connection is pinned to
-that exact IP (see `localm/netpin.py`), so the connect cannot re-resolve to a
-different address. This closes the check-and-connect DNS-rebinding race: a host
-that flips to a private address at connect time is refused on the dialled IP,
-and an unresolvable host is refused rather than connected through a fresh lookup.
-The domain deny/allow lists remain an additional control.
+that exact IP, so the connect cannot re-resolve to a different address. This
+closes the check-and-connect DNS-rebinding race: a rebind or an unresolvable
+host is refused, not reconnected through a fresh lookup. The domain deny/allow
+lists remain an additional control.
 
 ## Web search
 
@@ -95,8 +93,6 @@ localm config net_allow_private true    # if the instance is on your LAN
    continues (at most 3 web rounds per send). Every request and result is
    visible in the conversation - nothing happens silently.
 
-With the toggle off and no `/web`, chat is exactly as offline as before.
-
 ## The coder
 
 `web_search` and `fetch_url` appear in the coder's toolset automatically.
@@ -107,8 +103,6 @@ visible trace *on your terminal* of what went out, without writing anything
 to disk.
 
 ## What the policy does NOT govern
-
-Be aware of these boundaries - they are by design, but they are boundaries:
 
 - **Child processes.** `run_shell` commands like `pip install`, `npm install`,
   or `git clone` talk to the network themselves. The gate for those is the

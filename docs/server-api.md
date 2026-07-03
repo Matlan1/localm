@@ -47,17 +47,14 @@ tokenizer plus performance numbers:
 }
 ```
 
-`ttft_ms` (time to first token) is reported on streaming responses only; a
-non-streaming response carries the token counts and `tokens_per_sec` but no
-`ttft_ms`.
+`ttft_ms` (time to first token) is reported on streaming responses only; a non-streaming response still returns the token counts and `tokens_per_sec`, but no `ttft_ms`.
 
 Multimodal input uses the standard multipart content format with base64
 data-URIs (`{"type": "image_url", "image_url": {"url": "data:image/..."}}`)
-and requires a vision-capable model. A GGUF model does vision when paired with
-a multimodal projector (mmproj) GGUF (see `localm run --mmproj` /
-`localm pull --mmproj`); a GGUF loaded without an mmproj is text-only and
-rejects an attached image with a clear error. A HuggingFace-format vision model
-also works.
+and requires a vision-capable model (a GGUF paired with a multimodal projector
+via `localm run --mmproj` / `localm pull --mmproj`, or a HuggingFace-format
+vision model). A GGUF loaded without an mmproj is text-only and rejects an
+attached image with a clear error.
 
 ### `POST /v1/completions`
 
@@ -86,8 +83,7 @@ whether it is active and loaded.
 
 `POST /v1/models/unload` releases the model from VRAM (e.g. before image
 generation hands the GPU to ComfyUI); `POST /v1/models/load` reloads it.
-Both wait for any in-flight generation to finish first - freeing the
-native context mid-decode would crash the GPU driver. Unloading is
+Both wait for any in-flight generation to finish first. Unloading is
 implicit-recovery: the next chat request reloads automatically.
 
 ## Management endpoints
@@ -100,9 +96,9 @@ next model load.
 
 ## Plugin management endpoints
 
-These endpoints are part of the base server app (present under `localm serve`
-too, since `create_app` attaches the plugin engine). They are scope-gated:
-`GET` requires `PLUGINS_READ`, the mutations require `PLUGINS_ADMIN`.
+These endpoints are present under `localm serve` too, not just `localm gui`.
+They are scope-gated: `GET` requires `PLUGINS_READ`, the mutations require
+`PLUGINS_ADMIN`.
 
 ### `GET /api/plugins`
 

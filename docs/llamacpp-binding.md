@@ -49,9 +49,8 @@ with no ABI or soname bump, so `_structs.py` stays safe two ways:
 - it OVER-allocates the two by-value params structs (a named trailing field for
   what we know, plus a reserved pad), and the code round-trips
   `*_default_params()` (overwriting only the fields it names). A newer build
-  therefore never reads past our buffer in `llama_load_model_from_file` /
-  `llama_init_from_model`, and any field we do not name keeps its native default.
-  A trailing field ADDITION is harmless.
+  therefore never reads past our buffer, and any field we do not name keeps its
+  native default. A trailing field ADDITION is harmless.
 - a mid-struct REORDER (the memory-corrupting kind of drift) is caught at load
   time by `_abi.verify_abi` (below), which refuses rather than corrupting memory.
 
@@ -91,8 +90,7 @@ Key fields:
 
 b9682+ appended a trailing `ctx_other` (`struct llama_context *`), taking the
 native struct to 160 bytes; localm names it and over-allocates to 224 for
-headroom. Layout drift is caught at load time by `_abi.verify_abi`, not by the
-size asserts.
+headroom.
 
 ### `LlamaBatch` (56 bytes)
 
@@ -133,11 +131,10 @@ still loads (the drift is logged and shown by `localm doctor`). Two safety valve
 - `LOCALM_SKIP_ABI_CHECK=1` bypasses it entirely (logged), so a false alarm on an
   untested build can never permanently block a user.
 
-The fingerprint was validated byte-for-byte against the cpu, vulkan and amd-rocm
-prebuilts (commits b1288..b9740); offsets for these POD fields are
-commit-determined, not OS-determined, so a given build matches on every OS.
-`localm doctor` surfaces the verdict ("native ABI: ...") by running the check in a
-subprocess so a broken DLL cannot crash the diagnostic.
+The fingerprint was validated byte-for-byte against the cpu, vulkan, and amd-rocm
+prebuilts (b1288..b9740). Offsets for these POD fields are commit-determined, not
+OS-determined, so a given build matches on every OS. `localm doctor` surfaces the verdict ("native ABI: ...")
+by running the check in a subprocess so a broken DLL cannot crash the diagnostic.
 
 ## Checking against upstream (`scripts/check_llama_abi.py`)
 
@@ -253,8 +250,7 @@ Do NOT call `llama_sampler_accept` after `llama_sampler_sample`: sample()
 already accepts the token into every stateful sampler in the chain. A second
 accept advances the grammar sampler's parse state twice per token (it throws
 `std::runtime_error` across the C ABI once its stacks empty - WinError
-0xe06d7363) and double-counts the repetition-penalty window. Fixed 2026-07-02
-after being misdiagnosed as a native grammar-sampler fault.
+0xe06d7363) and double-counts the repetition-penalty window.
 
 ### Stop-string filter (`_filtered_stream`)
 
@@ -289,7 +285,7 @@ tokens) unless debug mode is active.
 ## Known Limitations
 
 - **Single sequence only**: `n_seq_max=1` (the `llama_batch_get_one` path)
-- **No embedding extraction**: the binding has no embedding path yet;
-  `GgufBackend.embed` raises `NotImplementedError` and `/v1/embeddings`
-  returns 422 for GGUF models. HF-format models embed fine.
+- **No embedding extraction**: the binding has no embedding path yet, so
+  `GgufBackend.embed` raises `NotImplementedError`. HF-format models embed fine.
+  (See server-api.md for the `/v1/embeddings` behavior.)
 - **No speculative decoding / draft models**

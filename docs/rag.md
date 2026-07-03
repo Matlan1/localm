@@ -36,8 +36,8 @@ localm rag rm manuals
 Collections live in `<data dir>/rag/<name>/` - plain JSON, no database.
 Deleting a collection removes only the index; your files are untouched.
 Creating or indexing a collection is an explicit action, so it writes to disk
-in every session mode (like generated images); the privacy contract governs
-*automatic* traces, not things you ask for.
+in every session mode; the privacy contract governs *automatic* traces, not
+things you ask for.
 
 ## Supported file types
 
@@ -50,15 +50,13 @@ Binary formats are refused rather than indexed as mojibake.
 
 ## How retrieval works (and why it's lexical-first)
 
-The built-in ctypes GGUF chat binding does not produce embeddings (a chat
-model's hidden states make poor vectors), so semantic vectors come from a small
-dedicated embedding model instead:
+The chat model does not produce embeddings, so semantic vectors come from a
+small dedicated embedding model instead:
 
 - **BM25** over ~1200-character paragraph-aware chunks is the always-on
   baseline - pure stdlib, deterministic, fast at home scale.
 - **Embeddings** use a small dedicated on-device embedding model (default
-  `bge-small-en-v1.5`), loaded separately from the chat model, so semantic
-  search works on the default GGUF runtime. Install it with
+  `bge-small-en-v1.5`). Install it with
   `localm setup-embeddings`. When it is present and you index with vectors
   enabled, chunk vectors are stored and queries score as an equal blend of
   normalised BM25 and cosine similarity. The Knowledge page shows `hybrid` vs
@@ -83,11 +81,10 @@ server, matching the GUI.
 
 ## Troubleshooting
 
-- **No embeddings? It still works.** If no embedding model is installed (or
-  embedding fails), retrieval degrades to lexical-only (BM25) automatically
-  rather than failing - results are keyword-matched instead of semantic. Run
-  `localm setup-embeddings` to install the on-device embedding model (default
-  `bge-small-en-v1.5`), then re-index to get vectors blended back in.
+- **No embeddings? It still works.** Retrieval degrades to lexical-only (BM25)
+  automatically (see above). Run `localm setup-embeddings` to install the
+  on-device embedding model (default `bge-small-en-v1.5`), then re-index to get
+  vectors blended back in.
 - **A query returns nothing.** No chunk matched: broaden or rephrase the query
   (exact words matter in lexical mode), or confirm the collection actually
   indexed the files (re-index if a source changed).

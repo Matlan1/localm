@@ -18,7 +18,7 @@ A plugin moves along two independent axes:
 
 | Term | Meaning |
 |------|---------|
-| **Available** (store) | Bundled first-party plugins live in `localm/plugins/builtin/` (the read-only "store"). They are NOT loaded from there. The static catalog (`localm/plugins/catalog.py`) is the core's only knowledge of plugins it has not installed. |
+| **Available** (store) | Bundled first-party plugins live read-only in `localm/plugins/builtin/` (the "store"). They are NOT loaded from there. |
 | **Installed** | Physically present on disk in the installed folder (`~/.localm/plugins/<name>/` with a `plugin.toml`). Installing copies a plugin from the store into the installed folder. "Installed" is disk presence, not a config flag. |
 | **Enabled** | A config toggle in `config["plugins_enabled"]` (WordPress-style). |
 | **Active** | `installed AND enabled`. Only active plugins are discovered and loaded; their routes, tabs, and assets are mounted on the live server. |
@@ -49,9 +49,8 @@ An installed first-party plugin is a *copy* of the store source taken at install
 time. A localm upgrade ships newer plugin code, but the older installed copy in
 your data dir keeps shadowing it - so without a refresh you would silently run
 stale plugin code (including missing fixes). Staleness is detected by a content
-hash of the store source (the plugin version is an unreliable signal - a bugfix
-often does not bump it), recorded in a `.localm-source.json` marker written into
-the installed dir at install time.
+hash of the store source, not the plugin version (a bugfix often does not bump
+it).
 
 Builtins are refreshed automatically on server launch (and on `enable`); you can
 also force it with `localm plugin refresh` (all installed builtins) or
@@ -62,16 +61,12 @@ and plugin data (under the data dir) are preserved. A plugin you installed from
 your own directory (a third-party plugin, marked `source = "external"`) is never
 a refresh target and is never overwritten.
 
-Some plugins need heavy Python dependencies shipped as a pip extra (see
-[Dependencies](#dependencies)). Installing the plugin selects it; the extra
-provides its libraries. By default localm installs the extra for you on the host
-when you install or enable such a plugin (the `auto_install_plugin_deps` setting,
-which `localm plugin setup` asks about and remembers). This only ever runs on the
-machine running localm - a remote client that enables a plugin is told to install
-the packages on the host, never triggering a server-side pip. Turn it off to keep
-the two as separate manual steps, and run `localm plugin install-deps [<name>|--all]`
-(or the GUI Plugins page's **Install dependencies** button) to fill them in later.
-`localm doctor` reports any enabled plugin whose extras are missing.
+Some plugins need heavy Python dependencies shipped as a pip extra. By default
+localm installs the extra for you on the host when you install or enable such a
+plugin (the `auto_install_plugin_deps` setting, which `localm plugin setup` asks
+about and remembers); see [Dependencies](#dependencies) for the full behaviour and
+the `localm plugin install-deps` command. `localm doctor` reports any enabled
+plugin whose extras are missing.
 
 ## Anatomy of a plugin
 
@@ -244,9 +239,8 @@ Scope and limits:
 - This is a server-side seam. It is independent of localm's existing
   client-side RAG / memory / web injection (assembled in the SPA before the
   request is sent), which it does not replace.
-- In a streaming turn, `inlet` and `stream` affect what the client receives, but
-  `outlet` runs after all chunks have been sent, so it only shapes the recorded
-  reply (audit / transcript / side-effects). Use a `stream` hook to rewrite
+- In a streaming turn, `outlet` runs after all chunks have been sent, so it only
+  shapes the recorded reply (audit / transcript). Use a `stream` hook to rewrite
   streamed output live.
 
 ## Dependencies
@@ -257,7 +251,8 @@ Scope and limits:
   installed or enabled (gated by the `auto_install_plugin_deps` setting, and only
   ever on the local host - never triggered by a remote client). With the setting
   off, or on a remote client, the two stay separate steps: install the plugin,
-  then `localm plugin install-deps <name>`. Plugins with no Python dependency
+  then `localm plugin install-deps [<name>|--all]` (or the GUI Plugins page's
+  **Install dependencies** button). Plugins with no Python dependency
   (like `tts`, which runs in the browser) declare no extra.
 - **`requires`** - other plugins that must be installed first. `missing_requires`
   surfaces these at install time.
@@ -294,10 +289,6 @@ adapter approach to wrapping extensions from other ecosystems.
 so bumping the contract is a deliberate, visible break.
 
 ## Before you ship a plugin (checklist)
-
-The cross-cutting invariants the engine and reviewers assume but that no single
-file makes obvious. The first group is enforced automatically; the rest are
-reviewer judgment, mirrored in the PR template.
 
 **Enforced by the guard suite**
 ([tests/test_builtin_plugins_contract.py](../tests/test_builtin_plugins_contract.py),

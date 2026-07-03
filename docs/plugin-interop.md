@@ -6,7 +6,7 @@ Status: Open WebUI and oobabooga adapters are roadmap; Skills importer is implem
 
 localm's architecture is a fixed kernel (server, plugin engine, auth/permissions, settings, inference engine, model manager) with *everything else* as optional plugins: the coder agent, image/music/video generation, RAG, web access, voice input/output, and the MCP server. A natural question follows: can localm run the plugins that already exist for *other* projects (LM Studio, Open WebUI, oobabooga, agent skills)?
 
-The honest answer: **there is no universal plugin ABI across projects, so you cannot run arbitrary foreign plugin code unchanged.** But that is not the real bar. Interop in practice is always *targeted*: you pick a concrete ecosystem, study what its plugins expect from the host, and write an adapter. VS Code reads TextMate grammars; dozens of tools ship "OpenAI-compatible" modes. "No universal ABI" only means you do it one ecosystem at a time, which is normal and tractable.
+The honest answer: **there is no universal plugin ABI across projects, so you cannot run arbitrary foreign plugin code unchanged.** But that is not the real bar. Interop in practice is always *targeted*: you pick a concrete ecosystem, study what its plugins expect from the host, and write an adapter, one ecosystem at a time.
 
 This document assesses three ecosystems (Open WebUI, oobabooga, Agent Skills), maps each ecosystem's demands onto localm's plugin contract, and proposes the small set of reusable primitives that unlock most of the value.
 
@@ -20,8 +20,7 @@ Compatibility is a spectrum, not a yes/no. For any target project, its plugins m
 
 The recurring demands an LLM-app plugin makes: call the model; register a tool the model can call; intercept/transform the prompt or response; read/write a setting; add a UI panel; access files/network/subprocess; be discovered and packaged.
 
-localm's host contract (see `localm/plugins/contract.py`) already offers:
-`mount_router`, `mount_static`, `add_settings`, `register_tab`, `plugin_config` / `save_plugin_config`, `has_scope` / `require_scope`, `engine`, `audit`, `browse_dirs`, `register_chat_hook`. Plus, outside the plugin host: the coder agent's `TOOL_REGISTRY` (model-callable tools), the kernel `/v1/chat/completions` path, the capability scope taxonomy (`localm/scopes.py`), the settings schema, and the network policy.
+localm's host contract (see `localm/plugins/contract.py`) already covers `mount_router`, `mount_static`, `add_settings`, `register_tab`, `plugin_config` / `save_plugin_config`, `has_scope` / `require_scope`, `engine`, `audit`, `browse_dirs`, and `register_chat_hook`. Plus, outside the plugin host: the coder agent's `TOOL_REGISTRY` (model-callable tools), the kernel `/v1/chat/completions` path, the capability scope taxonomy (`localm/scopes.py`), the settings schema, and the network policy.
 
 A decisive reuse point: **localm already adapts foreign tools into one registry.** The coder's `register_mcp_tools` (external MCP servers) and `register_plugin_tools` (plugin tool exports) both feed one `TOOL_REGISTRY`, gating untrusted sources as destructive. Every "tools" mapping below is just a new *source* into that same machinery.
 
@@ -30,10 +29,10 @@ A decisive reuse point: **localm already adapts foreign tools into one registry.
 The three ecosystems collapse onto a very small amount of kernel surface:
 
 - **(A) Foreign-tool adapter into the tool registry.** MCP + plugin-export adapters exist (used by the coder agent today). Unlocks Open WebUI Tools.
-- **(B) Chat-pipeline hook.** IMPLEMENTED (see `localm/inference/chat_pipeline.py` and the "Chat pipeline hooks" section of `docs/plugins.md`). The three phases - `inlet(messages, ctx)` pre-inference, `stream(token, ctx)` per-streamed text (sync only), and `outlet(text, messages, ctx)` post-inference - serve Open WebUI Filters *and* oobabooga's text-pipeline hooks (input/output modifiers). A plugin registers with `host.register_chat_hook(phase, fn)`. It is a server-side seam that runs for every `/v1/chat/completions` call, downstream of the engine's marker scrubbing. Note: localm's existing RAG / assistant-memory / web injection is client-side in the SPA (before the request is sent), so the hook chain is the new server-side place those and foreign filters can live.
+- **(B) Chat-pipeline hook.** IMPLEMENTED (see `localm/inference/chat_pipeline.py` and the "Chat pipeline hooks" section of `docs/plugins.md`). The three phases - `inlet(messages, ctx)` pre-inference, `stream(token, ctx)` per-streamed text (sync only), and `outlet(text, messages, ctx)` post-inference - serve Open WebUI Filters *and* oobabooga's text-pipeline hooks (input/output modifiers). A plugin registers with `host.register_chat_hook(phase, fn)`. It is a server-side seam that runs for every `/v1/chat/completions` call, downstream of the engine's marker scrubbing. localm's existing RAG / assistant-memory / web injection is client-side in the SPA, so this hook chain is the new server-side home for those and for foreign filters.
 - **(C) Skills importer.** IMPLEMENTED (see `docs/skills.md`). An Agent Skill is markdown instructions plus bundled resources, and localm's coder agent is exactly the consumer it expects. Needs neither A nor B.
 
-Everything else (Open WebUI Pipes, deep-inference oobabooga hooks, Gradio UI, Open WebUI Actions) is either a larger one-off (a virtual-model backend) or out of reach (runtime/frontend mismatch).
+Everything else is either a larger one-off (a virtual-model backend) or out of reach (runtime/frontend mismatch); see "Reachable vs out of reach" below.
 
 ## Open WebUI
 
@@ -61,7 +60,7 @@ Open WebUI plugins are **single `.py` files** with a frontmatter docstring (`tit
 
 ### Adapter: an `openwebui-compat` plugin
 
-Itself a normal localm plugin. It discovers Open WebUI `.py` files, parses the frontmatter, consent-gates `requirements`, loads the module, and routes by class: `Tools` -> register tools; `Filter` -> the chat hook; `Pipe` -> a virtual model; `Valves` -> settings. Everything scope-gated and audited, with side-effecting tool calls marked destructive (the coder-style confirm flow) - exactly how the MCP client already treats untrusted servers.
+Itself a normal localm plugin. It discovers Open WebUI `.py` files, parses the frontmatter, consent-gates `requirements`, loads the module, and routes by class (per the Mapping table above). Everything scope-gated and audited, with side-effecting tool calls marked destructive (the coder-style confirm flow).
 
 **Verdict:** v1 = **Tools + Valves** (reuses the existing tool-adapter machinery, unlocks the large community tool catalog, mostly introspection + dunder/valve shims). Filters next (they force the chat hook, which is independently useful). Pipes later (the virtual-model backend). Actions are server-runnable but UI-partial.
 
@@ -125,10 +124,10 @@ This is a *format*, not a runtime, and it maps to localm almost for free because
 Leverage-weighted:
 
 1. **Skills importer** - IMPLEMENTED. A coder-surface plugin with two tools (`list_skills`, `use_skill`), zero kernel change. Skills from `~/.localm/skills/` and `.localcoder/skills/` are discovered and loaded on agent start (see `docs/skills.md`).
-2. **Chat-pipeline hook (B)** - IMPLEMENTED. The kernel hook runs on every `/v1/chat/completions` call. Next, on top of it: the Open WebUI **Tools** adapter (reusing the existing tool-adapter machinery) and the oobabooga / OWUI **text-pipeline** adapters (each translates a foreign filter's signature to `register_chat_hook`). One kernel piece, two ecosystems.
-3. **Open WebUI Tools adapter** - ROADMAP. A localm plugin that discovers and loads Open WebUI `.py` files, parses their `Tools` classes, and registers them into the coder's `TOOL_REGISTRY`. Mirrors how the coder already handles MCP servers and plugin tools.
-4. **Open WebUI Pipes** - ROADMAP. A virtual-model backend (bigger, deferred). Lets Open WebUI pipe functions register as selectable models.
-5. **oobabooga text-pipeline adapter** - ROADMAP. A localm plugin that discovers oobabooga extensions and bridges their `input_modifier` / `output_modifier` signatures to `register_chat_hook`.
+2. **Chat-pipeline hook (B)** - IMPLEMENTED. The kernel hook runs on every `/v1/chat/completions` call; the Tools and text-pipeline adapters build on top of it (see the per-ecosystem sections above).
+3. **Open WebUI Tools adapter** - ROADMAP. Reuses the existing tool-adapter machinery (see Open WebUI above).
+4. **Open WebUI Pipes** - ROADMAP. A virtual-model backend (bigger, deferred).
+5. **oobabooga text-pipeline adapter** - ROADMAP. Bridges oobabooga text-pipeline hooks to the chat hook (see oobabooga above).
 
 ## Security posture
 
