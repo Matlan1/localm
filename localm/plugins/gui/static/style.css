@@ -1017,6 +1017,22 @@ pre:hover .canvas-btn { opacity: 1; }
 .card-head-text { min-width: 0; }
 .card-head h3, .card-head .card-title { margin: 0; font-size: 15px; font-weight: 600; }
 .card-desc { font-size: 12px; color: var(--text-dim); margin-top: 1px; }
+/* Category-hued icon for a card-head / section header (color = which area, matching the
+   category NAV hues). Pair with an icon: <span class="ic cat-ic cat-slate" data-icon="...">. */
+.cat-ic.cat-blue   { color: var(--cat-blue); }
+.cat-ic.cat-cyan   { color: var(--cat-cyan); }
+.cat-ic.cat-green  { color: var(--cat-green); }
+.cat-ic.cat-teal   { color: var(--cat-teal); }
+.cat-ic.cat-violet { color: var(--cat-violet); }
+.cat-ic.cat-amber  { color: var(--cat-amber); }
+.cat-ic.cat-slate  { color: var(--cat-slate); }
+/* A schema-driven settings section head (.settings-section-head) sits INSIDE a .card-head
+   now; drop its own divider so the card-head's single border wins (no double rule). */
+.card-head .settings-section-head { border: 0; padding: 0; margin: 0; }
+/* Plugin rows: content icon takes the plugins category hue (violet). */
+.ic-plugin { color: var(--cat-violet); }
+/* Leading content icon inside a mono .log-entry (e.g. the Knowledge doc list). */
+.log-entry .log-ic { margin-right: 6px; vertical-align: -0.15em; }
 /* Quiet motion on interactive rows/buttons; reduced-motion fully respected. */
 .list-row, nav button, .settings-nav-link, .btn-primary, .btn-secondary, .btn-danger,
 .data-table tbody tr, .conv-item, .coder-session-item {
