@@ -85,6 +85,13 @@ def register(app: FastAPI, ctx) -> None:
                 result["uploaded"] = True
                 if isinstance(up, dict) and up.get("url"):
                     result["issue_url"] = up["url"]
+            except bugreport.RateLimitedError as e:
+                # Rate limited: hand the GUI a structured signal so it can count down
+                # and auto-retry, instead of a dead-end error (the file is still saved).
+                result["uploaded"] = False
+                result["rate_limited"] = True
+                result["retry_after"] = e.retry_after
+                result["upload_error"] = f"rate limited; retry in {e.retry_after}s"
             except bugreport.LocalmError as e:
                 result["uploaded"] = False
                 result["upload_error"] = (f"{e.summary}: {e.reason}"

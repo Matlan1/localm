@@ -343,7 +343,7 @@ if ($("server-shutdown")) {
 // via capabilities.bugreport_upload) ALSO files it as a GitHub issue through the
 // proxy, so a tester needs no GitHub account. A failed upload is reported honestly
 // (the file is still saved), never as success.
-export async function submitBugReport(upload) {
+export async function submitBugReport(upload, isRetry = false) {
   const desc = ($("bug-desc").value || "").trim();
   if (!desc) { toast("Describe the problem first", true); return; }
   const includeLog = !!($("bug-include-log") && $("bug-include-log").checked);
@@ -359,6 +359,7 @@ export async function submitBugReport(upload) {
     viewport: window.innerWidth + "x" + window.innerHeight,
     console: (window.__localmClientLog || []).slice(-40),
   };
+  const out = $("bug-result");
   try {
     const r = await fetch("/api/bug-report", {
       method: "POST",
@@ -368,7 +369,14 @@ export async function submitBugReport(upload) {
     });
     const data = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(data.detail || r.statusText);
-    const out = $("bug-result");
+    // Rate limited: if auto-retry is on (default), keep the user's text, count down,
+    // and retry the send ONCE; if the toggle is off, fall through to a plain notice.
+    const autoRetry = !$("bug-autoretry") || $("bug-autoretry").checked;
+    if (upload && data.rate_limited && !isRetry && autoRetry) {
+      const secs = Math.max(1, parseInt(data.retry_after, 10) || 30);
+      await countdownRetryBugReport(secs, out);
+      return;   // the retry (and the finally below) re-enable the buttons
+    }
     const where = data.path || data.filename || "report";
     const uploadFailed = upload && data.upload_error;
     if (out) {
@@ -376,6 +384,9 @@ export async function submitBugReport(upload) {
       if (upload && data.uploaded) {
         out.textContent = "Sent." +
           (data.issue_url ? " Tracking issue: " + data.issue_url : "");
+      } else if (data.rate_limited) {
+        out.textContent = "Saved: " + where +
+          "  -  rate limited; wait a bit and click Send again.";
       } else if (uploadFailed) {
         out.textContent = "Saved: " + where + "  -  could not send (" +
           data.upload_error + "); email it to " + (data.maintainer || "the maintainer");
@@ -384,8 +395,10 @@ export async function submitBugReport(upload) {
           (data.maintainer ? "  -  send it to " + data.maintainer : "");
       }
     }
-    $("bug-desc").value = "";
+    // Keep the description if a rate-limited send might still be retried by hand.
+    if (!data.rate_limited) $("bug-desc").value = "";
     if (upload && data.uploaded) toast("Bug report sent");
+    else if (data.rate_limited) toast("Rate limited; wait a bit and click Send again", true);
     else if (uploadFailed) toast("Saved, but could not send: " + data.upload_error, true);
     else toast("Bug report saved");
   } catch (e) {
@@ -394,6 +407,21 @@ export async function submitBugReport(upload) {
     if (saveBtn) saveBtn.disabled = false;
     if (upBtn) upBtn.disabled = false;
   }
+}
+
+// Show a live countdown in the bug-report result line, then auto-retry the send once
+// (isRetry=true, so it never loops). The caller's buttons stay disabled throughout,
+// so this cannot be double-fired.
+async function countdownRetryBugReport(secs, out) {
+  for (let s = secs; s > 0; s--) {
+    if (out) {
+      out.hidden = false;
+      out.textContent = "Rate limited by the server - retrying automatically in " + s + "s...";
+    }
+    await new Promise((res) => setTimeout(res, 1000));
+  }
+  if (out) out.textContent = "Retrying...";
+  await submitBugReport(true, true);
 }
 
 if ($("bug-send")) $("bug-send").onclick = () => submitBugReport(false);
