@@ -1,5 +1,18 @@
 /* localm GUI - dark, quiet, professional */
 
+/* Inter (self-hosted, SIL OFL) - the UI typeface. A real designed face with true
+   weight steps replaces the thin OS system font (the "pencil font" look) and falls
+   back to the native stack, offline-clean, if a woff2 ever fails to load. Latin
+   subset, ~24KB/weight. Notices: THIRD-PARTY-NOTICES.md + vendor/inter/OFL.txt. */
+@font-face { font-family: "Inter"; font-style: normal; font-weight: 400; font-display: swap;
+  src: url("vendor/inter/inter-latin-400-normal.woff2") format("woff2"); }
+@font-face { font-family: "Inter"; font-style: normal; font-weight: 500; font-display: swap;
+  src: url("vendor/inter/inter-latin-500-normal.woff2") format("woff2"); }
+@font-face { font-family: "Inter"; font-style: normal; font-weight: 600; font-display: swap;
+  src: url("vendor/inter/inter-latin-600-normal.woff2") format("woff2"); }
+@font-face { font-family: "Inter"; font-style: normal; font-weight: 700; font-display: swap;
+  src: url("vendor/inter/inter-latin-700-normal.woff2") format("woff2"); }
+
 :root {
   --bg:        #0e1014;
   --bg-raised: #171c26;
@@ -9,6 +22,17 @@
   --text-dim:  #98a2b4;
   --accent:    #5aa2fb;
   --accent-soft: rgba(90, 162, 251, 0.15);
+  /* Category hues: color as INFORMATION on nav/section icons (which area each is),
+     muted and at a shared lightness so they read as one family, never a rainbow.
+     Applied to ICONS only; text and surfaces stay neutral. core=blue, build=green,
+     media=violet, docs=amber, jobs=teal, network=cyan, system=slate. */
+  --cat-blue:   #62a6fb;
+  --cat-cyan:   #4bb8d6;
+  --cat-green:  #4fc08d;
+  --cat-teal:   #33c3b1;
+  --cat-violet: #a98bfb;
+  --cat-amber:  #e0a44f;
+  --cat-slate:  #8fa3c2;
   /* Depth: dark UIs read flat without a shadow. Cards/modals float on this so
      a surface reads as a surface, not a same-color rectangle (the picker gets
      this for free from its modal backdrop; the settings cards did not). */
@@ -18,7 +42,7 @@
   --yellow:    #d9a741;
   --code-bg:   #11141a;
   --mono: "Cascadia Code", "Consolas", "JetBrains Mono", monospace;
-  --sans: "Segoe UI", system-ui, -apple-system, sans-serif;
+  --sans: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
   /* R17: readable column width for chat/coder transcript blocks. The chat and
      coder views widen this to full-width (see #view-chat / #view-coder). */
   --thread-max: 860px;
@@ -38,6 +62,13 @@
   --yellow:    #a16207;
   --code-bg:   #f0f1f4;
   --shadow-card: 0 1px 2px rgba(30, 41, 59, 0.05), 0 4px 14px rgba(30, 41, 59, 0.06);
+  --cat-blue:   #2563eb;
+  --cat-cyan:   #0e8fb8;
+  --cat-green:  #12925a;
+  --cat-teal:   #0d9488;
+  --cat-violet: #7c53e6;
+  --cat-amber:  #b5791f;
+  --cat-slate:  #586a86;
 }
 
 * { box-sizing: border-box; }
@@ -49,6 +80,13 @@ html, body {
   color: var(--text);
   font-family: var(--sans);
   font-size: 14.5px;
+  /* Inter renders crisper with grayscale smoothing + its stylistic sets (cv02/03/04
+     give the single-storey a/g/l; cv11 the straight-tail y) - part of shaking the
+     thin, low-contrast "pencil font" feel. Harmless on the system-font fallback. */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  text-rendering: optimizeLegibility;
 }
 
 #app { display: flex; height: 100vh; }
@@ -144,6 +182,25 @@ span[data-icon], .ic, .nav-ic, .btn-ic, .lbl-ic { display: inline-flex; align-it
 .composer .attach, .composer .send { display: flex; align-items: center; justify-content: center; }
 .composer .attach svg, .composer .send svg { width: 19px; height: 19px; }
 #nav-toggle svg { width: 22px; height: 22px; }
+/* Category-colored nav icons (color = which area, not decoration). The icon takes
+   its area's hue via data-icon (static markup) or data-icon-name (JS-built), so
+   the sidebar reads as organized zones instead of a grey column. Labels/surfaces
+   stay neutral; the active row still carries the accent. */
+.nav-ic[data-icon="chat"],     .nav-ic[data-icon-name="chat"]     { color: var(--cat-blue); }
+.nav-ic[data-icon="models"],   .nav-ic[data-icon-name="models"]   { color: var(--cat-blue); }
+.nav-ic[data-icon="coder"],    .nav-ic[data-icon-name="coder"]    { color: var(--cat-green); }
+.nav-ic[data-icon="studio"],   .nav-ic[data-icon-name="studio"]   { color: var(--cat-violet); }
+.nav-ic[data-icon="image"],    .nav-ic[data-icon-name="image"]    { color: var(--cat-violet); }
+.nav-ic[data-icon="music"],    .nav-ic[data-icon-name="music"]    { color: var(--cat-violet); }
+.nav-ic[data-icon="video"],    .nav-ic[data-icon-name="video"]    { color: var(--cat-violet); }
+.nav-ic[data-icon="plugins"],  .nav-ic[data-icon-name="plugins"]  { color: var(--cat-violet); }
+.nav-ic[data-icon="book"],     .nav-ic[data-icon-name="book"]     { color: var(--cat-amber); }
+.nav-ic[data-icon="clock"],    .nav-ic[data-icon-name="clock"]    { color: var(--cat-teal); }
+.nav-ic[data-icon="settings"], .nav-ic[data-icon-name="settings"] { color: var(--cat-slate); }
+/* Keep the tint quiet until the row is hovered/active, so the icons read as a
+   colored family, not a row of glowing dots. */
+nav button .nav-ic { opacity: 0.82; }
+nav button:hover .nav-ic, nav button.active .nav-ic { opacity: 1; }
 /* Every dynamically-built checkbox/radio inherits the accent (matches the picker
    checkboxes) instead of the browser default. */
 input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); cursor: pointer; }
@@ -928,15 +985,30 @@ pre:hover .canvas-btn { opacity: 1; }
   display: flex; flex-direction: column; gap: 2px;
 }
 .settings-nav-link {
+  display: flex; align-items: center; gap: 10px;
   text-align: left; background: transparent; border: 0; color: var(--text-dim);
-  padding: 8px 12px; border-radius: 8px; cursor: pointer;
+  padding: 8px 11px; border-radius: 8px; cursor: pointer;
   font: inherit; font-size: 13.5px; width: 100%;
+  --nav-cat: var(--text-dim);
 }
+/* Each section owns a hue; the icon carries it, and the active row tints its bg +
+   accent bar to match, so the six areas are scannable by color (as in the mockup).*/
+.settings-nav-link.cat-blue   { --nav-cat: var(--cat-blue); }
+.settings-nav-link.cat-cyan   { --nav-cat: var(--cat-cyan); }
+.settings-nav-link.cat-green  { --nav-cat: var(--cat-green); }
+.settings-nav-link.cat-teal   { --nav-cat: var(--cat-teal); }
+.settings-nav-link.cat-violet { --nav-cat: var(--cat-violet); }
+.settings-nav-link.cat-amber  { --nav-cat: var(--cat-amber); }
+.settings-nav-link.cat-slate  { --nav-cat: var(--cat-slate); }
+.settings-nav-link .nav-ic { color: var(--nav-cat); flex: 0 0 auto; opacity: 0.9; }
 .settings-nav-link:hover { background: var(--bg-input); color: var(--text); }
+.settings-nav-link:hover .nav-ic { opacity: 1; }
 .settings-nav-link.active {
-  background: var(--accent-soft); color: var(--accent); font-weight: 600;
-  box-shadow: inset 2px 0 0 var(--accent);
+  background: color-mix(in srgb, var(--nav-cat) 16%, transparent);
+  color: var(--text); font-weight: 600;
+  box-shadow: inset 2px 0 0 var(--nav-cat);
 }
+.settings-nav-link.active .nav-ic { opacity: 1; }
 .settings-content { flex: 1 1 auto; min-width: 0; }
 #config-form { display: block; }
 .settings-section { display: none; }
