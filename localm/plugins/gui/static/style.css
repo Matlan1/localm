@@ -893,8 +893,15 @@ pre:hover .canvas-btn { opacity: 1; }
 .settings-content { flex: 1 1 auto; min-width: 0; }
 #config-form { display: block; }
 .settings-section { display: none; }
+/* A group shows all its sections stacked; each .card already carries its own
+   bottom margin, so they read as separate cards without extra spacing rules. */
 .settings-section.active { display: block; }
+/* Both gate-hidden mechanisms win over .active, so a conditionally-shown card
+   (owner-only keys card via .sec-hidden; proxy-gated Updates/Issues via the
+   [hidden] attribute) stays hidden even while its group is active, and self-reveals
+   the instant the gate is lifted - no extra nav rebuild needed. */
 .settings-section.sec-hidden { display: none !important; }
+.settings-section[hidden] { display: none !important; }
 .settings-section-head {
   margin: 0 0 4px; font-size: 15px;
   border-bottom: 1px solid var(--border); padding-bottom: 8px;

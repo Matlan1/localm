@@ -448,10 +448,11 @@
                  with its own heading + Save button (built by refreshSettingsPage). -->
             <div id="config-form"></div>
 
-            <section class="card settings-section" id="sec-performance" data-sec-label="Performance">
-              <h3>Performance</h3>
-              <div class="sub">How much of the model runs on the GPU, and how large its context window
-              is. Applies on the next model load. The VRAM figure is an estimate.</div>
+            <section class="card settings-section" id="sec-performance" data-group="model" data-sec-label="Live tuning">
+              <h3>Live tuning (apply now)</h3>
+              <div class="sub">Adjust the running model without a reload: how much of it is on the GPU,
+              and how large its context window is. The Runtime &amp; GPU settings above are the persisted
+              next-load defaults; these apply right now. The VRAM figure is an estimate.</div>
               <label>GPU layers (0-999) - how much of the model to offload to the GPU</label>
               <input type="number" id="perf-gpu-layers" min="0" max="999" step="1" value="999">
               <label>Context window - the most tokens the model can attend to
@@ -463,27 +464,19 @@
               </div>
             </section>
 
-            <section class="card settings-section" id="sec-appearance" data-sec-label="Appearance">
+            <section class="card settings-section" id="sec-appearance" data-group="system" data-sec-label="Appearance">
               <h3>Appearance</h3>
               <label>Logo style</label>
               <div class="sub">How the wordmark is drawn in the sidebar. Saved in this browser only.</div>
               <div id="logo-style-picker" class="logo-style-picker"></div>
-              <label>API key - saved on this device (a secure cookie) so you stay
-                signed in. Leave blank and Save to sign out.</label>
-              <input type="password" id="gui-api-key" placeholder="only needed when LOCALM_API_KEY is set">
-              
+
               <label style="margin-top:20px; display:flex; align-items:center; gap:8px;">
                 <input type="checkbox" id="show-mmproj-files" style="width:auto; margin:0">
                 Show vision projector (.mmproj) files in repository search results
               </label>
-
-              <div class="actions">
-                <button class="btn-secondary" id="gui-key-save">Save key</button>
-                <button class="btn-secondary" id="gui-clear-convs">Delete all conversations</button>
-              </div>
             </section>
 
-            <section class="card settings-section" id="keys-card" data-sec-label="Keys &amp; devices">
+            <section class="card settings-section" id="keys-card" data-group="security" data-sec-label="Keys &amp; devices">
               <h3>Keys &amp; devices</h3>
               <div class="sub">Mint a named, scope-limited key to pair another device
                 or person - each key gets only the capabilities you check, and a QR is
@@ -509,7 +502,17 @@
               <div id="keys-list" class="keys-list"></div>
             </section>
 
-            <section class="card settings-section" id="sec-companion" data-sec-label="Companion app">
+            <section class="card settings-section" id="sec-signin" data-group="security" data-sec-label="Sign in on this device">
+              <h3>Sign in on this device</h3>
+              <div class="sub">Save an API key on this device (a secure cookie) so you stay signed in.
+              Leave blank and Save to sign out.</div>
+              <input type="password" id="gui-api-key" placeholder="only needed when LOCALM_API_KEY is set">
+              <div class="actions">
+                <button class="btn-secondary" id="gui-key-save">Save key</button>
+              </div>
+            </section>
+
+            <section class="card settings-section" id="sec-companion" data-group="server" data-sec-label="Companion app">
               <h3>Companion app</h3>
               <div class="sub">This app talks only to the server that served it. To use LocaLM on your
               phone, open one of these addresses on the phone (on the same Wi-Fi, or over a private
@@ -537,8 +540,8 @@
               </div>
             </section>
 
-            <section class="card settings-section" id="sec-server" data-sec-label="Server">
-              <h3>Server</h3>
+            <section class="card settings-section" id="sec-server" data-group="server" data-sec-label="Server controls">
+              <h3>Server controls</h3>
               <div class="sub">Control this LocaLM server from here instead of force-closing
               the window (which can crash without a clean unload). The model is unloaded first
               either way. Restart brings the server back automatically; Shut down stops it (start
@@ -549,7 +552,15 @@
               </div>
             </section>
 
-            <section class="card settings-section" id="sec-bugreport" data-sec-label="Report a bug">
+            <section class="card settings-section" id="sec-privacy-data" data-group="privacy" data-sec-label="Your data">
+              <h3>Your data</h3>
+              <div class="sub">Erase the conversations stored on this device. This cannot be undone.</div>
+              <div class="actions">
+                <button class="btn-secondary" id="gui-clear-convs">Delete all conversations</button>
+              </div>
+            </section>
+
+            <section class="card settings-section" id="sec-bugreport" data-group="system" data-sec-label="Report a bug">
               <h3>Report a bug</h3>
               <div class="sub">Describe what went wrong. We save an editable report to your
               data folder with a safe diagnostic snapshot (OS, GPU, backend, loaded model,
@@ -571,7 +582,7 @@
             <!-- Updates + Issues: shown only when the proxy is configured for them
                  (capabilities.update_available / .issues_available). localm never
                  self-updates; applying is always this explicit button. -->
-            <section class="card settings-section" id="sec-updates" data-sec-label="Updates" hidden>
+            <section class="card settings-section" id="sec-updates" data-group="system" data-sec-label="Updates" hidden>
               <h3>Updates</h3>
               <div class="sub">Check for a newer localm build. You always start it - localm
               never updates itself. Most updates apply with just a restart.</div>
@@ -582,7 +593,7 @@
               <div id="update-status" class="sub" hidden></div>
             </section>
 
-            <section class="card settings-section" id="sec-issues" data-sec-label="Issues" hidden>
+            <section class="card settings-section" id="sec-issues" data-group="system" data-sec-label="Issues" hidden>
               <h3>Issues</h3>
               <div class="sub">Open and resolved issues for this project (read-only) - see
               whether a bug you reported has been fixed.</div>
@@ -592,7 +603,7 @@
               <div id="issues-list" class="sub"></div>
             </section>
 
-            <section class="card settings-section" id="sec-logs" data-sec-label="Logs">
+            <section class="card settings-section" id="sec-logs" data-group="system" data-sec-label="Logs">
               <h3>Logs</h3>
               <div class="sub">Copy every log file of this running instance into a folder you
               choose - handy when sending diagnostics. Each export goes into its own
@@ -603,7 +614,7 @@
               <div id="logs-result" class="sub" hidden></div>
             </section>
 
-            <section class="card settings-section" id="sec-uploads" data-sec-label="Upload files">
+            <section class="card settings-section" id="sec-uploads" data-group="system" data-sec-label="Upload files">
               <h3>Upload files</h3>
               <div class="sub">Send files from this device or your phone into localm's
               <code>uploads</code> folder, so models and tools can read them. They are stored
