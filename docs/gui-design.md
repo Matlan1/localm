@@ -19,7 +19,20 @@ surface.
   hydrated on load. Call `hydrateIcons(root)` after inserting a fragment.
 - Every icon is a 24x24 `viewBox` stroke SVG drawn with `stroke="currentColor"`,
   so it inherits color and both themes. Add a new one to `APP_ICONS`.
-- ASCII `x` (close) and `+` are fine as text; they are crisp and conventional.
+- Action buttons use an icon, including "new/add" ones (the `plus` icon, not a
+  literal `+`), so the whole chrome reads as one icon set. A close/remove `x` may
+  stay ASCII text on a dense inline affordance (a chip/tag remove): it is crisp
+  and conventional there.
+
+Color carries meaning in two independent registers, and they must not be mixed:
+
+- CATEGORY hue = which area (nav icons, and a card-head / section-head icon). Muted
+  and shared-lightness (`--cat-blue/-cyan/-green/-teal/-violet/-amber/-slate`), applied
+  via `.nav-ic[data-icon=...]` or a `.cat-ic.cat-*` class. Chrome only.
+- CONTENT-TYPE hue = what kind of thing a row is (a model, a doc, a video, a track,
+  a plugin). Applied to a row's leading icon via `.ic-model/-folder/-doc/-media/-audio/
+  -video/-code/-plugin`. Content only. A data-table name cell leads with one inside
+  `.name-cell`; a `.disc-repo` history row leads with one in its head.
 
 ## 2. Every interactive row has hover + an inset accent bar when active
 
@@ -42,11 +55,15 @@ Inside a dense `.data-table`, the compact `.data-table button` styling wins;
 there, use `.primary` / `.danger` modifiers (accent / red that fill on hover).
 Never ship a class-less `el("button", "", ...)`.
 
-## 4. Sections are cards
+## 4. Sections are cards, with a `.card-head`
 
-`bg-raised`, `1px var(--border)`, 12px radius, generous padding, an `<h3>` head,
-and `.sub` helper text under labels. The settings page is built entirely from
-these; loose inline clusters should adopt the same shell so weight is consistent.
+`bg-raised`, `1px var(--border)`, 12px radius, generous padding, and `.sub` helper
+text under labels. The head is a `.card-head`, not a lone `<h3>`: a category-hued
+leading icon + `.card-head-text` (the `<h3>`, optionally a one-line `.card-desc`) +
+a bottom divider, so no card shows a bare grey title. Every content-page card and
+settings section uses it (the schema-driven settings sections wrap their existing
+`.settings-section-head` in a `.card-head`). Loose inline clusters should adopt the
+same shell so weight is consistent.
 
 ## 5. Inputs are one primitive
 
@@ -58,7 +75,10 @@ filter field adds a leading search/type SVG via the `.picker-filter` shell.
 ## 6. State is a pill, not bare colored text
 
 ok / fail / running / active read as a `.job-state`-shaped badge: ~11px, 999px
-radius, `1px` border, a tinted background per state. Not bare `color: green`.
+radius, `1px` border, a tinted background per state. Not bare `color: green`, and
+not a `(status)` parenthetical. The run-status variants are `.job-state.st-ok` /
+`.st-error` / `.st-skipped` / `.st-running` / `.st-pending` / `.st-paused`, their
+tints `color-mix`ed from the theme tokens so both themes follow the palette.
 
 ## 7. Empty and unsupported states are designed
 

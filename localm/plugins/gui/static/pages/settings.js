@@ -8,6 +8,7 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { pickDirectory, pickFile } from "../app/picker.js";
 import { $, authHeaders, el, toast } from "../app/helpers.js";
+import { emptyState } from "../app/icons.js";
 import { caps } from "../app/settings-perf.js";
 
 /* ================================================================ */
@@ -567,7 +568,8 @@ export async function refreshKeysPanel() {
 
   list.replaceChildren();
   if (!keys.length) {
-    list.appendChild(el("div", "sub", "No named keys yet."));
+    list.appendChild(emptyState("key", "No named keys yet",
+      "Mint a scope-limited key above to pair a device or person."));
   }
   for (const k of keys) {
     const row = el("div", "key-row");
