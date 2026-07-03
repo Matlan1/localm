@@ -23,6 +23,7 @@ function setup() {
   runScript(window, `
     globalThis.__pickOpts = null;
     globalThis.__pickResult = ["/some/docs"];
+    caps.fsAccess = "host";   // host access -> the picker path is offered
     window.prompt = () => { throw new Error("prompt() must not be used (suppressed on mobile/PWA)"); };
     pickPath = (opts) => { globalThis.__pickOpts = opts; return Promise.resolve(globalThis.__pickResult); };
     streamJob = () => Promise.resolve({ status: "done" });
@@ -97,4 +98,19 @@ test("cancelling the picker (null) sends no /add request", async () => {
   await tick();
   assert.equal(calls.filter((c) => c.url.includes("/add")).length, 0,
     "no add when the picker is dismissed");
+});
+
+test("without host access, add-docs never opens the picker or POSTs", async () => {
+  const { window, calls } = setup();
+  // A non-host caller: the host picker would 403, so add-docs must short-circuit
+  // with a message (device upload is the coming path) - no pickPath, no /add.
+  runScript(window, `
+    caps.fsAccess = "none";
+    globalThis.__pickOpts = null;
+  `);
+  runScript(window, "kbAddDocs('mycoll');");
+  await tick();
+  await tick();
+  assert.equal(window.__pickOpts, null, "the host picker is not opened");
+  assert.equal(calls.filter((c) => c.url.includes("/add")).length, 0, "no /add POST");
 });

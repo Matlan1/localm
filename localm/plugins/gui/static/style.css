@@ -1395,6 +1395,10 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
 .picker-row.unselectable .picker-name,
 .picker-row.unselectable .picker-ic { opacity: 0.45; }
 .picker-empty { padding: 26px 12px; text-align: center; font-size: 12.5px; color: var(--text-dim); }
+.picker-trunc {
+  padding: 8px 12px; font-size: 11.5px; color: var(--yellow);
+  border-top: 1px solid var(--border); background: rgba(217, 167, 65, 0.06);
+}
 
 .picker-hint {
   display: flex; align-items: center; gap: 6px;

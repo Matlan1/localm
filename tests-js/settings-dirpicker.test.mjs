@@ -43,8 +43,15 @@ function makeFetch(patches) {
   };
 }
 
-async function render(win) {
-  runScript(win, "refreshSettingsPage();");
+async function render(win, fsAccess = "host") {
+  // init.js calls refreshPluginCommands() at load, whose /api/capabilities fetch
+  // resolves a tick later and sets caps.fsAccess from the (stubbed) response.
+  // Let that one-shot settle FIRST, then pin caps for this render - nothing
+  // re-fetches capabilities during refreshSettingsPage, so it stays put.
+  await new Promise((r) => setTimeout(r, 0));
+  // Folder/path fields only render for a HOST-access caller; default the tests
+  // to host so the Browse-button behaviour is exercised.
+  runScript(win, `caps.fsAccess = ${JSON.stringify(fsAccess)}; refreshSettingsPage();`);
   await new Promise((r) => setTimeout(r, 0));
 }
 
@@ -64,6 +71,20 @@ test("folder/path fields render a Browse button; other widgets do not", async ()
     "number field has no Browse button");
   assert.equal(doc.querySelector('button[data-browse="mode"]'), null,
     "select field has no Browse button");
+});
+
+test("without host access, host-path fields are hidden entirely", async () => {
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch([]) });
+  await render(win, "none");
+  const doc = win.document;
+  // The folder + path fields (server-side host config) are not rendered at all.
+  assert.equal(doc.querySelector('[data-key="binary_dir"]'), null,
+    "folder field hidden for a non-host caller");
+  assert.equal(doc.querySelector('[data-key="some_path"]'), null,
+    "path field hidden for a non-host caller");
+  // Non-path fields still render normally.
+  assert.ok(doc.querySelector('[data-key="n_ctx"]'), "number field still shown");
+  assert.ok(doc.querySelector('[data-key="mode"]'), "select field still shown");
 });
 
 test("clicking Browse fills the input from pickDirectory and saves it", async () => {

@@ -220,21 +220,55 @@ def _save_keystore(records: list) -> None:
     _restrict_perms(path)
 
 
+# Filesystem-access level a credential may reach on the SERVER HOST. A single
+# graded dial (nested: host > shared > none), NOT a scope, so it can be set below
+# host even on an owner's own device (the device just carries a key with a lower
+# level). "none" = no host FS at all (device upload only); "shared" = confined to
+# owner-designated shared roots; "host" = the whole server filesystem.
+FS_ACCESS_LEVELS = ("none", "shared", "host")
+
+
+def norm_fs_access(level: Optional[str]) -> str:
+    """Coerce *level* to a known FS-access level; unknown/blank -> the safe
+    default 'none' (least privilege)."""
+    lv = (level or "none").strip().lower()
+    return lv if lv in FS_ACCESS_LEVELS else "none"
+
+
+def fs_access_for(token: str, default: str = "none") -> str:
+    """The stored host-filesystem-access level for the key behind *token*, or
+    *default* if the key is unknown or has no level recorded (a legacy key minted
+    before this attribute existed defaults to the safe 'none')."""
+    if not token or not token.strip():
+        return default
+    h = _hash_key(token.strip())
+    for r in _load_keystore():
+        if r.get("hash") == h:
+            return norm_fs_access(r.get("fs_access", default))
+    return default
+
+
 def list_keys() -> list:
     """Public metadata for every named key (never the hash)."""
     return [
         {"id": r.get("id"), "name": r.get("name", ""),
          "scopes": r.get("scopes", []), "created": r.get("created"),
-         "expires": r.get("expires"), "last_used": r.get("last_used")}
+         "expires": r.get("expires"), "last_used": r.get("last_used"),
+         "fs_access": norm_fs_access(r.get("fs_access", "none"))}
         for r in _load_keystore()
     ]
 
 
 def create_key(name: str, scope_list, *, allow_privileged: bool = False,
-               expires: Optional[float] = None) -> dict:
+               expires: Optional[float] = None, fs_access: str = "none") -> dict:
     """Mint a named key with *scope_list*, persist its hash, and return a record
     INCLUDING the plaintext key once - the caller must surface it now, it cannot
     be recovered. Raises ValueError on an unknown scope.
+
+    *fs_access* is the host-filesystem reach this key grants ("none" | "shared" |
+    "host"); it defaults to the safe "none" so a new scoped key cannot browse the
+    server disk unless the owner deliberately grants it. The owner/ADMIN key
+    always resolves to "host" regardless of this field (see effective_fs_access).
 
     PRIVILEGED_SCOPES (admin / keys:admin / plugins:admin / config:write /
     coder:full) are refused with PermissionError unless *allow_privileged* is
@@ -265,6 +299,7 @@ def create_key(name: str, scope_list, *, allow_privileged: bool = False,
         "scopes": clean,
         "created": time.time(),
         "expires": float(expires) if expires is not None else None,
+        "fs_access": norm_fs_access(fs_access),
     }
     with _KEYSTORE_LOCK:
         records = _load_keystore()
@@ -272,7 +307,7 @@ def create_key(name: str, scope_list, *, allow_privileged: bool = False,
         _save_keystore(records)
     return {"id": record["id"], "name": record["name"],
             "scopes": record["scopes"], "expires": record["expires"],
-            "key": key}
+            "fs_access": record["fs_access"], "key": key}
 
 
 def revoke_key(key_id: str) -> bool:

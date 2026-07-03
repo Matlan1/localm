@@ -8,6 +8,7 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { pickDirectory, pickFile } from "../app/picker.js";
 import { $, authHeaders, el, toast } from "../app/helpers.js";
+import { caps } from "../app/settings-perf.js";
 
 /* ================================================================ */
 /*  Settings page                                                    */
@@ -226,6 +227,11 @@ export function buildSettingControl(field) {
   // naming tokens below - so tagging beats guessing (NEW-M-BROWSE).
   const isPath = field.widget === "path" || field.accepts_path || field.key.endsWith("_path") || field.key.endsWith("_file") || lbl.includes("file") || lbl.includes("path") || lbl.includes("cmd");
   const isDir = field.widget === "folder" || field.accepts_dir || field.key.endsWith("_dir") || lbl.includes("folder") || lbl.includes("dir");
+  // A host-path / folder field is server-side config: hide it entirely from a
+  // caller without host filesystem access - they cannot (and should not) browse
+  // or set paths on the server disk. The server still enforces on /api/fs/* and
+  // the config write; this just avoids rendering a dead, confusing field.
+  if ((isPath || isDir) && caps.fsAccess !== "host") return null;
   if (isPath || isDir) {
     const row = el("div", "dir-picker-row");
     const browse = el("button", "btn-secondary dir-picker-btn", "Browse...");
