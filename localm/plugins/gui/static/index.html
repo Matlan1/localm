@@ -74,7 +74,7 @@
     </nav>
 
     <div id="conversations">
-      <h3>Conversations <button id="new-conv" title="New conversation">+</button></h3>
+      <h3>Conversations <button id="new-conv" data-icon="plus" title="New conversation"></button></h3>
       <input type="text" id="conv-search" placeholder="search chats…" spellcheck="false">
       <div id="conv-list"></div>
     </div>
@@ -102,7 +102,7 @@
       <div class="mtb-title">local<span>m</span></div>
       <!-- New-chat compose button: on a phone the sidebar (with its + button) is
            a closed drawer, so surface "new chat" right in the top bar. -->
-      <button id="mtb-new" aria-label="New chat" title="New chat">&#43;</button>
+      <button id="mtb-new" aria-label="New chat" data-icon="plus" title="New chat"></button>
     </div>
 
     <!-- ============ CHAT ============ -->
@@ -228,10 +228,10 @@
       <div class="composer-wrap" id="coder-composer" style="display:none">
         <div id="coder-attach-chips"></div>
         <div class="composer">
-          <button class="attach" id="coder-attach" title="Attach text files - their content is added to your message">&#128206;</button>
+          <button class="attach" id="coder-attach" data-icon="attach" title="Attach text files - their content is added to your message"></button>
           <input type="file" id="coder-file" accept=".pdf,.docx,.txt,.md,.markdown,.rst,.html,.htm,.ipynb,.json,.jsonl,.yaml,.yml,.toml,.csv,.tsv,.log,.py,.js,.ts,.java,.c,.h,.cpp,.cs,.go,.rs,.rb,.sh,.ps1,.sql,.xml,.css" multiple style="display:none">
           <textarea id="coder-input" rows="1" placeholder="Describe a task for the agent…" title="Enter to send · Shift+Enter for a new line"></textarea>
-          <button class="send" id="coder-send" title="Send">&#10148;</button>
+          <button class="send" id="coder-send" data-icon="send" title="Send"></button>
         </div>
         <div class="composer-row">
           <span></span>
@@ -240,7 +240,7 @@
       </div>
       </div>
       <aside id="coder-sessions">
-        <h3>Open sessions <button id="coder-new-session" title="Start a new coder session">+</button></h3>
+        <h3>Open sessions <button id="coder-new-session" data-icon="plus" title="Start a new coder session"></button></h3>
         <div id="coder-session-list"></div>
       </aside>
     </section>
@@ -250,7 +250,8 @@
       <div class="page">
         <h2>Models</h2>
         <div class="card">
-          <h3>Find models</h3>
+          <div class="card-head"><span class="ic cat-ic cat-blue" data-icon="search"></span>
+            <div class="card-head-text"><h3>Find models</h3></div></div>
           <div class="row">
             <input type="text" id="disc-query" placeholder="search HuggingFace for GGUF models - empty shows the most downloaded" spellcheck="false">
             <button class="btn-primary" id="disc-search">Search</button>
@@ -259,7 +260,8 @@
           <div id="disc-results"></div>
         </div>
         <div class="card">
-          <h3>Add a model</h3>
+          <div class="card-head"><span class="ic cat-ic cat-blue" data-icon="download"></span>
+            <div class="card-head-text"><h3>Add a model</h3></div></div>
           <div class="sub">From HuggingFace (owner/repo[:file.gguf]) or an https URL, or add one already on disk - paste a folder/file path, or use Browse to pick a folder.</div>
           <div class="row">
             <input type="text" id="pull-spec" placeholder="owner/repo:file.gguf  ·  https://…  ·  a local folder or .gguf path" spellcheck="false">
@@ -278,7 +280,8 @@
           <pre id="pull-log" class="job-log" style="display:none"></pre>
         </div>
         <div class="card">
-          <h3>Registered models</h3>
+          <div class="card-head"><span class="ic cat-ic cat-blue" data-icon="models"></span>
+            <div class="card-head-text"><h3>Registered models</h3></div></div>
           <div id="models-table"></div>
         </div>
       </div>
@@ -313,14 +316,16 @@
           <div id="img-result"></div>
         </div>
         <div class="card">
-          <h3>History</h3>
+          <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="image"></span>
+            <div class="card-head-text"><h3>History</h3></div></div>
           <div class="sub">Tick thumbnails to select for bulk actions; click one for
           details, metadata, and per-image actions.</div>
           <div id="img-bulk" style="display:none"></div>
           <div id="img-history" class="img-grid"></div>
         </div>
         <div class="card">
-          <h3>Workflow</h3>
+          <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="sliders"></span>
+            <div class="card-head-text"><h3>Workflow</h3></div></div>
           <div class="sub">The ComfyUI workflow this page uses. Upload one (in
           ComfyUI: Save -> API format) and select it, or keep the built-in default.</div>
           <div id="img-workflows" data-media="image"></div>
@@ -354,11 +359,13 @@
           <div id="music-result"></div>
         </div>
         <div class="card">
-          <h3>History</h3>
+          <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="music"></span>
+            <div class="card-head-text"><h3>History</h3></div></div>
           <div id="music-history"></div>
         </div>
         <div class="card">
-          <h3>Workflow</h3>
+          <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="sliders"></span>
+            <div class="card-head-text"><h3>Workflow</h3></div></div>
           <div class="sub">The ComfyUI workflow this page uses. Upload one (in
           ComfyUI: Save -> API format) and select it, or keep the built-in default.</div>
           <div id="music-workflows" data-media="music"></div>
@@ -398,11 +405,13 @@
           <div id="video-result"></div>
         </div>
         <div class="card">
-          <h3>History</h3>
+          <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="video"></span>
+            <div class="card-head-text"><h3>History</h3></div></div>
           <div id="video-history"></div>
         </div>
         <div class="card">
-          <h3>Workflow</h3>
+          <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="sliders"></span>
+            <div class="card-head-text"><h3>Workflow</h3></div></div>
           <div class="sub">The ComfyUI workflow this page uses. Upload one (in
           ComfyUI: Save -> API format) and select it, or keep the built-in default.</div>
           <div id="video-workflows" data-media="video"></div>
@@ -420,14 +429,16 @@
         in automatically when the active model supports them. Collections live in the
         localm data directory under <code>rag/</code>.</div>
         <div class="card">
-          <h3>New collection</h3>
+          <div class="card-head"><span class="ic cat-ic cat-amber" data-icon="book"></span>
+            <div class="card-head-text"><h3>New collection</h3></div></div>
           <div class="row">
             <input type="text" id="kb-name" placeholder="name (letters, digits, - _)" spellcheck="false" style="max-width:260px">
             <button class="btn-primary" id="kb-create">Create</button>
           </div>
         </div>
         <div class="card">
-          <h3>Collections</h3>
+          <div class="card-head"><span class="ic cat-ic cat-amber" data-icon="book"></span>
+            <div class="card-head-text"><h3>Collections</h3></div></div>
           <div class="check-row"><label title="Compute embeddings for semantic (vector) search in addition to BM25, when you add documents. Needs an embedding-capable active model; BM25 lexical retrieval always works without it. Uncheck to index BM25-only (faster, no model needed)."><input type="checkbox" id="kb-embed" checked> Compute embeddings when indexing (semantic search)</label></div>
           <div id="kb-table"></div>
           <pre id="kb-log" class="job-log" style="display:none"></pre>
@@ -443,11 +454,13 @@
         the box; install the others as you need them. Enabling or disabling a plugin takes effect
         instantly - no restart, no model reload.</div>
         <div class="card">
-          <h3>First-party plugins</h3>
+          <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="plugins"></span>
+            <div class="card-head-text"><h3>First-party plugins</h3></div></div>
           <div id="catalog-table"></div>
         </div>
         <div class="card">
-          <h3>External plugins</h3>
+          <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="plugins"></span>
+            <div class="card-head-text"><h3>External plugins</h3></div></div>
           <div class="sub">A third-party plugin is a folder with a <code>plugin.toml</code> manifest
           under <code>~/.localm/plugins/</code>; it can add a CLI command and export tools to the
           coder agent. Installation is a local directory copy.</div>
@@ -474,7 +487,8 @@
             <div id="config-form"></div>
 
             <section class="card settings-section" id="sec-performance" data-group="model" data-sec-label="Live tuning">
-              <h3>Live tuning (apply now)</h3>
+              <div class="card-head"><span class="ic cat-ic cat-blue" data-icon="sliders"></span>
+                <div class="card-head-text"><h3>Live tuning (apply now)</h3></div></div>
               <div class="sub">Adjust the running model without a reload: how much of it is on the GPU,
               and how large its context window is. The Runtime &amp; GPU settings above are the persisted
               next-load defaults; these apply right now. The VRAM figure is an estimate.</div>
@@ -490,7 +504,8 @@
             </section>
 
             <section class="card settings-section" id="sec-appearance" data-group="system" data-sec-label="Appearance">
-              <h3>Appearance</h3>
+              <div class="card-head"><span class="ic cat-ic cat-slate" data-icon="theme"></span>
+                <div class="card-head-text"><h3>Appearance</h3></div></div>
               <label>Logo style</label>
               <div class="sub">How the wordmark is drawn in the sidebar. Saved in this browser only.</div>
               <div id="logo-style-picker" class="logo-style-picker"></div>
@@ -502,7 +517,8 @@
             </section>
 
             <section class="card settings-section" id="keys-card" data-group="security" data-sec-label="Keys &amp; devices">
-              <h3>Keys &amp; devices</h3>
+              <div class="card-head"><span class="ic cat-ic cat-amber" data-icon="key"></span>
+                <div class="card-head-text"><h3>Keys &amp; devices</h3></div></div>
               <div class="sub">Mint a named, scope-limited key to pair another device
                 or person - each key gets only the capabilities you check, and a QR is
                 shown to scan (no typing). A <b>coder</b> key is restricted (read +
@@ -528,7 +544,8 @@
             </section>
 
             <section class="card settings-section" id="sec-signin" data-group="security" data-sec-label="Sign in on this device">
-              <h3>Sign in on this device</h3>
+              <div class="card-head"><span class="ic cat-ic cat-amber" data-icon="key"></span>
+                <div class="card-head-text"><h3>Sign in on this device</h3></div></div>
               <div class="sub">Save an API key on this device (a secure cookie) so you stay signed in.
               Leave blank and Save to sign out.</div>
               <input type="password" id="gui-api-key" placeholder="only needed when LOCALM_API_KEY is set">
@@ -538,7 +555,8 @@
             </section>
 
             <section class="card settings-section" id="sec-companion" data-group="server" data-sec-label="Companion app">
-              <h3>Companion app</h3>
+              <div class="card-head"><span class="ic cat-ic cat-cyan" data-icon="web"></span>
+                <div class="card-head-text"><h3>Companion app</h3></div></div>
               <div class="sub">This app talks only to the server that served it. To use LocaLM on your
               phone, open one of these addresses on the phone (on the same Wi-Fi, or over a private
               network like Tailscale), trust the certificate once, and install it from there.</div>
@@ -566,7 +584,8 @@
             </section>
 
             <section class="card settings-section" id="sec-server" data-group="server" data-sec-label="Server controls">
-              <h3>Server controls</h3>
+              <div class="card-head"><span class="ic cat-ic cat-cyan" data-icon="refresh"></span>
+                <div class="card-head-text"><h3>Server controls</h3></div></div>
               <div class="sub">Control this LocaLM server from here instead of force-closing
               the window (which can crash without a clean unload). The model is unloaded first
               either way. Restart brings the server back automatically; Shut down stops it (start
@@ -578,7 +597,8 @@
             </section>
 
             <section class="card settings-section" id="sec-privacy-data" data-group="privacy" data-sec-label="Your data">
-              <h3>Your data</h3>
+              <div class="card-head"><span class="ic cat-ic cat-green" data-icon="memory"></span>
+                <div class="card-head-text"><h3>Your data</h3></div></div>
               <div class="sub">Erase the conversations stored on this device. This cannot be undone.</div>
               <div class="actions">
                 <button class="btn-secondary" id="gui-clear-convs">Delete all conversations</button>
@@ -586,7 +606,8 @@
             </section>
 
             <section class="card settings-section" id="sec-bugreport" data-group="system" data-sec-label="Report a bug">
-              <h3>Report a bug</h3>
+              <div class="card-head"><span class="ic cat-ic cat-slate" data-icon="send"></span>
+                <div class="card-head-text"><h3>Report a bug</h3></div></div>
               <div class="sub">Describe what went wrong. We save an editable report to your
               data folder with a safe diagnostic snapshot (OS, GPU, backend, loaded model,
               settings subset, dependency versions, recent activity, and any browser console
@@ -609,7 +630,8 @@
                  (capabilities.update_available / .issues_available). localm never
                  self-updates; applying is always this explicit button. -->
             <section class="card settings-section" id="sec-updates" data-group="system" data-sec-label="Updates" hidden>
-              <h3>Updates</h3>
+              <div class="card-head"><span class="ic cat-ic cat-slate" data-icon="download"></span>
+                <div class="card-head-text"><h3>Updates</h3></div></div>
               <div class="sub">Check for a newer localm build. You always start it - localm
               never updates itself. Most updates apply with just a restart.</div>
               <div class="actions">
@@ -620,7 +642,8 @@
             </section>
 
             <section class="card settings-section" id="sec-issues" data-group="system" data-sec-label="Issues" hidden>
-              <h3>Issues</h3>
+              <div class="card-head"><span class="ic cat-ic cat-slate" data-icon="book"></span>
+                <div class="card-head-text"><h3>Issues</h3></div></div>
               <div class="sub">Open and resolved issues for this project (read-only) - see
               whether a bug you reported has been fixed.</div>
               <div class="actions">
@@ -630,7 +653,8 @@
             </section>
 
             <section class="card settings-section" id="sec-logs" data-group="system" data-sec-label="Logs">
-              <h3>Logs</h3>
+              <div class="card-head"><span class="ic cat-ic cat-slate" data-icon="file"></span>
+                <div class="card-head-text"><h3>Logs</h3></div></div>
               <div class="sub">Copy every log file of this running instance into a folder you
               choose - handy when sending diagnostics. Each export goes into its own
               timestamped subfolder, so nothing is overwritten.</div>
@@ -641,7 +665,8 @@
             </section>
 
             <section class="card settings-section" id="sec-uploads" data-group="system" data-sec-label="Upload files">
-              <h3>Upload files</h3>
+              <div class="card-head"><span class="ic cat-ic cat-slate" data-icon="attach"></span>
+                <div class="card-head-text"><h3>Upload files</h3></div></div>
               <div class="sub">Send files from this device or your phone into localm's
               <code>uploads</code> folder, so models and tools can read them. They are stored
               on the host, separate from chat attachments. Large model weights use the model
