@@ -288,6 +288,16 @@ else
   say "  Data directory: $DATA_DIR"
 fi
 
+# ---- build the native LocaLM launcher ---------------------------------------
+# So a process monitor shows LocaLM, not python. It is a copy of the venv
+# interpreter in .venv/bin/LocaLM, self-contained in this clone; if the copy
+# cannot run standalone (non-relocatable interpreter) the menu entry below falls
+# back to the venv python. `localm gui` always works; this never blocks install.
+say ""
+say "  Building the LocaLM app launcher ..."
+.venv/bin/localm make-launcher --force \
+  || say "  [!] Could not build the LocaLM launcher - 'localm gui' still works."
+
 # ---- application menu entry --------------------------------------------------
 SHORTCUT=""
 mk="$(ask "  Create an application menu entry? [Y/n]: " Y)"
@@ -300,12 +310,19 @@ case "$mk" in
     # Prefer the scalable SVG (the freedesktop-friendly format); fall back to
     # the .ico that ships for the Windows shortcut if it is ever missing.
     icon="$(pwd)/assets/localm.svg"; [ -f "$icon" ] || icon="$(pwd)/assets/localm.ico"
+    # Launch the GUI directly as the branded LocaLM binary when it built and runs;
+    # otherwise open the graphical launcher (the venv python).
+    if [ -x "$(pwd)/.venv/bin/LocaLM" ]; then
+      launch_exec="$(pwd)/.venv/bin/LocaLM -m localm gui"
+    else
+      launch_exec="$(pwd)/localm-launcher.sh"
+    fi
     cat > "$apps/localm.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=LocaLM
 Comment=Local LLM - chat, coder, models, images
-Exec=$(pwd)/localm-launcher.sh
+Exec=$launch_exec
 Icon=$icon
 Terminal=false
 Categories=Utility;Development;Science;

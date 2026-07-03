@@ -95,6 +95,35 @@ def setup_embeddings(model):
                   "Memory and RAG will now use semantic search.")
 
 
+@main.command("make-launcher")
+@click.option("--force", is_flag=True,
+              help="Rebuild the launcher even if it already exists (use after a "
+                   "Python upgrade to refresh the copied interpreter).")
+def make_launcher_cmd(force: bool) -> None:
+    """Build the native app launcher so the server runs as LocaLM, not python.
+
+    Windows: creates <venv>\\localm-app\\LocaLM.exe (a branded copy of the venv
+    interpreter, with the LocaLM icon) - launch it as `LocaLM.exe -m localm gui`
+    and Task Manager shows LocaLM.exe. Linux: creates <venv>/bin/LocaLM and a
+    LocaLM.desktop launcher. It is a branded copy of the interpreter, not a
+    compiled binary; it stays inside this clone's venv. Re-runnable; setup runs it
+    for you."""
+    from localm import applaunch
+    res = applaunch.make_launcher(force=force)
+    for note in res.notes:
+        console.print(f"  [dim]-[/dim] {note}")
+    if not res.ok:
+        console.print("[yellow]Could not build the native launcher.[/yellow] "
+                      "`localm gui` still works.")
+        sys.exit(1)
+    if res.path:
+        console.print(f"[green]Launcher ready:[/green] {res.path}")
+    if res.desktop_file:
+        console.print(f"[dim]Desktop entry:[/dim] {res.desktop_file}")
+    if sys.platform == "win32" and res.path:
+        console.print(f'[dim]Launch it:[/dim] "{res.path}" -m localm gui')
+
+
 @main.command("bug-report")
 @click.option("-m", "--message", default="", help="One-line summary of the problem.")
 def bug_report_cmd(message: str) -> None:

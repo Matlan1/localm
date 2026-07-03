@@ -180,6 +180,13 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     # Brand the window right away so it never reads as a python.exe path; a richer
     # title (with the port) is set once the port is chosen below.
     set_console_title("LocaLM")
+    # Give this process a real app identity: set the taskbar grouping id
+    # (AppUserModelID) now, BEFORE the splash/status window is created below, so its
+    # taskbar button groups as LocaLM. Also best-effort sets the console icon (the
+    # console is hidden once the server is up; the splash window carries the icon
+    # itself). Pairs with the LocaLM.exe launcher so the running app reads as LocaLM.
+    from localm.applaunch import apply_window_identity
+    apply_window_identity()
     # Light branding: a single wordmark line (the M in accent blue), no noise.
     console.print("[bold]LocaL[/bold][bold #4f9cf9]M[/bold #4f9cf9]  [dim]local AI, offline[/dim]")
 
