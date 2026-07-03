@@ -118,7 +118,7 @@ Not every plugin needs an extra: the image/music/video plugins talk to an extern
 
 ### No models yet?
 
-On a fresh install the launcher's **Import** row gets you a first model three ways: *from file...* / *from folder...* register a GGUF or a HuggingFace directory already on disk, and *from URL...* opens the Web GUI on its Models page and downloads the model there with a live progress bar. You can also just launch the Web GUI with nothing registered (`localm gui --no-model`); it opens straight to the Models page.
+On a fresh install the launcher's **Import** row gets you a first model three ways: *from file...* / *from folder...* register a GGUF or a HuggingFace directory already on disk, and *from URL...* opens the Web GUI on its Models page and downloads the model there with a live progress bar. You can also launch the Web GUI with no models (`localm gui --no-model`); it opens straight to the Models page.
 
 ---
 
@@ -261,7 +261,7 @@ localm setup-llama --from <build-dir>    # or copy your own llama.cpp build
 
 Vulkan runs on any GPU with just the vendor's normal driver; CUDA/ROCm give peak performance when their runtime is present; CPU always works. The AMD ROCm build is self-contained (it bundles its ROCm runtime via the `[gpu]` extra's `rocm-sdk` wheels). macOS/Metal is experimental. See [docs/phone.md](docs/phone.md) to reach the GUI from a phone.
 
-**NVIDIA users:** the installer recommends **Vulkan** by default (works with just your GPU driver, no CUDA Toolkit) - press Enter to accept it and your GPU is used. For **peak performance choose `cuda`** in the setup menu (or run `localm setup-llama --backend cuda`): it fetches a self-contained CUDA runtime (no Toolkit needed), verifies the build actually loads, and falls back to Vulkan with a clear message if your driver is too old for CUDA 12.4+.
+**NVIDIA users:** the installer recommends **Vulkan** by default (works with just your GPU driver, no CUDA Toolkit) - press Enter to accept it and your GPU is used. For **peak performance choose `cuda`** in the setup menu (or run `localm setup-llama --backend cuda`): it fetches a self-contained CUDA runtime (no Toolkit needed), verifies the build loads, and falls back to Vulkan with a clear message if your driver is too old for CUDA 12.4+.
 
 localm resolves the binary directory in order: `LLAMA_CPP_LIB` env > `binary_dir` config > the bundled runtime wheel. No absolute path is ever assumed as a default; an unprovisioned install resolves to nothing and points you at `localm setup-llama`. Before loading a model, localm checks free VRAM against the model size and warns when it will not fit, instead of crashing mid-load.
 

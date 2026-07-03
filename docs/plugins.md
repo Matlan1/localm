@@ -150,7 +150,7 @@ instant and clean.
 | `browse_dirs(path)` | Server-side folder picker helper. |
 | `register_chat_hook(phase, fn, *, priority=0)` | Register an inlet/stream/outlet transform that runs on every chat turn (see [Chat pipeline hooks](#chat-pipeline-hooks)). |
 
-A routes-only plugin (`voice`) is just:
+A routes-only plugin (`voice`) is:
 
 ```python
 from fastapi import APIRouter

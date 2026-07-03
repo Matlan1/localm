@@ -124,7 +124,7 @@ Run the coder in verbose mode to see MCP startup:
 localm coder --verbose
 ```
 
-A server that starts cleanly prints nothing here: its tools simply appear in the agent's tool list (named `mcp_<server>_<tool>` and listed in the system prompt). Confirm it loaded by checking its tools are offered, for example `mcp_fs_search`.
+A server that starts cleanly prints nothing here: its tools appear in the agent's tool list (named `mcp_<server>_<tool>` and listed in the system prompt). Confirm it loaded by checking its tools are offered, for example `mcp_fs_search`.
 
 If a server fails to start, the coder prints a warning and continues - MCP problems never break the agent. For example:
 

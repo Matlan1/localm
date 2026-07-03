@@ -326,7 +326,6 @@ class ProjectMap:
         ext  = abs_path.suffix.lower()
         lang = _SYMBOL_LANGS.get(ext) or ("text" if ext in _TEXT_EXTS else "unknown")
 
-        # Remove old entry
         self.files = [f for f in self.files if f.path != rel]
 
         if not abs_path.exists():
