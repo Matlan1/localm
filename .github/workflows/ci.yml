@@ -1,7 +1,11 @@
 name: CI
 
 on:
+  # Push runs only on master (post-merge verification). Branch work is covered by
+  # the pull_request trigger, so a PR gets ONE run, not two (push + PR) - half the
+  # Actions spend. workflow_dispatch + the weekly schedule are unaffected.
   push:
+    branches: [master]
   pull_request:
   workflow_dispatch:
   schedule:
