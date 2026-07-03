@@ -111,15 +111,11 @@ $("kb-create").onclick = async () => {
 };
 
 export async function kbAddDocs(name) {
-  // Adding docs by host path needs host filesystem access (the picker hits
-  // /api/fs/*, which is host-gated). A caller without it cannot browse the
-  // server disk; per-device upload is the coming path (PR B). Guard here so the
-  // button gives a clear message instead of a 403 inside the picker.
-  if (caps.fsAccess !== "host") {
-    toast("Adding documents from the server needs host file access. "
-          + "Uploading from your device is coming soon.", true);
-    return;
-  }
+  // Host access -> browse the SERVER disk (the picker hits host-gated /api/fs/*).
+  // A caller WITHOUT host access cannot browse the server, so it uploads from its
+  // OWN device instead (kbUploadDocs) - that reads no server path and needs no
+  // filesystem access.
+  if (caps.fsAccess !== "host") return kbUploadDocs(name);
   // In-page file/folder picker (multi-select) instead of prompt(): mobile/PWA
   // browsers suppress prompt(), and typing a full path by hand was the worst of
   // the old flow. The server's /add takes a paths[] array, so several files and
@@ -235,6 +231,92 @@ export async function kbAppendAllowedRoots(folders) {
     toast("Could not update allowed folders: " + e.message, true);
     return false;
   }
+}
+
+/** Per-device upload: pick files from the user's OWN device (the browser's file
+ *  input - no server browsing) and POST their bytes to /upload for indexing. Used
+ *  when the caller lacks host filesystem access, so it reads no server path. */
+export async function kbUploadDocs(name) {
+  const files = await pickDeviceFiles(RAG_EXTS);
+  if (!files.length) return;
+  const MAX = 30 * 1024 * 1024;                 // mirror the server per-file cap
+  const tooBig = files.filter((f) => f.size > MAX);
+  if (tooBig.length) {
+    toast("Too large (max 30 MB each): " + tooBig.map((f) => f.name).join(", "), true);
+    return;
+  }
+  const embed = $("kb-embed") ? $("kb-embed").checked : true;
+  const log = $("kb-log");
+  log.style.display = "block";
+  const label = files.length === 1 ? files[0].name : `${files.length} files`;
+  log.textContent = `Uploading ${label} to '${name}'`
+    + (embed ? "" : " (BM25 only)") + "…\n";
+  let payload;
+  try {
+    payload = await Promise.all(files.map(async (f) => ({
+      filename: f.name, content_b64: await fileToB64(f),
+    })));
+  } catch (e) {
+    log.textContent += "failed to read files: " + e.message + "\n";
+    toast("Could not read the selected files", true);
+    return;
+  }
+  try {
+    const r = await fetch(
+      `/api/rag/collections/${encodeURIComponent(name)}/upload`, {
+        method: "POST", headers: authHeaders(),
+        body: JSON.stringify({ files: payload, embed }),
+      });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    const end = await streamJob(data.job_id, (line) => {
+      log.textContent += line + "\n";
+      log.scrollTop = log.scrollHeight;
+    });
+    toast(end.status === "done" ? "Upload indexed" : "Upload " + end.status,
+          end.status !== "done");
+    refreshKnowledgePage();
+  } catch (e) {
+    log.textContent += "failed: " + e.message + "\n";
+    toast("Upload failed: " + e.message, true);
+  }
+}
+
+/** Open the browser's native file picker (multi-select, filtered to the RAG
+ *  extensions) and resolve the chosen File objects, or [] if cancelled. */
+export function pickDeviceFiles(exts) {
+  return new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.multiple = true;
+    if (Array.isArray(exts) && exts.length) input.accept = exts.join(",");
+    input.style.display = "none";
+    let done = false;
+    const finish = (files) => {
+      if (done) return;
+      done = true;
+      input.remove();
+      resolve(files);
+    };
+    input.addEventListener("change", () => finish(Array.from(input.files || [])));
+    // A cancelled dialog fires no 'change', only a window focus. Resolve empty on
+    // the next focus (after a beat, so a real 'change' wins) so a dismissed picker
+    // does not leave the promise pending forever.
+    window.addEventListener("focus",
+      () => setTimeout(() => finish([]), 300), { once: true });
+    document.body.appendChild(input);
+    input.click();
+  });
+}
+
+/** Read a File as base64 (without the data: URL prefix). */
+export function fileToB64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "");
+    reader.onerror = () => reject(new Error("could not read " + file.name));
+    reader.readAsDataURL(file);
+  });
 }
 
 export async function kbInfoModal(name) {

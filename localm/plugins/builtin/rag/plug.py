@@ -6,7 +6,8 @@ Routes (mounted by the engine, auto-scoped to the ``rag`` capability):
   POST   /api/rag/collections                  - create a collection
   GET    /api/rag/collections/{name}           - collection detail + docs
   DELETE /api/rag/collections/{name}           - delete a collection
-  POST   /api/rag/collections/{name}/add       - index files/folders (job)
+  POST   /api/rag/collections/{name}/add       - index server files/folders (job)
+  POST   /api/rag/collections/{name}/upload    - index uploaded device files (job)
   POST   /api/rag/collections/{name}/query     - retrieve top-k chunks
   POST   /api/rag/collections/{name}/remove-doc - drop one doc
   POST   /api/rag/extract                       - attachment -> text (in memory)
@@ -78,6 +79,17 @@ class RagExtractRequest(BaseModel):
     filename: str
     content_b64: str              # in-memory extraction - no disk writes
     max_chars: int = 24_000
+
+
+class RagUploadItem(BaseModel):
+    filename: str
+    content_b64: str
+
+
+class RagUploadRequest(BaseModel):
+    files: list[RagUploadItem]
+    embed: bool = True            # try embeddings; degrades to lexical-only
+    reindex: bool = False         # force re-index of an unchanged upload
 
 
 def _make_self_embed(self_url: str, active_model):
@@ -223,6 +235,68 @@ async def rag_add(name: str, req: RagAddRequest, request: Request):
 
     from localm.inference.http_server import principal_id
     job = jobs.start_fn("rag-index", _index, owner=principal_id(request))
+    return {"job_id": job.id}
+
+
+@_router.post("/api/rag/collections/{name}/upload")
+async def rag_upload(name: str, req: RagUploadRequest, request: Request):
+    """Ingest documents UPLOADED from the caller's OWN DEVICE into the collection.
+
+    Unlike /add, this reads NO server path - the bytes are in the request - so it
+    needs no host filesystem access and no path confinement (whitelist/blacklist
+    does not apply to the caller's own files). This is the per-device path for a
+    client (a phone, a scoped key) that cannot browse the server disk. Held to the
+    rag scope like the rest of the plugin. Per-file and per-request size caps guard
+    against a memory-exhaustion upload; a zip bomb is caught during extraction."""
+    coll = _get_collection(name)
+    if not req.files:
+        raise HTTPException(400, "No files given")
+    if len(req.files) > 50:
+        raise HTTPException(400, "Too many files in one upload (max 50)")
+    uploads: list = []
+    total = 0
+    for item in req.files:
+        try:
+            data = base64.b64decode(item.content_b64, validate=True)
+        except Exception:
+            raise HTTPException(400, f"content_b64 is not valid base64: {item.filename}")
+        total += len(data)
+        # Cap the DECODED bytes (per file and per request) so a huge upload cannot
+        # exhaust memory; the zip-bomb amplification guard lives in extract_bytes.
+        if len(data) > 30_000_000:
+            raise HTTPException(413, f"File too large (max 30 MB): {item.filename}")
+        if total > 100_000_000:
+            raise HTTPException(413, "Upload too large (max 100 MB per request)")
+        uploads.append({"filename": item.filename, "data": data})
+
+    embed = req.embed
+    jobs = request.app.state.jobs
+    self_embed = _make_self_embed(request.app.state.self_url,
+                                  request.app.state.active_model)
+
+    def _index(job):
+        embed_fn = self_embed if embed else None
+        try:
+            result = coll.add_uploads(
+                uploads, embed_fn=embed_fn, force=req.reindex,
+                on_progress=lambda t: job.push({"type": "line", "text": t}))
+        except ValueError as e:
+            # e.g. an embedding-model dimension change (C3) - report, don't crash.
+            job.push({"type": "line", "text": f"error: {e}"})
+            return False
+        summary = (f"done: {result['added']} added, "
+                   f"{result['updated']} updated, "
+                   f"{result['skipped']} unchanged, "
+                   f"{len(result['failed'])} failed - "
+                   f"{result['chunks']} chunks total")
+        job.push({"type": "line", "text": summary})
+        for f in result["failed"][:10]:
+            job.push({"type": "line",
+                      "text": f"  failed: {f['path']}: {f['error']}"})
+        return True
+
+    from localm.inference.http_server import principal_id
+    job = jobs.start_fn("rag-upload", _index, owner=principal_id(request))
     return {"job_id": job.id}
 
 
