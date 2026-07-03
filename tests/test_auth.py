@@ -365,8 +365,7 @@ def test_first_key_from_loopback_gui_seeds_owner_session(auth):
     follow-up request via the cookie - now that auth is on - is authorized."""
     from fastapi.testclient import TestClient
     from localm import scopes as S
-    from localm.inference.http_server import (CSRF_COOKIE, SESSION_COOKIE,
-                                              create_app)
+    from localm.inference.http_server import SESSION_COOKIE, create_app
 
     assert not auth.any_key_configured()          # starts open/keyless
     app = create_app(None)                         # bind_host unset -> loopback default
@@ -380,9 +379,10 @@ def test_first_key_from_loopback_gui_seeds_owner_session(auth):
         # a persistent OWNER key was seeded so the local owner keeps full access
         owner = auth.get_api_key()
         assert owner is not None and auth.verify(owner) == {S.ADMIN}
-        # the response established the browser session (both cookies)
+        # the response established the browser session (opaque session cookie; CSRF
+        # is derived from the session, not a cookie)
         set_cookies = " ".join(r.headers.get_list("set-cookie"))
-        assert SESSION_COOKIE in set_cookies and CSRF_COOKIE in set_cookies
+        assert SESSION_COOKIE in set_cookies
         # auth is now on; the follow-up rides the session cookie from the jar
         # (NOT the now-dead shell token) and is authorized -> no lockout.
         assert auth.any_key_configured()

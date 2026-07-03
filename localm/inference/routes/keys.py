@@ -7,7 +7,6 @@ Extracted verbatim from create_app(); behavior unchanged.
 from __future__ import annotations
 
 import ipaddress
-import secrets
 import time
 from typing import Optional
 
@@ -116,9 +115,8 @@ def register(app: FastAPI, ctx) -> None:
             response.set_cookie(_hs.SESSION_COOKIE, sid, httponly=True,
                                 secure=secure, samesite="strict", path="/",
                                 max_age=_hs.SESSION_MAX_AGE)
-            response.set_cookie(_hs.CSRF_COOKIE, secrets.token_urlsafe(32),
-                                httponly=False, secure=secure, samesite="strict",
-                                path="/", max_age=_hs.SESSION_MAX_AGE)
+            # CSRF is derived from the session (client fetches it from
+            # GET /api/session); no separate CSRF cookie to set.
         # The plaintext key is returned exactly once - it is never recoverable.
         return created
 

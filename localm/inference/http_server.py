@@ -15,6 +15,7 @@ Start programmatically:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import json
 import secrets
@@ -289,14 +290,40 @@ def _principal_from_token(token, source):
     return held, _hash_key(token), fs
 
 
-def _csrf_double_submit_ok(request) -> bool:
-    """Double-submit CSRF check: the ``X-CSRF-Token`` header must equal the
-    readable ``localm_csrf`` cookie (both set at login). A cross-site page can
-    neither read the cookie to forge the header nor (with SameSite=Strict) get
-    the browser to send the cookie at all - defence in depth."""
+def _csrf_secret(request) -> str:
+    """The per-process CSRF secret for this app, created lazily if a standalone
+    mount (a bare attach_gui in tests) never ran create_app's setup."""
+    st = request.app.state
+    sec = getattr(st, "csrf_secret", None)
+    if not sec:
+        sec = secrets.token_urlsafe(32)
+        st.csrf_secret = sec
+    return sec
+
+
+def csrf_token_for(request, sid: str) -> str:
+    """The CSRF token for a session id: a deterministic HMAC of the id under the
+    per-process secret. Derived from the session, so it is available exactly when
+    the session is (delivered to the client via GET /api/session and the shell
+    <meta>) and can never desync from it. Empty for an empty sid."""
+    if not sid:
+        return ""
+    return hmac.new(_csrf_secret(request).encode("utf-8"),
+                    sid.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _csrf_ok(request) -> bool:
+    """CSRF check for a cookie-authenticated unsafe request: the ``X-CSRF-Token``
+    header must equal the token DERIVED from the session cookie (signed with the
+    per-process secret). No separate CSRF cookie exists to be cleared or to desync,
+    so a valid session always has a usable token. A cross-site page can neither read
+    the HttpOnly session cookie nor the token (SOP), and cannot set a non-simple
+    header; SameSite=Strict and the same-origin guard remain in force."""
     header = request.headers.get(CSRF_HEADER, "")
-    cookie = request.cookies.get(CSRF_COOKIE, "")
-    return bool(header and cookie and hmac.compare_digest(header, cookie))
+    sid = (request.cookies.get(SESSION_COOKIE) or "").strip()
+    if not header or not sid:
+        return False
+    return hmac.compare_digest(header, csrf_token_for(request, sid))
 
 
 def _enforce_request(request: Request, scope: Optional[str]) -> None:
@@ -320,7 +347,7 @@ def _enforce_request(request: Request, scope: Optional[str]) -> None:
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
     held = prin[0]
     if source == "cookie" and request.method not in _SAFE_METHODS:
-        if not _csrf_double_submit_ok(request):
+        if not _csrf_ok(request):
             raise HTTPException(
                 status_code=403,
                 detail="Missing or invalid CSRF token for a cookie-"
@@ -759,6 +786,14 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
     # the Origin guard alone do not cover. Per-process so it dies on restart;
     # never persisted.
     app.state.shell_token = secrets.token_urlsafe(32)
+
+    # Per-process CSRF secret. The CSRF token is a deterministic HMAC of the
+    # session id (below), so it is provably present exactly when the session is and
+    # CANNOT desync from it (the old design used a SEPARATE readable cookie that a
+    # client reset could clear while the HttpOnly session survived, 403-ing every
+    # write). Per-process so it dies on restart (the client re-fetches the token
+    # from /api/session on the next boot); never persisted.
+    app.state.csrf_secret = secrets.token_urlsafe(32)
 
     # api-mode landing: a bare `localm serve` has no GUI shell, so GET / would
     # 404. Redirect it to the auto-generated API docs. Only on the api path so

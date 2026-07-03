@@ -92,18 +92,17 @@ def _index_html_with_shell_token(token: str) -> str:
 
 
 def _set_session_cookies(response, key: str, *, secure: bool) -> None:
-    """Establish the S2 auth cookies on *response* for a loopback owner: mint an
+    """Establish the S2 auth cookie on *response* for a loopback owner: mint an
     OPAQUE server-side session for the current owner *key* and set the HttpOnly
     ``localm_session`` cookie to the SESSION ID (never the key, so it never touches
-    page JS and rolling the key does not invalidate it), plus a readable
-    ``localm_csrf`` token for double-submit CSRF. Names match http_server's
-    SESSION_COOKIE / CSRF_COOKIE; both carry SESSION_MAX_AGE so the session PERSISTS
-    across a browser/PWA restart (SEAMLESS). No-op if *key* is not a valid key."""
-    import secrets as _secrets
+    page JS and rolling the key does not invalidate it). It carries SESSION_MAX_AGE
+    so the session PERSISTS across a browser/PWA restart (SEAMLESS). No-op if *key*
+    is not a valid key. The CSRF token is DERIVED from the session and fetched by
+    the client from GET /api/session, so there is no separate CSRF cookie to set (or
+    to fall out of sync with the session, the pre-rework 'missing CSRF token' bug)."""
     from localm import scopes as S, sessions
     from localm.auth import _hash_key, fs_access_for, verify
-    from localm.inference.http_server import (CSRF_COOKIE, SESSION_COOKIE,
-                                              SESSION_MAX_AGE)
+    from localm.inference.http_server import SESSION_COOKIE, SESSION_MAX_AGE
     held = verify(key)
     if held is None:
         return
@@ -111,9 +110,6 @@ def _set_session_cookies(response, key: str, *, secure: bool) -> None:
     sid = sessions.create(scopes=held, key_hash=_hash_key(key), fs_access=fs)
     response.set_cookie(SESSION_COOKIE, sid, httponly=True, secure=secure,
                         samesite="strict", path="/", max_age=SESSION_MAX_AGE)
-    response.set_cookie(CSRF_COOKIE, _secrets.token_urlsafe(32), httponly=False,
-                        secure=secure, samesite="strict", path="/",
-                        max_age=SESSION_MAX_AGE)
 
 
 # ------------------------------------------------------------------ #

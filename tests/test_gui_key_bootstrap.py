@@ -82,7 +82,9 @@ class TestShellRoute:
         assert "localm_session=" in cookies
         assert "httponly" in cookies.lower()
         assert "samesite=strict" in cookies.lower()
-        assert "localm_csrf=" in cookies
+        # CSRF is derived from the session (fetched via GET /api/session), so there
+        # is NO separate localm_csrf cookie to set (or to desync from the session).
+        assert "localm_csrf=" not in cookies
         # SEAMLESS: the auto-seeded cookie PERSISTS (max-age) so the loopback user
         # stays signed in across a browser restart, matching the /api/session path.
         assert "max-age=" in cookies.lower()

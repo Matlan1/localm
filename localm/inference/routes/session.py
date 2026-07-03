@@ -8,8 +8,6 @@ referenced via ``_hs.`` so external importers still find them there.
 
 from __future__ import annotations
 
-import secrets
-
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 
 import localm.inference.http_server as _hs
@@ -20,16 +18,17 @@ def register(app: FastAPI, ctx) -> None:
     require_scope = _hs.require_scope
     _bearer_token = _hs._bearer_token
     _request_token = _hs._request_token
-    _csrf_double_submit_ok = _hs._csrf_double_submit_ok
+    _csrf_ok = _hs._csrf_ok
 
     @app.post("/api/session", include_in_schema=False)
     async def session_login(request: Request, response: Response):
-        """Exchange the API key for an HttpOnly session cookie so the browser
-        GUI never has to hold the key in JS-readable localStorage. The key is
-        read from the JSON body ``{"key": ...}`` or an Authorization: Bearer
-        header, verified, and on success set as the HttpOnly ``localm_session``
-        cookie plus a readable ``localm_csrf`` cookie (double-submit CSRF). 401
-        on a bad key; 400 in open mode (nothing to log into)."""
+        """Exchange the API key for an HttpOnly session cookie so the browser GUI
+        never has to hold the key in JS-readable localStorage. The key is read from
+        the JSON body ``{"key": ...}`` or an Authorization: Bearer header, verified,
+        and on success set as the HttpOnly ``localm_session`` cookie (an opaque
+        session id). The response body returns the ``csrf`` token (an HMAC of the
+        session, NOT a cookie) for the client to send as ``X-CSRF-Token`` on writes.
+        401 on a bad key; 400 in open mode (nothing to log into)."""
         from localm.auth import any_key_configured, verify
         presented = None
         try:
@@ -57,29 +56,29 @@ def register(app: FastAPI, ctx) -> None:
         sid = sessions.create(scopes=held, key_hash=_hash_key(presented),
                               fs_access=fs)
         secure = request.url.scheme == "https"
-        csrf = secrets.token_urlsafe(32)
         response.set_cookie(_hs.SESSION_COOKIE, sid, httponly=True,
                             secure=secure, samesite="strict", path="/",
                             max_age=_hs.SESSION_MAX_AGE)
-        response.set_cookie(_hs.CSRF_COOKIE, csrf, httponly=False,
-                            secure=secure, samesite="strict", path="/",
-                            max_age=_hs.SESSION_MAX_AGE)
-        return {"authed": True, "scopes": sorted(held)}
+        # CSRF token is DERIVED from the session (not a separate cookie that could
+        # be cleared independently and desync); hand it back for the client to echo
+        # as X-CSRF-Token on state-changing requests.
+        return {"authed": True, "scopes": sorted(held),
+                "csrf": _hs.csrf_token_for(request, sid)}
 
     @app.post("/api/session/logout", include_in_schema=False)
     async def session_logout(request: Request, response: Response):
-        """Clear the session + CSRF cookies (sign the browser out).
+        """Sign the browser out: revoke the session and clear its cookie.
 
-        A POST from the cookie-authenticated browser GUI is subject to the
-        same double-submit CSRF check as every other state-changing endpoint
-        (Task 3: CSRF-post-clear). A bearer-header caller (CLI / SDK) is
-        CSRF-exempt because it cannot be driven cross-site."""
+        A POST from the cookie-authenticated browser GUI is subject to the same CSRF
+        check as every other state-changing endpoint (the X-CSRF-Token header must
+        match the token derived from the session). A bearer-header caller (CLI / SDK)
+        is CSRF-exempt because it cannot be driven cross-site."""
         token, source = _request_token(request)
-        if source == "cookie" and not _csrf_double_submit_ok(request):
+        if source == "cookie" and not _csrf_ok(request):
             raise HTTPException(
                 403,
-                "Missing or invalid CSRF token. Include the localm_csrf "
-                "cookie value in the X-CSRF-Token header.")
+                "Missing or invalid CSRF token. Send the session's csrf token "
+                "(from GET /api/session) in the X-CSRF-Token header.")
         # Real, server-side logout: drop the session row so the cookie value can
         # never be replayed (deleting the cookie alone left a valid server session).
         if source == "cookie" and token:
@@ -87,7 +86,6 @@ def register(app: FastAPI, ctx) -> None:
             sessions.revoke(token)
         secure = request.url.scheme == "https"
         response.delete_cookie(_hs.SESSION_COOKIE, path="/", httponly=True, secure=secure, samesite="strict")
-        response.delete_cookie(_hs.CSRF_COOKIE, path="/", httponly=False, secure=secure, samesite="strict")
         return {"authed": False}
 
     @app.post("/api/auth/key/clear",
@@ -97,19 +95,18 @@ def register(app: FastAPI, ctx) -> None:
         """Delete the server-side owner key (auth.key) and immediately
         invalidate the caller's session cookie.
 
-        CSRF-protected: a cookie-authenticated caller must echo the
-        localm_csrf cookie value in X-CSRF-Token (double-submit pattern).
-        After this call any_key_configured() returns False (assuming no
-        LOCALM_API_KEY env var and an empty keystore), and all subsequent
-        web UI requests that rely on the session cookie will fail auth and
+        CSRF-protected: a cookie-authenticated caller must send the session's
+        derived token in X-CSRF-Token. After this call any_key_configured() returns
+        False (assuming no LOCALM_API_KEY env var and an empty keystore), and all
+        subsequent web UI requests that rely on the session cookie will fail auth and
         be redirected to the key gate by the client (Task 3: CSRF-post-clear).
         """
         _, source = _request_token(request)
-        if source == "cookie" and not _csrf_double_submit_ok(request):
+        if source == "cookie" and not _csrf_ok(request):
             raise HTTPException(
                 403,
-                "Missing or invalid CSRF token. Include the localm_csrf "
-                "cookie value in the X-CSRF-Token header.")
+                "Missing or invalid CSRF token. Send the session's csrf token "
+                "(from GET /api/session) in the X-CSRF-Token header.")
         from localm.auth import clear_api_key
         clear_api_key()
         # The key that minted every current session is gone; those sessions carry
@@ -124,23 +121,27 @@ def register(app: FastAPI, ctx) -> None:
         # no longer matches any key). Also clear the CSRF token.
         response.delete_cookie(_hs.SESSION_COOKIE, path="/", httponly=True,
                                secure=secure, samesite="strict")
-        response.delete_cookie(_hs.CSRF_COOKIE, path="/", httponly=False,
-                               secure=secure, samesite="strict")
         from localm.debuglog import logger as _dbg
         _dbg.info("owner API key cleared via /api/auth/key/clear; session invalidated")
         return {"cleared": True}
 
     @app.get("/api/session", include_in_schema=False)
     async def session_state(request: Request):
-        """Report whether the caller is authenticated, so the GUI can show or
-        hide its key gate without ever reading the key. *authed* reflects the
-        presented cookie/header; *required* is True when a key is configured."""
+        """Report whether the caller is authenticated, so the GUI can show or hide
+        its key gate without ever reading the key. *authed* reflects the presented
+        cookie/header; *required* is True when a key is configured. For a cookie
+        session it also returns the ``csrf`` token derived from that session, so the
+        client always has a token in lockstep with its session (it can never desync)
+        and can refresh it after a server restart rotated the secret."""
         from localm.auth import any_key_configured, require_auth_enabled
         configured = any_key_configured()
         token, source = _request_token(request)
         prin = (_hs._principal_from_token(token, source)
                 if (configured and token) else None)
         held = prin[0] if prin else None
+        csrf = (_hs.csrf_token_for(request, token)
+                if (held is not None and source == "cookie") else "")
         return {"authed": held is not None,
                 "scopes": sorted(held) if held else [],
-                "required": configured or require_auth_enabled()}
+                "required": configured or require_auth_enabled(),
+                "csrf": csrf}
