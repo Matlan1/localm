@@ -1041,7 +1041,9 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   const params = chatParams();
   const webEnabled = $("p-web").checked;
   const messages = [];
-  let sysText = params.system || "";
+  // Per-chat System prompt (the drawer) OVERRIDES; a blank drawer inherits the
+  // Settings "Default system prompt" (chat.systemDefault, from /v1/config).
+  let sysText = params.system || chat.systemDefault || "";
   // Long-term memory is now injected SERVER-SIDE by the chat plugin's inlet hook
   // (query-aware, for every client), gated on the memory_enabled config that the
   // brain toggle drives. We deliberately no longer prepend it here, so it is not

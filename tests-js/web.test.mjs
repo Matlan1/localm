@@ -6,7 +6,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { loadApp } from "./harness.mjs";
+import { loadApp, runScript } from "./harness.mjs";
 
 const jsonResp = (obj) => ({
   ok: true, status: 200, json: async () => obj, text: async () => JSON.stringify(obj),
@@ -416,4 +416,42 @@ test("CHAT-TOOL-1: the re-sent context defangs the assistant tool-call turn (no 
     "raw <|tool_call> markers are NOT re-fed to the model");
   assert.match(String(asst.content), /web search/,
     "the tool call is represented as a readable note instead");
+});
+
+// ---------------------------------------------------------------------------
+//  Chat defaults vs per-chat override: a blank drawer System prompt inherits the
+//  Settings "Default system prompt" (chat.systemDefault); a set field overrides.
+// ---------------------------------------------------------------------------
+
+async function systemForSend({ drawerSystem, settingsDefault }) {
+  const { impl, calls } = recordingFetch([]);
+  const { window } = loadApp({ fetchImpl: impl });
+  window.maybeCompactConversation = async () => {};
+  window.readSSE = async (_r, onData) =>
+    onData(JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] }));
+  const doc = window.document;
+  doc.getElementById("p-speak").checked = false;
+  doc.getElementById("p-memory").checked = false;   // isolate the system message
+  doc.getElementById("p-web").checked = false;
+  doc.getElementById("p-system").value = drawerSystem;
+  // chat.systemDefault is set from /v1/config; seed it directly (shared realm global).
+  runScript(window, `chat.systemDefault = ${JSON.stringify(settingsDefault)};`);
+  const conv = { id: "c1", title: "t", messages: [{ role: "user", content: "hi" }] };
+  await window.runCompletion(conv);
+  const completion = calls.find((c) => c.url === "/v1/chat/completions");
+  return (completion.body.messages.find((m) => m.role === "system") || {}).content || "";
+}
+
+test("a blank System prompt inherits the Settings default system prompt", async () => {
+  const sys = await systemForSend({ drawerSystem: "", settingsDefault: "You are a terse pirate." });
+  assert.match(sys, /terse pirate/, "the Settings default was used when the drawer is blank");
+});
+
+test("a set System prompt overrides the Settings default (not both)", async () => {
+  const sys = await systemForSend({
+    drawerSystem: "You are a helpful librarian.",
+    settingsDefault: "You are a terse pirate.",
+  });
+  assert.match(sys, /helpful librarian/, "the drawer System prompt is used");
+  assert.ok(!/pirate/.test(sys), "the Settings default is NOT also injected");
 });
