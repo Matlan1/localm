@@ -175,8 +175,11 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
 
     # A click into this console window must not freeze the server
     # (Windows QuickEdit suspends output, and output blocks inference).
-    from localm.winconsole import disable_quickedit
+    from localm.winconsole import disable_quickedit, set_console_title
     disable_quickedit()
+    # Brand the window right away so it never reads as a python.exe path; a richer
+    # title (with the port) is set once the port is chosen below.
+    set_console_title("LocaLM")
 
     if debug:
         from localm.debuglog import enable_debug
@@ -366,6 +369,10 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     elif model_less:
         open_url = f"{base_url}?view=models"
 
+    _wtitle = f"LocaLM  -  localhost:{chosen_port}"
+    if not model_less and (display_name or model):
+        _wtitle = f"LocaLM  -  {display_name or model}  -  :{chosen_port}"
+    set_console_title(_wtitle)
     console.print(f"[bold green]localm GUI[/bold green] → {base_url}")
     if model_less:
         console.print("  model: [yellow]none yet - add one on the Models page[/yellow]")
