@@ -80,6 +80,23 @@ class LocalmError(Exception):
         self.context = context or {}
 
 
+class RateLimitedError(LocalmError):
+    """The bug-report proxy returned HTTP 429 (rate limited). Carries *retry_after*
+    (seconds) so a caller can wait and retry once instead of failing outright. A
+    subclass of LocalmError, so existing ``except LocalmError`` handlers still treat
+    it as a (non-fatal) send failure; callers that want the retry catch it first."""
+
+    def __init__(self, retry_after: int = 30, reason: str = ""):
+        try:
+            ra = max(1, int(retry_after))
+        except (TypeError, ValueError):
+            ra = 30
+        super().__init__("the bug-report server is rate limiting reports",
+                         reason=reason or f"try again in about {ra} seconds",
+                         context={"retry_after": ra})
+        self.retry_after = ra
+
+
 def _localm_version() -> str:
     # Live VERSION-file read (falls back to installed metadata): the install is
     # editable, so a code-only update changes VERSION without refreshing dist-info.
@@ -705,6 +722,34 @@ def upload_available() -> bool:
     return upload_config()[0] is not None
 
 
+def _retry_after_from(headers, body_text) -> int:
+    """Best-effort retry delay (seconds) for a 429: the ``Retry-After`` response
+    header, else a ``retry_after`` field in the JSON body, else a 30s default."""
+    val = None
+    try:
+        if headers is not None:
+            val = headers.get("Retry-After")
+    except Exception:
+        # Header access is best-effort; a missing/odd header just falls through to
+        # the body/default below - never let it break the (already-failed) upload.
+        val = None
+    if val:
+        try:
+            return max(1, int(str(val).strip()))
+        except (TypeError, ValueError):
+            pass
+    if body_text:
+        try:
+            import json as _json
+            obj = _json.loads(body_text)
+            if isinstance(obj, dict) and obj.get("retry_after"):
+                return max(1, int(obj["retry_after"]))
+        except Exception:
+            # A non-JSON or malformed body simply yields the default delay.
+            pass
+    return 30
+
+
 def upload_report(title: str, body: str, *, url: Optional[str] = None,
                   token: Optional[str] = None, timeout: float = 15.0,
                   opener=None) -> dict:
@@ -755,6 +800,10 @@ def upload_report(title: str, body: str, *, url: Optional[str] = None,
                     # read we still raise the failure below (with an empty detail),
                     # so the rejection is never hidden.
                     pass
+                if e.code == 429:
+                    raise RateLimitedError(
+                        _retry_after_from(getattr(e, "headers", None), detail),
+                        reason=detail)
                 raise LocalmError("the bug-report server rejected the upload",
                                   reason=f"HTTP {e.code}: {detail}".strip())
             except (urllib.error.URLError, OSError) as e:
@@ -762,6 +811,8 @@ def upload_report(title: str, body: str, *, url: Optional[str] = None,
                                   reason=str(getattr(e, "reason", e)))
 
     status, raw = opener(url, payload, headers, timeout)
+    if int(status) == 429:
+        raise RateLimitedError(_retry_after_from(None, raw), reason=str(raw)[:300])
     if not (200 <= int(status) < 300):
         raise LocalmError("the bug-report server rejected the upload",
                           reason=f"HTTP {status}: {raw[:300]}".strip())
@@ -852,11 +903,25 @@ def report_failure(*, summary: str, reason: str = "",
 
     try:
         if action == "upload":
-            try:
+            def _send():
                 res = upload_report(summary, body, url=up_url, token=up_token)
                 link = res.get("url") if isinstance(res, dict) else None
                 console.print("[green]Sent to the maintainer.[/green]"
                               + (f" Tracking issue: {link}" if link else ""))
+            try:
+                _send()
+            except RateLimitedError as e:
+                # Rate limited: wait the server-advised delay and retry ONCE, rather
+                # than making the tester re-run the whole command.
+                import time as _time
+                console.print("[yellow]The bug-report server is rate limiting. "
+                              f"Retrying in {e.retry_after}s...[/yellow]")
+                _time.sleep(e.retry_after)
+                try:
+                    _send()
+                except LocalmError as e2:
+                    console.print(f"[yellow]Still could not send it ({e2.reason}). "
+                                  f"The report is at {where} - email it instead.[/yellow]")
             except LocalmError as e:
                 # A failed send must not look like success - say so and keep the file.
                 console.print(f"[yellow]Could not send it ({e.summary}: {e.reason}). "

@@ -293,16 +293,20 @@ DEFAULT_CONFIG: dict = {
     # records the choice here. Default True. Read via .get(..., True) since a
     # user config saved before this key existed will not contain it.
     "auto_install_plugin_deps": True,
-    # Bug-report upload endpoint. When set, the in-app "Send to maintainer" channel
-    # POSTs the (user-reviewed) report to this URL, which files it as a GitHub issue
-    # - so a tester needs no GitHub account and no token ships in the app. Intended
-    # to point at the localm bug-report proxy (a small Cloudflare Worker that holds
-    # the GitHub token server-side; see tools/bugreport-proxy/). None = no upload
-    # channel (the report is still saved to a file and can be emailed). The token is
-    # an OPTIONAL low-value shared secret the proxy may require to deter spam; it can
-    # only file an issue through the rate-limited proxy, never read the repo.
-    "bugreport_upload_url": None,
-    "bugreport_upload_token": None,
+    # Bug reports, the read-only Issues view, and the self-updater all talk to ONE
+    # small Cloudflare Worker (the localm proxy; see tools/bugreport-proxy/) that
+    # holds the GitHub tokens SERVER-SIDE. These ship as DEFAULTS so a fresh download
+    # works with ZERO setup: the "Report a bug" button, the Issues view, and the
+    # update check are live out of the box (update_url/token below fall back to
+    # these). No GitHub token is in the app - only the public Worker URL and a
+    # low-value client token. That token is intentionally PUBLIC (like a Sentry DSN),
+    # NOT a secret: it just gates the endpoint against drive-by spam (Cloudflare rate
+    # limiting is the real control), can ONLY file an issue through the proxy (never
+    # read the repo), and is rotatable at the Worker. Set either to "" (or null) in
+    # config.json to opt a build out of the hosted channel (a report then just saves
+    # to a file / opens email).
+    "bugreport_upload_url": "https://localm-bugreport-proxy.localm.workers.dev",
+    "bugreport_upload_token": "3x_HA2UXbwNDnNfdDmpFBvvfcl2S-I-9t7XLQRAShM4",
     # Update channel + read-only issues tracker. One Worker hosts report + issues +
     # update, so these default to the bug-report proxy above; set update_url/token
     # ONLY to point updates at a different Worker. The updater needs a Contents:read

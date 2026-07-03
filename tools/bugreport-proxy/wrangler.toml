@@ -3,6 +3,18 @@ name = "localm-bugreport-proxy"
 main = "worker.js"
 compatibility_date = "2024-11-01"
 
+# Rate limiting (GA `ratelimit` binding): throttle bug-report ISSUE CREATION per client
+# IP so the public, zero-config endpoint cannot be used to spam the repo. Enforced in
+# worker.js (fileReport calls env.RATE_LIMIT.limit). Takes effect only when DEPLOYED
+# (not in `wrangler dev`). `period` must be 10 or 60 (seconds); `namespace_id` is any
+# unique-per-account integer. 20 reports / 60s per IP clears any real human use while
+# still capping a hammering script (the window is bursty, so effective allowance is
+# ~2-3x). Define it HERE (not the dashboard) so `wrangler deploy` keeps it in sync.
+[[ratelimits]]
+name = "RATE_LIMIT"
+namespace_id = "400"
+simple = { limit = 20, period = 60 }
+
 # Public, non-secret config. Point this at the repo issues + releases live in.
 [vars]
 TARGET_REPO = "Matlan1/localm"
