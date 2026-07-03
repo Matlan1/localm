@@ -300,18 +300,22 @@ class TestDetectHome:
         monkeypatch.setenv("LOCALM_HOME", str(tmp_path / "custom"))
         assert _detect_home() == tmp_path / "custom"
 
-    def test_default_is_user_dot_localm(self, tmp_path, monkeypatch):
+    def test_default_is_contained_never_user_localm(self, tmp_path, monkeypatch, capsys):
+        # No LOCALM_HOME, no marker, no ./home: the default is a CONTAINED ./home
+        # inside the install, surfaced on stderr - NEVER a shared ~/.localm outside it.
         from localm import config as cfg
         monkeypatch.delenv("LOCALM_HOME", raising=False)
-        # point the repo-root probe at a bare directory (no marker, no home/)
+        # Path.home() must not decide the default now; point it at an obvious dir so
+        # any regression back to ~/.localm would show up as this path.
         monkeypatch.setattr(cfg.Path, "home", staticmethod(lambda: tmp_path))
+        monkeypatch.setattr(cfg, "_warned_unconfigured_home", False)
         result = cfg._detect_home()
-        # either portable detection of the real dev checkout or the user dir;
-        # with no home/ dir or marker in the dev repo it must be the user dir
         repo_root = cfg.Path(cfg.__file__).resolve().parents[1]
-        if not (repo_root / "home").is_dir() and \
-           not (repo_root / "localm-home.cfg").is_file():
-            assert result == tmp_path / ".localm"
+        assert result != tmp_path / ".localm"          # never the shared user dir
+        if not (repo_root / "localm-home.cfg").is_file():
+            assert result == repo_root / "home"        # contained fallback in the install
+            if not (repo_root / "home").is_dir():
+                assert "no data directory is configured" in capsys.readouterr().err
 
     def test_portable_marker_file(self, tmp_path, monkeypatch):
         from localm import config as cfg

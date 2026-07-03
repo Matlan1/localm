@@ -1,0 +1,158 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""The optional global `localm` command must add itself SAFELY: idempotent,
+reversible, respecting an existing command, and NEVER via ``setx`` (which
+truncates and silently corrupts the user PATH). These tests use an in-memory
+fake for the registry, so they never touch the real machine's PATH."""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+import pytest
+
+from localm import globalcmd as gc
+
+
+class _FakePath:
+    """In-memory stand-in for HKCU\\Environment\\Path, patched over the module's
+    read/write helpers so no test can touch the real registry."""
+
+    def __init__(self, value=""):
+        self.value = value
+        self.regtype = 2  # REG_EXPAND_SZ sentinel
+
+    def read(self):
+        return self.value, self.regtype
+
+    def write(self, value, regtype):
+        self.value = value
+        self.regtype = regtype
+
+
+@pytest.fixture
+def fake_path(monkeypatch):
+    fp = _FakePath()
+    monkeypatch.setattr(gc, "_win_read_user_path", fp.read)
+    monkeypatch.setattr(gc, "_win_write_user_path", fp.write)
+    return fp
+
+
+# --------------------------- the setx guard ------------------------------- #
+
+def test_path_edited_via_registry_not_setx():
+    """PATH is edited through the Windows registry (winreg), never by shelling out
+    to `setx` (which truncates + corrupts the user PATH). Enforced structurally:
+    the module spawns NO external process for a PATH edit. (The docstring names
+    setx on purpose, to say it is banned, so we assert on mechanism not the word.)"""
+    src = Path(gc.__file__).read_text(encoding="utf-8")
+    assert "import subprocess" not in src         # no shelling out at all
+    assert ("os." + "system") not in src          # concat avoids a scanner false-positive
+    assert "winreg" in src                        # uses the registry API instead
+
+
+# ----------------------- platform-agnostic helpers ------------------------ #
+
+def test_split_and_same_dir():
+    assert gc._split_path("a" + os.pathsep + os.pathsep + "b") == ["a", "b"]
+    assert not gc._same_dir("/a/b", "/a/c")
+    if sys.platform == "win32":
+        assert gc._same_dir("C:\\Foo\\", "C:/foo")   # case + slash + trailing sep
+
+
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="Windows registry PATH semantics (; separator, case-insensitive)")
+def test_win_path_add_is_idempotent(fake_path):
+    d = r"C:\clone\bin"
+    assert gc._win_path_add(d) is True          # first add changes PATH
+    assert d in fake_path.value
+    assert gc._win_path_add(d) is False         # second add is a no-op
+    assert fake_path.value.count(d) == 1        # never duplicated
+
+
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="Windows registry PATH semantics (; separator, case-insensitive)")
+def test_win_path_remove_only_ours(fake_path):
+    fake_path.value = os.pathsep.join([r"C:\keep\me", r"C:\clone\bin", r"C:\also\keep"])
+    assert gc._win_path_remove(r"C:\clone\bin") is True
+    assert r"C:\keep\me" in fake_path.value      # every OTHER entry preserved
+    assert r"C:\also\keep" in fake_path.value
+    assert r"C:\clone\bin" not in fake_path.value
+    assert gc._win_path_remove(r"C:\clone\bin") is False   # already gone -> no-op
+
+
+def test_existing_localm_ignores_our_own_shim(monkeypatch, tmp_path):
+    shim = tmp_path / "localm.cmd"
+    shim.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(gc.shutil, "which", lambda name: str(shim))
+    assert gc.existing_localm(shim) is None            # our own -> not a conflict
+    other = tmp_path / "other" / "localm"
+    monkeypatch.setattr(gc.shutil, "which", lambda name: str(other))
+    assert gc.existing_localm(shim) == str(other)      # a different one -> reported
+
+
+def test_deterministic_locations(tmp_path):
+    d = gc.bin_dir(tmp_path)
+    s = gc.shim_path(tmp_path)
+    assert s.parent == d
+    if sys.platform == "win32":
+        assert d == tmp_path / "bin"
+        assert s.name == "localm.cmd"
+    else:
+        assert s.name == "localm"
+
+
+# ----------------------------- install path ------------------------------- #
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows shim + registry PATH")
+def test_install_uninstall_roundtrip_windows(fake_path, tmp_path, monkeypatch):
+    monkeypatch.setattr(gc.shutil, "which", lambda name: None)   # no pre-existing localm
+    res = gc.install(tmp_path)
+    shim = Path(res["shim"])
+    assert shim.exists()
+    assert "localm.exe" in shim.read_text(encoding="utf-8")
+    assert res["path_modified"] is True
+    assert res["path_dir"] in fake_path.value
+    assert res["conflict"] is None
+    # reverse it: shim gone, our PATH entry gone, everything else untouched.
+    rep = gc.uninstall_command(res["path_dir"], res["shim"])
+    assert not shim.exists()
+    assert res["path_dir"] not in fake_path.value
+    assert any("PATH entry" in x for x in rep["removed"])
+
+
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="POSIX symlink usually needs privilege on Windows")
+def test_install_posix_symlink(monkeypatch, tmp_path):
+    bindir = tmp_path / "localbin"
+    monkeypatch.setattr(gc, "bin_dir", lambda root: bindir)
+    monkeypatch.setattr(gc, "shim_path", lambda root: bindir / "localm")
+    monkeypatch.setattr(gc, "_posix_ensure_on_path", lambda d: False)
+    monkeypatch.setattr(gc.shutil, "which", lambda name: None)
+    target = tmp_path / ".venv" / "bin" / "localm"
+    target.parent.mkdir(parents=True)
+    target.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(gc, "_venv_localm", lambda root: target)
+    res = gc.install(tmp_path)
+    link = Path(res["shim"])
+    assert link.is_symlink()
+    assert Path(os.path.realpath(link)) == target.resolve()
+
+
+def test_install_cli_exit_code_reflects_path_modified(monkeypatch):
+    """setup keys off this exit code to record --path-modified accurately: 0 =
+    PATH changed, 20 = installed but PATH already set, 1 = failed. install() is
+    mocked so no real PATH/registry is touched."""
+    monkeypatch.setattr(gc, "install", lambda root: {
+        "path_dir": "d", "shim": "s", "path_modified": True, "conflict": None})
+    assert gc.main(["install", "--root", "."]) == 0
+
+    monkeypatch.setattr(gc, "install", lambda root: {
+        "path_dir": "d", "shim": "s", "path_modified": False, "conflict": None})
+    assert gc.main(["install", "--root", "."]) == 20
+
+    def _boom(root):
+        raise OSError("cannot write shim")
+    monkeypatch.setattr(gc, "install", _boom)
+    assert gc.main(["install", "--root", "."]) == 1

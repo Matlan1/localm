@@ -311,7 +311,7 @@ export async function refreshPluginsPage() {
         actions.style.textAlign = "right";
         const rm = el("button", "danger", "remove");
         rm.onclick = async () => {
-          if (!confirm(`Remove plugin '${p.name}'? Its folder under ~/.localm/plugins/ is deleted.`)) return;
+          if (!confirm(`Remove plugin '${p.name}'? Its folder in the data directory's plugins/ is deleted.`)) return;
           const rr = await fetch(`/v1/plugins/${encodeURIComponent(p.name)}`, {
             method: "DELETE", headers: authHeaders() });
           const dd = await rr.json();

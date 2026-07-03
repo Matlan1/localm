@@ -69,8 +69,11 @@ def serve(model, host, port, ctx, gpu_layers, mmproj, device, no_tls, tls_cert,
     """
     # A click into this console window must not freeze the server
     # (Windows QuickEdit suspends output, and output blocks inference).
-    from ..winconsole import disable_quickedit
+    from ..winconsole import disable_quickedit, set_console_title
     disable_quickedit()
+    set_console_title("LocaLM")
+    # Light branding: a single wordmark line (the M in accent blue), no noise.
+    console.print("[bold]LocaL[/bold][bold #4f9cf9]M[/bold #4f9cf9]  [dim]local AI, offline[/dim]")
 
     if debug:
         from ..debuglog import enable_debug
@@ -145,6 +148,7 @@ def serve(model, host, port, ctx, gpu_layers, mmproj, device, no_tls, tls_cert,
             f"[yellow]Port {requested if requested is not None else load_config().get('port', 8642)} "
             f"is in use - serving on {port} instead.[/yellow]"
         )
+    set_console_title(f"LocaLM  -  {display_name}  -  :{port}")
 
     # Built-in TLS: encrypt the bind out of the box past loopback (NET-1).
     ssl_certfile, ssl_keyfile = _setup_tls_or_exit(

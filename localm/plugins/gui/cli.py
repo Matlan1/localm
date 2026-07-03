@@ -175,8 +175,13 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
 
     # A click into this console window must not freeze the server
     # (Windows QuickEdit suspends output, and output blocks inference).
-    from localm.winconsole import disable_quickedit
+    from localm.winconsole import disable_quickedit, set_console_title
     disable_quickedit()
+    # Brand the window right away so it never reads as a python.exe path; a richer
+    # title (with the port) is set once the port is chosen below.
+    set_console_title("LocaLM")
+    # Light branding: a single wordmark line (the M in accent blue), no noise.
+    console.print("[bold]LocaL[/bold][bold #4f9cf9]M[/bold #4f9cf9]  [dim]local AI, offline[/dim]")
 
     if debug:
         from localm.debuglog import enable_debug
@@ -394,6 +399,10 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         _q["localm_token"] = mint_launch_grant(app)
         open_url = urlunparse(_p._replace(query=urlencode(_q)))
 
+    _wtitle = f"LocaLM  -  localhost:{chosen_port}"
+    if not model_less and (display_name or model):
+        _wtitle = f"LocaLM  -  {display_name or model}  -  :{chosen_port}"
+    set_console_title(_wtitle)
     console.print(f"[bold green]localm GUI[/bold green] → {base_url}")
     if model_less:
         console.print("  model: [yellow]none yet - add one on the Models page[/yellow]")
@@ -516,6 +525,43 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     # surface (API + GUI) so a future launch in the same dir can discover and
     # attach to it. --isolated keeps it invisible to discovery.
     from localm import portmux
+    from localm import appface, debuglog
+    from localm.config import home_dir as _home_dir
+    # Tray control surface (Windows): Open / Copy address / View logs / Restart /
+    # Stop, so the running server is a real background app, not just a console.
+    # Best-effort and fully guarded - it never blocks the server. Restart/Stop are
+    # wired to the server's existing hooks; "View logs" dumps the always-on activity
+    # buffer (INFO+, no chat content) to a readable file. (Linux gets a styled Tk
+    # control window next; see appface.)
+    app_face = appface.start_app_face(
+        name="LocaLM", url=base_url, logfile=_home_dir() / "logs" / "recent.log",
+        get_log_lines=debuglog.recent_activity,
+        on_restart=hs._do_restart, on_stop=hs._do_shutdown)
+    if app_face is not None:
+        # Accurate splash: flip the window from "Starting..." to "Running" (and, on
+        # Windows, hide it to the tray) once the port is ACTUALLY accepting
+        # connections. Polled in a thread so it is independent of the web
+        # framework's event API (a raw TCP connect works for http and https alike).
+        def _mark_ready_when_listening():
+            import socket
+            import time as _t
+            for _ in range(160):   # up to ~40s, then flip anyway
+                try:
+                    with socket.create_connection(("127.0.0.1", chosen_port), 0.5):
+                        break
+                except OSError:
+                    _t.sleep(0.25)
+            app_face.set_ready()
+            # When the launcher spawned us with our OWN console, hide it now that
+            # the server is up and the tray/status window is the surface - so it
+            # runs like a background app. A direct `localm gui` in a terminal has no
+            # such flag, so that terminal is left alone.
+            import os as _os2
+            if _os2.environ.get("LOCALM_OWN_CONSOLE"):
+                from localm.winconsole import hide_console
+                hide_console()
+        threading.Thread(target=_mark_ready_when_listening,
+                         name="localm-ready", daemon=True).start()
     try:
         with instances.advertise(app, home_dir(), host=host, port=chosen_port,
                                  mode="full", scheme=scheme, project=project,
@@ -526,6 +572,8 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
             portmux.run_server(app, host=host, port=chosen_port, log_level="warning",
                                ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
     finally:
+        if app_face is not None:
+            app_face.close()
         if mdns_advertiser is not None:
             mdns_advertiser.close()
         manager.close_all()

@@ -230,6 +230,12 @@ class Launcher(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("LocaLM launcher")
+        try:
+            _ico = REPO_DIR / "assets" / "localm.ico"
+            if _ico.is_file():
+                self.iconbitmap(str(_ico))
+        except Exception:
+            pass  # cosmetic; a missing/blocked icon must not stop the launcher
         self.configure(bg=BG)
         self.resizable(False, False)
         self._style()
@@ -259,6 +265,7 @@ class Launcher(tk.Tk):
         self._build()
         self._on_mode_change()
         self._pin_width()
+        self._center()
 
     def _pin_width(self) -> None:
         """Lock the window to its built width so nothing can widen it later.
@@ -274,6 +281,18 @@ class Launcher(tk.Tk):
             w = self.winfo_reqwidth()
             self.minsize(w, self.winfo_reqheight())
             self.maxsize(w, self.winfo_screenheight())
+        except Exception:
+            pass
+
+    def _center(self) -> None:
+        """Open centered on the screen (upper third) so the launcher does not land
+        in a random corner. Best-effort; never blocks startup."""
+        try:
+            self.update_idletasks()
+            w, h = self.winfo_reqwidth(), self.winfo_reqheight()
+            sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+            x, y = max(0, (sw - w) // 2), max(0, (sh - h) // 3)
+            self.geometry(f"+{x}+{y}")
         except Exception:
             pass
 
@@ -784,6 +803,11 @@ class Launcher(tk.Tk):
         env = os.environ.copy()
         if self.debug.get() and "--debug" not in cmd:
             env["LOCALM_DEBUG"] = "1"
+        # Web GUI mode shows a tray + status window, so the console we open for it
+        # is ours to hide once the server is up (it then runs like a background
+        # app). Debug mode keeps the console visible so its live log stays readable.
+        if self.mode.get() == "gui" and not self.debug.get():
+            env["LOCALM_OWN_CONSOLE"] = "1"
 
         # --- authentication: persist the key + require flag, inject into env ---
         a = _auth()

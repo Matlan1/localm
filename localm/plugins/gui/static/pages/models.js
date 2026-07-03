@@ -87,7 +87,7 @@ export async function refreshModelsPage() {
     if (!m.active) {
       const rm = el("button", "danger", "remove");
       rm.onclick = async () => {
-        if (!confirm(`Remove '${m.name}'? The file is deleted only when this is its last name and it lives in ~/.localm.`)) return;
+        if (!confirm(`Remove '${m.name}'? The file is deleted only when this is its last name and it lives in the data directory.`)) return;
         const r = await fetch("/api/models/remove", {
           method: "POST", headers: authHeaders(),
           body: JSON.stringify({ model: m.name }),
