@@ -83,7 +83,8 @@ def test_newer_switch_preempts_in_flight_load():
             "A": FakeEngine("A", load_gate=never, loaded_log=log),
             "B": FakeEngine("B", load_gate=ready, loaded_log=log),
         }
-        make = lambda n: engines[n]
+        def make(n):
+            return engines[n]
 
         task_a = asyncio.create_task(hs.switch_engine("A", make))
         await _await_started(engines["A"])
@@ -114,7 +115,8 @@ def test_rapid_switches_coalesce_to_latest():
             "B": FakeEngine("B", load_gate=never, loaded_log=log),
             "C": FakeEngine("C", load_gate=ready, loaded_log=log),
         }
-        make = lambda n: engines[n]
+        def make(n):
+            return engines[n]
 
         task_a = asyncio.create_task(hs.switch_engine("A", make))
         await _await_started(engines["A"])
@@ -140,7 +142,8 @@ def test_reselecting_the_loading_model_does_not_restart_it():
         log = []
         gate = threading.Event()           # opened by the test to finish A's load
         engine = FakeEngine("A", load_gate=gate, loaded_log=log)
-        make = lambda n: engine
+        def make(n):
+            return engine
 
         task1 = asyncio.create_task(hs.switch_engine("A", make))
         await _await_started(engine)

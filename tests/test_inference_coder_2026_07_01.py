@@ -63,9 +63,16 @@ def test_coder_prompt_does_not_leak_absolute_home_path():
 # --------------------------------------------------------------------------- #
 
 def _load_launcher():
+    import importlib.machinery
     import importlib.util
     root = Path(__file__).resolve().parents[1]
-    spec = importlib.util.spec_from_file_location("launcher_pyw", root / "launcher.pyw")
+    path = str(root / "launcher.pyw")
+    # .pyw is a recognized Python source suffix only on Windows; on POSIX
+    # spec_from_file_location cannot infer a loader and returns None, so pass an
+    # explicit SourceFileLoader (mirrors tests/test_launcher_phase3.py) to load it
+    # on every platform.
+    loader = importlib.machinery.SourceFileLoader("launcher_pyw", path)
+    spec = importlib.util.spec_from_file_location("launcher_pyw", path, loader=loader)
     mod = importlib.util.module_from_spec(spec)
     try:
         spec.loader.exec_module(mod)
