@@ -91,20 +91,70 @@ def _index_html_with_shell_token(token: str) -> str:
     return snippet + html
 
 
-def _set_session_cookies(response, key: str, *, secure: bool) -> None:
-    """Set the S2 auth cookies on *response*: the HttpOnly ``localm_session``
-    cookie (the API key, unreadable by page JS) plus a readable ``localm_csrf``
-    token for double-submit CSRF. Names match http_server's SESSION_COOKIE /
-    CSRF_COOKIE; both carry SESSION_MAX_AGE so the key PERSISTS across a browser/
-    PWA restart (SEAMLESS) instead of being dropped as a session cookie."""
+def mint_launch_grant(app, ttl: float = 120.0) -> str:
+    """Mint a single-use, short-lived grant that the launcher/CLI puts in the
+    browser URL (``/?localm_token=<grant>``) so a just-launched loopback browser
+    lands AUTHENTICATED via a real navigation, instead of relying on the implicit
+    GET / cookie auto-seed (which a focused-but-not-reloaded tab or a warm service-
+    worker cache can skip). Stored in-process on ``app.state.launch_grants`` (dies on
+    restart); expired grants are pruned on each mint so the dict cannot grow."""
     import secrets as _secrets
-    from localm.inference.http_server import (CSRF_COOKIE, SESSION_COOKIE,
-                                              SESSION_MAX_AGE)
-    response.set_cookie(SESSION_COOKIE, key, httponly=True, secure=secure,
+    import time as _time
+    grants = getattr(app.state, "launch_grants", None)
+    if grants is None:
+        grants = {}
+        app.state.launch_grants = grants
+    now = _time.time()
+    for k in [k for k, exp in grants.items() if exp <= now]:
+        grants.pop(k, None)
+    token = _secrets.token_urlsafe(32)
+    grants[token] = now + float(ttl)
+    return token
+
+
+def _consume_launch_grant(app, token: str) -> bool:
+    """Redeem a launch grant: SINGLE-USE (popped) and not expired. False for an
+    unknown/used/expired token (so a replayed or guessed token simply falls through
+    to the normal key gate, never an error that would confirm anything)."""
+    import time as _time
+    if not token:
+        return False
+    grants = getattr(app.state, "launch_grants", None) or {}
+    exp = grants.pop(token, None)      # single use: remove on redeem
+    return exp is not None and _time.time() <= float(exp)
+
+
+def _set_session_cookies(response, key: str, *, secure: bool) -> None:
+    """Establish the S2 auth cookie on *response* for a loopback owner: mint an
+    OPAQUE server-side session for the current owner *key* and set the HttpOnly
+    ``localm_session`` cookie to the SESSION ID (never the key, so it never touches
+    page JS and rolling the key does not invalidate it). It carries SESSION_MAX_AGE
+    so the session PERSISTS across a browser/PWA restart (SEAMLESS). No-op if *key*
+    is not a valid key. The CSRF token is DERIVED from the session and fetched by
+    the client from GET /api/session, so there is no separate CSRF cookie to set (or
+    to fall out of sync with the session, the pre-rework 'missing CSRF token' bug)."""
+    from localm import scopes as S, sessions
+    from localm.auth import _hash_key, fs_access_for, verify
+    from localm.inference.http_server import SESSION_COOKIE, SESSION_MAX_AGE
+    held = verify(key)
+    if held is None:
+        return
+    fs = "host" if S.ADMIN in held else fs_access_for(key, "none")
+    try:
+        sid = sessions.create(scopes=held, key_hash=_hash_key(key), fs_access=fs)
+    except Exception as e:
+        # The session store could not be written (e.g. a corrupt/unreadable
+        # sessions.json). Do NOT 500 the whole GUI shell over a convenience
+        # auto-seed: serve the shell WITHOUT a session cookie so the client falls
+        # to the key gate (recoverable), and surface the reason. Fail SAFE - no
+        # cookie means no access granted, so this never reports a success that did
+        # not happen (AGENTS rule 5).
+        from localm.debuglog import logger as _dbg
+        _dbg.warning("could not establish a browser session (auto-seed): %s; "
+                     "serving the shell unauthenticated (the key gate will show)", e)
+        return
+    response.set_cookie(SESSION_COOKIE, sid, httponly=True, secure=secure,
                         samesite="strict", path="/", max_age=SESSION_MAX_AGE)
-    response.set_cookie(CSRF_COOKIE, _secrets.token_urlsafe(32), httponly=False,
-                        secure=secure, samesite="strict", path="/",
-                        max_age=SESSION_MAX_AGE)
 
 
 # ------------------------------------------------------------------ #
@@ -306,6 +356,11 @@ def attach_gui(
     # (headless / no GUI). The manager is also returned for close_all().
     app.state.switch_model = switch_model
     app.state.coder_sessions = manager
+    # One-time launcher -> browser handoff grants (see mint_launch_grant): a small
+    # in-process dict of token -> expiry. Created here so both the auto-opened
+    # loopback browser and a later remote mint have somewhere to store them.
+    if not hasattr(app.state, "launch_grants"):
+        app.state.launch_grants = {}
 
     # Route groups (extracted to localm/plugins/gui/routes/*.py). The active-model
     # accessor, the model-switch callable, and the job manager are the only locals
@@ -381,11 +436,35 @@ def attach_gui(
         # token and references the current assets, so always revalidate (a new
         # app.js / index.html is then picked up without the user clearing caches).
         headers = {"Cache-Control": "no-cache"}
-        if key and loopback:
-            # Protected mode on loopback: establish the HttpOnly session cookie
-            # directly so the key never touches page JS / localStorage (S2).
-            resp = HTMLResponse(_index_html_with_shell_token(""), headers=headers)
+        # One-time launch handoff: the launcher/CLI opens /?localm_token=<grant>.
+        # A valid single-use grant (loopback + key configured) establishes a session
+        # and 303-redirects to the clean path (token stripped from URL/history), so
+        # the browser lands authenticated via a REAL navigation that a stale tab or a
+        # warm SW cannot short-circuit. A bad/used/expired grant just falls through to
+        # the normal shell (no error, nothing leaked).
+        grant = request.query_params.get("localm_token")
+        if grant and loopback and key and _consume_launch_grant(request.app, grant):
+            from urllib.parse import urlencode
+            from fastapi.responses import RedirectResponse
+            q = {k: v for k, v in request.query_params.items() if k != "localm_token"}
+            clean = request.url.path + (("?" + urlencode(q)) if q else "")
+            resp = RedirectResponse(url=clean, status_code=303, headers=headers)
             _set_session_cookies(resp, key, secure=request.url.scheme == "https")
+            return resp
+        if key and loopback:
+            # Protected mode on loopback: establish an HttpOnly session cookie so
+            # the key never touches page JS / localStorage (S2). Only MINT a new
+            # session when the browser has no valid one, so an ordinary reload does
+            # not spawn a session each time - and, crucially, a browser whose
+            # session is still valid after an owner-key ROLL stays signed in (the
+            # session is decoupled from the key), instead of being bounced to the
+            # key gate (the reported bug).
+            from localm.inference.http_server import SESSION_COOKIE
+            from localm import sessions as _sessions
+            existing = (request.cookies.get(SESSION_COOKIE) or "").strip()
+            resp = HTMLResponse(_index_html_with_shell_token(""), headers=headers)
+            if not (existing and _sessions.lookup(existing) is not None):
+                _set_session_cookies(resp, key, secure=request.url.scheme == "https")
             return resp
         if not key and loopback:
             # Open mode on loopback: seed the per-process shell token as a JS

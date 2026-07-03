@@ -108,13 +108,22 @@ export function updateKeyGateCertStep() {
     // <a download> would save as the "cert" (J2).
     const certLink = $("key-gate-cert-link");
     if (certLink) certLink.href = "https://" + location.host + "/localm-ca.crt";
+    // Firefox keeps its OWN certificate store and ignores the Windows/OS one, so a
+    // system install leaves the warning here - the most common "I installed it but
+    // it still warns" case. Surface the Firefox-specific step prominently.
+    const ff = $("key-gate-cert-ff");
+    if (ff) {
+      const isFirefox = /firefox\//i.test(navigator.userAgent || "");
+      ff.style.display = isFirefox ? "block" : "none";
+    }
   }
 }
 window.updateKeyGateCertStep = updateKeyGateCertStep;
 
-// POST the entered key to /api/session so the server sets the HttpOnly auth
-// cookie (the key never lives in JS), then reload so the boot re-runs
-// authenticated. The CSRF cookie set alongside it is read by authHeaders().
+// POST the entered key to /api/session so the server sets the HttpOnly session
+// cookie (the key never lives in JS) and returns the session's CSRF token, then
+// reload so the boot re-runs authenticated. Stash the token so a write issued
+// before the reload already has it (the boot re-fetches it via refreshCsrf too).
 export async function loginWithKey(key) {
   try {
     const r = await fetch("/api/session", {
@@ -122,6 +131,9 @@ export async function loginWithKey(key) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ key }),
     });
+    if (r.ok) {
+      try { window.__LOCALM_CSRF__ = (await r.json()).csrf || ""; } catch (e) { /* body optional */ }
+    }
     return r.ok;
   } catch (e) { return false; }
 }
