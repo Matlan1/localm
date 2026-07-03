@@ -109,16 +109,56 @@ def test_engine_embed_uses_backend_when_it_can_embed(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_embed_texts_none_when_no_model(monkeypatch):
-    calls = {"n": 0}
+    """No embedding model -> None (lexical fallback), and the network auto-download
+    is attempted AT MOST once - a batch of embed calls must not re-download per
+    chunk. (The filesystem is still re-checked each call; only the download probe
+    is latched.)"""
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"embedding_model": "bge-small-en-v1.5",
+                                 "n_gpu_layers": 99, "net_mode": "ask"})
+    downloads = {"n": 0}
 
-    def _resolve(*a, **k):
-        calls["n"] += 1
+    def _resolve(*, allow_download=None):
+        if allow_download is not False:       # the download-permitted probe
+            downloads["n"] += 1
         return None
 
     monkeypatch.setattr(emb, "resolve_embedding_model_path", _resolve)
     assert emb.embed_texts(["a"]) is None
     assert emb.get_embedder() is None
-    assert calls["n"] == 1                    # resolution is attempted once, cached
+    assert emb.get_embedder() is None
+    assert downloads["n"] == 1                 # auto-download probed once, not per call
+
+
+def test_get_embedder_picks_up_model_installed_mid_session(monkeypatch):
+    """A model installed into a RUNNING server (``localm setup-embeddings``) is
+    picked up on the NEXT call, without a restart. Regression: get_embedder latched
+    the 'no model' result for the whole process lifetime, so embeddings stayed dead
+    (RAG/memory 422 -> lexical) until a restart even right after setup."""
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"embedding_model": "bge-small-en-v1.5",
+                                 "n_gpu_layers": 99, "net_mode": "ask"})
+    state = {"path": None}
+    monkeypatch.setattr(emb, "resolve_embedding_model_path",
+                        lambda *, allow_download=None: state["path"])
+
+    class _FakeEmbedder:
+        dim = 3
+
+        def __init__(self, path, **kw):
+            self.model_path = path
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(emb, "GGUFEmbedder", _FakeEmbedder)
+
+    # No model yet -> lexical fallback; the negative result must NOT be latched.
+    assert emb.get_embedder() is None
+    # setup-embeddings installs the model; the next call must find it, no reset().
+    state["path"] = "/home/models/embeddings/bge-small.gguf"
+    e = emb.get_embedder()
+    assert e is not None and e.model_path.endswith("bge-small.gguf")
 
 
 # --------------------------------------------------------------------------- #

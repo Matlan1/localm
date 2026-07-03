@@ -96,7 +96,19 @@ def _make_self_embed(self_url: str, active_model):
                      json={"input": texts, "model": active_model() or "localm"},
                      headers=headers, timeout=600,
                      verify=_tls.requests_verify(self_url))
-        r.raise_for_status()
+        if not r.ok:
+            # Surface the endpoint's actionable detail (e.g. "No embedding model
+            # available. Run 'localm setup-embeddings'") instead of the bare HTTP
+            # status. This message is shown to the user when indexing/querying
+            # degrades to lexical-only, and "422 Unprocessable Entity for url ..."
+            # tells them nothing about what to do or that the fix is one command
+            # away (AGENTS.md rule 10 / do-not-hide-problems: errors actionable).
+            detail = ""
+            try:
+                detail = (r.json() or {}).get("detail") or ""
+            except Exception:
+                detail = (r.text or "").strip()
+            raise RuntimeError(detail or f"embeddings endpoint returned HTTP {r.status_code}")
         return [d["embedding"] for d in r.json()["data"]]
     return _self_embed
 
