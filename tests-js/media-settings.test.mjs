@@ -65,7 +65,10 @@ function makeFetch(posts) {
 }
 
 async function render(win) {
-  runScript(win, "refreshSettingsPage();");
+  // Let init.js's one-shot /api/capabilities fetch settle, then pin host access
+  // so the host-path fields (workdir etc.) render for these tests.
+  await new Promise((r) => setTimeout(r, 0));
+  runScript(win, `caps.fsAccess = "host"; refreshSettingsPage();`);
   for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 0));
 }
 

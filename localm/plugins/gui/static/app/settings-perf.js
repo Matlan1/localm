@@ -591,6 +591,13 @@ export async function loadClientPlugins() {
 // unreachable. `suggest` mirrors the suggest_plugins config toggle.
 export const pluginCommands = { map: {}, suggest: true };
 
+// The current key's effective capabilities, refreshed from /api/capabilities.
+// fsAccess is the host-filesystem reach ("none"|"shared"|"host"); it drives
+// whether the GUI shows host-path config fields and the host file browser. The
+// server ALWAYS enforces - this only avoids rendering dead controls. Defaults to
+// "none" (safe) until the first capabilities load resolves it.
+export const caps = { fsAccess: "none" };
+
 // R50: signal other same-origin tabs that the installed/enabled plugin set
 // changed (a new value is required for the storage event to fire, so use the
 // clock). The writing tab refreshes itself directly; other tabs react to the
@@ -618,6 +625,7 @@ export async function refreshPluginCommands() {
     pluginCommands.map = map;
     pluginCommands.suggest = data.suggest_plugins !== false;
     pluginState = data.plugins || [];
+    caps.fsAccess = data.fs_access || "none";
     if (data.core) applyCoreTabVisibility(data.core);
     // Reveal the bug-report "Send to maintainer" button only when an upload
     // endpoint is configured (otherwise the report is saved-to-file + emailed).

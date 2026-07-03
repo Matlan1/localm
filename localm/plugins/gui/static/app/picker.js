@@ -265,6 +265,13 @@ export function pickPath(opts = {}) {
             q ? "No matches" : (data && data.parent === null)
               ? "No drives found" : "This folder is empty"));
         }
+        // The server caps very large listings; say so rather than silently
+        // showing a partial folder (AGENTS rule 5).
+        if (data && data.truncated) {
+          listEl.appendChild(el("div", "picker-trunc",
+            "This folder is very large - showing a partial list. "
+            + "Filter or open a subfolder to narrow it."));
+        }
       }
       function buildRow(entry) {
         const canSelect = selectable(entry);

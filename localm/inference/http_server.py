@@ -354,6 +354,40 @@ def job_owner_ok(request: Request, job_owner: Optional[str]) -> bool:
     return principal_id(request) == job_owner
 
 
+def effective_fs_access(request: Request) -> str:
+    """The caller's effective reach into the SERVER HOST filesystem: "host" (the
+    whole disk), "shared" (confined to owner-designated shared roots), or "none"
+    (no host FS - device upload only).
+
+    Open mode (loopback owner) and the owner/ADMIN key always resolve to "host";
+    any other valid key uses its stored fs_access level (default "none" for a
+    legacy key); no valid key -> "none". Filesystem reach is a per-credential dial
+    kept deliberately INDEPENDENT of ownership, so an owner can pair one of their
+    own devices with a lower-reach key."""
+    from localm.auth import any_key_configured, fs_access_for
+    if not any_key_configured():
+        return "host"                       # open/dev mode = loopback owner
+    held = caller_scopes(request)
+    if held is None:
+        return "none"                       # keys configured, none/invalid presented
+    if scopes.ADMIN in held:
+        return "host"                       # owner key
+    token, _ = _request_token(request)
+    return fs_access_for(token, "none")
+
+
+def require_fs_host(request: Request) -> None:
+    """FastAPI dependency: require a caller with FULL host filesystem access
+    (owner / open mode / a key explicitly granted fs_access=host). Gates the host
+    file/folder browser so a merely config-reading key can no longer enumerate the
+    server's disk."""
+    _enforce_request(request, None)         # a valid key (or open mode) first
+    if effective_fs_access(request) != "host":
+        raise HTTPException(
+            status_code=403,
+            detail="This key does not have host filesystem access")
+
+
 # ------------------------------------------------------------------ #
 #  Surface mounting (H6 phase 5: on-demand GUI on a running instance)  #
 # ------------------------------------------------------------------ #
