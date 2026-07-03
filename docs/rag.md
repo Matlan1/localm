@@ -86,7 +86,7 @@ server, matching the GUI.
   on-device embedding model (default `bge-small-en-v1.5`), then re-index to get
   vectors blended back in.
 - **A query returns nothing.** No chunk matched: broaden or rephrase the query
-  (exact words matter in lexical mode), or confirm the collection actually
+  (exact words matter in lexical mode), or confirm the collection
   indexed the files (re-index if a source changed).
 - **Indexing failed.** Indexing is atomic, so a failed index leaves the previous
   snapshot intact. Check the error in the GUI/CLI and `--debug` log; common causes

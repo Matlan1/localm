@@ -398,7 +398,7 @@ export async function toggleMic() {
     return;
   }
   if (!voice.available) {
-    toast(voice.reason || "Speech-to-text is not installed on the server", true);
+    toast(voice.reason || "Speech-to-text not installed", true);
     return;
   }
   if (!voice.modelCached) {
