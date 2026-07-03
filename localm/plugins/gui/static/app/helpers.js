@@ -119,23 +119,27 @@ export function stripThink(text) {
   return (text || "").replace(/<think>[\s\S]*?(<\/think>|$)/g, "").trim();
 }
 
-/** Replace raw <tool_call> JSON blocks with a compact human-readable note -
- *  shown while the web-access loop executes the request. */
+/** Replace a raw tool-call block with a compact human-readable note. Runs in the
+ *  DISPLAY and on the assistant history RE-SENT to the model, so a model never
+ *  sees its own raw control tokens echoed back (feeding `<|tool_call>` markers into
+ *  the context destabilised some finetunes into repetition - CHAT-TOOL-1).
+ *
+ *  Matches every dialect `parseWebCall` EXECUTES, not just the canonical tag:
+ *  `<tool_call>`, the |-piped `<|tool_call|>` finetune wrappers, and the Gemma
+ *  `call:{...}` prefix. The name/query are pulled with tolerant regexes (the inner
+ *  JSON is often single-quoted / trailing-comma'd), so anything that ran is also
+ *  defanged instead of leaking raw to the screen and the next prompt. */
 export function formatToolCalls(text) {
   return (text || "").replace(
-    /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g,
-    (m, body) => {
-      try {
-        const call = JSON.parse(body);
-        const a = call.args || call.arguments || {};
-        const what =
-          call.name === "web_search" ? `web search: "${a.query || ""}"` :
-          call.name === "fetch_url"  ? `read page: ${a.url || ""}` :
-          String(call.name || "request");
-        return `\n> 🌐 *${what}*\n`;
-      } catch (e) {
-        return "\n> 🌐 *web request*\n";
-      }
+    /<\|?\/?tool_call\|?>[\s\S]*?<\|?\/?tool_call\|?>/g,
+    (block) => {
+      const name = (block.match(/"name"\s*:\s*"(\w+)"/) || [])[1] || "";
+      const arg = (block.match(/"(?:query|url)"\s*:\s*"([^"]*)"/) || [])[1] || "";
+      const what =
+        name === "web_search" ? `web search: "${arg}"` :
+        name === "fetch_url"  ? `read page: ${arg || ""}` :
+        arg ? `web request: ${arg}` : "web request";
+      return `\n> 🌐 *${what}*\n`;
     });
 }
 
