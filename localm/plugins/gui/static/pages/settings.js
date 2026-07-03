@@ -30,9 +30,48 @@ export let _settingsControls = [];
 // Monotonic token so overlapping refreshes don't both render (the old text
 // dumper doubled every field when two refreshes raced; we keep the guard).
 export let _settingsRenderToken = 0;
-// The section the user explicitly navigated to (a section element id). Survives
-// re-renders so saving a section keeps you on it. Null = use the default tab.
-export let _activeSettingsSection = null;
+// The top-level GROUP the user is on (a group id below). Survives re-renders so
+// saving a section keeps you on its group. Null = use the default (first) group.
+export let _activeSettingsGroup = null;
+
+// Top-level settings groups, in nav order. Every .settings-section is assigned to
+// one of these via its data-group attribute (static cards carry it in index.html;
+// schema + media sections get it set when rendered). A group nav link shows all of
+// its sections stacked; conditionally-hidden cards (Updates/Issues via the `hidden`
+// attribute, the owner-gated keys card via .sec-hidden) simply do not appear inside
+// their group until they apply. This replaces the old one-tab-per-section sprawl.
+export const SETTINGS_GROUPS = [
+  { id: "model",    label: "Model" },
+  { id: "server",   label: "Server & network" },
+  { id: "security", label: "Security" },
+  { id: "plugins",  label: "Plugins" },
+  { id: "privacy",  label: "Privacy & data" },
+  { id: "system",   label: "System" },
+];
+
+// Which top-level group a core schema `group` string belongs to. Plugin (owner)
+// sections and the Media section always go to "plugins". Anything unmapped falls
+// back to "system" (the residual app drawer), so a new core group never vanishes.
+export const CORE_GROUP_TO_TOP = {
+  Engine: "model", Models: "model", Sampling: "model",
+  Server: "server", Security: "security", Privacy: "privacy",
+  Plugins: "plugins", General: "system", "Bug reports": "system",
+};
+
+// Friendlier per-section headings once grouped (the schema `group` string is left
+// unchanged, so section ids + validation are untouched - this is display only). An
+// empty string means render NO heading: used for the lone require_auth toggle and
+// the Privacy persistence block, which are the primary content of their group and
+// would only repeat the group name.
+export const CORE_SECTION_HEADING = {
+  Engine: "Runtime & GPU", Models: "Library", Sampling: "Generation",
+  Server: "Network", Security: "", Privacy: "", Plugins: "Plugin management",
+};
+
+/** The top-level group id a section element belongs to (defaults to "system"). */
+export function sectionTopGroup(sec) {
+  return (sec && sec.dataset && sec.dataset.group) || "system";
+}
 
 // R10: track which setting inputs the user edited so we can warn before leaving
 // with unsaved changes. A control that is re-rendered (full settings refresh, or
@@ -47,16 +86,24 @@ export function settingsDirty() {
 }
 window.settingsDirty = settingsDirty;
 
-/** R09: Ctrl+S on the Settings page saves the active section. Clicks the core
- *  section's Save button, or (Media section) the first subsection's Save - reusing
- *  all the existing save/validation logic. Returns true when it triggered a save. */
+/** R09: Ctrl+S on the Settings page saves the section the user is working in.
+ *  A group shows several sections stacked, so target the one holding the focused
+ *  control; otherwise fall back to the first savable active section. Reuses the
+ *  section's own Save button (all validation/PATCH logic). Returns true on save. */
 export function saveActiveSettingsSection() {
   const content = $("settings-content");
   if (!content) return false;
-  const active = content.querySelector(".settings-section.active:not(.sec-hidden)");
-  if (!active) return false;
-  const save = active.querySelector(".settings-section-save") ||
-               active.querySelector(".actions .btn-primary");
+  const savable = (sec) => sec && sec.classList.contains("active")
+    && !sec.classList.contains("sec-hidden") && !sec.hidden
+    && (sec.querySelector(".settings-section-save") || sec.querySelector(".actions .btn-primary"));
+  let sec = document.activeElement && document.activeElement.closest
+    ? document.activeElement.closest(".settings-section") : null;
+  if (!savable(sec)) {
+    sec = [...content.querySelectorAll(".settings-section.active")].find(savable) || null;
+  }
+  if (!sec) return false;
+  const save = sec.querySelector(".settings-section-save") ||
+               sec.querySelector(".actions .btn-primary");
   if (!save) return false;
   save.click();
   return true;
@@ -577,60 +624,81 @@ export function settingsSectionOf(field) {
   return { id: "core-" + field.group, label: field.group, plugin: false };
 }
 
-/** Show one settings section (others hidden) and highlight its nav link. */
-export function showSettingsSection(secId) {
+/** Show one top-level GROUP: activate every section assigned to it and hide the
+ *  rest, then highlight its nav link. Sections stay `.active` in DOM order, so a
+ *  group renders its members stacked. Conditionally-hidden members (Updates/Issues
+ *  via the `hidden` attribute, the owner-gated keys card via `.sec-hidden`) are
+ *  still activated but kept invisible by their display:none !important rule, so
+ *  they self-reveal the moment they apply without another nav rebuild. */
+export function showSettingsGroup(groupId) {
   const content = $("settings-content");
   if (!content) return;
   for (const sec of content.querySelectorAll(".settings-section")) {
-    sec.classList.toggle("active", sec.id === secId);
+    sec.classList.toggle("active", sectionTopGroup(sec) === groupId);
   }
   const nav = $("settings-nav");
   if (nav) {
     for (const link of nav.querySelectorAll(".settings-nav-link")) {
-      link.classList.toggle("active", link.dataset.target === secId);
+      link.classList.toggle("active", link.dataset.target === groupId);
     }
   }
 }
 
-/** Jump to a specific settings section and REMEMBER it, so an async panel rebuild
- *  (e.g. the owner-only keys card resolving) cannot bounce the selection back to a
- *  default. Used by the command palette to reach "Keys & devices" directly instead
- *  of hunting the settings sub-nav. */
+/** Jump to the GROUP that owns section *secId* and scroll that section into view,
+ *  remembering the group so an async rebuild (e.g. the owner-only keys card
+ *  resolving) cannot bounce the selection. Used by the command palette to reach
+ *  "Keys & devices" (inside the Security group) directly. Accepts a raw section id
+ *  ("keys-card") or a schema section id; falls back to treating the arg as a group
+ *  id so older callers still work. */
 export function gotoSettingsSection(secId) {
-  _activeSettingsSection = secId;
-  showSettingsSection(secId);
+  const sec = document.getElementById(secId)
+    || document.getElementById("settings-sec-" + secId);
+  const groupId = sec ? sectionTopGroup(sec)
+    : (SETTINGS_GROUPS.some((g) => g.id === secId) ? secId : null);
+  if (!groupId) return;
+  _activeSettingsGroup = groupId;
+  showSettingsGroup(groupId);
+  if (sec && typeof sec.scrollIntoView === "function") {
+    sec.scrollIntoView({ block: "start" });
+  }
 }
 window.gotoSettingsSection = gotoSettingsSection;
 
-/** (Re)build the left nav from every section currently in the content area,
- *  skipping any hidden by their own gating (e.g. the owner-only API keys card).
- *  The active tab is the user's explicit choice if still present, else the first
- *  config section - chosen deterministically so a stray rebuild (e.g. the
- *  owner-only keys panel resolving) can never leave a static card selected. */
+/** Whether a group has at least one section that is NOT gate-hidden (owner-only
+ *  keys card via .sec-hidden, or a proxy-gated Updates/Issues card via [hidden]).
+ *  A group with only gated-away sections drops out of the nav until one applies. */
+function groupHasVisibleSection(content, groupId) {
+  for (const sec of content.querySelectorAll(".settings-section")) {
+    if (sectionTopGroup(sec) !== groupId) continue;
+    if (sec.classList.contains("sec-hidden") || sec.hidden) continue;
+    return true;
+  }
+  return false;
+}
+
+/** (Re)build the left nav as ONE link per top-level group (SETTINGS_GROUPS order),
+ *  listing only groups that currently have a visible section. The active group is
+ *  the user's explicit choice if still present, else the first group - chosen
+ *  deterministically so a stray rebuild (e.g. the owner-only keys panel resolving)
+ *  can never bounce the selection. */
 export function buildSettingsNav() {
   const nav = $("settings-nav"), content = $("settings-content");
   if (!nav || !content) return;
-  const secs = [...content.querySelectorAll(".settings-section")]
-    .filter((s) => !s.classList.contains("sec-hidden"));
+  const present = SETTINGS_GROUPS.filter((g) => groupHasVisibleSection(content, g.id));
   nav.replaceChildren();
-  for (const sec of secs) {
-    const label = sec.dataset.secLabel || sec.querySelector("h3")?.textContent || sec.id;
-    const link = el("button", "settings-nav-link", label);
-    link.dataset.target = sec.id;
-    link.onclick = () => { _activeSettingsSection = sec.id; showSettingsSection(sec.id); };
+  for (const g of present) {
+    const link = el("button", "settings-nav-link", g.label);
+    link.dataset.target = g.id;
+    link.onclick = () => { _activeSettingsGroup = g.id; showSettingsGroup(g.id); };
     nav.appendChild(link);
   }
-  const schema = secs.filter((s) => s.id.startsWith("settings-sec-"));
   let target = null;
-  if (_activeSettingsSection && secs.some((s) => s.id === _activeSettingsSection)) {
-    target = _activeSettingsSection;             // the user's chosen tab, still present
-  } else if (schema.length) {
-    target = schema[0].id;                        // default: first config section
+  if (_activeSettingsGroup && present.some((g) => g.id === _activeSettingsGroup)) {
+    target = _activeSettingsGroup;                 // the user's chosen group, still present
+  } else if (present.length) {
+    target = present[0].id;                         // default: the first group (Model)
   }
-  if (target) showSettingsSection(target);
-  else if (!content.querySelector(".settings-section.active:not(.sec-hidden)") && secs.length) {
-    showSettingsSection(secs[0].id);             // nothing config-y yet: pick something
-  }
+  if (target) showSettingsGroup(target);
 }
 
 /** Save just one section: PATCH only the keys whose controls live in it. */
@@ -699,17 +767,24 @@ export async function refreshSettingsPage() {
 
   form.replaceChildren();
   for (const sec of ordered) {
+    // Heading: plugin sections keep "<name> plugin"; core sections use the
+    // friendlier grouped heading (schema `group` unchanged), and a blank heading
+    // (the lone require_auth toggle, the Privacy block) renders no <h3> at all so
+    // it does not just echo its group name.
+    const heading = sec.plugin ? (sec.label + " plugin")
+      : (sec.label in CORE_SECTION_HEADING ? CORE_SECTION_HEADING[sec.label] : sec.label);
+    const topGroup = sec.plugin ? "plugins" : (CORE_GROUP_TO_TOP[sec.label] || "system");
     const panel = el("section", "card settings-section");
     panel.id = "settings-sec-" + sec.id;
     panel.dataset.sec = sec.id;
-    panel.dataset.secLabel = sec.label + (sec.plugin ? " plugin" : "");
-    panel.appendChild(el("h3", "settings-section-head",
-                         sec.label + (sec.plugin ? " plugin" : "")));
+    panel.dataset.group = topGroup;
+    panel.dataset.secLabel = heading || sec.label;
+    if (heading) panel.appendChild(el("h3", "settings-section-head", heading));
     const grid = el("div", "settings-fields");
     for (const c of sec.ctrls) grid.appendChild(c.node);
     panel.appendChild(grid);
     const actions = el("div", "actions");
-    const save = el("button", "btn-primary settings-section-save", "Save " + sec.label);
+    const save = el("button", "btn-primary settings-section-save", "Save " + (heading || sec.label));
     save.dataset.sec = sec.id;
     save.onclick = () => saveSettingsSection(sec.id);
     actions.appendChild(save);
@@ -762,6 +837,7 @@ export async function buildMediaSection(form) {
     const fail = el("section", "card settings-section");
     fail.id = "settings-sec-media";
     fail.dataset.sec = "media";
+    fail.dataset.group = "plugins";
     fail.dataset.secLabel = "Media";
     fail.appendChild(el("h3", "settings-section-head", "Media"));
     fail.appendChild(el("div", "sub",
@@ -776,6 +852,7 @@ export async function buildMediaSection(form) {
   const panel = el("section", "card settings-section");
   panel.id = "settings-sec-media";
   panel.dataset.sec = "media";
+  panel.dataset.group = "plugins";
   panel.dataset.secLabel = "Media";
   panel.appendChild(el("h3", "settings-section-head", "Media"));
   panel.appendChild(el("div", "sub",
