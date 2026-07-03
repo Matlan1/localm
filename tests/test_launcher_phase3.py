@@ -297,3 +297,51 @@ def test_set_busy_disables_launch_and_generate(launcher_mod):
     assert all(b.state == "normal" for b in fake.import_btns)
     assert fake.launch_btn.state == "normal"
     assert fake.gen_btn.state == "normal"
+
+
+# --------------------------------------------------------------------------- #
+# Exposing on the network AUTO-PROVISIONS an API key instead of instructing the #
+# user to pre-set LOCALM_API_KEY. Loopback-only launches need no key.           #
+# --------------------------------------------------------------------------- #
+
+
+class _FakeAuth:
+    def generate_key(self):
+        return "MINTED-key-0123456789"
+
+
+def test_expose_without_key_mints_one(launcher_mod):
+    plan = launcher_mod.Launcher._expose_key_plan
+    for mode in ("gui", "serve"):
+        key, auto, err = plan(mode, True, "", _FakeAuth())
+        assert err is None
+        assert auto is True, f"{mode}: exposing with no key must mint one"
+        assert key == "MINTED-key-0123456789"
+
+
+def test_expose_with_existing_key_does_not_mint(launcher_mod):
+    key, auto, err = launcher_mod.Launcher._expose_key_plan(
+        "gui", True, "  my-strong-key  ", _FakeAuth())
+    assert err is None and auto is False
+    assert key == "my-strong-key", "existing key is used verbatim (trimmed), not replaced"
+
+
+def test_loopback_launch_needs_no_key(launcher_mod):
+    # host_lan False -> not exposing -> no key required, none minted.
+    key, auto, err = launcher_mod.Launcher._expose_key_plan(
+        "gui", False, "", _FakeAuth())
+    assert err is None and auto is False and key == ""
+
+
+def test_expose_without_auth_module_is_a_clear_error(launcher_mod):
+    key, auto, err = launcher_mod.Launcher._expose_key_plan("gui", True, "", None)
+    assert auto is False and key == ""
+    assert err and "auth module" in err
+
+
+def test_expose_label_no_longer_instructs_setting_the_env_var():
+    # Regression: the stale "set LOCALM_API_KEY first!" instruction is gone; the
+    # launcher provisions the key itself.
+    source = LAUNCHER_PATH.read_text(encoding="utf-8")
+    assert "LOCALM_API_KEY first" not in source
+    assert "Expose on the network (0.0.0.0, HTTPS)" in source
