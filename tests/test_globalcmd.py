@@ -61,6 +61,8 @@ def test_split_and_same_dir():
         assert gc._same_dir("C:\\Foo\\", "C:/foo")   # case + slash + trailing sep
 
 
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="Windows registry PATH semantics (; separator, case-insensitive)")
 def test_win_path_add_is_idempotent(fake_path):
     d = r"C:\clone\bin"
     assert gc._win_path_add(d) is True          # first add changes PATH
@@ -69,6 +71,8 @@ def test_win_path_add_is_idempotent(fake_path):
     assert fake_path.value.count(d) == 1        # never duplicated
 
 
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="Windows registry PATH semantics (; separator, case-insensitive)")
 def test_win_path_remove_only_ours(fake_path):
     fake_path.value = os.pathsep.join([r"C:\keep\me", r"C:\clone\bin", r"C:\also\keep"])
     assert gc._win_path_remove(r"C:\clone\bin") is True
