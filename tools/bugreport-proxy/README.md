@@ -67,20 +67,20 @@ cannot do safely. (Free Worker tier is far more than enough for 1-2 testers.)
    Keeping the two tokens distinct means a leak of one does not grant the other, and
    neither can push or admin.
 
-5. **Point localm at it** - in the build you hand to testers, set these in
-   `~/.localm/config.json` (intentionally not in the Settings form, so a tester does
-   not see or change the proxy URL / secret):
-   ```json
-   {
-     "bugreport_upload_url": "https://localm-bugreport-proxy.<you>.workers.dev",
-     "bugreport_upload_token": "<the SHARED_SECRET>"
-   }
-   ```
-   One Worker hosts all three surfaces, so `bugreport_upload_url`/`_token` also drive
-   the issues list and the updater (override with `update_url`/`update_token` only if
-   you host updates on a different Worker). With these set: the GUI shows **Send to
-   maintainer**, an **Issues** view, and an **Update available** banner; the CLI gains
-   `localm issues` and `localm update`. Unset = those surfaces are simply hidden.
+5. **That is it - localm already points at the Worker.** The Worker URL and the
+   public client token ship as DEFAULTS in `localm/config.py` (`bugreport_upload_url`
+   / `bugreport_upload_token`), so a fresh download works with **zero config**: the
+   GUI shows **Report a bug**, an **Issues** view, and the **Update** check, and the
+   CLI has `localm issues` / `localm update`, out of the box. One Worker hosts all
+   three surfaces, so those two defaults also drive the issues list and the updater
+   (`update_url`/`update_token` fall back to them; set those only to host updates on a
+   different Worker).
+
+   The token is a PUBLIC, low-value client token (like a Sentry DSN), not a secret: it
+   only gates the endpoint against drive-by spam and can never read the repo. If you
+   redeploy to a different Worker or rotate `SHARED_SECRET`, update the two defaults in
+   `localm/config.py` to match. To opt a build OUT of the hosted channel, set either
+   key to `""` in `config.json` (a report then just saves to a file / opens email).
 
 ## Spam / abuse control
 

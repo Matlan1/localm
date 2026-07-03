@@ -21,10 +21,30 @@ from localm.inference.http_server import create_app
 
 # ------------------------------- config gating --------------------------- #
 
-def test_upload_not_configured_by_default(monkeypatch):
+def test_upload_gate_off_when_url_absent(monkeypatch):
+    # Opt-out path: a config with no bugreport_upload_url has no hosted upload channel
+    # (a report still saves to a file). This is the OFF state; the ON state is now the
+    # shipped default - see test_hosted_channel_on_by_default.
     monkeypatch.setattr("localm.config.load_config", lambda: {})
     assert bugreport.upload_config() == (None, None)
     assert bugreport.upload_available() is False
+
+
+def test_hosted_channel_on_by_default(monkeypatch):
+    # Zero-config guarantee: a fresh install (pure DEFAULT_CONFIG, no user config.json)
+    # has the hosted channel LIVE out of the box - the "Report a bug" button shows and
+    # `localm update` / `localm issues` work with no setup. All three surfaces read the
+    # one shipped default (update/issues fall back to bugreport_upload_url/token).
+    import copy
+
+    from localm import config, issue_tracker, updater
+    default = copy.deepcopy(config.DEFAULT_CONFIG)
+    assert default["bugreport_upload_url"].startswith("https://")   # a real URL, not None
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: copy.deepcopy(config.DEFAULT_CONFIG))
+    assert bugreport.upload_available() is True
+    assert updater.available() is True
+    assert issue_tracker.available() is True
 
 
 def test_upload_config_reads_url_and_token(monkeypatch):
@@ -77,7 +97,11 @@ def test_upload_report_non_2xx_raises():
     assert "502" in (ei.value.reason or "")
 
 
-def test_upload_report_omits_token_header_when_none():
+def test_upload_report_omits_token_header_when_none(monkeypatch):
+    # Opt-out build (no token configured): with no configured token and token=None,
+    # NO X-Localm-Token header is sent. Must simulate the empty config explicitly now
+    # that a token ships in DEFAULT_CONFIG (which would otherwise be auto-filled).
+    monkeypatch.setattr("localm.config.load_config", lambda: {})
     seen = {}
 
     def opener(url, data, headers, timeout):
