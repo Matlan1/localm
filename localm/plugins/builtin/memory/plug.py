@@ -90,6 +90,20 @@ def _recall_enabled() -> bool:
         return True                                # config unreadable -> default on
 
 
+def _recall_in_privacy(surface: str) -> bool:
+    """Whether the user opted into READ-ONLY memory recall in privacy mode for
+    *surface* ('chat' or 'coder'). Off by default so privacy stays fully inert; the
+    master switch AND the per-surface switch must both be on. Never permits a
+    WRITE - only reading existing memories into the prompt."""
+    try:
+        from localm.config import load_config
+        cfg = load_config()
+        return bool(cfg.get("memory_recall_in_privacy")
+                    and cfg.get(f"memory_recall_in_privacy_{surface}", True))
+    except Exception:
+        return False
+
+
 def _memory_root() -> Path:
     return _home() / "memory"
 
@@ -579,15 +593,16 @@ def _memory_outlet(text, messages, ctx):
 
 
 def _memory_inlet(messages, ctx):
-    """Inject recalled memories into the system message. Off entirely when the
-    `memory_enabled` recall knob is off OR the session is in privacy mode - privacy
-    mode disables memory COMPLETELY (no recall, no legacy fallback), so past facts
-    never reach the model. Best-effort: any failure is logged at debug and skipped
-    (the pipeline also isolates it)."""
+    """Inject recalled memories into the system message. Off when the `memory_enabled`
+    recall knob is off. In privacy mode it is off too UNLESS the user opted into
+    read-only recall for chat (`memory_recall_in_privacy` + ..._chat) - and even
+    then it only READS: no reinforcement, no migration, no write. Best-effort: any
+    failure is logged at debug and skipped (the pipeline also isolates it)."""
     if not _recall_enabled():
         return None
-    # Privacy mode: memory is fully off - no recall at all.
-    if not _persist_enabled():
+    writes_ok = _persist_enabled()
+    # Privacy mode: fully off unless the user opted into read-only recall for chat.
+    if not writes_ok and not _recall_in_privacy("chat"):
         return None
     try:
         from localm import memory as _mem
@@ -595,9 +610,15 @@ def _memory_inlet(messages, ctx):
         if not query.strip():
             return None
         store = _chat_store()
-        _migrate_legacy(store)                     # not privacy here -> writes ok
+        if writes_ok:
+            _migrate_legacy(store)                 # migration is a write
         block_records = store.recall(query, k=_mem.MAX_INJECT,
-                                     embed_fn=_embed_fn(), reinforce=True)
+                                     embed_fn=_embed_fn(), reinforce=writes_ok)
+        if not block_records and not writes_ok:
+            # Privacy-recall opt-in with an un-migrated store: read the legacy flat
+            # file, strictly read-only (no migration/write).
+            block_records = [{"text": b}
+                             for b in _legacy_bullets()[:_mem.MAX_INJECT]]
         block = _mem.render_memories(block_records)
         if not block:
             return None

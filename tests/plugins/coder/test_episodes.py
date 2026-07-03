@@ -283,6 +283,30 @@ def test_privacy_mode_disables_episodic(home, tmp_path):
     assert agent._with_episodes("add retry logic") == "add retry logic"
 
 
+def test_privacy_recall_opt_in_for_coder(home, tmp_path, monkeypatch):
+    """With the coder privacy-recall opt-in on, a privacy-mode session RECALLS past
+    lessons (read-only) but still writes NO new episode at close - reading existing
+    lessons never creates a new trace."""
+    import localm.config as cfg
+    monkeypatch.setattr(cfg, "load_config", lambda: {
+        "coder_episodic_memory": True,
+        "memory_recall_in_privacy": True,
+        "memory_recall_in_privacy_coder": True})
+    EpisodeStore(tmp_path).add(Episode(
+        task="add retry logic to the http client",
+        lesson="exponential backoff capped at 30s"))
+    agent = _agent(tmp_path, backend=_ChatBackend(_REPLY), mode=SessionMode.PRIVACY)
+    assert agent._episodic is True                            # recall enabled
+    out = agent._with_episodes("add retry logic to the uploader")
+    assert "exponential backoff" in out                       # recalled read-only
+    # A privacy session still writes NO new episode at close.
+    agent._changed_files = {"foo.py": {"original": None, "writes": 1,
+                                       "last_tool": "write_file"}}
+    agent._episode_task = "add retry"
+    agent.close()
+    assert len(EpisodeStore(tmp_path).all()) == 1             # only the seeded lesson
+
+
 def test_restricted_session_disables_episodic(home, tmp_path):
     agent = _agent(tmp_path, restricted=True)
     assert agent._episodic is False
