@@ -162,6 +162,23 @@ def python_exe() -> str:
     return sys.executable.replace("pythonw.exe", "python.exe")
 
 
+def launch_exe() -> str:
+    """The interpreter to SPAWN modes with. Prefer the branded LocaLM launcher
+    (built by ``localm make-launcher`` into the venv) so the running mode shows as
+    LocaLM in Task Manager / a process monitor, not python. Falls back to the plain
+    venv interpreter when the launcher was not built."""
+    if sys.platform == "win32":
+        cand = REPO_DIR / ".venv" / "localm-app" / "LocaLM.exe"
+    else:
+        cand = REPO_DIR / ".venv" / "bin" / "LocaLM"
+    try:
+        if cand.is_file():
+            return str(cand)
+    except OSError:
+        pass
+    return python_exe()
+
+
 def _auth():
     """The localm.auth module (file-backed API key), or None if unavailable."""
     try:
@@ -621,7 +638,7 @@ class Launcher(tk.Tk):
         if not spec or not spec.strip():
             return
         spec = spec.strip()
-        cmd = [python_exe(), "-m", "localm", "gui", "--pull", spec]
+        cmd = [launch_exe(), "-m", "localm", "gui", "--pull", spec]
         port = self.port.get().strip()
         if port:
             cmd += ["-p", port]
@@ -685,7 +702,7 @@ class Launcher(tk.Tk):
             self.status_msg("Pick or import a model first", error=True)
             return None
 
-        cmd = [python_exe(), "-m", "localm"]
+        cmd = [launch_exe(), "-m", "localm"]
         ctx = self.ctx.get().strip()
         gpu = self.gpu_layers.get().strip()
         port = self.port.get().strip()

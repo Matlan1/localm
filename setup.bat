@@ -252,6 +252,16 @@ rem  parenthesis parser ("The syntax of the command is incorrect."), so keep the
 rem  custom-path flow out of the block entirely.
 if "%DATAPICK%"=="2" call :do_custom_home
 
+rem ---- build the native LocaLM.exe launcher ---------------------------------
+rem  So the running server shows as LocaLM.exe in Task Manager (not python.exe)
+rem  and carries the LocaLM icon. It is a branded copy of the venv interpreter,
+rem  placed in .venv\localm-app, self-contained in this clone. `localm gui` still
+rem  works if this step fails; it never blocks the install.
+echo.
+echo  Building the LocaLM app launcher ...
+.venv\Scripts\python -m localm make-launcher --force
+if errorlevel 1 echo  [!] Could not build LocaLM.exe - `localm gui` still works ^(shows python.exe^).
+
 rem ---- optional desktop shortcut ----------------------------------------------
 echo.
 echo  Create desktop shortcut?
@@ -278,13 +288,12 @@ if "%SCPICK%"=="1" (
 if "%SCPICK%"=="2" (
     powershell -NoProfile -Command ^
         "$s = (New-Object -ComObject WScript.Shell).CreateShortcut([Environment]::GetFolderPath('Desktop') + '\LocaLM.lnk');" ^
-        "$s.TargetPath = '%CD%\.venv\Scripts\localm.exe';" ^
-        "$s.Arguments = 'gui';" ^
+        "$exe = '%CD%\.venv\localm-app\LocaLM.exe'; if (Test-Path $exe) { $s.TargetPath = $exe; $s.Arguments = '-m localm gui' } else { $s.TargetPath = '%CD%\.venv\Scripts\localm.exe'; $s.Arguments = 'gui' };" ^
         "$s.WorkingDirectory = '%CD%';" ^
         "$s.IconLocation = '%CD%\assets\localm.ico';" ^
         "$s.Description = 'LocaLM - open the web GUI';" ^
         "$s.Save()"
-    if not errorlevel 1 echo  Shortcut created: Desktop\LocaLM.lnk  ^(opens the GUI^)
+    if not errorlevel 1 echo  Shortcut created: Desktop\LocaLM.lnk  ^(opens the GUI as LocaLM.exe^)
 )
 if "%SCPICK%"=="3" echo  No shortcut created.
 

@@ -80,7 +80,7 @@ Clone anywhere and double-click `setup.bat`. It creates a private `.venv` inside
 - **inside the clone** (`.\home`) - fully portable and self-contained; multiple clones on one machine are completely independent (this is the default), or
 - **a custom path** (recorded in `localm-home.cfg`) - e.g. a shared models drive.
 
-There is no silent per-user fallback: if nothing is configured, localm keeps its data in a contained `.\home` inside the install and says so, never a shared `~/.localm` outside it. It then offers an optional desktop shortcut, an optional global `localm` command, and walks you through which plugins to enable (`localm plugin setup`). Nothing is installed globally, and your PATH is left untouched unless you opt into the global `localm` command. The `LOCALM_HOME` environment variable overrides the data location at any time.
+There is no silent per-user fallback: if nothing is configured, localm keeps its data in a contained `.\home` inside the install and says so, never a shared `~/.localm` outside it. It then builds a native `LocaLM.exe` launcher (so the running server shows as `LocaLM.exe` in Task Manager, not `python.exe`, and carries the LocaLM icon - see [native app](docs/native-app.md)), offers an optional desktop shortcut and global `localm` command, and walks you through which plugins to enable (`localm plugin setup`). Nothing is installed globally, and your PATH is left untouched unless you opt into the global `localm` command. The `LOCALM_HOME` environment variable overrides the data location at any time.
 
 ### Manual (any OS)
 
@@ -314,6 +314,7 @@ See [docs/llamacpp-binding.md](docs/llamacpp-binding.md) for the binding interna
 | [docs/network.md](docs/network.md) | Internet access for coder and chat: modes, domain rules, SSRF guard |
 | [docs/tls.md](docs/tls.md) | API keys, TLS, and reverse proxies for LAN serving |
 | [docs/phone.md](docs/phone.md) | Using localm from your phone: the installable PWA companion |
+| [docs/native-app.md](docs/native-app.md) | The native `LocaLM.exe` launcher: how it works, `make-launcher`, the freeze trade-off |
 
 ---
 
