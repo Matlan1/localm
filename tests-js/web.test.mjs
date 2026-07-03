@@ -379,3 +379,41 @@ test("R27: ticking 'don't ask again' stops the approval popup re-firing", async 
   assert.equal(modal.style.display, "none", "the modal did not reopen");
   assert.equal(await p2, true, "the remembered choice auto-approved");
 });
+
+// ---------------------------------------------------------------------------
+//  CHAT-TOOL-1: defang EVERY tool-call dialect parseWebCall executes, in the
+//  display AND in the context re-sent to the model. A model must never see its
+//  own raw <|tool_call> control tokens echoed back - that destabilised some
+//  finetunes (a Gemma-4 aeon-abliterated build) into a repetition loop.
+// ---------------------------------------------------------------------------
+
+test("formatToolCalls defangs the |-piped / call:-prefixed dialect (not just <tool_call>)", () => {
+  const { window: w } = loadApp();
+  // The exact shape the reported model emitted (piped wrapper + call: prefix).
+  const piped = '<|tool_call>call:{"name": "web_search", "args": {"query": "privacy X"}}<|tool_call|>';
+  const out = w.formatToolCalls(piped);
+  assert.ok(!/tool_call/.test(out), "no raw tool_call marker survives the defang");
+  assert.match(out, /web search: "privacy X"/, "shows a readable note with the query");
+  // Canonical form still works, and plain prose is untouched.
+  assert.match(w.formatToolCalls('<tool_call>{"name":"fetch_url","args":{"url":"https://x"}}</tool_call>'),
+    /read page: https:\/\/x/);
+  assert.equal(w.formatToolCalls("just a normal answer"), "just a normal answer");
+});
+
+test("CHAT-TOOL-1: the re-sent context defangs the assistant tool-call turn (no raw markers to the model)", async () => {
+  const piped = '<|tool_call>call:{"name": "web_search", "args": {"query": "privacy"}}<|tool_call|>';
+  const { completions } = await runChat({
+    web: true,
+    rounds: [content(piped), content("Here is the grounded answer [1].")],
+  });
+  assert.ok(completions.length >= 2, "the web loop re-completed after running the search");
+  // The FINAL (answer) turn's messages must carry the earlier tool-call turn as a
+  // clean note, never the raw <|tool_call> tokens the model originally emitted.
+  const answerMsgs = completions[completions.length - 1].body.messages;
+  const asst = answerMsgs.find((m) => m.role === "assistant");
+  assert.ok(asst, "the assistant tool-call turn is present in the re-sent context");
+  assert.ok(!/tool_call/.test(String(asst.content)),
+    "raw <|tool_call> markers are NOT re-fed to the model");
+  assert.match(String(asst.content), /web search/,
+    "the tool call is represented as a readable note instead");
+});
