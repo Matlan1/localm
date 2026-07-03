@@ -35,8 +35,9 @@ export function readStoredJSON(key, fallback) {
 
 // S2: the API key is no longer kept in JS-readable localStorage. Open-mode
 // management uses the per-process shell token (injected as a global, sent as a
-// bearer HEADER); protected mode rides the HttpOnly session cookie set at login
-// or loopback auto-seed (auto-sent same-origin) with a double-submit CSRF token.
+// bearer HEADER); protected mode rides the HttpOnly session cookie (an opaque
+// session id, auto-sent same-origin) plus a session-DERIVED CSRF token that
+// authHeaders() reads from window.__LOCALM_CSRF__ (fetched from GET /api/session).
 export const SHELL_TOKEN = window.__LOCALM_SHELL_TOKEN__ || "";
 
 export function readCookie(name) {
