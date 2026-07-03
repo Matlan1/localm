@@ -190,7 +190,7 @@ localm config heretic_path "D:\path\to\heretic"
 localm config autoprune_missing_models true
 ```
 
-Config lives at `~/.localm/config.json` and only known keys are settable (both the CLI and the GUI validate against the schema). Only the settings you actually changed are stored in the file; everything else follows the current built-in defaults, so a new localm version's improved defaults apply automatically unless you overrode them. Auth: configure an API key (`LOCALM_API_KEY` env var, the launcher's Auth card / `auth.key` file, or a named key) to require bearer auth on the HTTP API; auth is recommended before binding to anything other than 127.0.0.1, and the CLI warns about exposed unauthenticated binds. Set `require_auth true` (or `LOCALM_REQUIRE_AUTH=1`) to fail closed and refuse requests until a key exists. CORS is locked to localhost by default and can be widened with `cors_origins`. See [docs/tls.md](../docs/tls.md) for LAN serving.
+Config lives at `~/.localm/config.json` and only known keys are settable (both the CLI and the GUI validate against the schema). Only the settings you actually changed are stored in the file. Set `require_auth true` (or `LOCALM_REQUIRE_AUTH=1`) to fail closed and refuse requests until a key exists; localm warns when binding to a non-loopback address without a key; `cors_origins` widens CORS (locked to localhost by default). See the [API keys](#api-keys) section and [SECURITY.md](../SECURITY.md) for the auth and scope model, and [docs/tls.md](../docs/tls.md) for LAN serving.
 
 ### Dynamic context window
 
@@ -202,11 +202,11 @@ localm config n_ctx_grow 8192    # grow in bigger steps (fewer rebuilds)
 localm config ctx_auto false     # use the fixed n_ctx_max ceiling instead of VRAM sizing
 ```
 
-`ctx_auto` is **on by default**: localm measures free VRAM at load time, subtracts the model weights and a fixed overhead, and sizes the ceiling from what remains (clamped to 4k-64k). When a conversation reaches the ceiling, replies shorten to fit; when even that is impossible you get a clear error instead of an out-of-memory crash. An explicit `-c/--ctx` larger than the ceiling always wins.
+`ctx_auto` is **on by default**: it sizes the ceiling from free VRAM at load time (clamped to 4k-64k), overriding `n_ctx_max`. When a conversation reaches the ceiling, replies shorten to fit; when even that is impossible you get a clear error instead of an out-of-memory crash. An explicit `-c/--ctx` larger than the ceiling always wins.
 
-Reading free VRAM needs `torch` (the `[gpu]` extra). On a CPU-only install without it, `ctx_auto` cannot measure VRAM and falls back to a fixed 16384-token ceiling (to change that ceiling on a CPU-only install, set `ctx_auto false` and raise `n_ctx_max`); the pre-flight "Low VRAM" warning and the post-load VRAM usage line are skipped for the same reason.
+Reading free VRAM needs `torch` (the `[gpu]` extra). On a CPU-only install without it, `ctx_auto` cannot measure VRAM and falls back to a fixed 16384-token ceiling (set `ctx_auto false` and raise `n_ctx_max` to change it).
 
-Long chats compact automatically before they collide with the ceiling: at 70% fill, older turns are summarised by the model and replaced with a short summary, keeping the last two exchanges verbatim. If summarisation is unavailable the history is trimmed with a visible note instead.
+Long chats compact automatically before they collide with the ceiling. See [docs/architecture.md](../docs/architecture.md) for the compaction and VRAM-sizing details.
 
 ---
 
@@ -224,6 +224,8 @@ localm key list                 # list named keys (metadata only, never the secr
 localm key rm KEY_ID            # revoke a named key by ID
 localm key recover              # recover owner access after a lockout (run locally on the server machine)
 ```
+
+The owner key can also be set outside these commands: the `LOCALM_API_KEY` env var, or a `<data dir>/auth.key` file.
 
 Privileged scopes (`config:write`, `plugins:admin`, `keys:admin`, `admin`, `coder:full`) are never minted into a named key; only the owner key carries them. See [SECURITY.md](../SECURITY.md) for the auth and scope model, and [docs/tls.md](../docs/tls.md) for serving over a LAN.
 
@@ -252,7 +254,7 @@ localm plugin install-deps NAME # install a plugin's pip extras on this host
 localm plugin install-deps --all# fill in missing extras for every enabled plugin
 ```
 
-The store names are `coder`, `image`, `music`, `video`, `rag`, `web`, `voice`, `tts`, `jobs`, and `mcp` (plus the protected `chat`). Plugins with heavy Python dependencies carry them in a pip extra: by default `install`/`enable`/`setup` install it for you on the host (the `auto_install_plugin_deps` setting; pass `--no-deps` to skip, or `--with-deps` to force). A remote client never triggers a server-side pip - it is told to install on the host, e.g. with `localm plugin install-deps`. A running GUI server picks up new HTTP routes and tabs at runtime, while stdio plugins like mcp take effect on the next `localm mcp`.
+The store names are `coder`, `image`, `music`, `video`, `rag`, `web`, `voice`, `tts`, `jobs`, and `mcp` (plus the protected `chat`). Plugins with heavy Python dependencies carry them in a pip extra, installed on the host by default (the `auto_install_plugin_deps` setting; `--no-deps` to skip, `--with-deps` to force, or `localm plugin install-deps` later). A running GUI server picks up new HTTP routes and tabs at runtime; stdio plugins like mcp take effect on the next `localm mcp`. See [docs/plugins.md](../docs/plugins.md).
 
 Third-party plugins are folders containing a `plugin.toml` manifest and Python files. Install from a local path with `localm plugin install <path>` (the same command takes a store name or a directory); installation is a local directory copy, fully offline. See [docs/plugins.md](../docs/plugins.md) for the full authoring contract.
 

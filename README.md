@@ -42,7 +42,7 @@ localm serve mymodel                        # OpenAI-compatible API server
 
 - **A coding agent that does the work (coder plugin).** `localm coder` works through a task with tools for files, the shell, search, and tests; you can redirect it mid-run or review what it touched with session diffs. It speaks MCP both ways, so localm can expose your models to clients like Claude Desktop, and the coder can pull in external MCP tool servers.
 
-- **Media generation (image/music/video plugins).** localm drives a local media-generation server - **ComfyUI is the backend supported today** - it is what the maintainer happens to run, not a recommendation. You bring the server and models; localm orchestrates generation and VRAM handover from the LLM, and surfaces it as the Images/Music/Video pages and chat commands. The plugins keep a backend seam so other media servers can be added later.
+- **Media generation (image/music/video plugins).** localm drives a local media-generation server (**ComfyUI is the supported backend today**, with a seam for others later). You bring the server and models; localm orchestrates generation and VRAM handover from the LLM, and surfaces it as the Images/Music/Video pages and chat commands.
 
 - **Bring your own data (rag, voice, and tts plugins).** Attach files or index whole folders and chat against them with citations (Knowledge), dictate with local Whisper speech-to-text, or have replies read back to you with in-browser Kokoro text-to-speech.
 
@@ -60,7 +60,7 @@ localm serve mymodel                        # OpenAI-compatible API server
 
 - **For GGUF GPU inference:** a compiled `llama.dll` + GPU runtime DLLs. `localm setup-llama` provisions these for you (see [GPU setup](#gpu-setup)). The installer detects your hardware and chooses the backend automatically.
 
-- **NVIDIA CUDA (optional, for peak performance):** a recent NVIDIA driver (new enough for CUDA >= 12.4). **No CUDA Toolkit needed** - localm fetches a self-contained CUDA runtime. An older driver still works: setup falls back to Vulkan and tells you how to enable CUDA later. The default install uses Vulkan (any GPU, driver-only); choose CUDA in the setup menu (or `localm setup-llama --backend cuda`) for peak NVIDIA performance.
+- **NVIDIA CUDA (optional, for peak performance):** the default install uses Vulkan (any GPU, driver only). For peak NVIDIA performance choose CUDA in the setup menu (or `localm setup-llama --backend cuda`); no CUDA Toolkit is needed, and an old driver simply falls back to Vulkan. Details in [GPU setup](#gpu-setup).
 
 Run `localm doctor` after installing to check Python, the native library, GPU driver, VRAM, and optional packages in one shot.
 
@@ -75,7 +75,7 @@ Run `localm doctor` after installing to check Python, the native library, GPU dr
 
 ### Recommended (Windows): self-contained setup
 
-Clone anywhere and double-click `setup.bat`. It creates a private `.venv` inside the clone (always Python 3.12), installs localm into it, detects your GPU and provisions the matching llama.cpp backend (Vulkan for any GPU, CUDA/ROCm for peak performance, or CPU), and asks where data should live:
+Clone anywhere and double-click `setup.bat`. It creates a private `.venv` inside the clone (always Python 3.12), installs localm into it, detects your GPU and provisions the matching llama.cpp backend (see [GPU setup](#gpu-setup)), and asks where data should live:
 
 - **inside the clone** (`.\home`) - fully portable; multiple clones on one machine are completely independent,
 - **shared** (`~/.localm`) - clones share models and settings, or
@@ -115,7 +115,7 @@ A pip extra and a plugin install are two separate steps. The extra installs a pl
 
 Not every plugin needs an extra: the image/music/video plugins talk to an external media-generation server you run (ComfyUI today), jobs and web have no extra, and tts runs in the browser.
 
-> **Avoid `uv tool install` for this project.** Tool installs are *global per package name*: a second clone installing the `localm` tool silently replaces the first one's `localm.exe`/`localcoder.exe`. The `[gpu]` extra also needs `--python 3.12` there (the ROCm torch wheels are cp312-only).
+> **Avoid `uv tool install` for this project.** Tool installs are *global per package name*, so a second clone would silently replace the first one's `localm.exe`.
 
 ### No models yet?
 
@@ -228,7 +228,7 @@ Full reference: [docs/cli.md](docs/cli.md).
 
 ## Plugins
 
-localm core is a model loader plus a plugin engine. Chat is the protected, preinstalled plugin and is the only feature active out of the box; every other feature (coder, image, music, video, rag, web, voice, tts, jobs, mcp) is a plugin you install when you want it.
+localm core is a model loader plus a plugin engine. Chat is preinstalled and active out of the box; every other feature is a plugin you install when you want it.
 
 **Plugin states.** Bundled plugins live read-only in `localm/plugins/builtin/` (the "store"). *Installing* copies one into `~/.localm/plugins/` (installed = on disk); *enabling* adds it to `config["plugins_enabled"]`; a plugin is *active* only when it is both installed and enabled. Chat is protected (cannot be disabled or uninstalled) and `default_enabled`, so it is active on first run; nothing else is.
 
@@ -270,70 +270,29 @@ localm resolves the binary directory in order: `LLAMA_CPP_LIB` env > `binary_dir
 
 ## Architecture
 
+localm is a **model loader plus a plugin engine**. The CLI knows nothing about inference and inference knows nothing about the CLI; they meet at a single `Engine`. Chat is the protected plugin #0; every other feature is a plugin layered on top.
+
 ```
-runtime/                      # localm-llama-runtime wheel: native llama.cpp
-|                             #   binaries bundled in the venv (self-contained)
+runtime/            # localm-llama-runtime wheel: native llama.cpp binaries (in the venv)
 localm/
-├── cli/                      # Click command package, split by area (core + plugin command groups)
-├── config.py                 # data-dir paths, config, port range, defaults
-├── auth.py, scopes.py        # API-key auth and capability scopes
-├── netpolicy.py              # the off/ask/allow web-access policy + SSRF guard
-├── setup_llama.py            # `localm setup-llama`: provision native binaries
-├── model_manager/            # registry, pull, dedup, aliases, Ollama manifests (gguf/registry/pull)
-├── image_gen/                # shared ComfyUI FLUX transport (used by image plugin)
-├── music_gen/                # shared ComfyUI ACE-Step transport (used by music plugin)
-├── video_gen/                # shared ComfyUI Wan 2.2 transport (used by video plugin)
-├── media/                    # shared ComfyUI client (comfy_client.py), used by image/music/video
-├── inference/
-|   ├── engine.py             # unified Engine: GGUF vs HF detection
-|   ├── http_server.py        # FastAPI app factory (create_app) + shared inference state
-|   ├── routes/               # HTTP route handlers (admin, chat, config, keys, models, plugins, session, system)
-|   ├── protocol.py           # Pydantic models (OpenAI wire format)
-|   ├── chat_pipeline.py      # kernel chat-pipeline hook chain (inlet/stream/outlet)
-|   ├── compact.py            # automatic history compaction
-|   └── backends/
-|       ├── base.py           # shared backend base class
-|       ├── gguf.py           # GgufBackend + VRAM pre-flight + dynamic context
-|       ├── hf.py             # HFBackend (Transformers)
-|       └── llamacpp/         # pure-Python ctypes llama.cpp binding
-└── plugins/                  # the plugin engine and every feature plugin
-    ├── engine.py             # PluginManager: install/enable/active state, route mounting
-    ├── contract.py           # the plugin contract (manifest schema, surfaces, API version)
-    ├── catalog.py            # the first-party store listing
-    ├── loader.py             # external plugin discovery (~/.localm/plugins/)
-    ├── media_config.py       # shared ComfyUI config for the media plugins
-    ├── coder/                # the coding agent: agent loop, tools, MCP client, skills
-    ├── gui/                  # the web GUI server (FastAPI routes + static SPA)
-    ├── abliterate/           # `localm abliterate`: Heretic hand-off + register
-    ├── mcpserver/            # `localm mcp` stdio server
-    └── builtin/              # the read-only store (only chat is active by default)
-        ├── chat/             # protected plugin #0: history, memory, personas
-        ├── coder/            # manifest + shim -> plugins/coder
-        ├── image/            # FLUX image generation (consumes image_gen/)
-        ├── music/            # ACE-Step music generation (consumes music_gen/)
-        ├── video/            # Wan 2.2 video generation (consumes video_gen/)
-        ├── rag/              # Knowledge: collections + cited retrieval
-        ├── web/              # web_search + fetch_url under the network policy
-        ├── voice/            # local Whisper speech-to-text
-        ├── tts/              # in-browser Kokoro text-to-speech (client assets)
-        ├── jobs/             # scheduled recurring chat/coder prompts (scheduler + Jobs tab)
-        └── mcp/              # manifest + shim -> plugins/mcpserver
+├── cli/            # Click command package
+├── inference/      # Engine (GGUF vs HF), FastAPI server, routes, backends/llamacpp (ctypes binding)
+├── model_manager/  # registry, pull, dedup, aliases
+├── image_gen/ music_gen/ video_gen/ media/   # ComfyUI transports for the media plugins
+└── plugins/        # the plugin engine + every feature plugin (builtin/ = the read-only store)
 ```
 
-Each `builtin/<name>/` entry is a manifest (`plugin.toml`) plus its plugin code; the coder and mcp entries are thin shims that delegate to the top-level implementation packages (`plugins/coder/`, `plugins/mcpserver/`), and the image/music/video plugins consume the shared `image_gen/` / `music_gen/` / `video_gen/` transports.
+See [docs/architecture.md](docs/architecture.md) for the full module map and design notes.
 
 ### The ctypes llama.cpp binding
 
-`localm.inference.backends.llamacpp` is a zero-dependency Python wrapper around the native `llama.dll`. It replaces `llama-cpp-python` entirely, meaning:
+`localm.inference.backends.llamacpp` is a zero-dependency Python wrapper around the native `llama.dll`, replacing `llama-cpp-python` entirely:
 
 - **No C compiler** needed at install time
 - **No Python wheel** tied to a specific Python/CUDA version
 - Any prebuilt `llama.dll` works: Ollama's DLL, a custom build, any binary
-- The struct layouts in `_structs.py` were derived by probing `llama_model_default_params()` / `llama_context_default_params()` against known default values and cross-referenced with `llama.h`
 
-The generation loop (`LlamaCpp._generate`) implements the full sampler chain: `top_k -> top_p -> min_p -> temperature -> dist (random draw)`, or `greedy` when `temperature <= 0`. Stop strings (`<|im_end|>`, `<end_of_turn>`, etc.) are filtered via a streaming buffer that watches for multi-token sequences across piece boundaries.
-
----
+See [docs/llamacpp-binding.md](docs/llamacpp-binding.md) for the binding internals: struct layouts, ABI checks, and the full sampler chain.
 
 ## Documentation
 

@@ -4,13 +4,7 @@ localm generates short video clips (MP4, h264) through the same local ComfyUI se
 
 ## What you get
 
-**The Video page** (when the video plugin is enabled) has the full generation form - prompt, negative, duration, fps, resolution, seed, steps, CFG, optional start image - a streamed job log, an inline player, and a history with play, move-to-folder, and delete actions. Generated clips are stored in the localm data directory at `gui_video/` and are always saved; the prompt is never written to disk in privacy mode (the default).
-
-**CLI**: `localm video "a red fox running through snow, tracking shot"` generates a default ~5 s clip and saves it as `video_<timestamp>.mp4` in the current directory; see [CLI Reference](cli.md) for the full command syntax and options.
-
-**Chat**: `/generate-video <prompt>` generates a default ~5 s clip inline and attaches a player to the conversation.
-
-**API**: `POST /api/video` (with fields like prompt, seconds, fps, width, height, seed, steps, cfg, input_image) returns a job id; stream progress via `GET /api/jobs/{id}/events`. Use `GET /api/video/history` to list all generated clips, and `GET /api/video/file/{name}` to serve a clip.
+Four surfaces: the **Video page** in the GUI, the `localm video` **CLI**, the `/generate-video` **chat** command, and the `POST /api/video` HTTP **API**. See [Usage](#usage) below for each. Generated clips are stored in the localm data directory at `gui_video/` and are always saved (see [Privacy](#privacy) for what metadata is written).
 
 ## Expect slow render times - timing examples
 
@@ -34,7 +28,7 @@ The default poll timeout is 60 minutes; very long/large clips on slow cards can 
 - 5 s = 121 frames (native)
 - 10 s = 241 frames
 
-**Render at the native resolution (1280x704).** The 5B was trained at 720p. Resolution is not a speed dial - well below native, output collapses into washed-out smears rather than a "faster preview". Verified on real hardware: the same prompt and seed that produce a crisp, on-prompt clip at 1280x704 produce unrecognisable mush at 640x368. Iterate by shortening the clip and lowering steps instead, then re-render the keeper at full length with the same `--seed`. Width and height are free integers (any multiple of 16 works and nothing is enforced); these are illustrative, not a fixed preset list:
+**Render at the native resolution (1280x704).** The 5B was trained at 720p. Resolution is not a speed dial - well below native, output collapses into washed-out smears rather than a "faster preview". Iterate by shortening the clip and lowering steps instead, then re-render the keeper at full length with the same `--seed`. Width and height are free integers (any multiple of 16 works and nothing is enforced); these are illustrative, not a fixed preset list:
 
 - **1280x704** (recommended - native)
 - 1024x576 (not recommended - quality drops sharply)
@@ -50,7 +44,7 @@ The template expects the public Comfy-Org repackaged files (ComfyUI v0.3.46+ has
 | `umt5_xxl_fp8_e4m3fn_scaled.safetensors` (~6 GB) | `models/text_encoders/` |
 | `wan2.2_vae.safetensors` (~1.4 GB) | `models/vae/` |
 
-The fp16 encoder (`umt5_xxl_fp16.safetensors`, ~11 GB) works too - it just occupies ~11 GB of VRAM during text encoding before being offloaded, adding load time on a 16 GB card. Prefer the fp8_scaled file; with a different encoder filename you need a `wan_workflow_local.json` override (below).
+The fp16 encoder (`umt5_xxl_fp16.safetensors`, ~11 GB) also works but uses more VRAM; prefer the fp8_scaled file. A different encoder filename needs a `wan_workflow_local.json` override (below).
 
 ## Usage
 
@@ -71,7 +65,11 @@ localm video "city timelapse" -d 1 --steps 20 --seed 7   # quick iteration (~7 m
 localm video "gentle ocean waves" --width 1280 --height 704      # explicit resolution
 ```
 
+See the [CLI Reference](cli.md) for the full command syntax and options.
+
 ### API
+
+`POST /api/video` accepts prompt, seconds, fps, width, height, seed, steps, cfg, and input_image, and returns a job id.
 
 ```bash
 # Start a generation (returns job_id)
@@ -101,7 +99,7 @@ Prompt tip: **motion verbs matter**. "a fox" tends to produce a near-static shot
 
 ## Retrieving results
 
-Generated clips are stored at `~/.localm/gui_video/` (or the configured data directory). Each clip is an MP4 file with an optional `.json` sidecar in non-privacy modes containing the prompt, seed, and generation settings for reproducibility.
+Generated clips are stored at `~/.localm/gui_video/` (or the configured data directory) as MP4 files, each with an optional `.json` sidecar (see [Privacy](#privacy)).
 
 **Via the GUI Video page:** the history shows all clips with their metadata, and you can play, download, move to a folder, or delete them inline.
 
@@ -115,17 +113,7 @@ Same lifecycle as image and music generation: the chat model is unloaded before 
 
 ## Using your own workflow
 
-Drop a `wan_workflow_local.json` next to `localm/video_gen/wan_workflow.json` (it is gitignored - which models you run stays private). Parameters are injected by role, not by node id: the sampler is found by class (`KSampler`), and the positive / negative / latent / `CreateVideo` nodes by following its input edges. So a local or exported Wan graph works with any node ids, as long as it wires a `KSampler` with `positive` / `negative` / `latent_image` inputs (and a `CreateVideo` node for fps). You can just export a Wan 2.2 workflow from ComfyUI (Save -> API format) and select it, no renumbering needed.
-
-The committed template uses these node ids and roles (yours may differ):
-
-| Node id | Role |
-|---|---|
-| `4` | positive prompt (`CLIPTextEncode`) |
-| `5` | negative prompt (`CLIPTextEncode`) |
-| `6` | video latent - `width` / `height` / `length` (+ `start_image` for i2v) |
-| `8` | sampler - `seed` / `steps` / `cfg` (`KSampler`) |
-| `10` | `CreateVideo` - `fps` |
+Drop a `wan_workflow_local.json` next to `localm/video_gen/wan_workflow.json` (it is gitignored - which models you run stays private). Parameters are injected by role, so node ids do not matter: the graph just needs a `KSampler` wired with `positive` / `negative` / `latent_image` inputs and a `CreateVideo` node for fps. Export a Wan 2.2 workflow from ComfyUI (Save -> API format) and select it, no renumbering needed.
 
 ## Privacy
 
@@ -135,14 +123,14 @@ In privacy mode (the default) no `<clip>.mp4.json` sidecar is written - the prom
 
 **"returned no prompt_id"** - almost always missing model files (check the ComfyUI console) or a ComfyUI older than v0.3.46 (no Wan 2.2 nodes). Make sure the three model files are present in ComfyUI's model directories and readable.
 
-**Washed-out, smeared, unrecognisable output** - the resolution is below the model's native 1280x704 and/or you have too few steps. Render at native resolution with 20+ steps; shorten the clip to save time instead. The 5B was trained exclusively at 720p - there is no "lower resolution = faster preview" option.
+**Washed-out, smeared, unrecognisable output** - the resolution is below native 1280x704 and/or you have too few steps. Render at native with 20+ steps and shorten the clip to save time instead (see [Specifications](#specifications)).
 
 **Out of VRAM during sampling** - shorten the clip (fewer frames) or close other GPU users. Don't drop resolution below native to save memory - quality collapses (see above). If you have a card with 8-12 GB VRAM, consider starting with 3 s clips and 20 steps.
 
 **"Ran out of memory when regular VAE decoding"** in the ComfyUI console - normal on 16 GB at 720p; ComfyUI automatically retries with tiled decoding and the clip comes out fine. If it keeps failing, the clip is too long for your VRAM; shorten it or reduce steps.
 
-**Static output** - the model defaults to near-static scenes when motion language is absent. Add explicit motion verbs to the prompt ("running", "flying", "rolling", "spinning"). Raise CFG slightly (5.0 to 6.0) to make the model follow the prompt harder; at very high CFG (8+) output becomes erratic.
+**Static output** - add explicit motion verbs to the prompt (see the prompt tip above). Raise CFG slightly (5.0 to 6.0) to make the model follow the prompt harder; at very high CFG (8+) output becomes erratic.
 
-**Job times out** - the default poll timeout is 60 minutes. Very long or large clips on slow cards can exceed it. Generate shorter clips, or in the Python API pass a larger `max_poll_seconds` (e.g. `max_poll_seconds=7200` for 2 hours).
+**Job times out** - the default poll timeout is 60 minutes (see the timing section). Generate shorter clips, or in the Python API pass a larger `max_poll_seconds` (e.g. `max_poll_seconds=7200` for 2 hours).
 
 **ComfyUI does not start** - check that `comfy_launch_cmd` is set in your config (e.g. `comfy_launch_cmd: python -m ComfyUI.main` with `comfy_workdir` set to your ComfyUI repo). The GUI and CLI both auto-launch when configured. You can also start ComfyUI manually via `python main.py` in the ComfyUI directory; it prints its URL (default http://127.0.0.1:8188). Make sure the URL matches what localm expects in the config.

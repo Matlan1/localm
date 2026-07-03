@@ -9,12 +9,12 @@ setups (a real domain, a public CA).
 
 ## Threat model in one paragraph
 
-The HTTP API can run inference (costs your GPU time), unload and switch
-models, and, when the GUI is enabled, start coder sessions that write files
-and run shell commands on the host. Anyone who can reach the port can do all
-of that. Bearer auth (`LOCALM_API_KEY`) is the minimum; TLS stops the key and
-your prompts from crossing the network in cleartext. localm now does the TLS
-itself on a network bind, so both protections are on by default.
+Anyone who can reach the port can run inference (costs your GPU time), unload
+and switch models, and, when the GUI is enabled, start coder sessions that write
+files and run shell commands on the host. Bearer auth (`LOCALM_API_KEY`) is the
+minimum; TLS stops the key and your prompts from crossing the network in
+cleartext. localm now does the TLS itself on a network bind, so both protections
+are on by default.
 
 ## Always set an API key
 
@@ -51,11 +51,10 @@ if 8642 was busy - use the address it prints). Under the hood:
   `<LOCALM_HOME>/tls/` (`ca.crt` + `ca.key`) and a server certificate signed by
   it. The certificate covers 127.0.0.1, your LAN IP, any Tailscale IP, and the
   hostname, so the same cert works however a device reaches you.
-- The certificate is reused across restarts and regenerated only when it nears
-  expiry (about 30 days before) or the set of addresses and names it must cover
-  changes (a new bind IP, or a changed hostname, `.local`, or Tailscale name).
-  The CA is reused even then, so a device you trusted once stays trusted after
-  your address changes.
+- The certificate is reused across restarts, and it is regenerated as it nears
+  expiry (about 30 days before) or when its addresses/names change. The CA is
+  reused even then, so a device you trusted once stays trusted after your address
+  changes.
 - The CA private key never leaves your machine.
 
 ### The one-time "trust this certificate" step
@@ -63,8 +62,8 @@ if 8642 was busy - use the address it prints). Under the hood:
 Because the certificate is signed by *your* CA and not a public one, the first
 time a device opens the `https://` address its browser shows a one-time "not
 secure" warning, and a phone will not offer **Install app** until the CA is
-trusted. This is a browser rule for any private/self-signed certificate on a raw
-IP, not a localm limitation - so localm makes clearing it one tap:
+trusted. This is a browser rule for any private certificate on a raw IP; localm
+makes clearing it one tap:
 
 1. Open the printed `https://<ip>:<port>/` address on the device.
 2. Proceed through the browser's one-time warning to reach the page.
@@ -87,9 +86,9 @@ localm gui -H 0.0.0.0 --no-tls          # plain HTTP (key crosses the LAN in cle
 localm gui -H 0.0.0.0 --tls-cert C:\certs\localm.crt --tls-key C:\certs\localm.key
 ```
 
-`--no-tls` is an escape hatch for a trusted, isolated network only.
-`--tls-cert`/`--tls-key` let you supply your own certificate (for example one
-issued for a real hostname) instead of the built-in local CA.
+`--no-tls` serves plain HTTP and is an escape hatch for a trusted, isolated
+network only. `--tls-cert`/`--tls-key` let you supply your own certificate (for
+example one issued for a real hostname) instead of the built-in local CA.
 
 ## Advanced: terminate TLS with a reverse proxy
 
