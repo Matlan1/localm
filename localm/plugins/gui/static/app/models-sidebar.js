@@ -108,6 +108,14 @@ export function updateKeyGateCertStep() {
     // <a download> would save as the "cert" (J2).
     const certLink = $("key-gate-cert-link");
     if (certLink) certLink.href = "https://" + location.host + "/localm-ca.crt";
+    // Firefox keeps its OWN certificate store and ignores the Windows/OS one, so a
+    // system install leaves the warning here - the most common "I installed it but
+    // it still warns" case. Surface the Firefox-specific step prominently.
+    const ff = $("key-gate-cert-ff");
+    if (ff) {
+      const isFirefox = /firefox\//i.test(navigator.userAgent || "");
+      ff.style.display = isFirefox ? "block" : "none";
+    }
   }
 }
 window.updateKeyGateCertStep = updateKeyGateCertStep;

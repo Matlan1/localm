@@ -702,16 +702,33 @@
           <b>Install app</b>.</p>
         <a id="key-gate-cert-link" class="btn-secondary onboard-cta" href="/localm-ca.crt"
            download="localm-ca.crt">Install certificate</a>
+        <!-- Shown by updateKeyGateCertStep() only when the browser is Firefox, which
+             uses its OWN certificate store and ignores the OS/Windows one - the most
+             common "I installed it but still get the warning" cause. -->
+        <p id="key-gate-cert-ff" class="dim" style="display:none">
+          <b>You're using Firefox.</b> Firefox keeps its own certificate store, so a
+          Windows install won't remove the warning here. Open the downloaded file and
+          import it under <b>Authorities</b> (check "Trust this CA to identify
+          websites"), or set <code>security.enterprise_roots.enabled</code> to
+          <code>true</code> in <code>about:config</code> to reuse the Windows store.
+        </p>
         <details class="onboard-help">
           <summary>How do I install it?</summary>
           <ul class="dim">
-            <li><b>Android / Chrome / Firefox:</b> open the downloaded file and confirm
-              "trust for websites".</li>
+            <li><b>Firefox (any OS):</b> Firefox uses its OWN certificate store, so a
+              Windows / system install does not cover it. Open the downloaded file, or
+              go to Settings &rarr; Privacy &amp; Security &rarr; Certificates &rarr;
+              View Certificates &rarr; Authorities &rarr; Import, and check "Trust this
+              CA to identify websites". (Or set
+              <code>security.enterprise_roots.enabled</code> to <code>true</code> in
+              <code>about:config</code> to use the operating system store.)</li>
+            <li><b>Chrome / Edge (Windows, macOS, Android):</b> open the downloaded file
+              and confirm "trust for websites" (they use the OS store).</li>
             <li><b>iOS / iPadOS:</b> the profile downloads, then Settings &rarr; General
               &rarr; VPN &amp; Device Management installs it, and Settings &rarr; General
               &rarr; About &rarr; Certificate Trust Settings turns it on.</li>
-            <li><b>Windows:</b> import it into "Trusted Root Certification Authorities"
-              for your user.</li>
+            <li><b>Windows (system store, for Chrome / Edge):</b> import it into "Trusted
+              Root Certification Authorities" for your user.</li>
           </ul>
         </details>
       </div>

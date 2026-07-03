@@ -443,6 +443,10 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
                 "(or open [/dim][cyan]" + f"{scheme}://{_ca_host}:{chosen_port}"
                 "/localm-ca.crt[/cyan][dim]) to trust it once - then no warning "
                 "and the app installs.[/dim]")
+            console.print(
+                "  [dim]Firefox has its own certificate store: import the CA in "
+                "Firefox (or set about:config security.enterprise_roots.enabled), "
+                "not just Windows. The key screen shows the exact steps.[/dim]")
         _ts_hint = netname.tailscale_rename_hint()
         if _ts_hint:
             console.print(f"  [dim]{_ts_hint}[/dim]")

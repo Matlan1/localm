@@ -94,6 +94,28 @@ test("SEAMLESS: over HTTPS a TRUSTED CA (SW registered) HIDES the cert step - no
     "a returning trusted device is NOT told to reinstall the certificate every time");
 });
 
+test("the cert step surfaces a Firefox-specific note ONLY on Firefox", async () => {
+  // Firefox uses its own certificate store and ignores the Windows/OS one, so a
+  // system install leaves the warning here - the exact case the user hit. The step
+  // must call this out, but only for Firefox (Chrome/Edge use the OS store).
+  const { window } = loadApp({ fetchImpl: keyless401, url: "https://192.168.0.5:8651/" });
+  await tick();
+  window.__swFailed = true;   // untrusted CA over HTTPS -> the cert step is shown
+  const ff = window.document.getElementById("key-gate-cert-ff");
+  assert.ok(ff, "#key-gate-cert-ff exists in the shell");
+
+  const setUA = (ua) => { try { Object.defineProperty(window.navigator, "userAgent",
+    { value: ua, configurable: true }); } catch (e) { /* jsdom */ } };
+
+  setUA("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36");
+  window.updateKeyGateCertStep();
+  assert.equal(ff.style.display, "none", "hidden for Chrome/Edge (they use the OS store)");
+
+  setUA("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0");
+  window.updateKeyGateCertStep();
+  assert.notEqual(ff.style.display, "none", "shown for Firefox (its own cert store)");
+});
+
 test("NET-1: over plain HTTP the cert link stays hidden (loopback dev gate)", async () => {
   const { window } = loadApp({ fetchImpl: keyless401, url: "http://localhost:8642/" });
   await tick();
