@@ -412,15 +412,13 @@ class Launcher(tk.Tk):
         # as the API server. A network bind serves HTTPS automatically (built-in
         # local-CA TLS), so no extra option is needed for encryption.
         ttk.Checkbutton(self.gui_opts,
-                        text="Expose on the network (0.0.0.0, HTTPS - set "
-                             "LOCALM_API_KEY first!)",
+                        text="Expose on the network (0.0.0.0, HTTPS)",
                         variable=self.host_lan).pack(side="left", padx=(16, 0))
         self.gui_opts.grid(row=3, column=0, columnspan=4, sticky="w", pady=(10, 0))
 
         self.serve_opts = ttk.Frame(opt_card, style="Card.TFrame")
         ttk.Checkbutton(self.serve_opts,
-                        text="Expose on the network (0.0.0.0, HTTPS - set "
-                             "LOCALM_API_KEY first!)",
+                        text="Expose on the network (0.0.0.0, HTTPS)",
                         variable=self.host_lan).pack(side="left")
         self.serve_opts.grid(row=4, column=0, columnspan=4, sticky="w", pady=(10, 0))
 
@@ -760,6 +758,24 @@ class Launcher(tk.Tk):
         except Exception:
             pass  # config write is best-effort; the --mode flag still applies
 
+    @staticmethod
+    def _expose_key_plan(mode, host_lan, current_key, auth_mod):
+        """Decide the API key for this launch. Exposing on the network requires
+        one (a loopback-only launch stays open and needs none); if the field is
+        empty we MINT one rather than making the user pre-set LOCALM_API_KEY - the
+        launcher already persists + injects the key, so instructing the user to do
+        it by hand was busywork. Returns ``(key, auto_generated, error)``:
+        *auto_generated* is True when we minted one just now (the caller reveals it
+        and keeps the window open so the user can copy it / pair a phone)."""
+        key = (current_key or "").strip()
+        exposing = mode in ("gui", "serve") and bool(host_lan)
+        if exposing and not key:
+            if auth_mod is None:
+                return "", False, ("Cannot expose on the network: the auth module "
+                                   "is unavailable to mint a key.")
+            return auth_mod.generate_key(), True, None
+        return key, False, None
+
     def _launch(self) -> None:
         cmd = self._build_command()
         if cmd is None:
@@ -770,12 +786,19 @@ class Launcher(tk.Tk):
             env["LOCALM_DEBUG"] = "1"
 
         # --- authentication: persist the key + require flag, inject into env ---
-        key = self.api_key.get().strip()
-        exposing = self.mode.get() in ("gui", "serve") and self.host_lan.get()
-        if exposing and not key:
-            self.status_msg("Set or Generate an API key before exposing on the "
-                            "network", error=True)
+        a = _auth()
+        key, auto_keyed, err = self._expose_key_plan(
+            self.mode.get(), self.host_lan.get(), self.api_key.get(), a)
+        if err:
+            self.status_msg(err, error=True)
             return
+        if auto_keyed:
+            # Surface the freshly minted key: reveal it in the field so the user
+            # can copy it / pair a phone (Companion QR), and keep the window open
+            # below even if "keep open" is off, so it is not lost behind a close.
+            self.api_key.set(key)
+            self.show_key.set(True)
+            self._toggle_key()
         if key and len(key) < 8:
             self.status_msg("API key must be at least 8 characters long.", error=True)
             return
@@ -817,8 +840,14 @@ class Launcher(tk.Tk):
             self.status_msg(f"Launch failed: {e}", error=True)
             return
 
-        self.status_msg("Launched ✓")
-        if not self.keep_open.get():
+        if auto_keyed:
+            self.status_msg("Launched ✓ - minted a network API key (shown above); "
+                            "clients need it (pair a phone via the Companion QR).")
+        else:
+            self.status_msg("Launched ✓")
+        # A just-minted key must stay visible: keep the window open even if "keep
+        # open" is off, so the user can copy the key / pair a phone.
+        if not self.keep_open.get() and not auto_keyed:
             self.after(700, self.destroy)
 
 
