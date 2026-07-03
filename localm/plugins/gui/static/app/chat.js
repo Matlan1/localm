@@ -650,7 +650,11 @@ export function addMessageRow(container, role, text, opts = {}) {
     body.classList.add("msg-literal");
     body.textContent = text;
   } else {
-    renderMarkdown(body, text);
+    // opts.final marks a SETTLED message (a reload / renderChat rebuild), not a
+    // fresh streaming shell - only then does renderMarkdown show its "(no reply
+    // text)" note for a body that rendered to nothing, so a live shell that is
+    // briefly empty before its first token never flashes it.
+    renderMarkdown(body, text, { final: opts.final });
   }
   for (const url of opts.images || []) {
     const img = document.createElement("img");
@@ -813,6 +817,9 @@ export function renderChat() {
       model: m.model,
       cls: tag ? "web-note" : "",
       label: tag ? NOTE_LABELS[tag] : undefined,
+      // A settled turn from history: let renderMarkdown surface a "(no reply
+      // text)" note if this message rendered to a blank body (empty ```fence).
+      final: true,
     });
   });
   // R31: only re-pin to the bottom when the user has not scrolled up. This tail
