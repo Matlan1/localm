@@ -50,7 +50,7 @@ export async function refreshModelsPage() {
     detail.onclick = () => showModelDetail(m.name);
     actions.appendChild(detail);
     if (!m.active) {
-      const use = el("button", "", "use");
+      const use = el("button", "primary", "use");
       use.onclick = async () => {
         use.disabled = true;
         try {
