@@ -1606,6 +1606,8 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
 .pathlist { display: flex; flex-direction: column; gap: 6px; }
 .pathlist-rm { flex: 0 0 auto; padding: 0 9px; display: inline-flex; align-items: center; }
 .pathlist-add { margin-top: 6px; align-self: flex-start; display: inline-flex; align-items: center; gap: 5px; }
+/* "in use" tag on the folder list the current RAG indexing mode enforces. */
+.rag-inuse { color: var(--accent, #4a9eff); font-weight: 600; font-size: 0.85em; }
 /* Plugin catalog: "requires X (missing)" warning under a plugin's description. */
 .plugin-missing-req { color: var(--danger, #d9534f); }
 

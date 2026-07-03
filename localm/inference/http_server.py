@@ -231,6 +231,15 @@ _bearer_scheme = HTTPBearer(auto_error=False)
 SESSION_COOKIE = "localm_session"
 CSRF_HEADER = "X-CSRF-Token"
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
+
+# Hard cap on any request body, rejected (413) from the Content-Length BEFORE the
+# body is buffered or parsed - so a large base64 upload cannot be materialized in
+# memory ahead of a route's own size checks (a decode-time OOM DoS on
+# /api/rag/upload + /extract, CWE-400). 160 MB comfortably fits the largest
+# legitimate upload (100 MB decoded ~= 133 MB base64 + the JSON wrapper) while
+# rejecting anything larger up front. Nothing else the server accepts is remotely
+# this big. Read at request time so a test can monkeypatch it.
+MAX_REQUEST_BODY_BYTES = 160_000_000
 # SEAMLESS: the session cookie PERSISTS so the user stays signed in across a browser
 # or PWA restart, instead of being a session cookie the browser drops on close
 # (which made the key gate - and its "Install certificate" step - reappear every
@@ -931,6 +940,24 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
                                  "localm GUI shell on this machine, or an API key "
                                  "(run 'localm key generate')."},
                     )
+        return await call_next(request)
+
+    @app.middleware("http")
+    async def _limit_body_size(request, call_next):
+        # Reject an over-large body from its Content-Length, BEFORE Starlette reads
+        # and parses it, so a giant base64 upload cannot be buffered into memory
+        # ahead of a route's own caps (the /api/rag/upload + /extract decode-time
+        # OOM DoS). Read the module global at call time so it stays monkeypatchable.
+        cl = request.headers.get("content-length")
+        if cl is not None:
+            try:
+                too_big = int(cl) > MAX_REQUEST_BODY_BYTES
+            except ValueError:
+                too_big = False
+            if too_big:
+                return JSONResponse(
+                    status_code=413,
+                    content={"detail": "Request body too large."})
         return await call_next(request)
 
     # Security response headers (R41 defense-in-depth). The user-content render

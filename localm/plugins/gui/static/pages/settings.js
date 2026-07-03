@@ -900,27 +900,34 @@ export async function refreshSettingsPage() {
   // section (not a static card) is the default tab. The owner-gated panels then
   // refresh: each may rebuild the nav, but they preserve the active section.
   buildSettingsNav();
-  syncRagIndexingModeVisibility();
+  syncRagIndexingModeHint();
   refreshPairingQR();
   refreshCompanion();
   refreshKeysPanel();
 }
 
-/** Show only the folder list that the current RAG indexing MODE uses: the Allowed
- *  list in whitelist mode, the Denied list in blacklist mode. Both are stored
- *  separately (so flipping the mode never reinterprets your entries); this just
- *  hides the one that is not in effect. A hidden list still saves its value
- *  unchanged. No-op when the owner-only Knowledge fields are not present (a
- *  non-owner never receives them). */
-export function syncRagIndexingModeVisibility() {
+/** Mark which folder list the current RAG indexing MODE actually uses (Allowed in
+ *  whitelist mode, Denied in blacklist mode) with a small "in use" tag, while
+ *  keeping BOTH lists visible and editable - you can curate both without flipping
+ *  the mode. The lists are stored separately, so the mode never reinterprets your
+ *  entries. No-op when the owner-only Knowledge fields are absent (a non-owner
+ *  never receives them). */
+export function syncRagIndexingModeHint() {
   const sel = document.querySelector('select[data-key="rag_indexing_mode"]');
   const allow = document.querySelector('[data-field-key="rag_allowed_roots"]');
   const deny = document.querySelector('[data-field-key="rag_denied_roots"]');
   if (!sel || !allow || !deny) return;
+  const mark = (wrap, on) => {
+    const label = wrap.querySelector("label");
+    if (!label) return;
+    let tag = label.querySelector(".rag-inuse");
+    if (on && !tag) label.appendChild(el("span", "rag-inuse", " · in use"));
+    else if (!on && tag) tag.remove();
+  };
   const apply = () => {
     const whitelist = sel.value !== "blacklist";
-    allow.style.display = whitelist ? "" : "none";
-    deny.style.display = whitelist ? "none" : "";
+    mark(allow, whitelist);
+    mark(deny, !whitelist);
   };
   sel.addEventListener("change", apply);
   apply();
