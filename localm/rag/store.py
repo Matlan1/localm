@@ -32,7 +32,8 @@ from typing import Callable, Optional
 from localm.debuglog import logger as _log
 from .bm25 import BM25
 from .chunk import chunk_text
-from .extract import EXTRACTABLE_SUFFIXES, ExtractError, extract_text
+from .extract import (EXTRACTABLE_SUFFIXES, ExtractError, extract_bytes,
+                      extract_text)
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
@@ -548,6 +549,112 @@ class Collection:
                 "chunks": len(new_chunks),
             }
             say(f"indexed {f.name} ({len(new_chunks)} chunks)")
+
+        self._save()
+        return {"added": added, "updated": updated, "skipped": skipped,
+                "failed": failed, "chunks": len(self._chunks)}
+
+    def add_uploads(self, uploads: list, *, embed_fn: Optional[EmbedFn] = None,
+                    on_progress: Optional[ProgressFn] = None,
+                    force: bool = False) -> dict:
+        """Index documents UPLOADED from the caller's own device (the per-device
+        path for a client that cannot browse the server disk).
+
+        Each item is ``{"filename": str, "data": bytes}``. Extraction runs in
+        memory (``extract_bytes`` - same zip-bomb / encoding guards as chat
+        attachments); the resulting chunks and optional vectors ARE persisted,
+        because a knowledge base is explicit user data like ``add_paths``. There is
+        deliberately NO filesystem confinement here: nothing on the server disk is
+        read, so the whitelist/blacklist policy does not apply - the bytes are the
+        caller's own device content. Docs are keyed ``upload:<filename>`` and
+        deduped by content hash, so re-uploading an unchanged file is skipped.
+        Returns the same counters as ``add_paths``.
+
+        The uploaded BYTES are not retained (only the extracted chunks/vectors), so
+        an ``upload:<name>`` doc cannot be re-read from disk: ``localm rag repair``
+        simply skips these keys (Path('upload:x') is not a file) - their chunks
+        persist and are never lost, they just cannot be re-embedded from source.
+        """
+        with _collection_lock(self.name):
+            self._load()
+            return self._add_uploads_locked(
+                uploads, embed_fn=embed_fn, on_progress=on_progress, force=force)
+
+    def _add_uploads_locked(self, uploads: list, *,
+                            embed_fn: Optional[EmbedFn] = None,
+                            on_progress: Optional[ProgressFn] = None,
+                            force: bool = False) -> dict:
+        """The add_uploads body. MUST run under _collection_lock after _load().
+
+        Mirrors the per-document body of _add_paths_locked (chunk -> embed ->
+        replace-prior-chunks -> record meta), but sourced from in-memory bytes with
+        a hash-only dedup (no fs mtime/size). Kept as a separate loop rather than
+        refactoring the battle-tested path loop, so the server-disk path is
+        untouched."""
+        say = on_progress or (lambda _t: None)
+        added = updated = skipped = 0
+        failed: list = []
+        embed_broken = embed_fn is None
+
+        for up in uploads:
+            filename = (str(up.get("filename") or "").strip() or "upload")
+            data = up.get("data") or b""
+            key = f"upload:{filename}"
+            digest = hashlib.sha256(data).hexdigest()
+            known = self._meta["docs"].get(key)
+            if not force and known and known.get("hash") == digest:
+                skipped += 1
+                continue
+            try:
+                text = extract_bytes(data, filename)
+            except ExtractError as e:
+                failed.append({"path": key, "error": str(e)})
+                say(f"skip {filename}: {e}")
+                continue
+            new_chunks = chunk_text(text)
+            for c in new_chunks:
+                c["source"] = key
+
+            vectors: list = [None] * len(new_chunks)
+            if not embed_broken and new_chunks:
+                try:
+                    vecs = embed_fn([c["text"] for c in new_chunks])
+                except Exception as e:
+                    embed_broken = True
+                    say(f"embeddings unavailable ({e}) - indexing lexical-only")
+                else:
+                    if len(vecs) == len(new_chunks):
+                        new_dim = _first_dim(vecs)
+                        if (self._vec_dim is not None and new_dim is not None
+                                and new_dim != self._vec_dim):
+                            raise ValueError(
+                                f"Embedding dimension changed "
+                                f"({self._vec_dim} -> {new_dim}): this collection "
+                                f"was built with a different embedding model. "
+                                f"Rebuild it (delete and re-add) or index with the "
+                                f"original model.")
+                        vectors = vecs
+                        if self._vec_dim is None and new_dim is not None:
+                            self._vec_dim = new_dim
+
+            if known:
+                keep = [i for i, c in enumerate(self._chunks)
+                        if c.get("source") != key]
+                self._chunks = [self._chunks[i] for i in keep]
+                if self._vectors is not None:
+                    self._vectors = [self._vectors[i] for i in keep]
+                updated += 1
+            else:
+                added += 1
+            if self._vectors is None:
+                self._vectors = [None] * len(self._chunks)
+            self._chunks.extend(new_chunks)
+            self._vectors.extend(vectors)
+            self._meta["docs"][key] = {
+                "size": len(data), "hash": digest,
+                "chunks": len(new_chunks), "uploaded": True,
+            }
+            say(f"indexed {filename} ({len(new_chunks)} chunks)")
 
         self._save()
         return {"added": added, "updated": updated, "skipped": skipped,

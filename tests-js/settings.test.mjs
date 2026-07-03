@@ -205,7 +205,7 @@ test("pathlist is hidden without host filesystem access", async () => {
     "no folder rows render without host FS access");
 });
 
-test("indexing mode toggle shows the active folder list", async () => {
+test("indexing mode marks the active list; both stay visible", async () => {
   const SCHEMA = { fields: [
     { key: "rag_indexing_mode", widget: "select", label: "Indexing folder rule",
       help: "h", group: "Knowledge", owner: "rag", admin_only: true,
@@ -231,14 +231,19 @@ test("indexing mode toggle shows the active folder list", async () => {
   const deny = doc.querySelector('[data-field-key="rag_denied_roots"]');
   const sel = doc.querySelector('select[data-key="rag_indexing_mode"]');
   assert.ok(allow && deny && sel, "all three RAG controls render for the owner");
-  // whitelist (default): Allowed shown, Denied hidden.
-  assert.notEqual(allow.style.display, "none", "Allowed shows in whitelist mode");
-  assert.equal(deny.style.display, "none", "Denied hidden in whitelist mode");
-  // flip to blacklist -> Denied shown, Allowed hidden.
+  // BOTH lists stay visible (editable) in every mode.
+  assert.notEqual(allow.style.display, "none", "Allowed visible");
+  assert.notEqual(deny.style.display, "none", "Denied visible");
+  // whitelist (default): the "in use" tag is on Allowed, not Denied.
+  assert.ok(allow.querySelector(".rag-inuse"), "Allowed marked in use (whitelist)");
+  assert.equal(deny.querySelector(".rag-inuse"), null, "Denied not marked");
+  // flip to blacklist -> the tag moves to Denied; both still visible.
   sel.value = "blacklist";
   sel.dispatchEvent(new win.Event("change", { bubbles: true }));
-  assert.equal(allow.style.display, "none", "Allowed hidden in blacklist mode");
-  assert.notEqual(deny.style.display, "none", "Denied shows in blacklist mode");
+  assert.equal(allow.querySelector(".rag-inuse"), null, "Allowed no longer marked");
+  assert.ok(deny.querySelector(".rag-inuse"), "Denied marked in use (blacklist)");
+  assert.notEqual(allow.style.display, "none", "Allowed still visible");
+  assert.notEqual(deny.style.display, "none", "Denied still visible");
 });
 
 test("each section saves only its own keys (per-section PATCH)", async () => {
