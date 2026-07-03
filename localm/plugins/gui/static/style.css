@@ -1004,6 +1004,10 @@ pre:hover .canvas-btn { opacity: 1; }
 .ic-audio  { color: var(--ic-audio); }
 .ic-video  { color: var(--ic-video); }
 .ic-code   { color: var(--ic-code); }
+/* a data-table name cell that leads with a colored content icon */
+.data-table .name-cell { display: flex; align-items: center; gap: 9px; }
+.data-table .name-cell .ic { flex: 0 0 auto; }
+.data-table .name-cell .ic svg { width: 16px; height: 16px; }
 /* A real section header inside a card: leading icon + title + one-line description, so no page
    shows a bare grey h3. Use .card-head { icon + .card-head-text { h3 + .card-desc } }. */
 .card-head { display: flex; align-items: center; gap: 10px; margin: 0 0 14px;
