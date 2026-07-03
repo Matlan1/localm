@@ -170,12 +170,24 @@ class TestLaunchGrantHandoff:
         assert r.status_code == 303
         assert r.headers["location"] == "/?view=models"
 
-    def test_grant_not_redeemed_on_lan_bind(self, monkeypatch):
-        # A LAN bind seeds nothing and must not redeem a grant either (only a
-        # loopback bind auto-authenticates a browser).
+    def test_grant_IS_redeemed_on_a_network_bind(self, monkeypatch):
+        # THE host-on-a-network-bind fix: the person launching is on THIS machine and
+        # must be handed a session even when the server is exposed on 0.0.0.0. The
+        # grant is a single-use secret only the launcher knows, so possessing it is
+        # the authorization regardless of bind (a network client never gets it).
         monkeypatch.setenv("LOCALM_API_KEY", "REALKEY123")
         app = _app("0.0.0.0")
         grant = self._grant(app)
         r = TestClient(app).get(f"/?localm_token={grant}", follow_redirects=False)
+        assert r.status_code == 303                          # redeemed on the LAN bind
+        assert "localm_session=" in _set_cookies(r)
+        assert "REALKEY123" not in _set_cookies(r)           # opaque session, not the key
+
+    def test_network_bind_without_a_grant_still_seeds_nothing(self, monkeypatch):
+        # The security boundary the grant does NOT cross: a plain GET / on a network
+        # bind (a network client, no grant) is still handed NO session - only the
+        # secret-bearing grant, or a loopback bind, auto-authenticates.
+        monkeypatch.setenv("LOCALM_API_KEY", "REALKEY123")
+        r = TestClient(_app("0.0.0.0")).get("/", follow_redirects=False)
         assert r.status_code == 200
         assert "localm_session=" not in _set_cookies(r)
