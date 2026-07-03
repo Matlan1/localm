@@ -94,6 +94,18 @@ export function iconEl(name, cls) {
 }
 window.iconEl = iconEl;
 
+/** A designed empty state: a centred icon, a line of text, and an optional
+ *  "do this next" hint. Replaces the bare `.sub` "No X yet" lines so every empty
+ *  list reads as intentional (design standard rule 7). */
+export function emptyState(iconName, text, hint) {
+  const box = el("div", "empty-state");
+  box.appendChild(iconEl(iconName, "empty-state-ic"));
+  box.appendChild(el("div", "empty-state-text", text));
+  if (hint) box.appendChild(el("div", "empty-state-hint", hint));
+  return box;
+}
+window.emptyState = emptyState;
+
 /** Replace every <span data-icon="NAME"> placeholder under `root` with its SVG
  *  (once). Static markup in index.html carries the placeholders; this runs on
  *  load and can be re-run after a fragment is inserted. */

@@ -9,6 +9,7 @@
 import { pickDirectory } from "../app/picker.js";
 import { $, GIB, authHeaders, confirmDanger, downloadRate, el, fmtBytes, fmtDuration, openModal, streamJob, toast } from "../app/helpers.js";
 import { onServerUnreachable } from "../app/init.js";
+import { emptyState } from "../app/icons.js";
 import { modelCache, refreshModels, switchModel } from "../app/models-sidebar.js";
 
 /* ================================================================ */
@@ -25,7 +26,8 @@ export async function refreshModelsPage() {
   const box = $("models-table");
   box.replaceChildren();
   if (!modelCache.models.length) {
-    box.appendChild(el("div", "sub", "No models registered yet - pull one above."));
+    box.appendChild(emptyState("models", "No models yet",
+      "Pull a model above, or search HuggingFace to add your first one."));
     return;
   }
   const table = el("table", "data-table");

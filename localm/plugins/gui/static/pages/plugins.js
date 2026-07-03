@@ -7,6 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { $, authHeaders, el, readSSE, toast } from "../app/helpers.js";
+import { emptyState } from "../app/icons.js";
 import { refreshPluginCommands } from "../app/settings-perf.js";
 
 /* ================================================================ */
@@ -286,7 +287,8 @@ export async function refreshPluginsPage() {
     if (!r.ok) throw new Error(r.statusText);
     const data = await r.json();
     if (!data.plugins.length) {
-      box.appendChild(el("div", "sub", "No external plugins installed."));
+      box.appendChild(emptyState("plugins", "No external plugins installed",
+        "Install one from the catalog above to add capabilities."));
     } else {
       const table = el("table", "data-table");
       const thead = el("thead");
