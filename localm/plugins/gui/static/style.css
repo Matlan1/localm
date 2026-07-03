@@ -1517,6 +1517,16 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
 .key-qr-img { width: 200px; max-width: 100%; }
 .key-qr-img svg { width: 100%; height: auto; display: block; background: #fff;
   padding: 8px; border-radius: 8px; }
+/* A QR must render dark-on-light or it will not scan. The server already pins
+   the modules to fill="#000000" over a fill="#ffffff" background rect (see
+   routes/pairing.py::_pairing_qr_svg), and we pin the same colors here so the
+   QR stays scannable even if a global `svg { fill: ... }` rule (e.g. an icon
+   rule using currentColor) is ever added: a CSS fill overrides the SVG's
+   presentation-attribute fills and, in the dark theme, would wash the modules
+   or background out. One <path> = every module, one <rect> = the quiet zone;
+   do NOT turn these into theme variables. */
+.pairing-qr svg path, .key-qr-img svg path { fill: #000; }
+.pairing-qr svg rect, .key-qr-img svg rect { fill: #fff; }
 .key-secret { margin-top: 10px; }
 .key-secret-value {
   font-family: var(--mono); font-size: 12px; margin: 4px 0; width: 100%;
