@@ -75,7 +75,11 @@ class TestShellRoute:
         assert "REALKEY123" not in r.text
         assert "localStorage.setItem('localm.apiKey'" not in r.text
         cookies = _set_cookies(r)
-        assert "localm_session=REALKEY123" in cookies
+        # Decoupled sessions (S2 hardened): the cookie carries an OPAQUE session id,
+        # never the raw key, so the key never lands in a cookie jar and rolling it
+        # does not invalidate the session. The key must appear NOWHERE in Set-Cookie.
+        assert "REALKEY123" not in cookies
+        assert "localm_session=" in cookies
         assert "httponly" in cookies.lower()
         assert "samesite=strict" in cookies.lower()
         assert "localm_csrf=" in cookies

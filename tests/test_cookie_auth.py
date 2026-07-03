@@ -101,6 +101,35 @@ def test_login_with_bad_key_rejected_no_cookie(client):
     assert not [c for c in _set_cookies(r) if c.startswith(SESSION_COOKIE + "=")]
 
 
+def test_session_cookie_is_opaque_not_the_key(client):
+    """The session cookie must carry an OPAQUE id, never the raw key: the durable
+    secret must not sit in a browser cookie jar (the pre-rework design flaw)."""
+    r = _login(client)
+    assert r.status_code == 200
+    sid = client.cookies.get(SESSION_COOKIE)
+    assert sid and sid != SECRET
+    assert SECRET not in " ".join(_set_cookies(r))
+
+
+def test_session_survives_owner_key_roll(client, tmp_path, monkeypatch):
+    """THE reported bug, at the HTTP layer: after login, rolling the owner key must
+    NOT log the browser out. The cookie is a session id decoupled from the key, so
+    a protected request over the SAME cookie still authorizes after the roll."""
+    assert _login(client).status_code == 200
+    assert client.get("/v1/models").status_code == 200
+    # Roll the owner key (what the launcher's Generate + Launch does). verify() now
+    # accepts only the NEW key, but the session store is untouched.
+    from localm import auth
+    monkeypatch.setenv("LOCALM_API_KEY", "a-brand-new-owner-key-xyz")
+    assert auth.get_api_key() == "a-brand-new-owner-key-xyz"
+    # Same session cookie, new key active -> still authorized (no key gate).
+    assert client.get("/v1/models").status_code == 200
+    # And a state change still works with the CSRF token from the same login.
+    token = client.cookies.get(CSRF_COOKIE)
+    assert client.post("/v1/models/unload",
+                       headers={CSRF_HEADER: token}).status_code == 200
+
+
 # --------------------------------------------------------------------------- #
 #  Cookie auth works for reads; CSRF gate for writes                          #
 # --------------------------------------------------------------------------- #

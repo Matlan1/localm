@@ -47,9 +47,18 @@ def register(app: FastAPI, ctx) -> None:
         held = verify(presented) if presented else None
         if held is None:
             raise HTTPException(401, "Invalid API key")
+        # Mint an OPAQUE server-side session; the cookie carries the session id,
+        # never the raw key (so rolling the key no longer logs the browser out and
+        # the durable secret never sits in a cookie jar). The scope/identity/
+        # fs-access snapshot is taken now so the session stays valid across a roll.
+        from localm import scopes as S, sessions
+        from localm.auth import _hash_key, fs_access_for
+        fs = "host" if S.ADMIN in held else fs_access_for(presented, "none")
+        sid = sessions.create(scopes=held, key_hash=_hash_key(presented),
+                              fs_access=fs)
         secure = request.url.scheme == "https"
         csrf = secrets.token_urlsafe(32)
-        response.set_cookie(_hs.SESSION_COOKIE, presented, httponly=True,
+        response.set_cookie(_hs.SESSION_COOKIE, sid, httponly=True,
                             secure=secure, samesite="strict", path="/",
                             max_age=_hs.SESSION_MAX_AGE)
         response.set_cookie(_hs.CSRF_COOKIE, csrf, httponly=False,
@@ -71,6 +80,11 @@ def register(app: FastAPI, ctx) -> None:
                 403,
                 "Missing or invalid CSRF token. Include the localm_csrf "
                 "cookie value in the X-CSRF-Token header.")
+        # Real, server-side logout: drop the session row so the cookie value can
+        # never be replayed (deleting the cookie alone left a valid server session).
+        if source == "cookie" and token:
+            from localm import sessions
+            sessions.revoke(token)
         secure = request.url.scheme == "https"
         response.delete_cookie(_hs.SESSION_COOKIE, path="/", httponly=True, secure=secure, samesite="strict")
         response.delete_cookie(_hs.CSRF_COOKIE, path="/", httponly=False, secure=secure, samesite="strict")
@@ -98,6 +112,12 @@ def register(app: FastAPI, ctx) -> None:
                 "cookie value in the X-CSRF-Token header.")
         from localm.auth import clear_api_key
         clear_api_key()
+        # The key that minted every current session is gone; those sessions carry
+        # their own ADMIN scope snapshot, so they MUST be revoked or a leftover
+        # cookie would keep full access after the key was cleared (would defeat the
+        # clear). Sign out everywhere.
+        from localm import sessions
+        sessions.revoke_all()
         secure = request.url.scheme == "https"
         # Invalidate the session cookie immediately so the browser is forced
         # back to the key gate on the next navigation (the old cookie value
@@ -115,11 +135,12 @@ def register(app: FastAPI, ctx) -> None:
         """Report whether the caller is authenticated, so the GUI can show or
         hide its key gate without ever reading the key. *authed* reflects the
         presented cookie/header; *required* is True when a key is configured."""
-        from localm.auth import (any_key_configured, require_auth_enabled,
-                                  verify)
+        from localm.auth import any_key_configured, require_auth_enabled
         configured = any_key_configured()
-        token, _ = _request_token(request)
-        held = verify(token) if (configured and token) else None
+        token, source = _request_token(request)
+        prin = (_hs._principal_from_token(token, source)
+                if (configured and token) else None)
+        held = prin[0] if prin else None
         return {"authed": held is not None,
                 "scopes": sorted(held) if held else [],
                 "required": configured or require_auth_enabled()}

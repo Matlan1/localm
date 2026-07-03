@@ -262,6 +262,33 @@ def _request_token(request) -> tuple[Optional[str], str]:
     return None, "none"
 
 
+def _principal_from_token(token, source):
+    """Resolve a presented credential to ``(scopes, key_hash, fs_access)`` or None.
+
+    A ``header`` token is a raw API key -> ``auth.verify()``. A ``cookie`` token is
+    now an OPAQUE SESSION ID -> the server-side session store (``localm.sessions``),
+    which returns the scope / owning-key / fs-access SNAPSHOT taken at login. So a
+    cookie session stays valid across an owner-key roll (the reported bug), and the
+    durable key never has to live in the cookie. ``key_hash`` is the sha256 of the
+    key that minted the session, so ``principal_id`` over a cookie matches the same
+    key presented as a bearer (job ownership parity)."""
+    if not token:
+        return None
+    if source == "cookie":
+        from localm import sessions
+        rec = sessions.lookup(token)
+        if rec is None:
+            return None
+        return (set(rec.get("scopes", [])), rec.get("key_hash"),
+                rec.get("fs_access", "none"))
+    from localm.auth import _hash_key, fs_access_for, verify
+    held = verify(token)
+    if held is None:
+        return None
+    fs = "host" if scopes.ADMIN in held else fs_access_for(token, "none")
+    return held, _hash_key(token), fs
+
+
 def _csrf_double_submit_ok(request) -> bool:
     """Double-submit CSRF check: the ``X-CSRF-Token`` header must equal the
     readable ``localm_csrf`` cookie (both set at login). A cross-site page can
@@ -279,7 +306,7 @@ def _enforce_request(request: Request, scope: Optional[str]) -> None:
     *scope* (None = 'any valid key') must be granted (the owner key implies every
     scope). Cookie-sourced auth on an unsafe method additionally requires a valid
     double-submit CSRF token."""
-    from localm.auth import any_key_configured, require_auth_enabled, verify
+    from localm.auth import any_key_configured, require_auth_enabled
     if not any_key_configured():
         if require_auth_enabled():
             raise HTTPException(
@@ -288,9 +315,10 @@ def _enforce_request(request: Request, scope: Optional[str]) -> None:
                        "(set one via the launcher or LOCALM_API_KEY)")
         return  # open/dev mode
     token, source = _request_token(request)
-    held = verify(token) if token else None
-    if held is None:
+    prin = _principal_from_token(token, source)
+    if prin is None:
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
+    held = prin[0]
     if source == "cookie" and request.method not in _SAFE_METHODS:
         if not _csrf_double_submit_ok(request):
             raise HTTPException(
@@ -320,11 +348,12 @@ def caller_scopes(request: Request) -> Optional[set]:
     None in open mode / when no valid key is presented. Routes use this to make
     authorisation decisions that depend on *who* the caller is (e.g. only an
     owner/ADMIN principal may mint keys carrying privileged scopes)."""
-    from localm.auth import any_key_configured, verify
+    from localm.auth import any_key_configured
     if not any_key_configured():
         return None
-    token, _ = _request_token(request)
-    return verify(token) if token else None
+    token, source = _request_token(request)
+    prin = _principal_from_token(token, source)
+    return prin[0] if prin else None
 
 
 def principal_id(request: Request) -> Optional[str]:
@@ -334,10 +363,17 @@ def principal_id(request: Request) -> Optional[str]:
     is identical whether the key arrives via the Authorization header or the
     session cookie. Used to bind a background job to the key that created it
     (KEY-SCOPE-2), so only that key (or an admin/owner) may stream or cancel it."""
-    from localm.auth import _hash_key
-    token, _ = _request_token(request)
+    token, source = _request_token(request)
     if not token or not token.strip():
         return None
+    if source == "cookie":
+        # A cookie is an opaque session id; its stable identity is the hash of the
+        # key that MINTED the session (recorded at login), so a job created in the
+        # browser and cancelled from the CLI with the same key share a principal.
+        from localm import sessions
+        rec = sessions.lookup(token)
+        return rec.get("key_hash") if rec else None
+    from localm.auth import _hash_key
     return _hash_key(token.strip())
 
 
@@ -364,16 +400,17 @@ def effective_fs_access(request: Request) -> str:
     legacy key); no valid key -> "none". Filesystem reach is a per-credential dial
     kept deliberately INDEPENDENT of ownership, so an owner can pair one of their
     own devices with a lower-reach key."""
-    from localm.auth import any_key_configured, fs_access_for
+    from localm.auth import any_key_configured
     if not any_key_configured():
         return "host"                       # open/dev mode = loopback owner
-    held = caller_scopes(request)
-    if held is None:
+    token, source = _request_token(request)
+    prin = _principal_from_token(token, source)
+    if prin is None:
         return "none"                       # keys configured, none/invalid presented
+    held, _key_hash, fs = prin
     if scopes.ADMIN in held:
-        return "host"                       # owner key
-    token, _ = _request_token(request)
-    return fs_access_for(token, "none")
+        return "host"                       # owner key / owner session
+    return fs                               # bearer key or session fs-access snapshot
 
 
 def require_fs_host(request: Request) -> None:

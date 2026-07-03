@@ -92,15 +92,24 @@ def _index_html_with_shell_token(token: str) -> str:
 
 
 def _set_session_cookies(response, key: str, *, secure: bool) -> None:
-    """Set the S2 auth cookies on *response*: the HttpOnly ``localm_session``
-    cookie (the API key, unreadable by page JS) plus a readable ``localm_csrf``
-    token for double-submit CSRF. Names match http_server's SESSION_COOKIE /
-    CSRF_COOKIE; both carry SESSION_MAX_AGE so the key PERSISTS across a browser/
-    PWA restart (SEAMLESS) instead of being dropped as a session cookie."""
+    """Establish the S2 auth cookies on *response* for a loopback owner: mint an
+    OPAQUE server-side session for the current owner *key* and set the HttpOnly
+    ``localm_session`` cookie to the SESSION ID (never the key, so it never touches
+    page JS and rolling the key does not invalidate it), plus a readable
+    ``localm_csrf`` token for double-submit CSRF. Names match http_server's
+    SESSION_COOKIE / CSRF_COOKIE; both carry SESSION_MAX_AGE so the session PERSISTS
+    across a browser/PWA restart (SEAMLESS). No-op if *key* is not a valid key."""
     import secrets as _secrets
+    from localm import scopes as S, sessions
+    from localm.auth import _hash_key, fs_access_for, verify
     from localm.inference.http_server import (CSRF_COOKIE, SESSION_COOKIE,
                                               SESSION_MAX_AGE)
-    response.set_cookie(SESSION_COOKIE, key, httponly=True, secure=secure,
+    held = verify(key)
+    if held is None:
+        return
+    fs = "host" if S.ADMIN in held else fs_access_for(key, "none")
+    sid = sessions.create(scopes=held, key_hash=_hash_key(key), fs_access=fs)
+    response.set_cookie(SESSION_COOKIE, sid, httponly=True, secure=secure,
                         samesite="strict", path="/", max_age=SESSION_MAX_AGE)
     response.set_cookie(CSRF_COOKIE, _secrets.token_urlsafe(32), httponly=False,
                         secure=secure, samesite="strict", path="/",
@@ -382,10 +391,19 @@ def attach_gui(
         # app.js / index.html is then picked up without the user clearing caches).
         headers = {"Cache-Control": "no-cache"}
         if key and loopback:
-            # Protected mode on loopback: establish the HttpOnly session cookie
-            # directly so the key never touches page JS / localStorage (S2).
+            # Protected mode on loopback: establish an HttpOnly session cookie so
+            # the key never touches page JS / localStorage (S2). Only MINT a new
+            # session when the browser has no valid one, so an ordinary reload does
+            # not spawn a session each time - and, crucially, a browser whose
+            # session is still valid after an owner-key ROLL stays signed in (the
+            # session is decoupled from the key), instead of being bounced to the
+            # key gate (the reported bug).
+            from localm.inference.http_server import SESSION_COOKIE
+            from localm import sessions as _sessions
+            existing = (request.cookies.get(SESSION_COOKIE) or "").strip()
             resp = HTMLResponse(_index_html_with_shell_token(""), headers=headers)
-            _set_session_cookies(resp, key, secure=request.url.scheme == "https")
+            if not (existing and _sessions.lookup(existing) is not None):
+                _set_session_cookies(resp, key, secure=request.url.scheme == "https")
             return resp
         if not key and loopback:
             # Open mode on loopback: seed the per-process shell token as a JS

@@ -106,8 +106,14 @@ def register(app: FastAPI, ctx) -> None:
         # did not already hold via the shell token.
         if was_open and _is_loopback(getattr(app.state, "bind_host", "127.0.0.1")):
             owner = auth.get_api_key() or auth.regenerate_key()
+            # Hand this browser an OPAQUE owner session (id in the cookie, never the
+            # key), so it keeps full access and survives a later key roll - same
+            # decoupled-session model as the login/auto-seed paths.
+            from localm import sessions
+            sid = sessions.create(scopes={scopes.ADMIN},
+                                  key_hash=auth._hash_key(owner), fs_access="host")
             secure = request.url.scheme == "https"
-            response.set_cookie(_hs.SESSION_COOKIE, owner, httponly=True,
+            response.set_cookie(_hs.SESSION_COOKIE, sid, httponly=True,
                                 secure=secure, samesite="strict", path="/",
                                 max_age=_hs.SESSION_MAX_AGE)
             response.set_cookie(_hs.CSRF_COOKIE, secrets.token_urlsafe(32),
