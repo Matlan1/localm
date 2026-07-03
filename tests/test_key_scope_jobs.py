@@ -93,13 +93,19 @@ class TestJobOwnerBinding:
                           headers=_hdr(a)).status_code == 200
 
     def test_cookie_auth_same_key_matches_owner(self, scoped_app):
-        """The GUI authenticates by the session cookie; the principal id must be
-        identical for the same key whether it arrives via header or cookie."""
-        from localm import auth
+        """The GUI authenticates by an OPAQUE session cookie minted at login; the
+        principal id must be identical for the same key whether it arrives via the
+        Authorization header or via a session cookie (job ownership parity)."""
+        from localm import auth, sessions
         a = auth.create_key("A", [S.MODELS_READ])["key"]
         job = _inject(scoped_app, owner=auth._hash_key(a))
+        # A session minted from key `a` records _hash_key(a) as its owning
+        # principal; the cookie value is the OPAQUE session id, never the key.
+        sid = sessions.create(scopes={S.MODELS_READ}, key_hash=auth._hash_key(a),
+                              fs_access="none")
         with TestClient(scoped_app) as c:
-            c.cookies.set("localm_session", a)   # GUI cookie auth (safe GET, no CSRF)
+            assert sid != a                    # the raw key is never the cookie value
+            c.cookies.set("localm_session", sid)   # GUI cookie auth (safe GET, no CSRF)
             assert c.get(f"/api/jobs/{job.id}/events").status_code == 200
 
     def test_missing_job_is_404(self, scoped_app):

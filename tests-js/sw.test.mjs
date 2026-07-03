@@ -98,6 +98,51 @@ function loadSWWithCaches(existingKeys) {
   return { handlers, deleted };
 }
 
+test("navigations are network-first (the shell is never served stale from cache when online)", async () => {
+  // Auth correctness depends on this: a navigation must reach the server so the
+  // loopback session auto-seed / one-time-token handoff runs and the fresh shell
+  // (with the current CSRF derivation) is delivered - never a cached logged-in/out
+  // shell. The cached index.html is only a fallback when the network fails.
+  const handlers = {};
+  let networkHit = false;
+  const self = {
+    location: { origin: "https://localhost:8642" },
+    addEventListener: (t, f) => { handlers[t] = f; },
+    skipWaiting: () => {}, clients: { claim: () => {} },
+  };
+  const caches = {
+    open: async () => ({ put: () => {}, add: () => {}, addAll: () => {} }),
+    match: async () => ({ cached: true }),   // a cache entry EXISTS...
+    keys: async () => [], delete: async () => {},
+  };
+  const netResp = { ok: true, network: true, clone: () => ({}) };
+  vm.runInNewContext(SW_SRC, {
+    self, caches, URL, Promise, console,
+    fetch: async () => { networkHit = true; return netResp; },
+  }, { filename: "sw.js" });
+
+  let responded;
+  handlers.fetch({
+    request: { method: "GET", url: "https://localhost:8642/", mode: "navigate" },
+    respondWith: (p) => { responded = p; },
+  });
+  const res = await responded;
+  assert.equal(networkHit, true, "a navigation must hit the network first");
+  assert.equal(res.network, true, "...and return the live response, not the cached shell");
+});
+
+test("index.html ships the pre-SW /?localm_reset=1 kill switch inside <head>", () => {
+  const html = readFileSync(
+    join(HERE, "..", "localm", "plugins", "gui", "static", "index.html"), "utf8");
+  const guardIdx = html.indexOf("localm_reset=1");
+  assert.ok(guardIdx !== -1, "the kill-switch guard must be present");
+  // It must live in <head> so it runs before the deferred app modules (which a
+  // wedged SW could serve stale) - the one recovery path a bad SW cannot break.
+  assert.ok(guardIdx < html.indexOf("</head>"), "the kill switch must be in <head>");
+  assert.ok(guardIdx < html.indexOf('src="/app/main.js"'),
+    "the kill switch must precede the app module entry");
+});
+
 test("activate purges only OLD shell caches, never the transformers model cache (REC-KOKORO-RELOAD)", async () => {
   // Read the current shell cache name straight from the source so this test
   // does not need updating on every version bump.

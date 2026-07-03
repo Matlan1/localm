@@ -8,7 +8,7 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { chat, ingestSharedFiles, initServerConversations, refreshCtxLimit, renderChat, renderConvList } from "./chat.js";
 import { populateSetupModels, reattachSessions } from "./coder.js";
-import { $, authHeaders, el } from "./helpers.js";
+import { $, authHeaders, el, refreshCsrf } from "./helpers.js";
 import { syncLogoStyleFromConfig } from "./logo.js";
 import { addRevealToggle, applyInstallGateUI, dismissInstallGate, isIOSSafari, refreshModels, shouldShowInstallGate, showInstallGate, showKeyGate, startHwStats, startQrScan, stopQrScan, submitKeyGate } from "./models-sidebar.js";
 import { loadClientPlugins, onVoicePick, populateVoicePicker, refreshKbSelect, refreshMemory, refreshPersonas, refreshPluginCommands, refreshVoiceStatus, setupPerfCard } from "./settings-perf.js";
@@ -17,6 +17,37 @@ import { VIEWS, showView } from "./tabs.js";
 /* ================================================================ */
 /*  Init                                                             */
 /* ================================================================ */
+
+// CSRF self-heal: a cookie-authed write can 403 if the in-memory CSRF token went
+// stale (e.g. the server restarted and rotated its per-process secret; or a POST
+// fired before the boot token fetch resolved). On such a 403, refresh the token
+// from /api/session and retry the write ONCE. Safe: a 403 is rejected before the
+// handler runs, so nothing is duplicated. Same-origin only, and only when we
+// actually sent an X-CSRF-Token (one of our own writes). Installed before any
+// fetch so it covers boot too. This, plus deriving the token from the session
+// (never a separate cookie), is what makes "missing CSRF token" unreachable.
+const _rawFetch = window.fetch.bind(window);
+window.fetch = async function (input, init) {
+  const res = await _rawFetch(input, init);
+  try {
+    const hdrs = init && init.headers;
+    const sent = hdrs instanceof Headers ? hdrs.get("X-CSRF-Token")
+               : (hdrs && typeof hdrs === "object") ? hdrs["X-CSRF-Token"] : null;
+    if (res.status === 403 && sent) {
+      const url = typeof input === "string" ? input : (input && input.url) || "";
+      if (url.startsWith("/") || url.startsWith(location.origin)) {
+        const fresh = await refreshCsrf();
+        if (fresh && fresh !== sent) {
+          const h2 = hdrs instanceof Headers ? new Headers(hdrs) : { ...hdrs };
+          if (h2 instanceof Headers) h2.set("X-CSRF-Token", fresh);
+          else h2["X-CSRF-Token"] = fresh;
+          return await _rawFetch(input, { ...init, headers: h2 });
+        }
+      }
+    }
+  } catch (e) { /* fall through with the original response */ }
+  return res;
+};
 
 $("setup-cwd").value = localStorage.getItem("localm.coderCwd") || "";
 // API-key gate wiring (shown by showKeyGate on a 401 boot, e.g. a network bind).
@@ -240,6 +271,10 @@ window.bootAuthProbe = bootAuthProbe;
   // Probe auth before loading any app data or revealing the shell.
   const authed = await bootAuthProbe();
   if (!authed) { hideStartupOverlay(); return; }   // gate / reconnect overlay takes over
+  // Stash the session's CSRF token (derived server-side, in lockstep with the
+  // session) before any state-changing request can fire, so the first write never
+  // has to rely on the 403 self-heal. Awaited so it is ready before the app loads.
+  await refreshCsrf();
   // On a phone not yet installed, show the one-time install landing first; the
   // app still loads behind it and is revealed by "Continue". Desktop / installed
   // / returning visits fall straight through.

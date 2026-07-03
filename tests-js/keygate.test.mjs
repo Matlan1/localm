@@ -94,6 +94,28 @@ test("SEAMLESS: over HTTPS a TRUSTED CA (SW registered) HIDES the cert step - no
     "a returning trusted device is NOT told to reinstall the certificate every time");
 });
 
+test("the cert step surfaces a Firefox-specific note ONLY on Firefox", async () => {
+  // Firefox uses its own certificate store and ignores the Windows/OS one, so a
+  // system install leaves the warning here - the exact case the user hit. The step
+  // must call this out, but only for Firefox (Chrome/Edge use the OS store).
+  const { window } = loadApp({ fetchImpl: keyless401, url: "https://192.168.0.5:8651/" });
+  await tick();
+  window.__swFailed = true;   // untrusted CA over HTTPS -> the cert step is shown
+  const ff = window.document.getElementById("key-gate-cert-ff");
+  assert.ok(ff, "#key-gate-cert-ff exists in the shell");
+
+  const setUA = (ua) => { try { Object.defineProperty(window.navigator, "userAgent",
+    { value: ua, configurable: true }); } catch (e) { /* jsdom */ } };
+
+  setUA("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36");
+  window.updateKeyGateCertStep();
+  assert.equal(ff.style.display, "none", "hidden for Chrome/Edge (they use the OS store)");
+
+  setUA("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0");
+  window.updateKeyGateCertStep();
+  assert.notEqual(ff.style.display, "none", "shown for Firefox (its own cert store)");
+});
+
 test("NET-1: over plain HTTP the cert link stays hidden (loopback dev gate)", async () => {
   const { window } = loadApp({ fetchImpl: keyless401, url: "http://localhost:8642/" });
   await tick();
@@ -195,30 +217,32 @@ test("NET-1 hard gate: a working (200) boot reveals the app and hides the gate",
   assert.equal(gate.style.display, "none", "gate hidden when authed / open mode");
 });
 
-test("S2: authHeaders sends the CSRF token from the cookie and no localStorage bearer", async () => {
+test("S2: authHeaders sends the in-memory CSRF token and no localStorage bearer", async () => {
   const { window } = loadApp({ fetchImpl: allOk });
   await tick();
-  window.document.cookie = "localm_csrf=tok123";
+  // The CSRF token is DERIVED from the session server-side and stashed in memory
+  // (fetched from GET /api/session), NOT read from a cookie that could desync.
+  window.__LOCALM_CSRF__ = "tok123";
   const h = window.authHeaders();
-  assert.equal(h["X-CSRF-Token"], "tok123", "CSRF token echoed from the readable cookie");
-  assert.ok(!("Authorization" in h), "no bearer header (cookie auth; no localStorage key)");
+  assert.equal(h["X-CSRF-Token"], "tok123", "CSRF token echoed from the in-memory session token");
+  assert.ok(!("Authorization" in h), "no bearer header (session auth; no localStorage key)");
 });
 
-test("S3: once a session cookie exists, authHeaders drops the shell-token bearer", async () => {
-  // Open mode (loopback shell token, no session cookie): the shell token is the
+test("S3: once a session exists, authHeaders drops the shell-token bearer", async () => {
+  // Open mode (loopback shell token, no session): the shell token is the
   // management credential and rides the Authorization header.
   const { window } = loadApp({ fetchImpl: allOk, shellToken: "SHELLXYZ" });
   await tick();
+  window.__LOCALM_CSRF__ = "";     // boot's refreshCsrf found no session token
   const open = window.authHeaders();
   assert.equal(open["Authorization"], "Bearer SHELLXYZ", "open mode sends the shell bearer");
   assert.ok(!("X-CSRF-Token" in open), "no CSRF token before a session exists");
-  // Session established (e.g. right after minting the first key sets the cookies):
-  // the header MUST NOT carry the now-dead shell token, which would win over the
-  // cookie server-side and 401. Cookie auth (CSRF header) only.
-  window.document.cookie = "localm_csrf=tok999";
+  // Session established (e.g. right after minting the first key): the header MUST
+  // NOT carry the now-dead shell token, which would win server-side and 401.
+  window.__LOCALM_CSRF__ = "tok999";
   const authed = window.authHeaders();
   assert.equal(authed["X-CSRF-Token"], "tok999", "session mode echoes the CSRF token");
-  assert.ok(!("Authorization" in authed), "shell-token bearer suppressed once a session cookie exists");
+  assert.ok(!("Authorization" in authed), "shell-token bearer suppressed once a session exists");
 });
 
 test("AUTH-2: both API-key inputs get a show/hide reveal toggle", async () => {

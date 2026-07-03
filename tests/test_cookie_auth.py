@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""S2: HttpOnly-cookie session auth + CSRF (double-submit) for the GUI.
+"""S2 (hardened): opaque-session-cookie auth + session-derived CSRF for the GUI.
 
-The GUI must stop holding the API key in JS-readable localStorage. Instead it
-POSTs the key once to ``/api/session``; the server sets an HttpOnly auth cookie
-(``localm_session``) the browser JS cannot read, plus a readable ``localm_csrf``
-cookie. State-changing (unsafe-method) requests authenticated BY THE COOKIE must
-echo the CSRF cookie in an ``X-CSRF-Token`` header (double-submit). The bearer
-header path (CLI/SDK/coder) is unchanged and CSRF-exempt (a cross-site page can
-neither read the key nor set the Authorization header).
+The GUI POSTs the key once to ``/api/session``; the server mints an OPAQUE server-
+side session and sets its id as the HttpOnly ``localm_session`` cookie (never the
+key). CSRF is an HMAC DERIVED from the session, returned in the response body and by
+GET /api/session (NOT a separate cookie that could desync), and echoed in the
+``X-CSRF-Token`` header on state-changing requests. The bearer header path
+(CLI/SDK/coder) is unchanged and CSRF-exempt (a cross-site page can neither read the
+key nor set the Authorization header).
 
-These tests are the S2 oracle; each carries a negative case.
+These tests are the oracle; each carries a negative case.
 """
 
 import os
@@ -56,42 +56,42 @@ def _set_cookies(resp):
     return resp.headers.get_list("set-cookie")
 
 
+def _csrf(c):
+    """The current session's CSRF token, from GET /api/session. It is DERIVED from
+    the session server-side (an HMAC), not a cookie, so it can never desync from the
+    session; the client fetches it here rather than reading a cookie."""
+    return c.get("/api/session").json().get("csrf", "")
+
+
 # --------------------------------------------------------------------------- #
 #  Login sets the cookies with the right flags                                #
 # --------------------------------------------------------------------------- #
 
-def test_login_sets_httponly_session_and_readable_csrf(client):
+def test_login_sets_httponly_session_and_returns_csrf_token(client):
     r = _login(client)
     assert r.status_code == 200, r.text
     cookies = " ; ".join(_set_cookies(r))
     session_sc = [c for c in _set_cookies(r) if c.startswith(SESSION_COOKIE + "=")]
-    csrf_sc = [c for c in _set_cookies(r) if c.startswith(CSRF_COOKIE + "=")]
     assert session_sc, f"no {SESSION_COOKIE} cookie set: {cookies}"
-    assert csrf_sc, f"no {CSRF_COOKIE} cookie set: {cookies}"
     # auth cookie: NOT readable by JS, not sent cross-site
     assert "httponly" in session_sc[0].lower()
     assert "samesite=strict" in session_sc[0].lower()
-    # csrf cookie: readable by JS (double-submit) -> must NOT be HttpOnly
-    assert "httponly" not in csrf_sc[0].lower()
-    assert "samesite=strict" in csrf_sc[0].lower()
+    # CSRF is DERIVED from the session and returned in the BODY, never a separate
+    # cookie that could be cleared independently and desync (the reported bug).
+    assert not [c for c in _set_cookies(r) if c.startswith(CSRF_COOKIE + "=")]
+    assert r.json().get("csrf"), "login must return a csrf token"
 
 
-def test_login_sets_persistent_max_age_on_both_cookies(client):
-    """SEAMLESS: the auth cookies must PERSIST across a browser/PWA restart, so
-    each carries a max-age (not a session cookie dropped on close - which made the
-    key gate, and its 'Install certificate' step, reappear every restart). Both
-    share ONE lifetime so the readable CSRF token never expires before the session
-    and bounces the user mid-use."""
+def test_session_cookie_is_persistent(client):
+    """SEAMLESS: the session cookie must PERSIST across a browser/PWA restart, so
+    it carries a max-age (not a session cookie dropped on close - which made the
+    key gate, and its 'Install certificate' step, reappear every restart)."""
     from localm.inference.http_server import SESSION_MAX_AGE
     r = _login(client)
     assert r.status_code == 200, r.text
     session_sc = [c for c in _set_cookies(r)
                   if c.startswith(SESSION_COOKIE + "=")][0].lower()
-    csrf_sc = [c for c in _set_cookies(r)
-               if c.startswith(CSRF_COOKIE + "=")][0].lower()
     assert f"max-age={SESSION_MAX_AGE}" in session_sc, session_sc
-    assert f"max-age={SESSION_MAX_AGE}" in csrf_sc, csrf_sc
-    # not a pure session cookie
     assert SESSION_MAX_AGE > 0
 
 
@@ -99,6 +99,123 @@ def test_login_with_bad_key_rejected_no_cookie(client):
     r = client.post("/api/session", json={"key": "wrong-key"})
     assert r.status_code == 401
     assert not [c for c in _set_cookies(r) if c.startswith(SESSION_COOKIE + "=")]
+
+
+def test_session_cookie_is_opaque_not_the_key(client):
+    """The session cookie must carry an OPAQUE id, never the raw key: the durable
+    secret must not sit in a browser cookie jar (the pre-rework design flaw)."""
+    r = _login(client)
+    assert r.status_code == 200
+    sid = client.cookies.get(SESSION_COOKIE)
+    assert sid and sid != SECRET
+    assert SECRET not in " ".join(_set_cookies(r))
+
+
+def test_scoped_key_session_dies_when_the_key_is_revoked(monkeypatch):
+    """A browser session minted from a SCOPED key must stop authenticating once that
+    key is revoked - parity with the bearer path (a revoke must actually revoke).
+    Without this, a paired phone keeps its access for up to 400 days after the owner
+    cuts the key off."""
+    monkeypatch.setenv("LOCALM_API_KEY", "owner-key-for-revoke-test")
+    from localm import auth, sessions
+    from localm import scopes as S
+    with TestClient(create_app(_make_engine())) as c:
+        created = auth.create_key("phone", [S.MODELS_READ])
+        sid = sessions.create(scopes={S.MODELS_READ},
+                              key_hash=auth._hash_key(created["key"]), fs_access="none")
+        c.cookies.set(SESSION_COOKIE, sid)
+        assert c.get("/v1/models").status_code == 200      # valid while the key lives
+        assert auth.revoke_key(created["id"]) is True
+        assert c.get("/v1/models").status_code == 401      # revoked -> session dead
+
+
+def test_scoped_key_session_does_not_outlive_the_key_expiry(monkeypatch):
+    """A short-lived scoped key must not be laundered into a long-lived session: once
+    the key's own expiry passes, the cookie session must stop authenticating too
+    (the cookie path re-checks the key each request, like the bearer path)."""
+    import time
+    monkeypatch.setenv("LOCALM_API_KEY", "owner-key-for-expiry-test")
+    from localm import auth, sessions
+    from localm import scopes as S
+    with TestClient(create_app(_make_engine())) as c:
+        created = auth.create_key("temp", [S.MODELS_READ], expires=time.time() + 3600)
+        sid = sessions.create(scopes={S.MODELS_READ},
+                              key_hash=auth._hash_key(created["key"]), fs_access="none")
+        c.cookies.set(SESSION_COOKIE, sid)
+        assert c.get("/v1/models").status_code == 200
+        # Age the key past its deadline in place (no revoke); the session must follow.
+        ks = auth._load_keystore()
+        for r in ks:
+            if r["id"] == created["id"]:
+                r["expires"] = time.time() - 1
+        auth._save_keystore(ks)
+        assert c.get("/v1/models").status_code == 401
+
+
+def test_owner_session_is_not_gated_on_the_keystore(monkeypatch):
+    """The scoped-session keystore re-check must NOT touch OWNER (ADMIN) sessions:
+    the owner key is not in the keystore, so gating it there would wrongly log the
+    owner out. An ADMIN session stays valid even with an empty keystore (and across a
+    key roll - the S1 fix)."""
+    monkeypatch.setenv("LOCALM_API_KEY", "owner-only-key-abcdef")
+    from localm import auth, sessions
+    from localm import scopes as S
+    with TestClient(create_app(_make_engine())) as c:
+        assert auth._load_keystore() == []                 # no scoped keys at all
+        sid = sessions.create(scopes={S.ADMIN},
+                              key_hash=auth._hash_key("owner-only-key-abcdef"),
+                              fs_access="host")
+        c.cookies.set(SESSION_COOKIE, sid)
+        assert c.get("/v1/models").status_code == 200      # ADMIN valid, keystore empty
+
+
+def test_startup_sweeps_expired_sessions(monkeypatch):
+    """The server lifespan prunes expired session rows at startup (design 3.1)."""
+    import json
+    import time
+    monkeypatch.setenv("LOCALM_API_KEY", "owner-sweep-key-123456")
+    from localm import sessions
+    monkeypatch.setattr(sessions, "_CACHE", {"mtime": None, "records": None})
+    sessions.create(scopes={"admin"}, key_hash="KH-GOOD", ttl=10_000)
+    sessions.create(scopes={"admin"}, key_hash="KH-DEAD", ttl=10_000)
+    data = json.loads(sessions.sessions_file().read_text(encoding="utf-8"))
+    for r in data:
+        if r["key_hash"] == "KH-DEAD":
+            r["expires"] = time.time() - 1
+    sessions.sessions_file().write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setattr(sessions, "_CACHE", {"mtime": None, "records": None})
+    with TestClient(create_app(_make_engine())):
+        pass                                                # lifespan runs sweep()
+    hashes = {r["key_hash"] for r in
+              json.loads(sessions.sessions_file().read_text(encoding="utf-8"))}
+    assert "KH-DEAD" not in hashes and "KH-GOOD" in hashes
+
+
+def test_session_survives_owner_key_roll(monkeypatch):
+    """THE reported bug, at the HTTP layer: after login, rolling the owner key must
+    NOT log the browser out. The cookie is a session id decoupled from the key, so
+    a protected request over the SAME cookie still authorizes after the roll.
+
+    Standalone (no shared `client` fixture) and monkeypatch-only for LOCALM_API_KEY:
+    mixing patch.dict (the fixture) with monkeypatch.setenv on the same var leaks it
+    into later open-mode tests via a teardown-order conflict."""
+    from localm import auth
+    monkeypatch.setenv("LOCALM_API_KEY", "old-owner-key-123456")
+    with TestClient(create_app(_make_engine())) as c:
+        assert c.post("/api/session", json={"key": "old-owner-key-123456"}
+                      ).status_code == 200
+        assert c.get("/v1/models").status_code == 200
+        # Roll the owner key (what the launcher's Generate + Launch does). verify()
+        # now accepts only the NEW key, but the session store is untouched.
+        monkeypatch.setenv("LOCALM_API_KEY", "new-owner-key-abcdef")
+        assert auth.get_api_key() == "new-owner-key-abcdef"
+        # Same session cookie, new key active -> still authorized (no key gate).
+        assert c.get("/v1/models").status_code == 200
+        # And a state change still works with the session's derived CSRF token.
+        token = c.get("/api/session").json().get("csrf", "")
+        assert token
+        assert c.post("/v1/models/unload",
+                      headers={CSRF_HEADER: token}).status_code == 200
 
 
 # --------------------------------------------------------------------------- #
@@ -122,10 +239,26 @@ def test_cookie_unsafe_method_without_csrf_is_refused(client):
 
 def test_cookie_unsafe_method_with_csrf_allowed(client):
     assert _login(client).status_code == 200
-    token = client.cookies.get(CSRF_COOKIE)
-    assert token, "csrf cookie not in jar after login"
+    token = _csrf(client)
+    assert token, "no csrf token from /api/session after login"
     r = client.post("/v1/models/unload", headers={CSRF_HEADER: token})
     assert r.status_code == 200, r.text
+
+
+def test_csrf_token_survives_clearing_readable_cookies(client):
+    """THE S3 fix: the CSRF token is derived from the session, not a separate
+    readable cookie, so a client that clears all readable cookies (what
+    resetClientState did, which could NOT clear the HttpOnly session) still gets a
+    usable token from /api/session and its writes keep working - no 403 storm."""
+    assert _login(client).status_code == 200
+    # There is no readable localm_csrf cookie to clear in the first place.
+    assert not client.cookies.get(CSRF_COOKIE)
+    # The session cookie (HttpOnly) survives; the token is re-derivable and writes
+    # succeed with it.
+    token = _csrf(client)
+    assert token
+    assert client.post("/v1/models/unload",
+                       headers={CSRF_HEADER: token}).status_code == 200
 
 
 def test_cookie_unsafe_method_with_wrong_csrf_refused(client):
@@ -169,7 +302,7 @@ def test_get_session_reports_authed_state(client):
 
 def test_logout_clears_cookie(client):
     assert _login(client).status_code == 200
-    token = client.cookies.get(CSRF_COOKIE)
+    token = _csrf(client)
     out = client.post("/api/session/logout", headers={CSRF_HEADER: token})
     assert out.status_code == 200
     # jar cleared -> a cookie-only protected request is now unauthorized
