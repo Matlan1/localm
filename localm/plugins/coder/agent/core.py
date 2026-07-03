@@ -222,17 +222,26 @@ class Agent(
         # Episodic memory: recall lessons from past sessions on this project, and
         # (at session close) distil this session into a new lesson. Disabled for
         # restricted, shareable-key sessions - they must neither read the owner's
-        # lessons nor write a trace - and the write half is additionally gated on
-        # the privacy contract at close time. The store path resolves under the
-        # localm home dir, never the project tree.
+        # lessons nor write a trace. In privacy mode it is off too (like the chat
+        # memory) UNLESS the user opted into read-only recall for the coder
+        # (memory_recall_in_privacy + ..._coder): then past lessons are RECALLED but
+        # the close-time write stays blocked (session.py gates it on privacy), so no
+        # new trace is created. The store path resolves under the localm home dir,
+        # never the project tree.
         self._episode_task: str = ""
         self._episode_store = None
         try:
             from localm.config import load_config
-            _episodic_cfg = bool(load_config().get("coder_episodic_memory", True))
+            _cfg = load_config()
+            _episodic_cfg = bool(_cfg.get("coder_episodic_memory", True))
+            _recall_in_privacy = bool(
+                _cfg.get("memory_recall_in_privacy")
+                and _cfg.get("memory_recall_in_privacy_coder", True))
         except Exception:
             _episodic_cfg = True
-        self._episodic: bool = _episodic_cfg and not self.restricted
+            _recall_in_privacy = False
+        _privacy_ok = self.mode != SessionMode.PRIVACY or _recall_in_privacy
+        self._episodic: bool = _episodic_cfg and not self.restricted and _privacy_ok
         if self._episodic:
             try:
                 from ..episodes import EpisodeStore

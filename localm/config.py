@@ -175,6 +175,13 @@ DEFAULT_CONFIG: dict = {
     # privacy mode (no new traces). Set False to require the manual "Synthesize
     # now" button / the jobs "memory" task / POST /api/memory/consolidate.
     "memory_auto_consolidate": True,
+    # Privacy mode normally disables memory ENTIRELY (no recall + no writes). Turn
+    # this on to allow READING existing memories into the prompt while in privacy
+    # mode (writing new memories stays off - privacy never creates a trace). Off by
+    # default so privacy stays fully inert unless the user opts in. Per-surface:
+    "memory_recall_in_privacy": False,
+    "memory_recall_in_privacy_chat": True,      # applies only when the master is on
+    "memory_recall_in_privacy_coder": True,     # applies only when the master is on
     # On-device embedding model for semantic search (RAG hybrid retrieval + agent
     # memory). A small dedicated GGUF (loaded separately from the chat model) so
     # embeddings work on the default runtime. Value is a known key

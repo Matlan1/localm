@@ -10,7 +10,7 @@ import json
 import pytest
 
 from localm.memory import MemoryRecord
-from localm.plugins.builtin.chat import plug
+from localm.plugins.builtin.memory import plug
 
 
 @pytest.fixture
