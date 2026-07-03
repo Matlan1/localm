@@ -388,6 +388,25 @@ def require_fs_host(request: Request) -> None:
             detail="This key does not have host filesystem access")
 
 
+def _is_loopback_host(host: str) -> bool:
+    """True for a loopback bind host (127.0.0.0/8, ::1, localhost).
+
+    Decisions that must distinguish a local-only server from a network-exposed
+    one key off the CONFIGURED bind host, never the request peer: portmux relays
+    every connection through an internal loopback socket, so the peer always looks
+    like 127.0.0.1 even for a genuinely remote client (see portmux.py, and
+    gui/web.py which makes the same choice for open-mode key seeding)."""
+    import ipaddress
+    if not host:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 # ------------------------------------------------------------------ #
 #  Surface mounting (H6 phase 5: on-demand GUI on a running instance)  #
 # ------------------------------------------------------------------ #
@@ -855,6 +874,28 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
         resp.headers.setdefault(
             "Content-Security-Policy-Report-Only", _CSP_REPORT_ONLY)
         return resp
+
+    # API-surface disclosure guard. FastAPI's built-in docs (/docs, /redoc,
+    # /openapi.json) enumerate every route plus its request/response schema. That
+    # is fine on a loopback bind (the local owner), but on a NETWORK bind it hands
+    # an UNAUTHENTICATED remote client a full map of the attack surface - every
+    # endpoint stays scope-gated, so it grants no access, but it is needless
+    # disclosure and inconsistent with how /whoami hides root_dir off-loopback.
+    # Serve the docs only on a loopback bind, keyed on the CONFIGURED bind host
+    # (never the peer - portmux makes the peer always look loopback). 404, not
+    # 403, so the endpoints simply do not exist off-loopback and reveal nothing.
+    # bind_host is unset in tests / a standalone mount -> default loopback ->
+    # docs stay available there, matching prior behaviour.
+    _DOCS_PATHS = frozenset(
+        {"/openapi.json", "/docs", "/redoc", "/docs/oauth2-redirect"})
+
+    @app.middleware("http")
+    async def _docs_loopback_only(request, call_next):
+        if request.url.path in _DOCS_PATHS:
+            host = getattr(request.app.state, "bind_host", "127.0.0.1")
+            if not _is_loopback_host(host):
+                return JSONResponse(status_code=404, content={"detail": "Not Found"})
+        return await call_next(request)
 
     # ---------------------------------------------------------------- #
     #  Route groups (extracted to localm/inference/routes/*.py)          #
