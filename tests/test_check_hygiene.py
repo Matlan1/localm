@@ -55,3 +55,45 @@ def test_shipped_index_html_has_no_machine_paths():
 def test_html_is_in_code_exts():
     ch = _load_check_hygiene()
     assert ".html" in ch._CODE_EXTS
+
+
+# ---- check 2: secret disclosure --------------------------------------------
+# The synthetic tokens below are assembled from fragments at runtime so this
+# test file does not itself contain a literal secret that the hygiene check
+# would (correctly) flag when it scans the tracked tree.
+
+def test_finegrained_github_pat_is_detected(tmp_path, monkeypatch):
+    """NEGATIVE: a modern fine-grained GitHub PAT (github_pat_11...) must be
+    flagged as a disclosure. The old check only knew the classic ghp_ prefix,
+    so a committed fine-grained PAT would have slipped through."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    token = "github" + "_pat_" + "11" + "A" * 60
+    p = tmp_path / "leak.txt"
+    p.write_text(f"WRANGLER_SECRET={token}\n", encoding="utf-8")
+    problems = ch._scan(p)
+    assert any("disclosure" in x for x in problems), problems
+
+
+def test_classic_github_pat_still_detected(tmp_path, monkeypatch):
+    """Regression: the classic ghp_ token must keep being flagged."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    token = "ghp" + "_" + "B" * 36
+    p = tmp_path / "leak.txt"
+    p.write_text(f"GH_TOKEN={token}\n", encoding="utf-8")
+    problems = ch._scan(p)
+    assert any("disclosure" in x for x in problems), problems
+
+
+def test_github_pat_mention_without_token_is_clean(tmp_path, monkeypatch):
+    """The bare 'github_pat_...' placeholder used in docs (no real token body)
+    must NOT be flagged: the pattern requires 20+ token chars after the
+    prefix, so a mention like 'starts with github_pat_...' stays clean."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    p = tmp_path / "doc.md"
+    p.write_text("Copy the token (starts with `github" + "_pat_...`).\n",
+                 encoding="utf-8")
+    problems = ch._scan(p)
+    assert not [x for x in problems if "disclosure" in x], problems
