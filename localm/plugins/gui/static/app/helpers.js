@@ -35,8 +35,9 @@ export function readStoredJSON(key, fallback) {
 
 // S2: the API key is no longer kept in JS-readable localStorage. Open-mode
 // management uses the per-process shell token (injected as a global, sent as a
-// bearer HEADER); protected mode rides the HttpOnly session cookie set at login
-// or loopback auto-seed (auto-sent same-origin) with a double-submit CSRF token.
+// bearer HEADER); protected mode rides the HttpOnly session cookie (an opaque
+// session id, auto-sent same-origin) plus a session-DERIVED CSRF token that
+// authHeaders() reads from window.__LOCALM_CSRF__ (fetched from GET /api/session).
 export const SHELL_TOKEN = window.__LOCALM_SHELL_TOKEN__ || "";
 
 export function readCookie(name) {
@@ -55,20 +56,37 @@ export function readCookie(name) {
 
 export function authHeaders(extra = {}) {
   const h = { "Content-Type": "application/json", ...extra };
-  const csrf = readCookie("localm_csrf");
+  const csrf = window.__LOCALM_CSRF__ || "";
   if (csrf) {
     // Session (cookie) mode: authenticate via the HttpOnly session cookie
-    // (auto-sent same-origin) + the double-submit CSRF header. Do NOT also send
-    // the shell-token bearer: the Authorization header wins over the cookie
-    // server-side, and the open-mode shell token is rejected once auth is on -
-    // so sending it would 401 despite a valid session (e.g. right after minting
-    // the first key turns auth on).
+    // (auto-sent same-origin) + a CSRF header. The token is DERIVED from the
+    // session server-side and fetched from GET /api/session (stashed here), NOT a
+    // readable cookie that could be cleared independently and desync from the
+    // session (which 403'd every write - the reported bug). Do NOT also send the
+    // shell-token bearer: the Authorization header wins over the cookie
+    // server-side, and the open-mode shell token is rejected once auth is on.
     h["X-CSRF-Token"] = csrf;
   } else if (SHELL_TOKEN) {
     // Open mode: the per-process loopback shell token authorises local management.
     h["Authorization"] = "Bearer " + SHELL_TOKEN;
   }
   return h;
+}
+
+// Fetch the CSRF token for the current session and stash it for authHeaders().
+// The token is an HMAC of the session computed server-side, so it is always in
+// lockstep with the session cookie - there is no separate cookie to fall out of
+// sync. Called at boot and by the 403-CSRF self-heal. Returns the token or "".
+export async function refreshCsrf() {
+  try {
+    const r = await fetch("/api/session", { cache: "no-store" });
+    if (!r.ok) return "";
+    const j = await r.json();
+    window.__LOCALM_CSRF__ = (j && j.csrf) || "";
+    return window.__LOCALM_CSRF__;
+  } catch (e) {
+    return "";
+  }
 }
 
 export function toast(msg, isError = false) {

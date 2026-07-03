@@ -95,22 +95,20 @@ def _principal_from_request(request: Request) -> tuple[bool, str | None]:
     its bearer>)`` and may touch only the sessions IT created. The principal is a
     SHA-256 of the presented bearer, so it identifies the key without storing it."""
     from localm import scopes as S
-    from localm.auth import any_key_configured, verify
-    from localm.inference.http_server import _request_token
+    from localm.auth import any_key_configured
+    from localm.inference.http_server import caller_scopes, principal_id
     if not any_key_configured():
         return True, None                       # open mode = loopback owner
-    # The browser GUI authenticates with the HttpOnly session cookie, not an
-    # Authorization header, so resolve BOTH (header wins, else the cookie) - the
-    # same source the main auth uses. Reading only the header made a cookie-authed
-    # owner (the GUI) look like a non-owner, so it never saw its own coder sessions
-    # (issue A1).
-    token, _src = _request_token(request)
-    held = verify(token) if token else None
+    # The browser GUI authenticates with the HttpOnly session cookie (now an opaque
+    # session id), not an Authorization header. Resolve identity through the SAME
+    # central helpers the main auth uses so a cookie session and the same key as a
+    # bearer map to one principal: caller_scopes/principal_id translate a session id
+    # to its scope snapshot and owning-key hash (a raw verify() would fail on a sid,
+    # making a cookie-authed owner look like a non-owner - issue A1).
+    held = caller_scopes(request)
     if held is not None and S.ADMIN in held:
-        return True, None                       # the owner key
-    import hashlib
-    digest = hashlib.sha256((token or "").encode("utf-8")).hexdigest()
-    return False, digest
+        return True, None                       # the owner key / owner session
+    return False, principal_id(request)
 
 
 def _get_session(request: Request, session_id: str):

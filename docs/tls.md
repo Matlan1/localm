@@ -69,15 +69,24 @@ makes clearing it one tap:
 2. Proceed through the browser's one-time warning to reach the page.
 3. On the key screen tap **Install certificate** (or open
    `https://<ip>:<port>/localm-ca.crt` directly) and trust it when prompted:
-   - **Android / desktop Chrome / Firefox:** open the downloaded `localm-ca.crt`
-     and confirm "trust for web sites".
+   - **Firefox (any OS):** Firefox keeps its OWN certificate store and ignores the
+     operating system's, so a Windows/macOS install does not cover it. Open the
+     downloaded `localm-ca.crt` and import it, or go to Settings > Privacy &
+     Security > Certificates > View Certificates > Authorities > Import and check
+     "Trust this CA to identify websites". (Or set
+     `security.enterprise_roots.enabled` to `true` in `about:config` to make Firefox
+     reuse the OS store.)
+   - **Chrome / Edge (Windows, macOS, Android):** open the downloaded `localm-ca.crt`
+     and confirm "trust for web sites" (they use the operating system store).
    - **iOS / iPadOS:** the profile downloads, then Settings > General > VPN &
      Device Management installs it, and Settings > General > About > Certificate
      Trust Settings turns it on.
-   - **Windows:** import `localm-ca.crt` into "Trusted Root Certification
-     Authorities" for the current user.
+   - **Windows (system store, for Chrome / Edge):** import `localm-ca.crt` into
+     "Trusted Root Certification Authorities" for the current user.
 
-After trusting it once: no more warning, and the PWA installs normally.
+After trusting it once: no more warning, and the PWA installs normally. On a plain
+loopback `localm gui` (127.0.0.1, HTTP) there is no certificate and no trust step at
+all - this only applies to a network (phone/LAN) bind over HTTPS.
 
 ### Turning it off or bringing your own certificate
 

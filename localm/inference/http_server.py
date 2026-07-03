@@ -15,6 +15,7 @@ Start programmatically:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import json
 import secrets
@@ -219,23 +220,23 @@ async def _idle_unload_loop() -> None:
 # Optional bearer-token auth - enabled when LOCALM_API_KEY is set.
 _bearer_scheme = HTTPBearer(auto_error=False)
 
-# S2: the browser GUI authenticates with an HttpOnly session cookie (the API key
-# the page JS can no longer read) instead of localStorage. Cookie-sourced auth on
-# a state-changing method must echo the readable CSRF cookie in this header
-# (double-submit); the Authorization-header path (CLI / SDK / coder) cannot be
-# forged cross-site and is therefore CSRF-exempt.
+# S2: the browser GUI authenticates with an HttpOnly session cookie whose value is
+# an OPAQUE session id (localm.sessions), NOT the API key - the page JS can never
+# read it, and rolling the key does not invalidate it. Cookie-sourced auth on a
+# state-changing method must additionally carry a CSRF token in this header; the
+# token is an HMAC DERIVED from the session (csrf_token_for / _csrf_ok), fetched by
+# the client from GET /api/session, so it is always in lockstep with the session and
+# cannot desync (there is NO separate CSRF cookie). The Authorization-header path
+# (CLI / SDK / coder) cannot be forged cross-site and is therefore CSRF-exempt.
 SESSION_COOKIE = "localm_session"
-CSRF_COOKIE = "localm_csrf"
 CSRF_HEADER = "X-CSRF-Token"
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
-# SEAMLESS: the auth cookies PERSIST so the user stays signed in across a browser
-# or PWA restart, instead of being session cookies the browser drops on close
+# SEAMLESS: the session cookie PERSISTS so the user stays signed in across a browser
+# or PWA restart, instead of being a session cookie the browser drops on close
 # (which made the key gate - and its "Install certificate" step - reappear every
-# time, the "install a new cert / re-enter the key every restart" report).
-# Browsers clamp cookie lifetime to ~400 days, so we ask for that ceiling; the
-# escape hatch is the existing /api/session/logout (Settings: leave the key blank
-# and Save). Both cookies MUST share this lifetime, or the readable CSRF token
-# would expire before the session and bounce the user mid-use.
+# time, the "install a new cert / re-enter the key every restart" report). Browsers
+# clamp cookie lifetime to ~400 days, so we ask for that ceiling; the escape hatch is
+# /api/session/logout (Settings: leave the key blank and Save).
 SESSION_MAX_AGE = 400 * 24 * 3600  # ~400 days (the browser cap)
 
 
@@ -262,14 +263,77 @@ def _request_token(request) -> tuple[Optional[str], str]:
     return None, "none"
 
 
-def _csrf_double_submit_ok(request) -> bool:
-    """Double-submit CSRF check: the ``X-CSRF-Token`` header must equal the
-    readable ``localm_csrf`` cookie (both set at login). A cross-site page can
-    neither read the cookie to forge the header nor (with SameSite=Strict) get
-    the browser to send the cookie at all - defence in depth."""
+def _principal_from_token(token, source):
+    """Resolve a presented credential to ``(scopes, key_hash, fs_access)`` or None.
+
+    A ``header`` token is a raw API key -> ``auth.verify()``. A ``cookie`` token is
+    now an OPAQUE SESSION ID -> the server-side session store (``localm.sessions``),
+    which returns the scope / owning-key / fs-access SNAPSHOT taken at login. So a
+    cookie session stays valid across an owner-key roll (the reported bug), and the
+    durable key never has to live in the cookie. ``key_hash`` is the sha256 of the
+    key that minted the session, so ``principal_id`` over a cookie matches the same
+    key presented as a bearer (job ownership parity)."""
+    if not token:
+        return None
+    if source == "cookie":
+        from localm import sessions
+        rec = sessions.lookup(token)
+        if rec is None:
+            return None
+        held = set(rec.get("scopes", []))
+        if scopes.ADMIN not in held:
+            # A SCOPED-key session lives only as long as its underlying key does:
+            # re-validate the owning key against the live keystore every request, so
+            # revoking or expiring the key cuts the session off too (parity with the
+            # bearer path, where verify() re-checks the keystore each request). An
+            # owner/ADMIN session is intentionally exempt - it is decoupled from the
+            # key VALUE so an owner-key ROLL does not log the owner out (the S1 fix).
+            from localm.auth import key_hash_live
+            if not key_hash_live(rec.get("key_hash")):
+                return None
+        return (held, rec.get("key_hash"), rec.get("fs_access", "none"))
+    from localm.auth import _hash_key, fs_access_for, verify
+    held = verify(token)
+    if held is None:
+        return None
+    fs = "host" if scopes.ADMIN in held else fs_access_for(token, "none")
+    return held, _hash_key(token), fs
+
+
+def _csrf_secret(request) -> str:
+    """The per-process CSRF secret for this app, created lazily if a standalone
+    mount (a bare attach_gui in tests) never ran create_app's setup."""
+    st = request.app.state
+    sec = getattr(st, "csrf_secret", None)
+    if not sec:
+        sec = secrets.token_urlsafe(32)
+        st.csrf_secret = sec
+    return sec
+
+
+def csrf_token_for(request, sid: str) -> str:
+    """The CSRF token for a session id: a deterministic HMAC of the id under the
+    per-process secret. Derived from the session, so it is available exactly when
+    the session is (delivered to the client via GET /api/session and the shell
+    <meta>) and can never desync from it. Empty for an empty sid."""
+    if not sid:
+        return ""
+    return hmac.new(_csrf_secret(request).encode("utf-8"),
+                    sid.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _csrf_ok(request) -> bool:
+    """CSRF check for a cookie-authenticated unsafe request: the ``X-CSRF-Token``
+    header must equal the token DERIVED from the session cookie (signed with the
+    per-process secret). No separate CSRF cookie exists to be cleared or to desync,
+    so a valid session always has a usable token. A cross-site page can neither read
+    the HttpOnly session cookie nor the token (SOP), and cannot set a non-simple
+    header; SameSite=Strict and the same-origin guard remain in force."""
     header = request.headers.get(CSRF_HEADER, "")
-    cookie = request.cookies.get(CSRF_COOKIE, "")
-    return bool(header and cookie and hmac.compare_digest(header, cookie))
+    sid = (request.cookies.get(SESSION_COOKIE) or "").strip()
+    if not header or not sid:
+        return False
+    return hmac.compare_digest(header, csrf_token_for(request, sid))
 
 
 def _enforce_request(request: Request, scope: Optional[str]) -> None:
@@ -278,8 +342,8 @@ def _enforce_request(request: Request, scope: Optional[str]) -> None:
     key is required - from the Authorization header OR the session cookie - and
     *scope* (None = 'any valid key') must be granted (the owner key implies every
     scope). Cookie-sourced auth on an unsafe method additionally requires a valid
-    double-submit CSRF token."""
-    from localm.auth import any_key_configured, require_auth_enabled, verify
+    CSRF token (an HMAC derived from the session)."""
+    from localm.auth import any_key_configured, require_auth_enabled
     if not any_key_configured():
         if require_auth_enabled():
             raise HTTPException(
@@ -288,11 +352,12 @@ def _enforce_request(request: Request, scope: Optional[str]) -> None:
                        "(set one via the launcher or LOCALM_API_KEY)")
         return  # open/dev mode
     token, source = _request_token(request)
-    held = verify(token) if token else None
-    if held is None:
+    prin = _principal_from_token(token, source)
+    if prin is None:
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
+    held = prin[0]
     if source == "cookie" and request.method not in _SAFE_METHODS:
-        if not _csrf_double_submit_ok(request):
+        if not _csrf_ok(request):
             raise HTTPException(
                 status_code=403,
                 detail="Missing or invalid CSRF token for a cookie-"
@@ -320,11 +385,12 @@ def caller_scopes(request: Request) -> Optional[set]:
     None in open mode / when no valid key is presented. Routes use this to make
     authorisation decisions that depend on *who* the caller is (e.g. only an
     owner/ADMIN principal may mint keys carrying privileged scopes)."""
-    from localm.auth import any_key_configured, verify
+    from localm.auth import any_key_configured
     if not any_key_configured():
         return None
-    token, _ = _request_token(request)
-    return verify(token) if token else None
+    token, source = _request_token(request)
+    prin = _principal_from_token(token, source)
+    return prin[0] if prin else None
 
 
 def principal_id(request: Request) -> Optional[str]:
@@ -334,10 +400,17 @@ def principal_id(request: Request) -> Optional[str]:
     is identical whether the key arrives via the Authorization header or the
     session cookie. Used to bind a background job to the key that created it
     (KEY-SCOPE-2), so only that key (or an admin/owner) may stream or cancel it."""
-    from localm.auth import _hash_key
-    token, _ = _request_token(request)
+    token, source = _request_token(request)
     if not token or not token.strip():
         return None
+    if source == "cookie":
+        # A cookie is an opaque session id; its stable identity is the hash of the
+        # key that MINTED the session (recorded at login), so a job created in the
+        # browser and cancelled from the CLI with the same key share a principal.
+        from localm import sessions
+        rec = sessions.lookup(token)
+        return rec.get("key_hash") if rec else None
+    from localm.auth import _hash_key
     return _hash_key(token.strip())
 
 
@@ -364,16 +437,17 @@ def effective_fs_access(request: Request) -> str:
     legacy key); no valid key -> "none". Filesystem reach is a per-credential dial
     kept deliberately INDEPENDENT of ownership, so an owner can pair one of their
     own devices with a lower-reach key."""
-    from localm.auth import any_key_configured, fs_access_for
+    from localm.auth import any_key_configured
     if not any_key_configured():
         return "host"                       # open/dev mode = loopback owner
-    held = caller_scopes(request)
-    if held is None:
+    token, source = _request_token(request)
+    prin = _principal_from_token(token, source)
+    if prin is None:
         return "none"                       # keys configured, none/invalid presented
+    held, _key_hash, fs = prin
     if scopes.ADMIN in held:
-        return "host"                       # owner key
-    token, _ = _request_token(request)
-    return fs_access_for(token, "none")
+        return "host"                       # owner key / owner session
+    return fs                               # bearer key or session fs-access snapshot
 
 
 def require_fs_host(request: Request) -> None:
@@ -658,6 +732,15 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
         global _inference_sem
         # Semaphore created inside the running event loop - Python 3.10+ safe
         _inference_sem = asyncio.Semaphore(1)
+        # Prune expired browser sessions once at startup so an install that rarely
+        # mints new sessions does not accumulate stale rows (create() only prunes
+        # opportunistically). Best-effort: a sweep failure must never block startup.
+        try:
+            from localm import sessions as _sessions
+            _sessions.sweep()
+        except Exception:
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("session sweep at startup failed (non-fatal)", exc_info=True)
         # SRV-3: route an uncaught asyncio task exception through the bug reporter
         # instead of a silent "Task exception was never retrieved". Skipped under
         # pytest so the test runner keeps its own loop handling.
@@ -722,6 +805,14 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
     # the Origin guard alone do not cover. Per-process so it dies on restart;
     # never persisted.
     app.state.shell_token = secrets.token_urlsafe(32)
+
+    # Per-process CSRF secret. The CSRF token is a deterministic HMAC of the
+    # session id (below), so it is provably present exactly when the session is and
+    # CANNOT desync from it (the old design used a SEPARATE readable cookie that a
+    # client reset could clear while the HttpOnly session survived, 403-ing every
+    # write). Per-process so it dies on restart (the client re-fetches the token
+    # from /api/session on the next boot); never persisted.
+    app.state.csrf_secret = secrets.token_urlsafe(32)
 
     # api-mode landing: a bare `localm serve` has no GUI shell, so GET / would
     # 404. Redirect it to the auto-generated API docs. Only on the api path so

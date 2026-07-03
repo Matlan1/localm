@@ -228,7 +228,18 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
                         "instance?); opening its address anyway.[/yellow]")
             console.print(f"  [dim]Opening[/dim] [cyan]{url}[/cyan]")
             if not no_browser:
-                webbrowser.open(url)
+                # Force a FRESH navigation with a unique cache-buster so the browser
+                # actually reloads (instead of silently focusing an already-open tab
+                # at the same URL) and cannot serve the shell from a warm service-
+                # worker cache. That fresh loopback GET / makes the remote re-run its
+                # own session auto-seed, so a relaunch lands authenticated even after
+                # a key roll. We do NOT mint a launch grant here: the running instance
+                # may be an OLDER localm that has no grant endpoint, whereas the
+                # loopback auto-seed exists in every version. The app ignores the
+                # stray param.
+                import secrets as _secrets
+                sep = "&" if "?" in url else "?"
+                webbrowser.open(f"{url}{sep}lm={_secrets.token_hex(3)}")
             return
 
     from localm.config import load_registry, pick_port
@@ -370,6 +381,19 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         open_url = f"{base_url}?view=models&pull={quote(pull_spec, safe='')}"
     elif model_less:
         open_url = f"{base_url}?view=models"
+    # One-time launch handoff: when auth is on and this is a loopback bind, hand the
+    # auto-opened browser a single-use grant in the URL so it lands AUTHENTICATED via
+    # a real navigation (a fresh query string a warm SW cannot serve from cache and
+    # that forces a load even if a tab is already open), instead of depending on the
+    # implicit GET / cookie auto-seed that a focused-but-not-reloaded tab can skip.
+    from localm import auth as _auth
+    from .web import _is_loopback_host, mint_launch_grant
+    if _auth.get_api_key() and _is_loopback_host(host):
+        from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+        _p = urlparse(open_url)
+        _q = dict(parse_qsl(_p.query))
+        _q["localm_token"] = mint_launch_grant(app)
+        open_url = urlunparse(_p._replace(query=urlencode(_q)))
 
     _wtitle = f"LocaLM  -  localhost:{chosen_port}"
     if not model_less and (display_name or model):
@@ -439,6 +463,10 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
                 "(or open [/dim][cyan]" + f"{scheme}://{_ca_host}:{chosen_port}"
                 "/localm-ca.crt[/cyan][dim]) to trust it once - then no warning "
                 "and the app installs.[/dim]")
+            console.print(
+                "  [dim]Firefox has its own certificate store: import the CA in "
+                "Firefox (or set about:config security.enterprise_roots.enabled), "
+                "not just Windows. The key screen shows the exact steps.[/dim]")
         _ts_hint = netname.tailscale_rename_hint()
         if _ts_hint:
             console.print(f"  [dim]{_ts_hint}[/dim]")

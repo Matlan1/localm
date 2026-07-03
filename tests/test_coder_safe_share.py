@@ -229,16 +229,25 @@ def test_cookie_authed_owner_is_recognised_for_history(tmp_path, monkeypatch):
                        headers={"Authorization": "Bearer ownersecret"}).json()
         assert h["authorized"] is True
         # Owner via the session COOKIE (the GUI path): must ALSO be authorized.
+        # The cookie now carries an OPAQUE session id (not the key); mint an owner
+        # session the same way login/auto-seed does.
+        from localm import auth, sessions
+        from localm import scopes as S
+        owner_sid = sessions.create(scopes={S.ADMIN},
+                                    key_hash=auth._hash_key("ownersecret"),
+                                    fs_access="host")
         c = client.get("/api/coder/history",
-                       headers={"Cookie": "localm_session=ownersecret"}).json()
+                       headers={"Cookie": f"localm_session={owner_sid}"}).json()
         assert c["authorized"] is True
-        # A scoped, non-owner key is NOT authorized and sees no logs - and the
+        # A scoped, non-owner SESSION is NOT authorized and sees no logs - and the
         # response is distinguishable from privacy mode by the authorized flag.
-        from localm import auth
         scoped = auth.create_key("phone", ["coder"])
+        scoped_sid = sessions.create(scopes=set(scoped["scopes"]),
+                                     key_hash=auth._hash_key(scoped["key"]),
+                                     fs_access="none")
         s = client.get(
             "/api/coder/history",
-            headers={"Cookie": f"localm_session={scoped['key']}"}).json()
+            headers={"Cookie": f"localm_session={scoped_sid}"}).json()
         assert s["authorized"] is False
         assert s["logs"] == []
 

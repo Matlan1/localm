@@ -320,14 +320,45 @@ def create_key(name: str, scope_list, *, allow_privileged: bool = False,
 
 
 def revoke_key(key_id: str) -> bool:
-    """Delete a named key by id. Returns True if it existed."""
+    """Delete a named key by id. Returns True if it existed.
+
+    Also drops any browser SESSIONS minted from that key, so revoking a key cuts
+    off a paired device immediately instead of leaving its cookie session valid
+    until expiry. (The cookie auth path also re-validates a scoped session's key on
+    every request via key_hash_live, so this is belt-and-suspenders cleanup that
+    keeps the session store tidy rather than the sole enforcement.)"""
     with _KEYSTORE_LOCK:
         records = _load_keystore()
+        target = next((r for r in records if r.get("id") == key_id), None)
         remaining = [r for r in records if r.get("id") != key_id]
         if len(remaining) == len(records):
             return False
         _save_keystore(remaining)
+    if target and target.get("hash"):
+        try:
+            from localm import sessions
+            sessions.revoke_by_key_hash(target["hash"])
+        except Exception as e:
+            logger.debug("session cleanup after key revoke failed (non-fatal): %s", e)
     return True
+
+
+def key_hash_live(key_hash: Optional[str]) -> bool:
+    """True when a keystore key with this sha256 *key_hash* still exists AND has not
+    expired. Used to tie a scoped-key browser session to its key's lifecycle: the
+    cookie path checks this every request so revoking or expiring the underlying key
+    also invalidates the session, mirroring verify()'s per-request check for a
+    bearer. (Owner/ADMIN sessions are deliberately NOT gated on this - the owner key
+    is not in the keystore, and an owner session is decoupled from the key VALUE so a
+    key roll does not log the owner out.)"""
+    if not key_hash:
+        return False
+    now = time.time()
+    for r in _load_keystore():
+        if r.get("hash") == key_hash:
+            exp = r.get("expires")
+            return not (exp is not None and now > float(exp))
+    return False
 
 
 def _keystore_configured() -> bool:

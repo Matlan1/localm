@@ -9,7 +9,7 @@
 // Bump this whenever the cached shell assets (style.css, app/*.js, pages/*.js,
 // index.html, icons) change, so an installed PWA drops the old cache on activate
 // and re-precaches the new files instead of serving stale cache-first assets.
-const CACHE = "localm-shell-v37";
+const CACHE = "localm-shell-v42";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).
@@ -27,6 +27,10 @@ const SHELL = [
   "/vendor/marked.min.js", "/vendor/purify.min.js", "/vendor/highlight.min.js",
   "/vendor/katex.min.js", "/vendor/auto-render.min.js",
   "/vendor/github-dark.min.css", "/vendor/katex.min.css",
+  // Inter (UI typeface) - precache so the shell renders with it offline / on first
+  // paint instead of flashing the fallback then reflowing.
+  "/vendor/inter/inter-latin-400-normal.woff2", "/vendor/inter/inter-latin-500-normal.woff2",
+  "/vendor/inter/inter-latin-600-normal.woff2", "/vendor/inter/inter-latin-700-normal.woff2",
 ];
 
 self.addEventListener("install", (e) => {
