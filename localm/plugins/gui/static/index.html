@@ -2,6 +2,31 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<!-- Pre-service-worker kill switch: opening /?localm_reset=1 unregisters the
+     service worker and clears every cache, then reloads to a clean shell - and it
+     runs HERE, before any (possibly wedged) cached app module executes, so it is
+     the one recovery path a bad SW/cache cannot break. This is the manual escape
+     hatch for "the app is acting weird after an update / on revisit". -->
+<script>
+(function () {
+  try {
+    if (location.search.indexOf("localm_reset=1") === -1) return;
+    var done = function () { location.replace(location.pathname); };
+    var tasks = [];
+    if ("serviceWorker" in navigator && navigator.serviceWorker.getRegistrations) {
+      tasks.push(navigator.serviceWorker.getRegistrations().then(function (rs) {
+        return Promise.all(rs.map(function (r) { return r.unregister(); }));
+      }).catch(function () {}));
+    }
+    if (window.caches && caches.keys) {
+      tasks.push(caches.keys().then(function (ks) {
+        return Promise.all(ks.map(function (k) { return caches.delete(k); }));
+      }).catch(function () {}));
+    }
+    Promise.all(tasks).then(done, done);
+  } catch (e) { location.replace(location.pathname); }
+})();
+</script>
 <!-- viewport-fit=cover lets env(safe-area-inset-*) report the notch / home-bar
      insets so the composer and top bar can pad around them on phones. -->
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
