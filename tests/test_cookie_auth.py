@@ -111,6 +111,86 @@ def test_session_cookie_is_opaque_not_the_key(client):
     assert SECRET not in " ".join(_set_cookies(r))
 
 
+def test_scoped_key_session_dies_when_the_key_is_revoked(monkeypatch):
+    """A browser session minted from a SCOPED key must stop authenticating once that
+    key is revoked - parity with the bearer path (a revoke must actually revoke).
+    Without this, a paired phone keeps its access for up to 400 days after the owner
+    cuts the key off."""
+    monkeypatch.setenv("LOCALM_API_KEY", "owner-key-for-revoke-test")
+    from localm import auth, sessions
+    from localm import scopes as S
+    with TestClient(create_app(_make_engine())) as c:
+        created = auth.create_key("phone", [S.MODELS_READ])
+        sid = sessions.create(scopes={S.MODELS_READ},
+                              key_hash=auth._hash_key(created["key"]), fs_access="none")
+        c.cookies.set(SESSION_COOKIE, sid)
+        assert c.get("/v1/models").status_code == 200      # valid while the key lives
+        assert auth.revoke_key(created["id"]) is True
+        assert c.get("/v1/models").status_code == 401      # revoked -> session dead
+
+
+def test_scoped_key_session_does_not_outlive_the_key_expiry(monkeypatch):
+    """A short-lived scoped key must not be laundered into a long-lived session: once
+    the key's own expiry passes, the cookie session must stop authenticating too
+    (the cookie path re-checks the key each request, like the bearer path)."""
+    import time
+    monkeypatch.setenv("LOCALM_API_KEY", "owner-key-for-expiry-test")
+    from localm import auth, sessions
+    from localm import scopes as S
+    with TestClient(create_app(_make_engine())) as c:
+        created = auth.create_key("temp", [S.MODELS_READ], expires=time.time() + 3600)
+        sid = sessions.create(scopes={S.MODELS_READ},
+                              key_hash=auth._hash_key(created["key"]), fs_access="none")
+        c.cookies.set(SESSION_COOKIE, sid)
+        assert c.get("/v1/models").status_code == 200
+        # Age the key past its deadline in place (no revoke); the session must follow.
+        ks = auth._load_keystore()
+        for r in ks:
+            if r["id"] == created["id"]:
+                r["expires"] = time.time() - 1
+        auth._save_keystore(ks)
+        assert c.get("/v1/models").status_code == 401
+
+
+def test_owner_session_is_not_gated_on_the_keystore(monkeypatch):
+    """The scoped-session keystore re-check must NOT touch OWNER (ADMIN) sessions:
+    the owner key is not in the keystore, so gating it there would wrongly log the
+    owner out. An ADMIN session stays valid even with an empty keystore (and across a
+    key roll - the S1 fix)."""
+    monkeypatch.setenv("LOCALM_API_KEY", "owner-only-key-abcdef")
+    from localm import auth, sessions
+    from localm import scopes as S
+    with TestClient(create_app(_make_engine())) as c:
+        assert auth._load_keystore() == []                 # no scoped keys at all
+        sid = sessions.create(scopes={S.ADMIN},
+                              key_hash=auth._hash_key("owner-only-key-abcdef"),
+                              fs_access="host")
+        c.cookies.set(SESSION_COOKIE, sid)
+        assert c.get("/v1/models").status_code == 200      # ADMIN valid, keystore empty
+
+
+def test_startup_sweeps_expired_sessions(monkeypatch):
+    """The server lifespan prunes expired session rows at startup (design 3.1)."""
+    import json
+    import time
+    monkeypatch.setenv("LOCALM_API_KEY", "owner-sweep-key-123456")
+    from localm import sessions
+    monkeypatch.setattr(sessions, "_CACHE", {"mtime": None, "records": None})
+    sessions.create(scopes={"admin"}, key_hash="KH-GOOD", ttl=10_000)
+    sessions.create(scopes={"admin"}, key_hash="KH-DEAD", ttl=10_000)
+    data = json.loads(sessions.sessions_file().read_text(encoding="utf-8"))
+    for r in data:
+        if r["key_hash"] == "KH-DEAD":
+            r["expires"] = time.time() - 1
+    sessions.sessions_file().write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setattr(sessions, "_CACHE", {"mtime": None, "records": None})
+    with TestClient(create_app(_make_engine())):
+        pass                                                # lifespan runs sweep()
+    hashes = {r["key_hash"] for r in
+              json.loads(sessions.sessions_file().read_text(encoding="utf-8"))}
+    assert "KH-DEAD" not in hashes and "KH-GOOD" in hashes
+
+
 def test_session_survives_owner_key_roll(monkeypatch):
     """THE reported bug, at the HTTP layer: after login, rolling the owner key must
     NOT log the browser out. The cookie is a session id decoupled from the key, so

@@ -280,8 +280,18 @@ def _principal_from_token(token, source):
         rec = sessions.lookup(token)
         if rec is None:
             return None
-        return (set(rec.get("scopes", [])), rec.get("key_hash"),
-                rec.get("fs_access", "none"))
+        held = set(rec.get("scopes", []))
+        if scopes.ADMIN not in held:
+            # A SCOPED-key session lives only as long as its underlying key does:
+            # re-validate the owning key against the live keystore every request, so
+            # revoking or expiring the key cuts the session off too (parity with the
+            # bearer path, where verify() re-checks the keystore each request). An
+            # owner/ADMIN session is intentionally exempt - it is decoupled from the
+            # key VALUE so an owner-key ROLL does not log the owner out (the S1 fix).
+            from localm.auth import key_hash_live
+            if not key_hash_live(rec.get("key_hash")):
+                return None
+        return (held, rec.get("key_hash"), rec.get("fs_access", "none"))
     from localm.auth import _hash_key, fs_access_for, verify
     held = verify(token)
     if held is None:
@@ -722,6 +732,15 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
         global _inference_sem
         # Semaphore created inside the running event loop - Python 3.10+ safe
         _inference_sem = asyncio.Semaphore(1)
+        # Prune expired browser sessions once at startup so an install that rarely
+        # mints new sessions does not accumulate stale rows (create() only prunes
+        # opportunistically). Best-effort: a sweep failure must never block startup.
+        try:
+            from localm import sessions as _sessions
+            _sessions.sweep()
+        except Exception:
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("session sweep at startup failed (non-fatal)", exc_info=True)
         # SRV-3: route an uncaught asyncio task exception through the bug reporter
         # instead of a silent "Task exception was never retrieved". Skipped under
         # pytest so the test runner keeps its own loop handling.

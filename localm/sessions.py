@@ -74,7 +74,7 @@ def _load() -> list:
         st = path.stat()
     except FileNotFoundError:
         return []
-    except OSError as e:
+    except OSError:
         # Exists but unreadable: do NOT pretend it is empty (that would drop every
         # session silently). Surface it; lookup() fails closed on the exception.
         raise
@@ -238,6 +238,25 @@ def revoke(sid: Optional[str]) -> bool:
     except (OSError, ValueError) as e:
         logger.warning("could not revoke session (%s); the store may be unreadable", e)
         return False
+
+
+def revoke_by_key_hash(key_hash: Optional[str]) -> int:
+    """Delete every session minted from the key with this hash, so revoking a scoped
+    key also drops the sessions it authorized. Returns the count removed. Never
+    raises on a missing/unreadable store."""
+    if not key_hash:
+        return 0
+    try:
+        with _LOCK:
+            records = _load()
+            keep = [r for r in records if r.get("key_hash") != key_hash]
+            removed = len(records) - len(keep)
+            if removed:
+                _save(keep)
+            return removed
+    except (OSError, ValueError) as e:
+        logger.warning("could not revoke sessions for a key (%s)", e)
+        return 0
 
 
 def revoke_all() -> int:

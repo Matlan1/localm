@@ -99,6 +99,19 @@ class TestShellRoute:
         assert "SHELLTOK123" in r.text
         assert "localm_session=" not in _set_cookies(r)
 
+    def test_corrupt_session_store_serves_the_shell_not_a_500(self, monkeypatch):
+        # A corrupt/unreadable sessions.json must not 500 the whole GUI: the auto-seed
+        # fails SAFE (serves the shell with NO session cookie -> the client hits the
+        # recoverable key gate), never a hard 500 the user cannot escape.
+        monkeypatch.setenv("LOCALM_API_KEY", "REALKEY123")
+        from localm import sessions
+        monkeypatch.setattr(sessions, "_CACHE", {"mtime": None, "records": None})
+        sessions.sessions_file().parent.mkdir(parents=True, exist_ok=True)
+        sessions.sessions_file().write_text("{ corrupt not json", encoding="utf-8")
+        r = TestClient(_app("127.0.0.1")).get("/")
+        assert r.status_code == 200                      # shell served, not 500
+        assert "localm_session=" not in _set_cookies(r)  # fail-safe: no cookie/access
+
     def test_lan_bind_never_seeds(self, monkeypatch):
         # A non-loopback bind seeds nothing: no key in the page, no auth cookie,
         # no shell-token global. The same-machine user enters the key.

@@ -140,7 +140,19 @@ def _set_session_cookies(response, key: str, *, secure: bool) -> None:
     if held is None:
         return
     fs = "host" if S.ADMIN in held else fs_access_for(key, "none")
-    sid = sessions.create(scopes=held, key_hash=_hash_key(key), fs_access=fs)
+    try:
+        sid = sessions.create(scopes=held, key_hash=_hash_key(key), fs_access=fs)
+    except Exception as e:
+        # The session store could not be written (e.g. a corrupt/unreadable
+        # sessions.json). Do NOT 500 the whole GUI shell over a convenience
+        # auto-seed: serve the shell WITHOUT a session cookie so the client falls
+        # to the key gate (recoverable), and surface the reason. Fail SAFE - no
+        # cookie means no access granted, so this never reports a success that did
+        # not happen (AGENTS rule 5).
+        from localm.debuglog import logger as _dbg
+        _dbg.warning("could not establish a browser session (auto-seed): %s; "
+                     "serving the shell unauthenticated (the key gate will show)", e)
+        return
     response.set_cookie(SESSION_COOKIE, sid, httponly=True, secure=secure,
                         samesite="strict", path="/", max_age=SESSION_MAX_AGE)
 

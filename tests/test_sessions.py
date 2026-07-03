@@ -60,6 +60,18 @@ def test_revoke_removes_the_session(_home):
     assert sessions.revoke(sid) is False        # already gone
 
 
+def test_revoke_by_key_hash_drops_that_keys_sessions_only(_home):
+    a = sessions.create(scopes={"chat"}, key_hash="KH-A")
+    b = sessions.create(scopes={"chat"}, key_hash="KH-A")   # same key, another device
+    c = sessions.create(scopes={"admin"}, key_hash="KH-B")  # a different key
+    assert sessions.revoke_by_key_hash("KH-A") == 2
+    assert sessions.lookup(a) is None
+    assert sessions.lookup(b) is None
+    assert sessions.lookup(c) is not None                   # untouched
+    assert sessions.revoke_by_key_hash("KH-NONE") == 0
+    assert sessions.revoke_by_key_hash("") == 0
+
+
 def test_revoke_all_signs_out_every_device(_home):
     a = sessions.create(scopes={"admin"}, key_hash="KH")
     b = sessions.create(scopes={"chat"}, key_hash="KH2")
