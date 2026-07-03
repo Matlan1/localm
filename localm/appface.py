@@ -137,6 +137,10 @@ class _StatusWindow(AppFace):
     def set_error(self, text):
         self._q.put(("error", text))
 
+    def show(self):
+        """Re-show the window (from the tray). Thread-safe."""
+        self._q.put(("show", None))
+
     def close(self):
         self._q.put(("close", None))
 
@@ -287,6 +291,11 @@ class _StatusWindow(AppFace):
                         root.deiconify(); root.lift()
                     except Exception:
                         pass
+                elif kind == "show":
+                    try:
+                        root.deiconify(); root.lift(); root.focus_force()
+                    except Exception:
+                        pass
                 elif kind == "close":
                     try:
                         root.destroy()
@@ -356,20 +365,24 @@ def start_app_face(*, name: str = "LocaLM", url: str, logfile=None,
     if "pytest" in sys.modules:
         return None
     try:
+        # Window FIRST, so the tray can re-open it (double-click / "Show LocaLM").
+        window = _StatusWindow(name=name, url=url, logfile=logfile,
+                               get_log_lines=get_log_lines, on_restart=on_restart,
+                               on_stop=on_stop, hide_on_ready=False)
+        win_ok = window.start()
         tray = None
         tray_ok = False
         if sys.platform == "win32":
             tray = _WinTray(name=name, url=url, logfile=logfile,
-                            get_log_lines=get_log_lines,
-                            on_restart=on_restart, on_stop=on_stop)
+                            get_log_lines=get_log_lines, on_restart=on_restart,
+                            on_stop=on_stop,
+                            on_show=(window.show if win_ok else None))
             tray_ok = tray.start()
-        # Hide the window to the tray on ready ONLY when the tray is actually
-        # there, so we never leave the user with no visible surface.
-        window = _StatusWindow(name=name, url=url, logfile=logfile,
-                               get_log_lines=get_log_lines, on_restart=on_restart,
-                               on_stop=on_stop,
-                               hide_on_ready=(sys.platform == "win32" and tray_ok))
-        win_ok = window.start()
+        # Auto-hide the window to the tray on ready ONLY when the tray is there to
+        # bring it back (double-click / "Show LocaLM"); otherwise it stays visible
+        # so the user is never left with no surface.
+        if win_ok and tray_ok:
+            window.hide_on_ready = True
         if not win_ok and not tray_ok:
             return None
         return _AppFaceHandle(window if win_ok else None, tray if tray_ok else None)
@@ -388,14 +401,17 @@ class _WinTray(AppFace):
     _ID_LOGS = 1003
     _ID_RESTART = 1004
     _ID_STOP = 1005
+    _ID_SHOW = 1006
 
-    def __init__(self, *, name, url, logfile, on_restart, on_stop, get_log_lines=None):
+    def __init__(self, *, name, url, logfile, on_restart, on_stop, get_log_lines=None,
+                 on_show=None):
         self.name = name
         self.url = url
         self.logfile = logfile
         self.get_log_lines = get_log_lines
         self.on_restart = on_restart
         self.on_stop = on_stop
+        self.on_show = on_show
         self._hwnd = None
         self._nid = None
         self._wndproc_ref = None   # keep the WINFUNCTYPE alive (Windows holds a raw ptr)
@@ -456,6 +472,10 @@ class _WinTray(AppFace):
         if self.on_stop:
             threading.Thread(target=self.on_stop, daemon=True).start()
 
+    def _show(self):
+        if self.on_show:
+            self.on_show()
+
     def _dispatch(self, cmd_id: int):
         {
             self._ID_OPEN: self._open,
@@ -463,6 +483,7 @@ class _WinTray(AppFace):
             self._ID_LOGS: self._logs,
             self._ID_RESTART: self._restart,
             self._ID_STOP: self._stop,
+            self._ID_SHOW: self._show,
         }.get(cmd_id, lambda: None)()
 
     # ---- the Win32 plumbing (its own thread owns the window + message loop) ----
@@ -539,7 +560,7 @@ class _WinTray(AppFace):
                     self._show_menu(hwnd, user32, MF_STRING, MF_SEPARATOR,
                                     TPM_RIGHTBUTTON)
                 elif lparam == WM_LBUTTONDBLCLK:
-                    self._open()
+                    self._show()   # double-click brings the dashboard window back
                 return 0
             if msg == WM_COMMAND:
                 self._dispatch(int(wparam) & 0xFFFF)
@@ -601,6 +622,8 @@ class _WinTray(AppFace):
         from ctypes import wintypes
 
         hmenu = user32.CreatePopupMenu()
+        user32.AppendMenuW(hmenu, MF_STRING, self._ID_SHOW, "Show LocaLM")
+        user32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
         user32.AppendMenuW(hmenu, MF_STRING, self._ID_OPEN, "Open LocaLM")
         user32.AppendMenuW(hmenu, MF_STRING, self._ID_COPY, "Copy address")
         user32.AppendMenuW(hmenu, MF_STRING, self._ID_LOGS, "View logs")
