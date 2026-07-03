@@ -201,8 +201,10 @@ def confine_index_path(p, policy: Optional[dict] = None) -> Path:
 
     if policy.get("mode") == "blacklist":
         # Allow anything not explicitly denied (the hard floor above still holds).
+        # Path(d) coerces in case a caller hand-built the policy with str entries
+        # (indexing_policy() already returns Paths; this just never trusts that).
         for d in policy.get("denied", []):
-            if _path_within(rp, d):
+            if _path_within(rp, Path(d)):
                 raise ConfinementError(
                     f"This folder is on your denied list, so it is not indexed: {p}",
                     path=rp, reason="denied")
@@ -213,7 +215,7 @@ def confine_index_path(p, policy: Optional[dict] = None) -> Path:
     roots: list[Path] = []
     for r in [Path.home(), Path.cwd(), *policy.get("allowed", [])]:
         try:
-            roots.append(r.resolve())
+            roots.append(Path(r).resolve())   # coerce str entries, then resolve
         except (OSError, ValueError):
             continue
     if any(_path_within(rp, r) for r in roots):

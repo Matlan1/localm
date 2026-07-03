@@ -127,6 +127,21 @@ class TestBlacklist:
         assert ei2.value.reason == "credential"
 
 
+    def test_string_policy_entries_are_coerced(self, home_env, tmp_path):
+        # Robustness: a policy carrying str (not Path) entries must not crash
+        # (indexing_policy() returns Paths, but confine must not trust that).
+        outside = tmp_path / "z"
+        outside.mkdir()
+        f = outside / "a.txt"
+        f.write_text("x", encoding="utf-8")
+        assert confine_index_path(
+            f, {"mode": "whitelist", "allowed": [str(outside)], "denied": []}
+        ) == f.resolve()
+        with pytest.raises(ConfinementError, match="denied"):
+            confine_index_path(
+                f, {"mode": "blacklist", "allowed": [], "denied": [str(outside)]})
+
+
 # --------------------------------------------------------------------------- #
 #  Hard floor (both modes + the unconfined CLI)                               #
 # --------------------------------------------------------------------------- #
@@ -320,6 +335,46 @@ class TestRagAddRoute:
             r = client.post("/api/rag/collections/kb/add",
                             json={"paths": [str(keyfile)], "embed": False})
             assert r.status_code == 400   # hard floor: refused, never offered
+
+    def test_non_owner_gets_403_not_409_on_whitelist_miss(
+            self, tmp_path, monkeypatch, tmp_path_factory):
+        # A scoped rag key (NOT the owner) must be hard-refused (403) on a
+        # whitelist miss, not offered 409 - only the owner can widen the list, so a
+        # non-owner should not even get the addable hint.
+        from localm.plugins.engine import PluginManager
+        from localm.plugins.gui.web import attach_gui
+        home = tmp_path
+        localm = home / ".localm"
+        localm.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("LOCALM_HOME", str(localm))
+        monkeypatch.setenv("LOCALM_API_KEY", "owner-key-xyz")   # owner configured
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+        import localm.config as cfg
+        monkeypatch.setattr(cfg, "HOME_DIR", localm)
+        monkeypatch.setattr(cfg, "MODELS_DIR", localm / "models")
+        monkeypatch.setattr(cfg, "CONFIG_FILE", localm / "config.json")
+        monkeypatch.setattr(cfg, "REGISTRY_FILE", localm / "registry.json")
+        from localm import auth
+        scoped = auth.create_key("dev", ["rag"])["key"]         # rag scope, NOT admin
+
+        app = FastAPI()
+        PluginManager(app, external_root=tmp_path / "noplugins").install("rag")
+
+        async def switch_model(name):
+            pass
+        attach_gui(app, self_url="http://127.0.0.1:9/v1",
+                   switch_model=switch_model, active_model=lambda: "model-a")
+
+        outside = tmp_path_factory.mktemp("outside_home2")
+        (outside / "x.txt").write_text("secret", encoding="utf-8")
+        with TestClient(app) as client:
+            sc = {"Authorization": f"Bearer {scoped}"}
+            client.post("/api/rag/collections", json={"name": "kb"}, headers=sc)
+            r = client.post("/api/rag/collections/kb/add",
+                            json={"paths": [str(outside / "x.txt")], "embed": False},
+                            headers=sc)
+            assert r.status_code == 403, r.text
+            assert "owner" in r.text.lower()
 
     def test_blacklist_allows_outside_but_denies_listed(self, rag_route_app,
                                                         tmp_path_factory):
