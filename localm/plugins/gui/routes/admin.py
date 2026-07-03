@@ -133,20 +133,34 @@ def register(app: FastAPI, ctx) -> None:
         return {"status": "ok"}
 
     @app.get("/api/fs/dirs", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
-    async def fs_dirs(path: str = "", include_files: bool = False):
-        """Subdirectories of *path*, for the coder setup directory picker.
+    async def fs_dirs(path: str = "", include_files: bool = False,
+                      meta: bool = False):
+        """Directory listing for the GUI file/folder picker.
 
         An empty path lists drive roots on Windows (filesystem root
-        elsewhere). Only directory names leave the server - no file
-        names or contents. The GUI is localhost + bearer-auth, and the
-        coder agent this picker feeds can read those directories anyway.
+        elsewhere). Only names (and, with ``meta=true``, each child's size +
+        modification time) leave the server - never file contents. The GUI is
+        localhost + bearer-auth, and the coder agent this picker feeds can read
+        those directories anyway.
+
+        ``include_files=true`` lists files too (folder-only pickers leave it
+        off). ``meta=true`` additionally returns an ``entries`` list of
+        ``{name, is_dir, size, mtime}`` so the picker can show sizes and dates;
+        the flat ``dirs``/``files`` arrays stay for older callers.
         """
         if not path:
             if os.name == "nt":
                 import string
                 roots = [f"{letter}:\\" for letter in string.ascii_uppercase
                          if Path(f"{letter}:\\").is_dir()]
-                return {"path": "", "parent": None, "dirs": roots, "files": []}
+                result = {"path": "", "parent": None, "dirs": roots, "files": []}
+                if meta:
+                    # Drives have no meaningful size/mtime; the picker just needs
+                    # the names as navigable folders.
+                    result["entries"] = [
+                        {"name": r, "is_dir": True, "size": None, "mtime": None}
+                        for r in roots]
+                return result
             path = "/"
         p = Path(path).expanduser()
         if not p.is_dir():
@@ -154,20 +168,86 @@ def register(app: FastAPI, ctx) -> None:
         p = p.resolve()
         dirs = []
         files = []
+        entries = []
         try:
             for child in sorted(p.iterdir(), key=lambda c: c.name.lower()):
                 try:
-                    if not child.name.startswith("."):
-                        if child.is_dir():
-                            dirs.append(child.name)
-                        elif include_files and child.is_file():
-                            files.append(child.name)
+                    if child.name.startswith("."):
+                        continue
+                    is_dir = child.is_dir()
+                    if not is_dir and not (include_files and child.is_file()):
+                        # A file when only dirs were requested, or a non-file
+                        # non-dir (socket, device): not selectable, skip it.
+                        continue
+                    (dirs if is_dir else files).append(child.name)
+                    if meta:
+                        size = mtime = None
+                        try:
+                            st = child.stat()
+                            mtime = st.st_mtime
+                            if not is_dir:
+                                size = st.st_size
+                        except OSError:
+                            # Unreadable child (permissions, broken link): still
+                            # list the name so it can be navigated/reported;
+                            # size/mtime stay null rather than faked.
+                            pass
+                        entries.append({"name": child.name, "is_dir": is_dir,
+                                        "size": size, "mtime": mtime})
                 except OSError:
                     continue   # broken junction / reparse point
         except PermissionError:
             raise HTTPException(403, f"Permission denied: {path}")
         at_root = p.parent == p
-        return {"path": str(p),
-                "parent": "" if at_root else str(p.parent),
-                "dirs": dirs,
-                "files": files}
+        result = {"path": str(p),
+                  "parent": "" if at_root else str(p.parent),
+                  "dirs": dirs,
+                  "files": files}
+        if meta:
+            result["entries"] = entries
+        return result
+
+    @app.get("/api/fs/places", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
+    async def fs_places():
+        """Quick-access locations for the picker's Places rail: the user's home
+        and its standard subfolders (only the ones that exist), plus drive roots
+        on Windows (the filesystem root elsewhere).
+
+        Every path is derived from ``Path.home()`` - never hardcoded - so a
+        relocated profile still resolves, and a subfolder that is absent (a
+        localized profile, a machine with no Downloads) is simply omitted rather
+        than guessed.
+        """
+        places = []
+        try:
+            home = Path.home()
+        except (OSError, RuntimeError):
+            home = None
+        if home is not None and home.is_dir():
+            places.append({"label": "Home", "path": str(home), "icon": "home"})
+            # Standard English subfolder names. Localized profiles name these
+            # differently; we add only the ones that actually exist (no guessing).
+            for label, sub, icon in [("Desktop", "Desktop", "desktop"),
+                                     ("Documents", "Documents", "documents"),
+                                     ("Downloads", "Downloads", "downloads")]:
+                try:
+                    d = home / sub
+                    if d.is_dir():
+                        places.append({"label": label, "path": str(d),
+                                       "icon": icon})
+                except OSError:
+                    continue
+        drives = []
+        if os.name == "nt":
+            import string
+            for letter in string.ascii_uppercase:
+                root = f"{letter}:\\"
+                try:
+                    if Path(root).is_dir():
+                        drives.append({"label": root, "path": root,
+                                       "icon": "drive"})
+                except OSError:
+                    continue
+        else:
+            drives.append({"label": "/", "path": "/", "icon": "drive"})
+        return {"places": places, "drives": drives}

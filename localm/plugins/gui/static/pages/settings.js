@@ -6,7 +6,7 @@
 "use strict";
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
-import { pickDirectory, pickFile } from "../app/coder.js";
+import { pickDirectory, pickFile } from "../app/picker.js";
 import { $, authHeaders, el, toast } from "../app/helpers.js";
 
 /* ================================================================ */
