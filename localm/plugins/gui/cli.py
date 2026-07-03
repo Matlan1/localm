@@ -376,14 +376,18 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         open_url = f"{base_url}?view=models&pull={quote(pull_spec, safe='')}"
     elif model_less:
         open_url = f"{base_url}?view=models"
-    # One-time launch handoff: when auth is on and this is a loopback bind, hand the
-    # auto-opened browser a single-use grant in the URL so it lands AUTHENTICATED via
-    # a real navigation (a fresh query string a warm SW cannot serve from cache and
-    # that forces a load even if a tab is already open), instead of depending on the
-    # implicit GET / cookie auto-seed that a focused-but-not-reloaded tab can skip.
+    # One-time launch handoff: when auth is on, hand the auto-opened browser a
+    # single-use grant in the URL so it lands AUTHENTICATED via a real navigation,
+    # instead of depending on the implicit GET / cookie auto-seed. This runs on ANY
+    # bind, including a NETWORK bind - the person launching is on THIS machine (the
+    # host) and should never have to type the key, even when the server is exposed to
+    # the LAN. The grant is a 256-bit single-use secret only we know and only place in
+    # the URL we open locally, so a network client never sees it (see web.py's
+    # redemption note). Without this, a network bind treated the host user like a
+    # stranger and showed the key gate on their own machine.
     from localm import auth as _auth
-    from .web import _is_loopback_host, mint_launch_grant
-    if _auth.get_api_key() and _is_loopback_host(host):
+    from .web import mint_launch_grant
+    if _auth.get_api_key():
         from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
         _p = urlparse(open_url)
         _q = dict(parse_qsl(_p.query))
@@ -475,9 +479,34 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     if engine is not None:
         threading.Thread(target=_preload, daemon=True, name="preload").start()
 
+    # Print the exact local URL (Jupyter-style) so it is copy-pasteable even if the
+    # browser does not open. It carries the one-time grant, which is fine: this is the
+    # host's own console. soft_wrap so the long URL is emitted as ONE line (a wrapped
+    # URL with an injected newline is not copy-pasteable).
+    console.print(f"  [dim]Open the GUI:[/dim] [cyan]{open_url}[/cyan]", soft_wrap=True)
+
+    def _open_when_ready(url: str, port: int, timeout: float = 20.0) -> None:
+        """Open the browser only once the server actually ACCEPTS a connection, so a
+        fresh launch never lands the user on the "Can't reach the server /
+        reconnecting" overlay because the tab beat the listener (the cold-start
+        race). Polls the loopback port; opens anyway after *timeout* as a fallback."""
+        import socket
+        import time as _time
+        deadline = _time.monotonic() + timeout
+        while _time.monotonic() < deadline:
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                    break
+            except OSError:
+                _time.sleep(0.25)
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+
     if not no_browser:
-        # Delay slightly so the server is listening when the tab opens
-        threading.Timer(1.0, lambda: webbrowser.open(open_url)).start()
+        threading.Thread(target=_open_when_ready, args=(open_url, chosen_port),
+                         daemon=True, name="open-browser").start()
 
     # Record the bind host so the SPA-shell route knows whether every client is
     # loopback (a 127.0.0.1 bind) and can safely seed the API key into the page.
