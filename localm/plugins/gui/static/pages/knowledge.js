@@ -147,12 +147,31 @@ export async function kbAddDocs(name) {
   const label = paths.length === 1 ? paths[0] : `${paths.length} items`;
   log.textContent = `Indexing ${label} into '${name}'`
     + (embed ? "" : " (BM25 only)") + "…\n";
+  await kbRunAdd(name, paths, embed, log);
+}
+
+/** POST the add job. If the server replies 409 needs_consent (a whitelist miss,
+ *  owner only), offer to add the folders to the allowed list and retry ONCE. */
+export async function kbRunAdd(name, paths, embed, log, retried = false) {
   try {
     const r = await fetch(
       `/api/rag/collections/${encodeURIComponent(name)}/add`, {
         method: "POST", headers: authHeaders(),
         body: JSON.stringify({ paths, embed }),
       });
+    if (r.status === 409 && !retried) {
+      const info = await r.json().catch(() => ({}));
+      if (info && info.needs_consent) {
+        const folders = info.addable || [];
+        if (!(await kbConfirmAddRoots(folders))) {
+          log.textContent += "Cancelled - folders not added.\n";
+          return;
+        }
+        if (!(await kbAppendAllowedRoots(folders))) return;   // PATCH failed (toasted)
+        log.textContent += "Added to your allowed folders. Indexing…\n";
+        return kbRunAdd(name, paths, embed, log, true);       // retry once
+      }
+    }
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
     const end = await streamJob(data.job_id, (line) => {
@@ -166,6 +185,55 @@ export async function kbAddDocs(name) {
   } catch (e) {
     log.textContent += "failed: " + e.message + "\n";
     toast("Indexing failed: " + e.message, true);
+  }
+}
+
+/** In-page confirm (window.confirm is suppressed in some PWAs) asking whether to
+ *  add the out-of-whitelist folders to the allowed list and continue. */
+export function kbConfirmAddRoots(folders) {
+  return new Promise((resolve) => {
+    openModal("Add to allowed folders?", (body) => {
+      body.appendChild(el("p", "", folders.length === 1
+        ? "This folder is outside your allowed indexing folders:"
+        : "These folders are outside your allowed indexing folders:"));
+      const list = el("ul", "kb-addroots");
+      for (const f of folders) list.appendChild(el("li", "", f));
+      body.appendChild(list);
+      body.appendChild(el("p", "sub",
+        "Add " + (folders.length === 1 ? "it" : "them") + " to your allowed "
+        + "folders and index? You can change this later in Settings › Knowledge."));
+      const row = el("div", "actions");
+      const cancel = el("button", "btn-secondary", "Cancel");
+      cancel.onclick = () => { $("modal").style.display = "none"; resolve(false); };
+      const ok = el("button", "btn-secondary btn-primary", "Add and index");
+      ok.onclick = () => { $("modal").style.display = "none"; resolve(true); };
+      row.append(cancel, ok);
+      body.appendChild(row);
+    });
+  });
+}
+
+/** Append *folders* to rag_allowed_roots (owner-only) via the config API, merging
+ *  with the current list. Returns true on success. */
+export async function kbAppendAllowedRoots(folders) {
+  try {
+    const cur = await fetch("/v1/config", { headers: authHeaders() });
+    const cfg = cur.ok ? await cur.json() : {};
+    const existing = Array.isArray(cfg.rag_allowed_roots) ? cfg.rag_allowed_roots : [];
+    const merged = [...new Set([...existing, ...folders])];
+    const pr = await fetch("/v1/config", {
+      method: "PATCH", headers: authHeaders(),
+      body: JSON.stringify({ rag_allowed_roots: merged }),
+    });
+    if (!pr.ok) {
+      const e = await pr.json().catch(() => ({}));
+      toast(e.detail || "Could not update allowed folders", true);
+      return false;
+    }
+    return true;
+  } catch (e) {
+    toast("Could not update allowed folders: " + e.message, true);
+    return false;
   }
 }
 
