@@ -61,6 +61,7 @@ CATALOG: tuple = (
                  commands=("knowledge",)),
     CatalogEntry("web", "Web search and page fetch for chat",
                  commands=("search-web",)),
+    CatalogEntry("memory", "Remember durable facts about you across chats"),
     CatalogEntry("voice", "Speech-to-text for the chat mic button",
                  extra="voice"),
     CatalogEntry("tts", "Text-to-speech (neural voices) for reading replies aloud"),

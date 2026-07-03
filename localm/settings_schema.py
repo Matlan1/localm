@@ -180,18 +180,19 @@ CORE_FIELDS: list = [
                  "Overrides the global persistence for the coder only. Blank "
                  "inherits the global mode.",
                  group="Privacy", owner="coder", options=_PRIVACY_INHERIT),
-    SettingField("memory_enabled", Widget.TOGGLE, "Chat memory",
-                 "Recall the durable facts localm has learned about you and add "
-                 "them to the system prompt each chat turn. Turning this off "
-                 "stops using the memory (existing facts are kept).",
-                 group="Privacy"),
+    SettingField("memory_enabled", Widget.TOGGLE, "Recall memory",
+                 "While the memory plugin is enabled, recall the durable facts "
+                 "localm has learned about you and add them to the system prompt "
+                 "each chat turn. Off = keep the facts but stop recalling them. "
+                 "Privacy mode disables memory entirely (no recall, no writes).",
+                 group="Privacy", owner="memory"),
     SettingField("memory_auto_consolidate", Widget.TOGGLE, "Grow memory automatically",
                  "After a chat turn, quietly distil durable facts from the "
                  "conversation into memory in the background, so it accumulates "
                  "with no manual step. Always blocked in privacy mode (no new "
                  "traces). Turn this off to grow memory only via the 'Synthesize "
                  "now' button or a scheduled memory job.",
-                 group="Privacy"),
+                 group="Privacy", owner="memory"),
     # ---- Models ----
     SettingField("embedding_model", Widget.TEXT, "Embedding model",
                  "Small on-device model for semantic search in memory and RAG "

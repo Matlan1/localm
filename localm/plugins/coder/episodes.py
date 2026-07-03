@@ -226,8 +226,14 @@ class EpisodeStore:
                 qv = None
             evs = self._vectors(texts, ef) if qv else None
             if evs and all(len(v) == len(qv) for v in evs if v):
-                from localm.memory.store import _cosine
-                cos = [(_cosine(qv, v) if v else 0.0) for v in evs]
+                # Reuse the memory library's cosine (shared core module). Guarded
+                # so a missing/renamed helper degrades coder recall to lexical-only
+                # instead of raising - no hard dependency on a private symbol.
+                try:
+                    from localm.memory.store import _cosine
+                    cos = [(_cosine(qv, v) if v else 0.0) for v in evs]
+                except Exception:
+                    cos = []
 
         scored = []
         for i, e in enumerate(eps):

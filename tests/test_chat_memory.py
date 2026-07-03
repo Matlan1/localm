@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """
-Chat-plugin memory wiring: the server-side inlet injection and the /api/memory
+Memory-plugin wiring: the server-side inlet injection and the /api/memory
 routes (view / add / edit / delete), including privacy gating and best-effort
-isolation (a broken recall must never break a chat turn).
+isolation (a broken recall must never break a chat turn). Memory is its own
+plugin now (localm/plugins/builtin/memory); privacy mode disables it entirely.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from localm.memory import MemoryRecord
-from localm.plugins.builtin.chat import plug
+from localm.plugins.builtin.memory import plug
 
 
 @pytest.fixture
@@ -87,7 +88,11 @@ def test_inlet_best_effort_never_raises(home, monkeypatch):
     assert messages[0]["content"] == "sys"
 
 
-def test_migration_skipped_in_privacy_but_legacy_still_read(home, monkeypatch):
+def test_privacy_mode_disables_memory_entirely(home, monkeypatch):
+    """Privacy mode = memory FULLY off: migration is skipped (a write), AND the
+    inlet recalls nothing - no past fact reaches the model, not even the legacy
+    file or an existing structured record. Stronger than the old 'no new traces,
+    recall still allowed' contract (the maintainer's explicit requirement)."""
     monkeypatch.setenv("LOCALM_MODE", "privacy")
     (home / "chat-memory.md").write_text("- user likes strong coffee\n",
                                          encoding="utf-8")
@@ -95,12 +100,19 @@ def test_migration_skipped_in_privacy_but_legacy_still_read(home, monkeypatch):
     plug._migrate_legacy(store)                     # privacy -> must NOT import
     assert store.all() == []
     assert not store.path.with_suffix(".legacy-imported").exists()
-    # recall is not amnesia: the legacy fact is still injected READ-ONLY
+    # Privacy: the inlet injects NOTHING - no recall of the legacy fact.
     messages = [{"role": "user", "content": "coffee preferences?"}]
-    out = plug._memory_inlet(messages, _ctx())
-    assert out and "strong coffee" in out[0]["content"]
-    # ...and nothing new was written to disk
-    assert store.all() == [] and plug._chat_store().all() == []
+    assert plug._memory_inlet(messages, _ctx()) is None
+    # Even a pre-existing structured record is not recalled in privacy mode.
+    monkeypatch.setenv("LOCALM_MODE", "log")        # write one, then go private
+    s = plug._chat_store()
+    s.add(MemoryRecord(text="user likes strong coffee", kind="semantic",
+                       source="user", importance=0.9), embed_fn=None)
+    monkeypatch.setenv("LOCALM_MODE", "privacy")
+    assert plug._memory_inlet(
+        [{"role": "user", "content": "coffee?"}], _ctx()) is None
+    # ...and nothing new was written to disk during the privacy recall attempt.
+    assert not store.path.with_suffix(".legacy-imported").exists()
 
 
 def test_inlet_neutralises_poisoned_memory(home):
@@ -240,13 +252,19 @@ def test_end_to_end_memory_inlet_via_real_pipeline(tmp_path, monkeypatch):
     captured: dict = {}
     app = create_app(_capturing_engine(captured))
     assert isinstance(app.state.chat_pipeline, ChatPipeline)
+    # Memory is an OPT-IN plugin now (off by default): enable it so its /api/memory
+    # routes and recall inlet hook are live - the realistic "user turned memory on"
+    # path. Enabling live-registers the router + hooks on the running app.
+    mgr = app.state.plugin_manager
+    mgr.install("memory")
+    mgr.enable("memory")
     # Open-mode management routes (POST /api/memory/*) require the per-process shell
     # token as a bearer (the H5 gate); the GUI shell injects it. Present it here so
     # this exercises the real gate too.
     shell = getattr(app.state, "shell_token", None)
     hdr = {"Authorization": f"Bearer {shell}"} if shell else {}
     with TestClient(app) as c:
-        # register(host) mounted the chat plugin's /api/memory routes
+        # the memory plugin mounted the /api/memory routes on enable
         assert c.get("/api/memory").status_code == 200
         assert c.post("/api/memory/append", headers=hdr,
                       json={"text": "User prefers Rust and cargo"}).status_code == 200
@@ -261,3 +279,73 @@ def test_end_to_end_memory_inlet_via_real_pipeline(tmp_path, monkeypatch):
     assert any("<remembered_facts>" in (m.get("content") or "")
                and "Rust and cargo" in m["content"] for m in sys_msgs), \
         f"memory not injected; system messages={sys_msgs}"
+
+
+def test_chat_works_with_memory_plugin_disabled(tmp_path, monkeypatch):
+    """Degradation: with the memory plugin off (the default), /api/memory 404s and
+    a chat turn still completes with NO memory injection - chat never hard-depends
+    on memory."""
+    monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
+    monkeypatch.setenv("LOCALM_MODE", "log")
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    import localm.config as cfg
+    monkeypatch.setattr(cfg, "HOME_DIR", tmp_path)
+    monkeypatch.setattr(cfg, "MODELS_DIR", tmp_path / "models")
+    monkeypatch.setattr(cfg, "CONFIG_FILE", tmp_path / "config.json")
+    monkeypatch.setattr(cfg, "REGISTRY_FILE", tmp_path / "registry.json")
+
+    from localm.inference.http_server import create_app
+
+    captured: dict = {}
+    app = create_app(_capturing_engine(captured))
+    # Memory is off by default - do NOT enable it.
+    with TestClient(app) as c:
+        assert c.get("/api/memory").status_code == 404      # routes not mounted
+        rr = c.post("/v1/chat/completions", json={
+            "model": "m",
+            "messages": [{"role": "user", "content": "hello there"}]})
+        assert rr.status_code == 200                          # chat still works
+    sys_msgs = [m for m in captured.get("messages", [])
+                if m.get("role") == "system"]
+    assert not any("<remembered_facts>" in (m.get("content") or "")
+                   for m in sys_msgs), "memory injected while its plugin was off"
+
+
+def test_disabling_memory_plugin_removes_hooks_and_routes(tmp_path, monkeypatch):
+    """Enabling then disabling the memory plugin unmounts its routes (404) and
+    strips its chat hooks, so a subsequent turn does not recall - the toggle is a
+    real off switch, not just a config flag."""
+    monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
+    monkeypatch.setenv("LOCALM_MODE", "log")
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    import localm.config as cfg
+    monkeypatch.setattr(cfg, "HOME_DIR", tmp_path)
+    monkeypatch.setattr(cfg, "MODELS_DIR", tmp_path / "models")
+    monkeypatch.setattr(cfg, "CONFIG_FILE", tmp_path / "config.json")
+    monkeypatch.setattr(cfg, "REGISTRY_FILE", tmp_path / "registry.json")
+
+    from localm.inference.http_server import create_app
+
+    captured: dict = {}
+    app = create_app(_capturing_engine(captured))
+    mgr = app.state.plugin_manager
+    mgr.install("memory")
+    mgr.enable("memory")
+    shell = getattr(app.state, "shell_token", None)
+    hdr = {"Authorization": f"Bearer {shell}"} if shell else {}
+    with TestClient(app) as c:
+        c.post("/api/memory/append", headers=hdr,
+               json={"text": "User prefers Zig"})
+        assert c.get("/api/memory").status_code == 200
+        mgr.disable("memory")                                 # flip the toggle off
+        assert c.get("/api/memory").status_code == 404        # routes gone
+        rr = c.post("/v1/chat/completions", json={
+            "model": "m",
+            "messages": [{"role": "user", "content": "tell me about zig"}]})
+        assert rr.status_code == 200
+    sys_msgs = [m for m in captured.get("messages", [])
+                if m.get("role") == "system"]
+    assert not any("<remembered_facts>" in (m.get("content") or "")
+                   for m in sys_msgs), "recall hook still fired after disable"

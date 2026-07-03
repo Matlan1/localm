@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 
+from localm.audit import SessionMode
 from localm.plugins.coder.episodes import (
     Episode,
     EpisodeStore,
@@ -262,9 +263,24 @@ def _agent(tmp_path, backend=None, **kw):
 
 
 def test_agent_enables_episodic_by_default(home, tmp_path):
-    agent = _agent(tmp_path)
+    # In a normal (non-privacy) session, episodic memory is on by default.
+    agent = _agent(tmp_path, mode=SessionMode.LOG)
     assert agent._episodic is True
     assert agent._episode_store is not None
+
+
+def test_privacy_mode_disables_episodic(home, tmp_path):
+    # Privacy mode disables the coder's episodic memory ENTIRELY (no recall AND no
+    # write): the store is not even opened, so past-session lessons never reach the
+    # model. Mirrors the chat memory's "fully off in privacy" contract.
+    agent = _agent(tmp_path, mode=SessionMode.PRIVACY)
+    assert agent._episodic is False
+    assert agent._episode_store is None
+    # And a pre-existing lesson is NOT recalled in privacy mode.
+    EpisodeStore(tmp_path).add(Episode(
+        task="add retry logic to the http client",
+        lesson="exponential backoff capped at 30s"))
+    assert agent._with_episodes("add retry logic") == "add retry logic"
 
 
 def test_restricted_session_disables_episodic(home, tmp_path):
@@ -276,7 +292,7 @@ def test_restricted_session_disables_episodic(home, tmp_path):
 def test_config_off_disables_episodic(home, tmp_path, monkeypatch):
     import localm.config as cfg
     monkeypatch.setattr(cfg, "load_config", lambda: {"coder_episodic_memory": False})
-    agent = _agent(tmp_path)
+    agent = _agent(tmp_path, mode=SessionMode.LOG)
     assert agent._episodic is False
 
 
@@ -284,7 +300,7 @@ def test_with_episodes_injects_relevant_lesson(home, tmp_path):
     EpisodeStore(tmp_path).add(Episode(
         task="add retry logic to the http client",
         lesson="exponential backoff capped at 30s"))
-    agent = _agent(tmp_path)
+    agent = _agent(tmp_path, mode=SessionMode.LOG)
     out = agent._with_episodes("add retry logic to the http client uploader")
     assert "Past lessons" in out
     assert "exponential backoff" in out
@@ -294,7 +310,7 @@ def test_with_episodes_injects_relevant_lesson(home, tmp_path):
 def test_with_episodes_noop_when_no_relevant_history(home, tmp_path):
     EpisodeStore(tmp_path).add(Episode(task="totally unrelated css work",
                                        lesson="use grid"))
-    agent = _agent(tmp_path)
+    agent = _agent(tmp_path, mode=SessionMode.LOG)
     assert agent._with_episodes("quantum chromodynamics solver") == \
         "quantum chromodynamics solver"
 
@@ -314,12 +330,14 @@ def test_close_writes_episode_on_changes(home, tmp_path):
 
 
 def test_close_skips_episode_in_privacy_mode(home, tmp_path):
-    from localm.audit import SessionMode
     agent = _agent(tmp_path, backend=_ChatBackend(_REPLY), mode=SessionMode.PRIVACY)
     agent._changed_files = {"foo.py": {"original": None, "writes": 1,
                                        "last_tool": "write_file"}}
     agent.close()
-    assert agent._episode_store.all() == []         # privacy: no trace written
+    # Privacy: episodic memory is fully off - the store is never even opened...
+    assert agent._episode_store is None
+    # ...and nothing was written to disk for this project.
+    assert EpisodeStore(tmp_path).all() == []
 
 
 def test_close_writes_nothing_without_changes(home, tmp_path):

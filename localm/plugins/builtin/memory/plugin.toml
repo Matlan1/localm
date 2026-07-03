@@ -1,0 +1,12 @@
+[plugin]
+name = "memory"
+version = "1.0.0"
+description = "Durable chat memory: remember facts about you across conversations."
+scope = "memory"
+register = "plug"
+data_subdir = "memory"
+# Off by default (opt-in): not preinstalled, not default_enabled. Install + enable
+# it from the Plugins page to turn chat memory on. Existing memory data under
+# <home>/memory is preserved and reactivates the moment the plugin is enabled.
+# Headless (no [surface] tab): it adds the /api/memory* routes + the chat recall
+# and consolidation hooks, and its settings render under the plugin's own section.

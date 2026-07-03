@@ -25,7 +25,7 @@ def chat_home(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "MODELS_DIR", tmp_path / "models")
     monkeypatch.setattr(cfg, "REGISTRY_FILE", tmp_path / "registry.json")
     monkeypatch.setattr(cfg, "CONFIG_FILE", tmp_path / "config.json")
-    import localm.plugins.builtin.chat.plug as plug
+    import localm.plugins.builtin.memory.plug as plug
     monkeypatch.setattr(plug, "_home", lambda: tmp_path)
     monkeypatch.setattr(plug, "_memory_root", lambda: tmp_path / "memory")
     monkeypatch.setattr(plug, "_embed_fn", lambda: None)
