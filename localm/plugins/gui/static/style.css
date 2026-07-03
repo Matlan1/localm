@@ -1816,6 +1816,15 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
   color: var(--text-dim);
 }
 
+/* Shown in place of a reply body that rendered to nothing visible (e.g. a tiny
+ * model emitting only an empty ```code fence) - a plain note instead of a blank
+ * bubble, so the reply never just looks broken. */
+.md-empty {
+  color: var(--text-dim);
+  font-style: italic;
+  font-size: 13px;
+}
+
 /* inline checkbox next to a button row */
 .inline-check {
   display: inline-flex;
