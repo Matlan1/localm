@@ -480,6 +480,23 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         name="LocaLM", url=base_url, logfile=_home_dir() / "logs" / "recent.log",
         get_log_lines=debuglog.recent_activity,
         on_restart=hs._do_restart, on_stop=hs._do_shutdown)
+    if app_face is not None:
+        # Accurate splash: flip the window from "Starting..." to "Running" (and, on
+        # Windows, hide it to the tray) once the port is ACTUALLY accepting
+        # connections. Polled in a thread so it is independent of the web
+        # framework's event API (a raw TCP connect works for http and https alike).
+        def _mark_ready_when_listening():
+            import socket
+            import time as _t
+            for _ in range(160):   # up to ~40s, then flip anyway
+                try:
+                    with socket.create_connection(("127.0.0.1", chosen_port), 0.5):
+                        break
+                except OSError:
+                    _t.sleep(0.25)
+            app_face.set_ready()
+        threading.Thread(target=_mark_ready_when_listening,
+                         name="localm-ready", daemon=True).start()
     try:
         with instances.advertise(app, home_dir(), host=host, port=chosen_port,
                                  mode="full", scheme=scheme, project=project,
