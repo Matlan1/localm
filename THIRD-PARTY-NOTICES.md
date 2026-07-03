@@ -61,7 +61,7 @@ upstream license notices.
 ## Arm's-length tools (not bundled, linked, or redistributed)
 
 localm interoperates with some external programs by invoking them over HTTP or as
-separate subprocesses, for example ComfyUI (image / music / video generation) and
-Heretic (model abliteration). These independent programs the user installs are
-not bundled, statically or dynamically linked, or redistributed by localm, so
-their licenses (including GPL / AGPL) do not extend to localm or its users.
+separate subprocesses, for example ComfyUI (image / music / video generation).
+These independent programs the user installs are not bundled, statically or
+dynamically linked, or redistributed by localm, so their licenses (including
+GPL / AGPL) do not extend to localm or its users.

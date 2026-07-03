@@ -612,7 +612,7 @@ export async function refreshKeysPanel() {
 // Friendly section label per plugin owner (falls back to the capitalized scope).
 export const PLUGIN_SECTION_LABEL = {
   image: "Image", web: "Web access", voice: "Voice", coder: "Coder",
-  abliterate: "Abliterate", music: "Music", video: "Video", rag: "Knowledge",
+  music: "Music", video: "Video", rag: "Knowledge",
   mcp: "MCP", chat: "Chat",
 };
 

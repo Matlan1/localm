@@ -105,7 +105,6 @@ A pip extra and a plugin install are two separate steps. The extra installs a pl
 | `audio` | Audio multimodal input (`soundfile`) |
 | `rag` | PDF parsing for Knowledge (`pypdf`); other formats are stdlib |
 | `voice` | Whisper speech-to-text for the GUI mic (`faster-whisper`, CPU, no torch) |
-| `abliterate` | Opt-in marker for `localm abliterate` (no new deps; shells out to Heretic) |
 | `monitor` | Live hardware monitor in the GUI status bar (`psutil`) |
 | `qr` | QR code for phone pairing (the Settings key QR / companion onboarding) |
 | `grammar` | Grammar-constrained decoding for HuggingFace models (`xgrammar`, layers on `[gpu]`) |

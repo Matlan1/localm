@@ -10,7 +10,7 @@ fixed set of choices, free text for URLs, a folder picker for directories, a
 masked input for secrets - and so each plugin can contribute its own section.
 
 `owner` records which surface a setting belongs to ("core" or a plugin scope).
-Plugin-owned core keys (comfy_*, net_*, voice_*, coder_*, heretic_path) migrate
+Plugin-owned core keys (comfy_*, net_*, voice_*, coder_*) migrate
 to those plugins in Phase 3 - this field is the migration map.
 
 Phase 0 ships the schema + the core fields. The renderer (GUI) lands in Phase 5.
@@ -391,12 +391,6 @@ CORE_FIELDS: list = [
                  "Force a language for transcription, e.g. en or de. Blank "
                  "auto-detects from the audio.",
                  group="Voice", owner="voice"),
-    # ---- Abliterate (plugin) ----
-    SettingField("heretic_path", Widget.FOLDER, "Heretic checkout path",
-                 "Folder of a Heretic checkout for the abliterate plugin (a "
-                 "separate program run via subprocess). Blank auto-detects, or "
-                 "localm offers to clone it.",
-                 group="Advanced", owner="abliterate"),
 ]
 
 

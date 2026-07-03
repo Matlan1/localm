@@ -55,7 +55,7 @@ def test_window_width_is_fixed_against_long_content():
 
         # Slam in pathological content the user complained about.
         app.status_msg("X" * 400)
-        app.model.set("Llama3.3-8B-Instruct-Thinking-Heretic-Uncensored-"
+        app.model.set("Llama3.3-8B-Instruct-Thinking-Extended-Uncensored-"
                       "Claude-4.5-Opus-High-Reasoning.i1-Q6_K" * 3)
         app.model_box["values"] = [app.model.get()]
         app.update_idletasks()

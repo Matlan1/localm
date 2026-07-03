@@ -35,8 +35,7 @@ First tagged release. A self-contained, offline local-LLM platform.
   lists).
 - **Networking**: reach a network-bound instance by name over mDNS (`localm.local`)
   and Tailscale MagicDNS, folded into the TLS certificate.
-- **Model tools**: abliteration (decensoring) via Heretic, HuggingFace search, and
-  local model registration.
+- **Model tools**: HuggingFace search and local model registration.
 
 ### Known limitations
 - Media generation (image / music / video) requires a local ComfyUI backend; RAG's
