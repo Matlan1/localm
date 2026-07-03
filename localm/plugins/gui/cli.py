@@ -495,6 +495,14 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
                 except OSError:
                     _t.sleep(0.25)
             app_face.set_ready()
+            # When the launcher spawned us with our OWN console, hide it now that
+            # the server is up and the tray/status window is the surface - so it
+            # runs like a background app. A direct `localm gui` in a terminal has no
+            # such flag, so that terminal is left alone.
+            import os as _os2
+            if _os2.environ.get("LOCALM_OWN_CONSOLE"):
+                from localm.winconsole import hide_console
+                hide_console()
         threading.Thread(target=_mark_ready_when_listening,
                          name="localm-ready", daemon=True).start()
     try:

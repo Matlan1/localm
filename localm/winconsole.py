@@ -144,3 +144,24 @@ def set_console_title(title: str) -> bool:
         return False
     except Exception:
         return False  # cosmetic hardening must never block startup
+
+
+def hide_console() -> bool:
+    """Hide THIS process's own console window (Windows), so a launcher-spawned
+    server runs like a background app - just its tray + status window, no raw
+    console. Only the caller knows it is safe (the console is ours, not a user's
+    interactive terminal), so this is opt-in via that caller. No-op off Windows or
+    when there is no console. Best-effort; returns True if a window was hidden."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+
+        hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+        if not hwnd:
+            return False
+        SW_HIDE = 0
+        ctypes.windll.user32.ShowWindow(hwnd, SW_HIDE)
+        return True
+    except Exception:
+        return False
