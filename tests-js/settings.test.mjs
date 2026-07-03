@@ -98,12 +98,44 @@ test("settings renders a typed control per schema field, split into sections", a
   assert.notEqual(nctx.closest(".settings-section"), webSec,
     "core and plugin settings live in separate sections");
 
-  // Left nav lists the sections (incl. the web plugin) so they can be jumped to.
+  // Left nav lists the 6 top-level GROUPS (not one link per section); the web
+  // plugin's section lives INSIDE the Plugins group.
   const navLabels = [...doc.querySelectorAll("#settings-nav .settings-nav-link")]
     .map((l) => l.textContent);
-  assert.ok(navLabels.some((l) => /web/i.test(l)), "web section appears in the nav");
-  // Exactly one section is shown at a time.
-  assert.equal(doc.querySelectorAll("#settings-content .settings-section.active").length, 1);
+  assert.deepEqual(navLabels,
+    ["Model", "Server & network", "Security", "Plugins", "Privacy & data", "System"],
+    "nav shows one link per top-level group");
+  assert.equal(webSec.dataset.group, "plugins", "the web plugin section is in the Plugins group");
+  // A group shows all its sections stacked; only ONE group is active at a time.
+  const active = [...doc.querySelectorAll("#settings-content .settings-section.active")];
+  assert.ok(active.length >= 1, "the default group shows its section(s)");
+  const activeGroups = new Set(active.map((s) => s.dataset.group));
+  assert.equal(activeGroups.size, 1, "exactly one group is shown at a time");
+  assert.ok(activeGroups.has("model"), "Model is the default (first) group");
+});
+
+test("group nav shows all of a group's sections; require_auth + keys live in Security", async () => {
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch([]) });
+  await render(win);
+  await drain();
+  const doc = win.document;
+
+  // Click the Plugins group -> the web plugin section becomes visible.
+  const links = [...doc.querySelectorAll("#settings-nav .settings-nav-link")];
+  const plugins = links.find((l) => l.textContent === "Plugins");
+  assert.ok(plugins, "Plugins group link exists");
+  plugins.click();
+  const webSec = doc.querySelector('input[data-key="net_allow"]').closest(".settings-section");
+  assert.ok(webSec.classList.contains("active"), "clicking Plugins shows the web section");
+  // The require_auth toggle (core Security) and the keys card share the Security group.
+  const reqSec = doc.querySelector('input[data-key="require_auth"]').closest(".settings-section");
+  assert.equal(reqSec.dataset.group, "security", "require_auth is in the Security group");
+  assert.equal(doc.getElementById("keys-card").dataset.group, "security",
+    "the keys workbench is in the Security group");
+  // Jumping to the keys card (command palette) activates the Security group.
+  win.gotoSettingsSection("keys-card");
+  assert.ok(reqSec.classList.contains("active"), "gotoSettingsSection(keys-card) shows Security");
+  assert.ok(!webSec.classList.contains("active"), "and hides the Plugins group");
 });
 
 test("each section saves only its own keys (per-section PATCH)", async () => {
