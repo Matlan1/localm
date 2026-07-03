@@ -62,6 +62,20 @@ export const SETTINGS_NAV_META = {
   system:   { icon: "settings", cat: "cat-slate" },
 };
 
+/** A .card-head (category icon + the section's h3) for a schema/plugin settings
+ *  section, so it reads like the static cards. The h3 keeps its
+ *  .settings-section-head class + text (its divider now comes from .card-head). The
+ *  icon + hue follow the section's top-level group (SETTINGS_NAV_META). */
+export function settingsSectionHead(heading, groupId) {
+  const head = el("div", "card-head");
+  const nav = SETTINGS_NAV_META[groupId] || {};
+  head.appendChild(iconEl(nav.icon || "settings", "ic cat-ic " + (nav.cat || "cat-slate")));
+  const txt = el("div", "card-head-text");
+  txt.appendChild(el("h3", "settings-section-head", heading));
+  head.appendChild(txt);
+  return head;
+}
+
 // Which top-level group a core schema `group` string belongs to. Plugin (owner)
 // sections and the Media section always go to "plugins". Anything unmapped falls
 // back to "system" (the residual app drawer), so a new core group never vanishes.
@@ -800,7 +814,7 @@ export async function refreshSettingsPage() {
     panel.dataset.sec = sec.id;
     panel.dataset.group = topGroup;
     panel.dataset.secLabel = heading || sec.label;
-    if (heading) panel.appendChild(el("h3", "settings-section-head", heading));
+    if (heading) panel.appendChild(settingsSectionHead(heading, topGroup));
     const grid = el("div", "settings-fields");
     for (const c of sec.ctrls) grid.appendChild(c.node);
     panel.appendChild(grid);
@@ -860,7 +874,7 @@ export async function buildMediaSection(form) {
     fail.dataset.sec = "media";
     fail.dataset.group = "plugins";
     fail.dataset.secLabel = "Media";
-    fail.appendChild(el("h3", "settings-section-head", "Media"));
+    fail.appendChild(settingsSectionHead("Media", "plugins"));
     fail.appendChild(el("div", "sub",
       "Could not load media settings (" + e.message + "). The image/music/video "
       + "config is unavailable - check the server logs."));
@@ -875,7 +889,7 @@ export async function buildMediaSection(form) {
   panel.dataset.sec = "media";
   panel.dataset.group = "plugins";
   panel.dataset.secLabel = "Media";
-  panel.appendChild(el("h3", "settings-section-head", "Media"));
+  panel.appendChild(settingsSectionHead("Media", "plugins"));
   panel.appendChild(el("div", "sub",
     "ComfyUI settings for image, music, and video, each configured "
     + "independently. A blank field uses the shared default."));
