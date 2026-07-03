@@ -33,6 +33,16 @@
   --cat-violet: #a98bfb;
   --cat-amber:  #e0a44f;
   --cat-slate:  #8fa3c2;
+  /* Content-type icon hues (muted): color CONTENT by kind (a model reads blue, a folder amber,
+     a doc slate) on page rows/grids - the color lever for content, distinct from the category
+     NAV hues above. Chrome/nav = category; content = type. */
+  --ic-folder:  #e0a458;
+  --ic-doc:     #8fa3b8;
+  --ic-media:   #c98bd0;
+  --ic-audio:   #6bbf8a;
+  --ic-video:   #6ba3e0;
+  --ic-code:    #d4915d;
+  --ic-model:   #7fb0e6;
   /* Depth: dark UIs read flat without a shadow. Cards/modals float on this so
      a surface reads as a surface, not a same-color rectangle (the picker gets
      this for free from its modal backdrop; the settings cards did not). */
@@ -69,6 +79,13 @@
   --cat-violet: #7c53e6;
   --cat-amber:  #b5791f;
   --cat-slate:  #586a86;
+  --ic-folder:  #b9822f;
+  --ic-doc:     #5f7488;
+  --ic-media:   #9c5aa8;
+  --ic-audio:   #3d8f5f;
+  --ic-video:   #3f74ad;
+  --ic-code:    #b06a34;
+  --ic-model:   #4a7fbf;
 }
 
 * { box-sizing: border-box; }
@@ -976,6 +993,37 @@ pre:hover .canvas-btn { opacity: 1; }
 .card .row input { flex: 1; }
 .card .actions { margin-top: 14px; display: flex; gap: 10px; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 14px; }
+
+/* ---- content coherence (direction A): content-type icons + card headers + motion ---- */
+/* Content icons take the TYPE hue on page rows/grids (distinct from the category-hued NAV
+   icons). Apply alongside the icon span: <span class="ic ic-model">. */
+.ic-model  { color: var(--ic-model); }
+.ic-folder { color: var(--ic-folder); }
+.ic-doc    { color: var(--ic-doc); }
+.ic-media  { color: var(--ic-media); }
+.ic-audio  { color: var(--ic-audio); }
+.ic-video  { color: var(--ic-video); }
+.ic-code   { color: var(--ic-code); }
+/* A real section header inside a card: leading icon + title + one-line description, so no page
+   shows a bare grey h3. Use .card-head { icon + .card-head-text { h3 + .card-desc } }. */
+.card-head { display: flex; align-items: center; gap: 10px; margin: 0 0 14px;
+  padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+.card-head > .ic, .card-head > .nav-ic { flex: 0 0 auto; }
+.card-head > .ic svg, .card-head > .nav-ic svg { width: 18px; height: 18px; }
+.card-head-text { min-width: 0; }
+.card-head h3, .card-head .card-title { margin: 0; font-size: 15px; font-weight: 600; }
+.card-desc { font-size: 12px; color: var(--text-dim); margin-top: 1px; }
+/* Quiet motion on interactive rows/buttons; reduced-motion fully respected. */
+.list-row, nav button, .settings-nav-link, .btn-primary, .btn-secondary, .btn-danger,
+.data-table tbody tr, .conv-item, .coder-session-item {
+  transition: background 90ms ease, color 90ms ease, border-color 90ms ease, box-shadow 90ms ease;
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+/* One visible keyboard-focus treatment for buttons + a real disabled state. */
+.btn-primary:focus-visible, .btn-secondary:focus-visible, .btn-danger:focus-visible {
+  outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.btn-secondary:disabled { opacity: 0.5; cursor: default; color: var(--text-dim); border-color: var(--border); }
 
 /* Settings: a left section nav + a content area that shows one section (tab) at
    a time. Each core group and each plugin is its own section with its own Save. */
