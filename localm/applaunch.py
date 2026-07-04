@@ -347,7 +347,8 @@ def apply_window_identity(*, app_id: str = APP_USER_MODEL_ID) -> bool:
         # LocaLM.exe inside a terminal shares that console, so it is left visible.
         if (os.path.basename(sys.executable).lower() == "localm.exe"
                 and _owns_console()
-                and not os.environ.get("LOCALM_DEBUG")):
+                and not os.environ.get("LOCALM_DEBUG")
+                and "--debug" not in sys.argv):
             os.environ.setdefault("LOCALM_OWN_CONSOLE", "1")
     except Exception:
         return applied
