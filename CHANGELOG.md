@@ -5,6 +5,20 @@ All notable changes to localm are documented here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Being pre-1.0,
 minor versions may include breaking changes.
 
+## [0.1.1] - 2026-07-04
+
+### Fixed
+- **Inference**: Fixed a threading race/concurrency crash in lazy grammar sampling by ensuring mock Llama structures consistently initialize the underlying `_inference_lock`.
+- **Security**: Hardened background job API routes by restoring correct principal ID hashing for admin/owner keys, preventing a privilege escalation regression where owner-created jobs became accessible/owned by loopback anonymous roles.
+- **CLI**: Resolved a server start delegation issue in `localm serve` where fail-fast binding security gates were skipped due to late port-bind warning evaluations.
+- **CLI**: Fixed a potential `UnboundLocalError` for `sys` in the chat runner module.
+- **CLI**: Avoid ComfyUI launch shell injection vectors on Windows platform.
+- **Setup**: Discarded stray buffered keyboard inputs prior to interactive CUDA configuration prompts to prevent accidental selections.
+- **Setup**: Skip console window hiding behavior in debug mode on Windows.
+- **Setup**: Fixed release tag asset resolution logic to skip draft releases with un-uploaded binary archives.
+- **Plugins**: Ensure builtin `chat` dependency is pre-installed/self-healed prior to running CLI plugin dependency checks.
+- **Tests**: Isolated all suite environments using a temp directory `LOCALM_HOME` in `conftest.py` to prevent local configuration state leakages from polluting test executions.
+
 ## [0.1.0] - 2026-07-04
 
 First tagged release. A self-contained, offline local-LLM platform.
@@ -45,4 +59,5 @@ First tagged release. A self-contained, offline local-LLM platform.
 - The NVIDIA GPU path is validated by design and CI-adjacent testing; the primary
   development hardware is AMD.
 
+[0.1.1]: https://github.com/Matlan1/localm/releases/tag/v0.1.1
 [0.1.0]: https://github.com/Matlan1/localm/releases/tag/v0.1.0

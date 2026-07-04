@@ -789,7 +789,7 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
 
     app = FastAPI(
         title="localm inference server",
-        version="0.1.0",
+        version="0.1.1",
         lifespan=lifespan,
     )
 
