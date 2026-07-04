@@ -124,6 +124,26 @@ def _load_engine(model: Optional[str]):
     from localm.model_manager import get_model_info
 
     name = model
+
+    try:
+        from localm.inference.http_server import _engine as _live
+        if _live is not None and _live.loaded:
+            if not name or _live.display_name == name:
+                return _live          # reuse - no VRAM cost, no load time
+            
+            # VRAM gate: unload the live engine if VRAM is tight
+            from localm import vram as _vram
+            from localm.discover import vram_info
+            free = vram_info().get("free")
+            est = _vram.media_estimate_bytes("chat")
+            if _vram.should_swap_for_media(free, est):
+                _live.unload()
+                _vram.wait_for_vram_release(
+                    lambda: vram_info().get("free"),
+                    before_bytes=free)
+    except Exception:
+        pass
+
     if not name:
         cfg = load_config()
         name = cfg.get("default_model") or cfg.get("model")

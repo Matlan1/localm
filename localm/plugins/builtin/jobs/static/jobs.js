@@ -306,13 +306,63 @@ export function register(ctx) {
     promptTa.placeholder = "what the job should do";
     prompt.appendChild(promptTa);
 
-    const schedKind = selectRow("Schedule kind", "jobs-sched-kind", [
-      ["interval", "interval (seconds)"],
-      ["cron", "cron (5-field)"],
+    // Human-friendly schedule picker
+    const schedContainer = el("div", "jobs-sched-container");
+    const schedKind = selectRow("Schedule", "jobs-sched-preset", [
+      ["hours", "Every N hours"],
+      ["day", "Every day"],
+      ["week", "Every week"],
+      ["interval", "Custom interval (seconds)"],
+      ["cron", "Custom cron (5-field)"],
     ]);
-    const sched = inputRow("Schedule", "text", "jobs-sched", "3600");
-    const schedHint = el("div", "sub",
-      "interval: seconds between runs (e.g. 3600). cron: minute hour dom month dow.");
+    const schedDetails = el("div", "jobs-sched-details");
+    
+    function updateSchedDetails() {
+      clear(schedDetails);
+      const val = schedKind.querySelector("select").value;
+      if (val === "hours") {
+        const wrap = el("div", "");
+        wrap.appendChild(el("span", null, "Every "));
+        const inp = document.createElement("input");
+        inp.type = "number"; inp.min = "1"; inp.value = "6"; inp.id = "jobs-sched-hours";
+        inp.style.width = "4em";
+        wrap.appendChild(inp);
+        wrap.appendChild(el("span", null, " hours"));
+        schedDetails.appendChild(wrap);
+      } else if (val === "day") {
+        const wrap = el("div", "");
+        wrap.appendChild(el("span", null, "At time: "));
+        const inp = document.createElement("input");
+        inp.type = "time"; inp.value = "08:00"; inp.id = "jobs-sched-time";
+        wrap.appendChild(inp);
+        schedDetails.appendChild(wrap);
+      } else if (val === "week") {
+        const wrap = el("div", "");
+        wrap.appendChild(el("span", null, "On "));
+        const daySel = document.createElement("select");
+        daySel.id = "jobs-sched-day";
+        ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].forEach((d, i) => {
+          const opt = document.createElement("option"); opt.value = i; opt.textContent = d;
+          if(i===1) opt.selected = true;
+          daySel.appendChild(opt);
+        });
+        wrap.appendChild(daySel);
+        wrap.appendChild(el("span", null, " at time: "));
+        const inp = document.createElement("input");
+        inp.type = "time"; inp.value = "08:00"; inp.id = "jobs-sched-time";
+        wrap.appendChild(inp);
+        schedDetails.appendChild(wrap);
+      } else if (val === "interval") {
+        schedDetails.appendChild(inputRow("Seconds between runs", "text", "jobs-sched-interval", "3600"));
+      } else if (val === "cron") {
+        schedDetails.appendChild(inputRow("Cron expression", "text", "jobs-sched-cron", "0 8 * * *"));
+        schedDetails.appendChild(el("div", "sub", "minute hour dom month dow."));
+      }
+    }
+    schedKind.querySelector("select").onchange = updateSchedDetails;
+    updateSchedDetails();
+    schedContainer.appendChild(schedKind);
+    schedContainer.appendChild(schedDetails);
 
     // Model is a dropdown of installed models (blank = active/default). It is
     // populated asynchronously from /api/models so the form renders immediately.
@@ -330,23 +380,41 @@ export function register(ctx) {
     add.id = "jobs-add";
     actions.appendChild(add);
 
-    [name, taskKind, prompt, schedKind, sched, schedHint, model, cwd, scope, actions]
+    [name, taskKind, prompt, schedContainer, model, cwd, scope, actions]
       .forEach((n) => card.appendChild(n));
 
     add.onclick = async () => {
-      const kind = schedKind.querySelector("select").value;
-      let schedule = sched.querySelector("input").value.trim();
-      if (kind === "interval") {
-        // The "3600" in the field is a placeholder, not a value: an untouched
-        // field is empty -> parseInt("")=NaN -> JSON null -> a cryptic 422.
-        // Default the blank case to 3600 and reject a non-numeric interval
-        // (e.g. "1 hour") instead of silently coercing it to a 1-second job.
-        if (!/^\d+$/.test(schedule)) schedule = schedule === "" ? "3600" : "";
-        schedule = parseInt(schedule, 10);
+      const preset = schedKind.querySelector("select").value;
+      let kind = "interval";
+      let schedule = "";
+      if (preset === "hours") {
+        const h = parseInt(document.getElementById("jobs-sched-hours").value, 10);
+        if (Number.isNaN(h) || h < 1) { toast("Hours must be a positive number.", true); return; }
+        schedule = h * 3600;
+      } else if (preset === "day") {
+        kind = "cron";
+        const t = document.getElementById("jobs-sched-time").value || "08:00";
+        const [hh, mm] = t.split(":");
+        schedule = `${parseInt(mm, 10)} ${parseInt(hh, 10)} * * *`;
+      } else if (preset === "week") {
+        kind = "cron";
+        const d = document.getElementById("jobs-sched-day").value;
+        const t = document.getElementById("jobs-sched-time").value || "08:00";
+        const [hh, mm] = t.split(":");
+        schedule = `${parseInt(mm, 10)} ${parseInt(hh, 10)} * * ${d}`;
+      } else if (preset === "interval") {
+        kind = "interval";
+        let raw = document.getElementById("jobs-sched-interval").value.trim();
+        if (!/^\d+$/.test(raw)) raw = raw === "" ? "3600" : "";
+        schedule = parseInt(raw, 10);
         if (Number.isNaN(schedule) || schedule < 1) {
           toast("Interval must be a whole number of seconds (e.g. 3600).", true);
           return;
         }
+      } else if (preset === "cron") {
+        kind = "cron";
+        schedule = document.getElementById("jobs-sched-cron").value.trim();
+        if (!schedule) schedule = "0 8 * * *";
       }
       const payload = {
         name: name.querySelector("input").value.trim(),
