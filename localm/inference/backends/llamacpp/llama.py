@@ -530,6 +530,8 @@ class LlamaCpp:
         # --- load model ---
         mp = api.llama_model_default_params()
         mp.n_gpu_layers = n_gpu_layers
+        if n_gpu_layers >= 99:
+            mp.use_mmap = False
 
         # Preemptive model switching: wire llama.cpp's native load-progress
         # callback so a load can be ABORTED mid-flight. The callback returns false
