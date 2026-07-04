@@ -21,6 +21,9 @@ const SCHEMA = {
       group: "Security", owner: "core", secret: true },   // NO default
     { key: "plugins_enabled", widget: "hidden", label: "Enabled plugins",
       help: "", group: "Plugins", owner: "core", default: [] },
+    { key: "chat_system_prompt", widget: "textarea", label: "Default system prompt",
+      help: "Empty = no default system prompt.", group: "Chat", owner: "chat",
+      default: "You are a helpful assistant." },
   ],
 };
 
@@ -275,4 +278,29 @@ test("each section saves only its own keys (per-section PATCH)", async () => {
   assert.ok(Array.isArray(patches[1].net_allow), "net_allow sent as an array");
   assert.deepEqual(patches[1].net_allow, ["x.com", "y.com"], "trimmed, blanks dropped");
   assert.equal("n_ctx" in patches[1], false, "Engine key not resent from the web section");
+});
+
+test("blanking the default system prompt textarea saves an empty string, not null", async () => {
+  // Regression guard: the textarea widget used to treat a blank box as "leave
+  // unchanged" (right for a SECRET field, wrong here - chat_system_prompt's
+  // own default IS "" and its help text says "Empty = no default system
+  // prompt"). Sending null for this field made the server 400 the whole
+  // section's PATCH (TEXTAREA is not in _validate_one's null-tolerant widget
+  // list), so a user could never actually clear a saved prompt.
+  const patches = [];
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(patches) });
+  await render(win);
+  const doc = win.document;
+
+  const ta = doc.querySelector('textarea[data-key="chat_system_prompt"]');
+  assert.ok(ta, "chat_system_prompt renders as a textarea");
+  assert.equal(ta.value, "You are a helpful assistant.");
+
+  ta.value = "";
+  ta.closest(".settings-section").querySelector(".settings-section-save").click();
+  await drain();
+
+  assert.equal(patches.length, 1, "blanking it still triggers a PATCH");
+  assert.equal(patches[0].chat_system_prompt, "",
+    "blank saves as an empty string, not null - null would 400 on this widget");
 });

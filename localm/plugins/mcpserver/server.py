@@ -13,13 +13,20 @@ rich progress) must go to stderr - see _redirect_consoles_to_stderr().
 Tools exposed:
     chat            - generate a response with a local model
     list_models     - registered model names with type and size
+    system_stats    - live CPU/RAM/VRAM/GPU load, for judging model/quant fit
+    search_models   - search HuggingFace for GGUF repos
+    list_model_files - a repo's GGUF files with quant/size/VRAM-fit
+    pull_model      - download + register + (optionally) load a GGUF
     embed           - embedding vectors (models that support it)
     generate_image  - local FLUX via ComfyUI (omit with --no-images)
+    run_coder_task  - delegate a whole coding task to the local coder agent
+                      (only when the coder plugin is installed+enabled)
 """
 
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -98,12 +105,26 @@ class EngineCache:
             return self._engine
         if self._engine is not None:
             _log(f"switching model {self._loaded_name} -> {name}")
+            from localm.discover import vram_info
+            before_free = vram_info().get("free")
             try:
                 self._engine.unload()
             except Exception as e:
                 # Unload is best-effort (we still load the new model), but a
                 # cleanup failure must be visible, not silently swallowed.
                 _log(f"warning: failed to unload {self._loaded_name}: {e}")
+            # The native unload's VRAM free is asynchronous - loading the next
+            # model before it lands can exceed total VRAM and hang the GPU
+            # driver (the same TDR risk the /v1/models/unload endpoint guards
+            # against; see vram.wait_for_vram_release). before_free is None
+            # when VRAM is not measurable at all, in which case this is a
+            # no-op and behaves as before.
+            from localm.vram import wait_for_vram_release
+            released, _final = wait_for_vram_release(
+                lambda: vram_info().get("free"), before_bytes=before_free)
+            if released is False:
+                _log(f"warning: VRAM free did not rise after unloading "
+                     f"{self._loaded_name} within the timeout - loading {name} anyway")
         _log(f"loading model {name}")
         self._engine = self._factory(name)
         self._loaded_name = name
@@ -131,7 +152,20 @@ def _backend_can_embed(engines: "EngineCache") -> bool:
     return getattr(backend, "can_embed", True) is not False
 
 
-def build_tools(engines: EngineCache, enable_images: bool = True) -> Dict[str, dict]:
+def _coder_available() -> bool:
+    """True when the coder plugin is installed on disk AND enabled - matches the
+    same check `localm coder` itself does before accepting a task (see
+    plugins/coder/cli/_main.py), so the tool is only advertised when a call
+    would actually work."""
+    try:
+        from localm.plugins.engine import PluginManager
+        return PluginManager(None).is_active("coder")
+    except Exception:
+        return False
+
+
+def build_tools(engines: EngineCache, enable_images: bool = True,
+                 enable_coder: bool = True) -> Dict[str, dict]:
     """Return {tool_name: {schema, handler}} for everything this server offers."""
 
     def chat(args: dict) -> dict:
@@ -167,6 +201,72 @@ def build_tools(engines: EngineCache, enable_images: bool = True) -> Dict[str, d
                 size = "missing"
             lines.append(f"{name}  [{size}]  {info.get('source', 'local')}")
         return _text_result("\n".join(lines))
+
+    def system_stats(args: dict) -> dict:
+        from localm.sysstats import system_stats as _stats
+        return _text_result(json.dumps(_stats()))
+
+    def search_models(args: dict) -> dict:
+        from localm.discover import DiscoverError, hf_search
+        try:
+            results = hf_search(args.get("query", ""), limit=args.get("limit", 20))
+        except DiscoverError as e:
+            return _text_result(str(e), is_error=True)
+        return _text_result(json.dumps(results))
+
+    def list_model_files(args: dict) -> dict:
+        repo = args.get("repo", "")
+        if not repo:
+            return _text_result("'repo' is required (e.g. 'bartowski/Qwen2.5-7B-Instruct-GGUF')",
+                                 is_error=True)
+        from localm.discover import DiscoverError, fit_label, hf_gguf_files, vram_info
+        try:
+            files = hf_gguf_files(repo)
+        except DiscoverError as e:
+            return _text_result(str(e), is_error=True)
+        total_vram = vram_info().get("total")
+        for f in files:
+            f["fit"] = fit_label(f["size_bytes"], total_vram)
+        return _text_result(json.dumps(files))
+
+    def pull_model(args: dict) -> dict:
+        repo = args.get("repo", "")
+        name = args.get("name", "")
+        if not repo:
+            return _text_result("'repo' is required", is_error=True)
+        if not name:
+            return _text_result(
+                "'name' is required - pick a short registry name for this model",
+                is_error=True)
+        spec = f"{repo}:{args['file']}" if args.get("file") else repo
+
+        import contextlib
+        from localm.model_manager.pull import pull_model as _pull
+
+        # pull_model()'s progress bars/messages print via a rich Console (module-
+        # level singleton in model_manager/_shared.py, imported by value into
+        # pull.py at load time - patching model_manager's own re-exported name
+        # would miss it). redirect_stdout catches it regardless of which Console
+        # instance is in play, same defense generate_image uses above.
+        with contextlib.redirect_stdout(sys.stderr):
+            try:
+                ok = _pull(spec, name=name)
+            except Exception as e:
+                return _text_result(f"pull failed: {e}", is_error=True)
+        if not ok:
+            return _text_result(f"pull failed for {spec!r} - see server stderr for detail",
+                                 is_error=True)
+
+        if not args.get("load", True):
+            return _text_result(f"pulled and registered as {name!r} (not loaded)")
+
+        try:
+            engines.get(name)
+        except Exception as e:
+            return _text_result(
+                f"pulled and registered as {name!r}, but loading it failed: {e}",
+                is_error=True)
+        return _text_result(f"pulled, registered, and loaded {name!r} - ready to use")
 
     def embed(args: dict) -> dict:
         texts = args.get("texts")
@@ -228,6 +328,76 @@ def build_tools(engines: EngineCache, enable_images: bool = True) -> Dict[str, d
             )
         return _text_result(message, is_error=not ok)
 
+    def run_coder_task(args: dict) -> dict:
+        task = args.get("task", "")
+        if not task:
+            return _text_result("'task' is required", is_error=True)
+        cwd = args.get("cwd", "")
+        if not cwd:
+            return _text_result("'cwd' is required (the project directory to work in)",
+                                 is_error=True)
+        cwd_path = Path(cwd).expanduser()
+        if not cwd_path.is_dir():
+            return _text_result(f"cwd is not a directory: {cwd_path}", is_error=True)
+
+        # Shells out to the already-tested `localm coder` single-shot CLI rather
+        # than reconstructing Agent/backend wiring in-process: it reuses the CLI's
+        # own project-config resolution and instance attach/spawn logic verbatim,
+        # and keeps this MCP server's own EngineCache (used by chat/embed) from
+        # fighting the coder's separate server process over the same model load.
+        cmd = [sys.executable, "-m", "localm", "coder", task,
+               "--cwd", str(cwd_path), "--output-format", "json"]
+        if args.get("model"):
+            cmd += ["--model", args["model"]]
+        if args.get("max_turns") is not None:
+            cmd += ["--max-turns", str(args["max_turns"])]
+        # Default OFF (matches the CLI's own R19a fail-closed default): without
+        # this, file writes still happen but run_shell is denied for lack of a
+        # TTY to confirm it. Opt in per call once the task is known to need it.
+        if args.get("yes"):
+            cmd.append("--yes")
+        timeout = args.get("timeout_seconds") or 900
+
+        try:
+            # cwd=cwd_path matters beyond the coder's own file/shell tool scope:
+            # if no server is already running for this project, the coder CLI
+            # auto-spawns one and identifies "this project" by the SPAWNING
+            # process's OS working directory, not just the --cwd flag above. Omit
+            # this and the auto-spawned server registers under the MCP server's
+            # own directory instead, so the coder's own attach-back lookup can
+            # never find it (looks like a timeout; it is a project-root mismatch).
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                                  cwd=str(cwd_path))
+        except subprocess.TimeoutExpired:
+            return _text_result(f"coder task timed out after {timeout}s", is_error=True)
+
+        # --output-format json pretty-prints with indent=2 (multi-line), and
+        # console messages (e.g. "attached to running server") print to stdout
+        # BEFORE it - so the JSON is neither the whole stdout nor its last
+        # line (that's just the closing brace). Find the last line that is a
+        # lone "{" (the JSON dict is always non-empty, so indent=2 always
+        # opens it on its own line) and parse from there to the end.
+        stdout = proc.stdout.strip()
+        payload = None
+        if stdout:
+            lines = stdout.splitlines()
+            starts = [i for i, ln in enumerate(lines) if ln == "{"]
+            if starts:
+                try:
+                    payload = json.loads("\n".join(lines[starts[-1]:]))
+                except json.JSONDecodeError:
+                    payload = None
+
+        if payload is None:
+            detail = proc.stderr.strip() or stdout or f"exit code {proc.returncode}"
+            return _text_result(f"coder task failed to run: {detail}", is_error=True)
+
+        text = payload.get("response", "")
+        meta = (f"\n\n[turns={payload.get('turns')} "
+                f"tokens={payload.get('total_tokens')} "
+                f"success={payload.get('success')}]")
+        return _text_result(text + meta, is_error=not payload.get("success", False))
+
     _model_param = {"type": "string",
                     "description": "Registered model name (default: server's configured model)"}
 
@@ -253,6 +423,64 @@ def build_tools(engines: EngineCache, enable_images: bool = True) -> Dict[str, d
             "inputSchema": {"type": "object", "properties": {}},
             "handler": list_models,
         },
+        "system_stats": {
+            "description": (
+                "Live CPU/RAM/VRAM/GPU load. Use this BEFORE picking a model or "
+                "quant for a task: if VRAM is tight, prefer a smaller quant "
+                "(Q4/Q6 over Q8) rather than skipping the task or degrading "
+                "quality - and prefer evicting the current model over settling "
+                "for a worse-fit one when the task genuinely needs it."
+            ),
+            "inputSchema": {"type": "object", "properties": {}},
+            "handler": system_stats,
+        },
+        "search_models": {
+            "description": "Search HuggingFace for GGUF model repos (empty query = most downloaded).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search text (optional)"},
+                    "limit": {"type": "integer", "description": "Max results (default 20, max 50)"},
+                },
+            },
+            "handler": search_models,
+        },
+        "list_model_files": {
+            "description": (
+                "List a HuggingFace repo's GGUF files (quant, size, and a fit "
+                "badge - 'fits'/'tight'/'too-big' - against this machine's VRAM) "
+                "so you can pick the right quant before pulling."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "repo": {"type": "string",
+                             "description": "HuggingFace repo id, e.g. 'bartowski/Qwen2.5-7B-Instruct-GGUF'"},
+                },
+                "required": ["repo"],
+            },
+            "handler": list_model_files,
+        },
+        "pull_model": {
+            "description": (
+                "Download a GGUF file from HuggingFace, register it under 'name', "
+                "and (by default) load it - blocks until ready. Use search_models "
+                "+ list_model_files first to pick repo/file/quant."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "repo": {"type": "string", "description": "HuggingFace repo id"},
+                    "file": {"type": "string",
+                             "description": "Specific GGUF filename from list_model_files (omit for a full snapshot pull)"},
+                    "name": {"type": "string", "description": "Registry name to give this model"},
+                    "load": {"type": "boolean",
+                             "description": "Load it into the engine after pulling (default true)"},
+                },
+                "required": ["repo", "name"],
+            },
+            "handler": pull_model,
+        },
     }
 
     # Only advertise embed when the active backend can actually produce vectors
@@ -271,6 +499,37 @@ def build_tools(engines: EngineCache, enable_images: bool = True) -> Dict[str, d
                 "required": ["texts"],
             },
             "handler": embed,
+        }
+
+    if enable_coder and _coder_available():
+        tools["run_coder_task"] = {
+            "description": (
+                "Delegate a whole coding task (read/edit files, run shell commands, "
+                "git, tests) to localm's own offline agent, running entirely on a "
+                "local model. Blocks until the task finishes or times out, then "
+                "returns the agent's final result - use this to hand off a "
+                "self-contained sub-task instead of doing it turn-by-turn yourself."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string", "description": "The task to perform"},
+                    "cwd":  {"type": "string",
+                             "description": "Project directory the agent should work in"},
+                    "model": _model_param,
+                    "max_turns": {"type": "integer",
+                                  "description": "Safety cap on agent iterations (default: 40)"},
+                    "yes": {"type": "boolean",
+                            "description": ("Auto-approve shell commands too, not just file "
+                                             "writes (default false: shell calls are denied "
+                                             "without this since there is no TTY to confirm "
+                                             "them)")},
+                    "timeout_seconds": {"type": "integer",
+                                        "description": "Give up after this long (default 900)"},
+                },
+                "required": ["task", "cwd"],
+            },
+            "handler": run_coder_task,
         }
 
     if enable_images:
@@ -394,11 +653,13 @@ class MCPStdioServer:
         _log("stdin closed - shutting down")
 
 
-def serve_stdio(model: Optional[str] = None, enable_images: bool = True) -> None:
+def serve_stdio(model: Optional[str] = None, enable_images: bool = True,
+                 enable_coder: bool = True) -> None:
     """Entry point used by the CLI: build everything and block on stdio."""
     _redirect_consoles_to_stderr()
     engines = EngineCache(default_model=model)
-    server = MCPStdioServer(build_tools(engines, enable_images=enable_images))
+    server = MCPStdioServer(build_tools(engines, enable_images=enable_images,
+                                          enable_coder=enable_coder))
     try:
         server.run_stdio()
     finally:
