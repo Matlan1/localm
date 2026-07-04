@@ -153,7 +153,6 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
         console.print("[dim]No server running. Starting one in the background...[/dim]")
         import subprocess
         import time
-        import sys
         
         cmd = [sys.executable, "-m", "localm", "gui", "--no-browser", "--api-mode"]
         # Use no_model if no model was provided, else pass it
