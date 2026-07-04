@@ -409,18 +409,28 @@ def principal_id(request: Request) -> Optional[str]:
     is identical whether the key arrives via the Authorization header or the
     session cookie. Used to bind a background job to the key that created it
     (KEY-SCOPE-2), so only that key (or an admin/owner) may stream or cancel it."""
+    from localm import scopes
+    from localm.auth import any_key_configured
+    if not any_key_configured():
+        return None
     token, source = _request_token(request)
     if not token or not token.strip():
         return None
     if source == "cookie":
-        # A cookie is an opaque session id; its stable identity is the hash of the
-        # key that MINTED the session (recorded at login), so a job created in the
-        # browser and cancelled from the CLI with the same key share a principal.
         from localm import sessions
         rec = sessions.lookup(token)
-        return rec.get("key_hash") if rec else None
-    from localm.auth import _hash_key
-    return _hash_key(token.strip())
+        if rec:
+            if scopes.ADMIN in rec.get("scopes", []):
+                return None
+            return rec.get("key_hash")
+        return None
+    prin = _principal_from_token(token, source)
+    if prin is not None:
+        held, key_hash, _ = prin
+        if scopes.ADMIN in held:
+            return None
+        return key_hash
+    return None
 
 
 def job_owner_ok(request: Request, job_owner: Optional[str]) -> bool:
@@ -1165,14 +1175,7 @@ async def _stream_sse(
     ts = int(time.time())
     think = ThinkSplitter()   # route <think> reasoning into delta.reasoning_content (H4)
 
-    # Exact prompt token count from the backend tokenizer
-    prompt_text = " ".join(
-        m.get("content") if isinstance(m.get("content"), str)
-        else " ".join(p.get("text", "") for p in (m.get("content") or [])
-                      if p.get("type") == "text")
-        for m in messages
-    )
-    prompt_tokens = engine.count_tokens(prompt_text)
+    prompt_tokens = engine.count_messages_tokens(messages)
 
     # Context Limit Handling: Trigger compact_messages if we are dangerously close to the limit.
     # We reserve a buffer of 2048 tokens for compaction overhead and response generation.
@@ -1186,13 +1189,7 @@ async def _stream_sse(
             new_messages, changed = compact_messages(messages, _gen_for_compact)
             if changed:
                 messages = list(new_messages)
-                prompt_text = " ".join(
-                    m.get("content") if isinstance(m.get("content"), str)
-                    else " ".join(p.get("text", "") for p in (m.get("content") or [])
-                                  if p.get("type") == "text")
-                    for m in messages
-                )
-                prompt_tokens = engine.count_tokens(prompt_text)
+                prompt_tokens = engine.count_messages_tokens(messages)
 
     # Role announcement
     role_chunk = ChatChunk(
@@ -1426,14 +1423,7 @@ async def _complete(
 ):
     loop = asyncio.get_running_loop()
 
-    # Exact prompt token count before running inference
-    prompt_text = " ".join(
-        m.get("content") if isinstance(m.get("content"), str)
-        else " ".join(p.get("text", "") for p in (m.get("content") or [])
-                      if p.get("type") == "text")
-        for m in messages
-    )
-    prompt_tokens = engine.count_tokens(prompt_text)
+    prompt_tokens = engine.count_messages_tokens(messages)
 
     capacity = engine.context_capacity()
     if capacity is not None and len(messages) > 3:
@@ -1445,13 +1435,7 @@ async def _complete(
             new_messages, changed = compact_messages(messages, _gen_for_compact)
             if changed:
                 messages = list(new_messages)
-                prompt_text = " ".join(
-                    m.get("content") if isinstance(m.get("content"), str)
-                    else " ".join(p.get("text", "") for p in (m.get("content") or [])
-                                  if p.get("type") == "text")
-                    for m in messages
-                )
-                prompt_tokens = engine.count_tokens(prompt_text)
+                prompt_tokens = engine.count_messages_tokens(messages)
     def _run():
         return "".join(engine.chat_stream(messages, **gen_kwargs))
 
