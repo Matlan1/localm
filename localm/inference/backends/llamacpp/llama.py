@@ -796,7 +796,15 @@ class LlamaCpp:
                         # sampler fault" that kept grammar enforcement dormant. It
                         # also double-counted tokens in the repetition-penalty
                         # window. Do NOT re-add an accept after sample.
-                        token = api.llama_sampler_sample(sampler, self._ctx_ptr, -1)
+                        #
+                        # _ctx() suppresses native stderr here because the lazy
+                        # grammar sampler logs "Grammar still awaiting trigger
+                        # after token N" for EVERY token while the trigger pattern
+                        # has not matched yet - harmless status, not a warning,
+                        # but hundreds of lines of noise per response.  The decode
+                        # calls below are already guarded; this was the gap.
+                        with _ctx():
+                            token = api.llama_sampler_sample(sampler, self._ctx_ptr, -1)
                         eog = self._tokenizer.is_eog(token)
 
                     # Stop when the model signals end-of-generation via the vocabulary
