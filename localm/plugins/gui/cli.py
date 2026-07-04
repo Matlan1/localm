@@ -582,7 +582,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
                          name="localm-ready", daemon=True).start()
     try:
         with instances.advertise(app, home_dir(), host=host, port=chosen_port,
-                                 mode="full", scheme=scheme, project=project,
+                                 mode="api" if api_mode else "full", scheme=scheme, project=project,
                                  isolated=isolated):
             # On a TLS (network) bind, also catch a plain-http request on the same
             # port with an https redirect (issue 8) instead of a bare connection

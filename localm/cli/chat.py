@@ -153,9 +153,9 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
         console.print("[dim]No server running. Starting one in the background...[/dim]")
         import subprocess
         import time
-        from ..applaunch import launch_exe
+        import sys
         
-        cmd = [launch_exe(), "-m", "localm", "gui", "--no-browser"]
+        cmd = [sys.executable, "-m", "localm", "gui", "--no-browser", "--api-mode"]
         # Use no_model if no model was provided, else pass it
         if not model:
             cmd.append("--no-model")
@@ -166,6 +166,9 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
         if gpu_layers is not None: cmd.extend(["-g", str(gpu_layers)])
         
         kwargs = {}
+        env = os.environ.copy()
+        env["LOCALM_OWN_CONSOLE"] = "1"
+        kwargs["env"] = env
         if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
         else:
