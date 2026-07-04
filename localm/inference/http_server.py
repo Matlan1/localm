@@ -1645,27 +1645,15 @@ async def _complete(
                 if hasattr(engine, "count_messages_tokens"):
                     prompt_tokens = engine.count_messages_tokens(messages)
     def _run():
-        print("HTTP_SERVER: entering _run", flush=True)
-        try:
-            if hasattr(engine, "chat_stream"):
-                print("HTTP_SERVER: calling chat_stream", flush=True)
-                res = "".join(engine.chat_stream(messages, **gen_kwargs))
-                print(f"HTTP_SERVER: chat_stream finished, result length={len(res)}", flush=True)
-                return res
-            print("HTTP_SERVER: engine does not have chat_stream", flush=True)
-            return "ok"
-        except Exception as e:
-            print(f"HTTP_SERVER: exception in _run: {e}", flush=True)
-            raise
+        if hasattr(engine, "chat_stream"):
+            return "".join(engine.chat_stream(messages, **gen_kwargs))
+        return "ok"
 
     # Serialise inference - only one request runs at a time
-    print("HTTP_SERVER: waiting for semaphore", flush=True)
     async with sem:
-        print("HTTP_SERVER: acquired semaphore", flush=True)
         gen_start = time.perf_counter()
         text = await loop.run_in_executor(None, _run)
         gen_elapsed = time.perf_counter() - gen_start
-        print(f"HTTP_SERVER: completed run_in_executor, elapsed={gen_elapsed}", flush=True)
 
     # Outlet fully controls the returned content in the non-streaming path.
     if pipeline is not None and ctx is not None and pipeline.has("outlet"):
