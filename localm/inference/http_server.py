@@ -420,15 +420,11 @@ def principal_id(request: Request) -> Optional[str]:
         from localm import sessions
         rec = sessions.lookup(token)
         if rec:
-            if scopes.ADMIN in rec.get("scopes", []):
-                return None
             return rec.get("key_hash")
         return None
     prin = _principal_from_token(token, source)
     if prin is not None:
         held, key_hash, _ = prin
-        if scopes.ADMIN in held:
-            return None
         return key_hash
     return None
 
