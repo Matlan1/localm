@@ -346,7 +346,8 @@ def apply_window_identity(*, app_id: str = APP_USER_MODEL_ID) -> bool:
         # shortcut matches the launcher's console-less experience. A dev running
         # LocaLM.exe inside a terminal shares that console, so it is left visible.
         if (os.path.basename(sys.executable).lower() == "localm.exe"
-                and _owns_console()):
+                and _owns_console()
+                and not os.environ.get("LOCALM_DEBUG")):
             os.environ.setdefault("LOCALM_OWN_CONSOLE", "1")
     except Exception:
         return applied
