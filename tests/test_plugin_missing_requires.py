@@ -89,3 +89,28 @@ def test_no_requires_means_no_missing(env):
     _make_plugin(plugins, "solo")
     mgr = PluginManager(FastAPI(), external_root=plugins, builtin_root=None)
     assert _state(mgr)["solo"]["missing_requires"] == []
+
+
+def test_preinstalled_dep_self_heals_before_headless_cli_check(env, monkeypatch):
+    """A data dir where the server/GUI has never started - only headless CLI
+    commands like `localm plugin install jobs` have run - must still see a
+    preinstalled/protected dependency (chat) as installed. Previously
+    `_ensure_preinstalled` (the self-heal that provisions chat onto disk) only
+    ran from `load_enabled()` (the server-start path); a bare `discover()` call
+    (every CLI entry point) never provisioned it, so `missing_requires` falsely
+    reported chat as missing on a fresh home, even though chat is protected +
+    default_enabled and always supposed to be present."""
+    from localm.plugins import catalog as _cat
+    from localm.plugins.engine import PluginManager
+
+    store, installed = env / "store", env / "installed"
+    _make_plugin(store, "chat")                          # available in the store...
+    _make_plugin(installed, "jobs", requires=["chat"])    # ...but NOT yet installed
+    assert not (installed / "chat").exists()
+
+    monkeypatch.setattr(_cat, "preinstalled", lambda: ("chat",))
+    mgr = PluginManager(FastAPI(), store_root=store, installed_root=installed)
+
+    by_name = _state(mgr)                                 # triggers discover()
+    assert by_name["jobs"]["missing_requires"] == []
+    assert (installed / "chat" / "plugin.toml").is_file()

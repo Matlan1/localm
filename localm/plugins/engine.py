@@ -562,7 +562,17 @@ class PluginManager:
 
     def discover(self) -> dict[str, PluginSpec]:
         """Discover INSTALLED plugins only (the installed folder). The store shelf
-        is never discovered - it is just the source for install()."""
+        is never discovered - it is just the source for install().
+
+        Self-heals preinstalled/protected plugins (chat) onto disk first. Without
+        this, a data dir where the server/GUI has never started (only headless CLI
+        commands like `plugin install X` have run) never gets chat physically
+        provisioned - `_ensure_preinstalled` was previously only called from
+        `load_enabled()` (the server-start path), so `missing_requires`/
+        `_installed_set` saw chat as absent and every CLI dependency check on a
+        plugin that `requires = ["chat"]` (e.g. jobs) falsely reported it as not
+        installed, even though chat is always supposed to be present."""
+        self._ensure_preinstalled()
         self._specs = {}
         prior = self._discover_errors        # for change-only warning logs below
         self._discover_errors = {}
