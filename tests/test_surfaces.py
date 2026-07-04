@@ -101,21 +101,27 @@ class TestSurfaceEndpointOpenMode:
 
     def test_unauthenticated_post_is_refused(self, tmp_path):
         app = _api_app(tmp_path)
+        shell = getattr(app.state, "shell_token", None)
+        h = {"Authorization": f"Bearer {shell}"} if shell else {}
         with TestClient(app) as client:
-            assert client.get("/api/models").status_code == 404   # not mounted yet
+            assert client.get("/api/models", headers=h).status_code == 404   # not mounted yet
             r = client.post("/v1/surfaces/gui")                    # no token
             assert r.status_code == 403
 
     def test_wrong_token_is_refused(self, tmp_path):
         app = _api_app(tmp_path, instance_token="the-real-token")
+        shell = getattr(app.state, "shell_token", None)
+        h = {"Authorization": f"Bearer {shell}"} if shell else {}
         with TestClient(app) as client:
             r = client.post("/v1/surfaces/gui",
                             headers={"Authorization": "Bearer not-the-token"})
             assert r.status_code == 403
-            assert client.get("/api/models").status_code == 404   # still not mounted
+            assert client.get("/api/models", headers=h).status_code == 404   # still not mounted
 
     def test_instance_token_mounts_then_routes_appear(self, tmp_path):
         app = _api_app(tmp_path, instance_token="the-real-token")
+        shell = getattr(app.state, "shell_token", None)
+        h = {"Authorization": f"Bearer {shell}"} if shell else {}
         with TestClient(app) as client:
             r = client.post("/v1/surfaces/gui",
                             headers={"Authorization": "Bearer the-real-token"})
@@ -123,7 +129,7 @@ class TestSurfaceEndpointOpenMode:
             assert r.json()["status"] == "mounted"
             assert r.json()["mode"] == "full"
             # The GUI surface is now live on the same process.
-            assert client.get("/api/models").status_code == 200
+            assert client.get("/api/models", headers=h).status_code == 200
             assert "text/html" in client.get("/").headers.get("content-type", "")
             assert client.get("/whoami").json()["mode"] == "full"
 

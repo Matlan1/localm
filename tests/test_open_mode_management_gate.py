@@ -76,6 +76,18 @@ class TestOpenModeGate:
         r = c.patch("/v1/config", json={"n_ctx": 8192}, headers=_bearer(app))
         assert r.status_code == 200
 
+    def test_get_config_without_token_refused(self, open_app):
+        c, _ = open_app
+        assert c.get("/v1/config").status_code == 403
+
+    def test_get_config_with_token_allowed(self, open_app):
+        c, app = open_app
+        assert c.get("/v1/config", headers=_bearer(app)).status_code == 200
+
+    def test_get_session_does_not_need_token(self, open_app):
+        c, _ = open_app
+        assert c.get("/api/session").status_code == 200
+
     def test_model_unload_without_token_refused(self, open_app):
         c, _ = open_app
         assert c.post("/v1/models/unload").status_code == 403

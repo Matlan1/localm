@@ -207,7 +207,7 @@ class TestServerModes:
         with TestClient(app) as client:
             with patch("localm.config.load_config",
                        return_value=_cfg(mode="log")):
-                data = client.get("/v1/config").json()
+                data = client.get("/v1/config", headers={"Authorization": f"Bearer {app.state.shell_token}"}).json()
         assert data["effective_mode"] == "log"
 
 

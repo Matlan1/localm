@@ -270,3 +270,47 @@ def test_shipped_example_workflow_uses_fast_dequant():
     assert loaders, "example should load the UNet via a GGUF loader"
     for n in loaders:
         assert n["inputs"].get("dequant_dtype") != "float32"
+
+
+def test_comfy_launch_argv_safety(tmp_path, monkeypatch):
+    import sys
+    from localm.media import comfy_client
+    
+    # We want to check how argv is calculated inside comfy_client.py
+    # Since we can mock subprocess.Popen, let's call _spawn_launcher and check spawned argv
+    cfg = {"comfy_launch_cmd": 'C:\\path\\python.exe main.py --port 8188',
+           "comfy_workdir": str(tmp_path), "comfy_launch_timeout": 30,
+           "comfy_disable_auto_launch": True}
+    
+    spawned = []
+    def fake_popen(argv, **kw):
+        spawned.append(argv)
+        proc = MagicMock()
+        proc.poll.return_value = None
+        return proc
+
+    # On Windows, python.exe should run directly as list (no cmd wrapper)
+    monkeypatch.setattr(sys, "platform", "win32")
+    alive_1 = iter([False, True])
+    with patch("localm.config.load_config", return_value=cfg), \
+         patch("subprocess.Popen", side_effect=fake_popen), \
+         patch.object(comfy_client, "_comfy_alive", side_effect=lambda *a, **k: next(alive_1)):
+        comfy.ensure_comfy("http://127.0.0.1:8188")
+        
+    assert len(spawned) == 1
+    assert spawned[0] == ['C:\\path\\python.exe', 'main.py', '--port', '8188', '--disable-auto-launch']
+
+    # On Windows, comfy.bat (batch file) should prepend cmd /d /c
+    cfg_bat = {"comfy_launch_cmd": 'C:\\path\\comfy.bat --port 8188',
+               "comfy_workdir": str(tmp_path), "comfy_launch_timeout": 30,
+               "comfy_disable_auto_launch": True}
+    spawned.clear()
+    alive_2 = iter([False, True])
+    with patch("localm.config.load_config", return_value=cfg_bat), \
+         patch("subprocess.Popen", side_effect=fake_popen), \
+         patch.object(comfy_client, "_comfy_alive", side_effect=lambda *a, **k: next(alive_2)):
+        comfy.ensure_comfy("http://127.0.0.1:8188")
+        
+    assert len(spawned) == 1
+    assert spawned[0] == ['cmd', '/d', '/c', 'C:\\path\\comfy.bat', '--port', '8188', '--disable-auto-launch']
+
