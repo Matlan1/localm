@@ -144,6 +144,20 @@ def test_apply_window_identity_never_raises():
         assert result is False
 
 
+def test_apply_window_identity_skips_console_own_in_debug(monkeypatch):
+    import os
+    monkeypatch.delenv("LOCALM_OWN_CONSOLE", raising=False)
+    monkeypatch.setenv("LOCALM_DEBUG", "1")
+    # Mock sys.executable basename to be localm.exe
+    monkeypatch.setattr(os.path, "basename", lambda path: "localm.exe" if "python" not in path else os.path.basename(path))
+    # We can mock sys.executable specifically
+    monkeypatch.setattr(sys, "executable", "C:\\some\\path\\localm.exe")
+    monkeypatch.setattr(applaunch, "_owns_console", lambda: True)
+    
+    applaunch.apply_window_identity()
+    assert os.environ.get("LOCALM_OWN_CONSOLE") is None
+
+
 def test_make_launcher_returns_result_without_raising():
     # Do not mutate the real venv here: only assert the call is safe and typed.
     # (The building itself is exercised by hand in a throwaway venv.)
