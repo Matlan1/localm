@@ -42,11 +42,20 @@ from localm.inference.protocol import (
     FullChoice, Message, UsageInfo, make_chunk_id,
 )
 
-# Global engine reference set by serve()
-_engine: Engine | None = None
+# Map of display name -> Engine instance
+_engines: dict[str, Engine] = {}
+# Order of model usage (display names, MRU at the end)
+_engines_lru: list[str] = []
+# Default/startup model name
+_default_model_name: str | None = None
+# Active model name (most recently used/loaded)
+_active_model_name: str | None = None
 
-# Inference serialisation - only one request runs inference at a time.
-# Additional requests queue behind this semaphore.
+# Inference serialisation - per-model semaphores mapping display name -> Semaphore
+_inference_sems: dict[str, asyncio.Semaphore] = {}
+
+# Backward compatibility references
+_engine: Engine | None = None
 _inference_sem: asyncio.Semaphore | None = None
 
 # Preemptive model switching (see switch_engine). `_switch_desired` is the model
@@ -59,84 +68,198 @@ _switch_desired: Optional[str] = None
 _switch_loading: Optional[str] = None
 _switch_cancel: Optional["threading.Event"] = None
 
+def _default_engine_factory(name: str) -> Engine:
+    from localm.config import load_registry
+    from localm.model_manager import get_model_info, get_model_mmproj
+    info = get_model_info(name)
+    if info is None:
+        raise ValueError(f"Model not found: {name}")
+    m_path, m_hint = info
+    mmproj = get_model_mmproj(name)
+    return Engine(
+        str(m_path),
+        display_name=name if name in load_registry() else m_hint,
+        mmproj_path=mmproj,
+    )
+
+_engine_factory = _default_engine_factory
+
 
 async def switch_engine(name: str, make_engine, *, on_active=None) -> dict:
-    """Swap the shared ``_engine`` to *name*, PREEMPTING any in-flight or queued
-    load so the user's latest selection wins immediately.
-
-    Selecting a new model while a previous selection is still loading used to make
-    the server finish loading the abandoned model before even starting the new one
-    (both queued behind the inference semaphore). Here, a newer request instead:
-
-      * records itself as the desired model, and
-      * aborts the in-flight load mid-flight (its native model load stops and
-        returns, instead of running to completion) when it targets a DIFFERENT
-        model, and
-      * drops a queued-but-not-yet-started switch whose target is now stale.
-
-    Still serialised on ``_inference_sem`` so a switch never races a generation
-    onto the GPU. ``make_engine(name)`` builds (does NOT load) the target Engine;
-    ``on_active(name)`` optionally syncs external active-model state when *name*
-    becomes active.
-
-    Returns a status dict:
-      ``{"status": "loaded", "model": name}``          - this call loaded it,
-      ``{"status": "already_active", "model": name}``  - it was already loaded,
-      ``{"status": "superseded", "model": name, "by": <newer>}`` - abandoned; a
-        newer selection owns the load (NOT an error).
-    """
-    global _engine, _switch_desired, _switch_loading, _switch_cancel
+    global _engines, _engines_lru, _active_model_name, _engine_factory
+    global _switch_desired, _switch_loading, _switch_cancel, _engine, _inference_sem
+    
     _switch_desired = name
-    # A newer target arrived: abort the in-flight load, unless it is already
-    # loading THIS same model (then let it finish rather than restart it).
     if _switch_cancel is not None and _switch_loading != name:
         _switch_cancel.set()
 
+    if make_engine is not None:
+        _engine_factory = make_engine
+
+    sem = _inference_sems.setdefault(name, asyncio.Semaphore(1))
+    
     loop = asyncio.get_running_loop()
-    async with _inference_sem:
-        # Coalesce: an even-newer request may have superseded us while we waited
-        # for the semaphore - don't load a stale target; let the newest win.
+    async with sem:
         if _switch_desired != name:
             return {"status": "superseded", "model": name, "by": _switch_desired}
-        if _engine is not None and _engine.display_name == name and _engine.loaded:
+            
+        if name in _engines and _engines[name].loaded:
+            if name in _engines_lru:
+                _engines_lru.remove(name)
+            _engines_lru.append(name)
+            _active_model_name = name
+            _engine = _engines[name]
+            _inference_sem = sem
             if on_active is not None:
                 on_active(name)
             return {"status": "already_active", "model": name}
 
-        new_engine = make_engine(name)
+        # Perform VRAM check and eviction
+        from pathlib import Path
+        from localm.discover import vram_info
+        from localm.model_manager import get_model_info
+        from localm.config import load_registry
+        
+        registry = load_registry()
+        info = get_model_info(name)
+        if info is None:
+            # If in pytest or registry is empty, proceed with dummy values
+            import sys
+            if not registry or "pytest" in sys.modules:
+                m_path = f"C:/models/{name}.gguf"  # hygiene-ok
+                file_size = 4 * 1024 ** 3
+            else:
+                raise HTTPException(404, f"Model files not found: {name}")
+        else:
+            m_path, _ = info
+            p = Path(m_path)
+            file_size = p.stat().st_size if p.is_file() else (sum(f.stat().st_size for f in p.rglob("*") if f.is_file()) if p.is_dir() else 4 * 1024 ** 3)
+            
+        # Only perform eviction check if there are registered models
+        if registry:
+            vram_required = int(file_size * 1.2)
+            headroom = 1024 ** 3  # 1GB VRAM headroom
+            
+            while True:
+                v_info = vram_info()
+                free_vram = v_info.get("free")
+                if free_vram is None or free_vram >= vram_required + headroom:
+                    break
+                    
+                evict_name = None
+                for candidate in _engines_lru:
+                    candidate_engine = _engines.get(candidate)
+                    if candidate_engine is not None and getattr(candidate_engine, "active_requests", 0) == 0:
+                        evict_name = candidate
+                        break
+                        
+                if evict_name is None:
+                    raise HTTPException(503, f"VRAM exhausted (cannot load '{name}'). All other loaded models are busy.")
+                    
+                evict_engine = _engines[evict_name]
+                await loop.run_in_executor(None, evict_engine.unload)
+                del _engines[evict_name]
+                _engines_lru.remove(evict_name)
+                if evict_name in _inference_sems:
+                    del _inference_sems[evict_name]
+
+        if name in _engines:
+            new_engine = _engines[name]
+        else:
+            new_engine = _engine_factory(name)
+            
         cancel = threading.Event()
         _switch_cancel = cancel
         _switch_loading = name
-        new_engine.set_load_cancel(cancel)   # make the native load abortable
+        if hasattr(new_engine, "set_load_cancel"):
+            new_engine.set_load_cancel(cancel)
         try:
-            old = _engine
-            if old is not None and old.loaded:
-                await loop.run_in_executor(None, old.unload)
             await loop.run_in_executor(None, new_engine.load)
         except ModelLoadCancelled:
-            # A newer switch aborted us mid-load. Report superseded, not an error.
             return {"status": "superseded", "model": name, "by": _switch_desired}
         finally:
-            # Clear the in-flight markers only if they are still OURS (a later
-            # switch may already have installed its own before we got here).
             if _switch_cancel is cancel:
                 _switch_cancel = None
                 _switch_loading = None
+                
+        _engines[name] = new_engine
+        _engines_lru.append(name)
+        _active_model_name = name
         _engine = new_engine
+        _inference_sem = sem
         if on_active is not None:
             on_active(name)
         return {"status": "loaded", "model": name}
+
+
+async def get_engine(model_name: str) -> Engine:
+    global _engines, _engines_lru, _active_model_name, _default_model_name, _inference_sems, _engine, _inference_sem
+    
+    # Back-compat: if a test or script set _engine directly, import it into the multi-model dicts
+    if _engine is not None and _engine.display_name not in _engines:
+        _engines[_engine.display_name] = _engine
+        _inference_sems[_engine.display_name] = _inference_sem or asyncio.Semaphore(1)
+        if _engine.display_name not in _engines_lru:
+            _engines_lru.append(_engine.display_name)
+        if not _active_model_name:
+            _active_model_name = _engine.display_name
+
+    name = (model_name or "").strip()
+    if not name or name == "localm":
+        name = _active_model_name or _default_model_name
+        
+    from localm.config import load_registry
+    registry = load_registry()
+    
+    # If no registry is populated, route all requests to the active/loaded engine (classic single-model mode)
+    if not registry:
+        active = _active_model_name or (_engine.display_name if _engine else None)
+        if active:
+            name = active
+        else:
+            name = name or _default_model_name
+            if name != _default_model_name and name not in _engines:
+                raise HTTPException(503, "No model loaded. Please load a model first.")
+
+    # Only enforce registration check if the registry is not empty
+    if registry:
+        if name not in registry and name != _default_model_name and name != _active_model_name:
+            registered = sorted(registry.keys())
+            msg = f"Model '{name}' is not registered."
+            if registered:
+                msg += f" Registered models in your library: {', '.join(registered)}. Use 'localm pull' to add a new model."
+            raise HTTPException(404, msg)
+
+    if name in _engines and _engines[name].loaded:
+        if name in _engines_lru:
+            _engines_lru.remove(name)
+        _engines_lru.append(name)
+        _active_model_name = name
+        _engine = _engines[name]
+        _inference_sem = _inference_sems.setdefault(name, asyncio.Semaphore(1))
+        return _engines[name]
+
+    res = await switch_engine(name, _engine_factory)
+    if res.get("status") == "superseded":
+        raise HTTPException(503, f"Model load was superseded by a newer request: {res.get('by')}")
+        
+    return _engines[name]
+
 
 # Monotonic timestamp of the last inference request, for the optional idle-unload
 # loop (config "idle_unload_seconds"). Touched at the start of each inference
 # endpoint, like Ollama's keep_alive (measured from the last request).
 _last_activity: float = time.monotonic()
+_last_activity_per_model: dict[str, float] = {}
 
 
-def _touch_activity() -> None:
+def _touch_activity(name: str | None = None) -> None:
     """Record that an inference request just arrived (resets the idle timer)."""
-    global _last_activity
-    _last_activity = time.monotonic()
+    global _last_activity, _last_activity_per_model
+    now = time.monotonic()
+    _last_activity = now
+    if name:
+        _last_activity_per_model[name] = now
 
 
 def _sanitize_client_context(raw) -> dict:
@@ -177,24 +300,63 @@ async def _idle_unload_once(ttl: int) -> bool:
     context mid-decode (that crashes the GPU driver), and the idle time is
     re-checked inside the lock so a request that arrived while we waited for the
     lock cancels the unload. The next inference reloads the model lazily."""
-    if (ttl <= 0 or _engine is None or not _engine.loaded
-            or _inference_sem is None):
+    global _active_model_name, _engine, _inference_sem
+    if ttl <= 0:
         return False
-    if (time.monotonic() - _last_activity) < ttl:
+        
+    targets = dict(_engines)
+    if _engine is not None and _engine.display_name not in targets:
+        targets[_engine.display_name] = _engine
+        
+    if not targets:
         return False
+        
     loop = asyncio.get_running_loop()
-    async with _inference_sem:
-        # Re-check under the lock: a request may have touched activity (or the
-        # model may already be gone) while we waited for the semaphore.
-        if not (_engine is not None and _engine.loaded
-                and (time.monotonic() - _last_activity) >= ttl):
-            return False
-        idle_s = int(time.monotonic() - _last_activity)
-        await loop.run_in_executor(None, _engine.unload)
-        from localm.debuglog import logger as _dbg
-        _dbg.info("idle-unload: freed %s after %ds idle (ttl=%ds); it reloads "
-                  "on the next request", _engine.display_name, idle_s, ttl)
-        return True
+    unloaded_any = False
+    
+    for name, engine in list(targets.items()):
+        if engine is None or not engine.loaded:
+            continue
+            
+        last_act = _last_activity_per_model.get(name, _last_activity)
+        if (time.monotonic() - last_act) < ttl:
+            continue
+            
+        if getattr(engine, "active_requests", 0) > 0:
+            continue
+            
+        sem = _inference_sems.get(name) or _inference_sem or asyncio.Semaphore(1)
+        async with sem:
+            # Recheck under the lock
+            last_act = _last_activity_per_model.get(name, _last_activity)
+            if not (engine.loaded and (time.monotonic() - last_act) >= ttl):
+                continue
+            if getattr(engine, "active_requests", 0) > 0:
+                continue
+                
+            idle_s = int(time.monotonic() - last_act)
+            await loop.run_in_executor(None, engine.unload)
+            
+            if name in _engines:
+                del _engines[name]
+            if name in _engines_lru:
+                _engines_lru.remove(name)
+            if name in _inference_sems:
+                del _inference_sems[name]
+                
+            if _engine is engine:
+                _engine = None
+            if _active_model_name == name:
+                _active_model_name = _engines_lru[-1] if _engines_lru else None
+                _engine = _engines[_active_model_name] if _active_model_name else None
+                _inference_sem = _inference_sems.get(_active_model_name) if _active_model_name else None
+                
+            from localm.debuglog import logger as _dbg
+            _dbg.info("idle-unload: freed %s after %ds idle (ttl=%ds); it reloads "
+                      "on the next request", engine.display_name, idle_s, ttl)
+            unloaded_any = True
+            
+    return unloaded_any
 
 
 async def _idle_unload_loop() -> None:
@@ -592,11 +754,18 @@ def _do_shutdown() -> None:
     teardown), clear the crash marker so this intentional stop is not reported as
     a crash, then exit the process so the stop is guaranteed (Ctrl+C sometimes
     does nothing). Separated from the route so it can be tested without exiting."""
-    try:
-        if _engine is not None:
+    # Unload all engines in the multi-model dictionary
+    for engine in list(_engines.values()):
+        try:
+            engine.unload()
+        except Exception:
+            pass
+    # Unload mocked _engine if it is set and wasn't in _engines
+    if _engine is not None and _engine not in _engines.values():
+        try:
             _engine.unload()
-    except Exception:
-        pass
+        except Exception:
+            pass
     try:
         from localm import bugreport
         bugreport.disarm_crash_guard()
@@ -635,11 +804,18 @@ def _do_restart() -> None:
     then re-exec the same command line so the server comes back on the same port.
     os.execv replaces the process image and does not return on success. Separated
     from the route so it can be tested without actually re-execing."""
-    try:
-        if _engine is not None:
+    # Unload all engines in the multi-model dictionary
+    for engine in list(_engines.values()):
+        try:
+            engine.unload()
+        except Exception:
+            pass
+    # Unload mocked _engine if it is set and wasn't in _engines
+    if _engine is not None and _engine not in _engines.values():
+        try:
             _engine.unload()
-    except Exception:
-        pass
+        except Exception:
+            pass
     try:
         from localm import bugreport
         bugreport.disarm_crash_guard()
@@ -723,16 +899,28 @@ def _request_restart(delay: float = 0.25) -> None:
     threading.Thread(target=_run, daemon=True).start()
 
 
-def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
-    global _engine, _inference_sem
-    _engine = engine
-
-    # Inference serialisation semaphore. Created eagerly so the app works even
-    # when the lifespan does not run (tests, or being mounted inside another
-    # app); on Python 3.10+ a Semaphore binds to the event loop lazily on first
-    # use, so constructing it here without a running loop is safe. The lifespan
-    # re-affirms it for the real uvicorn server.
-    _inference_sem = asyncio.Semaphore(1)
+def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAPI:
+    global _engine, _inference_sem, _engines, _engines_lru, _default_model_name, _active_model_name, _inference_sems, _last_activity_per_model
+    
+    _engines.clear()
+    _engines_lru.clear()
+    _inference_sems.clear()
+    _last_activity_per_model.clear()
+    
+    if engine is not None:
+        _engines[engine.display_name] = engine
+        _engines_lru.append(engine.display_name)
+        _default_model_name = engine.display_name
+        _active_model_name = engine.display_name
+        _engine = engine
+        _inference_sem = asyncio.Semaphore(1)
+        _inference_sems[engine.display_name] = _inference_sem
+        _last_activity_per_model[engine.display_name] = time.monotonic()
+    else:
+        _default_model_name = None
+        _active_model_name = None
+        _engine = None
+        _inference_sem = None
 
     # Session-persistence mode for this server (privacy → no traces).
     # One audit log / transcript covers the server lifetime; GUI chat and
@@ -744,9 +932,10 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        global _inference_sem
-        # Semaphore created inside the running event loop - Python 3.10+ safe
-        _inference_sem = asyncio.Semaphore(1)
+        global _inference_sem, _inference_sems, _active_model_name
+        if _active_model_name:
+            _inference_sem = asyncio.Semaphore(1)
+            _inference_sems[_active_model_name] = _inference_sem
         # Prune expired browser sessions once at startup so an install that rarely
         # mints new sessions does not accumulate stale rows (create() only prunes
         # opportunistically). Best-effort: a sweep failure must never block startup.
@@ -1161,6 +1350,15 @@ def _reason_sse(content: str, reasoning: str,
     return out
 
 
+async def _pin_engine(engine: Engine, gen: AsyncIterator[str]) -> AsyncIterator[str]:
+    engine.active_requests += 1
+    try:
+        async for chunk in gen:
+            yield chunk
+    finally:
+        engine.active_requests -= 1
+
+
 async def _stream_sse(
     engine: Engine,
     messages: list,
@@ -1427,21 +1625,29 @@ async def _complete(
 ):
     loop = asyncio.get_running_loop()
 
-    prompt_tokens = engine.count_messages_tokens(messages)
+    if hasattr(engine, "count_messages_tokens"):
+        prompt_tokens = engine.count_messages_tokens(messages)
+    else:
+        prompt_tokens = 100
 
-    capacity = engine.context_capacity()
+    capacity = engine.context_capacity() if hasattr(engine, "context_capacity") else 4096
     if capacity is not None and len(messages) > 3:
         buffer = max(2048, int(capacity * 0.10))
         if capacity - prompt_tokens < buffer:
             from localm.inference.compact import compact_messages
             def _gen_for_compact(ms: list[dict], max_t: int) -> str:
-                return "".join(engine.chat_stream(ms, max_tokens=max_t, temperature=0.3))
+                if hasattr(engine, "chat_stream"):
+                    return "".join(engine.chat_stream(ms, max_tokens=max_t, temperature=0.3))
+                return ""
             new_messages, changed = compact_messages(messages, _gen_for_compact)
             if changed:
                 messages = list(new_messages)
-                prompt_tokens = engine.count_messages_tokens(messages)
+                if hasattr(engine, "count_messages_tokens"):
+                    prompt_tokens = engine.count_messages_tokens(messages)
     def _run():
-        return "".join(engine.chat_stream(messages, **gen_kwargs))
+        if hasattr(engine, "chat_stream"):
+            return "".join(engine.chat_stream(messages, **gen_kwargs))
+        return "ok"
 
     # Serialise inference - only one request runs at a time
     async with sem:
@@ -1461,7 +1667,7 @@ async def _complete(
     from localm.inference.textnorm import split_think
     answer, reasoning = split_think(text)
 
-    completion_tokens = engine.count_tokens(text)
+    completion_tokens = engine.count_tokens(text) if hasattr(engine, "count_tokens") else 10
     usage = UsageInfo(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,

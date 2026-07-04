@@ -242,6 +242,7 @@ Keep it cheap and self-contained:
   variable to a temporary path for the test instance.
 - Bind to localhost only, and stop the instance once the check is done. Do not
   leave a server bound across turns.
+- **Eat the dogfood (Live MCP verification)**: When modifying the server, the CLI, the coder, or the API endpoints, always verify that the MCP server runs correctly with those changes. Run the latest version + your unpublished changes using `npx mcporter` or an MCP client over stdio, and call tools (e.g. `list_models`, `chat`) to guarantee that any bugs or integration issues are caught live.
 
 ## Git and PR workflow
 
