@@ -919,6 +919,14 @@ def create_app(engine: Engine, *, api_landing: bool = False) -> FastAPI:
             # for an allowlisted CORS origin (F2): an Origin header is forgeable
             # by a non-browser client, so it is not a management credential - a
             # configured external origin must use an API key for state changes.
+        is_unsafe = request.method in _UNSAFE_METHODS
+        is_metadata_get = (
+            request.method == "GET"
+            and (request.url.path.startswith("/api/") or request.url.path.startswith("/v1/"))
+            and request.url.path != "/api/session"
+            and not request.url.path.startswith("/v1/models")
+        )
+        if (is_unsafe or is_metadata_get) and not request.url.path.startswith(_CROSS_ORIGIN_OK):
             from localm.auth import any_key_configured, require_auth_enabled
             if not any_key_configured() and not require_auth_enabled():
                 token = getattr(request.app.state, "shell_token", None)

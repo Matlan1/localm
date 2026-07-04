@@ -284,20 +284,20 @@ def test_end_to_end_memory_inlet_via_real_pipeline(tmp_path, monkeypatch):
     hdr = {"Authorization": f"Bearer {shell}"} if shell else {}
     with TestClient(app) as c:
         # the memory plugin mounted the /api/memory routes on enable
-        assert c.get("/api/memory").status_code == 200
+        assert c.get("/api/memory", headers=hdr).status_code == 200
         assert c.post("/api/memory/append", headers=hdr,
-                      json={"text": "User prefers Rust and cargo"}).status_code == 200
+                       json={"text": "User prefers Rust and cargo"}).status_code == 200
         # a chat turn -> the memory inlet injects a remembered-facts system block
         rr = c.post("/v1/chat/completions", json={
             "model": "m",
             "messages": [{"role": "user",
-                          "content": "help me fix my rust cargo build"}]})
+                           "content": "help me fix my rust cargo build"}]})
         assert rr.status_code == 200
     sys_msgs = [m for m in captured.get("messages", [])
                 if m.get("role") == "system"]
     assert any("<remembered_facts>" in (m.get("content") or "")
                and "Rust and cargo" in m["content"] for m in sys_msgs), \
-        f"memory not injected; system messages={sys_msgs}"
+         f"memory not injected; system messages={sys_msgs}"
 
 
 def test_chat_works_with_memory_plugin_disabled(tmp_path, monkeypatch):
@@ -318,9 +318,11 @@ def test_chat_works_with_memory_plugin_disabled(tmp_path, monkeypatch):
 
     captured: dict = {}
     app = create_app(_capturing_engine(captured))
+    shell = getattr(app.state, "shell_token", None)
+    hdr = {"Authorization": f"Bearer {shell}"} if shell else {}
     # Memory is off by default - do NOT enable it.
     with TestClient(app) as c:
-        assert c.get("/api/memory").status_code == 404      # routes not mounted
+        assert c.get("/api/memory", headers=hdr).status_code == 404      # routes not mounted
         rr = c.post("/v1/chat/completions", json={
             "model": "m",
             "messages": [{"role": "user", "content": "hello there"}]})
@@ -357,9 +359,9 @@ def test_disabling_memory_plugin_removes_hooks_and_routes(tmp_path, monkeypatch)
     with TestClient(app) as c:
         c.post("/api/memory/append", headers=hdr,
                json={"text": "User prefers Zig"})
-        assert c.get("/api/memory").status_code == 200
+        assert c.get("/api/memory", headers=hdr).status_code == 200
         mgr.disable("memory")                                 # flip the toggle off
-        assert c.get("/api/memory").status_code == 404        # routes gone
+        assert c.get("/api/memory", headers=hdr).status_code == 404        # routes gone
         rr = c.post("/v1/chat/completions", json={
             "model": "m",
             "messages": [{"role": "user", "content": "tell me about zig"}]})
