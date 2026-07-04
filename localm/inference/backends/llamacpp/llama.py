@@ -835,6 +835,8 @@ class LlamaCpp:
                             break
                         tok_one = (llama_token * 1)(token)
                         batch = api.llama_batch_get_one(tok_one, 1)
+                        pos_arr = (ctypes.c_int32 * 1)(pos)
+                        batch.pos = ctypes.cast(pos_arr, ctypes.c_void_p)
                         print(f"GENERATOR: decoding token {token} at pos {pos}", flush=True)
                         with _ctx():
                             ret = api.llama_decode(self._ctx_ptr, batch)
@@ -936,8 +938,8 @@ class LlamaCpp:
                     # Clear any prior turn's KV so the mtmd prefill from position 0 is
                     # valid on a reused context, then evaluate the image+text prompt.
                     self._reset_kv_for_image()
-                    self._mtmd.eval_into(self._ctx_ptr, prompt, images,
-                                         add_special=add_special)
+                    pos = self._mtmd.eval_into(self._ctx_ptr, prompt, images,
+                                               add_special=add_special)
 
             sampler = _build_sampler(
                 vocab=self._tokenizer._vocab,
@@ -963,12 +965,16 @@ class LlamaCpp:
                         if self._stop.is_set() or self._ctx_ptr is None:
                             self.last_finish_reason = "error"
                             break
-                        batch = api.llama_batch_get_one((llama_token * 1)(token), 1)
+                        tok_one = (llama_token * 1)(token)
+                        batch = api.llama_batch_get_one(tok_one, 1)
+                        pos_arr = (ctypes.c_int32 * 1)(pos)
+                        batch.pos = ctypes.cast(pos_arr, ctypes.c_void_p)
                         with _ctx():
                             ret = api.llama_decode(self._ctx_ptr, batch)
                         if ret != 0:
                             self.last_finish_reason = "length"
                             break
+                        pos += 1
                 else:
                     self.last_finish_reason = "length"
             finally:
@@ -1067,6 +1073,8 @@ class LlamaCpp:
             chunk = suffix[i:i + _PREFILL_CHUNK]
             tok_arr = (llama_token * len(chunk))(*chunk)
             batch = api.llama_batch_get_one(tok_arr, len(chunk))
+            pos_arr = (ctypes.c_int32 * len(chunk))(*(range(prefix + i, prefix + i + len(chunk))))
+            batch.pos = ctypes.cast(pos_arr, ctypes.c_void_p)
             ret = api.llama_decode(self._ctx_ptr, batch)
             if ret != 0:
                 # Cache state is now unknown - wipe it so the next call
@@ -1109,6 +1117,8 @@ class LlamaCpp:
             chunk = prompt_tokens[i:i + n_batch]
             tok_arr = (llama_token * len(chunk))(*chunk)
             batch = api.llama_batch_get_one(tok_arr, len(chunk))
+            pos_arr = (ctypes.c_int32 * len(chunk))(*(range(i, i + len(chunk))))
+            batch.pos = ctypes.cast(pos_arr, ctypes.c_void_p)
             ret = api.llama_decode(self._ctx_ptr, batch)
             if ret != 0:
                 self._cached_tokens = []
