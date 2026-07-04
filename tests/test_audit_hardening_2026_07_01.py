@@ -231,7 +231,7 @@ def test_comfy_status_import_symbols_exist():
 def test_comfy_status_route_returns_200(tmp_path, monkeypatch):
     app = _keyless_app(tmp_path, monkeypatch)
     client = TestClient(app)
-    r = client.get("/v1/comfy/status")
+    r = client.get("/v1/comfy/status", headers={"Authorization": f"Bearer {app.state.shell_token}"})
     assert r.status_code == 200, r.text
     assert "alive" in r.json()
 

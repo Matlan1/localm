@@ -825,10 +825,11 @@ def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
         if workdir:
             _say(f"Running the launcher from {workdir}")
     workdir = workdir or None
+    argv = shlex.split(launch_cmd, posix=(_sys.platform != "win32"))
     if _sys.platform == "win32":
-        argv: "str | list" = 'cmd /S /c "' + launch_cmd + '"'
-    else:
-        argv = shlex.split(launch_cmd)
+        argv = [a.strip('"\'') for a in argv]
+        if argv and (argv[0].lower().endswith(".bat") or argv[0].lower().endswith(".cmd")):
+            argv = ["cmd", "/d", "/c"] + argv
     # Redirect the launcher's own stdout+stderr to a log file instead of
     # discarding them, so a ComfyUI that fails to start leaves its reason on
     # disk for the user (and for --debug-discoverable). Best-effort: fall back
