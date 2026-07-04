@@ -129,8 +129,9 @@ class TestPrincipalId:
             return Request({"type": "http", "headers": raw, "method": "GET",
                             "path": "/", "query_string": b""})
 
-        a = "key-aaa"
+        a = auth.create_key("A", [S.MODELS_READ])["key"]
+        b = auth.create_key("B", [S.MODELS_READ])["key"]
         assert principal_id(_req({"authorization": f"Bearer {a}"})) == auth._hash_key(a)
-        assert (principal_id(_req({"authorization": "Bearer key-aaa"}))
-                != principal_id(_req({"authorization": "Bearer key-bbb"})))
+        assert (principal_id(_req({"authorization": f"Bearer {a}"}))
+                != principal_id(_req({"authorization": f"Bearer {b}"})))
         assert principal_id(_req({})) is None

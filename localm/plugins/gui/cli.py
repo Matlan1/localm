@@ -303,20 +303,6 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
                     "(files missing or not a model).[/yellow] "
                     "Opening the GUI - fix or add one on the Models page.")
 
-    model_path = None
-    display_name = ""
-    if not model_less:
-        info = get_model_info(model)
-        if info is None:
-            console.print(f"[red]Model not found:[/red] {model}")
-            sys.exit(1)
-        model_path, display_hint = info
-        display_name = model if model in registry else display_hint
-
-    chosen_port, was_busy = pick_port(port, host="127.0.0.1" if host == "0.0.0.0" else host)
-    if was_busy:
-        console.print(f"[yellow]Requested port busy - using {chosen_port}.[/yellow]")
-
     # Refuse to bind past loopback without auth unless explicitly forced: the GUI
     # exposes not just the chat API but the coder agent, which can run shell
     # commands and edit files on this machine. Checked before any setup work.
@@ -330,6 +316,20 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     if bind_warning:
         console.print(f"[bold yellow]{bind_warning}[/bold yellow]")
         console.print("[bold yellow]  Proceeding anyway (--insecure set).[/bold yellow]")
+
+    model_path = None
+    display_name = ""
+    if not model_less:
+        info = get_model_info(model)
+        if info is None:
+            console.print(f"[red]Model not found:[/red] {model}")
+            sys.exit(1)
+        model_path, display_hint = info
+        display_name = model if model in registry else display_hint
+
+    chosen_port, was_busy = pick_port(port, host="127.0.0.1" if host == "0.0.0.0" else host)
+    if was_busy:
+        console.print(f"[yellow]Requested port busy - using {chosen_port}.[/yellow]")
 
     # Built-in TLS (NET-1): a network bind serves HTTPS out of the box so the
     # API key and all traffic are encrypted. Resolved before attach_gui so the
