@@ -23,7 +23,7 @@ import uuid
 from typing import Dict, Generator, Iterable, Iterator, List, Optional
 
 from . import _api as api
-from ._structs import llama_token, LlamaChatMessage
+from ._structs import llama_token, LlamaChatMessage, LlamaBatch
 
 
 _stderr_lock = threading.Lock()
@@ -702,6 +702,29 @@ class LlamaCpp:
         raw = b"".join(self._tokenizer.token_to_piece_bytes(t) for t in tokens)
         return raw.decode("utf-8", errors="replace")
 
+    def _create_batch(self, tokens: List[int], start_pos: int, logits_at_last_only: bool = True) -> LlamaBatch:
+        n = len(tokens)
+        batch = api.llama_batch_init(n, 0, 1)
+        
+        # cast pointers
+        token_ptr = ctypes.cast(batch.token, ctypes.POINTER(llama_token))
+        pos_ptr = ctypes.cast(batch.pos, ctypes.POINTER(ctypes.c_int32))
+        n_seq_id_ptr = ctypes.cast(batch.n_seq_id, ctypes.POINTER(ctypes.c_int32))
+        seq_id_ptr = ctypes.cast(batch.seq_id, ctypes.POINTER(ctypes.POINTER(ctypes.c_int32)))
+        logits_ptr = ctypes.cast(batch.logits, ctypes.POINTER(ctypes.c_int8))
+        
+        for idx, tok in enumerate(tokens):
+            token_ptr[idx] = tok
+            pos_ptr[idx] = start_pos + idx
+            n_seq_id_ptr[idx] = 1
+            seq_id_ptr[idx][0] = 0
+            if logits_at_last_only:
+                logits_ptr[idx] = 1 if idx == n - 1 else 0
+            else:
+                logits_ptr[idx] = 1
+                
+        return batch
+
     # ------------------------------------------------------------------ #
     #  Core generation loop                                               #
     # ------------------------------------------------------------------ #
@@ -827,10 +850,7 @@ class LlamaCpp:
                         if self._stop.is_set() or self._ctx_ptr is None:
                             self.last_finish_reason = "error"
                             break
-                        tok_one = (llama_token * 1)(token)
-                        batch = api.llama_batch_get_one(tok_one, 1)
-                        pos_arr = (ctypes.c_int32 * 1)(pos)
-                        batch.pos = ctypes.cast(pos_arr, ctypes.c_void_p)
+                        batch = self._create_batch([token], pos, logits_at_last_only=True)
                         with _ctx():
                             ret = api.llama_decode(self._ctx_ptr, batch)
                         if ret != 0:
@@ -843,6 +863,10 @@ class LlamaCpp:
                                 prompt_and_gen = self._cached_tokens.copy()
                                 self._prefill_fresh_context(prompt_and_gen, current_needed)
                                 # Retry decode on the newly grown context
+                                # Note: the old batch references the old context capacity or old layout,
+                                # so we must free the old batch and create a new batch for the retry!
+                                api.llama_batch_free(batch)
+                                batch = self._create_batch([token], pos, logits_at_last_only=True)
                                 with _ctx():
                                     ret = api.llama_decode(self._ctx_ptr, batch)
                                 
@@ -852,7 +876,9 @@ class LlamaCpp:
                                 # state, so invalidate it.
                                 self.last_finish_reason = "length"
                                 self._cached_tokens = []
+                                api.llama_batch_free(batch)
                                 break
+                        api.llama_batch_free(batch)
                         self._cached_tokens.append(token)
                         pos += 1
                         tokens_generated += 1
@@ -958,15 +984,14 @@ class LlamaCpp:
                         if self._stop.is_set() or self._ctx_ptr is None:
                             self.last_finish_reason = "error"
                             break
-                        tok_one = (llama_token * 1)(token)
-                        batch = api.llama_batch_get_one(tok_one, 1)
-                        pos_arr = (ctypes.c_int32 * 1)(pos)
-                        batch.pos = ctypes.cast(pos_arr, ctypes.c_void_p)
+                        batch = self._create_batch([token], pos, logits_at_last_only=True)
                         with _ctx():
                             ret = api.llama_decode(self._ctx_ptr, batch)
                         if ret != 0:
                             self.last_finish_reason = "length"
+                            api.llama_batch_free(batch)
                             break
+                        api.llama_batch_free(batch)
                         pos += 1
                 else:
                     self.last_finish_reason = "length"
@@ -1064,11 +1089,9 @@ class LlamaCpp:
                     "Model was unloaded during prefill - request aborted."
                 )
             chunk = suffix[i:i + _PREFILL_CHUNK]
-            tok_arr = (llama_token * len(chunk))(*chunk)
-            batch = api.llama_batch_get_one(tok_arr, len(chunk))
-            pos_arr = (ctypes.c_int32 * len(chunk))(*(range(prefix + i, prefix + i + len(chunk))))
-            batch.pos = ctypes.cast(pos_arr, ctypes.c_void_p)
+            batch = self._create_batch(chunk, prefix + i, logits_at_last_only=True)
             ret = api.llama_decode(self._ctx_ptr, batch)
+            api.llama_batch_free(batch)
             if ret != 0:
                 # Cache state is now unknown - wipe it so the next call
                 # starts clean rather than trusting a half-decoded prefix
@@ -1108,11 +1131,9 @@ class LlamaCpp:
         n_batch = cp.n_batch
         for i in range(0, len(prompt_tokens), n_batch):
             chunk = prompt_tokens[i:i + n_batch]
-            tok_arr = (llama_token * len(chunk))(*chunk)
-            batch = api.llama_batch_get_one(tok_arr, len(chunk))
-            pos_arr = (ctypes.c_int32 * len(chunk))(*(range(i, i + len(chunk))))
-            batch.pos = ctypes.cast(pos_arr, ctypes.c_void_p)
+            batch = self._create_batch(chunk, i, logits_at_last_only=True)
             ret = api.llama_decode(self._ctx_ptr, batch)
+            api.llama_batch_free(batch)
             if ret != 0:
                 self._cached_tokens = []
                 raise RuntimeError(f"llama_decode failed during prefill (code {ret})")
