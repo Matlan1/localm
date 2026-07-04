@@ -149,6 +149,44 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
                 f"[dim]connected to the localm server at {target['base_url']} "
                 f"(no second model load)[/dim]")
 
+    if engine is None and not no_server:
+        console.print("[dim]No server running. Starting one in the background...[/dim]")
+        import subprocess
+        import time
+        from ..applaunch import launch_exe
+        
+        cmd = [launch_exe(), "-m", "localm", "gui", "--no-browser"]
+        # Use no_model if no model was provided, else pass it
+        if not model:
+            cmd.append("--no-model")
+        else:
+            cmd.append(model)
+        
+        if ctx is not None: cmd.extend(["-c", str(ctx)])
+        if gpu_layers is not None: cmd.extend(["-g", str(gpu_layers)])
+        
+        kwargs = {}
+        if sys.platform == "win32":
+            kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
+        else:
+            kwargs["start_new_session"] = True
+            
+        try:
+            subprocess.Popen(cmd, **kwargs)
+            # Poll for the server to come up
+            for _ in range(40):
+                time.sleep(0.5)
+                target = instances.attach_target(home_dir(), instances.resolve_root_dir())
+                if target:
+                    from ..inference.http_engine import HttpEngine
+                    engine = HttpEngine(
+                        target["base_url"], token=target.get("token"),
+                        model=model, display_name=model)
+                    console.print(f"[dim]connected to newly started server at {target['base_url']}[/dim]")
+                    break
+        except Exception as e:
+            attach_error = e
+
     if engine is None:
         _note = _attach_fallback_note(no_server, attach_error)
         if _note:

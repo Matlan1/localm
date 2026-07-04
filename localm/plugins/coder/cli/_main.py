@@ -47,7 +47,7 @@ from ..display import (
     print_info,
     print_warning,
 )
-from ..server import ManagedServer, find_free_port
+from ..server import find_free_port
 from .goal import _run_goal_loop
 from .estimate import _run_estimate
 from .repl import _repl
@@ -222,9 +222,8 @@ def main(
             work_dir, model, max_turns, max_tokens, temperature, yes,
             interactive_confirm, mode, ci, provider))
 
-    # Build the LLM backend (and the managed server when one is auto-started;
-    # split out of main; see _build_backend).
-    backend, server_ctx = _build_backend(
+    # Build the LLM backend.
+    backend = _build_backend(
         provider, url, model, api_key, native_tools, port, no_server,
         force_new, work_dir, ci)
 
@@ -330,8 +329,6 @@ def main(
             print_info(f"Session transcript saved → {md_path}")
         if session_mode == SessionMode.PRIVACY:
             clear_shell_history_traces()
-        if server_ctx:
-            server_ctx.stop()
 
 
 def _handle_episode_flags(work_dir: Path, show_episodes: bool,
@@ -430,13 +427,11 @@ def _resolve_session_config(work_dir, model, max_turns, max_tokens, temperature,
 def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
                    force_new, work_dir, ci):
     """Build the LLM backend for the chosen provider / explicit URL / offline path.
-    Returns (backend, server_ctx) where server_ctx is a ManagedServer when one was
-    auto-started for the offline path (else None). Split out of main; exits
+    Returns backend. Split out of main; exits
     (2 under --ci, else 1) on a missing required option or a failed server start."""
     # Live-attribute access so a test patching cli.make_localm_backend is honoured
     # (the name moved into this submodule when cli.py became a package).
     make_localm_backend = _cli.make_localm_backend
-    server_ctx: Optional[ManagedServer] = None
 
     if provider == "openai":
         if not model:
@@ -496,16 +491,53 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
         if attached is not None:
             backend = attached
         else:
-            srv_port = port or find_free_port()
             if no_server:
+                srv_port = port or 8642
                 backend = make_localm_backend(model, port=srv_port, api_key=api_key)
             else:
-                server_ctx = ManagedServer(model, port=srv_port)
-                if not server_ctx.start():
-                    sys.exit(2 if ci else 1)
-                backend = make_localm_backend(model, port=srv_port, api_key=api_key)
+                console.print("[dim]No server running. Starting one in the background...[/dim]")
+                import subprocess
+                import time
+                from localm.applaunch import launch_exe
+                from localm import instances
+                from localm.config import home_dir
 
-    return backend, server_ctx
+                cmd = [launch_exe(), "-m", "localm", "gui", "--no-browser", "--api-mode"]
+                if model:
+                    cmd.append(model)
+                else:
+                    cmd.append("--no-model")
+                if port:
+                    cmd.extend(["-p", str(port)])
+
+                kwargs = {}
+                if sys.platform == "win32":
+                    kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
+                else:
+                    kwargs["start_new_session"] = True
+
+                try:
+                    subprocess.Popen(cmd, **kwargs)
+                    _tgt = None
+                    for _ in range(40):
+                        time.sleep(0.5)
+                        _root = instances.resolve_root_dir(start=str(work_dir))
+                        _tgt = instances.attach_target(home_dir(), _root)
+                        if _tgt:
+                            break
+                    if _tgt:
+                        backend = HTTPBackend(_tgt["base_url"], model, api_key=api_key,
+                                              native_tools=native_tools,
+                                              localm_server=True)
+                        console.print(f"[dim]connected to newly started server at {_tgt['base_url']}[/dim]")
+                    else:
+                        print_error("Failed to attach to the auto-started server.")
+                        sys.exit(2 if ci else 1)
+                except Exception as e:
+                    print_error(f"Failed to start server: {e}")
+                    sys.exit(2 if ci else 1)
+
+    return backend
 
 
 def _warn_sensitive_changes(agent: Agent) -> None:
