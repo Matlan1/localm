@@ -75,7 +75,7 @@ _ASSET_MATCH = {
     "win32": {
         "cpu":    ["bin-win-cpu-x64"],
         "vulkan": ["bin-win-vulkan-x64"],
-        "cuda":   ["bin-win-cuda-12"],          # prefer the 12.x runtime line
+        "cuda":   ["bin-win-cuda-12.4-x64", "bin-win-cuda-12"],          # prefer the 12.x runtime line
         "sycl":   ["bin-win-sycl-x64"],
         "hip":    ["bin-win-hip-radeon-x64"],   # needs AMD HIP SDK present
     },
@@ -83,8 +83,8 @@ _ASSET_MATCH = {
         "cpu":    ["bin-ubuntu-x64"],
         "vulkan": ["bin-ubuntu-vulkan-x64"],
         "cuda":   ["bin-ubuntu-cuda"],
-        "sycl":   ["bin-ubuntu-sycl-fp16", "bin-ubuntu-sycl"],
-        "hip":    ["bin-ubuntu-rocm"],
+        "sycl":   ["bin-ubuntu-sycl-fp16-x64", "bin-ubuntu-sycl-fp16", "bin-ubuntu-sycl"],
+        "hip":    ["bin-ubuntu-rocm-7.2-x64", "bin-ubuntu-rocm"],
     },
     "darwin": {
         "cpu":    ["bin-macos-arm64", "bin-macos-x64"],
@@ -273,25 +273,18 @@ def _resolve_backend_url(backend: str) -> str:
     tag = _latest_tag()
     # Ask the release for its assets so we match the real (version-suffixed)
     # name; fall back to a templated guess if the asset list is unavailable.
-    api = f"https://api.github.com/repos/{_UPSTREAM_REPO}/releases/tags/{tag}"
-    try:
-        req = urllib.request.Request(api, headers={"Accept": "application/vnd.github+json",
-                                                   "User-Agent": "localm-setup-llama"})
-        with urllib.request.urlopen(req, timeout=10) as r:
-            assets = json.loads(r.read().decode("utf-8")).get("assets", [])
-        for a in assets:
-            name = str(a.get("name", "")).lower()
-            # Exclude the cudart RUNTIME bundle: cudart-llama-bin-win-cuda-12.x
-            # contains the same "bin-win-cuda-12" fragment as the build and is
-            # often listed first, so without this the cuda build resolves to the
-            # runtime-only zip (no llama.dll) and provisioning aborts with "the
-            # archive did not contain llama.dll" (NEW-CUDADLL). The build is
-            # always llama-..., never cudart-..., so this is safe for every backend.
-            if (any(m in name for m in matchers) and "cudart" not in name
-                    and a.get("browser_download_url")):
-                return a["browser_download_url"]
-    except Exception:
-        pass
+    assets = _release_assets(tag)
+    for a in assets:
+        name = str(a.get("name", "")).lower()
+        # Exclude the cudart RUNTIME bundle: cudart-llama-bin-win-cuda-12.x
+        # contains the same "bin-win-cuda-12" fragment as the build and is
+        # often listed first, so without this the cuda build resolves to the
+        # runtime-only zip (no llama.dll) and provisioning aborts with "the
+        # archive did not contain llama.dll" (NEW-CUDADLL). The build is
+        # always llama-..., never cudart-..., so this is safe for every backend.
+        if (any(m in name for m in matchers) and "cudart" not in name
+                and a.get("browser_download_url")):
+            return a["browser_download_url"]
     # Fallback: construct the canonical URL from the first matcher token. The
     # asset list could not be fetched, so this URL is a guess that was NOT
     # confirmed against the release - warn so a later 404 is attributable to it
@@ -626,13 +619,26 @@ def nvidia_preflight() -> NvidiaInfo:
 
 
 def _release_assets(tag: str) -> list:
-    """The asset list for a release tag, or [] if the API is unavailable."""
+    """The asset list for a release tag, or [] if the API is unavailable.
+    If the API returns an empty assets list but includes download links in the
+    release body, those links are extracted and returned as simulated assets."""
     api = f"https://api.github.com/repos/{_UPSTREAM_REPO}/releases/tags/{tag}"
     try:
         req = urllib.request.Request(api, headers={"Accept": "application/vnd.github+json",
                                                    "User-Agent": "localm-setup-llama"})
         with urllib.request.urlopen(req, timeout=10) as r:
-            return json.loads(r.read().decode("utf-8")).get("assets", [])
+            data = json.loads(r.read().decode("utf-8"))
+            assets = data.get("assets", [])
+            body = data.get("body", "")
+            if not assets and body:
+                urls = re.findall(r'https://github\.com/[^/]+/[^/]+/releases/download/[^/]+/[^\s\)"\'>]+', body)
+                for url in urls:
+                    assets.append({
+                        "name": url.split("/")[-1],
+                        "browser_download_url": url,
+                        "size": 0
+                    })
+            return assets
     except Exception:
         return []
 
