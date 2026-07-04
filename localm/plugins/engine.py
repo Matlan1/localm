@@ -505,7 +505,7 @@ class PluginManager:
                  builtin_root: "Optional[Path] | object" = _UNSET,
                  external_root: Optional[Path] = None) -> None:
         self.app = app
-        self.inference_engine = inference_engine
+        self._inference_engine_static = inference_engine
         if store_root is not None:
             self._store_root = store_root
         elif builtin_root is not _UNSET:          # explicit (incl. None = "no store")
@@ -527,6 +527,17 @@ class PluginManager:
         # (plugin name, callback) queued by Host.on_startup before the server's
         # event loop exists; drained once by the app lifespan. See on_startup.
         self._startup_callbacks: list = []
+
+    @property
+    def inference_engine(self) -> Any:
+        try:
+            from localm.inference import http_server as _hs
+            name = getattr(_hs, "_active_model_name", None)
+            if name and name in getattr(_hs, "_engines", {}):
+                return _hs._engines[name]
+        except Exception:
+            pass
+        return self._inference_engine_static
 
     # ---- discovery (INSTALLED folder only) ---------------------------------
     # ---- deferred startup work (loop-dependent plugin init) ---------------- #

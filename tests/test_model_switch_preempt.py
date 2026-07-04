@@ -61,6 +61,9 @@ def _reset_switch_state():
     hs._switch_desired = None
     hs._switch_loading = None
     hs._switch_cancel = None
+    hs._engines.clear()
+    hs._engines_lru.clear()
+    hs._inference_sems.clear()
 
 
 async def _await_started(engine, timeout=2.0):

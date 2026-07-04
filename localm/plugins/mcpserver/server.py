@@ -138,18 +138,23 @@ def _text_result(text: str, is_error: bool = False) -> dict:
 def _backend_can_embed(engines: "EngineCache") -> bool:
     """True unless the active/default backend explicitly cannot embed.
 
-    The common GGUF backend has no embedding support and would make the 'embed'
-    tool error on every call (FAC-6), so we hide it. We resolve the default
-    engine WITHOUT loading the model (constructing the backend is cheap) and
-    read its ``can_embed`` flag; a backend that does not set the flag is treated
-    as embed-capable (e.g. the HuggingFace backend), and any failure to resolve
-    a model leaves the tool advertised rather than silently dropping it."""
+    Avoids loading the model at startup by checking the registry for GGUF suffix
+    if the engine object is not yet instantiated/cached."""
+    if engines._engine is not None:
+        backend = getattr(engines._engine, "_backend", None)
+        return getattr(backend, "can_embed", True) is not False
+
     try:
-        engine = engines.get(None)
+        name = engines.resolve_model(None)
+        from localm.model_manager import get_model_info
+        info = get_model_info(name)
+        if info is not None:
+            path, _hint = info
+            if str(path).lower().endswith(".gguf"):
+                return False
     except Exception:
-        return True  # cannot determine - do not hide a possibly-working tool
-    backend = getattr(engine, "_backend", None)
-    return getattr(backend, "can_embed", True) is not False
+        pass
+    return True
 
 
 def _coder_available() -> bool:

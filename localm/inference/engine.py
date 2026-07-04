@@ -156,6 +156,7 @@ class Engine:
             n_gpu_layers=n_gpu_layers,
             device=device,
         )
+        self.active_requests = 0
 
     @property
     def loaded(self) -> bool:

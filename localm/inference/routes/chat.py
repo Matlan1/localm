@@ -45,12 +45,15 @@ def register(app: FastAPI, ctx) -> None:
     _complete = _hs._complete
     _messages_prompt_text = _hs._messages_prompt_text
     _audit_exchange = _hs._audit_exchange
+    _pin_engine = _hs._pin_engine
 
     @app.post("/v1/chat/completions", dependencies=[Depends(_require_auth)])
     async def chat_completions(req: ChatRequest, request: Request):
-        if _hs._engine is None:
-            raise HTTPException(503, "No model loaded")
-        _touch_activity()
+        if not req.model:
+            raise HTTPException(400, "Model parameter is required and cannot be empty")
+            
+        engine = await _hs.get_engine(req.model)
+        _touch_activity(engine.display_name)
 
         # Convert pydantic Messages to plain dicts for the backend
         messages = _protocol_messages_to_dicts(req.messages)
@@ -73,16 +76,18 @@ def register(app: FastAPI, ctx) -> None:
             if pipeline.has("inlet"):
                 messages = await pipeline.run_inlet(messages, ctx)
 
+        sem = _hs._inference_sems.setdefault(engine.display_name, asyncio.Semaphore(1))
+
         # Reject image input on a text-only model with a clear 400 instead of
         # silently dropping the picture. For GGUF (always text-only) this is
         # known immediately; for an unloaded HF model multimodal support is
         # only known after loading, so load first before deciding.
-        if messages_contain_image(messages) and not _hs._engine.supports_images:
-            if not _hs._engine.loaded and _hs._engine.can_be_multimodal:
+        if messages_contain_image(messages) and not engine.supports_images:
+            if not engine.loaded and engine.can_be_multimodal:
                 loop = asyncio.get_running_loop()
-                async with _hs._inference_sem:
-                    await loop.run_in_executor(None, _hs._engine.load)
-            if not _hs._engine.supports_images:
+                async with sem:
+                    await loop.run_in_executor(None, engine.load)
+            if not engine.supports_images:
                 # Capability-aware, install-specific guidance: route to a vision
                 # model this install actually has, instead of a flat dead-end.
                 # supports_images is False here, so if an mmproj_path is set on the
@@ -91,7 +96,7 @@ def register(app: FastAPI, ctx) -> None:
                 # and not the stale "GGUF vision is not implemented".
                 from localm.model_manager import vision_input_guidance
                 mmproj_failed = bool(
-                    getattr(getattr(_hs._engine, "_backend", None), "mmproj_path", None))
+                    getattr(getattr(engine, "_backend", None), "mmproj_path", None))
                 raise HTTPException(400, vision_input_guidance(mmproj_failed=mmproj_failed))
 
         gen_kwargs = dict(
@@ -116,9 +121,9 @@ def register(app: FastAPI, ctx) -> None:
 
         if req.stream:
             return StreamingResponse(
-                _stream_sse(_hs._engine, messages, req.model, _hs._inference_sem,
+                _pin_engine(engine, _stream_sse(engine, messages, req.model, sem,
                             audit=_audit, transcript=_transcript,
-                            pipeline=pipeline, ctx=ctx, **gen_kwargs),
+                            pipeline=pipeline, ctx=ctx, **gen_kwargs)),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
@@ -126,9 +131,15 @@ def register(app: FastAPI, ctx) -> None:
                 },
             )
         else:
-            return await _complete(_hs._engine, messages, req.model, _hs._inference_sem,
-                                   audit=_audit, transcript=_transcript,
-                                   pipeline=pipeline, ctx=ctx, **gen_kwargs)
+            if isinstance(getattr(engine, "active_requests", None), int):
+                engine.active_requests += 1
+            try:
+                return await _complete(engine, messages, req.model, sem,
+                                       audit=_audit, transcript=_transcript,
+                                       pipeline=pipeline, ctx=ctx, **gen_kwargs)
+            finally:
+                if isinstance(getattr(engine, "active_requests", None), int):
+                    engine.active_requests = max(0, engine.active_requests - 1)
 
     # ---------------------------------------------------------------- #
     #  Embeddings  (/v1/embeddings)                                     #
@@ -136,9 +147,11 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/v1/embeddings", dependencies=[Depends(_require_auth)])
     async def embeddings(req: EmbeddingRequest):
-        if _hs._engine is None:
-            raise HTTPException(503, "No model loaded")
-        _touch_activity()
+        if not req.model:
+            raise HTTPException(400, "Model parameter is required and cannot be empty")
+            
+        engine = await _hs.get_engine(req.model)
+        _touch_activity(engine.display_name)
 
         # Honor the OpenAI encoding_format contract. "float" returns plain JSON
         # arrays; "base64" returns each vector as a base64-encoded little-endian
@@ -153,12 +166,18 @@ def register(app: FastAPI, ctx) -> None:
 
         texts = [req.input] if isinstance(req.input, str) else req.input
 
+        sem = _hs._inference_sems.setdefault(engine.display_name, asyncio.Semaphore(1))
         loop = asyncio.get_running_loop()
+        if isinstance(getattr(engine, "active_requests", None), int):
+            engine.active_requests += 1
         try:
-            async with _hs._inference_sem:
-                vecs = await loop.run_in_executor(None, lambda: _hs._engine.embed(texts))
+            async with sem:
+                vecs = await loop.run_in_executor(None, lambda: engine.embed(texts))
         except NotImplementedError as e:
             raise HTTPException(422, str(e))
+        finally:
+            if isinstance(getattr(engine, "active_requests", None), int):
+                engine.active_requests = max(0, engine.active_requests - 1)
 
         def _encode(vec):
             if fmt == "base64":
@@ -168,7 +187,7 @@ def register(app: FastAPI, ctx) -> None:
                 return base64.b64encode(buf).decode("ascii")
             return vec
 
-        total_tokens = sum(_hs._engine.count_tokens(t) for t in texts)
+        total_tokens = sum(engine.count_tokens(t) for t in texts)
         return {
             "object": "list",
             "data": [
@@ -185,9 +204,11 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/v1/completions", dependencies=[Depends(_require_auth)])
     async def completions(req: CompletionRequest, request: Request):
-        if _hs._engine is None:
-            raise HTTPException(503, "No model loaded")
-        _touch_activity()
+        if not req.model:
+            raise HTTPException(400, "Model parameter is required and cannot be empty")
+            
+        engine = await _hs.get_engine(req.model)
+        _touch_activity(engine.display_name)
 
         # Wrap the prompt as a single user message so raw completions flow through
         # the SAME chat-pipeline hooks and audit/transcript as
@@ -210,6 +231,8 @@ def register(app: FastAPI, ctx) -> None:
             if pipeline.has("inlet"):
                 messages = await pipeline.run_inlet(messages, ctx)
 
+        sem = _hs._inference_sems.setdefault(engine.display_name, asyncio.Semaphore(1))
+
         gen_kwargs = dict(
             max_tokens=req.max_tokens,
             temperature=req.temperature,
@@ -230,9 +253,9 @@ def register(app: FastAPI, ctx) -> None:
 
         if req.stream:
             return StreamingResponse(
-                _stream_sse_completion(_hs._engine, messages, req.model, _hs._inference_sem,
+                _pin_engine(engine, _stream_sse_completion(engine, messages, req.model, sem,
                                        audit=_audit, transcript=_transcript,
-                                       pipeline=pipeline, ctx=ctx, **gen_kwargs),
+                                       pipeline=pipeline, ctx=ctx, **gen_kwargs)),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
@@ -240,13 +263,19 @@ def register(app: FastAPI, ctx) -> None:
         loop = asyncio.get_running_loop()
         # Count tokens on the (possibly inlet-transformed) messages - what
         # inference actually sees, matching the chat path.
-        prompt_tokens = _hs._engine.count_tokens(_messages_prompt_text(messages))
+        prompt_tokens = engine.count_tokens(_messages_prompt_text(messages))
 
         def _run():
-            return "".join(_hs._engine.chat_stream(messages, **gen_kwargs))
+            return "".join(engine.chat_stream(messages, **gen_kwargs))
 
-        async with _hs._inference_sem:
-            text = await loop.run_in_executor(None, _run)
+        if isinstance(getattr(engine, "active_requests", None), int):
+            engine.active_requests += 1
+        try:
+            async with sem:
+                text = await loop.run_in_executor(None, _run)
+        finally:
+            if isinstance(getattr(engine, "active_requests", None), int):
+                engine.active_requests = max(0, engine.active_requests - 1)
 
         # Outlet fully controls the returned content in the non-streaming path;
         # then record the exchange (audit + transcript), exactly like chat.
@@ -254,7 +283,7 @@ def register(app: FastAPI, ctx) -> None:
             text = await pipeline.run_outlet(text, messages, ctx)
         _audit_exchange(_audit, _transcript, messages, text)
 
-        completion_tokens = _hs._engine.count_tokens(text)
+        completion_tokens = engine.count_tokens(text)
         ts  = int(time.time())
         cid = make_chunk_id()
         return {

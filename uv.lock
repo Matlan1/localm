@@ -505,7 +505,7 @@ sdist = { url = "https://files.pythonhosted.org/packages/18/c8/3eb9c10c138eaa9d6
 
 [[package]]
 name = "localm"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
