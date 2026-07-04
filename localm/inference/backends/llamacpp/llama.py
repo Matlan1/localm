@@ -705,6 +705,7 @@ class LlamaCpp:
     def _create_batch(self, tokens: List[int], start_pos: int, logits_at_last_only: bool = True) -> LlamaBatch:
         n = len(tokens)
         batch = api.llama_batch_init(n, 0, 1)
+        batch.n_tokens = n
         
         # cast pointers
         token_ptr = ctypes.cast(batch.token, ctypes.POINTER(llama_token))
