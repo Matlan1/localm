@@ -498,11 +498,11 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
                 console.print("[dim]No server running. Starting one in the background...[/dim]")
                 import subprocess
                 import time
-                from localm.applaunch import launch_exe
+                import sys
                 from localm import instances
                 from localm.config import home_dir
 
-                cmd = [launch_exe(), "-m", "localm", "gui", "--no-browser", "--api-mode"]
+                cmd = [sys.executable, "-m", "localm", "gui", "--no-browser", "--api-mode"]
                 if model:
                     cmd.append(model)
                 else:
@@ -510,7 +510,11 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
                 if port:
                     cmd.extend(["-p", str(port)])
 
+                import os
                 kwargs = {}
+                env = os.environ.copy()
+                env["LOCALM_OWN_CONSOLE"] = "1"
+                kwargs["env"] = env
                 if sys.platform == "win32":
                     kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
                 else:
