@@ -5,7 +5,7 @@ All notable changes to localm are documented here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Being pre-1.0,
 minor versions may include breaking changes.
 
-## [0.1.0] - 2026-07-02
+## [0.1.0] - 2026-07-04
 
 First tagged release. A self-contained, offline local-LLM platform.
 
