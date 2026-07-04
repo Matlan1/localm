@@ -151,6 +151,8 @@ class GGUFEmbedder:
         api.llama_backend_init()
         mp = api.llama_model_default_params()
         mp.n_gpu_layers = n_gpu_layers
+        if n_gpu_layers >= 99:
+            mp.use_mmap = False
         self._model = api.llama_load_model_from_file(model_path, mp)
         if not self._model:
             raise RuntimeError(f"failed to load embedding model: {model_path}")
