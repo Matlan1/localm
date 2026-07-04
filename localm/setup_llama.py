@@ -802,6 +802,33 @@ def _warn_off_profile(chosen: str) -> None:
                       "[yellow]Proceeding. Hardware must be present.[/yellow]")
 
 
+def _flush_stdin() -> None:
+    """Discard any input the OS/terminal buffered while we were NOT actually
+    waiting on it (e.g. a stray Enter pressed while a driver probe or a
+    multi-hundred-MB download was running). Without this, that buffered
+    keystroke is silently consumed the instant the NEXT ``click.confirm()``
+    prompt appears - answering a question the user never actually read, rather
+    than the one they meant to answer (or none at all). Call this immediately
+    before every interactive prompt in the setup flow.
+
+    Best-effort and silent on failure: a piped/non-tty stdin (tests, CI, a
+    non-interactive install) has nothing to flush and isatty() already guards
+    that; any other failure just leaves stray input in place - the pre-fix
+    behaviour - which is not a regression, so there is nothing worth surfacing."""
+    if not sys.stdin.isatty():
+        return
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            while msvcrt.kbhit():
+                msvcrt.getch()
+        else:
+            import termios
+            termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+    except Exception:
+        pass
+
+
 def _cuda_setup_dialogue(info: NvidiaInfo, assume_yes: bool) -> tuple:
     """Given the preflight, walk the user through making CUDA land. Returns
     ``(backend_to_provision, fetch_cudart_bundle)``.
@@ -840,12 +867,14 @@ def _cuda_setup_dialogue(info: NvidiaInfo, assume_yes: bool) -> tuple:
         if assume_yes:
             console.print("  [dim]--yes: using Vulkan (no NVIDIA GPU detected).[/dim]")
             return "vulkan", False
+        _flush_stdin()
         if click.confirm("  Continue with CUDA anyway? (No = use Vulkan)", default=False):
             return "cuda", True
         return "vulkan", False
 
     # Driver OK (or capability unknown but a GPU is present): offer the fetch.
     console.print("  [yellow]i[/yellow] Fetching self-contained CUDA runtime bundle. [bold]No Toolkit needed[/bold].")
+    _flush_stdin()
     if assume_yes or click.confirm("  Download the CUDA build + runtime now?", default=True):
         return "cuda", True
     console.print("  [dim]Falling back to Vulkan (works on your driver).[/dim]")
@@ -934,6 +963,7 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
     console.print(f"[dim]To retry later: localm setup-llama --backend {chosen} --force[/dim]")
     interactive = (not assume_yes) and sys.stdin.isatty()
     if interactive:
+        _flush_stdin()
         if not click.confirm(
                 f"  Install the universal Vulkan build now so you have a working "
                 f"setup? (your '{chosen}' pick is kept, not changed; decline to stop "
