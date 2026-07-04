@@ -6,7 +6,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { loadApp } from "./harness.mjs";
+import { loadApp, runScript } from "./harness.mjs";
 
 const jsonResp = (obj) => ({
   ok: true, status: 200, json: async () => obj, text: async () => JSON.stringify(obj),
@@ -378,4 +378,80 @@ test("R27: ticking 'don't ask again' stops the approval popup re-firing", async 
   const p2 = window.confirmWebRequest({ name: "web_search", args: { query: "y" } });
   assert.equal(modal.style.display, "none", "the modal did not reopen");
   assert.equal(await p2, true, "the remembered choice auto-approved");
+});
+
+// ---------------------------------------------------------------------------
+//  CHAT-TOOL-1: defang EVERY tool-call dialect parseWebCall executes, in the
+//  display AND in the context re-sent to the model. A model must never see its
+//  own raw <|tool_call> control tokens echoed back - that destabilised some
+//  finetunes (a Gemma-4 aeon-abliterated build) into a repetition loop.
+// ---------------------------------------------------------------------------
+
+test("formatToolCalls defangs the |-piped / call:-prefixed dialect (not just <tool_call>)", () => {
+  const { window: w } = loadApp();
+  // The exact shape the reported model emitted (piped wrapper + call: prefix).
+  const piped = '<|tool_call>call:{"name": "web_search", "args": {"query": "privacy X"}}<|tool_call|>';
+  const out = w.formatToolCalls(piped);
+  assert.ok(!/tool_call/.test(out), "no raw tool_call marker survives the defang");
+  assert.match(out, /web search: "privacy X"/, "shows a readable note with the query");
+  // Canonical form still works, and plain prose is untouched.
+  assert.match(w.formatToolCalls('<tool_call>{"name":"fetch_url","args":{"url":"https://x"}}</tool_call>'),
+    /read page: https:\/\/x/);
+  assert.equal(w.formatToolCalls("just a normal answer"), "just a normal answer");
+});
+
+test("CHAT-TOOL-1: the re-sent context defangs the assistant tool-call turn (no raw markers to the model)", async () => {
+  const piped = '<|tool_call>call:{"name": "web_search", "args": {"query": "privacy"}}<|tool_call|>';
+  const { completions } = await runChat({
+    web: true,
+    rounds: [content(piped), content("Here is the grounded answer [1].")],
+  });
+  assert.ok(completions.length >= 2, "the web loop re-completed after running the search");
+  // The FINAL (answer) turn's messages must carry the earlier tool-call turn as a
+  // clean note, never the raw <|tool_call> tokens the model originally emitted.
+  const answerMsgs = completions[completions.length - 1].body.messages;
+  const asst = answerMsgs.find((m) => m.role === "assistant");
+  assert.ok(asst, "the assistant tool-call turn is present in the re-sent context");
+  assert.ok(!/tool_call/.test(String(asst.content)),
+    "raw <|tool_call> markers are NOT re-fed to the model");
+  assert.match(String(asst.content), /web search/,
+    "the tool call is represented as a readable note instead");
+});
+
+// ---------------------------------------------------------------------------
+//  Chat defaults vs per-chat override: a blank drawer System prompt inherits the
+//  Settings "Default system prompt" (chat.systemDefault); a set field overrides.
+// ---------------------------------------------------------------------------
+
+async function systemForSend({ drawerSystem, settingsDefault }) {
+  const { impl, calls } = recordingFetch([]);
+  const { window } = loadApp({ fetchImpl: impl });
+  window.maybeCompactConversation = async () => {};
+  window.readSSE = async (_r, onData) =>
+    onData(JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] }));
+  const doc = window.document;
+  doc.getElementById("p-speak").checked = false;
+  doc.getElementById("p-memory").checked = false;   // isolate the system message
+  doc.getElementById("p-web").checked = false;
+  doc.getElementById("p-system").value = drawerSystem;
+  // chat.systemDefault is set from /v1/config; seed it directly (shared realm global).
+  runScript(window, `chat.systemDefault = ${JSON.stringify(settingsDefault)};`);
+  const conv = { id: "c1", title: "t", messages: [{ role: "user", content: "hi" }] };
+  await window.runCompletion(conv);
+  const completion = calls.find((c) => c.url === "/v1/chat/completions");
+  return (completion.body.messages.find((m) => m.role === "system") || {}).content || "";
+}
+
+test("a blank System prompt inherits the Settings default system prompt", async () => {
+  const sys = await systemForSend({ drawerSystem: "", settingsDefault: "You are a terse pirate." });
+  assert.match(sys, /terse pirate/, "the Settings default was used when the drawer is blank");
+});
+
+test("a set System prompt overrides the Settings default (not both)", async () => {
+  const sys = await systemForSend({
+    drawerSystem: "You are a helpful librarian.",
+    settingsDefault: "You are a terse pirate.",
+  });
+  assert.match(sys, /helpful librarian/, "the drawer System prompt is used");
+  assert.ok(!/pirate/.test(sys), "the Settings default is NOT also injected");
 });

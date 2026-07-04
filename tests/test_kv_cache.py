@@ -62,6 +62,7 @@ def _bare_llama() -> LlamaCpp:
     # Native-call serialization primitives normally set up in __init__.
     llm._gen_lock = threading.RLock()
     llm._stop = threading.Event()
+    llm._inference_lock = threading.Lock()
     _LIVE_FAKES.append(llm)
     return llm
 
@@ -347,3 +348,50 @@ class TestRepeatPenaltySampler:
         with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
             _build_sampler(vocab=1, temperature=0.0, repeat_penalty=1.2)
         mock_api.llama_sampler_init_penalties.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+#  Inference Serialization Lock
+# ---------------------------------------------------------------------------
+
+class TestInferenceLock:
+    def test_inference_lock_held_during_generate(self):
+        llm = _bare_llama()
+        
+        # Patch the dependencies needed for _generate
+        mock_api = MagicMock()
+        mock_api.llama_sampler_sample.return_value = 42
+        mock_api.llama_sampler_free = MagicMock()
+        mock_api.llama_decode.return_value = 0
+        
+        # Make the tokenizer return False for is_eog so it generates some tokens
+        llm._tokenizer.is_eog.return_value = False
+        
+        with patch("localm.inference.backends.llamacpp.llama.api", mock_api), \
+             patch("localm.inference.backends.llamacpp.llama._build_sampler", return_value=999):
+            
+            # Start the generator
+            gen = llm._generate(prompt_tokens=[1, 2, 3], max_new_tokens=2,
+                                temperature=0.8, top_k=40, top_p=0.95, repeat_penalty=1.1)
+            
+            # The lock is NOT acquired yet because the generator has not been iterated
+            assert not llm._inference_lock.locked()
+            
+            # Pull the first token
+            tok1 = next(gen)
+            assert tok1 == 42
+            
+            # Now the lock IS acquired because we are inside the generator's execution
+            assert llm._inference_lock.locked()
+            
+            # Pull the second token
+            tok2 = next(gen)
+            assert tok2 == 42
+            
+            # Complete the generator
+            with pytest.raises(StopIteration):
+                next(gen)
+                
+            # Now the lock is released
+            assert not llm._inference_lock.locked()
+

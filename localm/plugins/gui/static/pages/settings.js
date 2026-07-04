@@ -145,6 +145,7 @@ export function buildSettingControl(field) {
   const value = field.default;     // current value (omitted for secrets)
 
   const wrap = el("div");
+  wrap.dataset.fieldKey = field.key;   // so cross-field wiring can find a control
   const label = el("label", "", field.label || field.key);
   label.title = field.key;
   wrap.appendChild(label);
@@ -199,6 +200,75 @@ export function buildSettingControl(field) {
       input.value = Array.isArray(value) ? value.join(", ") : (value ?? "");
       input.placeholder = "comma-separated";
       read = () => input.value.split(",").map((s) => s.trim()).filter(Boolean);
+      break;
+    }
+    case "pathlist": {
+      // A list of server-disk FOLDERS, edited as add/remove rows each with a
+      // Browse button (the shared folder picker). Like the FOLDER/PATH controls,
+      // it is hidden from a caller without host filesystem access - they cannot
+      // browse or set server paths; the server still enforces on write.
+      if (caps.fsAccess !== "host") return null;
+      const list = el("div", "pathlist");
+      // The list container is the dirty anchor: a removed row's <input> is
+      // disconnected (so settingsDirty ignores it), but `list` stays in the DOM,
+      // so marking IT keeps the unsaved-changes signal honest across add/remove.
+      const dirty = () => markSettingDirty(list);
+      const addRow = (path = "") => {
+        const row = el("div", "dir-picker-row pathlist-row");
+        const inp = document.createElement("input");
+        inp.type = "text";
+        inp.value = path;
+        inp.placeholder = "folder path";
+        inp.dataset.key = field.key;
+        inp.addEventListener("input", dirty);
+        inp.addEventListener("change", dirty);
+        const browse = el("button", "btn-secondary dir-picker-btn", "Browse...");
+        browse.type = "button";
+        browse.onclick = async () => {
+          const picked = await pickDirectory("Pick a folder to allow", inp.value.trim());
+          if (picked) { inp.value = picked; dirty(); }
+        };
+        const rm = el("button", "btn-secondary pathlist-rm");
+        rm.type = "button";
+        rm.title = "Remove this folder";
+        rm.appendChild(iconEl("trash", "ic"));
+        rm.onclick = () => { row.remove(); dirty(); };
+        row.append(inp, browse, rm);
+        list.appendChild(row);
+        return inp;
+      };
+      const initial = Array.isArray(value) ? value : [];
+      for (const p of initial) addRow(p);
+      const add = el("button", "btn-secondary pathlist-add");
+      add.type = "button";
+      add.appendChild(iconEl("plus", "ic"));
+      add.appendChild(document.createTextNode("Add folder"));
+      add.onclick = async () => {
+        // Open the picker straight away (the common case); if the user cancels,
+        // still add an empty row they can type into.
+        const picked = await pickDirectory("Pick a folder to allow", "");
+        addRow(picked || "");
+        dirty();
+      };
+      read = () => [...list.querySelectorAll("input")]
+        .map((i) => i.value.trim()).filter(Boolean);
+      const write = (v) => {
+        list.replaceChildren();
+        (Array.isArray(v) ? v : []).forEach((p) => addRow(p));
+        dirty();
+      };
+      wrap.appendChild(list);
+      wrap.appendChild(add);
+      if (field.help) wrap.appendChild(el("div", "sub", field.help));
+      return { field, node: wrap, read, write };
+    }
+    case "textarea": {   // free-form multi-line (e.g. the default system prompt)
+      input = document.createElement("textarea");
+      input.rows = 4;
+      input.spellcheck = false;
+      input.value = value ?? "";
+      // Preserve the text's own line breaks; blank -> null (leave unchanged).
+      read = () => (input.value.trim() === "" ? null : input.value);
       break;
     }
     default: {   // text / folder / path
@@ -839,9 +909,37 @@ export async function refreshSettingsPage() {
   // section (not a static card) is the default tab. The owner-gated panels then
   // refresh: each may rebuild the nav, but they preserve the active section.
   buildSettingsNav();
+  syncRagIndexingModeHint();
   refreshPairingQR();
   refreshCompanion();
   refreshKeysPanel();
+}
+
+/** Mark which folder list the current RAG indexing MODE actually uses (Allowed in
+ *  whitelist mode, Denied in blacklist mode) with a small "in use" tag, while
+ *  keeping BOTH lists visible and editable - you can curate both without flipping
+ *  the mode. The lists are stored separately, so the mode never reinterprets your
+ *  entries. No-op when the owner-only Knowledge fields are absent (a non-owner
+ *  never receives them). */
+export function syncRagIndexingModeHint() {
+  const sel = document.querySelector('select[data-key="rag_indexing_mode"]');
+  const allow = document.querySelector('[data-field-key="rag_allowed_roots"]');
+  const deny = document.querySelector('[data-field-key="rag_denied_roots"]');
+  if (!sel || !allow || !deny) return;
+  const mark = (wrap, on) => {
+    const label = wrap.querySelector("label");
+    if (!label) return;
+    let tag = label.querySelector(".rag-inuse");
+    if (on && !tag) label.appendChild(el("span", "rag-inuse", " · in use"));
+    else if (!on && tag) tag.remove();
+  };
+  const apply = () => {
+    const whitelist = sel.value !== "blacklist";
+    mark(allow, whitelist);
+    mark(deny, !whitelist);
+  };
+  sel.addEventListener("change", apply);
+  apply();
 }
 
 // Media plugins, in display order, that the Media section configures.

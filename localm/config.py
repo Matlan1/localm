@@ -105,6 +105,9 @@ DEFAULT_CONFIG: dict = {
     # to false to use the fixed n_ctx_max instead.
     "ctx_auto": True,
     "n_gpu_layers": 99,    # 99 = offload everything to GPU
+    # Default system prompt for chat. The GUI's per-chat System prompt field
+    # OVERRIDES this when set; a blank field inherits this. Empty by default.
+    "chat_system_prompt": "",
     "temperature": 0.8,
     "top_p": 0.95,
     "top_k": 40,
@@ -220,6 +223,19 @@ DEFAULT_CONFIG: dict = {
     # first use (auto only under net_mode=allow; else run 'localm setup-embeddings').
     # Until an embedding model is present, memory/RAG fall back to lexical BM25.
     "embedding_model": "bge-small-en-v1.5",
+    # Which host folders the document-indexing (RAG) API may READ. A confinement
+    # over a filesystem-read boundary, so all three keys are OWNER-ONLY: a
+    # non-owner config:write key can neither see nor set them (enforced at PATCH
+    # /v1/config; see settings_schema.admin_only). The localm data dir and
+    # credential folders (.ssh, .aws, ...) stay denied in EVERY mode - a hard floor
+    # no toggle turns off (rag/store.py confine_index_path). Read by
+    # rag/store.py indexing_policy().
+    #   whitelist (default) = index only your home folder, the working dir, and
+    #                         the rag_allowed_roots below.
+    #   blacklist           = index anywhere EXCEPT the rag_denied_roots below.
+    "rag_indexing_mode": "whitelist",
+    "rag_allowed_roots": [],   # extra folders allowed in whitelist mode
+    "rag_denied_roots": [],    # folders refused in blacklist mode
     # Seconds a GUI coder approval card may sit unanswered before it is
     # auto-rejected and the agent moves on.
     "coder_confirm_timeout": 600,

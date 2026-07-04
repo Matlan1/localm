@@ -62,10 +62,14 @@ def register(app: FastAPI, ctx) -> None:
         pipeline = getattr(request.app.state, "chat_pipeline", None)
         ctx = None
         if pipeline is not None:
+            from localm.inference.http_server import caller_scopes, principal_id
             ctx = ChatHookContext(
                 model_id=req.model, stream=req.stream,
                 request_id=make_chunk_id(),
+                principal=principal_id(request),
+                scopes=tuple(caller_scopes(request) or ()),
             )
+            ctx.state["client_id"] = request.headers.get("x-client-id", "")
             if pipeline.has("inlet"):
                 messages = await pipeline.run_inlet(messages, ctx)
 
@@ -195,10 +199,14 @@ def register(app: FastAPI, ctx) -> None:
         pipeline = getattr(request.app.state, "chat_pipeline", None)
         ctx = None
         if pipeline is not None:
+            from localm.inference.http_server import caller_scopes, principal_id
             ctx = ChatHookContext(
                 model_id=req.model, stream=req.stream,
                 request_id=make_chunk_id(),
+                principal=principal_id(request),
+                scopes=tuple(caller_scopes(request) or ()),
             )
+            ctx.state["client_id"] = request.headers.get("x-client-id", "")
             if pipeline.has("inlet"):
                 messages = await pipeline.run_inlet(messages, ctx)
 

@@ -147,21 +147,38 @@ class HttpEngine:
                 yield piece
 
 
-def remote_active_model(base_url: str, token: Optional[str] = None,
-                        *, timeout: float = 5.0) -> Optional[str]:
-    """The id of the server's active model (``/v1/models`` -> first entry), or None
-    when the server has no model loaded or is unreachable. Best-effort: used only to
-    label the attached session, never to gate it."""
+def remote_model_status(base_url: str, token: Optional[str] = None,
+                        *, timeout: float = 5.0) -> tuple[str, Optional[str]]:
+    """Probe a server's loaded model via ``GET /v1/models``. Returns ``(state, id)``:
+
+      - ``("loaded", "<id>")``  the server reports a model (its id).
+      - ``("empty",  None)``    the server ANSWERED (200) but reports no model.
+      - ``("unknown", None)``   we could not tell: unreachable, an auth/scope error,
+        or a malformed reply. This is NOT proof that no model is loaded - ``/v1/models``
+        needs the ``models`` scope, so an attach token scoped only for chat gets a 403
+        here while chatting still works. Callers must not claim "no model loaded" on
+        ``unknown``.
+
+    Best-effort labelling only; never gates the attach."""
     import requests
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     try:
         r = requests.get(f"{base_url.rstrip('/')}/models",
                          headers=headers, timeout=timeout)
         if r.status_code >= 400:
-            return None
+            return "unknown", None
         data = (r.json() or {}).get("data") or []
-        if data and isinstance(data[0], dict):
-            return data[0].get("id")
+        if data and isinstance(data[0], dict) and data[0].get("id"):
+            return "loaded", data[0].get("id")
+        return "empty", None
     except Exception:
-        return None
-    return None
+        return "unknown", None
+
+
+def remote_active_model(base_url: str, token: Optional[str] = None,
+                        *, timeout: float = 5.0) -> Optional[str]:
+    """The id of the server's active model, or None when unknown / none loaded.
+    Thin wrapper over :func:`remote_model_status` for callers that only want the
+    label. Prefer ``remote_model_status`` when you must distinguish "no model" from
+    "could not read the model list" (see that function)."""
+    return remote_model_status(base_url, token, timeout=timeout)[1]

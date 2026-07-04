@@ -124,25 +124,73 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
             attach_error = e
             target = None
         if target:
-            from ..inference.http_engine import HttpEngine, remote_active_model
-            active = remote_active_model(target["base_url"], target.get("token"))
+            from ..inference.http_engine import HttpEngine, remote_model_status
+            state, active = remote_model_status(
+                target["base_url"], target.get("token"))
             if active and active != model:
                 console.print(
                     f"[yellow]Note:[/yellow] attaching to the localm server already "
                     f"running for this directory; it serves [bold]{active}[/bold], so "
                     f"the requested [bold]{model}[/bold] is not loaded. Use "
                     f"[bold]--no-server[/bold] to run it in a separate process.")
-            elif active is None:
+            elif state == "empty":
                 console.print(
                     "[yellow]Note:[/yellow] a localm server is running for this "
                     "directory but has no model loaded; load one (its GUI / API) or "
                     "use [bold]--no-server[/bold] to run in a separate process.")
+            # state == "unknown": the server answered our attach but we could not
+            # read /v1/models (it needs the models scope, so a chat-scoped attach
+            # token gets a 403). Do NOT claim it has no model - it very likely does;
+            # attach quietly and let the reply come from whatever it serves.
             engine = HttpEngine(
                 target["base_url"], token=target.get("token"),
                 model=active or model, display_name=active or model)
             console.print(
                 f"[dim]connected to the localm server at {target['base_url']} "
                 f"(no second model load)[/dim]")
+
+    if engine is None and not no_server:
+        console.print("[dim]No server running. Starting one in the background...[/dim]")
+        import subprocess
+        import time
+        import sys
+        
+        cmd = [sys.executable, "-m", "localm", "gui", "--no-browser", "--api-mode"]
+        # Use no_model if no model was provided, else pass it
+        if not model:
+            cmd.append("--no-model")
+        else:
+            cmd.append(model)
+        
+        if ctx is not None: cmd.extend(["-c", str(ctx)])
+        if gpu_layers is not None: cmd.extend(["-g", str(gpu_layers)])
+        if mmproj: cmd.extend(["--mmproj", mmproj])
+        if device: cmd.extend(["--device", device])
+        
+        kwargs = {}
+        env = os.environ.copy()
+        env["LOCALM_OWN_CONSOLE"] = "1"
+        kwargs["env"] = env
+        if sys.platform == "win32":
+            kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
+        else:
+            kwargs["start_new_session"] = True
+            
+        try:
+            subprocess.Popen(cmd, **kwargs)
+            # Poll for the server to come up
+            for _ in range(40):
+                time.sleep(0.5)
+                target = instances.attach_target(home_dir(), instances.resolve_root_dir())
+                if target:
+                    from ..inference.http_engine import HttpEngine
+                    engine = HttpEngine(
+                        target["base_url"], token=target.get("token"),
+                        model=model, display_name=model)
+                    console.print(f"[dim]connected to newly started server at {target['base_url']}[/dim]")
+                    break
+        except Exception as e:
+            attach_error = e
 
     if engine is None:
         _note = _attach_fallback_note(no_server, attach_error)

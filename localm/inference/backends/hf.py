@@ -340,6 +340,41 @@ class HFBackend(BaseBackend):
                 )
         return max(1, len(text) // 4)
 
+    def count_messages_tokens(self, messages: List[dict]) -> int:
+        """Return exact token count of the structured messages formatted with the
+        HF tokenizer/processor's chat template."""
+        if self._tokenizer is not None:
+            try:
+                template_messages = []
+                for msg in messages:
+                    content = msg.get("content")
+                    if isinstance(content, list):
+                        parts = []
+                        for part in content:
+                            ptype = part.get("type", "text")
+                            if ptype == "text":
+                                parts.append({"type": "text", "text": part.get("text", "")})
+                            elif ptype == "image_url" and self._is_multimodal:
+                                parts.append({"type": "image"})
+                            elif ptype == "input_audio" and self._is_multimodal:
+                                parts.append({"type": "audio"})
+                        template_messages.append({"role": msg.get("role", "user"), "content": parts})
+                    else:
+                        template_messages.append(msg)
+
+                if self._processor and self._is_multimodal:
+                    text = self._processor.apply_chat_template(
+                        template_messages, tokenize=False, add_generation_prompt=True
+                    )
+                else:
+                    text = self._tokenizer.apply_chat_template(
+                        template_messages, tokenize=False, add_generation_prompt=True
+                    )
+                return len(self._tokenizer.encode(text, add_special_tokens=False))
+            except Exception:
+                pass
+        return super().count_messages_tokens(messages)
+
     # ------------------------------------------------------------------ #
     #  Embeddings                                                          #
     # ------------------------------------------------------------------ #

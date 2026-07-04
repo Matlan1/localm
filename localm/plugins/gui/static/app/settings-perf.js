@@ -8,7 +8,7 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { iconEl } from "./icons.js";
 import { COMPACT_KEEP, addMessageRow, chat, chatParams, compactConversation, currentConv, maybeCompactConversation, msgImages, msgText, newConversation, renderAttachChips, renderChat, renderConvList, saveConversations, stripUserImages } from "./chat.js";
-import { $, GIB, authHeaders, autoGrow, el, nearBottom, openModal, readSSE, renderMarkdown, stripThink, toast } from "./helpers.js";
+import { $, GIB, authHeaders, autoGrow, el, formatToolCalls, nearBottom, openModal, readSSE, renderMarkdown, stripThink, toast } from "./helpers.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
 import { execChatCommand, handleSlashSubmit } from "./slash.js";
 import { CORE_VIEWS, VIEWS, _applyActiveClasses, closeNav, showView } from "./tabs.js";
@@ -1041,7 +1041,9 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   const params = chatParams();
   const webEnabled = $("p-web").checked;
   const messages = [];
-  let sysText = params.system || "";
+  // Per-chat System prompt (the drawer) OVERRIDES; a blank drawer inherits the
+  // Settings "Default system prompt" (chat.systemDefault, from /v1/config).
+  let sysText = params.system || chat.systemDefault || "";
   // Long-term memory is now injected SERVER-SIDE by the chat plugin's inlet hook
   // (query-aware, for every client), gated on the memory_enabled config that the
   // brain toggle drives. We deliberately no longer prepend it here, so it is not
@@ -1068,9 +1070,12 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       return { role: m.role,
                content: msgText(m) + "\n[An image was generated and shown to the user.]" };
     }
-    // Reasoning blocks are display-only - never resend them as context.
+    // Reasoning blocks are display-only - never resend them as context. Tool-call
+    // blocks are ALSO defanged to a "web search: X" note before re-sending, so the
+    // model never re-ingests its own raw <|tool_call> control tokens (echoing those
+    // back destabilised some finetunes into repetition - CHAT-TOOL-1).
     if (m.role === "assistant" && typeof m.content === "string") {
-      return { role: m.role, content: stripThink(m.content) };
+      return { role: m.role, content: formatToolCalls(stripThink(m.content)) };
     }
     return { role: m.role, content: m.content };
   });

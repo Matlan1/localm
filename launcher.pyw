@@ -603,7 +603,7 @@ class Launcher(tk.Tk):
             try:
                 proc = subprocess.run(
                     [python_exe(), "-m", "localm", "add", path,
-                     "--on-duplicate", "alias"],
+                     "--on-duplicate", "alias", "--fast"],
                     cwd=str(REPO_DIR), capture_output=True, text=True,
                     timeout=900)
                 ok = proc.returncode == 0
@@ -756,7 +756,11 @@ class Launcher(tk.Tk):
             if self.debug.get():
                 cmd += ["--debug"]
         elif mode == "serve":
-            cmd += ["serve", model]
+            cmd += ["gui", "--api-mode", "--no-browser"]
+            if no_model:
+                cmd += ["--no-model"]
+            else:
+                cmd += [model]
             if self.host_lan.get():
                 cmd += ["-H", "0.0.0.0"]
             if port:

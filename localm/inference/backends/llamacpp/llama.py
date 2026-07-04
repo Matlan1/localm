@@ -517,6 +517,7 @@ class LlamaCpp:
         # setting _stop so an in-flight generation bails at its next step.
         self._gen_lock    = threading.RLock()
         self._stop        = threading.Event()
+        self._inference_lock = threading.Lock()
         # Persistent KV cache bookkeeping (prefix reuse across calls)
         self._cached_tokens: List[int] = []   # tokens currently in the KV cache
         self._ctx_capacity  = n_ctx           # n_ctx of the live context
@@ -530,6 +531,8 @@ class LlamaCpp:
         # --- load model ---
         mp = api.llama_model_default_params()
         mp.n_gpu_layers = n_gpu_layers
+        if n_gpu_layers >= 99:
+            mp.use_mmap = False
 
         # Preemptive model switching: wire llama.cpp's native load-progress
         # callback so a load can be ABORTED mid-flight. The callback returns false
@@ -717,127 +720,128 @@ class LlamaCpp:
         a chat).  Otherwise the context is recreated from scratch - the
         behaviour of older builds without KV-management functions.
         """
-        if not self._model_ptr:
-            raise RuntimeError("Model not loaded")
+        with self._inference_lock:
+            if not self._model_ptr:
+                raise RuntimeError("Model not loaded")
 
-        n_prompt = len(prompt_tokens)
-        if n_prompt == 0:
-            return
-
-        # Dynamic window: shrink the generation budget to fit under the
-        # ceiling rather than blowing past it; fail clearly when even a
-        # minimal reply cannot fit any more.
-        max_new_tokens = self._fit_generation_budget(n_prompt, max_new_tokens)
-
-        _ctx = _quiet_stderr if not self._verbose else contextlib.nullcontext
-        
-        # If unlimited (<= 0), allocate a modest chunk up front and grow later
-        initial_budget = max_new_tokens if max_new_tokens > 0 else 512
-        needed = n_prompt + initial_budget + 64
-
-        # One contiguous suppression scope covering context work and prefill.
-        # The ROCm lazy-buffer verification messages fire asynchronously
-        # after llama_init_from_model returns but before the first
-        # llama_decode completes, so separate windows leave a gap.
-        # Prefill (re)creates/decodes into the context, so it must hold the
-        # lock against a concurrent unload too.
-        with self._gen_lock:
-            if self._stop.is_set():
+            n_prompt = len(prompt_tokens)
+            if n_prompt == 0:
                 return
-            with _ctx():
-                if self._can_reuse_kv(needed):
-                    self._prefill_with_reuse(prompt_tokens)
-                else:
-                    self._prefill_fresh_context(prompt_tokens, needed)
 
-        # Build sampler
-        sampler = _build_sampler(
-            vocab=self._tokenizer._vocab,
-            temperature=temperature,
-            top_k=top_k,
-            top_p=top_p,
-            repeat_penalty=repeat_penalty,
-            # A per-request seed (when provided) overrides the instance default
-            # so temperature>0 sampling is reproducible; masked to uint32 to match
-            # llama_sampler_init_dist's c_uint32 binding.
-            seed=self._seed if seed is None else (seed & 0xFFFFFFFF),
-            grammar=grammar,
-            grammar_lazy=grammar_lazy,
-            grammar_triggers=grammar_triggers,
-        )
+            # Dynamic window: shrink the generation budget to fit under the
+            # ceiling rather than blowing past it; fail clearly when even a
+            # minimal reply cannot fit any more.
+            max_new_tokens = self._fit_generation_budget(n_prompt, max_new_tokens)
 
-        pos = n_prompt
-        # Why generation ended, read by callers as self.last_finish_reason.
-        # Default "stop" - it must cover every early exit (EOG token, a
-        # stop-string match in _filtered_stream abandoning this generator,
-        # client abort). Only a genuinely exhausted token budget is "length".
-        self.last_finish_reason = "stop"
-        tokens_generated = 0
-        try:
-            while max_new_tokens <= 0 or tokens_generated < max_new_tokens:
-                # --- locked native region 1: sample the next token ---
-                with self._gen_lock:
-                    if self._stop.is_set() or self._ctx_ptr is None:
-                        # The context was freed (unload) while we were
-                        # generating. Stop cleanly instead of passing NULL
-                        # into the native library, which crashes the driver.
-                        self.last_finish_reason = "error"
-                        break
-                    # llama_sampler_sample() already ACCEPTS the sampled token
-                    # into every stateful sampler in the chain (documented
-                    # upstream as "sample and accept"). A second explicit
-                    # accept here advanced the grammar parser twice per token,
-                    # emptying its parse stacks and throwing std::runtime_error
-                    # across the C ABI (WinError 0xe06d7363) - the "grammar
-                    # sampler fault" that kept grammar enforcement dormant. It
-                    # also double-counted tokens in the repetition-penalty
-                    # window. Do NOT re-add an accept after sample.
-                    token = api.llama_sampler_sample(sampler, self._ctx_ptr, -1)
-                    eog = self._tokenizer.is_eog(token)
+            _ctx = _quiet_stderr if not self._verbose else contextlib.nullcontext
+            
+            # If unlimited (<= 0), allocate a modest chunk up front and grow later
+            initial_budget = max_new_tokens if max_new_tokens > 0 else 512
+            needed = n_prompt + initial_budget + 64
 
-                # Stop when the model signals end-of-generation via the vocabulary
-                if eog:
-                    break   # last_finish_reason stays "stop"
+            # One contiguous suppression scope covering context work and prefill.
+            # The ROCm lazy-buffer verification messages fire asynchronously
+            # after llama_init_from_model returns but before the first
+            # llama_decode completes, so separate windows leave a gap.
+            # Prefill (re)creates/decodes into the context, so it must hold the
+            # lock against a concurrent unload too.
+            with self._gen_lock:
+                if self._stop.is_set():
+                    return
+                with _ctx():
+                    if self._can_reuse_kv(needed):
+                        self._prefill_with_reuse(prompt_tokens)
+                    else:
+                        self._prefill_fresh_context(prompt_tokens, needed)
 
-                yield token   # consumer runs here; an unload can interleave
+            # Build sampler
+            sampler = _build_sampler(
+                vocab=self._tokenizer._vocab,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                repeat_penalty=repeat_penalty,
+                # A per-request seed (when provided) overrides the instance default
+                # so temperature>0 sampling is reproducible; masked to uint32 to match
+                # llama_sampler_init_dist's c_uint32 binding.
+                seed=self._seed if seed is None else (seed & 0xFFFFFFFF),
+                grammar=grammar,
+                grammar_lazy=grammar_lazy,
+                grammar_triggers=grammar_triggers,
+            )
 
-                # --- locked native region 2: feed the token back ---
-                with self._gen_lock:
-                    if self._stop.is_set() or self._ctx_ptr is None:
-                        self.last_finish_reason = "error"
-                        break
-                    tok_one = (llama_token * 1)(token)
-                    batch = api.llama_batch_get_one(tok_one, 1)
-                    with _ctx():
-                        ret = api.llama_decode(self._ctx_ptr, batch)
-                    if ret != 0:
-                        # KV cache full or error.
-                        # Attempt mid-generation context growth if there is headroom.
-                        current_needed = pos + 512
-                        target = self._target_ctx(current_needed)
-                        if target > self._ctx_capacity:
-                            # We can grow! Re-prefill the context.
-                            prompt_and_gen = self._cached_tokens.copy()
-                            self._prefill_fresh_context(prompt_and_gen, current_needed)
-                            # Retry decode on the newly grown context
-                            with _ctx():
-                                ret = api.llama_decode(self._ctx_ptr, batch)
-                            
-                        if ret != 0:
-                            # The reply was cut short and we cannot grow further.
-                            # The cache bookkeeping has diverged from native KV
-                            # state, so invalidate it.
-                            self.last_finish_reason = "length"
-                            self._cached_tokens = []
+            pos = n_prompt
+            # Why generation ended, read by callers as self.last_finish_reason.
+            # Default "stop" - it must cover every early exit (EOG token, a
+            # stop-string match in _filtered_stream abandoning this generator,
+            # client abort). Only a genuinely exhausted token budget is "length".
+            self.last_finish_reason = "stop"
+            tokens_generated = 0
+            try:
+                while max_new_tokens <= 0 or tokens_generated < max_new_tokens:
+                    # --- locked native region 1: sample the next token ---
+                    with self._gen_lock:
+                        if self._stop.is_set() or self._ctx_ptr is None:
+                            # The context was freed (unload) while we were
+                            # generating. Stop cleanly instead of passing NULL
+                            # into the native library, which crashes the driver.
+                            self.last_finish_reason = "error"
                             break
-                    self._cached_tokens.append(token)
-                    pos += 1
-                    tokens_generated += 1
-            else:
-                # Budget exhausted without the model finishing its turn
-                self.last_finish_reason = "length"
-        finally:
-            api.llama_sampler_free(sampler)
+                        # llama_sampler_sample() already ACCEPTS the sampled token
+                        # into every stateful sampler in the chain (documented
+                        # upstream as "sample and accept"). A second explicit
+                        # accept here advanced the grammar parser twice per token,
+                        # emptying its parse stacks and throwing std::runtime_error
+                        # across the C ABI (WinError 0xe06d7363) - the "grammar
+                        # sampler fault" that kept grammar enforcement dormant. It
+                        # also double-counted tokens in the repetition-penalty
+                        # window. Do NOT re-add an accept after sample.
+                        token = api.llama_sampler_sample(sampler, self._ctx_ptr, -1)
+                        eog = self._tokenizer.is_eog(token)
+
+                    # Stop when the model signals end-of-generation via the vocabulary
+                    if eog:
+                        break   # last_finish_reason stays "stop"
+
+                    yield token   # consumer runs here; an unload can interleave
+
+                    # --- locked native region 2: feed the token back ---
+                    with self._gen_lock:
+                        if self._stop.is_set() or self._ctx_ptr is None:
+                            self.last_finish_reason = "error"
+                            break
+                        tok_one = (llama_token * 1)(token)
+                        batch = api.llama_batch_get_one(tok_one, 1)
+                        with _ctx():
+                            ret = api.llama_decode(self._ctx_ptr, batch)
+                        if ret != 0:
+                            # KV cache full or error.
+                            # Attempt mid-generation context growth if there is headroom.
+                            current_needed = pos + 512
+                            target = self._target_ctx(current_needed)
+                            if target > self._ctx_capacity:
+                                # We can grow! Re-prefill the context.
+                                prompt_and_gen = self._cached_tokens.copy()
+                                self._prefill_fresh_context(prompt_and_gen, current_needed)
+                                # Retry decode on the newly grown context
+                                with _ctx():
+                                    ret = api.llama_decode(self._ctx_ptr, batch)
+                                
+                            if ret != 0:
+                                # The reply was cut short and we cannot grow further.
+                                # The cache bookkeeping has diverged from native KV
+                                # state, so invalidate it.
+                                self.last_finish_reason = "length"
+                                self._cached_tokens = []
+                                break
+                        self._cached_tokens.append(token)
+                        pos += 1
+                        tokens_generated += 1
+                else:
+                    # Budget exhausted without the model finishing its turn
+                    self.last_finish_reason = "length"
+            finally:
+                api.llama_sampler_free(sampler)
 
     # ------------------------------------------------------------------ #
     #  Dynamic context window                                              #
@@ -889,61 +893,62 @@ class LlamaCpp:
         sampling then continues exactly like the text loop. Grammar is not applied
         on the image path. mtmd fills the KV from scratch, so the text KV-reuse
         cache is invalidated afterwards."""
-        if not self._model_ptr or getattr(self, "_mtmd", None) is None:
-            raise RuntimeError("vision is not available on this model")
+        with self._inference_lock:
+            if not self._model_ptr or getattr(self, "_mtmd", None) is None:
+                raise RuntimeError("vision is not available on this model")
 
-        text_messages, images = self._messages_with_markers(
-            messages, self._mtmd.marker)
-        prompt = _apply_model_template(self._model_ptr, text_messages)
-        bos_markers = ("<bos>", "<s>", "﻿")
-        add_special = not any(prompt.startswith(m) for m in bos_markers)
+            text_messages, images = self._messages_with_markers(
+                messages, self._mtmd.marker)
+            prompt = _apply_model_template(self._model_ptr, text_messages)
+            bos_markers = ("<bos>", "<s>", "﻿")
+            add_special = not any(prompt.startswith(m) for m in bos_markers)
 
-        _ctx = _quiet_stderr if not self._verbose else contextlib.nullcontext
-        self.last_finish_reason = "stop"
-        with self._gen_lock:
-            if self._stop.is_set() or self._ctx_ptr is None:
-                return
-            with _ctx():
-                # Clear any prior turn's KV so the mtmd prefill from position 0 is
-                # valid on a reused context, then evaluate the image+text prompt.
-                self._reset_kv_for_image()
-                self._mtmd.eval_into(self._ctx_ptr, prompt, images,
-                                     add_special=add_special)
+            _ctx = _quiet_stderr if not self._verbose else contextlib.nullcontext
+            self.last_finish_reason = "stop"
+            with self._gen_lock:
+                if self._stop.is_set() or self._ctx_ptr is None:
+                    return
+                with _ctx():
+                    # Clear any prior turn's KV so the mtmd prefill from position 0 is
+                    # valid on a reused context, then evaluate the image+text prompt.
+                    self._reset_kv_for_image()
+                    self._mtmd.eval_into(self._ctx_ptr, prompt, images,
+                                         add_special=add_special)
 
-        sampler = _build_sampler(
-            vocab=self._tokenizer._vocab,
-            temperature=temperature, top_k=top_k, top_p=top_p,
-            repeat_penalty=repeat_penalty,
-            seed=self._seed if seed is None else (seed & 0xFFFFFFFF),
-            grammar=None,
-        )
-        try:
-            for _ in range(max_new_tokens):
-                with self._gen_lock:
-                    if self._stop.is_set() or self._ctx_ptr is None:
-                        self.last_finish_reason = "error"
+            sampler = _build_sampler(
+                vocab=self._tokenizer._vocab,
+                temperature=temperature, top_k=top_k, top_p=top_p,
+                repeat_penalty=repeat_penalty,
+                seed=self._seed if seed is None else (seed & 0xFFFFFFFF),
+                grammar=None,
+            )
+            try:
+                for _ in range(max_new_tokens):
+                    with self._gen_lock:
+                        if self._stop.is_set() or self._ctx_ptr is None:
+                            self.last_finish_reason = "error"
+                            break
+                        # No explicit accept: llama_sampler_sample() accepts
+                        # internally (see the why-comment in _generate).
+                        token = api.llama_sampler_sample(sampler, self._ctx_ptr, -1)
+                        eog = self._tokenizer.is_eog(token)
+                    if eog:
                         break
-                    # No explicit accept: llama_sampler_sample() accepts
-                    # internally (see the why-comment in _generate).
-                    token = api.llama_sampler_sample(sampler, self._ctx_ptr, -1)
-                    eog = self._tokenizer.is_eog(token)
-                if eog:
-                    break
-                yield token
-                with self._gen_lock:
-                    if self._stop.is_set() or self._ctx_ptr is None:
-                        self.last_finish_reason = "error"
-                        break
-                    batch = api.llama_batch_get_one((llama_token * 1)(token), 1)
-                    with _ctx():
-                        ret = api.llama_decode(self._ctx_ptr, batch)
-                    if ret != 0:
-                        self.last_finish_reason = "length"
-                        break
-            else:
-                self.last_finish_reason = "length"
-        finally:
-            api.llama_sampler_free(sampler)
+                    yield token
+                    with self._gen_lock:
+                        if self._stop.is_set() or self._ctx_ptr is None:
+                            self.last_finish_reason = "error"
+                            break
+                        batch = api.llama_batch_get_one((llama_token * 1)(token), 1)
+                        with _ctx():
+                            ret = api.llama_decode(self._ctx_ptr, batch)
+                        if ret != 0:
+                            self.last_finish_reason = "length"
+                            break
+                else:
+                    self.last_finish_reason = "length"
+            finally:
+                api.llama_sampler_free(sampler)
 
     def _fit_generation_budget(self, n_prompt: int, max_new_tokens: int) -> int:
         """

@@ -347,7 +347,8 @@ def apply_window_identity(*, app_id: str = APP_USER_MODEL_ID) -> bool:
         # LocaLM.exe inside a terminal shares that console, so it is left visible.
         if (os.path.basename(sys.executable).lower() == "localm.exe"
                 and _owns_console()
-                and not os.environ.get("LOCALM_DEBUG")):
+                and not os.environ.get("LOCALM_DEBUG")
+                and "--debug" not in sys.argv):
             os.environ.setdefault("LOCALM_OWN_CONSOLE", "1")
     except Exception:
         return applied
@@ -446,7 +447,17 @@ def make_linux_launcher(*, force: bool = False) -> LauncherResult:
     notes: List[str] = []
     built_ok = False
     try:
-        if force or not dst.exists():
+        entrypoint = _venv_root() / "bin" / "localm"
+        is_case_insensitive_clash = False
+        try:
+            if entrypoint.exists() and dst.exists() and os.path.samefile(entrypoint, dst):
+                is_case_insensitive_clash = True
+        except OSError:
+            pass
+
+        if is_case_insensitive_clash:
+            notes.append("case-insensitive filesystem detected; skipping LocaLM binary to preserve the 'localm' command")
+        elif force or not dst.exists():
             shutil.copy2(base, dst)
             try:
                 dst.chmod(0o755)
@@ -455,7 +466,9 @@ def make_linux_launcher(*, force: bool = False) -> LauncherResult:
             notes.append(f"built {dst.name} (copy of {base.name})")
         else:
             notes.append(f"{dst.name} already present (use --force to refresh)")
-        built_ok = _self_check(dst)
+        
+        if not is_case_insensitive_clash:
+            built_ok = _self_check(dst)
         if not built_ok:
             # Do not leave a launcher that does not run; the .desktop falls back to
             # the venv python (still works, just shows python in a process monitor).

@@ -155,9 +155,15 @@ def _print_qr(url: str) -> None:
               help="Start a private server that is invisible to discovery - "
                    "nothing attaches to it and it attaches to nothing (test "
                    "safety). Implies --new.")
+@click.option("--api-mode", is_flag=True,
+              help="Run as an API server only (do not mount the Web GUI).")
+@click.option("--mmproj", default=None,
+              help="Path to multimodal projector file (for LLaVA).")
+@click.option("--device", default=None,
+              help="Explicit device (e.g., cuda:0, metal).")
 def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, debug,
          mode, insecure, no_tls, tls_cert, tls_key, show_qr, project, force_new,
-         isolated):
+         isolated, api_mode, mmproj, device):
     """Open the localm web GUI - chat and the coder agent in your browser.
 
     \b
@@ -346,6 +352,8 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
             str(m_path),
             n_ctx=ctx,
             n_gpu_layers=gpu_layers,
+            mmproj_path=mmproj,
+            device=device,
             display_name=name if name in load_registry() else m_hint,
         )
 
@@ -372,12 +380,14 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         return await hs.switch_engine(
             name, _make_engine, on_active=lambda n: state.__setitem__("model", n))
 
-    manager = attach_gui(
-        app,
-        self_url=f"{scheme}://127.0.0.1:{chosen_port}/v1",
-        switch_model=switch_model,
-        active_model=lambda: state["model"],
-    )
+    manager = None
+    if not api_mode:
+        manager = attach_gui(
+            app,
+            self_url=f"{scheme}://127.0.0.1:{chosen_port}/v1",
+            switch_model=switch_model,
+            active_model=lambda: state["model"],
+        )
 
     base_url = f"{scheme}://127.0.0.1:{chosen_port}/"
     # Deep-link the browser to the Models page (and a pending download) when
@@ -410,7 +420,8 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     if not model_less and (display_name or model):
         _wtitle = f"LocaLM  -  {display_name or model}  -  :{chosen_port}"
     set_console_title(_wtitle)
-    console.print(f"[bold green]localm GUI[/bold green] → {base_url}")
+    _srv_name = "localm API server" if api_mode else "localm GUI"
+    console.print(f"[bold green]{_srv_name}[/bold green] → {base_url}")
     if model_less:
         console.print("  model: [yellow]none yet - add one on the Models page[/yellow]")
     else:
@@ -571,7 +582,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
                          name="localm-ready", daemon=True).start()
     try:
         with instances.advertise(app, home_dir(), host=host, port=chosen_port,
-                                 mode="full", scheme=scheme, project=project,
+                                 mode="api" if api_mode else "full", scheme=scheme, project=project,
                                  isolated=isolated):
             # On a TLS (network) bind, also catch a plain-http request on the same
             # port with an https redirect (issue 8) instead of a bare connection
@@ -583,4 +594,5 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
             app_face.close()
         if mdns_advertiser is not None:
             mdns_advertiser.close()
-        manager.close_all()
+        if manager is not None:
+            manager.close_all()

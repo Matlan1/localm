@@ -32,6 +32,7 @@ class Widget:
     FOLDER   = "folder"     # a directory (free text + folder picker)
     SECRET   = "secret"     # masked; never returned in plaintext
     LIST     = "list"       # list of strings (e.g. domains)
+    PATHLIST = "pathlist"   # list of folder paths (row editor + folder picker)
     HIDDEN   = "hidden"     # a config value managed elsewhere (e.g. the Plugins
                             # page), NOT rendered as a settings control
 
@@ -60,6 +61,10 @@ class SettingField:
     options: Optional[list] = None       # for SELECT
     applies: str = Applies.LIVE
     secret: bool = False
+    # Owner-only: a non-ADMIN caller may neither SEE this field in the schema nor
+    # WRITE it via PATCH /v1/config (it widens a trust boundary). Distinct from
+    # `owner` above, which only records the plugin section a setting belongs to.
+    admin_only: bool = False
     min: Optional[float] = None
     max: Optional[float] = None
     step: Optional[float] = None
@@ -70,6 +75,8 @@ class SettingField:
             "help": self.help, "group": self.group, "owner": self.owner,
             "applies": self.applies, "secret": self.secret,
         }
+        if self.admin_only:
+            d["admin_only"] = True
         if self.options is not None:
             d["options"] = self.options
         for attr in ("min", "max", "step"):
@@ -115,26 +122,34 @@ CORE_FIELDS: list = [
     SettingField("import_max_depth", Widget.NUMBER, "Folder import depth",
                  "Subfolder levels `localm add <dir>` scans for models.",
                  group="Models", min=1, max=10, step=1),
-    # ---- Sampling ----
+    # ---- Chat (the DEFAULTS every chat starts from) ----
+    # The GUI's per-chat "parameters" drawer OVERRIDES any of these for a single
+    # conversation; a blank field there inherits the value here. So this section is
+    # "set your chat defaults", the drawer is "fine-tune this one chat".
+    SettingField("chat_system_prompt", Widget.TEXTAREA, "Default system prompt",
+                 "The system prompt every new chat starts with. A chat's own System "
+                 "prompt field overrides this per conversation; leave that blank to "
+                 "use this. Empty = no default system prompt.",
+                 group="Chat"),
     SettingField("temperature", Widget.NUMBER, "Temperature",
                  "Randomness of replies. Lower is more focused; higher is more "
                  "varied and creative.",
-                 group="Sampling", min=0, max=2, step=0.05),
+                 group="Chat", min=0, max=2, step=0.05),
     SettingField("top_p", Widget.NUMBER, "Top-p (nucleus sampling)",
                  "Consider only the top tokens whose probabilities sum to this "
                  "fraction. 1.0 turns it off.",
-                 group="Sampling", min=0, max=1, step=0.05),
+                 group="Chat", min=0, max=1, step=0.05),
     SettingField("top_k", Widget.NUMBER, "Top-k",
                  "Consider only the k most likely tokens at each step. 0 turns it off.",
-                 group="Sampling", min=0, step=1),
+                 group="Chat", min=0, step=1),
     SettingField("repeat_penalty", Widget.NUMBER, "Repeat penalty",
                  "How strongly to discourage reusing tokens. 1.0 is no penalty; "
                  "higher reduces loops.",
-                 group="Sampling", min=0, step=0.05),
+                 group="Chat", min=0, step=0.05),
     SettingField("max_tokens", Widget.NUMBER, "Max tokens per reply",
                  "Upper limit on tokens per reply, a runaway guard not a target. "
                  "Thinking models need plenty of room.",
-                 group="Sampling", min=1, step=1),
+                 group="Chat", min=1, step=1),
     # ---- Server ----
     SettingField("port", Widget.NUMBER, "Server port",
                  "Port the API/GUI server binds to (default 8642); auto-bumps to "
@@ -324,6 +339,28 @@ CORE_FIELDS: list = [
                  "Model name for a cloud/URL reviewer. Blank uses a sensible provider "
                  "default or the agent's own model name.",
                  group="Coder", owner="coder", applies=Applies.NEXT_LOAD),
+    # ---- Knowledge (RAG plugin) ----
+    # All three are OWNER-ONLY: they define which host folders document indexing
+    # may read (a filesystem-read boundary). The localm data folder and credential
+    # folders (.ssh, .aws, ...) are refused in BOTH modes regardless - a hard floor.
+    SettingField("rag_indexing_mode", Widget.SELECT, "Indexing folder rule",
+                 "How localm decides which folders document (RAG) indexing may "
+                 "read. whitelist = only your home folder, the working directory, "
+                 "and the allowed folders below. blacklist = any folder except the "
+                 "denied folders below. Your data folder and credential folders "
+                 "(.ssh, .aws, ...) are always refused either way.",
+                 group="Knowledge", owner="rag", admin_only=True,
+                 options=["whitelist", "blacklist"]),
+    SettingField("rag_allowed_roots", Widget.PATHLIST, "Allowed folders",
+                 "Folders that may be indexed in whitelist mode, in addition to "
+                 "your home folder and the working directory. When you pick a "
+                 "folder outside this list, localm offers to add it here and "
+                 "continue.",
+                 group="Knowledge", owner="rag", admin_only=True),
+    SettingField("rag_denied_roots", Widget.PATHLIST, "Denied folders",
+                 "Folders that are never indexed in blacklist mode (everything "
+                 "else is allowed). Ignored in whitelist mode.",
+                 group="Knowledge", owner="rag", admin_only=True),
     # ---- Media (ComfyUI: image / music / video plugins) ----
     SettingField("comfy_workdir", Widget.FOLDER, "ComfyUI folder",
                  "Your ComfyUI install folder. localm runs it from here and "
@@ -519,6 +556,26 @@ def _validate_one(key: str, val, field: "SettingField", default):
     if widget == Widget.LIST:
         return _to_str_list(key, val)
 
+    if widget == Widget.PATHLIST:
+        # A list of folder paths. Run each through the RAG indexer's hard floor
+        # (confine_index_path with policy=None = only the always-denied checks: the
+        # localm data dir and credential folders), so a root that could never be
+        # indexed is rejected at SAVE time with a clear error instead of being
+        # silently useless. Store the resolved absolute path (what indexing_policy
+        # compares against) and drop duplicates, preserving order.
+        from localm.rag.store import confine_index_path
+        out: list = []
+        seen: set = set()
+        for item in _to_str_list(key, val):
+            try:
+                rp = str(confine_index_path(item))
+            except ValueError as e:
+                raise ValueError(f"{key}: {e}")
+            if rp not in seen:
+                seen.add(rp)
+                out.append(rp)
+        return out
+
     if widget == Widget.HIDDEN:
         if key == "logo_style":
             s = str(val)
@@ -606,9 +663,22 @@ def fields_by_owner(owner: str) -> list:
     return [f for f in CORE_FIELDS if f.owner == owner]
 
 
-def schema_json(values: Optional[dict] = None) -> list:
+def admin_only_keys() -> set:
+    """Config keys flagged owner-only (``admin_only``). A non-ADMIN caller may
+    neither see them in the schema nor write them via PATCH /v1/config, because
+    they widen a trust boundary (e.g. the rag_* indexing settings define which
+    host folders the indexer may read). The single source of truth for both gates."""
+    return {f.key for f in CORE_FIELDS if f.admin_only}
+
+
+def schema_json(values: Optional[dict] = None, *, is_owner: bool = True) -> list:
     """Serialize the core schema, injecting each non-secret field's current
     default from DEFAULT_CONFIG (or *values* if given). The GUI renders this.
+
+    When *is_owner* is False, owner-only fields (``admin_only``) are OMITTED, so a
+    non-owner never receives the control (the write is also refused server-side;
+    hiding it here just avoids rendering a field they cannot use). Callers that
+    are not request-scoped (the CLI, tests) default to owner (see everything).
 
     Auto-detect fields also carry an ``auto`` value: the path localm would
     resolve when the field is left blank, so the GUI can SHOW it (filled, greyed)
@@ -618,6 +688,8 @@ def schema_json(values: Optional[dict] = None) -> list:
     base = DEFAULT_CONFIG if values is None else values
     out = []
     for f in CORE_FIELDS:
+        if f.admin_only and not is_owner:
+            continue
         d = f.to_json()
         if not f.secret and f.key in base:
             d["default"] = base[f.key]

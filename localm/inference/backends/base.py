@@ -135,6 +135,20 @@ class BaseBackend(ABC):
         """
         return max(1, len(text) // 4)
 
+    def count_messages_tokens(self, messages: List[dict]) -> int:
+        """
+        Return the estimated number of tokens in a list of structured messages,
+        including chat template formatting.  Subclasses should override this
+        with their actual tokenizer and chat template for precise counts.
+        """
+        text = " ".join(
+            m.get("content") if isinstance(m.get("content"), str)
+            else " ".join(p.get("text", "") for p in (m.get("content") or [])
+                          if p.get("type") == "text")
+            for m in messages
+        )
+        return self.count_tokens(text)
+
     def embed(self, texts: List[str]) -> List[List[float]]:
         """
         Return embedding vectors for a list of texts.

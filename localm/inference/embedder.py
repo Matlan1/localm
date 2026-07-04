@@ -151,6 +151,8 @@ class GGUFEmbedder:
         api.llama_backend_init()
         mp = api.llama_model_default_params()
         mp.n_gpu_layers = n_gpu_layers
+        if n_gpu_layers >= 99:
+            mp.use_mmap = False
         self._model = api.llama_load_model_from_file(model_path, mp)
         if not self._model:
             raise RuntimeError(f"failed to load embedding model: {model_path}")
@@ -251,22 +253,40 @@ class GGUFEmbedder:
 
 _LOCK = threading.RLock()
 _EMBEDDER: Optional[GGUFEmbedder] = None
-_TRIED = False                 # so a missing model is resolved once, not every call
+# A model that is present on disk but fails to LOAD (corrupt / OOM) is cached as
+# failed so the expensive load is not retried on every call. A *missing* model is
+# deliberately NOT cached: `localm setup-embeddings` can install one into a RUNNING
+# server, and get_embedder re-checks the filesystem each call so it is picked up
+# without a restart. (Regression fixed: the old single `_TRIED` latch cached the
+# "no model" result for the whole process lifetime, so embeddings stayed dead -
+# 422 - until a restart even right after `setup-embeddings`.)
+_LOAD_FAILED = False
+_TRIED_DOWNLOAD = False          # one-time auto-download attempt (only net_mode=allow)
+_LAST_ERROR: Optional[str] = None   # why the last load failed (for the GUI picker)
 
 
 def get_embedder() -> Optional[GGUFEmbedder]:
     """The shared embedder, loading the configured model on first use. Returns None
-    (once, cached) when no embedding model can be resolved - callers then fall back
-    to lexical retrieval. Loading holds the engine's process-global load lock so it
-    cannot race a chat-model load onto the GPU."""
-    global _EMBEDDER, _TRIED
+    when no embedding model can be resolved - callers then fall back to lexical
+    retrieval. A missing model is re-checked on every call (so a mid-session
+    ``localm setup-embeddings`` is picked up without a restart); only a genuine
+    load FAILURE is cached. Loading holds the engine's process-global load lock so
+    it cannot race a chat-model load onto the GPU."""
+    global _EMBEDDER, _LOAD_FAILED, _TRIED_DOWNLOAD, _LAST_ERROR
     with _LOCK:
         if _EMBEDDER is not None:
             return _EMBEDDER
-        if _TRIED:
+        if _LOAD_FAILED:
             return None
-        _TRIED = True
-        path = resolve_embedding_model_path()
+        # Cheap filesystem-only re-check every call (NO download): finds a model a
+        # user just installed into this running server.
+        path = resolve_embedding_model_path(allow_download=False)
+        if not path and not _TRIED_DOWNLOAD:
+            # First miss: one auto-download attempt, gated by net policy inside
+            # (only actually fetches under net_mode=allow). Latched so a batch of
+            # embed calls does not re-attempt the download on every chunk.
+            _TRIED_DOWNLOAD = True
+            path = resolve_embedding_model_path()
         if not path:
             return None
         try:
@@ -276,8 +296,11 @@ def get_embedder() -> Optional[GGUFEmbedder]:
             with _LOAD_LOCK:
                 _EMBEDDER = GGUFEmbedder(path, n_gpu_layers=ngl)
             logger.info("embedding model ready: %s (dim=%d)", path, _EMBEDDER.dim)
+            _LAST_ERROR = None
             return _EMBEDDER
         except Exception as e:
+            _LOAD_FAILED = True
+            _LAST_ERROR = str(e)
             logger.warning("could not load embedding model %s (%s); lexical-only",
                            path, e)
             return None
@@ -291,11 +314,27 @@ def embed_texts(texts: List[str]) -> Optional[List[List[float]]]:
     return emb.embed(list(texts))
 
 
+def loaded_dim() -> Optional[int]:
+    """Dimension of the currently-loaded embedder, or None if none is loaded.
+    Does NOT trigger a load - safe for a cheap status probe (GUI picker)."""
+    with _LOCK:
+        return _EMBEDDER.dim if _EMBEDDER is not None else None
+
+
+def last_error() -> Optional[str]:
+    """Why the last embedding-model LOAD failed (e.g. the model is not an embedding
+    model), or None. For the GUI picker to tell the user what went wrong."""
+    with _LOCK:
+        return _LAST_ERROR
+
+
 def reset_embedder() -> None:
-    """Drop the cached embedder (tests / a model change)."""
-    global _EMBEDDER, _TRIED
+    """Drop the cached embedder and its negative caches (tests / a model change)."""
+    global _EMBEDDER, _LOAD_FAILED, _TRIED_DOWNLOAD, _LAST_ERROR
     with _LOCK:
         if _EMBEDDER is not None:
             _EMBEDDER.close()
         _EMBEDDER = None
-        _TRIED = False
+        _LOAD_FAILED = False
+        _TRIED_DOWNLOAD = False
+        _LAST_ERROR = None

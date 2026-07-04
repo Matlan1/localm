@@ -22,6 +22,7 @@ export const chat = {
   attachments: [],   // image attachments: {name, dataUri}
   docs: [],          // document attachments: {name, text, chars, truncated}
   ctxMax: 16384,     // context ceiling - refreshed from /v1/config
+  systemDefault: "", // default system prompt from Settings; a blank drawer inherits it
   privacy: false,    // server in privacy mode → conversations not persisted
   persist: false,    // non-privacy: conversations sync to the server store
   stick: true,       // R31: follow the stream to the bottom until the user scrolls up
@@ -151,6 +152,9 @@ export async function refreshCtxLimit() {
       // static config value - compaction should track what the model can
       // actually hold.
       chat.ctxMax = cfg.effective_ctx_max ?? cfg.n_ctx_max ?? 16384;
+      // The Settings "Default system prompt": a chat with a blank System prompt
+      // field inherits this (the per-chat drawer overrides it).
+      chat.systemDefault = (cfg.chat_system_prompt || "").trim();
       // Privacy mode: conversations live in memory only - wipe anything a
       // previous non-privacy session left behind and show the hint.
       chat.privacy = cfg.effective_mode === "privacy";
@@ -650,7 +654,11 @@ export function addMessageRow(container, role, text, opts = {}) {
     body.classList.add("msg-literal");
     body.textContent = text;
   } else {
-    renderMarkdown(body, text);
+    // opts.final marks a SETTLED message (a reload / renderChat rebuild), not a
+    // fresh streaming shell - only then does renderMarkdown show its "(no reply
+    // text)" note for a body that rendered to nothing, so a live shell that is
+    // briefly empty before its first token never flashes it.
+    renderMarkdown(body, text, { final: opts.final });
   }
   for (const url of opts.images || []) {
     const img = document.createElement("img");
@@ -813,6 +821,9 @@ export function renderChat() {
       model: m.model,
       cls: tag ? "web-note" : "",
       label: tag ? NOTE_LABELS[tag] : undefined,
+      // A settled turn from history: let renderMarkdown surface a "(no reply
+      // text)" note if this message rendered to a blank body (empty ```fence).
+      final: true,
     });
   });
   // R31: only re-pin to the bottom when the user has not scrolled up. This tail

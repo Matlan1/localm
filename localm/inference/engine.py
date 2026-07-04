@@ -217,6 +217,13 @@ class Engine:
         """
         return self._backend.count_tokens(text)
 
+    def count_messages_tokens(self, messages: List[dict]) -> int:
+        """
+        Return the number of tokens in a list of structured messages,
+        including chat template formatting.
+        """
+        return self._backend.count_messages_tokens(messages)
+
     def context_capacity(self) -> Optional[int]:
         """Maximum token capacity of the loaded model's context window.
 

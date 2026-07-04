@@ -323,6 +323,32 @@ class GgufBackend(BaseBackend):
         # Not loaded yet - fall back to a chars/4 heuristic
         return max(1, len(text) // 4)
 
+    def count_messages_tokens(self, messages: List[dict]) -> int:
+        """Return exact token count of the structured messages formatted with the
+        model's embedded chat template."""
+        if self._llm is not None:
+            try:
+                from .llamacpp.llama import _apply_model_template
+                # Convert the message content list to text parts if any
+                text_messages = []
+                for m in messages:
+                    content = m.get("content")
+                    if isinstance(content, list):
+                        text = " ".join(
+                            p.get("text", "") for p in content
+                            if isinstance(p, dict) and p.get("type") == "text"
+                        )
+                    else:
+                        text = content or ""
+                    text_messages.append({"role": m.get("role", "user"), "content": text})
+                prompt = _apply_model_template(self._llm._model_ptr, text_messages)
+                bos_markers = ("<bos>", "<s>", "﻿")
+                add_bos = not any(prompt.startswith(m) for m in bos_markers)
+                return len(self._llm.tokenize(prompt.encode("utf-8"), add_bos=add_bos))
+            except Exception:
+                pass
+        return super().count_messages_tokens(messages)
+
     # ------------------------------------------------------------------ #
     #  Embeddings                                                          #
     # ------------------------------------------------------------------ #
