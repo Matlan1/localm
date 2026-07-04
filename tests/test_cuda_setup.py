@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import io
 import json
+import sys
 
 import pytest
 
@@ -222,6 +223,64 @@ def test_dialogue_assume_yes_fetches_when_driver_ok():
 def test_dialogue_assume_yes_uses_vulkan_when_no_nvidia():
     info = sl.NvidiaInfo(present=False)
     assert sl._cuda_setup_dialogue(info, assume_yes=True) == ("vulkan", False)
+
+
+# ---------------- real click.confirm: reprompt + stray-input handling ------ #
+#
+# The tests above monkeypatch sl.click.confirm itself, so they never exercise
+# click's actual terminal-input loop. These use the REAL confirm() (only
+# sys.stdin is faked) to prove two properties end to end for the setup-llama
+# dialogue: garbage input re-asks the same question instead of crashing or
+# silently picking a default, and a genuine answer still lands correctly.
+
+def test_dialogue_reprompts_on_invalid_input_then_accepts_real_answer(monkeypatch, capsys):
+    # Two garbage lines, then a real "y" - click.confirm must re-ask after each
+    # invalid line rather than erroring out or defaulting silently.
+    monkeypatch.setattr("sys.stdin", io.StringIO("asdf\nqwerty\ny\n"))
+    info = sl.NvidiaInfo(present=False)   # -> the "continue with CUDA anyway?" prompt
+    result = sl._cuda_setup_dialogue(info, assume_yes=False)
+    assert result == ("cuda", True)       # the real "y" was honoured
+    out = capsys.readouterr().out
+    assert out.count("Error: invalid input") == 2   # one reprompt per garbage line
+    assert out.count("Continue with CUDA anyway?") == 3   # asked again each time
+
+
+def test_dialogue_reprompts_then_declines(monkeypatch, capsys):
+    monkeypatch.setattr("sys.stdin", io.StringIO("nope\nn\n"))
+    info = sl.NvidiaInfo(present=False)
+    result = sl._cuda_setup_dialogue(info, assume_yes=False)
+    assert result == ("vulkan", False)
+    assert capsys.readouterr().out.count("Error: invalid input") == 1
+
+
+def test_flush_stdin_noop_on_non_tty(monkeypatch):
+    # A piped/redirected stdin (tests, CI, scripted installs) is not a tty -
+    # _flush_stdin must not touch it or raise.
+    monkeypatch.setattr("sys.stdin", io.StringIO("y\n"))
+    sl._flush_stdin()   # must not raise
+    assert sl.click.confirm("  ok?", default=False) is True
+
+
+def test_flush_stdin_drains_pending_tty_bytes_on_windows(monkeypatch):
+    """Windows path: a stray buffered Enter (or any keystroke) sitting in the
+    console input queue from BEFORE the prompt appeared must be discarded, not
+    silently consumed as the answer to the next click.confirm()."""
+    monkeypatch.setattr(sl.sys, "platform", "win32")
+    monkeypatch.setattr(sl.sys.stdin, "isatty", lambda: True, raising=False)
+    calls = {"kbhit": [True, True, False], "getch": 0}
+
+    def fake_kbhit():
+        return calls["kbhit"].pop(0) if calls["kbhit"] else False
+
+    def fake_getch():
+        calls["getch"] += 1
+        return b"\r"
+
+    fake_msvcrt = type("_FakeMsvcrt", (), {"kbhit": staticmethod(fake_kbhit),
+                                           "getch": staticmethod(fake_getch)})()
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+    sl._flush_stdin()
+    assert calls["getch"] == 2   # drained exactly the two buffered keystrokes
 
 
 # --------------------------- off-profile warning -------------------------- #
