@@ -103,6 +103,12 @@ def _store() -> JobStore:
 
 def _engine_resolver():
     """Resolve the live inference engine from the plugin host, if any."""
+    try:
+        from localm.inference.http_server import _engine as _live_engine
+        if _live_engine is not None and _live_engine.loaded:
+            return _live_engine
+    except Exception:
+        pass
     if _host is None:
         return None
     try:
