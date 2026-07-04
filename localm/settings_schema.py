@@ -130,26 +130,26 @@ CORE_FIELDS: list = [
                  "The system prompt every new chat starts with. A chat's own System "
                  "prompt field overrides this per conversation; leave that blank to "
                  "use this. Empty = no default system prompt.",
-                 group="Chat"),
+                 group="Chat", owner="chat"),
     SettingField("temperature", Widget.NUMBER, "Temperature",
                  "Randomness of replies. Lower is more focused; higher is more "
                  "varied and creative.",
-                 group="Chat", min=0, max=2, step=0.05),
+                 group="Chat", owner="chat", min=0, max=2, step=0.05),
     SettingField("top_p", Widget.NUMBER, "Top-p (nucleus sampling)",
                  "Consider only the top tokens whose probabilities sum to this "
                  "fraction. 1.0 turns it off.",
-                 group="Chat", min=0, max=1, step=0.05),
+                 group="Chat", owner="chat", min=0, max=1, step=0.05),
     SettingField("top_k", Widget.NUMBER, "Top-k",
                  "Consider only the k most likely tokens at each step. 0 turns it off.",
-                 group="Chat", min=0, step=1),
+                 group="Chat", owner="chat", min=0, step=1),
     SettingField("repeat_penalty", Widget.NUMBER, "Repeat penalty",
                  "How strongly to discourage reusing tokens. 1.0 is no penalty; "
                  "higher reduces loops.",
-                 group="Chat", min=0, step=0.05),
+                 group="Chat", owner="chat", min=0, step=0.05),
     SettingField("max_tokens", Widget.NUMBER, "Max tokens per reply",
                  "Upper limit on tokens per reply, a runaway guard not a target. "
                  "Thinking models need plenty of room.",
-                 group="Chat", min=1, step=1),
+                 group="Chat", owner="chat", min=1, step=1),
     # ---- Server ----
     SettingField("port", Widget.NUMBER, "Server port",
                  "Port the API/GUI server binds to (default 8642); auto-bumps to "
@@ -190,7 +190,7 @@ CORE_FIELDS: list = [
     SettingField("chat_mode", Widget.SELECT, "Chat persistence override",
                  "Overrides the global persistence for chat only. Blank inherits "
                  "the global mode above.",
-                 group="Privacy", options=_PRIVACY_INHERIT),
+                 group="Privacy", owner="chat", options=_PRIVACY_INHERIT),
     SettingField("coder_mode", Widget.SELECT, "Coder persistence override",
                  "Overrides the global persistence for the coder only. Blank "
                  "inherits the global mode.",

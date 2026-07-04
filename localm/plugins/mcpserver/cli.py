@@ -15,9 +15,11 @@ import click
                    "[default: LOCALM_MODEL env, else first registered].")
 @click.option("--no-images", is_flag=True,
               help="Don't expose the generate_image tool.")
+@click.option("--no-coder", is_flag=True,
+              help="Don't expose run_coder_task even if the coder plugin is active.")
 @click.option("--print-config", is_flag=True,
               help="Print the mcpServers JSON block for your MCP client and exit.")
-def main(model, no_images, print_config):
+def main(model, no_images, no_coder, print_config):
     """Run localm as an MCP server (stdio transport).
 
     MCP clients launch this command on demand - add it to the client's
@@ -28,7 +30,9 @@ def main(model, no_images, print_config):
         localm mcp --print-config
 
     \b
-    Exposed tools: chat, list_models, embed, generate_image.
+    Exposed tools: chat, list_models, system_stats, search_models,
+    list_model_files, pull_model, embed, generate_image, and (only when
+    the coder plugin is installed+enabled) run_coder_task.
     All output except the protocol goes to stderr; logs never corrupt
     the JSON-RPC stream.
     """
@@ -38,6 +42,8 @@ def main(model, no_images, print_config):
             args += ["--model", model]
         if no_images:
             args += ["--no-images"]
+        if no_coder:
+            args += ["--no-coder"]
         block = {
             "mcpServers": {
                 "localm": {
@@ -86,4 +92,4 @@ def main(model, no_images, print_config):
         )
 
     from .server import serve_stdio
-    serve_stdio(model=model, enable_images=not no_images)
+    serve_stdio(model=model, enable_images=not no_images, enable_coder=not no_coder)

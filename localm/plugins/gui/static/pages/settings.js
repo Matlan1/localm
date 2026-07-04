@@ -267,8 +267,11 @@ export function buildSettingControl(field) {
       input.rows = 4;
       input.spellcheck = false;
       input.value = value ?? "";
-      // Preserve the text's own line breaks; blank -> null (leave unchanged).
-      read = () => (input.value.trim() === "" ? null : input.value);
+      // Blank is a real, savable value here ("Empty = no default system
+      // prompt" - the field's own default IS ""), not a leave-unchanged
+      // sentinel like a SECRET field's blank box. Preserve the text's own
+      // line breaks otherwise.
+      read = () => input.value;
       break;
     }
     default: {   // text / folder / path
