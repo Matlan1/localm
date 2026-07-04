@@ -13,6 +13,9 @@ or fall back cleanly. These tests pin, with no network and no real GPU:
 
 from __future__ import annotations
 
+import io
+import json
+
 import pytest
 
 from localm import setup_llama as sl
@@ -91,6 +94,86 @@ def test_pick_asset_requires_all_needles():
     assert sl._pick_asset(_FAKE_ASSETS, "vulkan")["name"].endswith("vulkan-x64.zip")
     assert sl._pick_asset(_FAKE_ASSETS, "cudart", "win-cuda-12") is not None
     assert sl._pick_asset(_FAKE_ASSETS, "rocm") is None
+
+
+# ------------------ _latest_tag skips a not-yet-uploaded release ---------- #
+#
+# Reproduces a real-world 404: upstream publishes a release (tag + notes) before
+# its CI matrix finishes uploading the ~25 platform archives, so `assets` can be
+# genuinely empty for a while even though the release body already lists the
+# (soon-to-exist) download URLs. Resolving to that tag anyway used to produce a
+# confident-looking match ("CUDA build: llama-bXXXX-bin-win-cuda-12.4-x64.zip")
+# that then downloads to a 404, because the linked file was not there yet.
+
+class _FakeHTTP:
+    def __init__(self, payload):
+        self._b = json.dumps(payload).encode("utf-8")
+
+    def __enter__(self):
+        return io.BytesIO(self._b)
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_latest_tag_skips_release_with_no_uploaded_assets(monkeypatch):
+    releases = [
+        {"tag_name": "b9871", "draft": False, "prerelease": False, "assets": [],
+         "body": "[Windows x64 (CUDA 12)](https://github.com/ggml-org/llama.cpp/"
+                 "releases/download/b9871/llama-b9871-bin-win-cuda-12.4-x64.zip)"},
+        {"tag_name": "b9870", "draft": False, "prerelease": False,
+         "assets": [{"name": "llama-b9870-bin-win-cuda-12.4-x64.zip",
+                     "browser_download_url": "https://example/real-cuda.zip",
+                     "size": 200_000_000}]},
+    ]
+    monkeypatch.setattr("urllib.request.urlopen",
+                        lambda req, timeout=None: _FakeHTTP(releases))
+    assert sl._latest_tag() == "b9870"     # NOT the not-yet-uploaded b9871
+
+
+def test_latest_tag_skips_draft_and_prerelease(monkeypatch):
+    releases = [
+        {"tag_name": "b9872", "draft": True, "prerelease": False,
+         "assets": [{"name": "x", "browser_download_url": "https://x", "size": 1}]},
+        {"tag_name": "b9871", "draft": False, "prerelease": True,
+         "assets": [{"name": "x", "browser_download_url": "https://x", "size": 1}]},
+        {"tag_name": "b9870", "draft": False, "prerelease": False,
+         "assets": [{"name": "x", "browser_download_url": "https://x", "size": 1}]},
+    ]
+    monkeypatch.setattr("urllib.request.urlopen",
+                        lambda req, timeout=None: _FakeHTTP(releases))
+    assert sl._latest_tag() == "b9870"
+
+
+def test_latest_tag_falls_back_when_nothing_has_assets(monkeypatch):
+    releases = [
+        {"tag_name": "b9871", "draft": False, "prerelease": False, "assets": []},
+        {"tag_name": "b9870", "draft": False, "prerelease": False, "assets": []},
+    ]
+    monkeypatch.setattr("urllib.request.urlopen",
+                        lambda req, timeout=None: _FakeHTTP(releases))
+    assert sl._latest_tag() == sl._FALLBACK_TAG
+
+
+def test_latest_tag_falls_back_on_network_error(monkeypatch):
+    def boom(req, timeout=None):
+        raise OSError("no network")
+    monkeypatch.setattr("urllib.request.urlopen", boom)
+    assert sl._latest_tag() == sl._FALLBACK_TAG
+
+
+def test_release_assets_does_not_scrape_body_when_assets_empty(monkeypatch):
+    """The body-scrape fallback removed here was the actual 404 source: a
+    release with assets=[] must yield an honest empty list, not simulated
+    entries built from not-yet-live body links."""
+    payload = {
+        "assets": [],
+        "body": "[Windows x64 (CUDA 12)](https://github.com/ggml-org/llama.cpp/"
+                "releases/download/b9871/llama-b9871-bin-win-cuda-12.4-x64.zip)",
+    }
+    monkeypatch.setattr("urllib.request.urlopen",
+                        lambda req, timeout=None: _FakeHTTP(payload))
+    assert sl._release_assets("b9871") == []
 
 
 # --------------------------- the CUDA dialogue ----------------------------- #
