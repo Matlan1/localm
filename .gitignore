@@ -15,6 +15,7 @@ venv/
 .vscode/
 .idea/
 .claude/
+.localcoder/
 *.swp
 *.swo
 *~
