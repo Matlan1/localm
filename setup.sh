@@ -141,11 +141,27 @@ is_our_venv() {  # a venv we created carries the marker / the localm console scr
 create_venv() {
   say ""
   say "  Creating .venv (Python 3.12) ..."
-  # PYPREF is empty (shared) or "--python-preference only-managed" (portable);
-  # left unquoted on purpose so an empty value expands to no argument.
-  # shellcheck disable=SC2086
-  uv venv --python 3.12 $PYPREF --clear .venv
-  : > .venv/.localm-venv   # marker: this venv was created by localm setup
+  while : ; do
+    # PYPREF is empty (shared) or "--python-preference only-managed" (portable);
+    # left unquoted on purpose so an empty value expands to no argument.
+    # shellcheck disable=SC2086
+    if uv venv --python 3.12 $PYPREF --clear .venv; then
+      : > .venv/.localm-venv   # marker: this venv was created by localm setup
+      break
+    else
+      say ""
+      say "  [!] Could not create the environment."
+      say "      If a localm process is still running, it may be locking the directory."
+      say "      Please close any open LocaLM launchers or servers."
+      say ""
+      if [ "$YES" = 1 ]; then
+        say "  Setup aborted (--yes mode cannot wait for retry). Please stop processes and try again."
+        exit 1
+      fi
+      retry="$(ask "  Try again? [Y/n]: " Y)"
+      case "$retry" in [Nn]*) say "  Setup aborted."; exit 1 ;; esac
+    fi
+  done
 }
 
 if [ -d .venv ]; then
