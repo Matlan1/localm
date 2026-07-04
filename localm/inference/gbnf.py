@@ -75,8 +75,8 @@ ws     ::= ([ \t\n\r])*
 # only when the model itself starts a <tool_call> - from there the call must
 # be structurally valid JSON. This is the "text-or-tool" enforcement.
 TOOL_CALLS_ONLY = r"""
-root       ::= ws tool-block+ ws
-tool-block ::= "<tool_call>" ws json-obj ws "</tool_call>" ws
+root       ::= opt-ws tool-block+ opt-ws
+tool-block ::= "<tool_call>" opt-ws json-obj opt-ws "</tool_call>" opt-ws
 json-obj   ::= "{" ws "\"name\"" ws ":" ws string ws "," ws "\"args\"" ws ":" ws object ws "}"
 object     ::= "{" ws (member ws ("," ws member ws)*)? "}"
 member     ::= string ws ":" ws value
@@ -85,6 +85,7 @@ array      ::= "[" ws (value ws ("," ws value ws)*)? "]"
 string     ::= "\"" ([^\"\\\x7F\x00-\x1F] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F]))* "\""
 number     ::= "-"? ([0-9] | [1-9] [0-9]*) ("." [0-9]+)? ([eE] [+-]? [0-9]+)?
 ws         ::= ([ \t\n\r])*
+opt-ws     ::= [ \t\n\r]? [ \t\n\r]? [ \t\n\r]?
 """.strip()
 
 # Lazy-grammar trigger for TOOL_CALLS_ONLY: full-match-with-capture-group form
