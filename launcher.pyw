@@ -603,7 +603,7 @@ class Launcher(tk.Tk):
             try:
                 proc = subprocess.run(
                     [python_exe(), "-m", "localm", "add", path,
-                     "--on-duplicate", "alias"],
+                     "--on-duplicate", "alias", "--fast"],
                     cwd=str(REPO_DIR), capture_output=True, text=True,
                     timeout=900)
                 ok = proc.returncode == 0
