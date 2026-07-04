@@ -221,6 +221,7 @@ class HTTPBackend(BaseLLMBackend):
         return {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
+            "X-Client-Id": "coder",
         }
 
     def _chat_url(self) -> str:
