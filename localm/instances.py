@@ -47,7 +47,7 @@ def _version() -> str:
         from importlib.metadata import version
         return version("localm")
     except Exception:
-        return "0.1.0"
+        return "0.1.1"
 
 
 def _now_iso() -> str:
