@@ -26,6 +26,10 @@ from . import _api as api
 from ._structs import llama_token, LlamaChatMessage
 
 
+_stderr_lock = threading.Lock()
+_devnull_fd: Optional[int] = None
+
+
 @contextlib.contextmanager
 def _quiet_stderr():
     """
@@ -41,21 +45,26 @@ def _quiet_stderr():
     there, which is the difference between a diagnosable crash and a
     silent one.
     """
-    from localm.debuglog import native_stderr_target
-    target_fd = native_stderr_target()
-    if target_fd is None:
-        # devnull discards native output: load diagnostics are only retained
-        # under LOCALM_DEBUG here (the load site uses _capture_stderr separately
-        # so a load FAILURE still surfaces its reason without this log).
-        target_fd = os.open(os.devnull, os.O_WRONLY)
-    saved_fd = os.dup(2)
-    os.dup2(target_fd, 2)
-    os.close(target_fd)
-    try:
-        yield
-    finally:
-        os.dup2(saved_fd, 2)
-        os.close(saved_fd)
+    global _devnull_fd
+    with _stderr_lock:
+        from localm.debuglog import native_stderr_target
+        target_fd = native_stderr_target()
+        should_close = False
+        if target_fd is None:
+            if _devnull_fd is None:
+                _devnull_fd = os.open(os.devnull, os.O_WRONLY)
+            target_fd = _devnull_fd
+        else:
+            should_close = True
+        saved_fd = os.dup(2)
+        os.dup2(target_fd, 2)
+        if should_close:
+            os.close(target_fd)
+        try:
+            yield
+        finally:
+            os.dup2(saved_fd, 2)
+            os.close(saved_fd)
 
 
 class _CapturedStderr:
@@ -733,7 +742,7 @@ class LlamaCpp:
             # minimal reply cannot fit any more.
             max_new_tokens = self._fit_generation_budget(n_prompt, max_new_tokens)
 
-            _ctx = _quiet_stderr if not self._verbose else contextlib.nullcontext
+            _ctx = _quiet_stderr if (not self._verbose and (grammar or grammar_lazy)) else contextlib.nullcontext
             
             # If unlimited (<= 0), allocate a modest chunk up front and grow later
             initial_budget = max_new_tokens if max_new_tokens > 0 else 512
