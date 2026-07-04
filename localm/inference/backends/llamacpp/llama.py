@@ -754,7 +754,6 @@ class LlamaCpp:
             # llama_decode completes, so separate windows leave a gap.
             # Prefill (re)creates/decodes into the context, so it must hold the
             # lock against a concurrent unload too.
-            print("GENERATOR: performing prefill", flush=True)
             with self._gen_lock:
                 if self._stop.is_set():
                     return
@@ -763,10 +762,8 @@ class LlamaCpp:
                         self._prefill_with_reuse(prompt_tokens)
                     else:
                         self._prefill_fresh_context(prompt_tokens, needed)
-            print("GENERATOR: prefill completed", flush=True)
 
             # Build sampler
-            print("GENERATOR: building sampler", flush=True)
             sampler = _build_sampler(
                 vocab=self._tokenizer._vocab,
                 temperature=temperature,
@@ -781,7 +778,6 @@ class LlamaCpp:
                 grammar_lazy=grammar_lazy,
                 grammar_triggers=grammar_triggers,
             )
-            print("GENERATOR: sampler built", flush=True)
 
             pos = n_prompt
             # Why generation ended, read by callers as self.last_finish_reason.
@@ -816,10 +812,8 @@ class LlamaCpp:
                         # has not matched yet - harmless status, not a warning,
                         # but hundreds of lines of noise per response.  The decode
                         # calls below are already guarded; this was the gap.
-                        print("GENERATOR: sampling token", flush=True)
                         with _ctx():
                             token = api.llama_sampler_sample(sampler, self._ctx_ptr, -1)
-                        print(f"GENERATOR: sampled token={token}", flush=True)
                         eog = self._tokenizer.is_eog(token)
 
                     # Stop when the model signals end-of-generation via the vocabulary
@@ -837,7 +831,6 @@ class LlamaCpp:
                         batch = api.llama_batch_get_one(tok_one, 1)
                         pos_arr = (ctypes.c_int32 * 1)(pos)
                         batch.pos = ctypes.cast(pos_arr, ctypes.c_void_p)
-                        print(f"GENERATOR: decoding token {token} at pos {pos}", flush=True)
                         with _ctx():
                             ret = api.llama_decode(self._ctx_ptr, batch)
                         if ret != 0:
