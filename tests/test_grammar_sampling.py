@@ -37,6 +37,7 @@ def _bare_llama() -> LlamaCpp:
     llm._ctx_capacity = 4096
     llm._kv_supported = None
     llm._gen_lock = threading.RLock()
+    llm._inference_lock = threading.Lock()
     llm._stop = threading.Event()
     _FAKES.append(llm)
     return llm

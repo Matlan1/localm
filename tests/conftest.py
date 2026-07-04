@@ -13,6 +13,19 @@ fixture).
 """
 
 import os
+import tempfile
+import shutil
+
+# Isolate LOCALM_HOME globally at import time so that any module importing
+# localm.config during test collection or execution resolves HOME_DIR to a
+# temporary directory instead of the developer's real home config/keys.
+_test_home_dir = tempfile.mkdtemp(prefix="localm_test_home_")
+os.environ["LOCALM_HOME"] = _test_home_dir
+
+
+def pytest_sessionfinish(session, exitstatus):
+    shutil.rmtree(_test_home_dir, ignore_errors=True)
+
 
 import pytest
 
