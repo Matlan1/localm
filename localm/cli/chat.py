@@ -164,6 +164,8 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
         
         if ctx is not None: cmd.extend(["-c", str(ctx)])
         if gpu_layers is not None: cmd.extend(["-g", str(gpu_layers)])
+        if mmproj: cmd.extend(["--mmproj", mmproj])
+        if device: cmd.extend(["--device", device])
         
         kwargs = {}
         env = os.environ.copy()
