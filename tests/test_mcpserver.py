@@ -3,6 +3,7 @@
 
 import io
 import json
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -59,7 +60,8 @@ class TestProtocol:
     def test_tools_list_includes_all(self):
         server, _ = _server()
         names = {t["name"] for t in _req(server, "tools/list")["result"]["tools"]}
-        assert names == {"chat", "list_models", "embed", "generate_image"}
+        assert names == {"chat", "list_models", "system_stats", "search_models",
+                         "list_model_files", "pull_model", "embed", "generate_image"}
 
     def test_no_images_flag_hides_tool(self):
         server, _ = _server(enable_images=False)
@@ -129,6 +131,28 @@ class TestEngineCache:
         second = cache.get("b")
         assert first is not second
         first.unload.assert_called_once()
+
+    def test_model_switch_waits_for_vram_release(self):
+        """A model switch must poll for the previous model's VRAM to actually
+        free before loading the next one (TDR-hang guard, shared with the
+        /v1/models/unload endpoint's own use of wait_for_vram_release)."""
+        cache = EngineCache("m", engine_factory=_stub_engine_factory)
+        cache.get("a")
+        with patch("localm.discover.vram_info", return_value={"free": 1_000_000_000}), \
+             patch("localm.vram.wait_for_vram_release",
+                   return_value=(True, 2_000_000_000)) as mock_wait:
+            cache.get("b")
+        mock_wait.assert_called_once()
+        assert mock_wait.call_args.kwargs["before_bytes"] == 1_000_000_000
+
+    def test_vram_unmeasurable_does_not_block_switch(self):
+        """When VRAM cannot be read at all (no GPU/torch), the wait is a no-op -
+        matches wait_for_vram_release's own before_bytes=None contract."""
+        cache = EngineCache("m", engine_factory=_stub_engine_factory)
+        cache.get("a")
+        with patch("localm.discover.vram_info", return_value={}):
+            second = cache.get("b")   # must not hang/raise
+        assert second is not None
 
     def test_no_default_falls_back_to_first_registered(self):
         cache = EngineCache(None, engine_factory=_stub_engine_factory)
@@ -204,7 +228,8 @@ class TestClientServerIntegration:
         try:
             client.start()
             assert {t["name"] for t in client.tools} == \
-                {"chat", "list_models", "embed"}
+                {"chat", "list_models", "system_stats", "search_models",
+                 "list_model_files", "pull_model", "embed"}
             res = client.call_tool("chat", {"prompt": "ping"})
             assert res.ok
             assert res.output == "pong"
@@ -389,6 +414,271 @@ class TestGenerateImageSafety:
         captured = capsys.readouterr()
         assert "PROGRESS_NOISE_ON_STDOUT" not in captured.out
         assert "PROGRESS_NOISE_ON_STDOUT" in captured.err
+
+
+class TestModelDiscoveryTools:
+    """system_stats / search_models / list_model_files / pull_model - always
+    advertised (no plugin gate, unlike run_coder_task) since they only need
+    core localm functionality."""
+
+    def _call(self, server, name, args):
+        return server.handle({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": name, "arguments": args}})
+
+    def test_system_stats_returns_live_stats(self):
+        server, _ = _server()
+        stats = {"cpu": {"percent": 12.0}, "ram": {"used": 1, "total": 2, "percent": 50.0},
+                 "vram": {"used": 1, "total": 8, "percent": 12.5}}
+        with patch("localm.sysstats.system_stats", return_value=stats):
+            r = self._call(server, "system_stats", {})
+        assert json.loads(r["result"]["content"][0]["text"]) == stats
+
+    def test_search_models_wraps_hf_search(self):
+        server, _ = _server()
+        results = [{"id": "bartowski/Qwen2.5-7B-Instruct-GGUF", "downloads": 999,
+                   "likes": 10, "updated": "2026-01-01"}]
+        with patch("localm.discover.hf_search", return_value=results) as mock_search:
+            r = self._call(server, "search_models", {"query": "qwen", "limit": 5})
+        assert json.loads(r["result"]["content"][0]["text"]) == results
+        mock_search.assert_called_once_with("qwen", limit=5)
+
+    def test_search_models_surfaces_discover_error(self):
+        server, _ = _server()
+        from localm.discover import DiscoverError
+        with patch("localm.discover.hf_search", side_effect=DiscoverError("offline")):
+            r = self._call(server, "search_models", {})
+        assert r["result"]["isError"] is True
+        assert "offline" in r["result"]["content"][0]["text"]
+
+    def test_list_model_files_missing_repo_is_error(self):
+        server, _ = _server()
+        r = self._call(server, "list_model_files", {})
+        assert r["result"]["isError"] is True
+        assert "repo" in r["result"]["content"][0]["text"]
+
+    def test_list_model_files_includes_fit_label(self):
+        server, _ = _server()
+        files = [{"file": "model.Q4_K_M.gguf", "quant": "Q4_K_M",
+                 "size_bytes": 4_000_000_000, "n_parts": 1}]
+        with patch("localm.discover.hf_gguf_files", return_value=files), \
+             patch("localm.discover.vram_info", return_value={"total": 8_000_000_000}), \
+             patch("localm.discover.fit_label", return_value="fits") as mock_fit:
+            r = self._call(server, "list_model_files", {"repo": "owner/repo"})
+        out = json.loads(r["result"]["content"][0]["text"])
+        assert out[0]["fit"] == "fits"
+        mock_fit.assert_called_once_with(4_000_000_000, 8_000_000_000)
+
+    def test_list_model_files_surfaces_discover_error(self):
+        server, _ = _server()
+        from localm.discover import DiscoverError
+        with patch("localm.discover.hf_gguf_files", side_effect=DiscoverError("not a repo")):
+            r = self._call(server, "list_model_files", {"repo": "nope"})
+        assert r["result"]["isError"] is True
+        assert "not a repo" in r["result"]["content"][0]["text"]
+
+    def test_pull_model_missing_repo_is_error(self):
+        server, _ = _server()
+        r = self._call(server, "pull_model", {"name": "m"})
+        assert r["result"]["isError"] is True
+        assert "repo" in r["result"]["content"][0]["text"]
+
+    def test_pull_model_missing_name_is_error(self):
+        server, _ = _server()
+        r = self._call(server, "pull_model", {"repo": "owner/repo"})
+        assert r["result"]["isError"] is True
+        assert "name" in r["result"]["content"][0]["text"]
+
+    def test_pull_model_success_loads_by_default(self):
+        server, engines = _server()
+        with patch("localm.model_manager.pull.pull_model", return_value=True) as mock_pull:
+            r = self._call(server, "pull_model",
+                           {"repo": "owner/repo", "file": "m.Q4_K_M.gguf", "name": "m"})
+        assert r["result"]["isError"] is False
+        assert "loaded" in r["result"]["content"][0]["text"]
+        mock_pull.assert_called_once_with("owner/repo:m.Q4_K_M.gguf", name="m")
+        assert engines._loaded_name == "m"
+
+    def test_pull_model_load_false_skips_loading(self):
+        # _server() eagerly resolves the default engine once already (the embed-
+        # capability probe in build_tools()), so "never loaded" is asserted as
+        # "the newly pulled name never became active", not "nothing is loaded".
+        server, engines = _server()
+        with patch("localm.model_manager.pull.pull_model", return_value=True):
+            r = self._call(server, "pull_model",
+                           {"repo": "owner/repo", "name": "m", "load": False})
+        assert r["result"]["isError"] is False
+        assert "not loaded" in r["result"]["content"][0]["text"]
+        assert engines._loaded_name != "m"
+
+    def test_pull_model_failure_is_surfaced(self):
+        server, _ = _server()
+        with patch("localm.model_manager.pull.pull_model", return_value=False):
+            r = self._call(server, "pull_model", {"repo": "owner/repo", "name": "m"})
+        assert r["result"]["isError"] is True
+        assert "pull failed" in r["result"]["content"][0]["text"]
+
+    def test_pull_model_exception_is_surfaced(self):
+        server, _ = _server()
+        with patch("localm.model_manager.pull.pull_model",
+                   side_effect=RuntimeError("network down")):
+            r = self._call(server, "pull_model", {"repo": "owner/repo", "name": "m"})
+        assert r["result"]["isError"] is True
+        assert "network down" in r["result"]["content"][0]["text"]
+
+    def test_pull_model_load_failure_is_distinguished_from_pull_failure(self):
+        engines = EngineCache(default_model=None, engine_factory=_stub_engine_factory)
+        server = MCPStdioServer(build_tools(engines))
+        with patch("localm.model_manager.pull.pull_model", return_value=True), \
+             patch.object(engines, "get", side_effect=RuntimeError("no GPU memory")):
+            r = self._call(server, "pull_model", {"repo": "owner/repo", "name": "m"})
+        assert r["result"]["isError"] is True
+        assert "loading it failed" in r["result"]["content"][0]["text"]
+        assert "no GPU memory" in r["result"]["content"][0]["text"]
+
+
+class TestRunCoderTask:
+    """run_coder_task shells out to `localm coder --output-format json` and is
+    only advertised when the coder plugin is installed+enabled (mirrors the
+    embed tool's capability-gated advertisement)."""
+
+    @pytest.fixture
+    def coder_active(self):
+        from localm.plugins.engine import PluginManager
+        PluginManager(None).set_installed_state("coder", True)
+
+    def _call(self, server, args):
+        return server.handle({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "run_coder_task", "arguments": args}})
+
+    def test_hidden_when_coder_not_active(self):
+        server, _ = _server()
+        names = {t["name"] for t in _req(server, "tools/list")["result"]["tools"]}
+        assert "run_coder_task" not in names
+
+    def test_listed_when_coder_active(self, coder_active):
+        server, _ = _server()
+        names = {t["name"] for t in _req(server, "tools/list")["result"]["tools"]}
+        assert "run_coder_task" in names
+
+    def test_no_coder_flag_hides_tool_even_when_active(self, coder_active):
+        engines = EngineCache(default_model="stub", engine_factory=_stub_engine_factory)
+        server = MCPStdioServer(build_tools(engines, enable_coder=False))
+        names = {t["name"] for t in _req(server, "tools/list")["result"]["tools"]}
+        assert "run_coder_task" not in names
+
+    def test_missing_task_is_error(self, coder_active, tmp_path):
+        server, _ = _server()
+        r = self._call(server, {"cwd": str(tmp_path)})
+        assert r["result"]["isError"] is True
+        assert "task" in r["result"]["content"][0]["text"]
+
+    def test_missing_cwd_is_error(self, coder_active):
+        server, _ = _server()
+        r = self._call(server, {"task": "do a thing"})
+        assert r["result"]["isError"] is True
+        assert "cwd" in r["result"]["content"][0]["text"]
+
+    def test_nonexistent_cwd_is_error(self, coder_active, tmp_path):
+        server, _ = _server()
+        r = self._call(server, {"task": "x", "cwd": str(tmp_path / "nope")})
+        assert r["result"]["isError"] is True
+        assert "directory" in r["result"]["content"][0]["text"]
+
+    def test_successful_run_parses_json_payload(self, coder_active, tmp_path):
+        # Real `--output-format json` pretty-prints (indent=2, multi-line) - a
+        # single-line json.dumps() here would silently hide the exact bug this
+        # parsing once had (see test_console_messages_before_json_are_ignored).
+        server, _ = _server()
+        payload = {"success": True, "response": "done: added type hints",
+                   "turns": 3, "total_tokens": 512}
+        fake = MagicMock(stdout=json.dumps(payload, indent=2) + "\n", stderr="", returncode=0)
+        with patch("localm.plugins.mcpserver.server.subprocess.run", return_value=fake) as mock_run:
+            r = self._call(server, {"task": "add type hints", "cwd": str(tmp_path)})
+        assert r["result"]["isError"] is False
+        assert "done: added type hints" in r["result"]["content"][0]["text"]
+        assert "turns=3" in r["result"]["content"][0]["text"]
+        cmd = mock_run.call_args.args[0]
+        assert cmd[:4] == [sys.executable, "-m", "localm", "coder"]
+        assert "add type hints" in cmd
+        assert "--cwd" in cmd and str(tmp_path) in cmd
+        assert "--output-format" in cmd and "json" in cmd
+        assert "--yes" not in cmd            # default off (R19a fail-closed)
+        # The subprocess's OWN OS cwd must also be the task dir, not just the
+        # --cwd flag: if the coder auto-spawns a background server (no instance
+        # running yet), it identifies "this project" by ITS OWN inherited
+        # working directory. Passing --cwd alone registers the auto-spawned
+        # server under the WRONG project root, so attach-back never finds it.
+        assert mock_run.call_args.kwargs["cwd"] == str(tmp_path)
+
+    def test_agent_reported_failure_is_surfaced_as_error(self, coder_active, tmp_path):
+        server, _ = _server()
+        payload = {"success": False, "response": "hit max turns", "turns": 40,
+                   "total_tokens": 9001}
+        fake = MagicMock(stdout=json.dumps(payload, indent=2) + "\n", stderr="", returncode=1)
+        with patch("localm.plugins.mcpserver.server.subprocess.run", return_value=fake):
+            r = self._call(server, {"task": "x", "cwd": str(tmp_path)})
+        assert r["result"]["isError"] is True
+        assert "hit max turns" in r["result"]["content"][0]["text"]
+
+    def test_yes_model_max_turns_thread_through_to_cmd(self, coder_active, tmp_path):
+        server, _ = _server()
+        fake = MagicMock(stdout=json.dumps({"success": True, "response": "ok"}, indent=2) + "\n",
+                         stderr="", returncode=0)
+        with patch("localm.plugins.mcpserver.server.subprocess.run", return_value=fake) as mock_run:
+            self._call(server, {"task": "x", "cwd": str(tmp_path), "model": "qwen2.5-7b",
+                                "max_turns": 10, "yes": True})
+        cmd = mock_run.call_args.args[0]
+        assert "--model" in cmd and "qwen2.5-7b" in cmd
+        assert "--max-turns" in cmd and "10" in cmd
+        assert "--yes" in cmd
+
+    def test_console_messages_before_json_are_ignored(self, coder_active, tmp_path):
+        """Regression guard: a live run against a real model produced exactly
+        this shape - console.print() messages (e.g. attaching to a running
+        server) print to stdout BEFORE the final --output-format json dump.
+        Parsing must find the JSON, not mistake the console text or the bare
+        closing brace for the payload."""
+        server, _ = _server()
+        payload = {"success": True, "response": "created hello.txt", "turns": 2,
+                   "total_tokens": 123}
+        stdout = (
+            "Using the localm already running for /some/project "
+            "(port 8642, mode api) - sharing its loaded model.\n"
+            + json.dumps(payload, indent=2) + "\n"
+        )
+        fake = MagicMock(stdout=stdout, stderr="", returncode=0)
+        with patch("localm.plugins.mcpserver.server.subprocess.run", return_value=fake):
+            r = self._call(server, {"task": "x", "cwd": str(tmp_path)})
+        assert r["result"]["isError"] is False
+        assert "created hello.txt" in r["result"]["content"][0]["text"]
+
+    def test_no_json_object_in_stdout_falls_back_cleanly(self, coder_active, tmp_path):
+        server, _ = _server()
+        fake = MagicMock(stdout="some console message, no JSON at all\n",
+                         stderr="", returncode=1)
+        with patch("localm.plugins.mcpserver.server.subprocess.run", return_value=fake):
+            r = self._call(server, {"task": "x", "cwd": str(tmp_path)})
+        assert r["result"]["isError"] is True
+        assert "some console message" in r["result"]["content"][0]["text"]
+
+    def test_timeout_is_reported_not_raised(self, coder_active, tmp_path):
+        import subprocess as _sp
+        server, _ = _server()
+        with patch("localm.plugins.mcpserver.server.subprocess.run",
+                   side_effect=_sp.TimeoutExpired(cmd="x", timeout=5)):
+            r = self._call(server, {"task": "x", "cwd": str(tmp_path), "timeout_seconds": 5})
+        assert r["result"]["isError"] is True
+        assert "timed out" in r["result"]["content"][0]["text"]
+
+    def test_non_json_output_falls_back_to_stderr_detail(self, coder_active, tmp_path):
+        server, _ = _server()
+        fake = MagicMock(stdout="", stderr="coder plugin is not active\n", returncode=1)
+        with patch("localm.plugins.mcpserver.server.subprocess.run", return_value=fake):
+            r = self._call(server, {"task": "x", "cwd": str(tmp_path)})
+        assert r["result"]["isError"] is True
+        assert "coder plugin is not active" in r["result"]["content"][0]["text"]
 
 
 class TestMcpCliWiring:
