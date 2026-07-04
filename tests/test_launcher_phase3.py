@@ -191,7 +191,7 @@ def test_serve_expose_still_binds_network(launcher_mod):
     """Regression: the serve-mode expose path is unchanged."""
     fake = _build_fake(launcher_mod, mode="serve", model="m", host_lan=True)
     cmd = launcher_mod.Launcher._build_command(fake)
-    assert "serve" in cmd and "-H" in cmd and "0.0.0.0" in cmd
+    assert "gui" in cmd and "--api-mode" in cmd and "-H" in cmd and "0.0.0.0" in cmd
 
 
 def test_invalid_numeric_fields(launcher_mod):
