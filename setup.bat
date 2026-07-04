@@ -93,11 +93,22 @@ if errorlevel 2 (
 :venv_create
 echo.
 echo  Creating .venv (Python %PYVER%) ...
+
+:venv_retry
 uv venv --python %PYVER% %PYPREF% --clear .venv
 if errorlevel 1 (
-    echo  [!] Could not create the environment. Install Python %PYVER%.
-    pause
-    exit /b 1
+    echo.
+    echo  [!] Could not create the environment.
+    echo      If you see "Access is denied" or "os error 5", a localm process is still running.
+    echo      Please close any open LocaLM launchers, chat windows, or server consoles.
+    echo.
+    choice /c YN /n /m "  Try again? [Y/n]: "
+    if errorlevel 2 (
+        echo  Setup aborted. Install Python %PYVER% if it is missing, or close processes and try again.
+        pause
+        exit /b 1
+    )
+    goto venv_retry
 )
 type nul > ".venv\.localm-venv"
 :venv_done
