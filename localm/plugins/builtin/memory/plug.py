@@ -33,7 +33,7 @@ import re
 import threading as _threading
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 _router = APIRouter()
@@ -48,8 +48,13 @@ _ENGINE = None
 
 
 # ------------------------------------------------------------------ #
-#  Request models                                                     #
+#  Memory store helper                                               #
 # ------------------------------------------------------------------ #
+
+def _chat_store(principal: str | None = None):
+    from localm import memory as _mem
+    return _mem.open_store(principal, "chat", "", root=_memory_root())
+
 
 class MemoryUpdate(BaseModel):
     text: str
@@ -108,9 +113,6 @@ def _memory_root() -> Path:
     return _home() / "memory"
 
 
-def _chat_store():
-    from localm import memory as _mem
-    return _mem.open_store(_OWNER, "chat", "", root=_memory_root())
 
 
 def _embed_fn():
@@ -218,8 +220,10 @@ def _rendered_text(store) -> str:
 # ------------------------------------------------------------------ #
 
 @_router.get("/api/memory")
-async def memory_get():
-    store = _chat_store()
+async def memory_get(request: Request = None):
+    from localm.inference.http_server import principal_id
+    principal = principal_id(request) if request is not None else None
+    store = _chat_store(principal)
     if _persist_enabled():
         _migrate_legacy(store)
     return {"text": _rendered_text(store), "writable": _persist_enabled(),
@@ -228,14 +232,14 @@ async def memory_get():
 
 
 @_router.put("/api/memory")
-async def memory_put(req: MemoryUpdate):
+async def memory_put(req: MemoryUpdate, request: Request = None):
     """Bulk-edit: the modal textarea is the authoritative user memory. DIFF-AWARE:
     a line matching an existing record's text keeps that record as-is; only new
     lines become new user records; omitted lines are deletes."""
     if not _persist_enabled():
         raise HTTPException(
             403, "Memory writes are off in privacy mode (no new traces). "
-                 "Set mode/chat_mode to 'log' or 'full' to enable them.")
+            "Set mode/chat_mode to 'log' or 'full' to enable them.")
     from localm.memory import MAX_TEXT_LEN, N_MAX, MemoryRecord
     if len(req.text) > _MEMORY_MAX:
         raise HTTPException(413, "Memory too large (max 64k chars)")
@@ -246,8 +250,11 @@ async def memory_put(req: MemoryUpdate):
     if len(facts) > N_MAX:
         raise HTTPException(
             413, f"Too many memory records ({len(facts)}); the store keeps at "
-                 f"most {N_MAX}. Trim the list before saving.")
-    store = _chat_store()
+            f"most {N_MAX}. Trim the list before saving.")
+    from localm.inference.http_server import principal_id
+    principal = principal_id(request) if request is not None else None
+    store = _chat_store(principal)
+
     _migrate_legacy(store)
     existing = {r.text: r for r in store.all()}
     seen: set = set()
@@ -264,16 +271,19 @@ async def memory_put(req: MemoryUpdate):
 
 
 @_router.post("/api/memory/append")
-async def memory_append(req: MemoryAppend):
+async def memory_append(req: MemoryAppend, request: Request = None):
     if not _persist_enabled():
         raise HTTPException(
             403, "Memory writes are off in privacy mode (no new traces)")
     fact = _strip_bullet(req.text)
     if not fact:
         raise HTTPException(400, "Nothing to remember")
-    from localm.memory import N_MAX, MemoryRecord
-    store = _chat_store()
+    from localm.inference.http_server import principal_id
+    principal = principal_id(request) if request is not None else None
+    store = _chat_store(principal)
+
     _migrate_legacy(store)
+    from localm.memory import N_MAX, MemoryRecord
     # Refuse to append past the cap rather than accept a fact the next prune would
     # silently evict (audit F4).
     if len(store) >= N_MAX:
@@ -286,10 +296,13 @@ async def memory_append(req: MemoryAppend):
 
 
 @_router.patch("/api/memory/{mem_id}")
-async def memory_patch(mem_id: str, req: MemoryPatch):
+async def memory_patch(mem_id: str, req: MemoryPatch, request: Request = None):
     if not _persist_enabled():
         raise HTTPException(403, "Memory writes are off in privacy mode")
-    store = _chat_store()
+    from localm.inference.http_server import principal_id
+    principal = principal_id(request) if request is not None else None
+    store = _chat_store(principal)
+
     fields = {}
     if req.text is not None:
         fields["text"] = req.text
@@ -303,15 +316,18 @@ async def memory_patch(mem_id: str, req: MemoryPatch):
 
 
 @_router.delete("/api/memory/{mem_id}")
-async def memory_delete(mem_id: str):
+async def memory_delete(mem_id: str, request: Request = None):
     if not _persist_enabled():
         raise HTTPException(403, "Memory writes are off in privacy mode")
-    store = _chat_store()
+    from localm.inference.http_server import principal_id
+    principal = principal_id(request) if request is not None else None
+    store = _chat_store(principal)
+
     return {"status": "deleted" if store.delete(mem_id) else "absent", "id": mem_id}
 
 
 @_router.post("/api/memory/consolidate")
-async def memory_consolidate():
+async def memory_consolidate(request: Request = None):
     """Manually distil durable facts from recent sessions into the store (the
     opt-in consolidation trigger). Gated on privacy; needs a loaded model."""
     if not _persist_enabled():
@@ -327,7 +343,9 @@ async def memory_consolidate():
         return strip_think("".join(_ENGINE.chat_stream(
             [{"role": "user", "content": prompt}]))).strip()
 
-    return synthesize_memory(complete)
+    from localm.inference.http_server import principal_id
+    principal = principal_id(request) if request is not None else None
+    return synthesize_memory(complete, principal=principal)
 
 
 # ------------------------------------------------------------------ #
@@ -341,7 +359,8 @@ async def memory_consolidate():
 
 def _recent_sessions_text(max_chars: int = 8000) -> str:
     """User+assistant content from the newest session JSONL logs (written only in
-    log/full mode), newest file first, capped to *max_chars*. Empty when none."""
+    log/full mode), newest file first, capped to *max_chars*. Empty when none.
+    Prioritises the most recent turns within each file."""
     sdir = _home() / "sessions"
     if not sdir.is_dir():
         return ""
@@ -349,12 +368,16 @@ def _recent_sessions_text(max_chars: int = 8000) -> str:
                    key=lambda p: p.stat().st_mtime, reverse=True)
     out: list[str] = []
     total = 0
+    stop = False
     for f in files:
+        if stop:
+            break
         try:
             raw = f.read_text(encoding="utf-8")
         except OSError:
             continue
-        for line in raw.splitlines():
+        file_pieces = []
+        for line in reversed(raw.splitlines()):
             try:
                 rec = json.loads(line)
             except (ValueError, TypeError):
@@ -375,14 +398,18 @@ def _recent_sessions_text(max_chars: int = 8000) -> str:
                 if not content.strip():
                     continue
             piece = f"{who}: {content.strip()}"
-            out.append(piece)
-            total += len(piece)
-        if total >= max_chars:
-            break
-    return "\n".join(out)[:max_chars]
+            added_len = len(piece) + (1 if out or file_pieces else 0)
+            if total + added_len > max_chars:
+                stop = True
+                break
+            file_pieces.insert(0, piece)
+            total += added_len
+        if file_pieces:
+            out = file_pieces + out
+    return "\n".join(out)
 
 
-def synthesize_memory(complete, *, max_facts: int = 12,
+def synthesize_memory(complete, *, principal: str | None = None, max_facts: int = 12,
                       max_chars: int = 8000) -> dict:
     """Distil durable user facts from recent sessions into the structured store.
 
@@ -400,7 +427,7 @@ def synthesize_memory(complete, *, max_facts: int = 12,
     if not sessions.strip():
         return {"status": "skipped", "reason": "no_sessions", "added": 0}
     from localm.memory import run_consolidation
-    store = _chat_store()
+    store = _chat_store(principal)
     _migrate_legacy(store)
     # Report which facts were newly added by diffing record ids (stable across
     # consolidation - store.replace reuses the same record objects), so an UPDATE
@@ -489,7 +516,7 @@ def _auto_stamp(now: float) -> None:
         logger.debug("memory auto-consolidate: could not stamp marker: %s", e)
 
 
-def _auto_consolidate_bg() -> None:
+def _auto_consolidate_bg(principal: str | None = None) -> None:
     """Run one consolidation pass in the background, binding the model to the
     stashed engine. Never raises (a daemon thread); clears the in-progress flag and
     stamps the marker when done."""
@@ -505,7 +532,7 @@ def _auto_consolidate_bg() -> None:
             return strip_think("".join(
                 eng.chat_stream([{"role": "user", "content": prompt}]))).strip()
 
-        res = synthesize_memory(complete)
+        res = synthesize_memory(complete, principal=principal)
         added = res.get("added", 0)
         if added:
             logger.info("memory auto-consolidate: added %d fact(s)", added)
@@ -518,7 +545,7 @@ def _auto_consolidate_bg() -> None:
             _auto_running = False
 
 
-def _maybe_auto_consolidate() -> None:
+def _maybe_auto_consolidate(principal: str | None = None) -> None:
     """Best-effort trigger for the debounced background consolidation. Cheap when
     not due (a timestamp compare under a lock); spawns at most one daemon thread.
     Gated on config + privacy + model-loaded so it never runs a write the mode
@@ -556,7 +583,7 @@ def _maybe_auto_consolidate() -> None:
         # Stamp immediately so a burst of concurrent turns cannot each spawn a pass
         # before the first finishes (the finally-stamp refreshes it).
         _auto_stamp(now)
-    _threading.Thread(target=_auto_consolidate_bg, daemon=True).start()
+    _threading.Thread(target=lambda: _auto_consolidate_bg(principal), daemon=True).start()
 
 
 # ------------------------------------------------------------------ #
@@ -585,7 +612,7 @@ def _memory_outlet(text, messages, ctx):
     (debounced). Side-effect only: returns the text unchanged. Any failure is
     contained so it can never affect the reply."""
     try:
-        _maybe_auto_consolidate()
+        _maybe_auto_consolidate(getattr(ctx, "principal", None))
     except Exception as e:
         from localm.debuglog import logger
         logger.debug("memory outlet skipped: %s", e)
@@ -598,6 +625,8 @@ def _memory_inlet(messages, ctx):
     read-only recall for chat (`memory_recall_in_privacy` + ..._chat) - and even
     then it only READS: no reinforcement, no migration, no write. Best-effort: any
     failure is logged at debug and skipped (the pipeline also isolates it)."""
+    if ctx is not None and ctx.state.get("client_id") == "coder":
+        return None
     if not _recall_enabled():
         return None
     writes_ok = _persist_enabled()
@@ -609,7 +638,8 @@ def _memory_inlet(messages, ctx):
         query = _last_user_text(messages)
         if not query.strip():
             return None
-        store = _chat_store()
+        store = _chat_store(getattr(ctx, "principal", None))
+
         if writes_ok:
             _migrate_legacy(store)                 # migration is a write
         block_records = store.recall(query, k=_mem.MAX_INJECT,
