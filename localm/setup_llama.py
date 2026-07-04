@@ -64,9 +64,10 @@ DEFAULT_URL = (
 )
 
 # Upstream llama.cpp prebuilts (ggml-org/llama.cpp). We resolve the latest
-# release tag at runtime; this pin is the fallback if that lookup fails.
+# release tag with uploaded assets at runtime; this pin is the fallback if that
+# lookup is unavailable.
 _UPSTREAM_REPO = "ggml-org/llama.cpp"
-_FALLBACK_TAG = "b9682"
+_FALLBACK_TAG = "b9870"
 
 # Per-backend asset matcher: substrings that must appear in the release asset
 # name for (platform, backend). Substring matching (not exact names) keeps this
@@ -229,23 +230,38 @@ def _auto_backend() -> str:
 
 
 def _latest_tag() -> str:
-    """The latest ggml-org/llama.cpp release tag, or the pinned fallback if the
-    lookup is unavailable (offline, rate-limited, etc.)."""
-    api = f"https://api.github.com/repos/{_UPSTREAM_REPO}/releases/latest"
+    """The newest ggml-org/llama.cpp release tag that actually has its build
+    assets uploaded, or the pinned fallback if no such release can be found
+    (offline, rate-limited, etc.).
+
+    Upstream publishes a release (tag + notes) as soon as it is cut, then its CI
+    matrix uploads the ~25 platform archives afterwards - which can take a while.
+    Right after publish, ``/releases/latest`` can point at a tag whose ``assets``
+    array is still genuinely empty even though the release body already lists
+    the (soon-to-exist) download URLs. Resolving to that tag anyway used to
+    produce a confident-looking match that 404s, because the linked file simply
+    is not there yet. So we scan recent releases newest-first and use the first
+    one that already has assets, skipping any still-uploading release."""
+    api = f"https://api.github.com/repos/{_UPSTREAM_REPO}/releases?per_page=10"
     try:
         req = urllib.request.Request(api, headers={"Accept": "application/vnd.github+json",
                                                    "User-Agent": "localm-setup-llama"})
         with urllib.request.urlopen(req, timeout=10) as r:
-            data = json.loads(r.read().decode("utf-8"))
-        tag = data.get("tag_name")
-        if isinstance(tag, str) and tag:
-            return tag
+            releases = json.loads(r.read().decode("utf-8"))
+        for rel in releases:
+            if rel.get("draft") or rel.get("prerelease"):
+                continue
+            tag = rel.get("tag_name")
+            if isinstance(tag, str) and tag and rel.get("assets"):
+                return tag
     except Exception:
         pass
     # Surface the fallback so the user knows the build may not be current (the
-    # latest-release lookup was unreachable); offer to rerun later for the latest.
-    console.print(f"[yellow]Could not reach GitHub; using pinned llama.cpp "
-                  f"{_FALLBACK_TAG} - rerun later for the latest.[/yellow]")
+    # release lookup was unreachable, or none of the recent releases has its
+    # assets uploaded yet); offer to rerun later for the latest.
+    console.print(f"[yellow]Could not find a ggml-org/llama.cpp release with "
+                  f"uploaded assets; using pinned llama.cpp {_FALLBACK_TAG} - "
+                  "rerun later for the latest.[/yellow]")
     return _FALLBACK_TAG
 
 
@@ -619,26 +635,23 @@ def nvidia_preflight() -> NvidiaInfo:
 
 
 def _release_assets(tag: str) -> list:
-    """The asset list for a release tag, or [] if the API is unavailable.
-    If the API returns an empty assets list but includes download links in the
-    release body, those links are extracted and returned as simulated assets."""
+    """The REAL uploaded asset list for a release tag, or [] if the API is
+    unavailable or the release has none (yet).
+
+    Deliberately does NOT fall back to scraping download links out of the
+    release body: those links describe files upstream's CI intends to upload,
+    not files that necessarily exist yet (see ``_latest_tag``), so trusting them
+    produces a plausible-looking match that 404s instead of a caught "no
+    assets" case. ``_latest_tag`` already skips a release in that state; a tag
+    passed in explicitly by the caller (--url, --force, etc.) should get an
+    honest empty list rather than a guess."""
     api = f"https://api.github.com/repos/{_UPSTREAM_REPO}/releases/tags/{tag}"
     try:
         req = urllib.request.Request(api, headers={"Accept": "application/vnd.github+json",
                                                    "User-Agent": "localm-setup-llama"})
         with urllib.request.urlopen(req, timeout=10) as r:
             data = json.loads(r.read().decode("utf-8"))
-            assets = data.get("assets", [])
-            body = data.get("body", "")
-            if not assets and body:
-                urls = re.findall(r'https://github\.com/[^/]+/[^/]+/releases/download/[^/]+/[^\s\)"\'>]+', body)
-                for url in urls:
-                    assets.append({
-                        "name": url.split("/")[-1],
-                        "browser_download_url": url,
-                        "size": 0
-                    })
-            return assets
+            return data.get("assets", [])
     except Exception:
         return []
 
