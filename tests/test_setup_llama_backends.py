@@ -180,3 +180,55 @@ def test_download_restores_timeout_on_success(monkeypatch, tmp_path):
 
     assert restored[0] == sl._DOWNLOAD_STALL_TIMEOUT
     assert restored[-1] is sentinel
+
+
+def test_resolve_backend_asset_resolves_sha256(monkeypatch):
+    dummy_assets = [
+        {
+            "name": "llama-b9870-bin-win-vulkan-x64.zip",
+            "browser_download_url": "https://dummy.github/releases/download/b9870/llama-vulkan.zip",
+            "digest": "sha256:dummysha256value"
+        }
+    ]
+    monkeypatch.setattr(sl, "_release_assets", lambda tag, repo=None: dummy_assets)
+    monkeypatch.setattr(sl, "_latest_tag", lambda: "b9870")
+    monkeypatch.setattr(sl, "_platform_key", lambda: "win32")
+
+    url, sha = sl._resolve_backend_asset("vulkan")
+    assert url == "https://dummy.github/releases/download/b9870/llama-vulkan.zip"
+    assert sha == "dummysha256value"
+
+
+def test_resolve_backend_asset_fallback_uses_pinned_sha256(monkeypatch):
+    monkeypatch.setattr(sl, "_release_assets", lambda tag, repo=None: [])
+    monkeypatch.setattr(sl, "_latest_tag", lambda: "b9870")
+    monkeypatch.setattr(sl, "_platform_key", lambda: "win32")
+
+    url, sha = sl._resolve_backend_asset("vulkan")
+    assert "llama-b9870-bin-win-vulkan-x64.zip" in url
+    assert sha == "8687a8405447853ccbd6b15bd7ccda23bb79cf85dd83243401e514bd9e45ed8a"
+
+
+def test_provision_backend_verifies_default_sha256(monkeypatch):
+    from pathlib import Path
+    passed_sha256 = []
+    def fake_fetch_and_place(url, target, sha256=None):
+        passed_sha256.append(sha256)
+        return 1
+
+    monkeypatch.setattr(sl, "_fetch_and_place", fake_fetch_and_place)
+    monkeypatch.setattr(sl, "_resolve_backend_asset", lambda backend: ("https://dummy.url", "dummysha"))
+
+    sl._provision_backend("vulkan", Path("dummy_target"), sha256=None, with_cudart=False)
+    assert passed_sha256 == ["dummysha"]
+
+
+def test_custom_url_warning_printed(monkeypatch):
+    monkeypatch.setattr(sl, "_fetch_and_place", lambda url, target, sha256=None: 1)
+    monkeypatch.setattr(sl, "_clear_target", lambda target: None)
+    monkeypatch.setattr(sl, "_verify", lambda: None)
+
+    from click.testing import CliRunner
+    runner = CliRunner()
+    result = runner.invoke(sl.main, ["--url", "https://dummy.invalid/llama.zip", "--force"])
+    assert "Warning: Custom URL download is unverified" in result.output

@@ -468,7 +468,7 @@ def test_provision_backend_cuda_no_assets_uses_templated_url(monkeypatch, tmp_pa
     monkeypatch.setattr(sl.sys, "platform", "win32")
     monkeypatch.setattr(sl, "_latest_tag", lambda: "b9999")
     monkeypatch.setattr(sl, "_resolve_cuda_pair", lambda tag: (None, None))
-    monkeypatch.setattr(sl, "_resolve_backend_url", lambda backend: "https://templated/cuda.zip")
+    monkeypatch.setattr(sl, "_resolve_backend_asset", lambda backend: ("https://templated/cuda.zip", "FALLBACK_SHA"))
     calls = []
     monkeypatch.setattr(sl, "_fetch_and_place",
                         lambda url, target, sha256=None: calls.append((url, sha256)))

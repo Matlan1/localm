@@ -140,6 +140,13 @@ def _backend_can_embed(engines: "EngineCache") -> bool:
 
     Avoids loading the model at startup by checking the registry for GGUF suffix
     if the engine object is not yet instantiated/cached."""
+    if getattr(engines, "_factory", None) != getattr(engines, "_build_engine", None):
+        try:
+            backend = getattr(engines.get(None), "_backend", None)
+            return getattr(backend, "can_embed", True) is not False
+        except Exception:
+            return True
+
     if engines._engine is not None:
         backend = getattr(engines._engine, "_backend", None)
         return getattr(backend, "can_embed", True) is not False
