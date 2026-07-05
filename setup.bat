@@ -14,6 +14,7 @@ rem  is the universal default (any GPU, no vendor toolkit); CUDA/ROCm are
 rem  offered for peak performance; CPU for machines with no GPU.
 rem ===========================================================================
 setlocal EnableDelayedExpansion
+set LOCALM_SETUP=1
 cd /d "%~dp0"
 title LocaLM setup
 
