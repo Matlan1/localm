@@ -132,6 +132,12 @@ def _quote_single_keys(s: str) -> str:
     return re.sub(r"'([^']+)':", r'"\1":', s)
 
 
+def _fix_unescaped_backslashes(s: str) -> str:
+    """Escapes backslashes in JSON strings that are not part of valid escape sequences.
+    This helps recover Windows paths (e.g. drive-letter style paths) that models fail to escape."""
+    return re.sub(r'(?<!\\)\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})', r'\\\\', s)
+
+
 def _lenient_json(body: str) -> Optional[dict]:
     """
     JSON parse tolerating the mangles local finetunes actually produce:
@@ -144,6 +150,7 @@ def _lenient_json(body: str) -> Optional[dict]:
     - Python triple-quoted string VALUES:  {"content": \"\"\"...\"\"\"} (a very
       common local-model mistake that used to silently break write_file)
     - trailing commas before } or ]
+    - unescaped backslashes in Windows file paths
     """
     candidates = [body]
     if body.startswith("{{") and body.endswith("}}"):
@@ -155,7 +162,8 @@ def _lenient_json(body: str) -> Optional[dict]:
         _quote_single_keys,
         _detriple_quoted,
         _strip_trailing_commas,
-        lambda s: _strip_trailing_commas(_detriple_quoted(_quote_single_keys(s))),
+        _fix_unescaped_backslashes,
+        lambda s: _fix_unescaped_backslashes(_strip_trailing_commas(_detriple_quoted(_quote_single_keys(s)))),
     )
     for cand in candidates:
         for fix in transforms:

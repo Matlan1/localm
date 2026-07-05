@@ -264,6 +264,18 @@ class TestRecoveredMalformations:
         assert len(calls) == 1
         assert calls[0].args["content"] == "x = 1"
 
+    def test_unescaped_backslashes_in_path_and_content(self):
+        text = (
+            '<tool_call>\n'
+            '{"name": "write_file", "args": {"path": "localm\\appface.py", "content": "def appface():\\n    icon_path = r\'D:\\\\MockFolder\\\\UserName\\AppData\\\\Local\\\\Programs\\\\LocalCoder\\\\appface.exe\'"}}\n'
+            '</tool_call>'
+        )
+        calls = parse_tool_calls(text, tool_names={"write_file"})
+        assert len(calls) == 1
+        assert calls[0].args["path"] == "localm\\appface.py"
+        assert "UserName\\AppData" in calls[0].args["content"]
+
+
 
 class TestNonStringName:
     """A tool call whose "name" is not a string is malformed, same as broken
