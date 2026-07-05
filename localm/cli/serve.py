@@ -1,14 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-import os
-import sys
 
 import click
 
-from ..config import load_config
-from ..model_manager import get_model_info
 from ._core import (
-    console, main, _complete_model_name,
-    _exposed_bind_warning, _setup_tls_or_exit,
+    main, _complete_model_name,
 )
 
 

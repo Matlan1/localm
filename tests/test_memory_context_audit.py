@@ -4,18 +4,15 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
 from fastapi import Request
 
 from localm.inference.backends.base import BaseBackend
-from localm.inference.engine import Engine
 from localm.inference.backends.gguf import GgufBackend
 from localm.inference.backends.hf import HFBackend
 from localm.plugins.builtin.memory.plug import (
-    _recent_sessions_text, _memory_inlet, _chat_store,
-    memory_get, memory_put, memory_append, memory_patch, memory_delete
+    _recent_sessions_text, _memory_inlet, memory_get, memory_put
 )
 from localm.inference.chat_pipeline import ChatHookContext
 from pydantic import BaseModel

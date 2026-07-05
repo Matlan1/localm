@@ -274,7 +274,11 @@ def test_shipped_example_workflow_uses_fast_dequant():
 
 def test_comfy_launch_argv_safety(tmp_path, monkeypatch):
     import sys
+    import subprocess
     from localm.media import comfy_client
+    
+    if not hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
+        monkeypatch.setattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 512, raising=False)
     
     # We want to check how argv is calculated inside comfy_client.py
     # Since we can mock subprocess.Popen, let's call _spawn_launcher and check spawned argv
