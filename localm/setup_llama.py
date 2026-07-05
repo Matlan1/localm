@@ -69,6 +69,51 @@ DEFAULT_URL = (
 _UPSTREAM_REPO = "ggml-org/llama.cpp"
 _FALLBACK_TAG = "b9870"
 
+# Pinned fallback checksums for tag b9870 and b1288 (lemonade AMD build) release assets
+_PINNED_FALLBACK_SHA256 = {
+    # tag b1288 ROCm assets
+    "llama-b1288-windows-rocm-gfx103X-x64.zip": "18a85d4be9052f8377ca7e7ade4bae6c0a2818b3367989a6eb3297bcb4282b5e",
+    "llama-b1288-windows-rocm-gfx110X-x64.zip": "1271b7088d934e6f443ac7e32b206a2aaa9297b232f52492f0039d9a8a8820aa",
+    "llama-b1288-windows-rocm-gfx1150-x64.zip": "33f7f8917ce0dd3f09d9b84269d60db286f2684b238f6b558c0788a4ef54df3a",
+    "llama-b1288-windows-rocm-gfx1151-x64.zip": "c94198d329256ac6f33c2e9701885a960574cd79d9df61422091e60976bd572f",
+    "llama-b1288-windows-rocm-gfx120X-x64.zip": "d7416e3a5bf7c4c058b5e729cf98d540eaf095614e66d4b207fc38e27af8ae24",
+    "llama-b1288-windows-rocm-gfx908-x64.zip": "fd2fb30d31671fd16ba4e4e9288c2706c913d02725a700409bbcc80143318e8f",
+    "llama-b1288-windows-rocm-gfx90a-x64.zip": "6f6d49bda990ecb2795ece9c1bf04c6f5827c770889dabe842f98b8d82e5c927",
+    "llama-b1288-ubuntu-rocm-gfx103X-x64.zip": "bc793bf354444a1fe3a2c57aa4a190da6c00bf6953c6864de7ab83208cb1a1a5",
+    "llama-b1288-ubuntu-rocm-gfx110X-x64.zip": "3bd617bbb21731d727cf5948e0536caa6d7be4d7605542306d219704d6a01da3",
+    "llama-b1288-ubuntu-rocm-gfx1150-x64.zip": "3db631e7fded551af4be1e63ffa74c78b1cfa493f83a28fb54ef7f5cdd2a7d2a",
+    "llama-b1288-ubuntu-rocm-gfx1151-x64.zip": "4fec75e80673511a43c4f98e33ee019143bf2193778c17b1b26ef3e20afdad2e",
+    "llama-b1288-ubuntu-rocm-gfx120X-x64.zip": "f0f5534e902cacbd1a159bca3708abb3dd76a1de597227896ee7f3e561b24381",
+    "llama-b1288-ubuntu-rocm-gfx908-x64.zip": "bb54bdc6e4eafa0a20888613f8b62c6caf79b1bd941fb3e2d11f4741b9977984",
+    "llama-b1288-ubuntu-rocm-gfx90a-x64.zip": "8c1d54115b820f30c6fff64b4a37bed6700dd4b882c39ee09d638558798cd19b",
+    # tag b9870 upstream assets
+    "cudart-llama-bin-win-cuda-12.4-x64.zip": "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6",
+    "cudart-llama-bin-win-cuda-13.3-x64.zip": "1462a050eb4c684921ba51dcc4cc488a036674c3e73e9945ee705b854808d03e",
+    "llama-b9870-bin-android-arm64.tar.gz": "f9f8e6207ba97b6d34c98e6877c8beba23d462f08a73ace59ffb2ff5d134d26c",
+    "llama-b9870-bin-macos-arm64.tar.gz": "9384fc29bfad58a665a617f3c5e490d5ab9f1f5506383b011d912f1bcc92804a",
+    "llama-b9870-bin-macos-x64.tar.gz": "8f12b275bec2083caa13643471bd86083549659f48b2d1fad72c61e84bd5ee59",
+    "llama-b9870-bin-ubuntu-arm64.tar.gz": "227564dead2145adf388d8fe3edbee8aeeea61e53cb151d03375661885ad8b1b",
+    "llama-b9870-bin-ubuntu-openvino-2026.2.1-x64.tar.gz": "e6892a3531d70d079803075c8cfef9429a9f55510f58e39e8eb10ed84da3e18b",
+    "llama-b9870-bin-ubuntu-rocm-7.2-x64.tar.gz": "b15e673147678ec5d89002cd77316f2eca1aa006e7a23b8fef499b6d5c7e9723",
+    "llama-b9870-bin-ubuntu-s390x.tar.gz": "dbe9d21482f356fc8e058bcc35594fb59d69082444fb338f5bcf4bdb35f631e2",
+    "llama-b9870-bin-ubuntu-sycl-fp16-x64.tar.gz": "77194249f0c800c26230c1ce919e282ab59647b75f8c9fc3e3f5ed59ab711d3a",
+    "llama-b9870-bin-ubuntu-sycl-fp32-x64.tar.gz": "0abb480beb83f230678b397b93b9316b829485008819616abd6509d883ccd06a",
+    "llama-b9870-bin-ubuntu-vulkan-arm64.tar.gz": "ba444f0d50b1e3807e8fab44adeb05455fa2da04f0c97f2e40fdbb3c410b0e46",
+    "llama-b9870-bin-ubuntu-vulkan-x64.tar.gz": "e8a54099fb3e7afc48d85992ce45b5529298819da814d539a0593da61efe65c2",
+    "llama-b9870-bin-ubuntu-x64.tar.gz": "16897263ccd016dd76c72a4d9b6ee27f975dae19bf652b4855b37dffbe7d4df1",
+    "llama-b9870-bin-win-cpu-arm64.zip": "97b77bfbfd1889da5485552d0103f1e73a13b9ec4dfe924bf6d98543d225dab1",
+    "llama-b9870-bin-win-cpu-x64.zip": "71be86e7af277e9503847c6050948ecd943d5e34b941e178a8af0c161b2d9a9e",
+    "llama-b9870-bin-win-cuda-12.4-x64.zip": "10ced0b05eb1fdf47981dfe39e820a9465804b9250811f1173d935a22d336d6f",
+    "llama-b9870-bin-win-cuda-13.3-x64.zip": "864a0a80b802124b34f19d3ce4cf327a2bd5fe9d41fe2dc21f7c63a0ed561979",
+    "llama-b9870-bin-win-hip-radeon-x64.zip": "834196230bffe3847a553b680398c1438bfc85bdbab2d5061be28db5fd8648bb",
+    "llama-b9870-bin-win-opencl-adreno-arm64.zip": "5b86328a27841d1aae3c477a414782d92f8135e46f5113dbca102474ae08115e",
+    "llama-b9870-bin-win-openvino-2026.2.1-x64.zip": "802ac0c28c4096d126062644b0bcf94d4cd13c4dc7eed08f835b29164f3e6643",
+    "llama-b9870-bin-win-sycl-x64.zip": "3b96c98aacac996ece92cd532c0a1a36215f14cd01c840c097fe72812c5d0c4b",
+    "llama-b9870-bin-win-vulkan-x64.zip": "8687a8405447853ccbd6b15bd7ccda23bb79cf85dd83243401e514bd9e45ed8a",
+    "llama-b9870-ui.tar.gz": "c0f6299ff94678fe9799cd09ef6c7f2d6fae9f55b86365b8825b5fc9c93772fa",
+    "llama-b9870-xcframework.zip": "792cb6560abc2e04262b105eb9ca3d5890814f358f998adea4e28497788e59f7",
+}
+
 # Per-backend asset matcher: substrings that must appear in the release asset
 # name for (platform, backend). Substring matching (not exact names) keeps this
 # robust to upstream version suffixes drifting (e.g. cuda-12.4, rocm-7.2).
@@ -265,18 +310,30 @@ def _latest_tag() -> str:
     return _FALLBACK_TAG
 
 
-def _resolve_backend_url(backend: str) -> str:
-    """Resolve a backend name to a downloadable archive URL.
+def _resolve_backend_asset(backend: str) -> tuple[str, Optional[str]]:
+    """Resolve a backend name to a (url, sha256_digest) pair.
 
-    ``amd-rocm`` is the self-contained lemonade build (special-cased). Every
-    other backend maps to an upstream llama.cpp release asset for this platform.
-    Raises ``click.ClickException`` if the backend is not available here."""
+    If the release listing is available, resolves it dynamically and gets the
+    sha256 from the digest field. If offline, falls back to the templated guess
+    and queries the local pinned checksum dictionary.
+    """
     if backend == "amd-rocm":
         if sys.platform != "win32":
             raise click.ClickException(
                 "the self-contained 'amd-rocm' build is Windows-only; on Linux "
                 "use --backend hip (needs ROCm) or build with --from.")
-        return DEFAULT_URL
+        # Try to resolve dynamically first
+        tag = "b1288"
+        assets = _release_assets(tag, repo="lemonade-sdk/llamacpp-rocm")
+        for a in assets:
+            if "windows-rocm-gfx103X" in a.get("name", ""):
+                url = a.get("browser_download_url") or DEFAULT_URL
+                digest = a.get("digest")
+                sha = digest.split("sha256:")[-1].strip() if digest and "sha256:" in digest else None
+                if not sha:
+                    sha = "18a85d4be9052f8377ca7e7ade4bae6c0a2818b3367989a6eb3297bcb4282b5e"
+                return url, sha
+        return DEFAULT_URL, "18a85d4be9052f8377ca7e7ade4bae6c0a2818b3367989a6eb3297bcb4282b5e"
 
     plat = _platform_key()
     matchers = _ASSET_MATCH.get(plat, {}).get(backend)
@@ -287,31 +344,37 @@ def _resolve_backend_url(backend: str) -> str:
             f"({plat}). Available: {avail or 'none'}.")
 
     tag = _latest_tag()
-    # Ask the release for its assets so we match the real (version-suffixed)
-    # name; fall back to a templated guess if the asset list is unavailable.
     assets = _release_assets(tag)
     for a in assets:
         name = str(a.get("name", "")).lower()
-        # Exclude the cudart RUNTIME bundle: cudart-llama-bin-win-cuda-12.x
-        # contains the same "bin-win-cuda-12" fragment as the build and is
-        # often listed first, so without this the cuda build resolves to the
-        # runtime-only zip (no llama.dll) and provisioning aborts with "the
-        # archive did not contain llama.dll" (NEW-CUDADLL). The build is
-        # always llama-..., never cudart-..., so this is safe for every backend.
         if (any(m in name for m in matchers) and "cudart" not in name
                 and a.get("browser_download_url")):
-            return a["browser_download_url"]
-    # Fallback: construct the canonical URL from the first matcher token. The
-    # asset list could not be fetched, so this URL is a guess that was NOT
-    # confirmed against the release - warn so a later 404 is attributable to it
-    # (offline/rate-limited) rather than looking like a silent failure.
+            url = a["browser_download_url"]
+            digest = a.get("digest")
+            sha = digest.split("sha256:")[-1].strip() if digest and "sha256:" in digest else None
+            if not sha:
+                sha = _PINNED_FALLBACK_SHA256.get(a.get("name", ""))
+            return url, sha
+
+    # Fallback: construct the canonical URL from the first matcher token.
     stem = matchers[0]
     ext = "zip" if plat == "win32" else "tar.gz"
     fname = f"llama-{tag}-{stem}.{ext}"
     guess = f"https://github.com/{_UPSTREAM_REPO}/releases/download/{tag}/{fname}"
+    sha = _PINNED_FALLBACK_SHA256.get(fname)
     console.print(f"[yellow]Could not verify release asset list; using unverified URL: {guess}[/yellow]\n"
                   "[yellow]If download fails, pass --from <build dir> or --url <archive>.[/yellow]")
-    return guess
+    return guess, sha
+
+
+def _resolve_backend_url(backend: str) -> str:
+    """Resolve a backend name to a downloadable archive URL.
+
+    ``amd-rocm`` is the self-contained lemonade build (special-cased). Every
+    other backend maps to an upstream llama.cpp release asset for this platform.
+    Raises ``click.ClickException`` if the backend is not available here."""
+    url, _sha = _resolve_backend_asset(backend)
+    return url
 
 
 # --------------------------------------------------------------------------- #
@@ -634,7 +697,7 @@ def nvidia_preflight() -> NvidiaInfo:
     return info
 
 
-def _release_assets(tag: str) -> list:
+def _release_assets(tag: str, repo: str = _UPSTREAM_REPO) -> list:
     """The REAL uploaded asset list for a release tag, or [] if the API is
     unavailable or the release has none (yet).
 
@@ -645,7 +708,7 @@ def _release_assets(tag: str) -> list:
     assets" case. ``_latest_tag`` already skips a release in that state; a tag
     passed in explicitly by the caller (--url, --force, etc.) should get an
     honest empty list rather than a guess."""
-    api = f"https://api.github.com/repos/{_UPSTREAM_REPO}/releases/tags/{tag}"
+    api = f"https://api.github.com/repos/{repo}/releases/tags/{tag}"
     try:
         req = urllib.request.Request(api, headers={"Accept": "application/vnd.github+json",
                                                    "User-Agent": "localm-setup-llama"})
@@ -733,24 +796,40 @@ def _provision_backend(chosen: str, target: Path, sha256: Optional[str],
             # warn that the runtime bundle could not be resolved automatically.
             console.print("[yellow]Could not resolve CUDA assets; fetching build only.[/yellow]\n"
                           "[yellow]If it fails to load, use --backend vulkan or install CUDA Toolkit.[/yellow]")
-            _fetch_and_place(_resolve_backend_url("cuda"), target, sha256)
+            url, fallback_sha = _resolve_backend_asset("cuda")
+            _fetch_and_place(url, target, sha256 or fallback_sha)
             return
+        
+        # Resolve build sha256
+        build_digest = build.get("digest")
+        build_sha = build_digest.split("sha256:")[-1].strip() if build_digest and "sha256:" in build_digest else None
+        if not build_sha:
+            build_sha = _PINNED_FALLBACK_SHA256.get(build["name"])
+        
         console.print(f"[dim]CUDA build:[/dim] {build['name']} ({_human_mb(build.get('size'))})")
-        _fetch_and_place(build["browser_download_url"], target, sha256)
+        _fetch_and_place(build["browser_download_url"], target, sha256 or build_sha)
         if cudart is not None:
             if sha256:
                 # The pin is a single hash; it can only cover the build. Be honest
                 # that the cudart bundle is validated by size + archive shape, not
                 # by the pinned digest (upstream publishes no per-asset hash here).
                 console.print("[yellow]Note:[/yellow] --sha256 pins the CUDA build only.")
+            
+            # Resolve cudart sha256
+            cudart_digest = cudart.get("digest")
+            cudart_sha = cudart_digest.split("sha256:")[-1].strip() if cudart_digest and "sha256:" in cudart_digest else None
+            if not cudart_sha:
+                cudart_sha = _PINNED_FALLBACK_SHA256.get(cudart["name"])
+            
             console.print(f"[dim]CUDA runtime:[/dim] {cudart['name']} "
                           f"({_human_mb(cudart.get('size'))}) - no Toolkit install needed")
-            _fetch_and_place(cudart["browser_download_url"], target)
+            _fetch_and_place(cudart["browser_download_url"], target, cudart_sha)
         else:
             console.print("[yellow]No cudart bundle found; CUDA Toolkit may be required.[/yellow]")
         return
     # Every other backend is a single archive resolved from the chosen name.
-    _fetch_and_place(_resolve_backend_url(chosen), target, sha256)
+    url, fallback_sha = _resolve_backend_asset(chosen)
+    _fetch_and_place(url, target, sha256 or fallback_sha)
 
 
 def _native_loads_ok() -> tuple:
@@ -1087,6 +1166,8 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
                           "See docs/gpu-setup.md.")
             sys.exit(1)
     elif url:
+        if not sha256:
+            console.print("[yellow]Warning: Custom URL download is unverified (no --sha256 provided).[/yellow]")
         console.print(f"[dim]Fetching:[/dim] {url}")
         try:
             _clear_target(target)
