@@ -11,6 +11,7 @@
 # =============================================================================
 set -euo pipefail
 cd "$(dirname "$0")"
+export LOCALM_SETUP=1
 
 YES=0; UNINSTALL=0; PURGE=0
 for arg in "$@"; do

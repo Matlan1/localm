@@ -16,6 +16,8 @@ def _warn_unconfigured_home(path: Path) -> None:
     """Surface (once) that no data dir was configured, so a missing / lost config
     is VISIBLE instead of silently masked (do-not-hide-problems). stderr, not the
     logger: this runs at import time before logging is wired."""
+    if os.environ.get("LOCALM_SETUP") == "1":
+        return
     global _warned_unconfigured_home
     if _warned_unconfigured_home:
         return
