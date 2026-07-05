@@ -571,7 +571,6 @@ def principal_id(request: Request) -> Optional[str]:
     is identical whether the key arrives via the Authorization header or the
     session cookie. Used to bind a background job to the key that created it
     (KEY-SCOPE-2), so only that key (or an admin/owner) may stream or cancel it."""
-    from localm import scopes
     from localm.auth import any_key_configured
     if not any_key_configured():
         return None

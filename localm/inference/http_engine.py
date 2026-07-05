@@ -75,6 +75,26 @@ class HttpEngine:
         model is not loaded)."""
         return max(1, len(text or "") // 4)
 
+    def context_capacity(self) -> Optional[int]:
+        """The loaded model's RESOLVED context ceiling from the server's
+        /v1/config (VRAM-derived under ctx_auto), cached after the first
+        successful fetch. Best-effort: None on any error."""
+        if hasattr(self, "_ctx_capacity_cached") and self._ctx_capacity_cached:
+            return self._ctx_capacity
+        self._ctx_capacity_cached = True
+        self._ctx_capacity = None
+        try:
+            import requests
+            resp = requests.get(f"{self._base}/config",
+                                headers=self._headers(), timeout=15)
+            if resp.status_code == 200:
+                v = resp.json().get("effective_ctx_max")
+                if isinstance(v, int) and v > 0:
+                    self._ctx_capacity = v
+        except Exception:
+            self._ctx_capacity = None
+        return self._ctx_capacity
+
     # --- chat --------------------------------------------------------------- #
     def _headers(self) -> dict:
         h = {"Content-Type": "application/json"}

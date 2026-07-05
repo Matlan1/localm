@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Optional
 
 import click
 
@@ -47,7 +46,6 @@ from ..display import (
     print_info,
     print_warning,
 )
-from ..server import find_free_port
 from .goal import _run_goal_loop
 from .estimate import _run_estimate
 from .repl import _repl
@@ -498,7 +496,6 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
                 console.print("[dim]No server running. Starting one in the background...[/dim]")
                 import subprocess
                 import time
-                import sys
                 from localm import instances
                 from localm.config import home_dir
 

@@ -1,16 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-import asyncio
-import time
-from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
-from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from localm.inference import http_server as hs
-from localm.inference.engine import Engine
-from localm.inference.protocol import ChatRequest, EmbeddingRequest, CompletionRequest
 
 
 class FakeEngine:

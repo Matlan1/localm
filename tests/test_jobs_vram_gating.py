@@ -2,7 +2,6 @@
 """Tests for VRAM gating and engine reuse in scheduled jobs."""
 
 from unittest.mock import MagicMock, patch
-import pytest
 
 from localm.plugins.builtin.jobs.runner import _load_engine
 

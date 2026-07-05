@@ -147,3 +147,45 @@ def test_remote_model_status_distinguishes_no_model_from_cannot_read(monkeypatch
 
     monkeypatch.setattr("requests.get", boom)
     assert remote_model_status("http://x/v1") == ("unknown", None)
+
+
+def test_context_capacity_fetches_and_caches(monkeypatch):
+    eng = HttpEngine("http://x/v1", token="t", model="m")
+    calls = []
+
+    def fake_get(url, headers=None, timeout=None):
+        calls.append((url, headers))
+        r = MagicMock()
+        r.status_code = 200
+        r.json = lambda: {"effective_ctx_max": 8192}
+        return r
+
+    monkeypatch.setattr("requests.get", fake_get)
+    # First fetch: calls requests.get
+    assert eng.context_capacity() == 8192
+    assert len(calls) == 1
+    assert calls[0][0] == "http://x/v1/config"
+    assert calls[0][1]["Authorization"] == "Bearer t"
+
+    # Second fetch: uses cached value
+    assert eng.context_capacity() == 8192
+    assert len(calls) == 1
+
+
+def test_context_capacity_degrades_gracefully_on_error(monkeypatch):
+    eng = HttpEngine("http://x/v1", token="t", model="m")
+
+    # Server error
+    r = MagicMock()
+    r.status_code = 500
+    monkeypatch.setattr("requests.get", lambda *a, **k: r)
+    assert eng.context_capacity() is None
+
+    # Reset cache
+    eng._ctx_capacity_cached = False
+    # Network exception
+    def boom(*a, **k):
+        raise Exception("refused")
+    monkeypatch.setattr("requests.get", boom)
+    assert eng.context_capacity() is None
+
