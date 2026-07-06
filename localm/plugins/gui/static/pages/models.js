@@ -21,29 +21,70 @@ export function fmtSize(bytes) {
   return (bytes / GIB).toFixed(2) + " GB";   // binary GiB, labelled GB (see app.js)
 }
 
+let currentTypeFilter = "all";
+
 export async function refreshModelsPage() {
   await refreshModels();
+  
+  // Toggle the search box vs placeholder based on selected tab type
+  const searchBox = $("disc-search-box");
+  const placeholder = $("disc-placeholder");
+  if (searchBox && placeholder) {
+    if (currentTypeFilter === "all" || currentTypeFilter === "llm") {
+      searchBox.style.display = "block";
+      placeholder.style.display = "none";
+    } else {
+      searchBox.style.display = "none";
+      placeholder.style.display = "block";
+    }
+  }
+
+  // Show scan row on media model tabs
+  const scanRow = $("models-scan-row");
+  if (scanRow) {
+    scanRow.style.display = (currentTypeFilter !== "all" && currentTypeFilter !== "llm") ? "flex" : "none";
+  }
+
   const box = $("models-table");
   box.replaceChildren();
-  if (!modelCache.models.length) {
+
+  const typeParam = currentTypeFilter === "all" ? "" : "?type=" + currentTypeFilter;
+  let models = [];
+  try {
+    const r = await fetch("/api/models" + typeParam, { headers: authHeaders() });
+    const data = await r.json();
+    models = (data && Array.isArray(data.models)) ? data.models : [];
+  } catch (e) {
+    box.appendChild(el("div", "sub", "Error loading models: " + e.message));
+    return;
+  }
+
+  if (!models.length) {
     box.appendChild(emptyState("models", "No models yet",
       "Pull a model above, or search HuggingFace to add your first one."));
     return;
   }
+
   const table = el("table", "data-table");
   const thead = el("thead");
   const hr = el("tr");
-  for (const h of ["Name", "Source", "Size", ""]) hr.appendChild(el("th", "", h));
+  for (const h of ["Name", "Role", "Source", "Size", ""]) hr.appendChild(el("th", "", h));
   thead.appendChild(hr);
   table.appendChild(thead);
   const tbody = el("tbody");
-  for (const m of modelCache.models) {
+  for (const m of models) {
     const tr = el("tr");
     const nameTd = el("td", "name-cell");
     nameTd.appendChild(iconEl("models", "ic ic-model"));
     nameTd.appendChild(el("span", "name", m.name));
     if (m.active) nameTd.appendChild(el("span", "active-tag", "active"));
     tr.appendChild(nameTd);
+    
+    // Role column (using job-state badge layout)
+    const roleTd = el("td", "mono");
+    roleTd.appendChild(el("span", "job-state", m.model_type || "llm"));
+    tr.appendChild(roleTd);
+    
     tr.appendChild(el("td", "mono", m.source || ""));
     tr.appendChild(el("td", "mono", fmtSize(m.size_bytes)));
 
@@ -52,56 +93,56 @@ export async function refreshModelsPage() {
     const detail = el("button", "", "info");
     detail.onclick = () => showModelDetail(m.name);
     actions.appendChild(detail);
-    if (!m.active) {
-      const use = el("button", "primary", "use");
-      use.onclick = async () => {
-        use.disabled = true;
-        try {
-          const res = await switchModel(m.name);
-          // Superseded: another model was picked while this was loading - the
-          // newer request owns the outcome, so skip the success toast/refresh here.
-          if (!res || res.status !== "superseded") {
-            toast("Model switched to " + m.name);
-            refreshModelsPage();
-          }
-        } catch (e) {
-          toast("Load failed: " + e.message, true);
-        } finally { use.disabled = false; }
-      };
-      actions.appendChild(use);
-    }
-    const alias = el("button", "", "alias");
-    alias.onclick = async () => {
-      const name = prompt(`New alias for '${m.name}':`);
-      if (!name) return;
-      const r = await fetch("/api/models/alias", {
-        method: "POST", headers: authHeaders(),
-        body: JSON.stringify({ model: m.name, alias: name.trim() }),
-      });
-      // .catch: a plain-text 500 body would otherwise throw here and kill the
-      // error toast entirely (the failure would land only in the client log).
-      const data = await r.json().catch(() => ({}));
-      if (r.ok) { toast(`Aliased as '${name.trim()}'`); refreshModelsPage(); }
-      else toast(data.detail || "Alias failed", true);
-    };
-    actions.appendChild(alias);
-    if (!m.active) {
-      const rm = el("button", "danger", "remove");
-      rm.onclick = async () => {
-        if (!confirm(`Remove '${m.name}'? The file is deleted only when this is its last name and it lives in the data directory.`)) return;
-        const r = await fetch("/api/models/remove", {
+    
+    // Only LLMs support use/alias/remove in Phase 1
+    const isLlm = !m.model_type || m.model_type === "llm";
+    if (isLlm) {
+      if (!m.active) {
+        const use = el("button", "primary", "use");
+        use.onclick = async () => {
+          use.disabled = true;
+          try {
+            const res = await switchModel(m.name);
+            if (!res || res.status !== "superseded") {
+              toast("Model switched to " + m.name);
+              refreshModelsPage();
+            }
+          } catch (e) {
+            toast("Load failed: " + e.message, true);
+          } finally { use.disabled = false; }
+        };
+        actions.appendChild(use);
+      }
+      const aliasBtn = el("button", "", "alias");
+      aliasBtn.onclick = async () => {
+        const name = prompt(`New alias for '${m.name}':`);
+        if (!name) return;
+        const r = await fetch("/api/models/alias", {
           method: "POST", headers: authHeaders(),
-          body: JSON.stringify({ model: m.name }),
+          body: JSON.stringify({ model: m.name, alias: name.trim() }),
         });
-        // .catch: keep the error toast alive on a non-JSON (plain-text 500) body.
         const data = await r.json().catch(() => ({}));
-        if (!r.ok) { toast(data.detail || "Remove failed", true); return; }
-        const end = await streamJob(data.job_id, null);
-        toast(end.status === "done" ? `Removed '${m.name}'` : "Remove failed",
-              end.status !== "done");
-        refreshModelsPage();
+        if (r.ok) { toast(`Aliased as '${name.trim()}'`); refreshModelsPage(); }
+        else toast(data.detail || "Alias failed", true);
       };
-      actions.appendChild(rm);
+      actions.appendChild(aliasBtn);
+      if (!m.active) {
+        const rm = el("button", "danger", "remove");
+        rm.onclick = async () => {
+          if (!confirm(`Remove '${m.name}'? The file is deleted only when this is its last name and it lives in the data directory.`)) return;
+          const r = await fetch("/api/models/remove", {
+            method: "POST", headers: authHeaders(),
+            body: JSON.stringify({ model: m.name }),
+          });
+          const data = await r.json().catch(() => ({}));
+          if (!r.ok) { toast(data.detail || "Remove failed", true); return; }
+          const end = await streamJob(data.job_id, null);
+          toast(end.status === "done" ? `Removed '${m.name}'` : "Remove failed",
+                end.status !== "done");
+          refreshModelsPage();
+        };
+        actions.appendChild(rm);
+      }
     }
     tr.appendChild(actions);
     tbody.appendChild(tr);
@@ -113,12 +154,12 @@ export async function refreshModelsPage() {
 export async function showModelDetail(name) {
   const r = await fetch(`/v1/models/${encodeURIComponent(name)}`, {
     headers: authHeaders() });
-  // .catch: keep the error toast alive on a non-JSON (plain-text 500) body.
   const data = await r.json().catch(() => ({}));
   if (!r.ok) { toast(data.detail || "Lookup failed", true); return; }
   openModal("Model - " + name, (body) => {
     const rows = [
       ["Path", data.path],
+      ["Type", data.model_type || "llm"],
       ["Source", data.source],
       ["Size", fmtSize(data.size_bytes)],
       ["SHA256", data.sha256 || "(not computed yet - hashes lazily on use)"],
@@ -721,4 +762,46 @@ $("pull-start").onclick = async () => {
     $("pull-start").disabled = false;
   }
 };
+
+
+// Bind tab click handlers
+const tabNav = $("models-tab-nav");
+if (tabNav) {
+  for (const btn of tabNav.querySelectorAll(".tab-btn")) {
+    btn.onclick = () => {
+      for (const b of tabNav.querySelectorAll(".tab-btn")) {
+        b.classList.remove("active");
+      }
+      btn.classList.add("active");
+      currentTypeFilter = btn.dataset.type;
+      refreshModelsPage();
+    };
+  }
+}
+
+// Bind Scan button click handler
+const scanBtn = $("models-scan-btn");
+if (scanBtn) {
+  scanBtn.onclick = async () => {
+    scanBtn.disabled = true;
+    toast("Scanning ComfyUI model folders...");
+    try {
+      const r = await fetch("/api/models/scan", {
+        method: "POST",
+        headers: authHeaders(),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok) {
+        toast(`Scan complete. Added ${data.added || 0} models, skipped ${data.skipped || 0} existing.`);
+        refreshModelsPage();
+      } else {
+        toast(data.detail || "Scan failed", true);
+      }
+    } catch (e) {
+      toast("Scan failed: " + e.message, true);
+    } finally {
+      scanBtn.disabled = false;
+    }
+  };
+}
 

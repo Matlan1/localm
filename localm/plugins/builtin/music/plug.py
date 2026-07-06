@@ -294,6 +294,12 @@ def register(host) -> None:
     from localm.media_workflows import make_workflow_router
     host.mount_router(make_workflow_router("music"))
 
+    # Register model roles
+    from localm.plugins.contract import ModelRoleDescriptor
+    host.register_model_role(ModelRoleDescriptor("music-unet", "Diffusion model (UNet)", "diffusion-unet"))
+    host.register_model_role(ModelRoleDescriptor("music-clip", "Text encoder (CLIP)", "text-encoder", required=False))
+    host.register_model_role(ModelRoleDescriptor("music-vae", "VAE", "vae", required=False))
+
 
 def unregister() -> None:
     pass

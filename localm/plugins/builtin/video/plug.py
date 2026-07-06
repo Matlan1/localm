@@ -339,6 +339,11 @@ def register(host) -> None:
     from localm.media_workflows import make_workflow_router
     host.mount_router(make_workflow_router("video"))
 
+    # Register model roles
+    from localm.plugins.contract import ModelRoleDescriptor
+    host.register_model_role(ModelRoleDescriptor("video-unet", "Diffusion model (UNet)", "diffusion-unet"))
+    host.register_model_role(ModelRoleDescriptor("video-clip", "Text encoder (CLIP)", "text-encoder", required=False))
+
 
 def unregister() -> None:
     pass
