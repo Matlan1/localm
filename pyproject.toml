@@ -101,7 +101,7 @@ voice = [
 # The installers include this so the readout works out of the box.
 # Install with:  pip install "localm[monitor]"
 monitor = [
-    "psutil>=5.9",
+    "psutil>=7.2.2",
 ]
 # Grammar-constrained decoding (GBNF/EBNF) for the HuggingFace backend. The GGUF
 # backend already has this natively via llama.cpp's grammar sampler; this extra
