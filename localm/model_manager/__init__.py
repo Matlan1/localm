@@ -82,6 +82,7 @@ from .registry import (
     sync_models_dir,
     vision_capable_models,
     vision_input_guidance,
+    MODEL_TYPES,
 )
 from .pull import (
     _check_disk_space,
@@ -117,7 +118,7 @@ __all__ = [
     "_register", "_sanitize_name", "_unique_registry_name", "ModelSyncResult",
     "_backup_registry", "sync_models_dir", "_register_with_dedup", "remove_model",
     "_add_local_gguf_dir", "add_local", "show_shortcuts", "_prompt_duplicate_action",
-    "_prompt_predownload_dup", "_resolve_ollama_manifest",
+    "_prompt_predownload_dup", "_resolve_ollama_manifest", "MODEL_TYPES",
     # pull
     "_emit_progress", "_progress_file_info", "_download_progress",
     "_snapshot_progress", "pull_model", "_stem_from_url", "_check_disk_space",

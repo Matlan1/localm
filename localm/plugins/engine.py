@@ -222,6 +222,8 @@ class PluginHost:
         self._static_prefixes: set = set()  # URL prefixes this plugin already serves
         self.settings: list = []
         self.surface: Optional[Surface] = spec.surface or None
+        self.model_roles: list = []
+
 
     def mount_router(self, router) -> None:
         """Mount *router* on the live app, gating every route with the plugin's
@@ -377,6 +379,14 @@ class PluginHost:
 
     def register_tab(self, surface: Surface) -> None:
         self.surface = surface
+
+    def register_model_role(self, descriptor) -> None:
+        from localm.model_manager.registry import MODEL_TYPES
+        if descriptor.model_type not in MODEL_TYPES:
+            raise ValueError(f"Invalid model_type {descriptor.model_type!r}; must be one of {MODEL_TYPES}")
+        descriptor.plugin_name = self._spec.name
+        self.model_roles.append(descriptor)
+
 
     def _own_config_key(self, name: Optional[str]) -> str:
         """Confine plugin config r/w to the plugin's OWN block.
@@ -557,6 +567,24 @@ class PluginManager:
         ran) so a disabled plugin's work can never fire later."""
         self._startup_callbacks = [
             (n, cb) for n, cb in self._startup_callbacks if n != name]
+
+    def get_all_model_roles(self) -> list[dict]:
+        """All registered ModelRoleDescriptors across active/loaded plugins."""
+        roles = []
+        for name, entry in self._loaded.items():
+            spec, module, host, uniq = entry
+            if hasattr(host, "model_roles"):
+                for r in host.model_roles:
+                    roles.append({
+                        "role_id": r.role_id,
+                        "label": r.label,
+                        "model_type": r.model_type,
+                        "plugin_name": r.plugin_name,
+                        "required": r.required,
+                        "description": r.description,
+                    })
+        return roles
+
 
     def run_startup_callbacks(self) -> None:
         """Run every queued startup callback once. Called by the app lifespan

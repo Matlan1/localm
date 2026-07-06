@@ -121,13 +121,15 @@ def benchmark(model, gen_tokens, prompts, ctx, gpu_layers):
               help="Download even when an identical model is already registered.")
 @click.option("--mmproj", default=None, metavar="FILE",
               help="Download an associated mmproj file alongside the main model.")
-def pull(model_spec, name, sha256, redownload, mmproj):
+@click.option("--type", default="auto",
+              type=click.Choice(["auto", "llm", "mmproj", "diffusion-unet", "text-encoder", "vae", "lora", "unknown"], case_sensitive=False),
+              help="Model type/role.")
+def pull(model_spec, name, sha256, redownload, mmproj, type):
     """Download a model from HuggingFace or a URL.
 
     \b
     Full HF model (transformers format, for multimodal / HF-native models):
       localm pull google/gemma-3-4b-it
-      localm pull microsoft/Phi-4-mini-instruct
 
     \b
     Single GGUF file (quantized, lighter, works with GGUF backend):
@@ -140,7 +142,7 @@ def pull(model_spec, name, sha256, redownload, mmproj):
 
     Models are stored in ~/.localm/models/ and registered automatically.
     """
-    if not pull_model(model_spec, name, expected_sha256=sha256, redownload=redownload, mmproj_spec=mmproj):
+    if not pull_model(model_spec, name, expected_sha256=sha256, redownload=redownload, mmproj_spec=mmproj, model_type=type):
         sys.exit(1)
 
 
@@ -204,7 +206,10 @@ def search_cmd(query, limit, list_files):
 
 
 @main.command("list")
-def list_cmd():
+@click.option("--type", default=None,
+              type=click.Choice(["llm", "mmproj", "diffusion-unet", "text-encoder", "vae", "lora", "unknown"], case_sensitive=False),
+              help="Filter models by type.")
+def list_cmd(type):
     """List registered models (auto-detecting changes in the models folder)."""
     result = sync_models_dir()
     if result.changed:
@@ -220,7 +225,7 @@ def list_cmd():
         console.print(f"[dim]Models folder synced: {', '.join(bits)}.[/dim]")
     if result.note:
         console.print(f"[yellow]{result.note}[/yellow]")
-    list_models()
+    list_models(type_filter=type)
 
 
 @main.command("relocate")

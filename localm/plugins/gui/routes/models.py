@@ -29,12 +29,15 @@ def register(app: FastAPI, ctx) -> None:
     # -------------------------- models ---------------------------- #
 
     @app.get("/api/models", dependencies=[Depends(require_scope(scopes.MODELS_READ))])
-    async def gui_models():
+    async def gui_models(type: Optional[str] = None):
         from localm.config import load_registry
         registry = load_registry()
         current = active_model()
         models = []
         for name, entry in sorted(registry.items()):
+            mtype = entry.get("model_type", "llm")
+            if type and mtype != type:
+                continue
             path = Path(entry.get("path", ""))
             size = None
             try:
@@ -47,8 +50,31 @@ def register(app: FastAPI, ctx) -> None:
                 "source": entry.get("source", ""),
                 "size_bytes": size,
                 "active": name == current,
+                "model_type": mtype,
             })
         return {"models": models, "active": current}
+
+    @app.post("/api/models/scan", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
+    async def gui_scan_models():
+        from localm.model_manager.scan import scan_comfy_models
+        import asyncio
+        loop = asyncio.get_running_loop()
+        try:
+            res = await loop.run_in_executor(None, scan_comfy_models)
+            return {
+                "added": res.added,
+                "skipped": res.skipped,
+                "method": res.method,
+            }
+        except Exception as e:
+            raise HTTPException(500, f"Scan failed: {e}")
+
+    @app.get("/api/models/roles", dependencies=[Depends(require_scope(scopes.MODELS_READ))])
+    async def gui_model_roles(request: Request):
+        manager = getattr(request.app.state, "plugin_manager", None)
+        if manager is None:
+            return {"roles": []}
+        return {"roles": manager.get_all_model_roles()}
 
     @app.post("/api/models/load", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def gui_load_model(req: LoadModelRequest):

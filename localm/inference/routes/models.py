@@ -93,6 +93,7 @@ def register(app: FastAPI, ctx) -> None:
             "aliases": aliases,
             "active": _hs._active_model_name == model_id,
             "loaded": model_id in _hs._engines and _hs._engines[model_id].loaded,
+            "model_type": entry.get("model_type", "llm"),
         }
 
     @app.post("/v1/models/unload",

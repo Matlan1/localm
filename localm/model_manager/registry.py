@@ -23,6 +23,9 @@ from .gguf import _has_gguf_magic
 from .gguf import first_split_part
 from .gguf import split_gguf_parts
 
+MODEL_TYPES = frozenset({'llm', 'mmproj', 'diffusion-unet', 'text-encoder', 'vae', 'lora', 'unknown'})
+
+
 
 
 
@@ -258,8 +261,10 @@ def vision_input_guidance(mmproj_failed: bool = False) -> str:
 
 
 
-def list_models() -> None:
+def list_models(type_filter: Optional[str] = None) -> None:
     reg = _mm.load_registry()
+    if type_filter:
+        reg = {k: v for k, v in reg.items() if v.get("model_type", "llm") == type_filter}
     if not reg:
         console.print("[dim]No models yet. Use [bold]localm pull <name>[/bold] to download one.[/dim]")
         console.print("[dim]Run [bold]localm models[/bold] to see what's available.[/dim]")
@@ -267,7 +272,8 @@ def list_models() -> None:
 
     table = Table(header_style="bold cyan", show_lines=False, expand=False)
     table.add_column("Name", style="bold white")
-    table.add_column("Type", style="cyan")
+    table.add_column("Format", style="cyan")
+    table.add_column("Role", style="magenta")
     table.add_column("Size", justify="right", style="green")
     table.add_column("Source", style="dim")
     table.add_column("Path", style="dim")
@@ -275,6 +281,7 @@ def list_models() -> None:
     for name, info in sorted(reg.items()):
         path = Path(info["path"])
         source = info.get("source", "local")
+        role = info.get("model_type", "llm")
 
         if path.is_dir():
             kind = "hf"
@@ -291,7 +298,7 @@ def list_models() -> None:
             size = "[red]-[/red]"
             name_cell = f"[red]{name}[/red]"
 
-        table.add_row(name_cell, kind, size, source, str(path))
+        table.add_row(name_cell, kind, role, size, source, str(path))
 
     console.print(table)
 
@@ -512,8 +519,9 @@ def _register(
     path: Path,
     source: str = "local",
     sha256: Optional[str] = None,
+    model_type: str = "llm",
 ) -> None:
-    entry = {"path": str(path.resolve()), "source": source}
+    entry = {"path": str(path.resolve()), "source": source, "model_type": model_type}
     if sha256:
         entry["sha256"] = sha256.lower()
     # Atomic read-modify-write so a concurrent registry writer (GUI thread,
@@ -738,6 +746,7 @@ def _register_with_dedup(
     on_duplicate: str = "ask",
     digest: Optional[str] = None,
     size: Optional[int] = None,
+    model_type: str = "llm",
 ) -> None:
     """
     Register a model, detecting duplicates first.
@@ -832,7 +841,7 @@ def _register_with_dedup(
                 shutil.move(str(p), str(dest))
                 moved_from = str(p.resolve())
                 dest_str = str(dest.resolve())
-                entry = {"path": dest_str, "source": source}
+                entry = {"path": dest_str, "source": source, "model_type": model_type}
                 if digest:
                     entry["sha256"] = digest.lower()
 
@@ -848,7 +857,7 @@ def _register_with_dedup(
             p = dest
         # action == "register" falls through unchanged
 
-    _mm._register(model_name, p, source, sha256=digest)
+    _mm._register(model_name, p, source, sha256=digest, model_type=model_type)
     console.print(f"[green]✓[/green] Registered [bold]{model_name}[/bold]")
 
 
@@ -961,6 +970,7 @@ def _add_local_gguf_dir(
     on_duplicate: str,
     no_hash: bool,
     fast: bool = False,
+    model_type: str = "llm",
 ) -> bool:
     """Register every loose .gguf model in a folder (the *first_parts* list).
 
@@ -998,7 +1008,7 @@ def _add_local_gguf_dir(
 
         _mm._register_with_dedup(
             model_name, gguf, "local", on_duplicate=on_duplicate,
-            digest=digest, size=size,
+            digest=digest, size=size, model_type=model_type,
         )
     return True
 
@@ -1011,6 +1021,7 @@ def add_local(
     on_duplicate: str = "ask",
     no_hash: bool = False,
     fast: bool = False,
+    model_type: str = "llm",
 ) -> bool:
     """Register a local .gguf / HF dir / Ollama blob. Returns True on a successful
     registration or a benign no-op (alias / user-skipped duplicate), False when the
@@ -1033,7 +1044,7 @@ def add_local(
             if blob_path.name.startswith("sha256-") else None
         _mm._register_with_dedup(
             model_name, blob_path, "ollama",
-            on_duplicate=on_duplicate, digest=digest,
+            on_duplicate=on_duplicate, digest=digest, model_type=model_type,
         )
         return True
 
@@ -1061,7 +1072,7 @@ def add_local(
         max_depth = max(1, int(load_config().get("import_max_depth", 3)))
         first_parts = _gguf_first_parts(p, max_depth=max_depth)
         if first_parts:
-            return _add_local_gguf_dir(first_parts, name, on_duplicate, no_hash, fast)
+            return _add_local_gguf_dir(first_parts, name, on_duplicate, no_hash, fast, model_type=model_type)
 
     if not (is_gguf or is_hf or is_blob):
         console.print(
@@ -1117,7 +1128,7 @@ def add_local(
             digest = _mm._hash_with_progress(p)
 
     _mm._register_with_dedup(
-        model_name, p, kind, on_duplicate=on_duplicate, digest=digest, size=size,
+        model_name, p, kind, on_duplicate=on_duplicate, digest=digest, size=size, model_type=model_type,
     )
     return True
 

@@ -166,6 +166,7 @@ def pull_model(
     expected_sha256: Optional[str] = None,
     redownload: bool = False,
     mmproj_spec: Optional[str] = None,
+    model_type: str = "auto",
 ) -> bool:
     """Download a model from HuggingFace or a URL.
 
@@ -173,6 +174,18 @@ def pull_model(
     user-skipped), False on a real error, so callers can set a non-zero exit
     code and the GUI can mark the job failed instead of reporting "finished".
     """
+    spec = _mm.resolve_spec(model_spec)
+    detected_type = "llm"
+    if model_type == "auto":
+        if "/" in spec and not (spec.startswith("http://") or spec.startswith("https://")):
+            repo_id = spec.split(":")[0] if ":" in spec else spec
+            detected_type = _hf_pipeline_tag_to_type(repo_id)
+            logger.info("Auto-detected model type for %s: %s", repo_id, detected_type)
+        else:
+            detected_type = "llm"
+    else:
+        detected_type = model_type
+
     # A local filesystem path is not a remote spec: register it in place rather
     # than mis-parsing a Windows drive-colon as an owner/repo:file spec, or
     # rejecting it as "Unknown spec" (H1). Only an absolute path or an existing
@@ -184,7 +197,7 @@ def pull_model(
     except OSError:
         is_local_path = False
     if is_local_path:
-        return _mm.add_local(str(local), name=name)
+        return _mm.add_local(str(local), name=name, model_type=detected_type)
 
     # SSRF-PULL: honour the net_mode kill switch for a REMOTE pull. net_mode=off
     # means "no network at all", so it must stop a model download too - previously
@@ -196,19 +209,19 @@ def pull_model(
             "needs the network; enable it with: localm config net_mode ask")
         return False
 
-    spec = _mm.resolve_spec(model_spec)
     if spec.startswith("http://") or spec.startswith("https://"):
         res = _pull_url(spec, _sanitize_name(name or _stem_from_url(spec)),
-                         expected_sha256=expected_sha256, redownload=redownload)
+                         expected_sha256=expected_sha256, redownload=redownload,
+                         model_type=detected_type)
     elif "/" in spec:
         if ":" in spec or spec.rsplit("/", 1)[-1].endswith(".gguf"):
             # owner/repo:file.gguf  or  owner/repo/file.gguf  -> single GGUF file
             res = _mm._pull_gguf_file(spec, name, expected_sha256=expected_sha256,
-                                   redownload=redownload)
+                                   redownload=redownload, model_type=detected_type)
         else:
             # owner/repo  (no filename) -> full HuggingFace snapshot
             res = _mm._pull_hf_snapshot(spec, name, expected_sha256=expected_sha256,
-                                     redownload=redownload)
+                                     redownload=redownload, model_type=detected_type)
     else:
         console.print(f"[red]Unknown spec:[/red] {model_spec}")
         console.print("Formats:")
@@ -293,6 +306,7 @@ def _pull_gguf_file(
     expected_sha256: Optional[str] = None,
     redownload: bool = False,
     register: bool = True,
+    model_type: str = "llm",
 ) -> bool:
     """Download a single .gguf file from a HuggingFace repo.
 
@@ -367,7 +381,7 @@ def _pull_gguf_file(
                 return False
         if register:
             _mm._register_with_dedup(model_name, dest, f"hf:{repo_id}",
-                                 digest=verify_digest)
+                                 digest=verify_digest, model_type=model_type)
         return True
 
     # Pre-download duplicate check: same bytes already on disk elsewhere?
@@ -441,7 +455,7 @@ def _pull_gguf_file(
 
     if register:
         _mm._register(model_name, _mm.MODELS_DIR / filename, f"hf:{repo_id}",
-                  sha256=verify_digest)
+                  sha256=verify_digest, model_type=model_type)
         console.print(f"[green]✓[/green] [bold]{model_name}[/bold] is ready")
     else:
         console.print(f"[green]✓[/green] [bold]{filename}[/bold] downloaded")
@@ -455,6 +469,7 @@ def _pull_hf_snapshot(
     name: Optional[str],
     expected_sha256: Optional[str] = None,
     redownload: bool = False,
+    model_type: str = "llm",
 ) -> bool:
     """Download a complete HuggingFace model repo (for transformers/HF format models)."""
     # FAC-5: a full-repo snapshot is many files; there is no single digest to
@@ -480,7 +495,7 @@ def _pull_hf_snapshot(
 
     if dest.exists() and (dest / "config.json").exists():
         console.print(f"[yellow]Already downloaded:[/yellow] {model_name}")
-        _mm._register_with_dedup(model_name, dest, f"hf:{repo_id}")
+        _mm._register_with_dedup(model_name, dest, f"hf:{repo_id}", model_type=model_type)
         return True
 
     # Same repo already pulled under a different name?
@@ -544,7 +559,7 @@ def _pull_hf_snapshot(
         console.print(f"[red]Download failed:[/red] {e}")
         return False
 
-    _mm._register(model_name, dest, f"hf:{repo_id}")
+    _mm._register(model_name, dest, f"hf:{repo_id}", model_type=model_type)
     console.print(f"[green]✓[/green] [bold]{model_name}[/bold] downloaded to {dest}")
     return True
 
@@ -590,6 +605,7 @@ def _pull_url(
     name: str,
     expected_sha256: Optional[str] = None,
     redownload: bool = False,
+    model_type: str = "llm",
 ) -> bool:
     """Download a model from a direct URL with resumable .part file support."""
     import requests
@@ -642,7 +658,7 @@ def _pull_url(
             )
         else:
             console.print(f"[yellow]Already downloaded:[/yellow] {filename}")
-        _mm._register_with_dedup(name, dest, url)
+        _mm._register_with_dedup(name, dest, url, model_type=model_type)
         return True
 
     # Pre-download check by user-supplied hash (URL servers can't tell us one)
@@ -807,7 +823,33 @@ def _pull_url(
                 alias_model(dups[0], name)
                 return True
 
-    _mm._register(name, dest, url, sha256=actual)
+    _mm._register(name, dest, url, sha256=actual, model_type=model_type)
     console.print(f"[green]✓[/green] [bold]{name}[/bold] is ready")
     return True
+
+
+def _hf_pipeline_tag_to_type(repo_id: str) -> str:
+    """Query HF API for model metadata and map pipeline_tag to a model_type.
+    Defaults to 'llm' if it looks like a text generation / LLM model or if query fails.
+    """
+    from localm.discover import _get, HF_API
+    try:
+        data = _get(f"{HF_API}/api/models/{repo_id}", {"full": "false"})
+        if isinstance(data, dict):
+            tag = data.get("pipeline_tag")
+            if tag in ("text-to-image", "image-to-image"):
+                return "diffusion-unet"
+            elif tag in ("text-to-audio", "audio-to-audio"):
+                return "diffusion-unet"
+            
+            tags = data.get("tags", [])
+            if any("text-encoder" in t.lower() or "clip" in t.lower() for t in tags):
+                return "text-encoder"
+            if any("vae" in t.lower() for t in tags):
+                return "vae"
+            if any("lora" in t.lower() for t in tags):
+                return "lora"
+    except Exception as e:
+        logger.debug("HF pipeline tag query failed for %s: %s", repo_id, e)
+    return "llm"
 

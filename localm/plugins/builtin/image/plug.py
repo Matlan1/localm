@@ -347,6 +347,14 @@ def register(host) -> None:
     from localm.media_workflows import make_workflow_router
     host.mount_router(make_workflow_router("image"))
 
+    # Register model roles
+    from localm.plugins.contract import ModelRoleDescriptor
+    host.register_model_role(ModelRoleDescriptor("image-unet", "Diffusion model (UNet)", "diffusion-unet"))
+    host.register_model_role(ModelRoleDescriptor("image-clip1", "Text encoder 1 (CLIP-L)", "text-encoder", required=False))
+    host.register_model_role(ModelRoleDescriptor("image-clip2", "Text encoder 2 (T5/CLIP-G)", "text-encoder", required=False))
+    host.register_model_role(ModelRoleDescriptor("image-vae", "VAE", "vae", required=False))
+    host.register_model_role(ModelRoleDescriptor("image-lora", "LoRA", "lora", required=False))
+
 
 def unregister() -> None:
     pass

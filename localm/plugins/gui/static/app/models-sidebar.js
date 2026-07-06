@@ -408,7 +408,7 @@ export let modelCache = { models: [], active: "" };
 
 export async function refreshModels() {
   try {
-    const r = await fetch("/api/models", { headers: authHeaders() });
+    const r = await fetch("/api/models?type=llm", { headers: authHeaders() });
     if (r.status === 401) {
       // No working key (e.g. a network bind, where the loopback key is never
       // auto-seeded). Show the in-page key gate instead of window.prompt() -

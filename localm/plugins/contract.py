@@ -64,6 +64,18 @@ KNOWN_SURFACE_KEYS = frozenset(Surface.__dataclass_fields__)
 
 
 @dataclass
+class ModelRoleDescriptor:
+    """Descriptor for a model role a plugin registers and consumes."""
+    role_id: str          # e.g. 'image-unet'
+    label: str            # e.g. 'Diffusion model (UNet)'
+    model_type: str       # one of MODEL_TYPES
+    plugin_name: str = "" # filled in by the host/engine at registration time
+    required: bool = True
+    description: str = ""
+
+
+
+@dataclass
 class PluginSpec:
     """Validated manifest of a plugin (superset of loader.PluginManifest)."""
     name: str
@@ -118,6 +130,8 @@ class Host(Protocol):
     def engine(self) -> Any: ...                          # inference engine handle
     def audit(self, event: str, data: dict) -> None: ...
     def browse_dirs(self, path: str) -> dict: ...         # server-side folder picker
+    def register_model_role(self, descriptor: ModelRoleDescriptor) -> None: ...
+
 
     def register_chat_hook(self, phase: str, fn: Any, *,
                            priority: int = 0) -> None:
