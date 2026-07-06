@@ -410,6 +410,144 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
                 f"success={payload.get('success')}]")
         return _text_result(text + meta, is_error=not payload.get("success", False))
 
+    def setup_embeddings(args: dict) -> dict:
+        model = args.get("model")
+        from localm.config import load_config, update_config
+        from localm.inference.embedder import (DEFAULT_EMBEDDING_MODEL,
+                                          KNOWN_EMBEDDING_MODELS,
+                                          resolve_embedding_model_path)
+        import contextlib
+        if model:
+            update_config(lambda c: c.update({"embedding_model": model}))
+        name = str(load_config().get("embedding_model") or DEFAULT_EMBEDDING_MODEL)
+        
+        with contextlib.redirect_stdout(sys.stderr):
+            try:
+                path = resolve_embedding_model_path(allow_download=True)
+            except Exception as e:
+                return _text_result(f"Failed to setup embeddings: {e}", is_error=True)
+        if not path:
+            return _text_result(
+                "Could not install the embedding model. It must be a known "
+                f"key {tuple(KNOWN_EMBEDDING_MODELS)}, a registered model, or a GGUF "
+                "path, and network must be enabled (net_mode is not 'off').",
+                is_error=True
+            )
+        return _text_result(f"Embedding model ready: {path}. Memory and RAG will now use semantic search.")
+
+    def remove_model(args: dict) -> dict:
+        model = args.get("model", "")
+        if not model:
+            return _text_result("'model' is required", is_error=True)
+        from localm.model_manager import remove_model as _rm
+        from localm.config import load_registry
+        reg = load_registry()
+        if model not in reg:
+            return _text_result(f"Model not found: {model}", is_error=True)
+        import contextlib
+        with contextlib.redirect_stdout(sys.stderr):
+            try:
+                _rm(model)
+            except Exception as e:
+                return _text_result(f"Failed to remove model: {e}", is_error=True)
+        return _text_result(f"Model '{model}' successfully removed.")
+
+    def run_doctor(args: dict) -> dict:
+        cmd = [sys.executable, "-m", "localm", "doctor"]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            output = proc.stdout
+            if proc.stderr:
+                output += "\n\nStderr:\n" + proc.stderr
+            return _text_result(output)
+        except subprocess.TimeoutExpired:
+            return _text_result("Doctor task timed out after 60s", is_error=True)
+        except Exception as e:
+            return _text_result(f"Failed to run doctor: {e}", is_error=True)
+
+    def list_plugins(args: dict) -> dict:
+        from localm.plugins.engine import PluginManager
+        mgr = PluginManager(None)
+        state = mgr.api_state()
+        plugins = state.get("plugins", [])
+        if not plugins:
+            return _text_result("No engine plugins discovered.")
+        lines = []
+        for p in plugins:
+            status = "enabled" if p.get("active") else ("disabled" if p.get("installed") else "available")
+            desc = f" - {p['description']}" if p.get("description") else ""
+            lines.append(f"{p['name']}  [{status}]{desc}")
+        return _text_result("\n".join(lines))
+
+    def install_plugin(args: dict) -> dict:
+        plugin = args.get("plugin", "")
+        if not plugin:
+            return _text_result("'plugin' is required", is_error=True)
+        from localm.plugins.engine import PluginManager
+        mgr = PluginManager(None)
+        import contextlib
+        with contextlib.redirect_stdout(sys.stderr):
+            try:
+                mgr.set_installed_state(plugin, True)
+            except KeyError:
+                return _text_result(f"No such plugin: {plugin}", is_error=True)
+            except ValueError as e:
+                return _text_result(str(e), is_error=True)
+            
+            with_deps = args.get("with_deps", True)
+            if with_deps and mgr.plugin_missing_deps(plugin):
+                mgr.install_plugin_deps(plugin)
+        return _text_result(f"Plugin '{plugin}' successfully installed and enabled.")
+
+    def enable_plugin(args: dict) -> dict:
+        plugin = args.get("plugin", "")
+        if not plugin:
+            return _text_result("'plugin' is required", is_error=True)
+        from localm.plugins.engine import PluginManager
+        mgr = PluginManager(None)
+        import contextlib
+        with contextlib.redirect_stdout(sys.stderr):
+            try:
+                mgr.set_enabled_state(plugin, True)
+            except KeyError:
+                return _text_result(f"No such plugin: {plugin}", is_error=True)
+            except ValueError as e:
+                return _text_result(str(e), is_error=True)
+        return _text_result(f"Plugin '{plugin}' successfully enabled.")
+
+    def disable_plugin(args: dict) -> dict:
+        plugin = args.get("plugin", "")
+        if not plugin:
+            return _text_result("'plugin' is required", is_error=True)
+        from localm.plugins.engine import PluginManager
+        mgr = PluginManager(None)
+        import contextlib
+        with contextlib.redirect_stdout(sys.stderr):
+            try:
+                mgr.set_enabled_state(plugin, False)
+            except KeyError:
+                return _text_result(f"No such plugin: {plugin}", is_error=True)
+            except ValueError as e:
+                return _text_result(str(e), is_error=True)
+        return _text_result(f"Plugin '{plugin}' successfully disabled.")
+
+    def uninstall_plugin(args: dict) -> dict:
+        plugin = args.get("plugin", "")
+        if not plugin:
+            return _text_result("'plugin' is required", is_error=True)
+        delete_data = args.get("delete_data", False)
+        from localm.plugins.engine import PluginManager
+        mgr = PluginManager(None)
+        import contextlib
+        with contextlib.redirect_stdout(sys.stderr):
+            try:
+                mgr.uninstall(plugin, delete_data=delete_data)
+            except KeyError:
+                return _text_result(f"No such plugin: {plugin}", is_error=True)
+            except ValueError as e:
+                return _text_result(str(e), is_error=True)
+        return _text_result(f"Plugin '{plugin}' successfully uninstalled.")
+
     _model_param = {"type": "string",
                     "description": "Registered model name (default: server's configured model)"}
 
@@ -563,6 +701,84 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
             },
             "handler": generate_image,
         }
+
+    tools["setup_embeddings"] = {
+        "description": "Install the on-device embedding model for semantic search (memory + RAG).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "model": {"type": "string", "description": "Optional embedding model name to set"}
+            }
+        },
+        "handler": setup_embeddings,
+    }
+    tools["remove_model"] = {
+        "description": "Remove a model from the registry (and delete the file if it's in ~/.localm/models/).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "model": {"type": "string", "description": "Registered model name to remove"}
+            },
+            "required": ["model"],
+        },
+        "handler": remove_model,
+    }
+    tools["run_doctor"] = {
+        "description": "Check system requirements and report any issues (runs localm doctor).",
+        "inputSchema": {"type": "object", "properties": {}},
+        "handler": run_doctor,
+    }
+    tools["list_plugins"] = {
+        "description": "List engine plugins, their descriptions, and activation status.",
+        "inputSchema": {"type": "object", "properties": {}},
+        "handler": list_plugins,
+    }
+    tools["install_plugin"] = {
+        "description": "Install and enable an engine plugin.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "plugin": {"type": "string", "description": "Plugin name to install"},
+                "with_deps": {"type": "boolean", "description": "Also install pip dependencies (default true)"}
+            },
+            "required": ["plugin"],
+        },
+        "handler": install_plugin,
+    }
+    tools["enable_plugin"] = {
+        "description": "Enable an installed engine plugin.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "plugin": {"type": "string", "description": "Plugin name to enable"}
+            },
+            "required": ["plugin"],
+        },
+        "handler": enable_plugin,
+    }
+    tools["disable_plugin"] = {
+        "description": "Disable an installed engine plugin.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "plugin": {"type": "string", "description": "Plugin name to disable"}
+            },
+            "required": ["plugin"],
+        },
+        "handler": disable_plugin,
+    }
+    tools["uninstall_plugin"] = {
+        "description": "Uninstall (deselect) an engine plugin.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "plugin": {"type": "string", "description": "Plugin name to uninstall"},
+                "delete_data": {"type": "boolean", "description": "Also delete stored data (default false)"}
+            },
+            "required": ["plugin"],
+        },
+        "handler": uninstall_plugin,
+    }
 
     return tools
 

@@ -60,8 +60,13 @@ class TestProtocol:
     def test_tools_list_includes_all(self):
         server, _ = _server()
         names = {t["name"] for t in _req(server, "tools/list")["result"]["tools"]}
-        assert names == {"chat", "list_models", "system_stats", "search_models",
-                         "list_model_files", "pull_model", "embed", "generate_image"}
+        expected = {
+            "chat", "list_models", "system_stats", "search_models",
+            "list_model_files", "pull_model", "embed", "generate_image",
+            "setup_embeddings", "remove_model", "run_doctor", "list_plugins",
+            "install_plugin", "enable_plugin", "disable_plugin", "uninstall_plugin"
+        }
+        assert names == expected
 
     def test_no_images_flag_hides_tool(self):
         server, _ = _server(enable_images=False)
@@ -227,9 +232,13 @@ class TestClientServerIntegration:
         client = MCPServer("self", sys.executable, [str(bridge)])
         try:
             client.start()
-            assert {t["name"] for t in client.tools} == \
-                {"chat", "list_models", "system_stats", "search_models",
-                 "list_model_files", "pull_model", "embed"}
+            expected = {
+                "chat", "list_models", "system_stats", "search_models",
+                "list_model_files", "pull_model", "embed",
+                "setup_embeddings", "remove_model", "run_doctor", "list_plugins",
+                "install_plugin", "enable_plugin", "disable_plugin", "uninstall_plugin"
+            }
+            assert {t["name"] for t in client.tools} == expected
             res = client.call_tool("chat", {"prompt": "ping"})
             assert res.ok
             assert res.output == "pong"
@@ -707,3 +716,79 @@ class TestMcpCliWiring:
         # the broken duplicate had no such option and never touched winconsole
         assert "winconsole" not in r.output
         assert "unexpected error" not in r.output.lower()
+
+
+class TestNewToolCalls:
+    def test_setup_embeddings(self):
+        server, _ = _server()
+        with patch("localm.inference.embedder.resolve_embedding_model_path", return_value="fake-path") as mock_resolve:
+            resp = _req(server, "tools/call",
+                        {"name": "setup_embeddings", "arguments": {"model": "fake-model"}})
+        assert resp["result"]["isError"] is False
+        assert "ready" in resp["result"]["content"][0]["text"]
+        mock_resolve.assert_called_once()
+
+    def test_remove_model(self):
+        server, _ = _server()
+        with patch("localm.config.load_registry", return_value={"to-remove": {"path": "x"}}), \
+             patch("localm.model_manager.remove_model") as mock_remove:
+            resp = _req(server, "tools/call",
+                        {"name": "remove_model", "arguments": {"model": "to-remove"}})
+        assert resp["result"]["isError"] is False
+        assert "removed" in resp["result"]["content"][0]["text"]
+        mock_remove.assert_called_once_with("to-remove")
+
+    def test_run_doctor(self):
+        server, _ = _server()
+        fake_proc = MagicMock(stdout="doctor-ok", stderr="", returncode=0)
+        with patch("localm.plugins.mcpserver.server.subprocess.run", return_value=fake_proc) as mock_run:
+            resp = _req(server, "tools/call", {"name": "run_doctor", "arguments": {}})
+        assert resp["result"]["isError"] is False
+        assert "doctor-ok" in resp["result"]["content"][0]["text"]
+        mock_run.assert_called_once()
+
+    def test_list_plugins(self):
+        server, _ = _server()
+        fake_state = {"plugins": [{"name": "fake", "description": "d", "installed": True, "active": True}]}
+        with patch("localm.plugins.engine.PluginManager.api_state", return_value=fake_state):
+            resp = _req(server, "tools/call", {"name": "list_plugins", "arguments": {}})
+        assert resp["result"]["isError"] is False
+        assert "fake" in resp["result"]["content"][0]["text"]
+        assert "enabled" in resp["result"]["content"][0]["text"]
+
+    def test_install_plugin(self):
+        server, _ = _server()
+        with patch("localm.plugins.engine.PluginManager.set_installed_state") as mock_install, \
+             patch("localm.plugins.engine.PluginManager.plugin_missing_deps", return_value=False):
+            resp = _req(server, "tools/call",
+                        {"name": "install_plugin", "arguments": {"plugin": "coder"}})
+        assert resp["result"]["isError"] is False
+        assert "installed" in resp["result"]["content"][0]["text"]
+        mock_install.assert_called_once_with("coder", True)
+
+    def test_enable_plugin(self):
+        server, _ = _server()
+        with patch("localm.plugins.engine.PluginManager.set_enabled_state") as mock_enable:
+            resp = _req(server, "tools/call",
+                        {"name": "enable_plugin", "arguments": {"plugin": "coder"}})
+        assert resp["result"]["isError"] is False
+        assert "enabled" in resp["result"]["content"][0]["text"]
+        mock_enable.assert_called_once_with("coder", True)
+
+    def test_disable_plugin(self):
+        server, _ = _server()
+        with patch("localm.plugins.engine.PluginManager.set_enabled_state") as mock_disable:
+            resp = _req(server, "tools/call",
+                        {"name": "disable_plugin", "arguments": {"plugin": "coder"}})
+        assert resp["result"]["isError"] is False
+        assert "disabled" in resp["result"]["content"][0]["text"]
+        mock_disable.assert_called_once_with("coder", False)
+
+    def test_uninstall_plugin(self):
+        server, _ = _server()
+        with patch("localm.plugins.engine.PluginManager.uninstall") as mock_uninstall:
+            resp = _req(server, "tools/call",
+                        {"name": "uninstall_plugin", "arguments": {"plugin": "coder", "delete_data": True}})
+        assert resp["result"]["isError"] is False
+        assert "uninstalled" in resp["result"]["content"][0]["text"]
+        mock_uninstall.assert_called_once_with("coder", delete_data=True)
