@@ -126,19 +126,25 @@ def make_launcher_cmd(force: bool) -> None:
 
 @main.command("bug-report")
 @click.option("-m", "--message", default="", help="One-line summary of the problem.")
-def bug_report_cmd(message: str) -> None:
+@click.option("-s", "--send", is_flag=True,
+              help="Send it to the maintainer immediately via the hosted proxy - "
+                   "no GitHub account needed. Works from any shell, interactive or "
+                   "not (a script, a non-tty launcher, an SSH session).")
+def bug_report_cmd(message: str, send: bool) -> None:
     """Generate an editable bug report and offer to send it to the maintainer.
 
     Collects a useful, safe diagnostic snapshot (OS, GPU, driver, backend, the
     loaded model, an allowlisted config subset, key dependency versions, and the
     in-memory recent-activity log - never your API key, config secrets, or chat
-    content), saves an editable markdown file, and offers to email it, open a
-    GitHub issue, or hand it off yourself."""
+    content), saves an editable markdown file, and offers to send it via the
+    account-less hosted channel, email it, open a GitHub issue, or hand it off
+    yourself. Pass --send to skip the menu and send it immediately."""
     from localm import bugreport
     bugreport.report_failure(
         summary=message or "user-reported issue",
         context={"operation": "bug-report"},
         as_failure=False,
+        auto_send=send,
         interactive=bool(getattr(sys.stdin, "isatty", lambda: False)()))
 
 

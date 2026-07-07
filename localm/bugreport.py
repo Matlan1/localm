@@ -829,6 +829,7 @@ def report_failure(*, summary: str, reason: str = "",
                    context: Optional[dict] = None,
                    interactive: bool = True,
                    assume_yes: bool = False,
+                   auto_send: bool = False,
                    as_failure: bool = True,
                    open_browser=webbrowser.open,
                    prompt=None) -> Optional[Path]:
@@ -838,7 +839,11 @@ def report_failure(*, summary: str, reason: str = "",
     ``assume_yes``) saves and points at the file without prompting or opening a
     browser - the right behaviour for unattended / scripted runs. ``as_failure``
     False is for a user-initiated report (``localm bug-report``): neutral header,
-    no apology. ``open_browser`` and ``prompt`` are injectable for tests."""
+    no apology. ``auto_send`` True uploads immediately via the account-less proxy
+    channel (no menu, no browser) - the caller's own explicit consent (e.g. the
+    ``--send`` flag) stands in for picking option [1] interactively, so this is
+    still an explicit user action, not automatic reporting. ``open_browser`` and
+    ``prompt`` are injectable for tests."""
     console.print()
     if as_failure:
         console.print(f"[bold red]Sorry - {summary}.[/bold red]")
@@ -857,9 +862,46 @@ def report_failure(*, summary: str, reason: str = "",
         console.print("[yellow]Could not save a report file; you can still copy the "
                       "details above.[/yellow]")
 
+    up_url, up_token = upload_config()
+    can_upload = up_url is not None
+
+    if auto_send:
+        body = path.read_text(encoding="utf-8") if path is not None else text
+        where = str(path) if path is not None else "the text above"
+        if not can_upload:
+            console.print("[yellow]No hosted send channel is configured - the report is "
+                          f"saved at {where}; email it to {MAINTAINER_EMAIL} instead.[/yellow]")
+            return path
+        try:
+            res = upload_report(summary, body, url=up_url, token=up_token)
+        except RateLimitedError as e:
+            import time as _time
+            console.print(f"[yellow]Rate limited. Retrying in {e.retry_after}s...[/yellow]")
+            _time.sleep(e.retry_after)
+            try:
+                res = upload_report(summary, body, url=up_url, token=up_token)
+            except LocalmError as e2:
+                console.print(f"[yellow]Still could not send it ({e2.reason}). The report "
+                              f"is at {where} - email it instead.[/yellow]")
+                return path
+        except LocalmError as e:
+            console.print(f"[yellow]Could not send it ({e.summary}: {e.reason}). The report "
+                          f"is at {where} - email it instead.[/yellow]")
+            return path
+        link = res.get("url") if isinstance(res, dict) else None
+        console.print("[green]Sent to the maintainer.[/green]"
+                      + (f" Tracking issue: {link}" if link else ""))
+        return path
+
     if not interactive or assume_yes:
-        console.print(f"[dim]Send it to the maintainer ({MAINTAINER_EMAIL}) by email or "
-                      "Discord, or open a GitHub issue once you have repo access.[/dim]")
+        if can_upload:
+            console.print(
+                "[dim]Run[/dim] [bold]localm bug-report --send[/bold] [dim]to send it now "
+                "(no GitHub account needed) - or email/Discord it yourself, or open a GitHub "
+                "issue if you have repo access.[/dim]")
+        else:
+            console.print(f"[dim]Send it to the maintainer ({MAINTAINER_EMAIL}) by email or "
+                          "Discord, or open a GitHub issue once you have repo access.[/dim]")
         return path
 
     # Re-read the saved file so the user's edits (made before picking a channel)
@@ -870,9 +912,6 @@ def report_failure(*, summary: str, reason: str = "",
             body = path.read_text(encoding="utf-8")
         except OSError:
             body = text
-
-    up_url, up_token = upload_config()
-    can_upload = up_url is not None
 
     console.print("How would you like to send it (edit the file first if you want)?")
     # Map the displayed number -> action, so an extra "send now" option when an
