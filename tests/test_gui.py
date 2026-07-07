@@ -564,6 +564,34 @@ class TestModelEndpoints:
         active = next(m for m in data["models"] if m["active"])
         assert active["name"] == "model-a"
 
+    def test_models_filter_by_type(self, gui_app):
+        # Regression guard for #435. The `type` query param must resolve its
+        # annotation and validate at request time. In the buggy window the param
+        # was `Optional[str]` while `Optional` was not imported in the route
+        # module, so under `from __future__ import annotations` FastAPI left the
+        # forward-ref unresolved; the field got a mock validator and EVERY
+        # GET /api/models 500'd with pydantic "is not fully defined" on the first
+        # request. This asserts the route returns 200 (not 500) AND that the
+        # filter actually works, so a re-broken annotation is caught here.
+        app, _ = gui_app
+        registry = {
+            "chat-model": {"path": "C:/nonexistent/chat.gguf", "source": "local",
+                           "model_type": "llm"},
+            "vision-proj": {"path": "C:/nonexistent/mmproj.gguf", "source": "local",
+                            "model_type": "mmproj"},
+        }
+        with patch("localm.config.load_registry", return_value=registry):
+            with TestClient(app) as client:
+                all_r = client.get("/api/models")             # no param -> all
+                llm_r = client.get("/api/models?type=llm")
+                proj_r = client.get("/api/models?type=mmproj")
+        assert all_r.status_code == 200
+        assert {m["name"] for m in all_r.json()["models"]} == {"chat-model", "vision-proj"}
+        assert llm_r.status_code == 200
+        assert [m["name"] for m in llm_r.json()["models"]] == ["chat-model"]
+        assert proj_r.status_code == 200
+        assert [m["name"] for m in proj_r.json()["models"]] == ["vision-proj"]
+
     def test_load_unknown_model_404(self, gui_app):
         app, _ = gui_app
         with patch("localm.config.load_registry", return_value=_FAKE_REGISTRY):
