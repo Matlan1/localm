@@ -41,6 +41,11 @@ def register(app: FastAPI, ctx) -> None:
                 "created":  now,
                 "owned_by": "localm",
                 "loaded":   loaded,
+                # Which model is the ACTIVE one (the default routing target and
+                # the one an attaching client should report as loaded). Without
+                # this a consumer cannot tell the active model from the merely
+                # first-listed one (AUDIT-HIGH-4).
+                "active":   name == _hs._active_model_name,
             })
             
         return {

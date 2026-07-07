@@ -188,8 +188,23 @@ def remote_model_status(base_url: str, token: Optional[str] = None,
         if r.status_code >= 400:
             return "unknown", None
         data = (r.json() or {}).get("data") or []
-        if data and isinstance(data[0], dict) and data[0].get("id"):
-            return "loaded", data[0].get("id")
+        # /v1/models lists EVERY registered model (sorted), each with a `loaded`
+        # flag and, since the active marker was added, an `active` flag. Pick the
+        # active model (else the first loaded one) - NOT data[0], which is just
+        # the alphabetically-first REGISTERED model and is almost never the loaded
+        # one (AUDIT-HIGH-4: reading data[0] made `localm run` attach to, and
+        # force-load, the wrong model).
+        dicts = [m for m in data if isinstance(m, dict) and m.get("id")]
+        chosen = next((m for m in dicts if m.get("active")), None) \
+            or next((m for m in dicts if m.get("loaded")), None)
+        if chosen is None and dicts and not any(
+                ("active" in m or "loaded" in m) for m in dicts):
+            # An older / minimal server that sends no active/loaded markers at
+            # all: fall back to the first entry (the pre-marker behaviour). When
+            # markers ARE present we never fall back to data[0].
+            chosen = dicts[0]
+        if chosen is not None:
+            return "loaded", chosen.get("id")
         return "empty", None
     except Exception:
         return "unknown", None
