@@ -153,6 +153,10 @@ class GGUFEmbedder:
         mp.n_gpu_layers = n_gpu_layers
         if n_gpu_layers >= 99:
             mp.use_mmap = False
+        # Multi-GPU: honour the configured main_gpu_index, same as the chat
+        # backend (see discover.apply_main_gpu / llamacpp/llama.py).
+        from localm.discover import apply_main_gpu
+        apply_main_gpu(mp)
         self._model = api.llama_load_model_from_file(model_path, mp)
         if not self._model:
             raise RuntimeError(f"failed to load embedding model: {model_path}")

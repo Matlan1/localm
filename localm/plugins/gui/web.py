@@ -178,6 +178,12 @@ class RemoveModelRequest(BaseModel):
     model: str
 
 
+class UnloadModelRequest(BaseModel):
+    # None (the default, and an empty POST body) unloads every loaded model -
+    # unchanged behavior; a name unloads only that one.
+    model: str | None = None
+
+
 class AliasRequest(BaseModel):
     model: str
     alias: str

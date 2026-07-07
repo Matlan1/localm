@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for the VRAM pre-flight warning in GgufBackend.load()."""
 
-from unittest.mock import patch
+import sys
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -127,3 +128,40 @@ class TestVramReport:
         assert "12.00 GB in use / 16.00 GB total" in out
         assert "+8.00 GB this load" in out
         assert "0.00 GB allocated" not in out      # the old, wrong line
+
+
+class TestFreeVramBytesDeviceSelection:
+    """_free_vram_bytes() must read the CONFIGURED main GPU device, not always
+    device 0, once a multi-GPU main_gpu_index is set."""
+
+    def _fake_torch(self, per_device_free_total):
+        fake = MagicMock()
+        fake.cuda.is_available.return_value = True
+        fake.cuda.device_count.return_value = len(per_device_free_total)
+        fake.cuda.mem_get_info.side_effect = lambda i: per_device_free_total[i]
+        return patch.dict(sys.modules, {"torch": fake})
+
+    def test_reads_configured_device(self, monkeypatch):
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"main_gpu_index": 1})
+        monkeypatch.setattr("localm.discover.list_gpus",
+                            lambda: [{"index": 0}, {"index": 1}])
+        with self._fake_torch([(1_000, 2_000), (5_000, 8_000)]):
+            free = GgufBackend._free_vram_bytes()
+        assert free == 5_000
+
+    def test_defaults_to_device_zero_when_unconfigured(self, monkeypatch):
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"main_gpu_index": None})
+        with self._fake_torch([(1_000, 2_000), (5_000, 8_000)]):
+            free = GgufBackend._free_vram_bytes()
+        assert free == 1_000
+
+    def test_invalid_configured_index_falls_back_to_device_zero(self, monkeypatch):
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"main_gpu_index": 9})
+        monkeypatch.setattr("localm.discover.list_gpus",
+                            lambda: [{"index": 0}])
+        with self._fake_torch([(1_000, 2_000)]):
+            free = GgufBackend._free_vram_bytes()
+        assert free == 1_000

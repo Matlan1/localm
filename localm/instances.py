@@ -471,6 +471,12 @@ def advertise(app, home: Path, *, host: str, port: int, mode: str,
     # self-url when it mounts a surface on demand (phase 5 on-demand GUI mount).
     app.state.instance_port = port
     app.state.instance_scheme = scheme
+    # Exposed so OTHER discovery-shaped features (e.g. the cross-install GPU/
+    # VRAM coordination registry) can honour --isolated too: instance_id above
+    # is set even when isolated (so /whoami still answers), but isolated means
+    # "invisible to discovery" - a test/throwaway instance must not register
+    # itself anywhere discoverable, in ANY registry, not just this one.
+    app.state.instance_isolated = isolated
 
     path = None
     if not isolated:

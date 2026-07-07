@@ -370,15 +370,12 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
             model_less = True
     app = hs.create_app(engine)
 
-    state = {"model": "" if model_less else model}
-
     async def switch_model(name: str) -> dict:
         """Swap engines, PREEMPTING any in-flight load so the latest selection
         wins immediately instead of waiting for an abandoned model to finish
         loading (see http_server.switch_engine). Serialised on the inference
         semaphore so no generation is mid-flight."""
-        return await hs.switch_engine(
-            name, _make_engine, on_active=lambda n: state.__setitem__("model", n))
+        return await hs.switch_engine(name, _make_engine)
 
     manager = None
     if not api_mode:
@@ -386,7 +383,16 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
             app,
             self_url=f"{scheme}://127.0.0.1:{chosen_port}/v1",
             switch_model=switch_model,
-            active_model=lambda: state["model"],
+            # Read the authoritative pointer directly rather than shadowing it
+            # in a local dict updated only on load (via on_active): that copy
+            # was never cleared on unload, so the GUI kept reporting a model
+            # "active" for an entire process lifetime after it was unloaded
+            # (found live: /api/models showed active=true post-unload while
+            # the core /v1/models/{id} - which reads this same pointer -
+            # correctly showed false). _active_model_name is already updated
+            # synchronously by both switch_engine (on load) and
+            # unload_all_models/unload_one_model (on unload).
+            active_model=lambda: hs._active_model_name or "",
         )
 
     base_url = f"{scheme}://127.0.0.1:{chosen_port}/"

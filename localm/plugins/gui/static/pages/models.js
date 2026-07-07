@@ -79,6 +79,11 @@ export async function refreshModelsPage() {
     nameTd.appendChild(iconEl("models", "ic ic-model"));
     nameTd.appendChild(el("span", "name", m.name));
     if (m.active) nameTd.appendChild(el("span", "active-tag", "active"));
+    // Independent of "active": a model can sit resident in VRAM without being
+    // the one currently serving requests - surfaced so a background-loaded
+    // model is never invisible/indistinguishable from one that was never
+    // loaded at all.
+    else if (m.loaded) nameTd.appendChild(el("span", "active-tag loaded-tag", "loaded"));
     tr.appendChild(nameTd);
     
     // Role column (using job-state badge layout)
@@ -130,6 +135,26 @@ export async function refreshModelsPage() {
         else toast(data.detail || "Alias failed", true);
       };
       actions.appendChild(aliasBtn);
+      if (m.loaded) {
+        const unload = el("button", "", "unload");
+        unload.title = "Release this model from GPU/CPU memory (it reloads "
+          + "automatically on the next chat request)";
+        unload.onclick = async () => {
+          unload.disabled = true;
+          try {
+            const r = await fetch("/api/models/unload", {
+              method: "POST", headers: authHeaders(),
+              body: JSON.stringify({ model: m.name }),
+            });
+            const data = await r.json().catch(() => ({}));
+            if (!r.ok) { toast(data.detail || "Unload failed", true); return; }
+            toast(`Unloaded '${m.name}'`);
+            refreshModelsPage();
+            refreshPerfEstimate();
+          } finally { unload.disabled = false; }
+        };
+        actions.appendChild(unload);
+      }
       if (!m.active) {
         const rm = el("button", "danger", "remove");
         rm.onclick = async () => {
@@ -809,6 +834,29 @@ if (scanBtn) {
       toast("Scan failed: " + e.message, true);
     } finally {
       scanBtn.disabled = false;
+    }
+  };
+}
+
+// Bind Unload-all button click handler
+const unloadAllBtn = $("models-unload-all-btn");
+if (unloadAllBtn) {
+  unloadAllBtn.onclick = async () => {
+    unloadAllBtn.disabled = true;
+    try {
+      const r = await fetch("/api/models/unload", {
+        method: "POST", headers: authHeaders(), body: JSON.stringify({}),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) { toast(data.detail || "Unload failed", true); return; }
+      const n = (data.unloaded_models || []).length;
+      toast(n ? `Unloaded ${n} model(s)` : "Nothing was loaded");
+      refreshModelsPage();
+      refreshPerfEstimate();
+    } catch (e) {
+      toast("Unload failed: " + e.message, true);
+    } finally {
+      unloadAllBtn.disabled = false;
     }
   };
 }

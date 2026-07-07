@@ -68,6 +68,16 @@ _switch_desired: Optional[str] = None
 _switch_loading: Optional[str] = None
 _switch_cancel: Optional["threading.Event"] = None
 
+# Cross-install GPU/VRAM coordination (multi-instance cooperation, see
+# localm.gpu_registry). None until the lifespan startup below populates it -
+# which only happens for a REAL, non-isolated, instances.advertise()'d server
+# (app.state.instance_id set and app.state.instance_isolated falsy). A plain
+# create_app() test app, or an --isolated run, never sets this, so it never
+# touches the shared machine-wide registry directory: this instance then
+# behaves exactly as it always has (zero-daemon-required). Shape:
+# {"instance_id", "port", "host", "scheme", "token"}.
+_gpu_coord: Optional[dict] = None
+
 def _default_engine_factory(name: str) -> Engine:
     from localm.config import load_registry
     from localm.model_manager import get_model_info, get_model_mmproj
@@ -83,6 +93,132 @@ def _default_engine_factory(name: str) -> Engine:
     )
 
 _engine_factory = _default_engine_factory
+
+
+# ------------------------------------------------------------------ #
+#  Cross-install GPU/VRAM coordination (see localm.gpu_registry)      #
+# ------------------------------------------------------------------ #
+
+def _model_file_size(name: str) -> Optional[int]:
+    """Best-effort on-disk size for registered model *name*, or None when not
+    resolvable (e.g. under pytest with no registry). Mirrors switch_engine's
+    own file_size computation so the VRAM estimate written to the coordination
+    registry is consistent with the number switch_engine itself used to decide
+    whether eviction was needed."""
+    try:
+        from pathlib import Path as _Path
+        from localm.model_manager import get_model_info
+        info = get_model_info(name)
+        if info is None:
+            return None
+        m_path, _ = info
+        if not m_path:
+            return None
+        p = _Path(m_path)
+        if p.is_file():
+            return p.stat().st_size
+        if p.is_dir():
+            return sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+    except (OSError, TypeError, ValueError):
+        return None
+    return None
+
+
+def _current_gpu_index() -> int:
+    """The configured main GPU device index (0 when unset/unconfigured) - see
+    ``main_gpu_index`` / ``discover.resolve_main_gpu_index``, the same
+    resolution ``vram_info()`` and the GGUF backend's own VRAM check use."""
+    try:
+        from localm.config import load_config
+        from localm.discover import resolve_main_gpu_index
+        return resolve_main_gpu_index(load_config().get("main_gpu_index"))
+    except Exception:
+        return 0
+
+
+def _gpu_registry_sync() -> None:
+    """Best-effort: write this instance's current model/VRAM state to the
+    cross-install GPU coordination registry (called on every successful model
+    load/unload, plus a periodic heartbeat). A no-op when this instance is not
+    registered for coordination (``_gpu_coord`` unset - a plain test app or an
+    ``--isolated`` run never reaches the shared registry directory at all).
+
+    Never raises into the caller: a registry write failure must not break the
+    model load/unload it is piggybacking on (RULE 5 - logged, not silenced)."""
+    global _gpu_coord
+    if not _gpu_coord:
+        return
+    try:
+        import os as _os
+        from localm import gpu_registry
+        model = _active_model_name
+        vram_bytes = None
+        if model:
+            size = _model_file_size(model)
+            if size is not None:
+                vram_bytes = int(size * 1.2)
+        gpu_registry.write_entry(
+            gpu_registry.registry_dir(),
+            instance_id=_gpu_coord["instance_id"],
+            pid=_os.getpid(),
+            port=_gpu_coord.get("port"),
+            host=_gpu_coord.get("host") or "127.0.0.1",
+            scheme=_gpu_coord.get("scheme") or "http",
+            model=model,
+            vram_estimate_bytes=vram_bytes,
+            gpu_index=_current_gpu_index(),
+            coordination_token=_gpu_coord["token"],
+        )
+    except Exception as e:
+        from localm.debuglog import logger as _dbg
+        _dbg.debug("gpu-registry sync failed (continuing): %s", e)
+
+
+def _attempt_cooperative_unload() -> bool:
+    """Best-effort: ask a live sibling localm instance (found via the
+    cross-install GPU-coordination registry) to release its own VRAM, so this
+    instance does not have to give up and 503 just because ITS OWN local
+    eviction candidates are all busy. Returns True once a peer confirms it
+    freed its model.
+
+    Only runs when THIS instance itself is registered for coordination
+    (``_gpu_coord`` set - never for a plain test app or an ``--isolated`` run,
+    so tests and isolated runs never touch the shared machine-wide registry
+    directory or make an outbound loopback call). Fully advisory: ANY failure
+    (no registry dir, no live peer, request timeout/refusal) is logged and
+    returns False - the caller's pre-existing 503 remains the unchanged
+    fallback (RULE 5: a failed cooperation attempt must never become a HARDER
+    failure than today's baseline, and must never be silenced)."""
+    global _gpu_coord
+    from localm.debuglog import logger as _dbg
+    if not _gpu_coord:
+        return False
+    try:
+        from localm import gpu_registry
+    except Exception as e:
+        _dbg.debug("gpu_registry unavailable, skipping cooperative unload: %s", e)
+        return False
+    try:
+        peers = gpu_registry.list_gpu_peers(exclude_self_id=_gpu_coord.get("instance_id"))
+    except Exception as e:
+        _dbg.warning("gpu-registry peer lookup failed (falling back to local-only "
+                     "eviction): %s", e)
+        return False
+    # Only a peer actually holding a model has anything to free.
+    holders = [p for p in peers if p.get("model")]
+    for peer in holders:
+        try:
+            ok = gpu_registry.request_cooperative_unload(peer)
+        except Exception as e:
+            _dbg.warning("cooperative-unload request to peer %s failed: %s",
+                        peer.get("instance_id"), e)
+            continue
+        if ok:
+            _dbg.info("cooperative unload: peer %s (port %s) released its model "
+                      "to free VRAM for this load", peer.get("instance_id"), peer.get("port"))
+            return True
+        _dbg.warning("peer %s declined/failed cooperative unload", peer.get("instance_id"))
+    return False
 
 
 async def switch_engine(name: str, make_engine, *, on_active=None) -> dict:
@@ -154,8 +290,20 @@ async def switch_engine(name: str, make_engine, *, on_active=None) -> dict:
                         break
                         
                 if evict_name is None:
+                    # Local eviction is exhausted (everything else is busy or
+                    # nothing else is loaded): before giving up, try a
+                    # best-effort ask to a sibling localm instance on this
+                    # machine (multi-instance GPU coordination, see
+                    # localm.gpu_registry) to release ITS VRAM. Off the event
+                    # loop since it may make a blocking loopback HTTP call.
+                    # Advisory only: any failure (no peer, timeout, refusal)
+                    # falls straight through to exactly today's 503 - never a
+                    # harder failure than the pre-existing baseline.
+                    cooperated = await loop.run_in_executor(None, _attempt_cooperative_unload)
+                    if cooperated:
+                        continue
                     raise HTTPException(503, f"VRAM exhausted (cannot load '{name}'). All other loaded models are busy.")
-                    
+
                 evict_engine = _engines[evict_name]
                 await loop.run_in_executor(None, evict_engine.unload)
                 del _engines[evict_name]
@@ -189,6 +337,11 @@ async def switch_engine(name: str, make_engine, *, on_active=None) -> dict:
         _inference_sem = sem
         if on_active is not None:
             on_active(name)
+        # Cross-install GPU coordination: reflect the newly-active model in
+        # the registry so a sibling instance's next VRAM check (or eviction
+        # decision) sees fresh state. No-op when not registered for
+        # coordination (see _gpu_registry_sync).
+        _gpu_registry_sync()
         return {"status": "loaded", "model": name}
 
 
@@ -242,8 +395,119 @@ async def get_engine(model_name: str) -> Engine:
     res = await switch_engine(name, _engine_factory)
     if res.get("status") == "superseded":
         raise HTTPException(503, f"Model load was superseded by a newer request: {res.get('by')}")
-        
+
     return _engines[name]
+
+
+async def unload_all_models() -> dict:
+    """Release every currently-loaded model from GPU/CPU memory and wait until
+    VRAM is actually reclaimed (see ``localm.vram.wait_for_vram_release`` - the
+    driver-hang guard: otherwise a media model can load on top of a
+    not-yet-freed LLM and exceed total VRAM).
+
+    Extracted from the ``POST /v1/models/unload`` route so it has exactly ONE
+    implementation, reused by two callers with two different auth models: the
+    owner-scoped ``/v1/models/unload`` route (``MODELS_WRITE``), and the
+    coordination-token-gated ``POST /v1/instances/cooperate-unload`` (a
+    sibling localm instance asking THIS one to free VRAM - multi-instance GPU
+    coordination, see ``localm.gpu_registry``). Behavior is unchanged from the
+    original inline implementation."""
+    global _active_model_name, _engine, _inference_sem
+    loop = asyncio.get_running_loop()
+    from localm.discover import vram_info
+    from localm.vram import wait_for_vram_release
+
+    def _free():
+        return vram_info().get("free")
+
+    before = _free()
+    unloaded_models = []
+
+    for name in list(_engines.keys()):
+        engine = _engines[name]
+        if not engine.loaded:
+            continue
+        sem = _inference_sems.setdefault(name, asyncio.Semaphore(1))
+        async with sem:
+            await loop.run_in_executor(None, engine.unload)
+            unloaded_models.append(name)
+            if name in _engines_lru:
+                _engines_lru.remove(name)
+
+    # Update compatibility pointers
+    _active_model_name = None
+    _engine = None
+    _inference_sem = None
+
+    if before is not None and unloaded_models:
+        released, after = await loop.run_in_executor(
+            None, lambda: wait_for_vram_release(_free, before_bytes=before))
+    else:
+        released, after = 0, before
+
+    result = {
+        "status": "unloaded" if unloaded_models else "already_unloaded",
+        "model": unloaded_models[0] if unloaded_models else "none",
+        "unloaded_models": unloaded_models
+    }
+    if before is not None:
+        result.update(vram_freed=released,
+                      vram_before_bytes=before, vram_after_bytes=after)
+    # Cross-install GPU coordination: reflect the now-empty (or changed) model
+    # state so a sibling instance's next eviction decision sees fresh state.
+    # No-op when not registered for coordination.
+    _gpu_registry_sync()
+    return result
+
+
+async def unload_one_model(name: str) -> dict:
+    """Release ONE currently-loaded model from GPU/CPU memory, leaving any
+    other loaded models untouched - the targeted counterpart to
+    ``unload_all_models()`` (same VRAM-release-wait + gpu-registry-sync
+    behavior, just scoped to a single engine). Clears the active-model
+    pointers only when *name* was the active model, so unloading a background
+    (loaded-but-not-active) model never disturbs the one actually serving
+    requests. A *name* that is registered but not currently loaded is a
+    no-op success (idempotent, matching unload_all_models()'s "nothing to do"
+    case), not an error - callers that need to reject an unknown model name
+    outright should check the registry themselves before calling this."""
+    global _active_model_name, _engine, _inference_sem
+    loop = asyncio.get_running_loop()
+    from localm.discover import vram_info
+    from localm.vram import wait_for_vram_release
+
+    engine = _engines.get(name)
+    if engine is None or not engine.loaded:
+        return {"status": "already_unloaded", "model": name}
+
+    def _free():
+        return vram_info().get("free")
+
+    before = _free()
+    sem = _inference_sems.setdefault(name, asyncio.Semaphore(1))
+    async with sem:
+        await loop.run_in_executor(None, engine.unload)
+        if name in _engines_lru:
+            _engines_lru.remove(name)
+
+    was_active = _active_model_name == name
+    if was_active:
+        _active_model_name = None
+        _engine = None
+        _inference_sem = None
+
+    if before is not None:
+        released, after = await loop.run_in_executor(
+            None, lambda: wait_for_vram_release(_free, before_bytes=before))
+    else:
+        released, after = 0, before
+
+    result = {"status": "unloaded", "model": name, "was_active": was_active}
+    if before is not None:
+        result.update(vram_freed=released,
+                      vram_before_bytes=before, vram_after_bytes=after)
+    _gpu_registry_sync()
+    return result
 
 
 # Monotonic timestamp of the last inference request, for the optional idle-unload
@@ -355,7 +619,10 @@ async def _idle_unload_once(ttl: int) -> bool:
             _dbg.info("idle-unload: freed %s after %ds idle (ttl=%ds); it reloads "
                       "on the next request", engine.display_name, idle_s, ttl)
             unloaded_any = True
-            
+            # Cross-install GPU coordination: reflect the freed model so a
+            # sibling instance sees fresh state. No-op when not registered.
+            _gpu_registry_sync()
+
     return unloaded_any
 
 
@@ -378,6 +645,23 @@ async def _idle_unload_loop() -> None:
         except Exception:
             from localm.debuglog import logger as _dbg
             _dbg.warning("idle-unload check failed (continuing)", exc_info=True)
+
+
+async def _gpu_registry_heartbeat_loop() -> None:
+    """Keep this instance's cross-install GPU-coordination entry fresh
+    (~every 20s), matching the ``_idle_unload_loop`` pattern above. Only
+    started when this instance is actually registered for coordination (see
+    ``_gpu_coord`` / the lifespan startup below) - a plain test app or an
+    ``--isolated`` run never starts this loop at all. A transient failure is
+    logged, not fatal (RULE 5): the entry just ages until the next tick, and a
+    stale entry is skipped by a peer's own liveness+identity check anyway."""
+    while True:
+        await asyncio.sleep(20)
+        try:
+            _gpu_registry_sync()
+        except Exception:
+            from localm.debuglog import logger as _dbg
+            _dbg.warning("gpu-registry heartbeat failed (continuing)", exc_info=True)
 
 # Optional bearer-token auth - enabled when LOCALM_API_KEY is set.
 _bearer_scheme = HTTPBearer(auto_error=False)
@@ -965,6 +1249,39 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         # is a cheap no-op while disabled. Cancelled on shutdown so it never
         # outlives the app.
         idle_task = asyncio.create_task(_idle_unload_loop())
+
+        # Cross-install GPU/VRAM coordination (see localm.gpu_registry):
+        # register this instance in the machine-wide registry, but ONLY for a
+        # real, non-isolated, instances.advertise()'d server - app.state.
+        # instance_id (+ port/scheme) are set by advertise() before uvicorn
+        # starts accepting connections, i.e. before this lifespan runs; a bare
+        # create_app() test app or an --isolated run never sets instance_id
+        # (or sets instance_isolated), so this stays a no-op there and never
+        # touches the shared machine-wide directory. Best-effort throughout:
+        # a failure here must never block server startup (RULE 5: logged, not
+        # silenced).
+        global _gpu_coord
+        gpu_task = None
+        _instance_id = getattr(app.state, "instance_id", None)
+        _isolated = getattr(app.state, "instance_isolated", False)
+        if _instance_id and not _isolated:
+            try:
+                _gpu_coord = {
+                    "instance_id": _instance_id,
+                    "port": getattr(app.state, "instance_port", None),
+                    "host": getattr(app.state, "bind_host", None) or "127.0.0.1",
+                    "scheme": getattr(app.state, "instance_scheme", None) or "http",
+                    "token": secrets.token_urlsafe(32),
+                }
+                app.state.gpu_coordination_token = _gpu_coord["token"]
+                _gpu_registry_sync()
+                gpu_task = asyncio.create_task(_gpu_registry_heartbeat_loop())
+            except Exception as e:
+                from localm.debuglog import logger as _dbg
+                _dbg.debug("gpu-registry startup failed (continuing without "
+                          "cross-instance GPU coordination): %s", e)
+                _gpu_coord = None
+
         try:
             yield
         finally:
@@ -973,6 +1290,25 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                 await idle_task
             except asyncio.CancelledError:
                 pass
+            if gpu_task is not None:
+                gpu_task.cancel()
+                try:
+                    await gpu_task
+                except asyncio.CancelledError:
+                    pass
+            if _gpu_coord is not None:
+                # Best-effort: a crash just leaves the entry to be aged out by
+                # a peer's own pid+identity liveness check (same philosophy as
+                # instances.py's own registry cleanup).
+                try:
+                    from localm import gpu_registry
+                    gpu_registry.remove_entry(
+                        gpu_registry.entry_path(gpu_registry.registry_dir(),
+                                                _gpu_coord["instance_id"]))
+                except Exception as e:
+                    from localm.debuglog import logger as _dbg
+                    _dbg.debug("gpu-registry cleanup on shutdown failed: %s", e)
+                _gpu_coord = None
             _audit.close()
 
     app = FastAPI(
@@ -1086,6 +1422,14 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         # cross-origin browser page still cannot set the Authorization header
         # without a secret it cannot read, so the exemption adds no CSRF surface.
         "/v1/surfaces/",
+        # Multi-instance GPU coordination (localm.gpu_registry): a SIBLING
+        # localm instance on this machine calls this loopback-only, exactly
+        # like the surface-management case above - it sends no Origin and has
+        # no shell_token (it is a different process). Its own coordination_
+        # token (never the real API key/shell token) is the real credential,
+        # checked inside the route itself, so the same-origin gate is exempt
+        # here for the same reason.
+        "/v1/instances/",
     )
     _cors_allowlist = cors_cfg if isinstance(cors_cfg, list) else []
     _cors_wildcard = cors_cfg == "*"
@@ -1240,6 +1584,8 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     _routes_config.register(app, ctx)
     from localm.inference.routes import keys as _routes_keys
     _routes_keys.register(app, ctx)
+    from localm.inference.routes import gpu as _routes_gpu
+    _routes_gpu.register(app, ctx)
     from localm.inference.routes import admin as _routes_admin
     _routes_admin.register(app, ctx)
     from localm.inference.routes import chat as _routes_chat

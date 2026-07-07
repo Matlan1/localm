@@ -2,10 +2,15 @@
 """Tests for localm.discover - HF search, quant parsing, VRAM fit badges.
 All HuggingFace calls are mocked; no real network."""
 
+import sys
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
 import pytest
 
 from localm.discover import (
-    DiscoverError, _quant_of, fit_label, hf_gguf_files, hf_search, vram_info,
+    DiscoverError, _quant_of, apply_main_gpu, fit_label, hf_gguf_files,
+    hf_search, list_gpus, resolve_main_gpu_index, vram_info,
 )
 
 
@@ -162,3 +167,174 @@ class TestFit:
         assert isinstance(info, dict)
         if info:
             assert info.get("total", 0) > 0
+
+
+# ------------------------------------------------------------------ #
+#  Multi-GPU: enumeration + main-GPU selection                        #
+# ------------------------------------------------------------------ #
+
+class TestListGpus:
+    def _fake_torch(self, devices):
+        """devices: [(name, free_bytes, total_bytes), ...]."""
+        fake = MagicMock()
+        fake.cuda.is_available.return_value = True
+        fake.cuda.device_count.return_value = len(devices)
+        fake.cuda.get_device_name.side_effect = lambda i: devices[i][0]
+        fake.cuda.mem_get_info.side_effect = lambda i: (devices[i][1], devices[i][2])
+        return patch.dict(sys.modules, {"torch": fake})
+
+    def test_enumerates_all_devices_with_names(self):
+        devices = [("RTX 4090", 20_000_000_000, 24_000_000_000),
+                   ("RTX 3060", 10_000_000_000, 12_000_000_000)]
+        with self._fake_torch(devices):
+            gpus = list_gpus()
+        assert gpus == [
+            {"index": 0, "name": "RTX 4090", "total": 24_000_000_000, "free": 20_000_000_000},
+            {"index": 1, "name": "RTX 3060", "total": 12_000_000_000, "free": 10_000_000_000},
+        ]
+
+    def test_three_plus_devices_all_enumerated(self):
+        devices = [(f"GPU{i}", i * 1_000_000_000, 8_000_000_000) for i in range(4)]
+        with self._fake_torch(devices):
+            gpus = list_gpus()
+        assert len(gpus) == 4
+        assert [g["index"] for g in gpus] == [0, 1, 2, 3]
+        assert [g["name"] for g in gpus] == ["GPU0", "GPU1", "GPU2", "GPU3"]
+
+    def test_falls_back_to_nvidia_smi_without_torch(self):
+        csv = ("0, NVIDIA RTX 4090, 24576, 20000\n"
+               "1, NVIDIA RTX 3060, 12288, 10000\n")
+        fake_proc = MagicMock(returncode=0, stdout=csv)
+        with patch.dict(sys.modules, {"torch": None}), \
+             patch("subprocess.run", return_value=fake_proc):
+            gpus = list_gpus()
+        assert len(gpus) == 2
+        assert gpus[0] == {"index": 0, "name": "NVIDIA RTX 4090",
+                            "total": 24576 * 1024 ** 2, "free": 20000 * 1024 ** 2}
+        assert gpus[1]["index"] == 1
+        assert gpus[1]["name"] == "NVIDIA RTX 3060"
+
+    def test_empty_when_nothing_available(self):
+        with patch.dict(sys.modules, {"torch": None}), \
+             patch("subprocess.run", side_effect=FileNotFoundError):
+            assert list_gpus() == []
+
+    def test_empty_when_torch_sees_no_cuda(self):
+        fake = MagicMock()
+        fake.cuda.is_available.return_value = False
+        with patch.dict(sys.modules, {"torch": fake}), \
+             patch("subprocess.run", side_effect=FileNotFoundError):
+            assert list_gpus() == []
+
+
+class TestResolveMainGpuIndex:
+    def test_none_returns_zero_without_querying_devices(self, monkeypatch):
+        calls = []
+
+        def _tracked_list_gpus():
+            calls.append(1)
+            return []
+
+        monkeypatch.setattr("localm.discover.list_gpus", _tracked_list_gpus)
+        assert resolve_main_gpu_index(None) == 0
+        assert calls == []
+
+    def test_configured_zero_used_without_querying_devices(self, monkeypatch):
+        calls = []
+
+        def _tracked_list_gpus():
+            calls.append(1)
+            return []
+
+        monkeypatch.setattr("localm.discover.list_gpus", _tracked_list_gpus)
+        assert resolve_main_gpu_index(0) == 0
+        assert calls == []
+
+    def test_valid_index_within_range_is_used(self):
+        gpus = [{"index": 0}, {"index": 1}, {"index": 2}]
+        assert resolve_main_gpu_index(2, gpus=gpus) == 2
+
+    def test_out_of_range_falls_back_to_zero_with_warning(self, caplog):
+        gpus = [{"index": 0}, {"index": 1}]
+        with caplog.at_level("WARNING", logger="localm"):
+            idx = resolve_main_gpu_index(5, gpus=gpus)
+        assert idx == 0
+        assert any("main_gpu_index" in r.message for r in caplog.records)
+
+    def test_negative_index_falls_back_with_warning(self, caplog):
+        with caplog.at_level("WARNING", logger="localm"):
+            idx = resolve_main_gpu_index(-1)
+        assert idx == 0
+        assert any("main_gpu_index" in r.message for r in caplog.records)
+
+    def test_non_integer_falls_back_with_warning(self, caplog):
+        with caplog.at_level("WARNING", logger="localm"):
+            idx = resolve_main_gpu_index("not-a-number")
+        assert idx == 0
+        assert any("main_gpu_index" in r.message for r in caplog.records)
+
+    def test_unmeasurable_passes_through_unchecked(self, monkeypatch):
+        # gpus not injected and list_gpus() finds nothing (no torch, no
+        # nvidia-smi): the configured index cannot be cross-checked, so it is
+        # trusted rather than discarded (documented boundary).
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: [])
+        assert resolve_main_gpu_index(3) == 3
+
+
+class TestApplyMainGpu:
+    def test_unset_leaves_native_default_untouched(self):
+        mp = SimpleNamespace(main_gpu=0)
+        apply_main_gpu(mp, config={"main_gpu_index": None})
+        assert mp.main_gpu == 0
+
+    def test_configured_index_is_set_on_mp(self, monkeypatch):
+        monkeypatch.setattr("localm.discover.list_gpus",
+                            lambda: [{"index": 0}, {"index": 1}])
+        mp = SimpleNamespace(main_gpu=0)
+        apply_main_gpu(mp, config={"main_gpu_index": 1})
+        assert mp.main_gpu == 1
+
+    def test_invalid_configured_index_falls_back_to_zero_with_warning(self, monkeypatch, caplog):
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: [{"index": 0}])
+        mp = SimpleNamespace(main_gpu=99)
+        with caplog.at_level("WARNING", logger="localm"):
+            apply_main_gpu(mp, config={"main_gpu_index": 7})
+        assert mp.main_gpu == 0
+        assert any("main_gpu_index" in r.message for r in caplog.records)
+
+    def test_reads_load_config_when_config_not_passed(self, monkeypatch):
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"main_gpu_index": None})
+        mp = SimpleNamespace(main_gpu=0)
+        apply_main_gpu(mp)
+        assert mp.main_gpu == 0
+
+
+class TestVramInfoRespectsConfiguredDevice:
+    """vram_info() must reflect the CONFIGURED main GPU, not always device 0,
+    once list_gpus() can see more than one device."""
+
+    _GPUS = [
+        {"index": 0, "name": "A", "total": 24_000_000_000, "free": 20_000_000_000},
+        {"index": 1, "name": "B", "total": 12_000_000_000, "free": 10_000_000_000},
+    ]
+
+    def test_uses_configured_device(self, monkeypatch):
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS)
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"main_gpu_index": 1})
+        assert vram_info() == {"total": 12_000_000_000, "free": 10_000_000_000}
+
+    def test_defaults_to_device_zero_when_unconfigured(self, monkeypatch):
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS)
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"main_gpu_index": None})
+        assert vram_info() == {"total": 24_000_000_000, "free": 20_000_000_000}
+
+    def test_invalid_configured_index_falls_back_to_zero(self, monkeypatch, caplog):
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS[:1])
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"main_gpu_index": 9})
+        with caplog.at_level("WARNING", logger="localm"):
+            info = vram_info()
+        assert info == {"total": 24_000_000_000, "free": 20_000_000_000}

@@ -114,6 +114,14 @@ CORE_FIELDS: list = [
                  "Model layers to run on the GPU. 99 puts the whole model on the "
                  "GPU; lower it if you run out of VRAM.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=0, max=999),
+    # HIDDEN: rendered by a dedicated Main GPU selector in the Live Tuning card
+    # (populated from GET /api/gpus), not the generic settings form - a plain
+    # number box would not show device names/VRAM. Still accepted by PATCH
+    # /v1/config (and `localm config main_gpu_index N`) like any other field.
+    SettingField("main_gpu_index", Widget.HIDDEN, "Main GPU",
+                 "Which GPU device to load models onto, for multi-GPU systems. "
+                 "Blank uses device 0.",
+                 group="Engine", applies=Applies.NEXT_LOAD, min=0),
     SettingField("idle_unload_seconds", Widget.NUMBER, "Idle model unload (s)",
                  "Free the model's VRAM after this many seconds with no request "
                  "(0 = never; the model stays resident). The next message reloads "
@@ -594,6 +602,21 @@ def _validate_one(key: str, val, field: "SettingField", default):
             raise ValueError(f"{key}: {val!r} is not one of {LOGO_STYLE_IDS}")
         if key == "key_presets":
             return _validate_key_presets(val)
+        if key == "main_gpu_index":
+            # A HIDDEN NUMBER-shaped field (the dedicated GPU selector renders
+            # it, not the generic number box - see its schema comment). val may
+            # arrive as a JSON int (GUI) or a CLI string (`localm config
+            # main_gpu_index 1`); coerce explicitly so config.json always
+            # stores a real int, not a stringly-typed one.
+            if isinstance(val, bool):
+                raise ValueError(f"{key}: expected an integer, not a boolean")
+            try:
+                idx = int(val)
+            except (TypeError, ValueError):
+                raise ValueError(f"{key}: expected an integer, got {val!r}")
+            if field.min is not None and idx < field.min:
+                raise ValueError(f"{key}: {idx} is below the minimum {field.min}")
+            return idx
         # plugins_enabled (list) / plugins (dict): managed by the engine, not the
         # settings form, but accepted with the right container type for the
         # GET->PATCH round-trip the GUI does.

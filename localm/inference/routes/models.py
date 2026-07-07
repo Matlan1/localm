@@ -8,7 +8,6 @@ reassigns them is reflected here).
 
 from __future__ import annotations
 
-import asyncio
 import time
 from pathlib import Path
 
@@ -98,55 +97,23 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/v1/models/unload",
               dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
-    async def unload_model():
+    async def unload_model(model: str | None = None):
         """
-        Release all models from GPU/CPU memory.
+        Release model(s) from GPU/CPU memory.
 
-        Call this before starting a VRAM-intensive task (e.g. ComfyUI FLUX
-        generation) so the GPU memory is fully available. The next call to
-        /v1/chat/completions will reload the model automatically.
+        With no `model`, releases EVERY currently-loaded model (unchanged
+        default behavior) - call this before a VRAM-intensive task (e.g.
+        ComfyUI FLUX generation) so the GPU memory is fully available. With
+        `model` set, releases only that one, leaving any other loaded models
+        untouched. Either way, the next matching /v1/chat/completions call
+        reloads lazily.
         """
-        loop = asyncio.get_running_loop()
-        from localm.discover import vram_info
-        from localm.vram import wait_for_vram_release
-
-        def _free():
-            return vram_info().get("free")
-
-        before = _free()
-        unloaded_models = []
-        
-        for name in list(_hs._engines.keys()):
-            engine = _hs._engines[name]
-            if not engine.loaded:
-                continue
-            sem = _hs._inference_sems.setdefault(name, asyncio.Semaphore(1))
-            async with sem:
-                await loop.run_in_executor(None, engine.unload)
-                unloaded_models.append(name)
-                if name in _hs._engines_lru:
-                    _hs._engines_lru.remove(name)
-                    
-        # Update compatibility pointers
-        _hs._active_model_name = None
-        _hs._engine = None
-        _hs._inference_sem = None
-
-        if before is not None and unloaded_models:
-            released, after = await loop.run_in_executor(
-                None, lambda: wait_for_vram_release(_free, before_bytes=before))
-        else:
-            released, after = 0, before
-            
-        result = {
-            "status": "unloaded" if unloaded_models else "already_unloaded",
-            "model": unloaded_models[0] if unloaded_models else "none",
-            "unloaded_models": unloaded_models
-        }
-        if before is not None:
-            result.update(vram_freed=released,
-                          vram_before_bytes=before, vram_after_bytes=after)
-        return result
+        if model:
+            from localm.config import load_registry
+            if model not in load_registry() and model != _hs._default_model_name:
+                raise HTTPException(404, f"Model not registered: {model}")
+            return await _hs.unload_one_model(model)
+        return await _hs.unload_all_models()
 
     @app.post("/v1/models/load",
               dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])

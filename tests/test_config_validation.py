@@ -8,6 +8,8 @@ list key (plugins_enabled / net_allow), and PATCH {net_deny: null} silently wipe
 the SSRF deny-list (P0-6 / SEC-2 / BUG-3).
 """
 
+from unittest.mock import patch
+
 import pytest
 
 from localm import settings_schema as ss
@@ -46,6 +48,32 @@ class TestValidateUpdate:
         with pytest.raises(ValueError, match="above the maximum"):
             ss.validate_update({"n_gpu_layers": 1111})
         assert ss.validate_update({"n_gpu_layers": 99}) == {"n_gpu_layers": 99}
+
+    def test_main_gpu_index_coerces_cli_string_to_int(self):
+        # `localm config main_gpu_index 1` arrives as the string "1"; it must
+        # be stored as a real int, not left stringly-typed (HIDDEN widgets
+        # skip the generic number coercion, so this key is special-cased).
+        assert ss.validate_update({"main_gpu_index": "1"}) == {"main_gpu_index": 1}
+        assert isinstance(ss.validate_update({"main_gpu_index": "1"})["main_gpu_index"], int)
+
+    def test_main_gpu_index_accepts_json_int(self):
+        # PATCH /v1/config from the GUI sends a native JSON int.
+        assert ss.validate_update({"main_gpu_index": 1}) == {"main_gpu_index": 1}
+
+    def test_main_gpu_index_null_clears_it(self):
+        assert ss.validate_update({"main_gpu_index": None}) == {"main_gpu_index": None}
+
+    def test_main_gpu_index_rejects_negative(self):
+        with pytest.raises(ValueError, match="below the minimum"):
+            ss.validate_update({"main_gpu_index": -1})
+
+    def test_main_gpu_index_rejects_non_integer(self):
+        with pytest.raises(ValueError, match="expected an integer"):
+            ss.validate_update({"main_gpu_index": "not-a-number"})
+
+    def test_main_gpu_index_rejects_bool(self):
+        with pytest.raises(ValueError, match="not a boolean"):
+            ss.validate_update({"main_gpu_index": True})
 
     def test_toggle_coercion(self):
         assert ss.validate_update({"require_auth": "true"}) == {"require_auth": True}
@@ -192,6 +220,63 @@ class TestConfigCli:
         assert r.exit_code != 0
         assert "mode" in self._cfg()  # default untouched
         assert self._cfg()["mode"] == DEFAULT_CONFIG["mode"]
+
+    def test_main_gpu_index_settable(self, cli_runner):
+        from localm.cli import main
+        r = cli_runner.invoke(main, ["config", "main_gpu_index", "1"])
+        assert r.exit_code == 0, r.output
+        assert self._cfg()["main_gpu_index"] == 1
+
+    def test_main_gpu_index_rejects_negative(self, cli_runner):
+        from localm.cli import main
+        # "--" so click's parser treats "-1" as the VALUE argument, not a
+        # (nonexistent) option flag.
+        r = cli_runner.invoke(main, ["config", "main_gpu_index", "--", "-1"])
+        assert r.exit_code != 0
+        assert self._cfg().get("main_gpu_index") is None   # default untouched
+
+
+# --------------------------------------------------------------------------- #
+#  `localm gpus` CLI                                                          #
+# --------------------------------------------------------------------------- #
+
+class TestGpusCli:
+    _GPUS = [
+        {"index": 0, "name": "RTX 4090", "total": 24 * 1024 ** 3, "free": 20 * 1024 ** 3},
+        {"index": 1, "name": "RTX 3060", "total": 12 * 1024 ** 3, "free": 10 * 1024 ** 3},
+    ]
+
+    def test_lists_detected_gpus(self, cli_runner):
+        from localm.cli import main
+        with patch("localm.discover.list_gpus", return_value=self._GPUS):
+            r = cli_runner.invoke(main, ["gpus"])
+        assert r.exit_code == 0, r.output
+        assert "RTX 4090" in r.output
+        assert "RTX 3060" in r.output
+        assert "24.0 GB total" in r.output
+
+    def test_marks_the_configured_device(self, cli_runner):
+        from localm.cli import main
+        cli_runner.invoke(main, ["config", "main_gpu_index", "1"])
+        with patch("localm.discover.list_gpus", return_value=self._GPUS):
+            r = cli_runner.invoke(main, ["gpus"])
+        assert r.exit_code == 0, r.output
+        assert "configured" in r.output.lower()
+
+    def test_no_gpus_detected(self, cli_runner):
+        from localm.cli import main
+        with patch("localm.discover.list_gpus", return_value=[]):
+            r = cli_runner.invoke(main, ["gpus"])
+        assert r.exit_code == 0, r.output
+        assert "no gpus detected" in r.output.lower()
+
+    def test_warns_when_configured_index_is_stale(self, cli_runner):
+        from localm.cli import main
+        cli_runner.invoke(main, ["config", "main_gpu_index", "5"])
+        with patch("localm.discover.list_gpus", return_value=self._GPUS[:1]):
+            r = cli_runner.invoke(main, ["gpus"])
+        assert r.exit_code == 0, r.output
+        assert "does not match any gpu" in r.output.lower()
 
 
 # --------------------------------------------------------------------------- #
