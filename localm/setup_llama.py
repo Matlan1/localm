@@ -1134,9 +1134,12 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
         if want == "auto" or (have is not None and have == want):
             label = f" ({have})" if have else ""
             console.print(f"[green]Already provisioned[/green]{label} at {target}")
-            console.print("[dim]Use --force to re-download/replace.[/dim]")
-            _ensure_importable()
-            return
+            if not assume_yes and sys.stdin and sys.stdin.isatty() and click.confirm("Do you want to re-download/replace them?", default=False):
+                force = True
+                console.print("[yellow]Replacing existing build...[/yellow]")
+            else:
+                _ensure_importable()
+                return
         if have:
             console.print(f"[yellow]Replacing {have} build with {want}.[/yellow]")
         else:

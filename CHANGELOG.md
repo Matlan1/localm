@@ -5,6 +5,20 @@ All notable changes to localm are documented here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Being pre-1.0,
 minor versions may include breaking changes.
 
+## [Unreleased]
+
+### Added
+- **RAG**: Support dynamic file type sniffing, zip/tar archives, and image OCR fallback (NEEDS A FULL VERIFICATION).
+- **Model Browser**: Implement Phase 1 of Unified Model Browser.
+- **MCP**: Expose setup, model removal, diagnostics, and plugin tools to the MCP server.
+- **Setup**: Prompt the user to confirm replacement of already provisioned native llama.cpp binaries instead of bailing out with instructions to use `--force`.
+
+### Fixed
+- **Inference**: Manually set n_tokens on initialized batch to avoid zero n_tokens decode failure.
+- **Setup**: Add default checksum verification for setup-llama downloads.
+- **Setup**: Suppress unconfigured data directory warning during setup phase.
+- **Inference**: Fix lenient JSON parser unescaped backslashes.
+
 ## [0.1.1] - 2026-07-04
 
 ### Fixed
