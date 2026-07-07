@@ -344,6 +344,13 @@ def register(host) -> None:
     host.register_model_role(ModelRoleDescriptor("video-unet", "Diffusion model (UNet)", "diffusion-unet"))
     host.register_model_role(ModelRoleDescriptor("video-clip", "Text encoder (CLIP)", "text-encoder", required=False))
 
+    # "On app start" readiness check (one of the 5 trigger points ComfyUI
+    # status gets checked at - see comfy_client.py's readiness-cache
+    # docstring): fire-and-forget, does not block plugin registration or
+    # attempt to launch ComfyUI.
+    from localm.media.comfy_client import warm_comfy_status_async
+    warm_comfy_status_async()
+
 
 def unregister() -> None:
     pass

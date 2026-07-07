@@ -181,14 +181,19 @@ def register(app: FastAPI, ctx) -> None:
     @app.get("/v1/comfy/status", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def get_comfy_status():
         """Alive status of ComfyUI, and whether localm launched THIS one (so the
-        GUI can show Stop/Restart only for a ComfyUI it can actually control)."""
+        GUI can show Stop/Restart only for a ComfyUI it can actually control).
+        This is the "direct status request" trigger - always a real, uncached
+        ping - and it primes the readiness cache with the fresh result, so a
+        task submitted right after does not need to re-check (see
+        comfy_client's module docstring on the readiness cache)."""
         # default_api_url is the current base-URL helper (the old _comfy_api_url
         # name no longer exists after the #292 shared-comfy-client refactor, so
         # importing it raised ImportError -> 500 on EVERY call) (NEW-COMFY-STATUS-IMPORT).
         from localm.image_gen.comfy import _comfy_alive, default_api_url
-        from localm.media.comfy_client import spawned_pid
+        from localm.media.comfy_client import mark_comfy_alive, mark_comfy_dead, spawned_pid
         url = default_api_url()
         alive = _comfy_alive(url, timeout=1.0)
+        (mark_comfy_alive if alive else mark_comfy_dead)(url)
         return {"alive": alive, "launched_by_localm": spawned_pid(url) is not None}
 
     @app.post("/v1/comfy/stop", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])

@@ -86,6 +86,21 @@ def _isolate_localm_home(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path / ".localm"))
 
 
+@pytest.fixture(autouse=True)
+def _reset_comfy_readiness_cache():
+    """comfy_client.py's ComfyUI readiness cache (_confirmed_alive) is a
+    module-level set so it survives across requests within one real localm
+    process - exactly the point of it - but that same persistence means it
+    leaks between tests in the same pytest session: a test that confirms
+    ComfyUI alive would let a LATER test's mocked-not-reachable case skip
+    straight past _comfy_alive() via the cache and get a false "running"
+    result. Clear it before and after every test so each starts cold."""
+    from localm.media import comfy_client
+    comfy_client._confirmed_alive.clear()
+    yield
+    comfy_client._confirmed_alive.clear()
+
+
 @pytest.fixture
 def cli_runner(tmp_path, monkeypatch):
     """End-to-end CLI harness: a click CliRunner with a throwaway LOCALM_HOME.

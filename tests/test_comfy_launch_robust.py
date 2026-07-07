@@ -190,7 +190,15 @@ def test_ensure_comfy_reports_launcher_immediate_exit(tmp_path):
 
 def _spawn_with_cfg(tmp_path, cfg):
     """Run ensure_comfy with a discoverable launcher in tmp_path and capture the
-    spawned argv. Returns the argv (str on Windows, list on POSIX)."""
+    spawned argv. Returns the argv (str on Windows, list on POSIX).
+
+    Clears the readiness cache first: callers (e.g. the two back-to-back
+    scenarios in test_disable_auto_launch_absent_by_default) reuse the same
+    hardcoded 127.0.0.1:8188 URL to test independent launch attempts, which
+    would otherwise short-circuit on the SECOND call via the cache the first
+    call just populated (see conftest.py's _reset_comfy_readiness_cache for
+    the cross-TEST half of this same isolation concern)."""
+    comfy_client._confirmed_alive.clear()
     launcher = tmp_path / f"comfyui.{_ext()}"
     launcher.write_text("echo hi\n", encoding="utf-8")
     cfg = {"comfy_launch_cmd": None, "comfy_workdir": str(tmp_path),
@@ -304,7 +312,12 @@ def test_comfy_launch_argv_safety(tmp_path, monkeypatch):
     assert len(spawned) == 1
     assert spawned[0] == ['C:\\path\\python.exe', 'main.py', '--port', '8188', '--disable-auto-launch']
 
-    # On Windows, comfy.bat (batch file) should prepend cmd /d /c
+    # On Windows, comfy.bat (batch file) should prepend cmd /d /c. A second,
+    # independent ensure_comfy() attempt at the same URL - clear the
+    # readiness cache the first call just set, else this short-circuits
+    # before ever reaching subprocess.Popen (see the note on _spawn_with_cfg
+    # above for the same isolation concern).
+    comfy_client._confirmed_alive.clear()
     cfg_bat = {"comfy_launch_cmd": 'C:\\path\\comfy.bat --port 8188',
                "comfy_workdir": str(tmp_path), "comfy_launch_timeout": 30,
                "comfy_disable_auto_launch": True}
