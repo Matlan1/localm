@@ -57,6 +57,24 @@ export async function refreshKnowledgePage() {
   const tbody = el("tbody");
   for (const c of data.collections) {
     const tr = el("tr");
+
+    // Drag-and-drop upload directly onto the collection row
+    tr.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      tr.classList.add("drag-over");
+    });
+    tr.addEventListener("dragleave", () => {
+      tr.classList.remove("drag-over");
+    });
+    tr.addEventListener("drop", async (e) => {
+      e.preventDefault();
+      tr.classList.remove("drag-over");
+      const files = Array.from(e.dataTransfer.files || []);
+      if (files.length) {
+        await uploadAndIndexFiles(c.name, files);
+      }
+    });
+
     const nameTd = el("td", "name-cell");
     nameTd.appendChild(iconEl("book", "ic ic-doc"));
     nameTd.appendChild(el("span", "name", c.name));
@@ -365,9 +383,7 @@ export async function kbAppendAllowedRoots(folders) {
 /** Per-device upload: pick files from the user's OWN device (the browser's file
  *  input - no server browsing) and POST their bytes to /upload for indexing. Used
  *  when the caller lacks host filesystem access, so it reads no server path. */
-export async function kbUploadDocs(name) {
-  const files = await pickDeviceFiles(RAG_EXTS);
-  if (!files.length) return;
+export async function uploadAndIndexFiles(name, files) {
   const MAX = 30 * 1024 * 1024;                 // mirror the server per-file cap
   const tooBig = files.filter((f) => f.size > MAX);
   if (tooBig.length) {
@@ -409,6 +425,13 @@ export async function kbUploadDocs(name) {
     log.textContent += "failed: " + e.message + "\n";
     toast("Upload failed: " + e.message, true);
   }
+}
+
+export async function kbUploadDocs(name) {
+  // Relax picker to allow all files; let the server's sniffer decide.
+  const files = await pickDeviceFiles();
+  if (!files.length) return;
+  await uploadAndIndexFiles(name, files);
 }
 
 /** Open the browser's native file picker (multi-select, filtered to the RAG

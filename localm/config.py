@@ -238,6 +238,10 @@ DEFAULT_CONFIG: dict = {
     "rag_indexing_mode": "whitelist",
     "rag_allowed_roots": [],   # extra folders allowed in whitelist mode
     "rag_denied_roots": [],    # folders refused in blacklist mode
+    # Classify custom/unknown text file extensions with the LLM (AI). Uses the
+    # active model to prompt-guess the file format (e.g. JSON, YAML, Javascript) from
+    # a text snippet. Guesses are cached per extension during the index run.
+    "rag_classify_unknown_files": True,
     # Seconds a GUI coder approval card may sit unanswered before it is
     # auto-rejected and the agent moves on.
     "coder_confirm_timeout": 600,

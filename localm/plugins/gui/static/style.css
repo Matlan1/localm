@@ -2034,4 +2034,26 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
   margin-bottom: 12px;
 }
 
+.picker-type-select {
+  flex: 0 0 auto;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 7px;
+  height: 30px;
+  padding: 0 8px;
+  font-size: 12.5px;
+  outline: none;
+  cursor: pointer;
+}
+.picker-type-select:focus {
+  border-color: var(--accent);
+}
+
+.data-table tr.drag-over {
+  background: var(--accent-soft) !important;
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
+}
+
 

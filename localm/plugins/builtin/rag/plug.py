@@ -129,6 +129,90 @@ def _make_self_embed(self_url: str, active_model):
     return _self_embed
 
 
+def _make_self_classify(self_url: str, active_model):
+    """Classify via this server's own /v1/chat/completions."""
+    def _self_classify(text_snippet: str) -> Optional[str]:
+        import requests as _rq
+        headers = {}
+        key = os.environ.get("LOCALM_API_KEY")
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        from localm import tls as _tls
+        prompt = (
+            "You are a file format classifier. Respond ONLY with a single lowercase word "
+            "identifying the format of the code/configuration/text snippet below "
+            "(e.g., json, yaml, csv, python, javascript, html, markdown, ini, xml, or text). "
+            "Do not include any extra words, formatting, markdown formatting, or punctuation.\n\n"
+            f"Snippet:\n{text_snippet[:1000]}"
+        )
+        try:
+            r = _rq.post(f"{self_url}/chat/completions",
+                         json={
+                             "model": active_model() or "localm",
+                             "messages": [{"role": "user", "content": prompt}],
+                             "temperature": 0.0,
+                             "max_tokens": 10,
+                         },
+                         headers=headers, timeout=10,
+                         verify=_tls.requests_verify(self_url))
+            if r.ok:
+                choice = r.json()["choices"][0]["message"]["content"].strip().lower()
+                choice = choice.replace("`", "").replace(".", "")
+                return choice
+        except Exception:
+            pass
+        return None
+    return _self_classify
+
+
+def _make_self_describe_image(self_url: str, active_model):
+    """Describe image via this server's own /chat/completions (vision support)."""
+    def _self_describe_image(image_bytes: bytes, mime_type: str) -> Optional[str]:
+        import requests as _rq
+        import base64
+        headers = {}
+        key = os.environ.get("LOCALM_API_KEY")
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        from localm import tls as _tls
+        b64 = base64.b64encode(image_bytes).decode("utf-8")
+        data_url = f"data:{mime_type};base64,{b64}"
+        prompt = "Describe this image in detail. Extract any visible text, handwriting, diagram structure, or code verbatim."
+        try:
+            r = _rq.post(f"{self_url}/chat/completions",
+                         json={
+                             "model": active_model() or "localm",
+                             "messages": [{
+                                 "role": "user",
+                                 "content": [
+                                     {"type": "text", "text": prompt},
+                                     {"type": "image_url", "image_url": {"url": data_url}}
+                                 ]
+                             }],
+                             "temperature": 0.2,
+                             "max_tokens": 1000,
+                         },
+                         headers=headers, timeout=60,
+                         verify=_tls.requests_verify(self_url))
+            if r.ok:
+                return r.json()["choices"][0]["message"]["content"].strip()
+            else:
+                err_detail = ""
+                try:
+                    err_detail = r.json().get("detail") or ""
+                except Exception:
+                    pass
+                if "cannot accept image input" in err_detail or "UnsupportedInputError" in err_detail or "vision" in err_detail:
+                    raise RuntimeError("Active model does not support vision (load a vision model/projector to index images).")
+                raise RuntimeError(err_detail or f"HTTP {r.status_code}")
+        except Exception as e:
+            if "does not support vision" in str(e):
+                raise
+            pass
+        return None
+    return _self_describe_image
+
+
 def _get_collection(name: str):
     from localm.rag import Collection
     try:
@@ -227,12 +311,18 @@ async def rag_add(name: str, req: RagAddRequest, request: Request):
     jobs = request.app.state.jobs
     self_embed = _make_self_embed(request.app.state.self_url,
                                   request.app.state.active_model)
+    self_classify = _make_self_classify(request.app.state.self_url,
+                                        request.app.state.active_model)
+    self_describe = _make_self_describe_image(request.app.state.self_url,
+                                              request.app.state.active_model)
 
     def _index(job):
         embed_fn = self_embed if embed else None
         try:
             result = coll.add_paths(
-                paths, embed_fn=embed_fn, policy=policy, force=req.reindex,
+                paths, embed_fn=embed_fn, classify_fn=self_classify,
+                describe_image_fn=self_describe,
+                policy=policy, force=req.reindex,
                 on_progress=lambda t: job.push({"type": "line", "text": t}))
         except ValueError as e:
             # e.g. an embedding-model dimension change (C3) - report, don't crash.
@@ -297,12 +387,18 @@ async def rag_upload(name: str, req: RagUploadRequest, request: Request):
     jobs = request.app.state.jobs
     self_embed = _make_self_embed(request.app.state.self_url,
                                   request.app.state.active_model)
+    self_classify = _make_self_classify(request.app.state.self_url,
+                                        request.app.state.active_model)
+    self_describe = _make_self_describe_image(request.app.state.self_url,
+                                              request.app.state.active_model)
 
     def _index(job):
         embed_fn = self_embed if embed else None
         try:
             result = coll.add_uploads(
-                uploads, embed_fn=embed_fn, force=req.reindex,
+                uploads, embed_fn=embed_fn, classify_fn=self_classify,
+                describe_image_fn=self_describe,
+                force=req.reindex,
                 on_progress=lambda t: job.push({"type": "line", "text": t}))
         except ValueError as e:
             # e.g. an embedding-model dimension change (C3) - report, don't crash.

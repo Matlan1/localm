@@ -32,8 +32,11 @@ from typing import Callable, Optional
 from localm.debuglog import logger as _log
 from .bm25 import BM25
 from .chunk import chunk_text
-from .extract import (EXTRACTABLE_SUFFIXES, ExtractError, extract_bytes,
+from .extract import (EXTRACTABLE_SUFFIXES, BLACKLISTED_SUFFIXES, ExtractError, extract_bytes,
                       extract_text)
+
+ClassifyFn = Callable[[str], Optional[str]]
+DescribeImageFn = Callable[[bytes, str], Optional[str]]
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
@@ -407,7 +410,7 @@ class Collection:
             elif p.is_dir():
                 for f in sorted(p.rglob("*")):
                     if (f.is_file()
-                            and f.suffix.lower() in EXTRACTABLE_SUFFIXES
+                            and f.suffix.lower() not in BLACKLISTED_SUFFIXES
                             and not any(part in _SKIP_DIRS for part in f.parts)):
                         out.append(f.resolve())
         # de-dup, keep order
@@ -425,6 +428,8 @@ class Collection:
         return kept
 
     def add_paths(self, paths: list, *, embed_fn: Optional[EmbedFn] = None,
+                  classify_fn: Optional[ClassifyFn] = None,
+                  describe_image_fn: Optional[DescribeImageFn] = None,
                   on_progress: Optional[ProgressFn] = None,
                   policy: Optional[dict] = None,
                   force: bool = False) -> dict:
@@ -448,10 +453,13 @@ class Collection:
         with _collection_lock(self.name):
             self._load()
             return self._add_paths_locked(
-                paths, embed_fn=embed_fn, on_progress=on_progress,
-                policy=policy, force=force)
+                paths, embed_fn=embed_fn, classify_fn=classify_fn,
+                describe_image_fn=describe_image_fn,
+                on_progress=on_progress, policy=policy, force=force)
 
     def _add_paths_locked(self, paths: list, *, embed_fn: Optional[EmbedFn] = None,
+                          classify_fn: Optional[ClassifyFn] = None,
+                          describe_image_fn: Optional[DescribeImageFn] = None,
                           on_progress: Optional[ProgressFn] = None,
                           policy: Optional[dict] = None,
                           force: bool = False) -> dict:
@@ -495,7 +503,7 @@ class Collection:
                 skipped += 1
                 continue
             try:
-                text = extract_text(f)
+                text = extract_text(f, classify_fn=classify_fn, describe_image_fn=describe_image_fn)
             except ExtractError as e:
                 failed.append({"path": key, "error": str(e)})
                 say(f"skip {f.name}: {e}")
@@ -555,6 +563,8 @@ class Collection:
                 "failed": failed, "chunks": len(self._chunks)}
 
     def add_uploads(self, uploads: list, *, embed_fn: Optional[EmbedFn] = None,
+                    classify_fn: Optional[ClassifyFn] = None,
+                    describe_image_fn: Optional[DescribeImageFn] = None,
                     on_progress: Optional[ProgressFn] = None,
                     force: bool = False) -> dict:
         """Index documents UPLOADED from the caller's own device (the per-device
@@ -578,10 +588,14 @@ class Collection:
         with _collection_lock(self.name):
             self._load()
             return self._add_uploads_locked(
-                uploads, embed_fn=embed_fn, on_progress=on_progress, force=force)
+                uploads, embed_fn=embed_fn, classify_fn=classify_fn,
+                describe_image_fn=describe_image_fn,
+                on_progress=on_progress, force=force)
 
     def _add_uploads_locked(self, uploads: list, *,
                             embed_fn: Optional[EmbedFn] = None,
+                            classify_fn: Optional[ClassifyFn] = None,
+                            describe_image_fn: Optional[DescribeImageFn] = None,
                             on_progress: Optional[ProgressFn] = None,
                             force: bool = False) -> dict:
         """The add_uploads body. MUST run under _collection_lock after _load().
@@ -606,7 +620,7 @@ class Collection:
                 skipped += 1
                 continue
             try:
-                text = extract_bytes(data, filename)
+                text = extract_bytes(data, filename, classify_fn=classify_fn, describe_image_fn=describe_image_fn)
             except ExtractError as e:
                 failed.append({"path": key, "error": str(e)})
                 say(f"skip {filename}: {e}")

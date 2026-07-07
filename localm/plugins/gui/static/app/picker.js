@@ -153,8 +153,30 @@ export function pickPath(opts = {}) {
       filterIn.placeholder = "Filter this folder";
       filterIn.setAttribute("aria-label", "Filter this folder");
       filterWrap.appendChild(filterIn);
+
+      let showAllFiles = false;
+      let typeSelect = null;
+      if (exts) {
+        typeSelect = el("select", "picker-type-select");
+        typeSelect.setAttribute("aria-label", "File type filter");
+        const optSupported = el("option", "", "Supported Files");
+        optSupported.value = "supported";
+        const optAll = el("option", "", "All Files (*.*)");
+        optAll.value = "all";
+        typeSelect.append(optSupported, optAll);
+        typeSelect.onchange = () => {
+          showAllFiles = typeSelect.value === "all";
+          renderList();
+          updateCount();
+        };
+      }
+
       const countEl = el("span", "picker-count");
-      tools.append(filterWrap, countEl);
+      if (typeSelect) {
+        tools.append(filterWrap, typeSelect, countEl);
+      } else {
+        tools.append(filterWrap, countEl);
+      }
       const listEl = el("div", "picker-list");
       listEl.tabIndex = 0;
       panel.append(tools, listEl);
@@ -180,7 +202,7 @@ export function pickPath(opts = {}) {
       function selectable(entry) {
         if (entry.is_dir) return multi;      // folders are selectable in multi only
         if (mode === "dir") return false;    // dir mode: files are context, not picks
-        if (!exts) return true;
+        if (!exts || showAllFiles) return true;
         return exts.has(extOf(entry.name));
       }
       function updateCount() {
