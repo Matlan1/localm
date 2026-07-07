@@ -265,19 +265,24 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
         
         registry = load_registry()
         info = get_model_info(name)
-        if info is None:
-            # If in pytest or registry is empty, proceed with dummy values
-            import sys
-            if not registry or "pytest" in sys.modules:
-                m_path = f"C:/models/{name}.gguf"  # hygiene-ok
-                file_size = 4 * 1024 ** 3
-            else:
-                raise HTTPException(404, f"Model files not found: {name}")
-        else:
+        # file_size feeds the VRAM-eviction estimate below, which is gated on a
+        # non-empty registry. So it is only needed for a registered model.
+        file_size = 0
+        if info is not None:
             m_path, _ = info
             p = Path(m_path)
             file_size = p.stat().st_size if p.is_file() else (sum(f.stat().st_size for f in p.rglob("*") if f.is_file()) if p.is_dir() else 4 * 1024 ** 3)
-            
+        elif registry:
+            # Registered/requested against a real registry but its files are not
+            # on disk. This is the shipped 404 contract - previously it was
+            # papered over with a fabricated model path + 4 GB size whenever
+            # pytest was importable, which made the 404 path untestable and ran
+            # all in-test eviction math on fiction (AUDIT rule 5 / no facade).
+            # Now the same path runs under tests as in production.
+            raise HTTPException(404, f"Model files not found: {name}")
+        # else: empty registry (single-model / direct-path startup) - no size to
+        # compute; the eviction block below is skipped for an empty registry.
+
         # Only perform eviction check if there are registered models
         if registry:
             from localm.vram import wait_for_vram_release
@@ -2043,29 +2048,27 @@ async def _complete(
 ):
     loop = asyncio.get_running_loop()
 
-    if hasattr(engine, "count_messages_tokens"):
-        prompt_tokens = engine.count_messages_tokens(messages)
-    else:
-        prompt_tokens = 100
+    # Call the engine's real methods directly. Every Engine implements these;
+    # the previous hasattr-guarded fallbacks (100 prompt tokens, 4096 capacity,
+    # a literal "ok" completion, 10 completion tokens) existed only so a
+    # method-less mock engine would pass through this real endpoint - which
+    # meant a genuinely broken/wrong engine object returned a fabricated 200
+    # instead of surfacing the failure (AUDIT rule 5 / no facade).
+    prompt_tokens = engine.count_messages_tokens(messages)
 
-    capacity = engine.context_capacity() if hasattr(engine, "context_capacity") else 4096
+    capacity = engine.context_capacity()
     if capacity is not None and len(messages) > 3:
         buffer = max(2048, int(capacity * 0.10))
         if capacity - prompt_tokens < buffer:
             from localm.inference.compact import compact_messages
             def _gen_for_compact(ms: list[dict], max_t: int) -> str:
-                if hasattr(engine, "chat_stream"):
-                    return "".join(engine.chat_stream(ms, max_tokens=max_t, temperature=0.3))
-                return ""
+                return "".join(engine.chat_stream(ms, max_tokens=max_t, temperature=0.3))
             new_messages, changed = compact_messages(messages, _gen_for_compact)
             if changed:
                 messages = list(new_messages)
-                if hasattr(engine, "count_messages_tokens"):
-                    prompt_tokens = engine.count_messages_tokens(messages)
+                prompt_tokens = engine.count_messages_tokens(messages)
     def _run():
-        if hasattr(engine, "chat_stream"):
-            return "".join(engine.chat_stream(messages, **gen_kwargs))
-        return "ok"
+        return "".join(engine.chat_stream(messages, **gen_kwargs))
 
     # Serialise inference - only one request runs at a time
     async with sem:
@@ -2085,7 +2088,7 @@ async def _complete(
     from localm.inference.textnorm import split_think
     answer, reasoning = split_think(text)
 
-    completion_tokens = engine.count_tokens(text) if hasattr(engine, "count_tokens") else 10
+    completion_tokens = engine.count_tokens(text)
     usage = UsageInfo(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
