@@ -182,6 +182,75 @@ def test_report_failure_neutral_header_when_not_a_failure(tmp_path, monkeypatch,
     assert "Sorry -" not in out
 
 
+# --------------------------- non-interactive message accuracy ------------- #
+# A friend testing localm hit this for real: any crash (or `localm bug-report`)
+# in a non-tty context (a script, an SSH session, the console-less native
+# launcher) used to print ONLY "email or Discord, or open a GitHub issue once
+# you have repo access" - completely omitting the account-less hosted channel
+# even when it is configured and working, steering the user toward the one
+# path that actually needs a GitHub login.
+
+def test_noninteractive_message_offers_send_flag_when_upload_configured(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
+    monkeypatch.setattr("localm.config.load_config", lambda: {
+        "bugreport_upload_url": "https://proxy.example/"})
+    bugreport.report_failure(summary="thing broke", interactive=False)
+    out = " ".join(capsys.readouterr().out.split())   # collapse rich's line-wrapping
+    assert "localm bug-report --send" in out
+    assert "no GitHub account needed" in out
+
+
+def test_noninteractive_message_falls_back_when_no_upload_configured(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
+    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": ""})
+    bugreport.report_failure(summary="thing broke", interactive=False)
+    out = " ".join(capsys.readouterr().out.split())   # collapse rich's line-wrapping
+    assert "--send" not in out
+    assert "open a GitHub issue once you have repo access" in out
+
+
+# --------------------------- auto_send (--send) ---------------------------- #
+
+def test_auto_send_uploads_without_prompting(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
+    monkeypatch.setattr("localm.config.load_config", lambda: {
+        "bugreport_upload_url": "https://proxy.example/"})
+    monkeypatch.setattr(bugreport, "upload_report",
+                        lambda *a, **k: {"url": "https://github.com/x/y/issues/9"})
+    bugreport.report_failure(
+        summary="bug", interactive=False, auto_send=True,
+        prompt=lambda _t: (_ for _ in ()).throw(AssertionError("must not prompt")))
+    out = capsys.readouterr().out
+    assert "Sent to the maintainer" in out
+    assert "https://github.com/x/y/issues/9" in out
+
+
+def test_auto_send_without_upload_configured_is_honest(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
+    monkeypatch.setattr("localm.config.load_config", lambda: {"bugreport_upload_url": ""})
+    bugreport.report_failure(summary="bug", interactive=False, auto_send=True)
+    out = capsys.readouterr().out
+    assert "No hosted send channel is configured" in out
+    assert "Sent to the maintainer" not in out
+
+
+def test_auto_send_upload_failure_is_never_reported_as_success(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
+    monkeypatch.setattr("localm.config.load_config", lambda: {
+        "bugreport_upload_url": "https://proxy.example/"})
+
+    def _boom(*a, **k):
+        raise bugreport.LocalmError("upload failed", reason="502 from proxy")
+    monkeypatch.setattr(bugreport, "upload_report", _boom)
+    bugreport.report_failure(summary="bug", interactive=False, auto_send=True)
+    out = capsys.readouterr().out
+    assert "Sent to the maintainer" not in out
+    assert "Could not send it" in out
+    assert "email it instead" in out
+
+
 # --------------------------- process-wide net ----------------------------- #
 
 def test_thread_excepthook_reports_without_prompting(monkeypatch):
@@ -292,3 +361,19 @@ def test_bug_report_command_via_cli(tmp_path, monkeypatch):
     assert "my problem" in res.output
     assert "Sorry -" not in res.output               # user-initiated, not a crash
     assert list((tmp_path / "bug-reports").glob("*.md"))
+
+
+def test_bug_report_command_send_flag_uploads_immediately(tmp_path, monkeypatch):
+    """`localm bug-report --send` is the fix's whole point: a working, login-free
+    send path that a tester in a non-tty shell (or told the exact command by the
+    maintainer) can actually run."""
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
+    monkeypatch.setattr("localm.config.load_config", lambda: {
+        "bugreport_upload_url": "https://proxy.example/"})
+    monkeypatch.setattr(bugreport, "upload_report",
+                        lambda *a, **k: {"url": "https://github.com/x/y/issues/3"})
+    from localm.cli import main
+    res = CliRunner().invoke(main, ["bug-report", "-m", "my problem", "--send"])
+    assert res.exit_code == 0, res.output
+    assert "Sent to the maintainer" in res.output
+    assert "https://github.com/x/y/issues/3" in res.output
