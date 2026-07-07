@@ -5,6 +5,7 @@ import os
 import socket
 import sys
 import threading
+import uuid
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -468,6 +469,55 @@ def _read_json(path: Path, default):
                   "falling back.", file=sys.stderr)
             continue
     return default() if callable(default) else default
+
+
+def instance_id() -> str:
+    """Stable, unguessable identifier for THIS install's data directory. Minted
+    once (uuid4 hex) on first call and reused for the life of the install by
+    persisting it to a small file under the data dir; never regenerated on a
+    normal restart. References the bare ``HOME_DIR`` global (like
+    ``ensure_dirs``), not a path frozen at import, so it always tracks whichever
+    data directory is actually configured (and so a test can point HOME_DIR
+    elsewhere via monkeypatch and this follows immediately).
+
+    Why this exists (AUD-INSTANCEID): browser localStorage is scoped by ORIGIN
+    (protocol+host+port) only - never by which backend DATA DIRECTORY is
+    actually running behind it. localm's server binds to a fixed default port
+    that only changes when it is already busy, so a fresh install opened after a
+    prior instance closed typically reuses the SAME origin, and therefore the
+    SAME localStorage bucket, as a totally unrelated data directory. The GUI
+    fetches this id from /v1/config and compares it against the id it last saw
+    for this browser origin, so it can tell "a normal restart of the same
+    install" apart from "a different install that happens to share this
+    browser" and never render, merge, or re-upload the other install's cached
+    conversation history into this one's own data directory."""
+    ensure_dirs()
+    path = HOME_DIR / "instance_id.txt"
+    with _io_lock:
+        if path.is_file():
+            try:
+                val = path.read_text(encoding="utf-8").strip()
+                if val:
+                    return val
+            except OSError as e:
+                # The marker exists but could not be read - do not silently
+                # treat this as "no id yet" without saying why (rule 5); fall
+                # through and mint a fresh one for this run.
+                print(f"[localm] WARNING: cannot read {path} ({e}); minting a "
+                      "fresh instance id for this run.", file=sys.stderr)
+        val = uuid.uuid4().hex
+        try:
+            path.write_text(val, encoding="utf-8")
+        except OSError as e:
+            # Cannot persist: this run's id will not survive a restart, so this
+            # install will fail to recognise its OWN cache next launch (the
+            # client just treats it as a new pairing and starts empty/re-syncs
+            # from the server - not a privacy failure, but a real usability
+            # degradation worth surfacing rather than hiding).
+            print(f"[localm] WARNING: cannot persist instance id to {path} "
+                  f"({e}); using an in-memory-only id for this run (it will "
+                  "change on the next start).", file=sys.stderr)
+        return val
 
 
 def load_config() -> dict:

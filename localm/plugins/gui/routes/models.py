@@ -140,6 +140,10 @@ def register(app: FastAPI, ctx) -> None:
             args += ["--name", req.name]
         if req.mmproj:
             args += ["--mmproj", req.mmproj]
+        if req.store:
+            if req.store not in ("copy", "move"):
+                raise HTTPException(400, "store must be 'copy' or 'move'")
+            args += ["--store", req.store]
         args += ["--", spec]
         # Stream structured download progress; suppress huggingface_hub's own
         # tqdm bars (their \r output doesn't line-stream cleanly).

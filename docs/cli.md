@@ -122,6 +122,15 @@ localm add D:\ollama\manifests\registry.ollama.ai\library\<model>\<tag>
 localm alias mymodel short                   # second name for the same file
 ```
 
+By default `add` (and `pull` with a local path) registers the file where it already is - nothing is copied or moved. Pass `--store copy` or `--store move` to bring it into `~/.localm/models` first and register it from there instead, so it's managed exactly like a pulled model:
+
+```bash
+localm add D:\models\mymodel.gguf --store copy   # duplicate into ~/.localm/models, keep the original
+localm add D:\models\mymodel.gguf --store move   # relocate into ~/.localm/models
+```
+
+`--store` moves/copies a split GGUF's every part and a sibling mmproj vision-projector file together with the model, so multi-part loading and vision capability survive the move. It refuses (no changes made) if a different file already occupies that name in `~/.localm/models`, if there isn't enough free disk space, or if a copy's SHA256 doesn't match the original afterward.
+
 ### List and remove
 
 ```bash

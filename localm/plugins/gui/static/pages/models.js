@@ -11,6 +11,7 @@ import { $, GIB, authHeaders, confirmDanger, downloadRate, el, fmtBytes, fmtDura
 import { onServerUnreachable } from "../app/init.js";
 import { emptyState } from "../app/icons.js";
 import { modelCache, refreshModels, switchModel } from "../app/models-sidebar.js";
+import { refreshPerfEstimate } from "../app/settings-perf.js";
 
 /* ================================================================ */
 /*  Models page                                                      */
@@ -106,6 +107,9 @@ export async function refreshModelsPage() {
             if (!res || res.status !== "superseded") {
               toast("Model switched to " + m.name);
               refreshModelsPage();
+              // Keep the Settings "Live tuning" VRAM estimate (which defaults to
+              // the active model) in sync with a switch made from this page too.
+              refreshPerfEstimate();
             }
           } catch (e) {
             toast("Load failed: " + e.message, true);
@@ -674,6 +678,8 @@ $("pull-start").onclick = async () => {
   const name = $("pull-name").value.trim();
   const mmprojInput = $("pull-mmproj");
   const mmproj = mmprojInput && mmprojInput.style.display !== "none" ? mmprojInput.value : null;
+  const storeInput = $("pull-store");
+  const store = storeInput && storeInput.value ? storeInput.value : null;
 
   $("pull-start").disabled = true;
   const log = $("pull-log");
@@ -694,7 +700,8 @@ $("pull-start").onclick = async () => {
   try {
     const payload = { spec, name: name || null };
     if (mmproj) payload.mmproj = mmproj;
-    
+    if (store) payload.store = store;
+
     const r = await fetch("/api/models/pull", {
       method: "POST", headers: authHeaders(),
       body: JSON.stringify(payload),
@@ -743,6 +750,7 @@ $("pull-start").onclick = async () => {
       toast("Pull finished");
       $("pull-spec").value = "";
       $("pull-name").value = "";
+      if (storeInput) storeInput.value = "";
       refreshModelsPage();
     } else {
       // Surface the failure: red bar, exit code, and keep the inputs so the

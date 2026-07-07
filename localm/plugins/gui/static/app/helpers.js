@@ -33,6 +33,70 @@ export function readStoredJSON(key, fallback) {
   }
 }
 
+// AUD-INSTANCEID: localStorage is scoped by browser ORIGIN (protocol+host+port)
+// only - never by which backend DATA DIRECTORY is actually running behind it.
+// localm's default port only changes when it is already busy, so a fresh
+// install opened after a prior instance closed typically reuses the same
+// origin, and therefore the SAME localStorage bucket, as a totally unrelated
+// data directory. Every key below holds data that is only meaningful for
+// whichever backend is actually connected, so all of them are wiped together
+// the moment the connected backend's instance id (served on /v1/config) does
+// not match the one last confirmed for this origin - see reconcileInstanceId.
+// (localm.theme, localm.logoStyle, and the TTS voice picks are genuine
+// device/browser preferences and are deliberately NOT in this list.)
+export const INSTANCE_SCOPED_KEYS = [
+  "localm.conversations",
+  "localm.activeView",
+  "localm.coderCwd",
+  "localm.kbAddPath",
+  "localm.convCollapsed",
+  "localm.imgMoveDest",
+  "localm.musicMoveDest",
+  "localm.videoMoveDest",
+  "localm.onboarded",
+  "localm.webAccess",
+  "localm.speakAloud",
+];
+
+const INSTANCE_ID_KEY = "localm.instanceId";
+
+/** True when this browser origin already confirmed the id of whichever backend
+ *  is currently connected, on some EARLIER successful /v1/config round trip.
+ *  Used to gate every instance-scoped localStorage read that runs at boot
+ *  BEFORE this page load's own round trip resolves (see init.js): a browser
+ *  that has never confirmed pairing with this exact backend must not trust,
+ *  render, or upload data left behind by a different one at the same
+ *  origin/port (AUD-INSTANCEID). */
+export function instanceCacheTrusted() {
+  try { return !!localStorage.getItem(INSTANCE_ID_KEY); }
+  catch (e) { return false; }
+}
+
+/** Reconcile the cached instance id against the one the connected backend just
+ *  reported (cfg.instance_id from /v1/config). Returns true when the
+ *  instance-scoped cache is CONFIRMED to belong to THIS backend (safe to
+ *  render/merge/upload); false when it was just wiped because it either
+ *  belonged to a DIFFERENT backend or had never been confirmed for this origin
+ *  before - a brand-new pairing, exactly the cross-instance leak scenario
+ *  (AUD-INSTANCEID). A missing/falsy *serverInstanceId* (an older server that
+ *  predates this field) is a no-op: there is nothing to compare against, so
+ *  existing behaviour is preserved rather than wiping on missing information. */
+export function reconcileInstanceId(serverInstanceId) {
+  if (!serverInstanceId) return true;
+  let cached;
+  try { cached = localStorage.getItem(INSTANCE_ID_KEY); }
+  catch (e) { return true; }   // localStorage unavailable - nothing to protect
+  const matched = cached === serverInstanceId;
+  if (!matched) {
+    for (const key of INSTANCE_SCOPED_KEYS) {
+      try { localStorage.removeItem(key); } catch (e) { /* best-effort wipe */ }
+    }
+    try { localStorage.setItem(INSTANCE_ID_KEY, serverInstanceId); }
+    catch (e) { /* storage full/blocked - callers still correct in-memory state */ }
+  }
+  return matched;
+}
+
 // S2: the API key is no longer kept in JS-readable localStorage. Open-mode
 // management uses the per-process shell token (injected as a global, sent as a
 // bearer HEADER); protected mode rides the HttpOnly session cookie (an opaque

@@ -9,7 +9,7 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { populateSetupModels } from "../app/coder.js";
 import { $, authHeaders } from "../app/helpers.js";
-import { refreshPluginCommands } from "../app/settings-perf.js";
+import { refreshPerfEstimate, refreshPluginCommands } from "../app/settings-perf.js";
 import { refreshImageHistory } from "./images.js";
 import { refreshKnowledgePage } from "./knowledge.js";
 import { refreshModelsPage, refreshUploadsList } from "./models.js";
@@ -34,7 +34,14 @@ window.onViewShown = (name) => {
   if (name === "video") { refreshVideoHistory(); refreshWorkflowPanel("video"); }
   if (name === "knowledge") refreshKnowledgePage();
   if (name === "plugins") { renderCatalogPlugins(); refreshPluginsPage(); }
-  if (name === "settings") { refreshSettingsPage(); refreshUploadsList(); }
+  if (name === "settings") {
+    refreshSettingsPage();
+    refreshUploadsList();
+    // The model could have been switched from the model dropdown or the Models
+    // page while Settings was not on screen - re-fetch the VRAM estimate so it
+    // always reflects the currently active model on (re-)entering the tab.
+    refreshPerfEstimate();
+  }
 };
 
 /** Pre-select the configured coder session mode in the setup form. */
