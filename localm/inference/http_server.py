@@ -399,9 +399,17 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
         return {"status": "loaded", "model": name}
 
 
-async def get_engine(model_name: str) -> Engine:
+async def get_engine(model_name: str, *, load: bool = True) -> Engine:
+    """Resolve the engine for *model_name*, loading it if necessary.
+
+    With ``load=False`` the resolved engine is returned WITHOUT forcing a load -
+    for callers like /v1/embeddings whose backend may not need the model resident
+    at all (a GGUF backend embeds via the dedicated embedder; AUDIT-MED-13). The
+    caller decides whether to load. Registration/resolution (and its 404) still
+    apply.
+    """
     global _engines, _engines_lru, _active_model_name, _default_model_name, _inference_sems, _engine, _inference_sem
-    
+
     # Back-compat: if a test or script set _engine directly, import it into the multi-model dicts
     if _engine is not None and _engine.display_name not in _engines:
         _engines[_engine.display_name] = _engine
@@ -445,6 +453,12 @@ async def get_engine(model_name: str) -> Engine:
         _engine = _engines[name]
         _inference_sem = _inference_sems.setdefault(name, asyncio.Semaphore(1))
         return _engines[name]
+
+    if not load:
+        # Return the engine object WITHOUT loading it: reuse a tracked (possibly
+        # unloaded) engine, else build a fresh one via the factory. Does NOT go
+        # through switch_engine, so no model is loaded and nothing is evicted.
+        return _engines.get(name) or _engine_factory(name)
 
     res = await switch_engine(name, _engine_factory, preempt=False)
     if res.get("status") == "superseded":
