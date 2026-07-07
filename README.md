@@ -206,7 +206,7 @@ Model management:
 ```bash
 localm pull SPEC                  # download from HuggingFace or URL
 localm search QUERY               # search HuggingFace for GGUF models
-localm add PATH                   # register a local model
+localm add PATH                   # register a local model (--store copy|move to import it into ~/.localm/models)
 localm alias MODEL NEWNAME        # add a second name
 localm list                        # registered models
 localm rm MODEL                   # remove a model

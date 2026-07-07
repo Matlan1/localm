@@ -209,6 +209,10 @@ class TestServerModes:
                        return_value=_cfg(mode="log")):
                 data = client.get("/v1/config", headers={"Authorization": f"Bearer {app.state.shell_token}"}).json()
         assert data["effective_mode"] == "log"
+        # AUD-INSTANCEID: /v1/config always carries a stable per-data-directory
+        # id so the GUI can tell a normal restart of THIS install apart from a
+        # different install sharing the same browser origin.
+        assert data["instance_id"], "instance_id must be present and non-empty"
 
 
 # ------------------------------------------------------------------ #

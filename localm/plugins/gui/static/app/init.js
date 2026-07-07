@@ -6,9 +6,9 @@
 "use strict";
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
-import { chat, ingestSharedFiles, initServerConversations, refreshCtxLimit, renderChat, renderConvList } from "./chat.js";
+import { chat, convUI, ingestSharedFiles, initServerConversations, refreshCtxLimit, renderChat, renderConvList } from "./chat.js";
 import { populateSetupModels, reattachSessions } from "./coder.js";
-import { $, authHeaders, el, refreshCsrf } from "./helpers.js";
+import { $, authHeaders, el, instanceCacheTrusted, refreshCsrf } from "./helpers.js";
 import { syncLogoStyleFromConfig } from "./logo.js";
 import { addRevealToggle, applyInstallGateUI, dismissInstallGate, isIOSSafari, refreshModels, shouldShowInstallGate, showInstallGate, showKeyGate, startHwStats, startQrScan, stopQrScan, submitKeyGate } from "./models-sidebar.js";
 import { loadClientPlugins, onVoicePick, populateVoicePicker, refreshKbSelect, refreshMemory, refreshPersonas, refreshPluginCommands, refreshVoiceStatus, setupPerfCard } from "./settings-perf.js";
@@ -49,7 +49,17 @@ window.fetch = async function (input, init) {
   return res;
 };
 
-$("setup-cwd").value = localStorage.getItem("localm.coderCwd") || "";
+// AUD-INSTANCEID: whether this browser origin already confirmed the id of the
+// backend it is about to talk to, on some earlier successful boot. Only then
+// are the instance-scoped localStorage reads below (which all run BEFORE this
+// page load's own /v1/config round trip can resolve) trusted for the very
+// FIRST paint - a brand-new pairing (no confirmed id yet, e.g. a fresh install
+// reusing a prior instance's browser origin) must never flash or reuse data
+// left behind by a different backend; refreshCtxLimit()/initServerConversations()
+// correct/repopulate everything for real once their round trip lands.
+const _instanceTrusted = instanceCacheTrusted();
+
+$("setup-cwd").value = _instanceTrusted ? (localStorage.getItem("localm.coderCwd") || "") : "";
 // API-key gate wiring (shown by showKeyGate on a 401 boot, e.g. a network bind).
 if ($("key-gate-submit")) $("key-gate-submit").onclick = submitKeyGate;
 if ($("key-gate-scan")) $("key-gate-scan").onclick = startQrScan;
@@ -283,9 +293,25 @@ window.bootAuthProbe = bootAuthProbe;
   syncLogoStyleFromConfig();   // reconcile the wordmark with the shared config
   // R25: hide the startup overlay once the model list resolves (the app is usable)
   // or fails - never leave it stuck over the shell.
-  refreshModels().then(() => populateSetupModels()).finally(hideStartupOverlay);
+  const modelsReady = refreshModels().then(() => populateSetupModels());
   // Server persistence depends on knowing the privacy state first.
-  refreshCtxLimit().then(initServerConversations);
+  const convReady = refreshCtxLimit().then(initServerConversations);
+  // AUD-INSTANCEID: the startup overlay fully covers #app - including the
+  // conversation sidebar (.reconnect-overlay/.startup-overlay is position:fixed,
+  // inset:0, an opaque background, above everything) - so keeping it up until
+  // refreshCtxLimit's instance-id reconciliation has actually RESOLVED (not
+  // merely until refreshModels resolves) closes the remaining flash-of-
+  // stale-content window. A browser that had already confirmed pairing with a
+  // DIFFERENT prior backend (instanceCacheTrusted() true, but for the WRONG id
+  // - exactly a fresh install reusing a previously-paired browser origin/port)
+  // renders that backend's cached conversation list into the DOM synchronously
+  // at boot (the common-case fast path below this IIFE), and the OLD code hid
+  // the overlay as soon as refreshModels alone resolved - a race against
+  // refreshCtxLimit, not a guarantee, that could reveal the foreign list before
+  // the mismatch was detected and the DOM corrected. Waiting on BOTH keeps any
+  // stale content hidden behind the overlay in every case, not just when timing
+  // happens to favour it.
+  Promise.allSettled([modelsReady, convReady]).finally(hideStartupOverlay);
 })();
 // Reveal toggles on the API-key inputs (AUTH-2): the in-page gate and the
 // Settings key field, so the user can confirm the key they typed.
@@ -323,6 +349,18 @@ setupPerfCard();  // Settings: GPU-layers/context sliders + live VRAM estimate
 // The resolved ctx ceiling only exists once a model has loaded - keep the
 // compaction threshold in sync as models load or switch.
 setInterval(refreshCtxLimit, 30000);
+// AUD-INSTANCEID: never paint the raw, unverified localStorage cache before a
+// same-instance confirmation exists for this origin (see _instanceTrusted
+// above) - a brand-new browser<->backend pairing starts from an empty list;
+// the async refreshCtxLimit()/initServerConversations() chain below populates
+// it for real (from the server, or by re-confirming the cache) once its round
+// trip lands, so the very first frame a user can see never shows another
+// install's conversations.
+if (!_instanceTrusted) {
+  chat.conversations = [];
+  chat.activeId = null;
+  convUI.collapsed = new Set();
+}
 renderConvList();
 if (chat.conversations.length) {
   chat.activeId = chat.conversations[0].id;
@@ -361,8 +399,11 @@ reattachSessions();
       }
     }, 0);
   } else {
-    // Restore the last active page (set in non-privacy mode only).
-    const savedView = localStorage.getItem("localm.activeView");
+    // Restore the last active page (set in non-privacy mode only). Gated on a
+    // confirmed same-instance cache (AUD-INSTANCEID): an unverified pairing
+    // ignores the stored view and stays on the chat default rather than
+    // trusting a value that may belong to a different backend.
+    const savedView = _instanceTrusted ? localStorage.getItem("localm.activeView") : null;
     if (savedView && savedView !== "chat") {
       setTimeout(() => { if (!window.__localmLocked) showView(savedView); }, 0);
     }

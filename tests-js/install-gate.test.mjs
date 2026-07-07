@@ -61,8 +61,23 @@ test("shouldShowInstallGate: true on a coarse-pointer device not yet onboarded",
 test("shouldShowInstallGate: false once the onboarded flag is set (no nagging)", () => {
   const { window } = loadApp({ fetchImpl: allOk });
   window.matchMedia = (q) => ({ matches: q.includes("coarse") });
+  // AUD-INSTANCEID: an "onboarded" flag is only honoured once this origin has
+  // confirmed pairing with the connected backend (localm.instanceId cached) -
+  // otherwise it could belong to a different install (see the next test).
+  window.localStorage.setItem("localm.instanceId", "instance-a");
   window.localStorage.setItem("localm.onboarded", "1");
   assert.equal(window.shouldShowInstallGate(), false);
+});
+
+test("shouldShowInstallGate: AUD-INSTANCEID - an onboarded flag with no confirmed " +
+     "instance id is NOT trusted (a fresh backend pairing still onboards)", () => {
+  const { window } = loadApp({ fetchImpl: allOk });
+  window.matchMedia = (q) => ({ matches: q.includes("coarse") });
+  // No localm.instanceId cached: this "onboarded" flag could have been left
+  // behind by an entirely different backend that shared this browser origin.
+  window.localStorage.setItem("localm.onboarded", "1");
+  assert.equal(window.shouldShowInstallGate(), true,
+    "an unverified onboarded flag must not silently skip onboarding for a new pairing");
 });
 
 test("show/dismiss: gate covers the app, Continue reveals it and remembers", () => {

@@ -738,6 +738,114 @@ def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
 
 
 
+def _store_into_models_dir(path: Path, action: str) -> Path:
+    """Copy or move an external model (file or directory) INTO ``MODELS_DIR``, so
+    it can be registered from there and treated exactly like a pulled model
+    afterward (BRING-IN-1). ``action`` is ``"copy"`` or ``"move"``.
+
+    Handles every on-disk shape a registered model can take:
+      - a single-file GGUF
+      - a split GGUF - every ``-NNNNN-of-NNNNN.gguf`` part (split_gguf_parts),
+        not just the part *path* happens to point at
+      - a GGUF's sibling mmproj vision-projector file, if one exists next to it
+        (find_sibling_mmproj) - it MUST travel with the model, or vision
+        capability silently breaks with no error at registration time
+      - an HF-style model directory - the whole tree (shutil.copytree/move)
+
+    Refuses (raises RuntimeError, does not touch anything) when a name inside
+    MODELS_DIR is already occupied by a genuinely different file - the same
+    path-identity guard the duplicate-content prompt already applied inline.
+    Preflights free disk space before copying (a copy needs room for both the
+    original and the new copy at once); a same-name/no-op destination (already
+    in place) contributes nothing to that check. After each copy the destination
+    is re-hashed against a pre-copy digest of the source and the whole operation
+    fails loudly on any mismatch (we do not hide problems: a copy that silently
+    landed corrupted must never be registered as if it worked). A move is not
+    re-verified: on the same volume it is an atomic rename with no data ever
+    written twice, and doubling the read of a many-GB model file just to
+    reconfirm what the OS's move already guarantees is not worth the cost.
+
+    Returns the new path of the primary file/directory (the first part, for a
+    split GGUF) - the caller registers THIS path, not the original.
+    """
+    _mm.ensure_dirs()
+    path = path.resolve()
+    verb = "Copying" if action == "copy" else "Moving"
+
+    if path.is_dir():
+        dest = _mm.MODELS_DIR / path.name
+        if dest.resolve() == path:
+            return path                                    # already in place
+        if dest.exists():
+            raise RuntimeError(f"Cannot {action}: {dest} already exists")
+        total = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+        if not _mm._check_disk_space(_mm.MODELS_DIR, total):
+            raise RuntimeError(
+                f"Not enough disk space to {action} {path} into {_mm.MODELS_DIR}"
+            )
+        console.print(f"[dim]{verb} {path} to {dest}…[/dim]")
+        if action == "copy":
+            shutil.copytree(path, dest)
+        else:
+            shutil.move(str(path), str(dest))
+        return dest
+
+    # Single GGUF: gather every split part plus a sibling mmproj (if any) -
+    # all of it must travel together or the model breaks (multi-part loading)
+    # or silently loses a capability (vision) with no error at registration time.
+    parts = split_gguf_parts(path.name) or [path.name]
+    sources = [path.parent / part for part in parts]
+    if path.suffix.lower() == ".gguf":
+        mmproj = find_sibling_mmproj(path)
+        if mmproj is not None and mmproj not in sources:
+            sources.append(mmproj)
+
+    dests: List[Path] = []
+    for src in sources:
+        dest = _mm.MODELS_DIR / src.name
+        if dest.exists() and dest.resolve() != src.resolve():
+            raise RuntimeError(f"Cannot {action}: {dest} already exists")
+        dests.append(dest)
+
+    to_transfer = [(s, d) for s, d in zip(sources, dests) if s.resolve() != d.resolve()]
+    total = sum(s.stat().st_size for s, _ in to_transfer if s.exists())
+    if not _mm._check_disk_space(_mm.MODELS_DIR, total):
+        raise RuntimeError(
+            f"Not enough disk space to {action} {path.name} into {_mm.MODELS_DIR}"
+        )
+
+    for src, dest in to_transfer:
+        if not src.exists():
+            # A split part or mmproj sibling that vanished between discovery and
+            # transfer (pre-existing incomplete/broken model on disk) - not this
+            # operation's problem to fix; note it and continue with the rest.
+            logger.debug("_store_into_models_dir: %s no longer exists, skipping", src)
+            continue
+        console.print(f"[dim]{verb} {src.name} to {dest}…[/dim]")
+        if action == "copy":
+            pre_digest = _mm._sha256_file(src)
+            shutil.copy2(src, dest)
+            post_digest = _mm._sha256_file(dest)
+            if post_digest != pre_digest:
+                # Don't leave a known-bad copy sitting in MODELS_DIR - it would
+                # otherwise be a ticking time bomb for a future sync_models_dir
+                # to auto-register as its own (corrupt) model.
+                try:
+                    dest.unlink()
+                except OSError:
+                    pass  # best-effort cleanup; the mismatch itself still raises
+                raise RuntimeError(
+                    f"Copy verification failed for {src.name}: sha256 mismatch "
+                    f"after copy to {dest} (source left untouched, bad copy removed)"
+                )
+        else:
+            shutil.move(str(src), str(dest))
+
+    return _mm.MODELS_DIR / path.name
+
+
+
+
 def _register_with_dedup(
     model_name: str,
     p: Path,
@@ -817,18 +925,20 @@ def _register_with_dedup(
             alias_model(dup_names[0], model_name)
             return
         if action in ("copy", "move"):
-            _mm.ensure_dirs()
-            dest = _mm.MODELS_DIR / p.name
-            if dest.exists() and dest.resolve() != p.resolve():
-                console.print(
-                    f"[red]Cannot {action}:[/red] {dest} already exists"
-                )
+            # Capture the pre-move resolved path BEFORE _store_into_models_dir
+            # touches anything - it's the key the alias-relink below matches on.
+            moved_from = str(p.resolve())
+            try:
+                dest = _mm._store_into_models_dir(p, action)
+            except RuntimeError as e:
+                console.print(f"[red]{e}[/red]")
                 return
-            if action == "copy":
-                console.print(f"[dim]Copying to {dest}…[/dim]")
-                shutil.copy2(p, dest)
-            else:
-                console.print(f"[dim]Moving to {dest}…[/dim]")
+            if action == "move":
+                dest_str = str(dest.resolve())
+                entry = {"path": dest_str, "source": source, "model_type": model_type}
+                if digest:
+                    entry["sha256"] = digest.lower()
+
                 # Move first so the file lands under MODELS_DIR (where a launch-time
                 # sync_models_dir can always recover it), THEN commit the registry in
                 # ONE atomic write: repoint the moved file's other aliases AND register
@@ -838,13 +948,6 @@ def _register_with_dedup(
                 # The move-then-write step is still not one transaction, but a crash
                 # between them leaves the file in MODELS_DIR and the registry fully
                 # pre-move, which sync reconciles on the next launch.
-                shutil.move(str(p), str(dest))
-                moved_from = str(p.resolve())
-                dest_str = str(dest.resolve())
-                entry = {"path": dest_str, "source": source, "model_type": model_type}
-                if digest:
-                    entry["sha256"] = digest.lower()
-
                 def _relink_and_register(r: dict) -> None:
                     for alias_name in dup_names:
                         if r.get(alias_name, {}).get("path") == moved_from:
@@ -964,6 +1067,56 @@ def _resolve_ollama_manifest(p: Path):
 
 
 
+def _store_loose_gguf_dir(first_parts: List[Path], store: str) -> Optional[List[Path]]:
+    """Bring every model in a directory-of-loose-ggufs import into MODELS_DIR
+    before ``_add_local_gguf_dir`` registers them (mirrors its per-file loop).
+
+    ``first_parts`` is one entry per independent model in the folder - but that
+    list also includes any mmproj vision-projector file sitting in the same
+    folder (``_gguf_first_parts`` does not filter those out, since they are
+    registered as their own model too, same as today without --store). A
+    projector is auto-attached to its model by _store_into_models_dir already
+    (find_sibling_mmproj), so if we called the helper again on the projector's
+    OWN entry we'd either re-move a file that is already gone (crash) or hit a
+    false "already exists" collision against the copy that just landed next to
+    its model (same name, different source directory). So: precompute, from the
+    ORIGINAL on-disk layout, which entries are an unambiguous sibling of some
+    OTHER entry in this same folder, and only "claim" a final path for those
+    (they ride along with their model) instead of transferring them a second time.
+
+    Returns the new first_parts list (paths now under MODELS_DIR), or None if
+    any transfer failed (name collision, disk space, or a copy that verified
+    corrupt) - the caller reports the printed error and aborts the whole import.
+    """
+    claimed_sibling_of: dict = {}   # resolved mmproj path -> its owning model path
+    for owner in first_parts:
+        sib = find_sibling_mmproj(owner)
+        if sib is None:
+            continue
+        sib_r = sib.resolve()
+        if any(sib_r == g.resolve() for g in first_parts):
+            claimed_sibling_of[sib_r] = owner
+
+    new_parts: List[Path] = []
+    for gguf in first_parts:
+        if gguf.resolve() in claimed_sibling_of:
+            # Transferred as a side effect of its owning model's own call below
+            # (whichever order that happens in) - just point at its new home.
+            new_parts.append(_mm.MODELS_DIR / gguf.name if _mm.is_external_path(gguf) else gguf)
+            continue
+        if not _mm.is_external_path(gguf):
+            new_parts.append(gguf)
+            continue
+        try:
+            new_parts.append(_mm._store_into_models_dir(gguf, store))
+        except RuntimeError as e:
+            console.print(f"[red]{e}[/red]")
+            return None
+    return new_parts
+
+
+
+
 def _add_local_gguf_dir(
     first_parts: List[Path],
     name: Optional[str],
@@ -1022,10 +1175,22 @@ def add_local(
     no_hash: bool = False,
     fast: bool = False,
     model_type: str = "llm",
+    store: Optional[str] = None,
 ) -> bool:
     """Register a local .gguf / HF dir / Ollama blob. Returns True on a successful
     registration or a benign no-op (alias / user-skipped duplicate), False when the
-    path is not a usable model, so `localm pull <path>` can set its exit code."""
+    path is not a usable model, so `localm pull <path>` can set its exit code.
+
+    *store* is ``"copy"``, ``"move"``, or ``None`` (default: register in place,
+    today's behavior). When set and the path is OUTSIDE ~/.localm/models, the
+    file/dir is brought into managed storage (via _store_into_models_dir) BEFORE
+    registration, so the model is treated exactly like a pulled model afterward
+    (BRING-IN-1). A failure here (name collision, no disk space, copy corrupted)
+    is a hard failure of the whole call - unlike the softer dedup-prompt copy/move
+    (where skipping just means "keep the old registration"), a requested --store
+    that silently fell back to registering the ORIGINAL external path would be a
+    hidden problem, not a benign no-op.
+    """
     p = Path(path_str).resolve()
     if not p.exists():
         console.print(f"[red]Not found:[/red] {path_str}")
@@ -1035,6 +1200,12 @@ def add_local(
     ollama = _resolve_ollama_manifest(p)
     if ollama is not None:
         blob_path, suggested = ollama
+        if store and _mm.is_external_path(blob_path):
+            try:
+                blob_path = _mm._store_into_models_dir(blob_path, store)
+            except RuntimeError as e:
+                console.print(f"[red]{e}[/red]")
+                return False
         # Sanitize the user-supplied -n name through the same filter
         # sync_models_dir uses, so a '../evil' or 'a/b' name can never become a
         # raw registry key (GAP-CLI-1).
@@ -1072,6 +1243,11 @@ def add_local(
         max_depth = max(1, int(load_config().get("import_max_depth", 3)))
         first_parts = _gguf_first_parts(p, max_depth=max_depth)
         if first_parts:
+            if store:
+                stored = _mm._store_loose_gguf_dir(first_parts, store)
+                if stored is None:
+                    return False
+                first_parts = stored
             return _add_local_gguf_dir(first_parts, name, on_duplicate, no_hash, fast, model_type=model_type)
 
     if not (is_gguf or is_hf or is_blob):
@@ -1097,6 +1273,17 @@ def add_local(
                 first_path = p.parent / first
                 if first_path.is_file():
                     p = first_path
+
+    # Bring an external file/dir into managed storage BEFORE registering, so the
+    # registry ends up pointing at the copy/move destination, not the original.
+    # Handles the split-GGUF parts and any sibling mmproj on its own
+    # (_store_into_models_dir); works for is_hf's whole directory too.
+    if store and _mm.is_external_path(p):
+        try:
+            p = _mm._store_into_models_dir(p, store)
+        except RuntimeError as e:
+            console.print(f"[red]{e}[/red]")
+            return False
 
     # Sanitize the user-supplied -n name (GAP-CLI-1): never let '../evil' or
     # 'a/b' become a raw registry key. p.stem is already path-component-safe.

@@ -167,12 +167,16 @@ def pull_model(
     redownload: bool = False,
     mmproj_spec: Optional[str] = None,
     model_type: str = "auto",
+    store: Optional[str] = None,
 ) -> bool:
     """Download a model from HuggingFace or a URL.
 
     Returns True on success or a benign no-op (already present / aliased /
     user-skipped), False on a real error, so callers can set a non-zero exit
     code and the GUI can mark the job failed instead of reporting "finished".
+
+    *store* ("copy" / "move" / None) only applies to the local-path branch
+    below - a remote HF/URL download already lands in MODELS_DIR on its own.
     """
     spec = _mm.resolve_spec(model_spec)
     detected_type = "llm"
@@ -197,7 +201,7 @@ def pull_model(
     except OSError:
         is_local_path = False
     if is_local_path:
-        return _mm.add_local(str(local), name=name, model_type=detected_type)
+        return _mm.add_local(str(local), name=name, model_type=detected_type, store=store)
 
     # SSRF-PULL: honour the net_mode kill switch for a REMOTE pull. net_mode=off
     # means "no network at all", so it must stop a model download too - previously

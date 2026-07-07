@@ -275,6 +275,11 @@
             <select id="pull-mmproj" style="display:none; max-width:200px">
               <option value="">No vision projector</option>
             </select>
+            <select id="pull-store" style="max-width:180px" title="Only applies to a local folder/file path - a HuggingFace or URL download always lands in ~/.localm/models on its own.">
+              <option value="">Register in place</option>
+              <option value="copy">Copy into library</option>
+              <option value="move">Move into library</option>
+            </select>
             <button class="btn-secondary" id="pull-browse" title="Pick a folder on this machine that holds the model(s)">Browse…</button>
             <button class="btn-primary" id="pull-start">Add</button>
           </div>

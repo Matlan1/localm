@@ -27,6 +27,10 @@ function makeFetch(calls, { fits = true } = {}) {
         model: "m", model_bytes: 4 * GIB, weights: 4 * GIB, kv_cache: 0.6 * GIB,
         overhead: 1.5 * GIB, needed: 6.1 * GIB, free: 11 * GIB, total: 16 * GIB,
         fits, approximate: true }) };
+    if (u.includes("/api/models/load") && method === "POST") {
+      const body = JSON.parse(opts.body || "{}");
+      return { ok: true, status: 200, json: async () => ({ status: "loaded", model: body.model }) };
+    }
     if (u.endsWith("/v1/config") && method === "GET")
       return { ok: true, status: 200, json: async () => ({ n_ctx: 8192, n_gpu_layers: 99 }) };
     if (u.endsWith("/v1/config") && method === "PATCH")
@@ -66,6 +70,29 @@ test("moving the context slider refetches the estimate", async () => {
   assert.ok(await waitFor(
     () => calls.filter((c) => c.u.includes("/api/vram-estimate")).length > before),
     "a new estimate is fetched after the slider moves");
+});
+
+test("switching the model via the dropdown refreshes the VRAM estimate", async () => {
+  const calls = [];
+  const { window } = loadApp({ fetchImpl: makeFetch(calls) });
+  await waitFor(() => /needed/.test(window.document.getElementById("perf-estimate").textContent));
+  const before = calls.filter((c) => c.u.includes("/api/vram-estimate")).length;
+  const sel = window.document.getElementById("model-select");
+  // The select is normally populated by refreshModels() from /api/models; add
+  // the option this test switches to directly so .value actually takes (jsdom,
+  // like a real browser, ignores setting .value to a value with no matching
+  // <option>).
+  const opt = window.document.createElement("option");
+  opt.value = "other-model";
+  sel.appendChild(opt);
+  sel.value = "other-model";
+  sel.dispatchEvent(new window.Event("change", { bubbles: true }));
+  assert.ok(await waitFor(
+    () => calls.some((c) => c.u.includes("/api/models/load") && c.method === "POST")),
+    "the dropdown change issues a model-load request");
+  assert.ok(await waitFor(
+    () => calls.filter((c) => c.u.includes("/api/vram-estimate")).length > before),
+    "a fresh estimate is fetched after the model switch");
 });
 
 test("Apply PATCHes n_ctx and n_gpu_layers to /v1/config", async () => {
