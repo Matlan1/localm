@@ -69,7 +69,7 @@ gpu = [
     # transformers 5.12 (tokenizers<=0.23.0,>=0.22.0) resolves to.
     "tokenizers==0.22.2",
     "accelerate>=1.14.0",
-    "pillow>=10.0",
+    "pillow>=12.3.0",
     "torch==2.9.1+rocm7.13.0; sys_platform == 'win32'",
     "torchvision==0.24.0+rocm7.13.0; sys_platform == 'win32'",
     "rocm; sys_platform == 'win32'",
