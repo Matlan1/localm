@@ -162,41 +162,34 @@ export function confirmWebRequest(call) {
 window.confirmWebRequest = confirmWebRequest;
 
 export const WEB_TOOL_PROMPT =
-  "You can access the internet through tools. When the answer depends on " +
-  "current, real-time, or external information you cannot be certain of " +
-  "(news, prices, software versions, documentation, anything after your " +
-  "training cutoff), get it from the web instead of guessing. Reply with " +
-  "ONLY a tool call block and nothing else:\n" +
+  "You can access the internet through tools. For current or uncertain " +
+  "info (news, prices, versions, anything after your training cutoff), " +
+  "get it from the web instead of guessing. Reply with ONLY a tool call " +
+  "block and nothing else:\n" +
   '<tool_call>{"name": "web_search", "args": {"query": "..."}}</tool_call>\n' +
   "To read a specific page:\n" +
   '<tool_call>{"name": "fetch_url", "args": {"url": "https://..."}}</tool_call>\n' +
-  "The results arrive in the next message; then answer and cite the source " +
-  "URLs you used.\n" +
-  "HONESTY: never invent search results, URLs, or page contents, and never " +
-  "say you searched or read a page unless you actually emitted a tool call " +
+  "Results arrive in the next message; then answer and cite the URLs used.\n" +
+  "Never invent search results, URLs, or page contents, and never say you " +
+  "searched or read a page unless you actually emitted a tool call " +
   "and received its result. If a search fails or finds nothing useful, say " +
   "so plainly instead of making something up.";
 
 export const NO_WEB_PROMPT =
-  "You are offline with NO internet access in this conversation. Do not " +
-  "present guessed or invented information as verified fact: current events, " +
-  "news, prices, live data, software versions, or anything you cannot confirm " +
-  "from this conversation. Never claim you looked something up, searched the " +
-  "web, or read a page, because you cannot. If the user needs current or " +
-  "external information, say plainly that you cannot verify it offline and " +
-  "that they can enable \"Web access\" with the 🌐 toggle in the " +
-  "parameters drawer (⚙). Saying \"I do not know\" is better than " +
-  "stating something false.";
+  "You have no internet access right now. Never claim to have searched or " +
+  "looked something up. If you cannot verify something from this " +
+  "conversation (current events, prices, versions), say so plainly instead " +
+  "of guessing - the user can turn on web access if they want a live " +
+  "answer.";
 
 // Used when web results were just injected (the explicit /web command, or a
 // model-initiated search) but the standing toggle is off: the model HAS fresh
 // results in hand, so the offline-denial floor would contradict them. Tell it
 // to use and cite the provided results, and not to fabricate beyond them.
 export const WEB_GROUNDED_PROMPT =
-  "Web search results have been provided to you in this conversation. Use them " +
-  "to answer, and cite the source URLs you relied on. Stay within what the " +
-  "results actually support: do not invent facts, URLs, or details beyond them, " +
-  "and if they do not answer the question, say so plainly.";
+  "Web results were just provided above. Use them to answer and cite the " +
+  "URLs you relied on. Do not invent facts or details beyond what they " +
+  "support; if they do not answer the question, say so plainly.";
 
 /** True when the most recent message is freshly injected web grounding (search
  *  results or fetched page content), as opposed to a repair note or a failure
