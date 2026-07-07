@@ -175,5 +175,5 @@ localm bug-report -m "short description of the problem"
 
 It collects a safe hardware/backend snapshot and never your API key, config, or
 chat data. The report is saved under your data dir (`bug-reports/`); you can edit
-it, then email it to the maintainer, open a GitHub issue (once you have repo
-access), or send the file however you like.
+it, then send it with `localm bug-report --send` (no GitHub account needed),
+email it to the maintainer, or send the file however you like.

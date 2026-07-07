@@ -137,8 +137,9 @@ def bug_report_cmd(message: str, send: bool) -> None:
     loaded model, an allowlisted config subset, key dependency versions, and the
     in-memory recent-activity log - never your API key, config secrets, or chat
     content), saves an editable markdown file, and offers to send it via the
-    account-less hosted channel, email it, open a GitHub issue, or hand it off
-    yourself. Pass --send to skip the menu and send it immediately."""
+    account-less hosted channel, email it, or hand it off yourself. Pass --send
+    to skip the menu and send it immediately. No GitHub account is ever
+    needed."""
     from localm import bugreport
     bugreport.report_failure(
         summary=message or "user-reported issue",
