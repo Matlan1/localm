@@ -29,6 +29,8 @@ import base64
 import os
 from pathlib import Path
 
+from typing import Optional
+
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 

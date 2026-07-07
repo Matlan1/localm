@@ -10,6 +10,8 @@ at the top of register(), so each handler body is identical to the original.
 
 from __future__ import annotations
 
+from typing import Optional
+
 import asyncio
 from pathlib import Path
 
