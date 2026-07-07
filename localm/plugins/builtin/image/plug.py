@@ -355,6 +355,13 @@ def register(host) -> None:
     host.register_model_role(ModelRoleDescriptor("image-vae", "VAE", "vae", required=False))
     host.register_model_role(ModelRoleDescriptor("image-lora", "LoRA", "lora", required=False))
 
+    # "On app start" readiness check (one of the 5 trigger points ComfyUI
+    # status gets checked at - see comfy_client.py's readiness-cache
+    # docstring): fire-and-forget, does not block plugin registration or
+    # attempt to launch ComfyUI.
+    from localm.media.comfy_client import warm_comfy_status_async
+    warm_comfy_status_async()
+
 
 def unregister() -> None:
     pass

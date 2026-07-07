@@ -1039,12 +1039,6 @@ export function renderMediaSubsection(name) {
     badge.style.backgroundColor = "var(--bg-card-hover, #30363d)";
     head.appendChild(badge);
     
-    // `timer` must be declared (not just `const`-assigned below) BEFORE checkComfy is
-    // called: the first synchronous checkComfy() runs before the interval is set, and
-    // when the badge is not yet connected it calls clearInterval(timer). With a bare
-    // `const timer = setInterval(...)` after the call, that read hit the temporal dead
-    // zone ("Cannot access 'timer' before initialization") and broke the whole media
-    // subsection render. `let timer = null` initialized up front fixes it.
     // NEW-STOPCOMFY: Stop/Restart controls. Stop shows whenever ComfyUI is up
     // (it always aborts the render + clears the queue; it terminates the process
     // only if localm launched it). Restart shows only for a localm-launched one.
@@ -1058,12 +1052,14 @@ export function renderMediaSubsection(name) {
     head.appendChild(stopBtn);
     head.appendChild(restartBtn);
 
-    let timer = null;
+    // ComfyUI status is checked here (Settings page opened), on app start, on
+    // the Image/Music/Video page being opened, before the first task
+    // submission, and after Stop/Restart below - not on a recurring timer.
+    // A 5-second setInterval used to poll this badge continuously for as
+    // long as Settings stayed open; ComfyUI does not appear/disappear on its
+    // own between requests, so that was pure unnecessary traffic (see
+    // comfy_client.py's readiness-cache docstring for the backend half).
     const checkComfy = () => {
-      if (!badge.isConnected) {
-        if (timer) clearInterval(timer);
-        return;
-      }
       fetch("/v1/comfy/status", { headers: authHeaders() })
         .then(r => r.json())
         .then(d => {
@@ -1091,7 +1087,6 @@ export function renderMediaSubsection(name) {
     restartBtn.onclick = () => comfyAction("/v1/comfy/restart", restartBtn, "Restarting...");
 
     checkComfy();
-    timer = setInterval(checkComfy, 5000);
   }
   
   const grid = el("div", "settings-fields");
