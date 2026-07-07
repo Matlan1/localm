@@ -273,43 +273,80 @@ async def switch_engine(name: str, make_engine, *, on_active=None) -> dict:
             
         # Only perform eviction check if there are registered models
         if registry:
+            from localm.vram import wait_for_vram_release
             vram_required = int(file_size * 1.2)
             headroom = 1024 ** 3  # 1GB VRAM headroom
-            
+
             while True:
                 v_info = vram_info()
                 free_vram = v_info.get("free")
-                if free_vram is None or free_vram >= vram_required + headroom:
+                measurable = free_vram is not None
+                if measurable and free_vram >= vram_required + headroom:
                     break
-                    
+
+                # Need to make room. When VRAM is measurable we evict idle models
+                # until the new one fits. When it is NOT measurable (the default
+                # GGUF-only / non-NVIDIA install, where discover.vram_info reports
+                # no "free"), we cannot prove the new model fits ALONGSIDE the
+                # others, so we fall back to single-resident behaviour - evict
+                # every idle model before loading - rather than stacking models
+                # until the driver OOMs (AUDIT-CRIT-2).
                 evict_name = None
                 for candidate in _engines_lru:
+                    if candidate == name:
+                        continue  # never evict the model we are loading
                     candidate_engine = _engines.get(candidate)
                     if candidate_engine is not None and getattr(candidate_engine, "active_requests", 0) == 0:
                         evict_name = candidate
                         break
-                        
+
                 if evict_name is None:
-                    # Local eviction is exhausted (everything else is busy or
-                    # nothing else is loaded): before giving up, try a
-                    # best-effort ask to a sibling localm instance on this
-                    # machine (multi-instance GPU coordination, see
-                    # localm.gpu_registry) to release ITS VRAM. Off the event
-                    # loop since it may make a blocking loopback HTTP call.
-                    # Advisory only: any failure (no peer, timeout, refusal)
-                    # falls straight through to exactly today's 503 - never a
-                    # harder failure than the pre-existing baseline.
+                    # Nothing idle left to evict.
+                    if not measurable:
+                        # Unmeasurable and every remaining model is busy (or none
+                        # is loaded): we have freed what we safely can - proceed to
+                        # load best-effort, exactly the pre-multi-model behaviour.
+                        break
+                    # Local eviction is exhausted: before giving up, try a
+                    # best-effort ask to a sibling localm instance on this machine
+                    # (multi-instance GPU coordination, see localm.gpu_registry) to
+                    # release ITS VRAM. Off the event loop since it may make a
+                    # blocking loopback HTTP call. Advisory only: any failure falls
+                    # straight through to the 503 below - never a harder failure
+                    # than the pre-existing baseline.
                     cooperated = await loop.run_in_executor(None, _attempt_cooperative_unload)
                     if cooperated:
                         continue
-                    raise HTTPException(503, f"VRAM exhausted (cannot load '{name}'). All other loaded models are busy.")
+                    if _engines:
+                        raise HTTPException(503, f"VRAM exhausted (cannot load '{name}'). "
+                                            "All other loaded models are busy.")
+                    raise HTTPException(503, f"Not enough VRAM to load '{name}' "
+                                        f"(need ~{vram_required // 1024 ** 2} MB, "
+                                        f"{(free_vram or 0) // 1024 ** 2} MB free).")
 
                 evict_engine = _engines[evict_name]
+                free_before = free_vram
+                # Safe to unload without the victim's own semaphore: active_requests
+                # == 0 means no request is pinned on it (a request pins its engine
+                # for its whole lifetime, from get_engine through stream end -
+                # AUDIT-CRIT-1), so no decode is in flight to race the native free.
+                # Acquiring the victim sem here while holding the target sem would
+                # also risk a two-switch lock-ordering deadlock.
                 await loop.run_in_executor(None, evict_engine.unload)
                 del _engines[evict_name]
                 _engines_lru.remove(evict_name)
                 if evict_name in _inference_sems:
                     del _inference_sems[evict_name]
+
+                # Wait for the native VRAM free to actually land before re-checking,
+                # so the next iteration does not see a stale-low reading and
+                # over-evict (the driver-hang guard used everywhere else -
+                # AUDIT-MED-11). Only meaningful when VRAM is measurable.
+                if measurable and free_before is not None:
+                    await loop.run_in_executor(
+                        None,
+                        lambda: wait_for_vram_release(
+                            lambda: vram_info().get("free"), before_bytes=free_before))
 
         if name in _engines:
             new_engine = _engines[name]
@@ -1695,13 +1732,33 @@ def _reason_sse(content: str, reasoning: str,
     return out
 
 
+def _pin(engine) -> None:
+    """Mark *engine* as in-use for the current request, the instant the request
+    takes ownership of it - call this SYNCHRONOUSLY right after get_engine, with
+    no await in between, so the event loop cannot interleave an eviction before
+    the pin lands. A pinned engine (active_requests > 0) is skipped by VRAM
+    eviction, closing the window where a concurrent model load would unload an
+    engine out from under an in-flight request (AUDIT-CRIT-1)."""
+    if isinstance(getattr(engine, "active_requests", None), int):
+        engine.active_requests += 1
+
+
+def _unpin(engine) -> None:
+    """Release the request pin taken by _pin. Balanced exactly once per request."""
+    if isinstance(getattr(engine, "active_requests", None), int):
+        engine.active_requests = max(0, engine.active_requests - 1)
+
+
 async def _pin_engine(engine: Engine, gen: AsyncIterator[str]) -> AsyncIterator[str]:
-    engine.active_requests += 1
+    """Release the request pin when a streaming response finishes. The pin itself
+    is TAKEN by the handler (via _pin) synchronously right after get_engine, so
+    the engine stays pinned across the pre-stream setup window too - this wrapper
+    only unpins at stream end."""
     try:
         async for chunk in gen:
             yield chunk
     finally:
-        engine.active_requests -= 1
+        _unpin(engine)
 
 
 async def _stream_sse(
