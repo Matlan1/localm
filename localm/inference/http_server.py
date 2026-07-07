@@ -637,14 +637,18 @@ async def _idle_unload_once(ttl: int) -> bool:
                 
             idle_s = int(time.monotonic() - last_act)
             await loop.run_in_executor(None, engine.unload)
-            
-            if name in _engines:
-                del _engines[name]
+
+            # Keep the (now-unloaded) Engine object in _engines so the next
+            # request reloads it lazily WITH ITS ORIGINAL CONSTRUCTOR SETTINGS
+            # (n_ctx / n_gpu_layers / device / mmproj), and so a direct-path
+            # served model - whose display name is not in the registry and cannot
+            # be rebuilt by the default factory - is not lost forever (AUDIT-HIGH-5;
+            # matches this function's own "reloads on the next request" contract).
+            # Only drop it from the LRU (it holds no VRAM while unloaded); keep its
+            # inference semaphore so a concurrent reload reuses the same lock.
             if name in _engines_lru:
                 _engines_lru.remove(name)
-            if name in _inference_sems:
-                del _inference_sems[name]
-                
+
             if _engine is engine:
                 _engine = None
             if _active_model_name == name:
