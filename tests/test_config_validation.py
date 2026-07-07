@@ -96,6 +96,16 @@ class TestValidateUpdate:
         with pytest.raises(ValueError, match="expected a list"):
             ss.validate_update({"plugins_enabled": "chat"})
 
+    def test_coder_index_timeout_settable(self):
+        # Previously read directly off raw config (checkpoint._index_deadline)
+        # but never registered in DEFAULT_CONFIG/CORE_FIELDS, so `localm config
+        # coder_index_timeout 30` raised "unknown config key" - the only way to
+        # set it was hand-editing config.json. Now a real, schema-backed field.
+        assert ss.validate_update({"coder_index_timeout": "30"}) == {
+            "coder_index_timeout": 30}
+        with pytest.raises(ValueError, match="below the minimum"):
+            ss.validate_update({"coder_index_timeout": -1})
+
     # --- PATHLIST (rag_allowed_roots): coerce, resolve, confine ----------- #
 
     def test_pathlist_coerces_list_and_resolves(self, tmp_path):
