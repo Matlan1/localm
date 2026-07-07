@@ -83,6 +83,58 @@ export function setupPerfCard() {
       refreshPerfEstimate();
     })
     .catch(() => { sync(); refreshPerfEstimate(); });
+  setupMainGpuSelector();
+}
+
+/** Populate the "Main GPU" selector from GET /api/gpus: one option per detected
+ *  device (name + total VRAM), pre-selected on the currently configured index.
+ *  Hidden entirely on a single-GPU box (the common case) - there is nothing
+ *  useful to choose there, and showing a one-option dropdown would just be
+ *  noise. Also hidden when the endpoint is unreachable or detection found
+ *  nothing (same "no GPU visible" case). */
+export async function refreshMainGpuSelector() {
+  const row = $("perf-gpu-select-row"), sel = $("perf-main-gpu");
+  if (!row || !sel) return;
+  try {
+    const r = await fetch("/api/gpus", { headers: authHeaders() });
+    if (!r.ok) { row.hidden = true; return; }
+    const data = await r.json();
+    const gpus = data.gpus || [];
+    if (gpus.length < 2) { row.hidden = true; return; }
+    sel.replaceChildren();
+    for (const g of gpus) {
+      const opt = document.createElement("option");
+      opt.value = String(g.index);
+      const gb = typeof g.total === "number" ? ` (${_perfGiB(g.total)} GB)` : "";
+      opt.textContent = `${g.index}: ${g.name || "GPU " + g.index}${gb}`;
+      sel.appendChild(opt);
+    }
+    const current = typeof data.main_gpu_index === "number" ? data.main_gpu_index : 0;
+    sel.value = String(current);
+    row.hidden = false;
+  } catch (e) { row.hidden = true; }   // server unreachable - stay hidden, not broken
+}
+
+/** Wire the Main GPU selector's onchange to PATCH /v1/config (main_gpu_index
+ *  is a NEXT_LOAD setting, unlike the GPU-layers/context sliders above, so it
+ *  saves on its own instead of waiting for the shared Apply button), then
+ *  populate it. */
+export function setupMainGpuSelector() {
+  const sel = $("perf-main-gpu");
+  if (!sel) return;
+  sel.onchange = async () => {
+    const idx = Number(sel.value);
+    if (!Number.isInteger(idx) || idx < 0) return;   // options are always valid indices
+    try {
+      const r = await fetch("/v1/config", {
+        method: "PATCH", headers: authHeaders(),
+        body: JSON.stringify({ main_gpu_index: idx }),
+      });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+      toast("Saved - applies on the next model load");
+    } catch (e) { toast("Could not save: " + e.message, true); }
+  };
+  refreshMainGpuSelector();
 }
 
 /* ---- web access (model-initiated, via the params-drawer toggle) ---- */

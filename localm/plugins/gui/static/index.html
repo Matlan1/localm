@@ -305,6 +305,9 @@
           <div class="scan-row" id="models-scan-row" style="display: none">
             <button class="btn-secondary" id="models-scan-btn">Scan ComfyUI Models</button>
           </div>
+          <div class="scan-row">
+            <button class="btn-secondary" id="models-unload-all-btn" title="Release every currently-loaded model from GPU/CPU memory">Unload all</button>
+          </div>
           <div id="models-table"></div>
         </div>
       </div>
@@ -534,6 +537,12 @@
                 (<span id="perf-ctx-val">4096</span>)</label>
               <input type="range" id="perf-ctx" min="512" max="32768" step="512" value="4096">
               <div id="perf-estimate" class="sub perf-estimate">estimate unavailable</div>
+              <div id="perf-gpu-select-row" hidden>
+                <label for="perf-main-gpu">Main GPU - which device the model loads onto</label>
+                <select id="perf-main-gpu"></select>
+                <div class="sub">Saves immediately; applies on the next model load. Shown only
+                when more than one GPU is detected.</div>
+              </div>
               <div class="actions">
                 <button class="btn-primary" id="perf-apply">Apply</button>
               </div>

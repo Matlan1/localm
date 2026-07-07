@@ -18,9 +18,11 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, HTTPException, Request
 
 from localm import scopes
-from localm.inference.http_server import principal_id, require_scope
+from localm.inference.http_server import (principal_id, require_scope,
+                                          unload_all_models, unload_one_model)
+import localm.inference.http_server as _hs
 from localm.plugins.gui.web import (AliasRequest, LoadModelRequest, PullRequest,
-                                    RemoveModelRequest)
+                                    RemoveModelRequest, UnloadModelRequest)
 
 
 def register(app: FastAPI, ctx) -> None:
@@ -47,11 +49,17 @@ def register(app: FastAPI, ctx) -> None:
                     size = path.stat().st_size
             except OSError:
                 pass
+            engine = _hs._engines.get(name)
             models.append({
                 "name": name,
                 "source": entry.get("source", ""),
                 "size_bytes": size,
                 "active": name == current,
+                # Independent of "active": a model can be resident in VRAM
+                # (loaded) without being the one currently serving requests -
+                # surfaced so the Models page can offer a per-row Unload
+                # action on ANY loaded model, not just the active one.
+                "loaded": engine.loaded if engine is not None else False,
                 "model_type": mtype,
             })
         return {"models": models, "active": current}
@@ -97,6 +105,19 @@ def register(app: FastAPI, ctx) -> None:
         # still counts as a successful load of the requested model.
         return result if result is not None else {"status": "loaded", "model": req.model}
 
+    @app.post("/api/models/unload", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
+    async def gui_unload_model(req: UnloadModelRequest):
+        """Release model(s) from GPU/CPU memory. With no `model` (or an empty
+        POST body), unloads everything - the GUI's global "Unload all"
+        button. With `model` set, unloads only that one, leaving any other
+        loaded models untouched - the GUI's per-row Unload button."""
+        if req.model:
+            from localm.config import load_registry
+            if req.model not in load_registry():
+                raise HTTPException(404, f"Model not registered: {req.model}")
+            return await unload_one_model(req.model)
+        return await unload_all_models()
+
     @app.get("/api/vram-estimate", dependencies=[Depends(require_scope(scopes.MODELS_READ))])
     async def vram_estimate(model: str = "", n_ctx: int = 4096, n_gpu_layers: int = 99):
         """Approximate VRAM needed to load *model* (defaults to the active one)
@@ -121,6 +142,16 @@ def register(app: FastAPI, ctx) -> None:
         fits = (est["needed"] <= free) if isinstance(free, int) else None
         return {"model": name, "model_bytes": model_bytes, **est,
                 "free": free, "total": total, "fits": fits, "approximate": True}
+
+    @app.get("/api/gpus", dependencies=[Depends(require_scope(scopes.MODELS_READ))])
+    async def gui_gpus():
+        """Every GPU device visible right now, plus the currently configured
+        main GPU index. Powers the Settings > Live tuning "Main GPU" selector
+        (hidden/disabled when only one device is detected)."""
+        from localm.config import load_config
+        from localm.discover import list_gpus
+        return {"gpus": list_gpus(),
+                "main_gpu_index": load_config().get("main_gpu_index")}
 
     # ----------------------- model ops + jobs --------------------- #
 

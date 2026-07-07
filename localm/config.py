@@ -108,6 +108,13 @@ DEFAULT_CONFIG: dict = {
     # to false to use the fixed n_ctx_max instead.
     "ctx_auto": True,
     "n_gpu_layers": 99,    # 99 = offload everything to GPU
+    # Which GPU device to load models onto (and read VRAM from) on a
+    # multi-GPU system. None = no explicit selection: device 0, today's
+    # behaviour. An index that no longer matches a detected device falls back
+    # to device 0 with a logged warning rather than silently using the wrong
+    # GPU or handing llama.cpp's native loader an out-of-range index (see
+    # discover.resolve_main_gpu_index).
+    "main_gpu_index": None,
     # Default system prompt for chat. The GUI's per-chat System prompt field
     # OVERRIDES this when set; a blank field inherits this. Empty by default.
     "chat_system_prompt": "",

@@ -188,6 +188,34 @@ fi
 say "  Installing localm into .venv ..."
 uv pip install -p .venv -e ".[coder,voice,monitor]"
 
+# Verify the CLI entry point actually landed. Reported live: on a WSL2 clone under
+# a Windows-drive mount (/mnt/c, /mnt/d, ...) the install can report success while
+# .venv/bin/localm itself is simply missing - every OTHER file (localcoder, the
+# venv's own python symlink) present and correct, only this one absent. That mount
+# is a 9p/DrvFs bridge where uv's own reflink fast-path already falls back to a
+# plain copy (unsupported there); a transient hiccup during that fallback write is
+# the leading suspect, and it does not reliably repeat back-to-back. Retry once;
+# if it is STILL missing, say so loudly rather than silently reaching "Done,
+# self-contained" with a broken CLI (do-not-hide-problems) - the rest of this
+# script does not depend on the entry point, so this warns and continues rather
+# than aborting the whole setup over it.
+if [ ! -x .venv/bin/localm ]; then
+  say "  [!] .venv/bin/localm did not get installed - retrying once ..."
+  uv pip install -p .venv -e ".[coder,voice,monitor]"
+  if [ ! -x .venv/bin/localm ]; then
+    say ""
+    say "  [!!] .venv/bin/localm is STILL missing after a retry."
+    say "       The CLI (.venv/bin/localm ...) will not work until this is fixed;"
+    say "       the graphical launcher (./localm-launcher.sh) is unaffected."
+    say "       Fix it yourself with:"
+    say "         uv pip install -p .venv -e \".[coder,voice,monitor]\" --reinstall"
+    say "       Seen specifically on a WSL2 clone under a Windows-drive mount"
+    say "       (/mnt/c, /mnt/d, ...) - cloning into a native Linux path (e.g."
+    say "       ~/localm) instead avoids that filesystem bridge entirely."
+    say ""
+  fi
+fi
+
 # ---- native llama.cpp runtime wheel (loader imports it) ---------------------
 # (The PyTorch/transformers stack is installed further down, AFTER the backend
 # pick, so the HF torch variant can FOLLOW the chosen runtime - see SETUP-1.)

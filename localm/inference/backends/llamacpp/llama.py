@@ -542,6 +542,11 @@ class LlamaCpp:
         mp.n_gpu_layers = n_gpu_layers
         if n_gpu_layers >= 99:
             mp.use_mmap = False
+        # Multi-GPU: honour the configured main_gpu_index (validated against
+        # the devices actually visible right now); leaves the native default
+        # (device 0) untouched when unset. See discover.apply_main_gpu.
+        from localm.discover import apply_main_gpu
+        apply_main_gpu(mp)
 
         # Preemptive model switching: wire llama.cpp's native load-progress
         # callback so a load can be ABORTED mid-flight. The callback returns false

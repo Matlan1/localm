@@ -215,6 +215,17 @@ Reading free VRAM needs `torch` (the `[gpu]` extra). On a CPU-only install witho
 
 Long chats compact automatically before they collide with the ceiling. See [docs/architecture.md](../docs/architecture.md) for the compaction and VRAM-sizing details.
 
+### Multi-GPU: picking the main device
+
+On a multi-GPU system, localm loads models onto device 0 by default. `localm gpus` lists every detected device (index, name, VRAM) and marks the configured one:
+
+```bash
+localm gpus                        # list detected GPUs
+localm config main_gpu_index 1     # load models onto device 1 instead
+```
+
+The GUI has the same control: Settings > Live tuning shows a "Main GPU" dropdown once more than one GPU is detected. An index that no longer matches a currently-detected device falls back to device 0 with a logged warning rather than silently loading onto the wrong card.
+
 ---
 
 ## API keys

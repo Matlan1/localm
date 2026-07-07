@@ -161,31 +161,149 @@ def _quant_of(name: str) -> str:
     return m.group(1).upper() if m else ""
 
 
-def vram_info() -> dict:
-    """{"total": bytes, "free"?: bytes} for the largest GPU, or {} when not
-    measurable. Tries torch (CUDA/ROCm), then nvidia-smi, then the Windows
-    display-adapter registry - the GGUF-only install has no torch, and the
-    fit badges must still work there (total is all fit_label needs)."""
+def list_gpus() -> list:
+    """Every GPU device visible right now: ``[{"index", "name", "total",
+    "free"}, ...]``, or ``[]`` when nothing is measurable.
+
+    Tries torch first (CUDA/ROCm - torch's ROCm build aliases torch.cuda.* to
+    HIP under the hood, so an AMD card enumerates through the exact same API,
+    no special-casing needed) since it also gives a device name; falls back to
+    a name-aware ``nvidia-smi`` listing (ALL devices, not just the first) for
+    the GGUF-only install that has no torch.
+
+    Deliberately does NOT fall back to the Windows display-adapter registry:
+    that tier (see vram_info()) can only report one aggregate "largest
+    adapter" number with no per-device identity, so it cannot support GPU
+    *selection* - only vram_info()'s single-number "total VRAM for fit
+    badges" use case. That is a scope boundary, not an oversight."""
     try:
         import torch
         if torch.cuda.is_available():
-            free, total = torch.cuda.mem_get_info(0)
-            return {"free": int(free), "total": int(total)}
+            out = []
+            for i in range(torch.cuda.device_count()):
+                try:
+                    free, total = torch.cuda.mem_get_info(i)
+                except Exception:
+                    continue   # one device failing to report never hides the rest
+                try:
+                    name = torch.cuda.get_device_name(i)
+                except Exception:
+                    name = f"GPU {i}"
+                out.append({"index": i, "name": name,
+                            "total": int(total), "free": int(free)})
+            if out:
+                return out
     except Exception:
         pass
 
     try:
         import subprocess
         proc = subprocess.run(
-            ["nvidia-smi", "--query-gpu=memory.total,memory.free",
+            ["nvidia-smi", "--query-gpu=index,name,memory.total,memory.free",
              "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=5)
         if proc.returncode == 0 and proc.stdout.strip():
-            total_mb, free_mb = proc.stdout.strip().splitlines()[0].split(",")
-            return {"total": int(total_mb) * 1024 ** 2,
-                    "free": int(free_mb) * 1024 ** 2}
+            out = []
+            for line in proc.stdout.strip().splitlines():
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) < 4:
+                    continue
+                idx_s, name, total_mb, free_mb = parts[0], parts[1], parts[2], parts[3]
+                try:
+                    out.append({
+                        "index": int(idx_s), "name": name,
+                        "total": int(total_mb) * 1024 ** 2,
+                        "free": int(free_mb) * 1024 ** 2,
+                    })
+                except ValueError:
+                    continue   # a malformed line never hides the rest
+            if out:
+                return out
     except Exception:
         pass
+    return []
+
+
+def resolve_main_gpu_index(configured, *, gpus: Optional[list] = None) -> int:
+    """The GPU device index to actually use, given the user's ``main_gpu_index``
+    config value.
+
+    None (not configured) resolves to device 0 - today's behaviour - with no
+    detection work done at all. An explicitly configured index is validated
+    against the devices ``list_gpus()`` (or the injected *gpus*, for tests)
+    currently sees: an index that does not match any of them is a real
+    problem (silently substituting the wrong GPU, or handing llama.cpp's
+    native loader an index past the end of its device array, is worse than
+    device 0), so it is surfaced as a WARNING and swapped for device 0 rather
+    than trusted blindly (rule 5, do-not-hide-problems).
+
+    When detection itself is unmeasurable (``list_gpus()`` returns nothing -
+    no torch, no nvidia-smi), the configured index cannot be cross-checked
+    either way; it is passed through unchecked rather than discarding an
+    explicit user choice we have no way to disprove (the same documented
+    boundary as the Windows-registry VRAM fallback)."""
+    if configured is None:
+        return 0
+    try:
+        idx = int(configured)
+    except (TypeError, ValueError):
+        logger.warning("main_gpu_index=%r is not a valid integer; using device 0",
+                       configured)
+        return 0
+    if idx < 0:
+        logger.warning("main_gpu_index=%d is negative; using device 0", idx)
+        return 0
+    if idx == 0:
+        return 0   # the native default anyway - no need to enumerate devices
+    if gpus is None:
+        gpus = list_gpus()
+    # Check membership by the "index" field, NOT list position: a device that
+    # fails to report (list_gpus() skips it rather than hide the rest) leaves a
+    # gap, so "idx < len(gpus)" alone could wrongly wave through an idx that
+    # does not actually correspond to any detected device.
+    if gpus and not any(g.get("index") == idx for g in gpus):
+        logger.warning(
+            "main_gpu_index=%d does not match any of the %d GPU(s) detected "
+            "right now; falling back to device 0", idx, len(gpus))
+        return 0
+    return idx
+
+
+def apply_main_gpu(mp, *, config: Optional[dict] = None) -> None:
+    """Set ``mp.main_gpu`` from the configured ``main_gpu_index``, validated via
+    :func:`resolve_main_gpu_index`. Leaves the native default (0, set by
+    ``llama_model_default_params()``) untouched when unset. Shared by the
+    llama.cpp chat backend and the embedder so both native-load call sites
+    honour the same selection with the same fallback/warning behaviour."""
+    from localm.config import load_config
+    cfg = config if config is not None else load_config()
+    configured = cfg.get("main_gpu_index")
+    if configured is None:
+        return
+    mp.main_gpu = resolve_main_gpu_index(configured)
+
+
+def vram_info() -> dict:
+    """{"total": bytes, "free"?: bytes} for the CONFIGURED main GPU device (see
+    main_gpu_index / resolve_main_gpu_index), or the largest GPU when none is
+    configured, or {} when not measurable. Tries torch (CUDA/ROCm) then
+    nvidia-smi (both via list_gpus()), then the Windows display-adapter
+    registry - the GGUF-only install has no torch, and the fit badges must
+    still work there (total is all fit_label needs)."""
+    from localm.config import load_config
+    gpus = list_gpus()
+    if gpus:
+        configured = load_config().get("main_gpu_index")
+        idx = resolve_main_gpu_index(configured, gpus=gpus)
+        # Look up by the "index" field, not list position (list_gpus() can
+        # have a gap when one device fails to report - see
+        # resolve_main_gpu_index); gpus[0] is a defensive fallback that should
+        # not be reachable since resolve_main_gpu_index already validated idx.
+        g = next((x for x in gpus if x.get("index") == idx), gpus[0])
+        out = {"total": g["total"]}
+        if g.get("free") is not None:
+            out["free"] = g["free"]
+        return out
 
     import sys
     if sys.platform == "win32":
