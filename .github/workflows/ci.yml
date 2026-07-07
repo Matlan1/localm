@@ -42,7 +42,7 @@ jobs:
       # into a stale claim. `uv lock --check` fails on drift. (The Install step
       # below still uses pip; the lock is the pinned set for `uv sync --locked`.)
       - name: Install uv (for the lockfile check)
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@v7
       - name: Verify uv.lock matches pyproject (DEP-1, no silent drift)
         run: uv lock --check
 
