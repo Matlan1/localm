@@ -521,6 +521,36 @@ class TestVramEstimate:
         assert r.json()["fits"] is None        # can't claim fit without a reading
 
 
+class TestGpusEndpoint:
+    """GET /api/gpus - powers the Settings > Live tuning "Main GPU" selector."""
+
+    def test_returns_detected_gpus_and_configured_index(self, gui_app):
+        app, _ = gui_app
+        fake_gpus = [
+            {"index": 0, "name": "RTX 4090", "total": 24 * 1024 ** 3, "free": 20 * 1024 ** 3},
+            {"index": 1, "name": "RTX 3060", "total": 12 * 1024 ** 3, "free": 10 * 1024 ** 3},
+        ]
+        with patch("localm.discover.list_gpus", return_value=fake_gpus), \
+             patch("localm.config.load_config", return_value={"main_gpu_index": 1}):
+            with TestClient(app) as client:
+                r = client.get("/api/gpus")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["gpus"] == fake_gpus
+        assert data["main_gpu_index"] == 1
+
+    def test_empty_when_nothing_detected(self, gui_app):
+        app, _ = gui_app
+        with patch("localm.discover.list_gpus", return_value=[]), \
+             patch("localm.config.load_config", return_value={"main_gpu_index": None}):
+            with TestClient(app) as client:
+                r = client.get("/api/gpus")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["gpus"] == []
+        assert data["main_gpu_index"] is None
+
+
 class TestCompanionEndpoint:
     """The Companion-app card's phone-reachable address feed (LAN / Tailscale).
     Showing the loopback origin was wrong - a phone cannot reach 127.0.0.1."""

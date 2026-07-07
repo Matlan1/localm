@@ -461,6 +461,7 @@ def config_cmd(key, value):
       localm config n_gpu_layers 99
       localm config n_ctx 8192
       localm config temperature 0.7
+      localm config main_gpu_index 1
     """
     from localm.settings_schema import validate_update
     try:
@@ -471,3 +472,108 @@ def config_cmd(key, value):
     cfg.update(validated)
     save_config(cfg)
     console.print(f"[green]✓[/green] {key} = {validated[key]}")
+
+
+@main.command("gpus")
+def gpus_cmd():
+    """List detected GPUs and the configured main GPU index.
+
+    On a multi-GPU system, localm loads models onto device 0 unless you set
+    main_gpu_index. Pick one from this list, then:
+
+    \b
+      localm config main_gpu_index <index>
+    """
+    from ..discover import list_gpus
+
+    cfg = load_config()
+    configured = cfg.get("main_gpu_index")
+    gpus = list_gpus()
+    if not gpus:
+        console.print("[dim]No GPUs detected (or VRAM detection is unavailable - "
+                      "no torch, no nvidia-smi).[/dim]")
+        return
+    for g in gpus:
+        marker = "  [green](configured)[/green]" if g["index"] == configured else ""
+        free = g.get("free")
+        free_s = f"{free / 1024**3:.1f} GB free / " if isinstance(free, int) else ""
+        console.print(
+            f"  [cyan]{g['index']}[/cyan]  {g.get('name') or '?':<30} "
+            f"{free_s}{g['total'] / 1024**3:.1f} GB total{marker}")
+    if configured is not None and not any(g["index"] == configured for g in gpus):
+        console.print(
+            f"[yellow]![/yellow]  configured main_gpu_index={configured} does not "
+            "match any GPU detected right now; loads fall back to device 0.")
+    console.print("\n[dim]Set the main GPU:  localm config main_gpu_index <index>[/dim]")
+
+
+@main.command("unload")
+@click.argument("model", required=False, shell_complete=_complete_model_name)
+def unload_cmd(model):
+    """Unload the currently loaded model(s) from a running localm server.
+
+    With no MODEL, unloads everything - frees the GPU for another task, the
+    same as the GUI's "Unload all". With MODEL, unloads only that one,
+    leaving any other loaded models running.
+
+    Talks to the server already serving this directory (see `localm status`);
+    set LOCALM_URL to target a different instance, and LOCALM_API_KEY if it
+    requires one.
+    """
+    import os
+
+    import requests
+
+    from .. import instances, tls
+
+    url = os.environ.get("LOCALM_URL", "").rstrip("/")
+    if not url:
+        entry = instances.find_attachable(HOME_DIR, instances.resolve_root_dir())
+        if entry is None:
+            console.print("[red]No running localm server found for this directory.[/red]")
+            console.print("[dim]Start one with[/dim] localm gui  [dim]or[/dim]  "
+                          "localm serve <model>")
+            console.print("[dim]Or set LOCALM_URL to target a different instance.[/dim]")
+            sys.exit(1)
+        scheme = entry.get("scheme", "http")
+        url = f"{scheme}://{entry.get('host', '127.0.0.1')}:{entry.get('port')}"
+
+    headers = {}
+    key = os.environ.get("LOCALM_API_KEY")
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+
+    try:
+        resp = requests.post(f"{url}/v1/models/unload", headers=headers,
+                             params={"model": model} if model else None,
+                             timeout=180, verify=tls.requests_verify(url))
+    except requests.RequestException as e:
+        console.print(f"[red]Could not reach {url}:[/red] {e}")
+        sys.exit(1)
+
+    if resp.status_code == 401:
+        console.print("[red]Unauthorized.[/red] Set LOCALM_API_KEY to the server's key.")
+        sys.exit(1)
+    if not resp.ok:
+        detail = ""
+        try:
+            detail = resp.json().get("detail", "")
+        except Exception:
+            pass
+        console.print(f"[red]Unload failed ({resp.status_code}):[/red] {detail or resp.text}")
+        sys.exit(1)
+
+    data = resp.json()
+    if data.get("status") == "already_unloaded":
+        # A targeted unload on a registered-but-not-loaded model is a no-op
+        # success (idempotent, matches the unload-everything "nothing to do"
+        # case) - say so plainly rather than claiming something was unloaded.
+        console.print(f"[dim]'{data.get('model', model)}' was not loaded - nothing to do.[/dim]")
+        return
+    unloaded = data.get("unloaded_models")
+    if unloaded is None:
+        unloaded = [data["model"]] if data.get("model") not in (None, "none") else []
+    if not unloaded:
+        console.print("[dim]Nothing was loaded.[/dim]")
+    else:
+        console.print(f"[green]✓[/green] unloaded: {', '.join(unloaded)}")

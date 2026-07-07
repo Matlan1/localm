@@ -78,11 +78,16 @@ class GgufBackend(BaseBackend):
 
     @staticmethod
     def _free_vram_bytes() -> Optional[int]:
-        """Free VRAM on device 0 in bytes, or None when not measurable."""
+        """Free VRAM in bytes on the configured main GPU device (device 0 when
+        unset - see main_gpu_index / discover.resolve_main_gpu_index), or None
+        when not measurable."""
         try:
             import torch
             if torch.cuda.is_available():
-                free, _total = torch.cuda.mem_get_info(0)
+                from localm.config import load_config
+                from localm.discover import resolve_main_gpu_index
+                idx = resolve_main_gpu_index(load_config().get("main_gpu_index"))
+                free, _total = torch.cuda.mem_get_info(idx)
                 return int(free)
         except Exception:
             pass
@@ -117,6 +122,47 @@ class GgufBackend(BaseBackend):
             )
         return p.stat().st_size if p.is_file() else 0
 
+    def _vram_holder_hint(self) -> str:
+        """Best-effort: name a concrete live sibling localm instance holding
+        VRAM on this same GPU device (port, model, how long ago it last
+        updated), via the cross-install GPU-coordination registry
+        (``localm.gpu_registry``) - instead of the generic "another GPU app"
+        guess. Falls back to the generic text when the registry is empty/
+        unavailable or the lookup itself fails; this is purely a nicer
+        diagnostic (never load-blocking either way).
+
+        Best-effort self-reference note: this does not exclude THIS process's
+        own registry entry (the backend layer has no reliable handle on "my
+        own instance_id" without importing the HTTP server module, which
+        would be a backwards layering dependency). In the rare case this
+        model load is itself running inside an advertised server mid model-
+        switch, the entry named here could be this same instance's own
+        previous state - cosmetically odd but still an accurate snapshot of
+        what was last recorded, and never a safety issue since this text is
+        advisory-only."""
+        try:
+            from localm.config import load_config
+            from localm.discover import resolve_main_gpu_index
+            from localm import gpu_registry
+            idx = resolve_main_gpu_index(load_config().get("main_gpu_index"))
+            peers = gpu_registry.list_gpu_peers()
+            holder = next(
+                (p for p in peers
+                 if p.get("model") and int(p.get("gpu_index", 0) or 0) == idx),
+                None,
+            )
+            if holder is not None:
+                age = gpu_registry.age_seconds(holder.get("updated_at"))
+                age_txt = f"{int(age)}s ago" if age is not None else "recently"
+                return (
+                    f"another localm instance (port {holder.get('port')}) is "
+                    f"running '{holder.get('model')}' (active {age_txt}) - "
+                    f"POST /v1/models/unload on port {holder.get('port')} to free it."
+                )
+        except Exception:
+            pass  # advisory only - fall through to the generic hint
+        return "another GPU app is holding memory (ComfyUI, a browser, another model)."
+
     def _check_vram(self) -> None:
         """
         Warn - loudly and with options - when the model is unlikely to fit
@@ -135,8 +181,7 @@ class GgufBackend(BaseBackend):
             f"[yellow]⚠ Low VRAM:[/yellow] this model needs roughly "
             f"[bold]{need / 1024**3:.1f} GB[/bold] (weights + buffers) but only "
             f"[bold]{free / 1024**3:.1f} GB[/bold] is free.\n"
-            f"  [dim]Likely cause: another GPU app is holding memory "
-            f"(ComfyUI, a browser, another model).[/dim]\n"
+            f"  [dim]Likely cause: {self._vram_holder_hint()}[/dim]\n"
             f"  Options:\n"
             f"    • Free VRAM first (close the other app, or POST "
             f"/v1/models/unload on its server)\n"
