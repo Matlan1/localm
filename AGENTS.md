@@ -244,6 +244,27 @@ Keep it cheap and self-contained:
   leave a server bound across turns.
 - **Eat the dogfood (Live MCP verification)**: When modifying the server, the CLI, the coder, or the API endpoints, always verify that the MCP server runs correctly with those changes. Run the latest version + your unpublished changes using `npx mcporter` or an MCP client over stdio, and call tools (e.g. `list_models`, `chat`) to guarantee that any bugs or integration issues are caught live.
 
+## Test-run cadence: full suite once, right before the PR
+
+Run the FULL suite (`pytest -m "not integration"` + `npm test`) once, as the gate
+immediately before opening or updating a PR - not after every small edit, and not
+once per individual unit of a larger task. The full suite takes minutes; CI runs
+it again on the PR anyway, so re-running it after every small change buys no
+extra signal for real cost.
+
+While iterating within a task:
+
+- Use a targeted/scoped check against just the touched area for fast feedback per
+  step: `pytest -k <substr>`, the single changed test file, `ruff check <file>`.
+- `python scripts/check_hygiene.py` is fast (no pytest) and fine to run often.
+- When a task naturally decomposes into several small units, batch them into one
+  PR rather than opening a PR (and burning a full-suite run) per unit. One PR
+  gets ONE full-suite pass before it opens; CI re-confirms it.
+
+This changes cadence, not the bar: the full suite is still mandatory, green, and
+non-negotiable before a PR opens or merges (see the "Ready" checklist below and
+`.github/PULL_REQUEST_TEMPLATE.md`).
+
 ## Git and PR workflow
 
 This is a solo-maintained repo, and the maintainer has delegated the full change
