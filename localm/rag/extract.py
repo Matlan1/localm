@@ -68,7 +68,36 @@ BLACKLISTED_SUFFIXES = {
     ".ttf", ".otf", ".woff", ".woff2",
     # Other binary data
     ".pyc", ".pyd", ".db", ".sqlite",
+    # Model weights / large ML binaries: multi-GB files with no index value that
+    # would otherwise be fully read into RAM and sha256-hashed (twice) before
+    # being rejected, on every re-add (rag-blacklist-model-files).
+    ".gguf", ".safetensors", ".pt", ".pth", ".onnx", ".ckpt", ".h5",
+    ".pb", ".tflite", ".npz", ".npy", ".pkl",
+    # Secret / key material: plain-text key/cert files must not land in a
+    # searchable, model-visible index during a folder walk (AUDIT-MED-18).
+    ".pem", ".key", ".crt", ".cer", ".der", ".p12", ".pfx",
+    ".keystore", ".jks", ".asc", ".gpg", ".kdbx",
 }
+
+# Extensionless / dotfile secrets a recursive folder walk must skip - the suffix
+# blacklist cannot catch these (AUDIT-MED-18). A user who explicitly picks one of
+# these single files is still honoured; this only filters the recursive walk.
+SECRET_INDEX_NAMES = {
+    "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
+    ".netrc", ".pgpass", ".htpasswd", ".git-credentials",
+    ".npmrc", ".pypirc", ".dockercfg", "credentials",
+}
+
+
+def is_secret_index_name(name: str) -> bool:
+    """True for a filename that a recursive index walk should skip as likely
+    secret material (extensionless keys, .env files, known credential files)."""
+    low = name.lower()
+    if low in SECRET_INDEX_NAMES:
+        return True
+    if low == ".env" or low.startswith(".env."):
+        return True
+    return False
 
 # Directories to skip when processing ZIP files (mirrors store.py _SKIP_DIRS)
 _SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__",
