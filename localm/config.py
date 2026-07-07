@@ -245,6 +245,9 @@ DEFAULT_CONFIG: dict = {
     # Seconds a GUI coder approval card may sit unanswered before it is
     # auto-rejected and the agent moves on.
     "coder_confirm_timeout": 600,
+    # Wall-clock cap on the coder's startup project-map scan (CODER-1). <= 0
+    # disables the deadline (scan to completion however long it takes).
+    "coder_index_timeout": 20,
     # Episodic memory: the coder recalls lessons from past sessions on a project
     # (what worked / what failed) and, at session close, distils the finished
     # session into a new lesson. Recall is free (BM25); the reflection is one
