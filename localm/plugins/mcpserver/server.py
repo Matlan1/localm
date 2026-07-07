@@ -412,14 +412,12 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
 
     def setup_embeddings(args: dict) -> dict:
         model = args.get("model")
-        from localm.config import load_config, update_config
-        from localm.inference.embedder import (DEFAULT_EMBEDDING_MODEL,
-                                          KNOWN_EMBEDDING_MODELS,
+        from localm.config import update_config
+        from localm.inference.embedder import (KNOWN_EMBEDDING_MODELS,
                                           resolve_embedding_model_path)
         import contextlib
         if model:
             update_config(lambda c: c.update({"embedding_model": model}))
-        name = str(load_config().get("embedding_model") or DEFAULT_EMBEDDING_MODEL)
         
         with contextlib.redirect_stdout(sys.stderr):
             try:

@@ -179,7 +179,7 @@ class TestHfShaIsNotAFacade:
         """pull_model must forward --sha256 to the HF GGUF path (not drop it)."""
         captured = {}
 
-        def _fake_gguf(spec, name, expected_sha256=None, redownload=False):
+        def _fake_gguf(spec, name, expected_sha256=None, redownload=False, **kw):
             captured["sha256"] = expected_sha256
             return True
 
@@ -192,7 +192,7 @@ class TestHfShaIsNotAFacade:
             self, fake_registry, monkeypatch):
         captured = {}
 
-        def _fake_snap(repo_id, name, expected_sha256=None, redownload=False):
+        def _fake_snap(repo_id, name, expected_sha256=None, redownload=False, **kw):
             captured["sha256"] = expected_sha256
             return True
 
