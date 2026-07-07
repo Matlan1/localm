@@ -156,7 +156,15 @@ def register(app: FastAPI, ctx) -> None:
         if not req.model:
             raise HTTPException(400, "Model parameter is required and cannot be empty")
             
-        engine = await _hs.get_engine(req.model)
+        # Resolve WITHOUT forcing a chat-model load. A GGUF backend
+        # (can_embed=False, the default runtime) embeds via the dedicated small
+        # embedder and never needs the multi-GB chat model resident, so loading
+        # it - and, under VRAM pressure, evicting the active chat model - is pure
+        # waste (AUDIT-MED-13). Only a backend that embeds its OWN weights (HF,
+        # can_embed) actually needs a real load.
+        engine = await _hs.get_engine(req.model, load=False)
+        if getattr(getattr(engine, "_backend", None), "can_embed", True):
+            engine = await _hs.get_engine(req.model)
         _touch_activity(engine.display_name)
 
         # Honor the OpenAI encoding_format contract. "float" returns plain JSON
