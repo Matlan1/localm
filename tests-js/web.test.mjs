@@ -150,8 +150,8 @@ test("looksLikeWebToolAttempt: true for a broken wrapper, false for clean prose"
 test("web OFF: the model is told it is offline and must not fabricate", async () => {
   const { completions } = await runChat({ web: false, rounds: [content("hello")] });
   const sys = systemOf(completions[0]);
-  assert.match(sys, /NO internet access/);
-  assert.match(sys, /Never claim you looked something up/);
+  assert.match(sys, /no internet access/i);
+  assert.match(sys, /Never claim to have searched/);
 });
 
 test("web ON: the model is taught the tools and the honesty rule", async () => {
@@ -229,8 +229,8 @@ test("/web with the toggle OFF: real search runs and the answer is grounded, not
   // The answering turn is grounded, NOT told it is offline.
   const completions = calls.filter((c) => c.url === "/v1/chat/completions");
   const sys = (completions[0].body.messages.find((m) => m.role === "system") || {}).content || "";
-  assert.match(sys, /Web search results have been provided/);
-  assert.doesNotMatch(sys, /NO internet access/);
+  assert.match(sys, /Web results were just provided/);
+  assert.doesNotMatch(sys, /no internet access/i);
 });
 
 // ---------------------------------------------------------------------------
