@@ -6,7 +6,7 @@
 "use strict";
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
-import { $, authHeaders, autoGrow, confirmDanger, el, fetchImageURL, readStoredJSON, renderMarkdown, scrubMarkers, stripThink, toast } from "./helpers.js";
+import { $, authHeaders, autoGrow, confirmDanger, el, fetchImageURL, INSTANCE_SCOPED_KEYS, readStoredJSON, reconcileInstanceId, renderMarkdown, scrubMarkers, stripThink, toast } from "./helpers.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
 import { runCompletion, speak, setWebAskSession } from "./settings-perf.js";
 import { showView } from "./tabs.js";
@@ -26,6 +26,14 @@ export const chat = {
   privacy: false,    // server in privacy mode → conversations not persisted
   persist: false,    // non-privacy: conversations sync to the server store
   stick: true,       // R31: follow the stream to the bottom until the user scrolls up
+  // AUD-INSTANCEID: true once the connected backend's instance id (from
+  // /v1/config) is CONFIRMED to match the one this browser origin last saw.
+  // Defaults to true (permissive) so an old server without the field, or a
+  // failed /v1/config round trip, never wipes the cache on pure missing
+  // information - only an ACTUAL confirmed mismatch (reconcileInstanceId
+  // returning false) flips this to false. See initServerConversations, which
+  // gates re-uploading a not-yet-synced local conversation on this flag.
+  instanceMatch: true,
 };
 
 // Conversation compaction mirrors localm/inference/compact.py: once the estimate
@@ -155,22 +163,56 @@ export async function refreshCtxLimit() {
       // The Settings "Default system prompt": a chat with a blank System prompt
       // field inherits this (the per-chat drawer overrides it).
       chat.systemDefault = (cfg.chat_system_prompt || "").trim();
+
+      // AUD-INSTANCEID: confirm this browser origin is actually talking to the
+      // SAME backend data directory whose cache it holds, BEFORE any of that
+      // cache is trusted for merging/uploading. A mismatch (or no prior
+      // confirmation at all - a brand-new pairing, exactly the reported
+      // cross-instance leak) wipes the instance-scoped localStorage keys AND
+      // the in-memory state a synchronous boot-time read may already have
+      // loaded, then repaints so nothing foreign is ever shown or re-uploaded.
+      const sameInstance = reconcileInstanceId(cfg.instance_id);
+      chat.instanceMatch = sameInstance;
+      if (!sameInstance) {
+        chat.conversations = [];
+        chat.activeId = null;
+        convUI.collapsed = new Set();
+        renderConvList();
+        renderChat();
+        // AUD-INSTANCEID: reconcileInstanceId already wiped "localm.coderCwd"
+        // from localStorage, but init.js reads that key into the Coder tab's
+        // "Project directory" INPUT VALUE synchronously at boot (before this
+        // round trip can resolve) whenever ANY instance id was previously
+        // cached - so on a confirmed MISMATCH the input itself still holds a
+        // different install's host filesystem path until something corrects
+        // it here. Nothing else re-reads that key into the field afterwards.
+        const cwdInput = $("setup-cwd");
+        if (cwdInput) cwdInput.value = "";
+      }
+
       // Privacy mode: conversations live in memory only - wipe anything a
-      // previous non-privacy session left behind and show the hint.
+      // previous non-privacy session left behind (in-memory AND on disk) and
+      // show the hint.
       chat.privacy = cfg.effective_mode === "privacy";
       if (chat.privacy) {
-        localStorage.removeItem("localm.conversations");
-        localStorage.removeItem("localm.activeView");
-        localStorage.removeItem("localm.coderCwd");
-        localStorage.removeItem("localm.kbAddPath");
-        localStorage.removeItem("localm.convCollapsed");
-        localStorage.removeItem("localm.imgMoveDest");
-        localStorage.removeItem("localm.musicMoveDest");
-        localStorage.removeItem("localm.videoMoveDest");
-        localStorage.removeItem("localm.onboarded");
-        localStorage.removeItem("localm.webAccess");   // R34: no trace in privacy
-        localStorage.removeItem("localm.speakAloud");
+        for (const key of INSTANCE_SCOPED_KEYS) localStorage.removeItem(key);
+        // The localStorage wipe above used to leave the already-populated
+        // in-memory chat.conversations (and the sidebar list already painted
+        // from it) untouched, so the stale list stayed on screen for the
+        // whole session even though the on-disk wipe "succeeded" (AUD-PRIV-2).
+        chat.conversations = [];
+        chat.activeId = null;
+        convUI.collapsed = new Set();
         setWebAskSession(null);                        // R27: forget the session choice
+        renderConvList();
+        renderChat();
+        // AUD-INSTANCEID/AUD-PRIV-2: same DOM-field gap as the mismatch branch
+        // above - the Coder tab's "Project directory" input was already
+        // populated from "localm.coderCwd" at boot before this could run, and
+        // nothing else re-reads that key into the field, so the wipe above
+        // needs a matching correction here too.
+        const cwdInputPriv = $("setup-cwd");
+        if (cwdInputPriv) cwdInputPriv.value = "";
         const h = document.querySelector("#conversations h3");
         if (h && !document.getElementById("privacy-hint")) {
           const hint = document.createElement("div");
@@ -326,10 +368,28 @@ export async function initServerConversations() {
       (c) => [c.id, { ...c, _meta: true, messages: [] }]));
     for (const local of chat.conversations) {
       const remote = byId.get(local.id);
+      if (!remote) {
+        // AUD-INSTANCEID: a cached conversation THIS backend's own index does
+        // not know about is either (a) a real local-only chat not yet synced
+        // back to the SAME instance after a restart (legitimate - keep + push),
+        // or (b) a conversation that belongs to an entirely DIFFERENT backend
+        // data directory that happens to share this browser origin. Keeping
+        // (b) would show foreign chat history in the sidebar, and
+        // pushConversation would PERMANENTLY WRITE it into this install's own
+        // data directory - the worst part of the cross-instance leak. Only a
+        // CONFIRMED same-instance pairing (chat.instanceMatch, set by
+        // refreshCtxLimit's reconcileInstanceId) may take the keep+push path;
+        // anything else is dropped here - never rendered, never uploaded.
+        if (chat.instanceMatch) {
+          byId.set(local.id, local);
+          pushConversation(local);
+        }
+        continue;
+      }
       // Keep the local FULL copy unless the server has a strictly newer version
       // (>= keeps it on a tie, so an already-cached conversation is not demoted to
       // an index-only placeholder that would need a needless re-fetch / break offline).
-      if (!remote || (local.updated_at || 0) >= (remote.updated_at || 0)) {
+      if ((local.updated_at || 0) >= (remote.updated_at || 0)) {
         byId.set(local.id, local);
         pushConversation(local);
       }

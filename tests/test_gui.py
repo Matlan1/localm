@@ -630,6 +630,49 @@ class TestModelEndpoints:
                 r = client.post("/api/models/pull", json={"spec": bad})
                 assert r.status_code == 400
 
+    def test_pull_store_copy_forwarded_to_cli(self, gui_app, monkeypatch):
+        """The GUI's 'Copy into library' / 'Move into library' picker (index.html
+        #pull-store) reaches the CLI as --store, so a browsed-to local path is
+        actually imported into MODELS_DIR, not just registered where it sits."""
+        app, _ = gui_app
+        captured = self._capture_pull_args(monkeypatch)
+        with TestClient(app) as client:
+            r = client.post(
+                "/api/models/pull",
+                json={"spec": "D:\\models\\mymodel.gguf", "store": "copy"})
+        assert r.status_code == 200
+        assert captured["args"] == [
+            "pull", "--store", "copy", "--", "D:\\models\\mymodel.gguf"]
+
+    def test_pull_store_move_forwarded_to_cli(self, gui_app, monkeypatch):
+        app, _ = gui_app
+        captured = self._capture_pull_args(monkeypatch)
+        with TestClient(app) as client:
+            r = client.post(
+                "/api/models/pull",
+                json={"spec": "D:\\models\\mymodel.gguf", "store": "move"})
+        assert r.status_code == 200
+        assert captured["args"] == [
+            "pull", "--store", "move", "--", "D:\\models\\mymodel.gguf"]
+
+    def test_pull_store_omitted_when_not_requested(self, gui_app, monkeypatch):
+        """Default 'Register in place' sends no store field - --store must not
+        appear at all, so the CLI keeps its today's-behavior default."""
+        app, _ = gui_app
+        captured = self._capture_pull_args(monkeypatch)
+        with TestClient(app) as client:
+            r = client.post("/api/models/pull", json={"spec": "owner/repo"})
+        assert r.status_code == 200
+        assert "--store" not in captured["args"]
+
+    def test_pull_rejects_invalid_store_value(self, gui_app, monkeypatch):
+        app, _ = gui_app
+        self._capture_pull_args(monkeypatch)
+        with TestClient(app) as client:
+            r = client.post(
+                "/api/models/pull", json={"spec": "owner/repo", "store": "delete"})
+        assert r.status_code == 400
+
 
 @pytest.fixture
 def coder_app(tmp_path, monkeypatch):

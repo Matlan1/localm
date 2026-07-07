@@ -169,6 +169,9 @@ class PullRequest(BaseModel):
     spec: str
     name: str | None = None
     mmproj: str | None = None
+    # "copy" | "move" | None (default: register a local path in place, unchanged).
+    # Ignored for a HuggingFace/URL spec - only the local-path pull branch uses it.
+    store: str | None = None
 
 
 class RemoveModelRequest(BaseModel):

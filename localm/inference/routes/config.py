@@ -41,6 +41,12 @@ def register(app: FastAPI, ctx) -> None:
         # bases its compaction threshold on this, not the static config.
         eff_ctx = getattr(_hs._engine, "effective_ctx_max", None) if _hs._engine else None
         cfg["effective_ctx_max"] = eff_ctx if isinstance(eff_ctx, int) else None
+        # AUD-INSTANCEID: a stable per-data-directory id so the GUI can tell a
+        # normal restart of THIS install apart from a different install that
+        # happens to share the browser origin (localStorage is scoped by
+        # origin only, not by data directory - see config.instance_id).
+        from localm.config import instance_id
+        cfg["instance_id"] = instance_id()
         return cfg
 
     @app.get("/v1/config/schema",
@@ -69,7 +75,8 @@ def register(app: FastAPI, ctx) -> None:
         not rejected for echoing back values it never edited."""
         from localm.config import load_config, save_config
         from localm.settings_schema import validate_update, admin_only_keys
-        readonly = {"effective_mode", "effective_coder_mode", "effective_ctx_max"}
+        readonly = {"effective_mode", "effective_coder_mode", "effective_ctx_max",
+                    "instance_id"}
         body = {k: v for k, v in body.items() if k not in readonly}
         # REC-OWNER-SETTINGS: an owner-only key widens a trust boundary (the rag_*
         # indexing settings define which host folders the indexer may read), so

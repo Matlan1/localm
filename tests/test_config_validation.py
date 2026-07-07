@@ -257,6 +257,114 @@ class TestPatchConfig:
         assert "maximum" in r.text
 
 
+# --------------------------------------------------------------------------- #
+#  /v1/config instance_id (AUD-INSTANCEID)                                    #
+#                                                                              #
+#  A stable per-data-directory id, so the GUI can tell a normal restart of    #
+#  THIS install apart from a different install that happens to share the     #
+#  browser origin (localStorage is scoped by origin, not by data directory)  #
+#  and never render/upload a foreign install's cached conversations.         #
+# --------------------------------------------------------------------------- #
+
+class TestConfigInstanceId:
+    @pytest.fixture
+    def client(self, tmp_path, monkeypatch):
+        from fastapi.testclient import TestClient
+        from localm.inference.http_server import create_app
+        import localm.config as cfg
+        home = tmp_path / ".localm"
+        home.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("LOCALM_HOME", str(home))
+        monkeypatch.setattr(cfg, "HOME_DIR", home)
+        monkeypatch.setattr(cfg, "CONFIG_FILE", home / "config.json")
+        monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
+        app = create_app(None)
+        return TestClient(
+            app, headers={"Authorization": f"Bearer {app.state.shell_token}"})
+
+    def test_instance_id_present_and_stable(self, client, tmp_path):
+        first = client.get("/v1/config").json()["instance_id"]
+        assert first, "instance_id must be a non-empty string"
+        second = client.get("/v1/config").json()["instance_id"]
+        assert second == first, "the id must not change across requests"
+        # Persisted under the data dir, not re-minted on the next read.
+        marker = tmp_path / ".localm" / "instance_id.txt"
+        assert marker.is_file()
+        assert marker.read_text(encoding="utf-8").strip() == first
+
+    def test_instance_id_differs_per_data_dir(self, tmp_path, monkeypatch):
+        # Two DIFFERENT data directories must never mint the same id - this is
+        # exactly what lets the GUI tell two installs apart.
+        from fastapi.testclient import TestClient
+        from localm.inference.http_server import create_app
+        import localm.config as cfg
+        home_a = tmp_path / "a"
+        home_a.mkdir()
+        home_b = tmp_path / "b"
+        home_b.mkdir()
+
+        monkeypatch.setattr(cfg, "HOME_DIR", home_a)
+        monkeypatch.setattr(cfg, "CONFIG_FILE", home_a / "config.json")
+        monkeypatch.setattr(cfg, "REGISTRY_FILE", home_a / "registry.json")
+        app_a = create_app(None)
+        client_a = TestClient(
+            app_a, headers={"Authorization": f"Bearer {app_a.state.shell_token}"})
+        id_a = client_a.get("/v1/config").json()["instance_id"]
+
+        monkeypatch.setattr(cfg, "HOME_DIR", home_b)
+        monkeypatch.setattr(cfg, "CONFIG_FILE", home_b / "config.json")
+        monkeypatch.setattr(cfg, "REGISTRY_FILE", home_b / "registry.json")
+        app_b = create_app(None)
+        client_b = TestClient(
+            app_b, headers={"Authorization": f"Bearer {app_b.state.shell_token}"})
+        id_b = client_b.get("/v1/config").json()["instance_id"]
+
+        assert id_a != id_b
+
+    def test_instance_id_is_readonly_on_patch(self, client):
+        # Echoing the whole GET response back through PATCH (as the settings
+        # form does) must not be rejected for the server-injected instance_id
+        # field, and PATCH must never be able to overwrite it.
+        got = client.get("/v1/config").json()
+        r = client.patch("/v1/config", json=got)
+        assert r.status_code == 200
+        got2 = client.get("/v1/config").json()
+        assert got2["instance_id"] == got["instance_id"]
+
+
+class TestInstanceIdUnit:
+    """Direct unit coverage of config.instance_id(), independent of the HTTP layer."""
+
+    def test_mints_and_persists(self, tmp_path, monkeypatch):
+        import localm.config as cfg
+        monkeypatch.setattr(cfg, "HOME_DIR", tmp_path)
+        val = cfg.instance_id()
+        assert val
+        marker = tmp_path / "instance_id.txt"
+        assert marker.is_file()
+        assert marker.read_text(encoding="utf-8").strip() == val
+
+    def test_reuses_existing_across_calls(self, tmp_path, monkeypatch):
+        import localm.config as cfg
+        monkeypatch.setattr(cfg, "HOME_DIR", tmp_path)
+        first = cfg.instance_id()
+        second = cfg.instance_id()
+        assert first == second, "never regenerated on a normal restart"
+
+    def test_recovers_from_empty_marker_file(self, tmp_path, monkeypatch):
+        # A zero-byte / corrupt marker (a truncated write) must not crash the
+        # caller - a fresh id is minted and persisted (rule 5: do not hide the
+        # corruption path behind a crash, but also do not brick the server).
+        import localm.config as cfg
+        monkeypatch.setattr(cfg, "HOME_DIR", tmp_path)
+        marker = tmp_path / "instance_id.txt"
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        marker.write_text("", encoding="utf-8")
+        val = cfg.instance_id()
+        assert val
+        assert marker.read_text(encoding="utf-8").strip() == val
+
+
 class TestGpuLayersCliRange:
     def test_run_rejects_out_of_range_gpu_layers(self, cli_runner):
         from localm.cli import main

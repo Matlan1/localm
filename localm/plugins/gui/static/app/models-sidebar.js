@@ -7,7 +7,8 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { chat } from "./chat.js";
-import { $, GIB, authHeaders, el, toast } from "./helpers.js";
+import { $, GIB, authHeaders, el, instanceCacheTrusted, toast } from "./helpers.js";
+import { refreshPerfEstimate } from "./settings-perf.js";
 
 /* ================================================================ */
 /*  Models (sidebar selector)                                        */
@@ -352,8 +353,13 @@ export function applyInstallUI(env) {
 // via Continue" flow - the install affordance was previously buried in Settings.
 export function shouldShowInstallGate() {
   if (pwaDisplayMode() === "standalone") return false;       // already installed
-  try { if (localStorage.getItem("localm.onboarded") === "1") return false; }
-  catch (e) { /* storage blocked - treat as not onboarded */ }
+  try {
+    // AUD-INSTANCEID: only trust a cached "already onboarded" flag once this
+    // origin has confirmed pairing with the connected backend - otherwise a
+    // fresh install reusing a prior instance's browser origin would silently
+    // skip its own onboarding because a DIFFERENT install was dismissed here.
+    if (instanceCacheTrusted() && localStorage.getItem("localm.onboarded") === "1") return false;
+  } catch (e) { /* storage blocked - treat as not onboarded */ }
   // Phones/tablets only: a touch device with a coarse pointer. A desktop
   // `localm gui` (fine pointer) opens straight into the app.
   return (navigator.maxTouchPoints || 0) > 0
@@ -476,7 +482,14 @@ modelSelect.onchange = async () => {
     const res = await switchModel(model);
     // Superseded: a newer selection is now loading - stay quiet and let its own
     // handler report when it lands, instead of toasting a model we abandoned.
-    if (!res || res.status !== "superseded") toast("Model switched to " + model);
+    if (!res || res.status !== "superseded") {
+      toast("Model switched to " + model);
+      // The Settings "Live tuning" VRAM estimate defaults to the active model
+      // server-side, but only re-fetches on its own slider input - refresh it
+      // here too so a switch made from the model dropdown is reflected without
+      // needing to nudge a slider or leave and re-enter Settings.
+      refreshPerfEstimate();
+    }
   } catch (e) {
     setStatus("err", "load failed");
     toast("Model load failed: " + e.message, true);

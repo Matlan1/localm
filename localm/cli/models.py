@@ -124,7 +124,12 @@ def benchmark(model, gen_tokens, prompts, ctx, gpu_layers):
 @click.option("--type", default="auto",
               type=click.Choice(["auto", "llm", "mmproj", "diffusion-unet", "text-encoder", "vae", "lora", "unknown"], case_sensitive=False),
               help="Model type/role.")
-def pull(model_spec, name, sha256, redownload, mmproj, type):
+@click.option("--store", default=None,
+              type=click.Choice(["copy", "move"], case_sensitive=False),
+              help="For a local PATH (not a HF/URL spec): bring the file/dir into "
+                   "~/.localm/models before registering it, instead of registering "
+                   "it in place at its original location.")
+def pull(model_spec, name, sha256, redownload, mmproj, type, store):
     """Download a model from HuggingFace or a URL.
 
     \b
@@ -140,9 +145,14 @@ def pull(model_spec, name, sha256, redownload, mmproj, type):
     Direct URL:
       localm pull https://example.com/model.gguf
 
+    \b
+    A local path already on disk (--store brings it into ~/.localm/models):
+      localm pull D:\\models\\mymodel.gguf --store copy
+
     Models are stored in ~/.localm/models/ and registered automatically.
     """
-    if not pull_model(model_spec, name, expected_sha256=sha256, redownload=redownload, mmproj_spec=mmproj, model_type=type):
+    if not pull_model(model_spec, name, expected_sha256=sha256, redownload=redownload,
+                       mmproj_spec=mmproj, model_type=type, store=store):
         sys.exit(1)
 
 
@@ -294,7 +304,12 @@ def rm(model, yes):
 @click.option("--on-duplicate", default="ask",
               type=click.Choice(["ask", "alias", "copy", "move", "register", "skip"]),
               help="What to do when the model is already registered (default: ask).")
-def add(path, name, no_hash, fast, on_duplicate):
+@click.option("--store", default=None,
+              type=click.Choice(["copy", "move"], case_sensitive=False),
+              help="Bring PATH into ~/.localm/models before registering it, "
+                   "instead of registering it in place at its original location. "
+                   "'copy' leaves the original untouched; 'move' relocates it.")
+def add(path, name, no_hash, fast, on_duplicate, store):
     """Register a local model file or HuggingFace directory.
 
     Duplicate detection is two-tier: the resolved path is checked first,
@@ -308,13 +323,15 @@ def add(path, name, no_hash, fast, on_duplicate):
       localm add D:\\models\\gemma.gguf --name gemma4-12b
       localm add D:\\models\\gemma.gguf -n g2 --on-duplicate alias
       localm add D:\\models\\bulk-dir --fast
+      localm add D:\\models\\mymodel.gguf --store copy   # copy into ~/.localm/models
+      localm add D:\\models\\mymodel.gguf --store move   # move into ~/.localm/models
     """
     # Resolve add_local from the package at call time so tests that monkeypatch
     # localm.cli.add_local affect this call site.
     from localm import cli as _cli
     add_local = _cli.add_local
     if not add_local(path, name, on_duplicate=on_duplicate,
-                     no_hash=no_hash, fast=fast):
+                     no_hash=no_hash, fast=fast, store=store):
         sys.exit(1)
 
 

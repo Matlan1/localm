@@ -90,7 +90,7 @@ const APP_SCRIPTS = [
  * Build a jsdom window with the app scripts loaded but the DOMContentLoaded init
  * NOT run. Returns { dom, window }. Pass fetchImpl to control network.
  */
-export function loadApp({ fetchImpl, url, shellToken } = {}) {
+export function loadApp({ fetchImpl, url, shellToken, seedLocalStorage } = {}) {
   const html = read("index.html");
   const dom = new JSDOM(html, {
     // Pass url: "https://..." to exercise the HTTPS-only paths (e.g. the
@@ -106,6 +106,15 @@ export function loadApp({ fetchImpl, url, shellToken } = {}) {
   // reads window.__LOCALM_SHELL_TOKEN__ into a const at load. Pass shellToken to
   // exercise the open-mode (loopback shell) auth path.
   if (shellToken) win.__LOCALM_SHELL_TOKEN__ = shellToken;
+  // Seed localStorage BEFORE the app scripts run: some module-level state
+  // (e.g. chat.js's `conversations`) reads localStorage at import/eval time, so
+  // a test simulating "this origin already had cached data from a PRIOR page
+  // load" (AUD-INSTANCEID: a different backend's cache left behind at the same
+  // origin) must seed it before injection - mirroring a real browser, where
+  // localStorage persists across page loads at the same origin.
+  if (seedLocalStorage) {
+    for (const [k, v] of Object.entries(seedLocalStorage)) win.localStorage.setItem(k, v);
+  }
 
   // app.js was split per section into app/<name>.js (same load order). Inject
   // each as a classic script in order: jsdom executes them in the window context;
