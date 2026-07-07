@@ -590,7 +590,7 @@ requires-dist = [
     { name = "rocm", marker = "sys_platform == 'win32' and extra == 'gpu'", index = "https://repo.amd.com/rocm/whl/gfx103X-all/" },
     { name = "rocm-sdk-core", marker = "sys_platform == 'win32' and extra == 'gpu'", index = "https://repo.amd.com/rocm/whl/gfx103X-all/" },
     { name = "rocm-sdk-libraries-gfx103x-all", marker = "sys_platform == 'win32' and extra == 'gpu'", index = "https://repo.amd.com/rocm/whl/gfx103X-all/" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15.17" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15.20" },
     { name = "soundfile", marker = "extra == 'audio'", specifier = ">=0.14.0" },
     { name = "tokenizers", marker = "extra == 'gpu'", specifier = "==0.22.2" },
     { name = "torch", marker = "python_full_version == '3.12.*' and sys_platform == 'win32' and extra == 'gpu'", url = "https://repo.amd.com/rocm/whl/gfx103X-all/torch-2.9.1%2Brocm7.13.0-cp312-cp312-win_amd64.whl" },
