@@ -221,22 +221,29 @@ def _attempt_cooperative_unload() -> bool:
     return False
 
 
-async def switch_engine(name: str, make_engine, *, on_active=None) -> dict:
+async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool = True) -> dict:
     global _engines, _engines_lru, _active_model_name, _engine_factory
     global _switch_desired, _switch_loading, _switch_cancel, _engine, _inference_sem
-    
-    _switch_desired = name
-    if _switch_cancel is not None and _switch_loading != name:
-        _switch_cancel.set()
+
+    # Preemption (a newer selection aborts an in-flight load) is a SINGLE-slot
+    # notion that belongs to an explicit user model-switch, not to API-routed
+    # loads: with preempt=True two concurrent requests for DIFFERENT models
+    # cancel each other and the earlier one fails 503 "superseded" (AUDIT-HIGH-3).
+    # get_engine therefore loads with preempt=False so independent model loads
+    # coexist/queue; only the GUI/CLI switch_model path preempts.
+    if preempt:
+        _switch_desired = name
+        if _switch_cancel is not None and _switch_loading != name:
+            _switch_cancel.set()
 
     if make_engine is not None:
         _engine_factory = make_engine
 
     sem = _inference_sems.setdefault(name, asyncio.Semaphore(1))
-    
+
     loop = asyncio.get_running_loop()
     async with sem:
-        if _switch_desired != name:
+        if preempt and _switch_desired != name:
             return {"status": "superseded", "model": name, "by": _switch_desired}
             
         if name in _engines and _engines[name].loaded:
@@ -354,16 +361,21 @@ async def switch_engine(name: str, make_engine, *, on_active=None) -> dict:
             new_engine = _engine_factory(name)
             
         cancel = threading.Event()
-        _switch_cancel = cancel
-        _switch_loading = name
-        if hasattr(new_engine, "set_load_cancel"):
-            new_engine.set_load_cancel(cancel)
+        if preempt:
+            # Only an explicit switch registers a load-cancel hook, so only an
+            # explicit newer switch can abort this load. API-routed loads
+            # (preempt=False) run to completion and are never cancelled by a
+            # concurrent load of a different model.
+            _switch_cancel = cancel
+            _switch_loading = name
+            if hasattr(new_engine, "set_load_cancel"):
+                new_engine.set_load_cancel(cancel)
         try:
             await loop.run_in_executor(None, new_engine.load)
         except ModelLoadCancelled:
             return {"status": "superseded", "model": name, "by": _switch_desired}
         finally:
-            if _switch_cancel is cancel:
+            if preempt and _switch_cancel is cancel:
                 _switch_cancel = None
                 _switch_loading = None
                 
@@ -429,7 +441,7 @@ async def get_engine(model_name: str) -> Engine:
         _inference_sem = _inference_sems.setdefault(name, asyncio.Semaphore(1))
         return _engines[name]
 
-    res = await switch_engine(name, _engine_factory)
+    res = await switch_engine(name, _engine_factory, preempt=False)
     if res.get("status") == "superseded":
         raise HTTPException(503, f"Model load was superseded by a newer request: {res.get('by')}")
 
