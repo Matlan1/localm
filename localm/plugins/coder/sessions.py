@@ -27,13 +27,20 @@ from typing import Optional
 _CONFIRM_TIMEOUT_S = 600
 
 
-def _confirm_timeout() -> float:
+def _confirm_timeout() -> Optional[float]:
+    """Seconds to wait for a confirmation before auto-rejecting it, or None
+    to block forever. `threading.Event.wait(timeout=0)` does NOT block at
+    all (it's a non-blocking poll), so a configured 0 - documented in
+    settings_schema.py as "wait forever" - must map to None, not 0.0."""
     try:
         from localm.config import load_config
-        return float(load_config().get("coder_confirm_timeout")
-                     or _CONFIRM_TIMEOUT_S)
+        val = load_config().get("coder_confirm_timeout")
+        if val is None:
+            return float(_CONFIRM_TIMEOUT_S)
+        val = float(val)
+        return None if val == 0 else val
     except Exception:
-        return _CONFIRM_TIMEOUT_S
+        return float(_CONFIRM_TIMEOUT_S)
 
 # Queue size: generous, but bounded so a disconnected client can't grow memory
 # without limit. When full, oldest events are dropped (tokens are recoverable -
