@@ -63,9 +63,11 @@ def checkpoint_info(cwd) -> Optional[dict]:
     return None
 
 def _index_deadline() -> Optional[float]:
-    """Wall-clock cap (seconds) for the startup project scan (CODER-1). Config
-    override ``coder_index_timeout``; a value <= 0 disables it; otherwise the
-    default ``_BUILD_DEADLINE_S``."""
+    """Wall-clock cap (seconds) for the startup project scan (CODER-1). Reads
+    the registered ``coder_index_timeout`` setting (``localm config
+    coder_index_timeout N``, or the Settings page); a value <= 0 disables the
+    deadline. Falls back to ``_BUILD_DEADLINE_S`` only if config itself is
+    unreadable (this function must never raise)."""
     raw = None
     try:
         from localm.config import load_config

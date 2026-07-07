@@ -295,6 +295,12 @@ CORE_FIELDS: list = [
                  "Seconds a coder approval card waits for an answer before it is "
                  "auto-rejected and the agent moves on (0 = wait forever).",
                  group="Coder", owner="coder", min=0, step=10),
+    SettingField("coder_index_timeout", Widget.NUMBER,
+                 "Coder project-scan timeout (s)",
+                 "Wall-clock cap on the coder's startup project-map scan (0 = no "
+                 "limit; scan to completion however long it takes). Raise this on "
+                 "a very large repo if the map is being cut off.",
+                 group="Coder", owner="coder", min=0, step=5),
     SettingField("coder_tool_grammar", Widget.TOGGLE,
                  "Grammar-constrain coder tool calls",
                  "Once the model starts a <tool_call>, force it to be valid "

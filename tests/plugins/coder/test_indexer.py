@@ -74,3 +74,48 @@ def test_deadline_none_disables_the_cap(tmp_path):
     pm = ProjectMap.build(tmp_path, deadline_s=None)
     assert not pm.truncated
     assert any(f.path.name == "a.py" for f in pm.files)
+
+
+# ------------------- _index_deadline() reads the registered setting -------- #
+#
+# coder_index_timeout is now a real DEFAULT_CONFIG/CORE_FIELDS setting (was
+# previously read ad hoc off raw config with no registered default, so
+# `localm config coder_index_timeout 30` failed with "unknown config key" -
+# the value could only be changed by hand-editing config.json).
+
+def test_index_deadline_uses_the_default_from_config(monkeypatch):
+    # _index_deadline() imports load_config LOCALLY (`from localm.config import
+    # load_config` inside the function), so the patch target is the source
+    # (localm.config.load_config), not the checkpoint module's namespace.
+    from localm.plugins.coder.agent.checkpoint import _index_deadline
+    from localm.config import DEFAULT_CONFIG
+    monkeypatch.setattr("localm.config.load_config", lambda: dict(DEFAULT_CONFIG))
+    assert _index_deadline() == DEFAULT_CONFIG["coder_index_timeout"]
+
+
+def test_index_deadline_honours_override(monkeypatch):
+    from localm.plugins.coder.agent.checkpoint import _index_deadline
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"coder_index_timeout": 45})
+    assert _index_deadline() == 45.0
+
+
+def test_index_deadline_zero_or_negative_disables_it(monkeypatch):
+    from localm.plugins.coder.agent.checkpoint import _index_deadline
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"coder_index_timeout": 0})
+    assert _index_deadline() is None
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"coder_index_timeout": -5})
+    assert _index_deadline() is None
+
+
+def test_index_deadline_falls_back_on_malformed_value(monkeypatch):
+    # A hand-edited or stale config.json could carry a non-numeric value; this
+    # must never raise (the docstring's own guarantee) - fall back to the
+    # built-in default instead.
+    from localm.plugins.coder.agent.checkpoint import _index_deadline
+    from localm.plugins.coder.indexer import _BUILD_DEADLINE_S
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"coder_index_timeout": "disabled"})
+    assert _index_deadline() == _BUILD_DEADLINE_S
