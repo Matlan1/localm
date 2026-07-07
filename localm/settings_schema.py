@@ -361,6 +361,10 @@ CORE_FIELDS: list = [
                  "Folders that are never indexed in blacklist mode (everything "
                  "else is allowed). Ignored in whitelist mode.",
                  group="Knowledge", owner="rag", admin_only=True),
+    SettingField("rag_classify_unknown_files", Widget.TOGGLE, "Classify unknown files with AI",
+                 "Use the local LLM to guess the programming language or format (e.g. JSON, YAML) "
+                 "of text files with unknown extensions to enable syntax-aware chunking.",
+                 group="Knowledge", owner="rag"),
     # ---- Media (ComfyUI: image / music / video plugins) ----
     SettingField("comfy_workdir", Widget.FOLDER, "ComfyUI folder",
                  "Your ComfyUI install folder. localm runs it from here and "

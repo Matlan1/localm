@@ -8,6 +8,9 @@ import re
 import zipfile
 from pathlib import Path
 
+from typing import Callable, Optional
+import io
+
 # Hard cap on extracted text per document - protects the chunker and the
 # index from a runaway file. ~8 MB of text is far beyond any useful context.
 MAX_TEXT_CHARS = 8_000_000
@@ -32,7 +35,115 @@ _PLAIN_SUFFIXES = {
     ".sh", ".ps1", ".bat", ".sql", ".r", ".lua", ".xml", ".css",
 }
 
-EXTRACTABLE_SUFFIXES = _PLAIN_SUFFIXES | {".pdf", ".docx", ".html", ".htm", ".ipynb"}
+_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+_ARCHIVE_SUFFIXES = {".zip", ".tar", ".gz", ".bz2", ".xz", ".tgz", ".tbz", ".txz"}
+
+EXTRACTABLE_SUFFIXES = _PLAIN_SUFFIXES | {".pdf", ".docx", ".html", ".htm", ".ipynb"} | _IMAGE_SUFFIXES | _ARCHIVE_SUFFIXES
+
+BLACKLISTED_SUFFIXES = {
+    # Executables / Binaries
+    ".exe", ".dll", ".so", ".dylib", ".bin", ".out", ".app", ".msi",
+    # Unsupported Images (non-standard / non-multimodal target)
+    ".bmp", ".ico", ".tiff",
+    # Audio / Video
+    ".mp3", ".wav", ".ogg", ".flac", ".m4a", ".mp4", ".mkv", ".avi", ".mov", ".wmv",
+    # Archives we don't want to expand as files directly (unsupported formats)
+    ".7z", ".rar",
+    # Fonts
+    ".ttf", ".otf", ".woff", ".woff2",
+    # Other binary data
+    ".pyc", ".pyd", ".db", ".sqlite",
+}
+
+# Directories to skip when processing ZIP files (mirrors store.py _SKIP_DIRS)
+_SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__",
+              ".pytest_cache", ".mypy_cache", "dist", "build", ".idea",
+              ".vscode"}
+
+# Cache for LLM guesses: extension -> content format / extension mapping
+_EXT_CLASSIFICATION_CACHE: dict[str, str] = {}
+
+
+def sniff_format(data: bytes, filename: str) -> Optional[str]:
+    """Sniff the format of a file based on its magic bytes/content.
+    Returns the mapped extension (e.g. '.pdf', '.docx', '.html', '.ipynb', '.txt', '.zip')
+    or None if it appears to be binary and unsupported.
+    """
+    if not data:
+        return ".txt"  # empty file behaves as text
+
+    # 1. Signature checks
+    if data.startswith(b"%PDF-"):
+        return ".pdf"
+
+    if data.startswith(b"PK\x03\x04"):
+        # Could be .docx or a general .zip
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                names = zf.namelist()
+                if "word/document.xml" in names:
+                    return ".docx"
+                return ".zip"
+        except Exception:
+            return None  # corrupt zip
+
+    # Images
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return ".jpeg"
+    if data.startswith(b"GIF8"):
+        return ".gif"
+    if data.startswith(b"RIFF") and len(data) >= 12 and data[8:12] == b"WEBP":
+        return ".webp"
+
+    # Tar archives (uncompressed, or compressed with gzip/bzip2/xz)
+    if len(data) >= 262 and data[257:262] == b"ustar":
+        return ".tar"
+    if data.startswith(b"\x1f\x8b"):
+        return ".tar"
+    if data.startswith(b"BZh"):
+        return ".tar"
+    if data.startswith(b"\xfd7zXZ\x00"):
+        return ".tar"
+
+    # HTML sniff
+    sample_len = min(len(data), 1024)
+    sample = data[:sample_len]
+    sample_lower = sample.lower()
+    if b"<html" in sample_lower or b"<!doctype html" in sample_lower:
+        return ".html"
+
+    # JSON / ipynb sniff
+    stripped = sample.strip()
+    if stripped.startswith((b"{", b"[")):
+        try:
+            parsed = json.loads(data.decode("utf-8", errors="ignore"))
+            if isinstance(parsed, dict) and "cells" in parsed:
+                return ".ipynb"
+            return ".json"
+        except Exception:
+            pass
+
+    # 2. Text check (avoid binary files)
+    if b"\x00" in sample:
+        return None
+
+    # Check non-printable control characters ratio (excluding tab/cr/lf)
+    control_count = sum(1 for b in sample if b < 32 and b not in (9, 10, 13))
+    if control_count > sample_len * 0.02:
+        return None
+
+    # Try decoding
+    try:
+        data.decode("utf-8")
+        return ".txt"
+    except UnicodeDecodeError:
+        try:
+            data.decode("cp1252")
+            return ".txt"
+        except UnicodeDecodeError:
+            return None
 
 
 class ExtractError(Exception):
@@ -67,7 +178,8 @@ def _decode_text(data: bytes) -> str:
         return data.decode("cp1252", errors="replace")
 
 
-def extract_text(path: Path) -> str:
+def extract_text(path: Path, classify_fn: Optional[Callable[[str], Optional[str]]] = None,
+                 describe_image_fn: Optional[Callable[[bytes, str], Optional[str]]] = None) -> str:
     """Return the plain text of *path*. Raises ExtractError on failure."""
     path = Path(path)
     if not path.is_file():
@@ -76,24 +188,71 @@ def extract_text(path: Path) -> str:
         data = path.read_bytes()
     except OSError as e:
         raise ExtractError(f"Cannot read {path.name}: {e}")
-    return extract_bytes(data, path.name)
+    return extract_bytes(data, path.name, classify_fn=classify_fn, describe_image_fn=describe_image_fn)
 
 
-def extract_bytes(data: bytes, filename: str) -> str:
+def extract_bytes(data: bytes, filename: str,
+                  classify_fn: Optional[Callable[[str], Optional[str]]] = None,
+                  describe_image_fn: Optional[Callable[[bytes, str], Optional[str]]] = None) -> str:
     """Extract plain text from in-memory file content (chat attachments) -
     nothing is written to disk, so privacy mode stays trace-free."""
     suffix = Path(filename).suffix.lower()
 
-    if suffix in _PLAIN_SUFFIXES:
+    # Determine type using sniffer if suffix is not known/supported
+    inferred_ext = suffix
+    if suffix not in EXTRACTABLE_SUFFIXES:
+        inferred = sniff_format(data, filename)
+        if not inferred:
+            raise ExtractError(
+                f"Unsupported or binary file format for '{suffix}' ({filename}). Supported: "
+                + ", ".join(sorted(EXTRACTABLE_SUFFIXES)))
+        inferred_ext = inferred
+
+    if inferred_ext == ".zip":
+        text = _extract_zip(data, filename, classify_fn, describe_image_fn)
+    elif inferred_ext == ".tar":
+        text = _extract_tar(data, filename, classify_fn, describe_image_fn)
+    elif inferred_ext in _IMAGE_SUFFIXES:
+        if not describe_image_fn:
+            raise ExtractError(
+                f"No extractable text in {filename}. "
+                "To index images, load a vision-capable model/projector."
+            )
+        mime_type = "image/png"
+        if inferred_ext == ".jpg" or inferred_ext == ".jpeg":
+            mime_type = "image/jpeg"
+        elif inferred_ext == ".gif":
+            mime_type = "image/gif"
+        elif inferred_ext == ".webp":
+            mime_type = "image/webp"
+
+        try:
+            desc = describe_image_fn(data, mime_type)
+        except Exception as e:
+            raise ExtractError(f"Image description failed: {e}")
+        if not desc or not desc.strip():
+            raise ExtractError(f"Active model returned empty description for {filename}")
+        text = desc
+    elif inferred_ext in _PLAIN_SUFFIXES:
         text = _decode_text(data)
-    elif suffix in (".html", ".htm"):
+        # Optional LLM classification if custom extension
+        if classify_fn and suffix not in _PLAIN_SUFFIXES:
+            from localm.config import load_config
+            if load_config().get("rag_classify_unknown_files", True):
+                guessed = _EXT_CLASSIFICATION_CACHE.get(suffix)
+                if not guessed:
+                    # Sniff first 1000 chars for classification
+                    guessed = classify_fn(text[:1000])
+                    if guessed:
+                        _EXT_CLASSIFICATION_CACHE[suffix] = guessed
+    elif inferred_ext in (".html", ".htm"):
         from localm.netpolicy import html_to_text
         text = html_to_text(_decode_text(data))
-    elif suffix == ".docx":
+    elif inferred_ext == ".docx":
         text = _extract_docx(data, filename)
-    elif suffix == ".ipynb":
+    elif inferred_ext == ".ipynb":
         text = _extract_ipynb(data, filename)
-    elif suffix == ".pdf":
+    elif inferred_ext == ".pdf":
         text = _extract_pdf(data, filename)
     else:
         raise ExtractError(
@@ -104,6 +263,73 @@ def extract_bytes(data: bytes, filename: str) -> str:
     if not text:
         raise ExtractError(f"No extractable text in {filename}")
     return text[:MAX_TEXT_CHARS]
+
+
+def _extract_zip(data: bytes, filename: str,
+                 classify_fn: Optional[Callable[[str], Optional[str]]] = None,
+                 describe_image_fn: Optional[Callable[[bytes, str], Optional[str]]] = None) -> str:
+    """Extract and merge text contents recursively from a ZIP archive."""
+    import io
+    texts = []
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            for member in sorted(zf.namelist()):
+                if member.endswith("/") or any(part in _SKIP_DIRS or part.startswith(".") for part in Path(member).parts):
+                    continue
+                limit = MAX_ARCHIVE_MEMBER_BYTES
+                try:
+                    with zf.open(member) as fh:
+                        member_data = fh.read(limit + 1)
+                    if len(member_data) > limit:
+                        texts.append(f"[file: {member} - skipped: exceeds decompressed limit]")
+                        continue
+                    inferred = sniff_format(member_data, member)
+                    # Skip nested archives to avoid infinite loops
+                    if inferred and inferred not in (".zip", ".tar"):
+                        txt = extract_bytes(member_data, member, classify_fn, describe_image_fn)
+                        if txt.strip():
+                            texts.append(f"[file: {member}]\n{txt}")
+                except Exception as e:
+                    texts.append(f"[file: {member} - error: {e}]")
+    except Exception as e:
+        raise ExtractError(f"Cannot parse {filename} as zip: {e}")
+    return "\n\n".join(texts)
+
+
+def _extract_tar(data: bytes, filename: str,
+                 classify_fn: Optional[Callable[[str], Optional[str]]] = None,
+                 describe_image_fn: Optional[Callable[[bytes, str], Optional[str]]] = None) -> str:
+    """Extract and merge text contents recursively from a TAR archive (tar/gz/bz2/xz)."""
+    import tarfile
+    import io
+    texts = []
+    try:
+        with tarfile.open(fileobj=io.BytesIO(data)) as tf:
+            for member in sorted(tf.getmembers(), key=lambda m: m.name):
+                if not member.isfile():
+                    continue
+                if any(part in _SKIP_DIRS or part.startswith(".") for part in Path(member.name).parts):
+                    continue
+                limit = MAX_ARCHIVE_MEMBER_BYTES
+                try:
+                    f = tf.extractfile(member)
+                    if f is None:
+                        continue
+                    member_data = f.read(limit + 1)
+                    if len(member_data) > limit:
+                        texts.append(f"[file: {member.name} - skipped: exceeds decompressed limit]")
+                        continue
+                    inferred = sniff_format(member_data, member.name)
+                    # Skip nested archives to avoid infinite loops
+                    if inferred and inferred not in (".zip", ".tar"):
+                        txt = extract_bytes(member_data, member.name, classify_fn, describe_image_fn)
+                        if txt.strip():
+                            texts.append(f"[file: {member.name}]\n{txt}")
+                except Exception as e:
+                    texts.append(f"[file: {member.name} - error: {e}]")
+    except Exception as e:
+        raise ExtractError(f"Cannot parse {filename} as tar archive: {e}")
+    return "\n\n".join(texts)
 
 
 def _read_zip_member(zf: zipfile.ZipFile, member: str, filename: str) -> str:
