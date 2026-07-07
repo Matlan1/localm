@@ -1,6 +1,10 @@
 version: 2
 updates:
-  - package-ecosystem: "pip"
+  # "uv" (not "pip"): native support for pyproject.toml + uv.lock together, GA since
+  # 2025-03. The generic "pip" ecosystem only bumps pyproject.toml's version pin and
+  # never touches uv.lock, so every PR failed CI's `uv lock --check` step (the
+  # lockfile was always left stale) - #430/#431/#432/#433/#434 all hit this.
+  - package-ecosystem: "uv"
     directory: "/"
     schedule:
       interval: "weekly"
