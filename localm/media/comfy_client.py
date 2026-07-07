@@ -469,6 +469,56 @@ def _comfy_alive(api_url: str, timeout: float = 3.0) -> bool:
         return False
 
 
+# ---------------------------------------------------------------------------
+#  Readiness cache - ComfyUI does not need re-checking on every task
+#
+#  Before this, ensure_comfy() pinged /system_stats on EVERY call, and every
+#  media submission called it twice back-to-back (once at the route-handler
+#  layer via ensure_available, once again at the top of the generator
+#  function) - plain redundant network round-trips, on top of the GUI's own
+#  5-second poll (settings.js, removed separately). ComfyUI does not appear
+#  or disappear on its own between requests, so once it has been confirmed
+#  reachable for a given api_url in this process's lifetime, later calls
+#  trust that instead of re-pinging: check on app start, on the Settings/
+#  Media page being opened, before the FIRST task submission, and on an
+#  explicit status request are enough. mark_comfy_dead() (called from
+#  stop_comfy(), and internally when ensure_comfy() can no longer reach it)
+#  clears the entry so the next check is real again.
+# ---------------------------------------------------------------------------
+
+_confirmed_alive: set[str] = set()
+
+
+def mark_comfy_alive(api_url: str) -> None:
+    _confirmed_alive.add(api_url.rstrip("/"))
+
+
+def mark_comfy_dead(api_url: str) -> None:
+    _confirmed_alive.discard(api_url.rstrip("/"))
+
+
+def is_comfy_confirmed(api_url: Optional[str] = None) -> bool:
+    """True when *api_url* has already been confirmed reachable this process
+    lifetime and nothing has invalidated that since (see module docstring)."""
+    return (api_url or default_api_url()).rstrip("/") in _confirmed_alive
+
+
+def warm_comfy_status_async(api_url: Optional[str] = None) -> None:
+    """Fire-and-forget readiness check for the "on app start" trigger: primes
+    the cache without blocking plugin registration and without attempting to
+    launch ComfyUI (an app boot should not decide FOR the user that this
+    session needs ComfyUI running - only the on-demand triggers do that)."""
+    import threading
+
+    url = (api_url or default_api_url()).rstrip("/")
+
+    def _check() -> None:
+        if _comfy_alive(url):
+            mark_comfy_alive(url)
+
+    threading.Thread(target=_check, name="comfy-status-warm", daemon=True).start()
+
+
 def history_execution_error(entry: dict) -> Optional[str]:
     """Return a human-readable ComfyUI execution error from a ``/history`` entry,
     or None when the job did not error.
@@ -689,6 +739,7 @@ def stop_comfy(api_url: Optional[str] = None) -> tuple[bool, str]:
     ComfyUI, terminates the process tree we spawned; if localm did NOT launch it,
     the process is left alone (we only kill our own) and the caller is told so."""
     api_url = (api_url or default_api_url()).rstrip("/")
+    mark_comfy_dead(api_url)   # about to stop it either way - the next check must be real
     interrupt_comfy(api_url)                       # abort render + clear queue
     try:
         free_comfy_vram(api_url)
@@ -697,6 +748,7 @@ def stop_comfy(api_url: Optional[str] = None) -> tuple[bool, str]:
     proc = _take_spawned(api_url)
     if proc is None:
         if _comfy_alive(api_url, timeout=2.0):
+            mark_comfy_alive(api_url)   # localm did not launch it and did not stop it
             return True, ("Aborted the in-flight render and cleared the queue. "
                           "localm did not launch this ComfyUI, so its process was "
                           "left running - stop it where you started it.")
@@ -754,8 +806,12 @@ def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
                 pass
 
     api_url = (api_url or default_api_url()).rstrip("/")
-    if _comfy_alive(api_url):
+    if is_comfy_confirmed(api_url):
         return True, "ComfyUI is running."
+    if _comfy_alive(api_url):
+        mark_comfy_alive(api_url)
+        return True, "ComfyUI is running."
+    mark_comfy_dead(api_url)
 
     cfg = load_config()
 
@@ -875,6 +931,7 @@ def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
     last_said = 0.0
     while _t.monotonic() < deadline:
         if _comfy_alive(api_url):
+            mark_comfy_alive(api_url)
             return True, "ComfyUI is up."
         elapsed = wait_seconds - (deadline - _t.monotonic())
         if elapsed - last_said >= 15:

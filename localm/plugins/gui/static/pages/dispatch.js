@@ -22,6 +22,16 @@ import { refreshWorkflowPanel } from "./workflow.js";
 /*  View refresh dispatcher                                          */
 /* ================================================================ */
 
+/** ComfyUI status check for the "Media module opened" trigger (one of the 5
+ *  points it gets checked at - see comfy_client.py's readiness-cache
+ *  docstring). Fire-and-forget: primes the backend's readiness cache so the
+ *  page's own first generate request does not have to re-check; there is no
+ *  status badge on these pages (unlike Settings), so the result is not read
+ *  here. */
+function warmComfyStatus() {
+  fetch("/v1/comfy/status", { headers: authHeaders() }).catch(() => {});
+}
+
 window.onViewShown = (name) => {
   // Re-sync the plugin command catalog on entering a composer so a plugin
   // toggled elsewhere (CLI, another tab) updates the slash hints without a
@@ -29,9 +39,9 @@ window.onViewShown = (name) => {
   if (name === "chat" || name === "coder") refreshPluginCommands();
   if (name === "coder") { populateSetupModels(); presetCoderMode(); }
   if (name === "models") refreshModelsPage();
-  if (name === "images") { refreshImageHistory(); refreshWorkflowPanel("image"); }
-  if (name === "music") { refreshMusicHistory(); refreshWorkflowPanel("music"); }
-  if (name === "video") { refreshVideoHistory(); refreshWorkflowPanel("video"); }
+  if (name === "images") { refreshImageHistory(); refreshWorkflowPanel("image"); warmComfyStatus(); }
+  if (name === "music") { refreshMusicHistory(); refreshWorkflowPanel("music"); warmComfyStatus(); }
+  if (name === "video") { refreshVideoHistory(); refreshWorkflowPanel("video"); warmComfyStatus(); }
   if (name === "knowledge") refreshKnowledgePage();
   if (name === "plugins") { renderCatalogPlugins(); refreshPluginsPage(); }
   if (name === "settings") { refreshSettingsPage(); refreshUploadsList(); }
