@@ -180,9 +180,10 @@ def test_cli_menu_no_upload_option_when_unconfigured(tmp_path, monkeypatch, caps
     assert opened == []
 
 
-def test_cli_menu_channels_stable_when_upload_configured(tmp_path, monkeypatch):
+def test_cli_menu_channels_stable_when_upload_configured(tmp_path, monkeypatch, capsys):
     """With upload configured, the upload option is [1] but email stays [2] and
-    issue stays [3] - the always-present channels are not renumbered."""
+    the manual/self channel stays [3] - the always-present channels are not
+    renumbered. There is no GitHub-issue option to renumber around any more."""
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
     monkeypatch.setattr(bugreport, "upload_config",
                         lambda: ("https://proxy.example", "tok"))
@@ -195,7 +196,8 @@ def test_cli_menu_channels_stable_when_upload_configured(tmp_path, monkeypatch):
     bugreport.report_failure(
         summary="bug", interactive=True,
         open_browser=lambda u: opened.append(u), prompt=lambda _t: "3")
-    assert opened and opened[0].startswith(bugreport.ISSUES_NEW_URL)
+    assert opened == []   # [3] is the manual/self channel, not a browser open
+    assert bugreport.MAINTAINER_EMAIL in capsys.readouterr().out
 
 
 # ------------------------------- endpoint --------------------------------- #

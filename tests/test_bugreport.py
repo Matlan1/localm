@@ -84,12 +84,6 @@ def test_mailto_url_targets_maintainer_and_encodes():
     assert " " not in url            # spaces must be percent-encoded
 
 
-def test_issue_url_points_at_repo():
-    url = bugreport.issue_url("a bug", "body")
-    assert url.startswith(f"{bugreport.ISSUES_NEW_URL}?")
-    assert "title=" in url and "body=" in url
-
-
 def test_prefill_body_is_capped():
     big = "x" * (bugreport._MAX_PREFILL_BODY * 3)
     capped = bugreport._truncate_body(big)
@@ -155,13 +149,36 @@ def test_report_failure_email_channel_opens_mailto(tmp_path, monkeypatch):
     assert opened and opened[0].startswith(f"mailto:{bugreport.MAINTAINER_EMAIL}")
 
 
-def test_report_failure_issue_channel_opens_github(tmp_path, monkeypatch):
+def test_report_failure_self_channel_prints_manual_instructions(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
+    monkeypatch.setattr("localm.config.load_config", lambda: {
+        "bugreport_upload_url": "https://proxy.example/"})   # [1] upload, [2] email, [3] self
     opened = []
     bugreport.report_failure(
         summary="bug", interactive=True,
         open_browser=lambda u: opened.append(u), prompt=lambda _t: "3")
-    assert opened and opened[0].startswith(bugreport.ISSUES_NEW_URL)
+    assert opened == []                              # no browser, no network
+    out = capsys.readouterr().out
+    assert bugreport.MAINTAINER_EMAIL in out
+    assert "Discord" in out
+
+
+def test_interactive_menu_never_offers_a_github_login_path(tmp_path, monkeypatch, capsys):
+    """The whole point: no channel in this app ever opens a github.com page or
+    otherwise asks for a GitHub login - the hosted proxy is the only channel
+    that creates an issue, and it is account-less."""
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
+    monkeypatch.setattr("localm.config.load_config", lambda: {
+        "bugreport_upload_url": "https://proxy.example/"})
+    bugreport.report_failure(
+        summary="bug", interactive=True, prompt=lambda _t: "")   # decline; just look at the menu
+    out = capsys.readouterr().out.lower()
+    assert "open a github issue" not in out
+    assert "github.com" not in out
+    # The only permitted mention of GitHub is the reassurance that none is needed.
+    assert "no github account" in out
+    assert not hasattr(bugreport, "issue_url")
+    assert not hasattr(bugreport, "ISSUES_NEW_URL")
 
 
 def test_report_failure_decline_opens_nothing(tmp_path, monkeypatch):
@@ -208,7 +225,8 @@ def test_noninteractive_message_falls_back_when_no_upload_configured(
     bugreport.report_failure(summary="thing broke", interactive=False)
     out = " ".join(capsys.readouterr().out.split())   # collapse rich's line-wrapping
     assert "--send" not in out
-    assert "open a GitHub issue once you have repo access" in out
+    assert "github" not in out.lower()
+    assert "email or Discord" in out
 
 
 # --------------------------- auto_send (--send) ---------------------------- #

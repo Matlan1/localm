@@ -6,12 +6,19 @@ broke and *why* in plain language, then offer to send a prefilled report the
 user can read and edit before anything leaves their machine.
 
 Channels, in the order that actually works for a tester:
+  * **hosted send** (`--send`, or menu [1]) - uploads through the account-less
+    Cloudflare Worker proxy, which files the GitHub issue server-side. No
+    GitHub account, ever - this is the only channel that actually creates an
+    issue automatically. See the "Upload channel" section below.
   * **email** - opens the user's mail app prefilled to the maintainer. Works for
     anyone, including a tester on a still-private repo.
-  * **GitHub issue** - opens a prefilled new-issue page. Best once the repo is
-    public (or the tester is a collaborator); noted as such.
   * **do it yourself** - the report is always saved to a file, so the user can
     drop it on Discord, paste it, or attach it however they like.
+
+There is deliberately NO "open a GitHub issue in your browser" channel: that
+would ask a tester to sign in to (and have access to) a private repo, exactly
+the friction the hosted channel exists to remove. Anyone who genuinely wants to
+file it on github.com themselves still can, by hand, outside the app.
 
 The maintainer's contact email is intentionally published here for bug reports
 (the maintainer opted in); see scripts/check_hygiene.py.
@@ -54,10 +61,8 @@ console = Console(highlight=False)
 
 # Intentionally published maintainer contact for bug reports (hygiene-ok).
 MAINTAINER_EMAIL = "theilige@gmail.com"
-REPO_SLUG = "Matlan1/localm"
-ISSUES_NEW_URL = f"https://github.com/{REPO_SLUG}/issues/new"
 
-# mailto/issue bodies cannot be arbitrarily long (mail clients and some browsers
+# A mailto body cannot be arbitrarily long (mail clients and some browsers
 # truncate very long query strings), so the prefilled body is a short pointer and
 # the full detail lives in the saved file the user attaches or pastes.
 _MAX_PREFILL_BODY = 1500
@@ -687,12 +692,6 @@ def mailto_url(summary: str, body: str) -> str:
     return f"mailto:{MAINTAINER_EMAIL}?{q}"
 
 
-def issue_url(summary: str, body: str) -> str:
-    q = urllib.parse.urlencode(
-        {"title": f"bug: {summary}", "body": _truncate_body(body)})
-    return f"{ISSUES_NEW_URL}?{q}"
-
-
 # --------------------------------------------------------------------------- #
 #  Upload channel: file the report as a GitHub issue WITHOUT a tester account  #
 #                                                                              #
@@ -897,11 +896,10 @@ def report_failure(*, summary: str, reason: str = "",
         if can_upload:
             console.print(
                 "[dim]Run[/dim] [bold]localm bug-report --send[/bold] [dim]to send it now "
-                "(no GitHub account needed) - or email/Discord it yourself, or open a GitHub "
-                "issue if you have repo access.[/dim]")
+                "(no GitHub account needed) - or email/Discord it yourself.[/dim]")
         else:
             console.print(f"[dim]Send it to the maintainer ({MAINTAINER_EMAIL}) by email or "
-                          "Discord, or open a GitHub issue once you have repo access.[/dim]")
+                          "Discord.[/dim]")
         return path
 
     # Re-read the saved file so the user's edits (made before picking a channel)
@@ -916,17 +914,16 @@ def report_failure(*, summary: str, reason: str = "",
     console.print("How would you like to send it (edit the file first if you want)?")
     # Map the displayed number -> action, so an extra "send now" option when an
     # upload endpoint is configured does not renumber the always-present channels
-    # (email is [2], issue [3], self [4] regardless of the upload option).
+    # (email is [2], self [3] regardless of the upload option).
     actions = {}
     if can_upload:
         console.print("  [1] Send to the maintainer now  "
                       "[dim](uploads the report - no GitHub account needed)[/dim]")
         actions["1"] = "upload"
     console.print("  [2] Email the maintainer  [dim](opens your mail app, works anywhere)[/dim]")
-    console.print("  [3] Open a GitHub issue   [dim](needs access while the repo is private)[/dim]")
-    console.print(f"  [4] I'll send it myself   [dim](Discord / email to {MAINTAINER_EMAIL})[/dim]")
+    console.print(f"  [3] I'll send it myself   [dim](Discord / email to {MAINTAINER_EMAIL})[/dim]")
     console.print("  [Enter] not now")
-    actions.update({"2": "email", "3": "issue", "4": "self"})
+    actions.update({"2": "email", "3": "self"})
 
     ask = prompt
     if ask is None:
@@ -970,10 +967,6 @@ def report_failure(*, summary: str, reason: str = "",
         elif action == "email":
             open_browser(mailto_url(summary, body))
             console.print(f"[green]Opened your mail app to {MAINTAINER_EMAIL}.[/green]")
-        elif action == "issue":
-            open_browser(issue_url(summary, body))
-            console.print("[green]Opened a prefilled GitHub issue in your browser.[/green]")
-            console.print("[dim](If it 404s, the repo is private - email it instead.)[/dim]")
         elif action == "self":
             console.print(f"[dim]Thanks. Send {where} to {MAINTAINER_EMAIL} or on Discord "
                           "when you can.[/dim]")
