@@ -567,7 +567,7 @@ voice = [
 
 [package.metadata]
 requires-dist = [
-    { name = "accelerate", marker = "extra == 'gpu'", specifier = ">=1.0" },
+    { name = "accelerate", marker = "extra == 'gpu'", specifier = ">=1.14.0" },
     { name = "click", specifier = ">=8.4.1" },
     { name = "cryptography", specifier = ">=42" },
     { name = "fastapi", specifier = ">=0.111" },
