@@ -33,7 +33,7 @@ from localm.debuglog import logger as _log
 from .bm25 import BM25
 from .chunk import chunk_text
 from .extract import (BLACKLISTED_SUFFIXES, ExtractError, extract_bytes,
-                      extract_text)
+                      extract_text, is_secret_index_name)
 
 ClassifyFn = Callable[[str], Optional[str]]
 DescribeImageFn = Callable[[bytes, str], Optional[str]]
@@ -411,6 +411,7 @@ class Collection:
                 for f in sorted(p.rglob("*")):
                     if (f.is_file()
                             and f.suffix.lower() not in BLACKLISTED_SUFFIXES
+                            and not is_secret_index_name(f.name)
                             and not any(part in _SKIP_DIRS for part in f.parts)):
                         out.append(f.resolve())
         # de-dup, keep order

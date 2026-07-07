@@ -21,6 +21,8 @@ const RAG_EXTS = [
   ".java", ".c", ".h", ".cpp", ".hpp", ".cs", ".go", ".rs", ".rb", ".php",
   ".swift", ".kt", ".sh", ".ps1", ".bat", ".sql", ".r", ".lua", ".xml", ".css",
   ".pdf", ".docx", ".html", ".htm", ".ipynb",
+  ".png", ".jpg", ".jpeg", ".webp", ".gif",
+  ".zip", ".tar", ".gz", ".bz2", ".xz", ".tgz", ".tbz", ".txz",
 ];
 
 /* ================================================================ */
