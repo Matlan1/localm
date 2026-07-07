@@ -27,6 +27,7 @@ import contextlib
 import logging
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -361,3 +362,149 @@ def native_stderr_target() -> Optional[int]:
         return os.open(str(path), os.O_WRONLY | os.O_APPEND | os.O_CREAT)
     except OSError:
         return None
+
+
+def record_native_line(text: str) -> None:
+    """Append a (possibly already-grouped) native log line straight into the
+    recent-activity ring buffer, so the GUI status window's live log tail
+    shows it too - see appface.py, which polls recent_activity() on a timer.
+
+    Deliberately bypasses the logging.Handler chain (does not call
+    logger.info()): a debug-mode run already has its own console
+    StreamHandler mirroring *structured* localm log calls to the terminal
+    (_add_console_handler), and routing native text through the same logger
+    would print it a second time there. dedup_native_stderr() below writes
+    the terminal copy itself directly, so this function's only job is the
+    ring buffer / GUI side.
+    """
+    if _ring_handler is None:
+        return
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    _ring_handler._buf.append(f"{stamp} INFO    localm.native: {text}")
+
+
+class _LineGrouper:
+    """Collapses a stream of consecutive IDENTICAL lines into "line(N)".
+
+    A different line flushes whatever was pending first. Nothing is dropped -
+    every distinct line is eventually emitted exactly once, either bare (a
+    run of 1) or with its repeat count."""
+
+    def __init__(self, emit) -> None:
+        self._emit = emit
+        self._pending: Optional[str] = None
+        self._count = 0
+
+    def feed(self, line: str) -> None:
+        if line == self._pending:
+            self._count += 1
+            return
+        self.flush()
+        self._pending = line
+        self._count = 1
+
+    def flush(self) -> None:
+        if self._pending is None:
+            return
+        text = self._pending if self._count <= 1 else f"{self._pending}({self._count})"
+        self._pending = None
+        self._count = 0
+        self._emit(text)
+
+
+@contextlib.contextmanager
+def dedup_native_stderr():
+    """
+    Redirect native (llama.cpp/ggml) stderr through a background reader that
+    collapses consecutive IDENTICAL lines into "line(N)" before re-emitting -
+    fixes console/GUI spam from a tight native logging loop (e.g. ggml-cuda's
+    "CUDA Graph id N reused", printed once per token during generation)
+    without silently discarding the information the way _quiet_stderr's
+    devnull suppression does.
+
+    The grouped line is:
+      - written to a stable duplicate of the REAL stderr, so a terminal
+        still shows it live, grouped instead of spammed;
+      - appended to the always-on recent-activity ring buffer via
+        record_native_line(), so the GUI status window's log tail (which
+        already polls that same buffer) shows the identical grouped view.
+
+    Nothing is lost from the persisted record: in debug mode, every RAW
+    (ungrouped) line is ALSO appended to the debug log file
+    (native_stderr_target()), exactly as _quiet_stderr already does for the
+    windows it covers - only the two LIVE views are grouped, never the file.
+
+    Draining a pipe requires an active reader (the writer blocks once it
+    fills), so this spins up a background thread - entering/exiting this
+    context is NOT cheap. Callers must wrap a whole generation loop in ONE
+    call, never re-enter it per native call / per token, or both the
+    dedup grouping (state resets on every entry) and the per-entry thread
+    overhead break.
+    """
+    # _stable_console_stream() MUST run before fd 2 is redirected below: it
+    # duplicates sys.stderr.fileno() (= fd 2) to get a handle that survives
+    # the redirect. Calling it AFTER the dup2 would duplicate the PIPE's
+    # write end instead of the real stderr - every "print to the terminal"
+    # would then loop straight back into the same pipe the reader thread is
+    # draining, which reads it again and re-emits it forever: a silent,
+    # CPU-spinning infinite loop with no forward progress (this exact bug
+    # was caught live - the whole generation call hung indefinitely).
+    console = _stable_console_stream()
+
+    saved_fd = os.dup(2)
+    read_fd, write_fd = os.pipe()
+    os.dup2(write_fd, 2)
+    os.close(write_fd)
+
+    debug_fd = native_stderr_target()
+
+    def _emit(text: str) -> None:
+        if console is not None:
+            with contextlib.suppress(OSError, ValueError):
+                console.write(text + "\n")
+                console.flush()
+        record_native_line(text)
+
+    grouper = _LineGrouper(_emit)
+
+    def _reader() -> None:
+        buf = b""
+        try:
+            while True:
+                try:
+                    chunk = os.read(read_fd, 4096)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                buf += chunk
+                while b"\n" in buf:
+                    raw, buf = buf.split(b"\n", 1)
+                    if debug_fd is not None:
+                        with contextlib.suppress(OSError):
+                            os.write(debug_fd, raw + b"\n")
+                    grouper.feed(raw.decode("utf-8", errors="replace"))
+        finally:
+            with contextlib.suppress(OSError):
+                os.close(read_fd)
+        if buf:
+            if debug_fd is not None:
+                with contextlib.suppress(OSError):
+                    os.write(debug_fd, buf)
+            grouper.feed(buf.decode("utf-8", errors="replace"))
+        grouper.flush()
+
+    thread = threading.Thread(target=_reader, name="native-stderr-dedup", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        os.dup2(saved_fd, 2)
+        thread.join(timeout=2.0)
+        os.close(saved_fd)
+        if debug_fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(debug_fd)
+        if console is not None:
+            with contextlib.suppress(OSError):
+                console.close()
