@@ -832,6 +832,35 @@ def _provision_backend(chosen: str, target: Path, sha256: Optional[str],
     _fetch_and_place(url, target, sha256 or fallback_sha)
 
 
+_EXC_HEADER_RE = re.compile(
+    r"^(?:[\w.]+\.)?\w*(?:Error|Exception|Warning|Interrupt|Exit)(?::|\s|\Z)")
+
+
+def _informative_error_line(text: str) -> str:
+    """Pull the line that actually explains a failed load from a subprocess's
+    captured output.
+
+    A Python traceback ends with the exception, but when that exception carries a
+    MULTI-LINE message the literal last line is not the cause. ``load_lib()``
+    raises a ``RuntimeError`` whose first line is the real dlopen error (e.g.
+    ``libgomp.so.1: cannot open shared object file``) followed by four
+    re-provision hint lines; a blind ``splitlines()[-1]`` returns the last hint
+    (``localm setup-llama --backend amd-rocm --force  (AMD RX 6000)``) and throws
+    the actual cause away, so setup reports a nonsensical "still failed to load
+    (<a command>)" reason (issue #451, AGENTS.md rule 5: do not hide the problem).
+
+    Prefer the exception HEADER line (``SomeError: <cause>``), which carries the
+    real error even when the message spans several lines; fall back to the last
+    non-empty line when the output is not a recognisable traceback."""
+    lines = [ln.rstrip() for ln in (text or "").splitlines() if ln.strip()]
+    if not lines:
+        return "library failed to load"
+    for ln in reversed(lines):
+        if _EXC_HEADER_RE.match(ln.lstrip()):
+            return ln.strip()
+    return lines[-1].strip()
+
+
 def _native_loads_ok() -> tuple:
     """Load-test the provisioned native library in a FRESH interpreter, exactly
     as ``localm run`` will, AND confirm it registered a compute backend. A build
@@ -858,7 +887,7 @@ def _native_loads_ok() -> tuple:
         return False, ('runtime loaded but registered no compute backends '
                        '("no backends are loaded") - this build does not fit this machine')
     detail = (r.stderr or r.stdout or "").strip()
-    return False, (detail.splitlines()[-1] if detail else "library failed to load")
+    return False, _informative_error_line(detail)
 
 
 def _warn_off_profile(chosen: str) -> None:

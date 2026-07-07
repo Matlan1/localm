@@ -68,3 +68,40 @@ def test_subprocess_spawn_error_is_reported(monkeypatch):
     ok, detail = setup_llama._native_loads_ok()
     assert ok is False
     assert "cannot spawn interpreter" in detail
+
+
+def test_multiline_load_error_reports_cause_not_hint(monkeypatch):
+    # Issue #451 regression. load_lib() raises a MULTI-LINE RuntimeError whose
+    # FIRST line is the real dlopen cause and whose trailing lines are
+    # re-provision hints. _native_loads_ok() must surface the CAUSE, not blindly
+    # take splitlines()[-1] (a hint line: "localm setup-llama --backend amd-rocm
+    # --force ..."). Before the fix the reported detail WAS that hint, so
+    # setup-llama's reason read "cpu ... still failed to load (<a command>)" -
+    # hiding the actual "libgomp.so.1: cannot open shared object file" cause
+    # (AGENTS.md rule 5).
+    err = (
+        "Traceback (most recent call last):\n"
+        '  File "run.py", line 1, in <module>\n'
+        "    _loader.load_lib()\n"
+        "RuntimeError: Failed to load libllama.so from /venv/lib/libllama.so: "
+        "libgomp.so.1: cannot open shared object file: No such file or directory\n"
+        "This usually means the provisioned build does not match this machine.\n"
+        "  localm setup-llama --backend vulkan --force   (any GPU, no vendor toolkit)\n"
+        "  localm setup-llama --backend cpu --force       (no GPU)\n"
+        "  localm setup-llama --backend amd-rocm --force  (AMD RX 6000)"
+    )
+    monkeypatch.setattr(setup_llama.subprocess, "run",
+                        lambda *a, **k: _FakeProc(1, stderr=err))
+    ok, detail = setup_llama._native_loads_ok()
+    assert ok is False
+    assert "libgomp.so.1: cannot open shared object file" in detail  # real cause
+    assert "--backend amd-rocm --force" not in detail                # not the hint
+
+
+def test_informative_error_line_falls_back_to_last_line():
+    # Non-traceback output (no recognisable exception header): keep the old
+    # best-effort behaviour of returning the last non-empty line, and a safe
+    # default for empty output.
+    assert setup_llama._informative_error_line(
+        "noise line\nactual tail") == "actual tail"
+    assert setup_llama._informative_error_line("") == "library failed to load"

@@ -10,8 +10,6 @@ at the top of register(), so each handler body is identical to the original.
 
 from __future__ import annotations
 
-from typing import Optional
-
 import asyncio
 from pathlib import Path
 
@@ -31,7 +29,15 @@ def register(app: FastAPI, ctx) -> None:
     # -------------------------- models ---------------------------- #
 
     @app.get("/api/models", dependencies=[Depends(require_scope(scopes.MODELS_READ))])
-    async def gui_models(type: Optional[str] = None):
+    async def gui_models(type: str = ""):
+        # Plain ``str = ""`` (not ``Optional[str]``) on purpose: this module uses
+        # ``from __future__ import annotations``, so an annotation like
+        # ``Optional[str]`` is a string forward-ref FastAPI must resolve against
+        # this module's globals at route-build time. If ``Optional`` is ever not
+        # imported here, that resolution fails silently and the field gets a mock
+        # validator that only raises "is not fully defined" on the FIRST request
+        # (issue #435). A builtin like ``str`` always resolves, and "" is the
+        # same "no filter" sentinel the sibling routes use (q="", model="").
         from localm.config import load_registry
         registry = load_registry()
         current = active_model()
