@@ -25,6 +25,21 @@ MAX_TEXT_CHARS = 8_000_000
 # the zip header's self-reported size (which an attacker controls).
 MAX_ARCHIVE_MEMBER_BYTES = 80_000_000
 
+# Hard cap on how many members an archive extractor will process, and the note
+# emitted when either that cap or the whole-archive MAX_TEXT_CHARS budget is hit.
+# Without these, an archive of thousands of highly-compressible members would be
+# decoded and joined in memory in full BEFORE the per-document MAX_TEXT_CHARS
+# truncation ever applied - a decompression-amplification DoS (a ~30 MB zip ->
+# ~30 GB of RAM). We stop as soon as the accumulated text reaches the budget.
+MAX_ARCHIVE_MEMBERS = 5_000
+_ARCHIVE_TRUNCATED_NOTE = "[archive truncated: content budget reached]"
+
+# Tar-family containers (plain tar plus single-stream gzip/bzip2/xz, which may be
+# a compressed tarball OR a single compressed file). All route to the tar-or-
+# stream handler, which falls back to single-stream decompression when the
+# payload is not actually a tar (AUDIT-MED-17).
+_TAR_LIKE_SUFFIXES = {".tar", ".gz", ".bz2", ".xz", ".tgz", ".tbz", ".txz"}
+
 # Suffixes handled by extract_text. Anything not listed is refused (binary
 # formats would poison the index with mojibake).
 _PLAIN_SUFFIXES = {
@@ -210,8 +225,8 @@ def extract_bytes(data: bytes, filename: str,
 
     if inferred_ext == ".zip":
         text = _extract_zip(data, filename, classify_fn, describe_image_fn)
-    elif inferred_ext == ".tar":
-        text = _extract_tar(data, filename, classify_fn, describe_image_fn)
+    elif inferred_ext in _TAR_LIKE_SUFFIXES:
+        text = _extract_tar_or_stream(data, filename, classify_fn, describe_image_fn)
     elif inferred_ext in _IMAGE_SUFFIXES:
         if not describe_image_fn:
             raise ExtractError(
@@ -265,71 +280,169 @@ def extract_bytes(data: bytes, filename: str,
     return text[:MAX_TEXT_CHARS]
 
 
+def _archive_log():
+    from localm.debuglog import logger as _dbg
+    return _dbg
+
+
+def _archive_budget() -> int:
+    """How many chars an archive extractor may accumulate before stopping. Leaves
+    room for the truncation note so it survives the outer MAX_TEXT_CHARS cap."""
+    return max(0, MAX_TEXT_CHARS - len(_ARCHIVE_TRUNCATED_NOTE) - 4)
+
+
+def _join_archive(texts: list, truncated: bool) -> str:
+    out = "\n\n".join(texts)
+    if truncated:
+        cap = _archive_budget()
+        if len(out) > cap:
+            out = out[:cap]
+        out = (out + "\n\n" + _ARCHIVE_TRUNCATED_NOTE) if out else _ARCHIVE_TRUNCATED_NOTE
+    return out
+
+
 def _extract_zip(data: bytes, filename: str,
                  classify_fn: Optional[Callable[[str], Optional[str]]] = None,
                  describe_image_fn: Optional[Callable[[bytes, str], Optional[str]]] = None) -> str:
-    """Extract and merge text contents recursively from a ZIP archive."""
+    """Extract and merge text from a ZIP archive, BOUNDED in total output and
+    member count so a many-member archive cannot amplify into a RAM DoS
+    (AUDIT-HIGH-8). Per-member read failures are logged, not folded into the
+    indexed text (AUDIT-MED-21)."""
     import io
-    texts = []
+    texts: list = []
+    total = 0
+    processed = 0
+    truncated = False
+    limit = MAX_ARCHIVE_MEMBER_BYTES
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
             for member in sorted(zf.namelist()):
                 if member.endswith("/") or any(part in _SKIP_DIRS or part.startswith(".") for part in Path(member).parts):
                     continue
-                limit = MAX_ARCHIVE_MEMBER_BYTES
+                if total >= _archive_budget() or processed >= MAX_ARCHIVE_MEMBERS:
+                    truncated = True
+                    break
+                processed += 1
                 try:
                     with zf.open(member) as fh:
                         member_data = fh.read(limit + 1)
                     if len(member_data) > limit:
-                        texts.append(f"[file: {member} - skipped: exceeds decompressed limit]")
+                        _archive_log().warning("rag: archive member %s in %s exceeds the "
+                                               "decompressed-size limit; skipped", member, filename)
                         continue
                     inferred = sniff_format(member_data, member)
-                    # Skip nested archives to avoid infinite loops
-                    if inferred and inferred not in (".zip", ".tar"):
+                    # Skip nested archives (zip / tar-family) to avoid loops.
+                    if inferred and inferred != ".zip" and inferred not in _TAR_LIKE_SUFFIXES:
                         txt = extract_bytes(member_data, member, classify_fn, describe_image_fn)
                         if txt.strip():
-                            texts.append(f"[file: {member}]\n{txt}")
+                            block = f"[file: {member}]\n{txt}"
+                            texts.append(block)
+                            total += len(block)
                 except Exception as e:
-                    texts.append(f"[file: {member} - error: {e}]")
+                    _archive_log().debug("rag: could not read archive member %s in %s: %s",
+                                         member, filename, e)
     except Exception as e:
         raise ExtractError(f"Cannot parse {filename} as zip: {e}")
-    return "\n\n".join(texts)
+    return _join_archive(texts, truncated)
 
 
-def _extract_tar(data: bytes, filename: str,
-                 classify_fn: Optional[Callable[[str], Optional[str]]] = None,
-                 describe_image_fn: Optional[Callable[[bytes, str], Optional[str]]] = None) -> str:
-    """Extract and merge text contents recursively from a TAR archive (tar/gz/bz2/xz)."""
+def _extract_tar_or_stream(data: bytes, filename: str,
+                           classify_fn: Optional[Callable[[str], Optional[str]]] = None,
+                           describe_image_fn: Optional[Callable[[bytes, str], Optional[str]]] = None) -> str:
+    """Extract a tar-family payload. Handles plain and compressed TARBALLS
+    (.tar/.tgz/.tbz/.txz/.tar.gz) via tarfile; when the payload is a SINGLE
+    gzip/bzip2/xz-compressed file rather than a tar, decompresses that one stream
+    and extracts its inner content (AUDIT-MED-17: previously a single .gz was
+    mis-routed here and failed, and .tgz/.tbz/.txz had no handler at all)."""
     import tarfile
     import io
-    texts = []
     try:
-        with tarfile.open(fileobj=io.BytesIO(data)) as tf:
-            for member in sorted(tf.getmembers(), key=lambda m: m.name):
-                if not member.isfile():
+        tf = tarfile.open(fileobj=io.BytesIO(data))
+    except tarfile.ReadError:
+        inner = _decompress_single_stream(data, filename)
+        return extract_bytes(inner, _strip_compression_suffix(filename),
+                             classify_fn, describe_image_fn)
+    try:
+        return _extract_tar_members(tf, filename, classify_fn, describe_image_fn)
+    finally:
+        tf.close()
+
+
+def _extract_tar_members(tf, filename: str, classify_fn, describe_image_fn) -> str:
+    texts: list = []
+    total = 0
+    processed = 0
+    truncated = False
+    limit = MAX_ARCHIVE_MEMBER_BYTES
+    try:
+        for member in sorted(tf.getmembers(), key=lambda m: m.name):
+            if not member.isfile():
+                continue
+            if any(part in _SKIP_DIRS or part.startswith(".") for part in Path(member.name).parts):
+                continue
+            if total >= _archive_budget() or processed >= MAX_ARCHIVE_MEMBERS:
+                truncated = True
+                break
+            processed += 1
+            try:
+                f = tf.extractfile(member)
+                if f is None:
                     continue
-                if any(part in _SKIP_DIRS or part.startswith(".") for part in Path(member.name).parts):
+                member_data = f.read(limit + 1)
+                if len(member_data) > limit:
+                    _archive_log().warning("rag: archive member %s in %s exceeds the "
+                                           "decompressed-size limit; skipped", member.name, filename)
                     continue
-                limit = MAX_ARCHIVE_MEMBER_BYTES
-                try:
-                    f = tf.extractfile(member)
-                    if f is None:
-                        continue
-                    member_data = f.read(limit + 1)
-                    if len(member_data) > limit:
-                        texts.append(f"[file: {member.name} - skipped: exceeds decompressed limit]")
-                        continue
-                    inferred = sniff_format(member_data, member.name)
-                    # Skip nested archives to avoid infinite loops
-                    if inferred and inferred not in (".zip", ".tar"):
-                        txt = extract_bytes(member_data, member.name, classify_fn, describe_image_fn)
-                        if txt.strip():
-                            texts.append(f"[file: {member.name}]\n{txt}")
-                except Exception as e:
-                    texts.append(f"[file: {member.name} - error: {e}]")
+                inferred = sniff_format(member_data, member.name)
+                if inferred and inferred != ".zip" and inferred not in _TAR_LIKE_SUFFIXES:
+                    txt = extract_bytes(member_data, member.name, classify_fn, describe_image_fn)
+                    if txt.strip():
+                        block = f"[file: {member.name}]\n{txt}"
+                        texts.append(block)
+                        total += len(block)
+            except Exception as e:
+                _archive_log().debug("rag: could not read archive member %s in %s: %s",
+                                     member.name, filename, e)
     except Exception as e:
         raise ExtractError(f"Cannot parse {filename} as tar archive: {e}")
-    return "\n\n".join(texts)
+    return _join_archive(texts, truncated)
+
+
+def _decompress_single_stream(data: bytes, filename: str) -> bytes:
+    """Decompress a single gzip/bzip2/xz stream with a BOUNDED read (bomb guard)."""
+    import io
+    import gzip
+    import bz2
+    import lzma
+    limit = MAX_ARCHIVE_MEMBER_BYTES
+    if data.startswith(b"\x1f\x8b"):
+        fh = gzip.GzipFile(fileobj=io.BytesIO(data))
+    elif data.startswith(b"BZh"):
+        fh = bz2.BZ2File(io.BytesIO(data))
+    elif data.startswith(b"\xfd7zXZ\x00"):
+        fh = lzma.LZMAFile(io.BytesIO(data))
+    else:
+        raise ExtractError(f"{filename}: not a tar and not a recognised compressed stream")
+    try:
+        with fh:
+            raw = fh.read(limit + 1)
+    except Exception as e:
+        raise ExtractError(f"{filename}: could not decompress: {e}")
+    if len(raw) > limit:
+        raise ExtractError(f"{filename}: decompressed content exceeds "
+                           f"{limit // 1_000_000} MB limit (possible bomb); refusing to extract.")
+    return raw
+
+
+def _strip_compression_suffix(filename: str) -> str:
+    low = filename.lower()
+    for ext in (".tgz", ".tbz", ".txz"):
+        if low.endswith(ext):
+            return filename[:-len(ext)] + ".tar"
+    for ext in (".gz", ".bz2", ".xz"):
+        if low.endswith(ext):
+            return filename[:-len(ext)]
+    return filename
 
 
 def _read_zip_member(zf: zipfile.ZipFile, member: str, filename: str) -> str:
