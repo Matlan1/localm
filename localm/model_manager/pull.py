@@ -179,6 +179,39 @@ def pull_model(
     below - a remote HF/URL download already lands in MODELS_DIR on its own.
     """
     spec = _mm.resolve_spec(model_spec)
+
+    # A local filesystem path is not a remote spec: register it in place rather
+    # than mis-parsing a Windows drive-colon as an owner/repo:file spec, or
+    # rejecting it as "Unknown spec" (H1). This is checked BEFORE any network
+    # auto-detect so registering a local file never leaks its path (and model
+    # filename) to huggingface.co - a POSIX absolute path or a forward-slash
+    # relative path both contain "/" and would otherwise be probed against HF
+    # (AUDIT-HIGH-6). Only an absolute path or an existing file counts, so a bare
+    # HF "owner/repo" is never shadowed by a same-named local directory. add_local
+    # does the validation + dedup.
+    try:
+        local = Path(model_spec).expanduser()
+        is_local_path = local.exists() and (local.is_absolute() or local.is_file())
+    except OSError:
+        is_local_path = False
+    if is_local_path:
+        # A local file gets no remote type probe: honour an explicit --type, else llm.
+        local_type = model_type if model_type != "auto" else "llm"
+        return _mm.add_local(str(local), name=name, model_type=local_type, store=store)
+
+    # SSRF-PULL: honour the net_mode kill switch for a REMOTE pull. net_mode=off
+    # means "no network at all", so it must stop a model download - and the type
+    # auto-detect probe below - too.
+    from localm.netpolicy import network_mode
+    if network_mode() == "off":
+        console.print(
+            "[red]Network access is disabled (net_mode=off).[/red] A model pull "
+            "needs the network; enable it with: localm config net_mode ask")
+        return False
+
+    # Remote spec: resolve the model type (a network probe against HF for a bare
+    # owner/repo). Only reached for confirmed-remote specs, after the local-path
+    # and net_mode gates above.
     detected_type = "llm"
     if model_type == "auto":
         if "/" in spec and not (spec.startswith("http://") or spec.startswith("https://")):
@@ -189,29 +222,6 @@ def pull_model(
             detected_type = "llm"
     else:
         detected_type = model_type
-
-    # A local filesystem path is not a remote spec: register it in place rather
-    # than mis-parsing a Windows drive-colon as an owner/repo:file spec, or
-    # rejecting it as "Unknown spec" (H1). Only an absolute path or an existing
-    # file counts, so a bare HF "owner/repo" is never shadowed by a same-named
-    # local directory. add_local does the validation + dedup.
-    try:
-        local = Path(model_spec).expanduser()
-        is_local_path = local.exists() and (local.is_absolute() or local.is_file())
-    except OSError:
-        is_local_path = False
-    if is_local_path:
-        return _mm.add_local(str(local), name=name, model_type=detected_type, store=store)
-
-    # SSRF-PULL: honour the net_mode kill switch for a REMOTE pull. net_mode=off
-    # means "no network at all", so it must stop a model download too - previously
-    # it only gated the discovery prelude, not the actual pull.
-    from localm.netpolicy import network_mode
-    if network_mode() == "off":
-        console.print(
-            "[red]Network access is disabled (net_mode=off).[/red] A model pull "
-            "needs the network; enable it with: localm config net_mode ask")
-        return False
 
     if spec.startswith("http://") or spec.startswith("https://"):
         res = _pull_url(spec, _sanitize_name(name or _stem_from_url(spec)),
