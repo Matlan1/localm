@@ -32,7 +32,7 @@ from typing import Callable, Optional
 from localm.debuglog import logger as _log
 from .bm25 import BM25
 from .chunk import chunk_text
-from .extract import (EXTRACTABLE_SUFFIXES, BLACKLISTED_SUFFIXES, ExtractError, extract_bytes,
+from .extract import (BLACKLISTED_SUFFIXES, ExtractError, extract_bytes,
                       extract_text)
 
 ClassifyFn = Callable[[str], Optional[str]]

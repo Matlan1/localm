@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-import json
 import zipfile
 import io
-from pathlib import Path
 import pytest
-from localm.rag import extract_text, extract_bytes, ExtractError
+from localm.rag import extract_text, ExtractError
 from localm.rag.extract import sniff_format, _EXT_CLASSIFICATION_CACHE
 from tests.test_rag import _tiny_pdf
 

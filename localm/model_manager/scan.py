@@ -1,14 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """ComfyUI model directory scanner to auto-discover and register media models."""
 
-import json
-import urllib.request
 from pathlib import Path
-from typing import Optional, NamedTuple, Dict, Any, List
+from typing import Optional, NamedTuple, Dict
 
 from localm.config import load_config, load_registry
-from localm.model_manager.registry import _register_with_dedup, MODEL_TYPES
-from localm.media.comfy_client import comfy_object_info, _MODEL_FILE_EXTS, _combo_options, _looks_like_model_files
+from localm.model_manager.registry import _register_with_dedup
+from localm.media.comfy_client import comfy_object_info, _MODEL_FILE_EXTS, _looks_like_model_files
 from localm.debuglog import logger
 
 # Table mapping ComfyUI model subdirectories to localm model_types
