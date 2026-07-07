@@ -38,7 +38,7 @@ dependencies = [
     "requests>=2.31",
     "huggingface-hub>=1.19.0",
     "pydantic>=2.13.4",
-    "fastapi>=0.111",
+    "fastapi>=0.139.0",
     "uvicorn>=0.30",
     # Built-in TLS (NET-1): localm mints a local CA + leaf cert so a network
     # bind serves HTTPS out of the box. Core, not an extra - encryption on an
