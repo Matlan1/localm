@@ -57,8 +57,9 @@ the GUI it serves).
 | # | Exercise | Expected | P/F/BLK |
 |---|---|---|---|
 | 1 | `localm doctor` | all core checks green (or a documented, benign note) | |
-| 2 | `localm pull <tiny gguf>` (or `add` a local one) | model downloads/registers, shows in `localm list` | |
-| 3 | `localm run <model>` then a prompt | a REAL streamed answer (non-empty, coherent, not an error) | |
+| 2 | `localm pull <tiny gguf>` AND a small HF model (`HuggingFaceTB/SmolLM2-135M-Instruct`, ~270MB; or `Qwen/Qwen2.5-0.5B-Instruct`) | both download and register, show in `localm list` | |
+| 3a | GGUF backend: `localm run <gguf> -p "..."` | a REAL answer via the bundled llama.cpp (non-empty, coherent) | |
+| 3b | HF/torch backend: `localm run <hf-model> -p "..."` | a REAL answer via transformers. BOTH inference backends are advertised, so both are verified. Where the `[gpu]` extra is installed, confirm it uses the GPU (SmolLM2-135M at ~1 tok/s means it silently fell back to CPU) | |
 | 4 | `localm gui`, open in a browser, pick the model, send a message | streamed reply in the GUI; history persists on reload | |
 | 5 | `localm serve` + an OpenAI-style `curl /v1/chat/completions` (Bearer key) | a real completion; `/v1/models` marks the active model | |
 
