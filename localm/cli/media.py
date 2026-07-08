@@ -81,6 +81,16 @@ def _maybe_apply_func_shim_and_retry(message: str, api_url: str, retry):
         "(Comfy-Org/ComfyUI #12116).[/yellow] localm can apply an in-memory, "
         "localm-side fix to a ComfyUI it starts: it writes nothing into your "
         "ComfyUI install and self-expires once ComfyUI ships its own fix.")
+    # S5 BUG-REOFFER: alongside the fix-this-run shim, offer the durable fix -
+    # localm's OWN managed, patched ComfyUI - but only ONCE, and only when the user
+    # has no managed instance yet (else it is moot). Presented here, at the same
+    # offer point, so the two read coherently: fix-now (shim) vs fix-for-good.
+    from ..media.comfy_client import (managed_comfy_setup_offer_message,
+                                      mark_managed_comfy_setup_offered,
+                                      should_offer_managed_comfy_setup)
+    if should_offer_managed_comfy_setup(message):
+        console.print("[cyan]" + managed_comfy_setup_offer_message() + "[/cyan]")
+        mark_managed_comfy_setup_offered()
     try:
         ans = console.input(
             "  Apply localm's fix? [o]nce / [r]emember (stop asking) / [N]o: "
