@@ -8,6 +8,10 @@ from ._core import console, main
 _OK_SYM   = "[green]✓[/green]"
 _WARN_SYM = "[yellow]![/yellow]"
 _FAIL_SYM = "[red]✗[/red]"
+# A neutral info marker for discovery hints that are NOT pass/fail checks (an
+# opt-in feature the user simply may not know about). Distinct from _WARN_SYM so
+# it never reads as "something is wrong".
+_HINT_SYM = "[cyan]i[/cyan]"
 
 
 def _check_python() -> None:
@@ -211,6 +215,38 @@ def _check_plugin_deps() -> None:
     console.print("       [dim]Install them with:  localm plugin install-deps --all[/dim]")
 
 
+def _check_managed_comfy() -> None:
+    """Discovery hint for the opt-in localm-managed ComfyUI (design decision 8).
+
+    Purely informational: it installs nothing and never changes doctor's verdict.
+    When no managed instance exists, nudge the user toward `localm comfy setup`;
+    when one IS installed, report where it lives instead. The hint is an info
+    line (not a warning) because a not-set-up opt-in feature is not a fault.
+
+    A discovery hint must never break doctor, so a probe fault is SURFACED as a
+    skipped line (AGENTS.md rule 5: surface, do not silence) rather than muted or
+    escalated into a doctor failure.
+    """
+    try:
+        from localm.media.managed_comfy import (
+            is_managed_comfy_installed,
+            managed_comfy_paths,
+        )
+        installed = is_managed_comfy_installed()
+    except Exception as e:  # noqa: BLE001 - a hint must not fail doctor; surface why.
+        console.print(f"  {_WARN_SYM}  managed-ComfyUI hint skipped [dim]({e})[/dim]")
+        return
+    if installed:
+        console.print(
+            f"  {_OK_SYM}  managed ComfyUI: installed at {managed_comfy_paths().root}"
+        )
+    else:
+        console.print(
+            f"  {_HINT_SYM}  localm can manage its own ComfyUI "
+            "(isolated, patched, pinned): run 'localm comfy setup'"
+        )
+
+
 @main.command()
 def doctor():
     """Check system requirements and report any issues.
@@ -223,6 +259,7 @@ def doctor():
       - Available VRAM
       - Required Python packages (huggingface-hub, torch, uvicorn, fastapi)
       - Enabled plugins have their pip extras installed
+    Also surfaces a one-line discovery hint for the opt-in managed ComfyUI.
     """
     # Resolve find_binary_dir from the package at call time so tests that
     # monkeypatch localm.cli.find_binary_dir affect this call site.
@@ -240,3 +277,4 @@ def doctor():
         console.print(f"  {_WARN_SYM}  No GPU driver found (nvidia-smi / rocm-smi) - CPU mode only")
     _check_packages()
     _check_plugin_deps()
+    _check_managed_comfy()
