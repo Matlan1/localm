@@ -149,6 +149,25 @@ def test_changelog_removed_lines_deleting_an_entry_fails():
     assert removed == ["- the GUI"], removed
 
 
+def test_changelog_rewriting_unreleased_is_allowed():
+    """The in-progress [Unreleased] draft is freely rewritable until it is cut into a
+    version: rewording or dropping an [Unreleased] line is NOT a history rewrite."""
+    ch = _load_check_hygiene()
+    new = _BASE_CHANGELOG.replace(
+        "### Added\n- work in progress\n\n## [0.1.0]",
+        "### Changed\n- reworded and expanded the in-progress notes\n\n## [0.1.0]")
+    assert ch._changelog_removed_lines(_BASE_CHANGELOG, new) == []
+
+
+def test_changelog_rewriting_a_published_entry_fails():
+    """A PUBLISHED (versioned) entry is frozen: rewriting its wording is a history
+    rewrite and is flagged, even though nothing is deleted outright."""
+    ch = _load_check_hygiene()
+    new = _BASE_CHANGELOG.replace("- the GUI\n", "- the GUI (reworded)\n")
+    removed = ch._changelog_removed_lines(_BASE_CHANGELOG, new)
+    assert removed == ["- the GUI"], removed
+
+
 def test_changelog_removed_lines_release_rename_is_clean():
     """Cutting a release renames the `## [Unreleased]` header, adds a version
     header, and rewrites the compare link + adds a new tag link. Only headers and

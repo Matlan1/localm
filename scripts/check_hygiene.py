@@ -129,28 +129,46 @@ def _scan(path: Path) -> list[str]:
 
 
 # ---- check 4: CHANGELOG is append-only -------------------------------------
-# The release changelog is the permanent public record of what shipped: each
-# release ADDS its section on top; existing entries are never deleted or rewritten
-# (typo/formatting fixes aside - see AGENTS.md). Enforced by diffing the working
-# CHANGELOG against the published-record baseline (the merge-base with
-# origin/master, else the last commit) and failing if any shipped ENTRY line
-# disappeared. Markdown HEADERS ("# ...") and link-reference definitions
-# ("[label]: url") are exempt: cutting a release legitimately renames the Unreleased
-# header to a version and rewrites the compare link without touching an entry.
-# Compared as a multiset, so MOVING entries under a new version header is fine -
-# only an actual deletion or rewrite of an entry line is caught.
+# The release changelog is the permanent public record of what shipped. Only the
+# PUBLISHED (versioned "## [x.y.z]") sections are frozen: a release ADDS its section
+# on top and its entries are then never deleted or rewritten (typo/formatting fixes
+# aside - see AGENTS.md). The "## [Unreleased]" draft (and any intro text before the
+# first version header) is the in-progress record and is FREELY rewritable until it
+# is cut into a version. Enforced by diffing the working CHANGELOG against the
+# published-record baseline (the merge-base with origin/master, else the last commit)
+# and failing if any PUBLISHED entry line disappeared. Markdown HEADERS ("# ...") and
+# link-reference definitions ("[label]: url") are exempt: cutting a release
+# legitimately renames the Unreleased header to a version and rewrites the compare
+# link. Compared as a multiset, so MOVING an entry from [Unreleased] under a new
+# version header is fine - only a deletion or rewrite of an already-PUBLISHED entry
+# line is caught.
 _CHANGELOG = "CHANGELOG.md"
 _CHANGELOG_LINKREF = re.compile(r"\[[^\]]+\]:\s")
+# An H2 section header opening a PUBLISHED version section, e.g. "## [0.1.1] - date".
+# "## [Unreleased]" does not match (no leading digit), so its section stays editable.
+_CHANGELOG_VERSION_HEADER = re.compile(r"^##\s+\[\d")
 
 
 def _changelog_protected_lines(text: str) -> list[str]:
-    """Changelog lines whose loss would rewrite history: non-blank lines that are
-    not a markdown header and not a link-reference definition. rstrip()'d so a
-    CRLF/LF or trailing-space difference is not mistaken for a real change."""
+    """Lines of the PUBLISHED (versioned) changelog sections whose loss would rewrite
+    history: non-blank, non-header, non-link-reference lines sitting UNDER a
+    ``## [x.y.z]`` header. Lines under ``## [Unreleased]`` (or before the first version
+    header) are the in-progress draft and are NOT protected - they may be rewritten
+    freely until the release is cut (AGENTS.md). rstrip()'d so a CRLF/LF or trailing-
+    space difference is not mistaken for a real change."""
     out = []
+    published = False   # intro + [Unreleased] (before the first version header) are editable
     for raw in text.splitlines():
         line = raw.rstrip()
         stripped = line.lstrip()
+        # An H2 section header ("## ...") switches zones: a versioned header opens the
+        # protected published record; [Unreleased] (or any other H2) closes it. Deeper
+        # headers ("### Added") are subsections and do NOT change the zone.
+        if stripped.startswith("## "):
+            published = bool(_CHANGELOG_VERSION_HEADER.match(stripped))
+            continue
+        if not published:
+            continue
         if not stripped or stripped.startswith("#") or _CHANGELOG_LINKREF.match(stripped):
             continue
         out.append(line)

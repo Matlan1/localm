@@ -186,3 +186,78 @@ def test_publish_allows_with_passing_record(monkeypatch):
 def test_changed_areas_empty_when_no_diff():
     # HEAD..HEAD has no changes -> empty list. Deterministic; exercises the git parse.
     assert release_verify.changed_areas("HEAD", REPO_ROOT) == []
+
+
+# --------------------------------------------------------------------------- #
+#  pre-publish HEAD==origin and tag-availability gates (fake git runner)      #
+# --------------------------------------------------------------------------- #
+
+_HEAD = "a" * 40
+_OTHER = "b" * 40
+
+
+def _git_runner(responses):
+    """Fake git runner for the release gates: `responses` is a list of
+    (arg-prefix, returncode, stdout); the first prefix that matches args[:len] wins."""
+    def run(args):
+        for prefix, rc, out in responses:
+            if tuple(args[:len(prefix)]) == tuple(prefix):
+                return types.SimpleNamespace(returncode=rc, stdout=out, stderr="")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    return run
+
+
+def test_head_matches_origin_passes_when_equal():
+    r = _git_runner([
+        (["fetch"], 0, ""),
+        (["rev-parse", "HEAD"], 0, _HEAD + "\n"),
+        (["rev-parse", "origin/master"], 0, _HEAD + "\n"),
+    ])
+    make_release._require_head_matches_origin("master", runner=r)   # must not raise
+
+
+def test_head_matches_origin_blocks_when_diverged():
+    r = _git_runner([
+        (["fetch"], 0, ""),
+        (["rev-parse", "HEAD"], 0, _HEAD + "\n"),
+        (["rev-parse", "origin/master"], 0, _OTHER + "\n"),
+    ])
+    with pytest.raises(SystemExit, match="not origin/master"):
+        make_release._require_head_matches_origin("master", runner=r)
+
+
+def test_tag_available_passes_when_absent():
+    r = _git_runner([
+        (["ls-remote"], 0, ""),                        # no origin tag
+        (["rev-parse", "-q", "--verify"], 1, ""),      # no local tag
+        (["rev-parse", "HEAD"], 0, _HEAD + "\n"),
+    ])
+    make_release._require_tag_available("v0.1.1", runner=r)   # free -> no raise
+
+
+def test_tag_available_passes_when_tag_is_at_head():
+    r = _git_runner([
+        (["ls-remote"], 0, f"{_HEAD}\trefs/tags/v0.1.1\n"),
+        (["rev-parse", "HEAD"], 0, _HEAD + "\n"),
+    ])
+    make_release._require_tag_available("v0.1.1", runner=r)   # already at HEAD -> ok
+
+
+def test_tag_available_blocks_when_tag_at_other_commit():
+    r = _git_runner([
+        (["ls-remote"], 0, f"{_OTHER}\trefs/tags/v0.1.1\n"),   # stale tag (the v0.1.1 case)
+        (["rev-parse", "HEAD"], 0, _HEAD + "\n"),
+    ])
+    with pytest.raises(SystemExit, match="already exists"):
+        make_release._require_tag_available("v0.1.1", runner=r)
+
+
+def test_tag_available_peels_annotated_tag_to_commit():
+    # An annotated tag emits both the tag-object line AND the peeled ^{} commit line;
+    # the peeled commit must be what we compare to HEAD.
+    r = _git_runner([
+        (["ls-remote"], 0,
+         f"{'c' * 40}\trefs/tags/v0.1.1\n{_HEAD}\trefs/tags/v0.1.1^{{}}\n"),
+        (["rev-parse", "HEAD"], 0, _HEAD + "\n"),
+    ])
+    make_release._require_tag_available("v0.1.1", runner=r)   # peeled == HEAD -> ok
