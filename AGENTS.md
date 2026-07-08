@@ -279,7 +279,24 @@ Do NOT wait for the maintainer to click merge.
 - CI is green; and
 - the PR is mergeable (no conflicts).
 
-Then squash-merge and delete the branch.
+Then squash-merge and delete the branch. This repo is usually worked in git
+worktrees, with `master` checked out in one of them. Git refuses to check out a
+branch that is already active in another worktree, so `gh pr merge
+--delete-branch` and `git checkout master` both fail here with `fatal: 'master'
+is already used by worktree ...` (the API merge still lands, but the local
+cleanup errors and leaves the remote branch undeleted). Merge and clean up
+WITHOUT ever checking out master, from the worktree that is on the PR branch:
+
+```
+gh pr merge <N> --squash            # remote squash-merge only (no --delete-branch)
+git push origin --delete <branch>   # delete the remote branch (does not move HEAD)
+git switch --detach                 # step off the PR branch without checking out master
+git branch -D <branch>              # delete the local branch (no worktree collision)
+```
+
+Confirm with `git ls-remote --heads origin <branch>` (empty means the remote
+branch is gone) and verify the merge landed via `git fetch origin master &&
+git log origin/master -1`, not a local checkout.
 
 Guardrails that still apply:
 
