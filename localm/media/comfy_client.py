@@ -545,6 +545,58 @@ def history_execution_error(entry: dict) -> Optional[str]:
     return None
 
 
+# ---------------------------------------------------------------------------
+#  Reactive ComfyUI __func__ regression detection + offer (MEDIA-1)
+# ---------------------------------------------------------------------------
+#
+#  A ComfyUI CORE regression in comfy_api/internal/__init__.py's
+#  make_locked_method_func does `getattr(type_obj, func).__func__`, assuming a
+#  node's FUNCTION is a bound method. A node whose FUNCTION resolves to a plain
+#  function (the core audio VAEDecodeAudio, used by native ACE-Step) has no
+#  `.__func__` -> AttributeError. Refs: Comfy-Org/ComfyUI #12116,
+#  patientx/ComfyUI-Zluda #424. localm only submits a workflow + polls, so this is
+#  purely upstream. We do NOT assume ComfyUI is broken: only when a REAL generation
+#  hits this exact error do we offer a localm-side, in-memory shim (see comfy_shim/).
+
+def is_known_comfy_func_regression(detail) -> bool:
+    """True when a ComfyUI execution-error detail is the known upstream
+    make_locked_method_func __func__ regression (Comfy-Org/ComfyUI #12116,
+    patientx/ComfyUI-Zluda #424). ONLY this specific error should trigger the
+    reactive offer; every other execution error is unrelated and behaves as before."""
+    if not detail:
+        return False
+    text = str(detail)
+    return ("has no attribute '__func__'" in text
+            or "make_locked_method_func" in text)
+
+
+def comfy_exec_error_message(payload, api_url: Optional[str] = None) -> str:
+    """Build the message for a ComfyUI POLL_EXEC_ERROR. For an unrelated error this
+    is the plain wording every generator used before. For the known __func__
+    regression it is a richer, actionable message: what it is, that the fix is
+    localm-side and in-memory (writes NOTHING into the user's ComfyUI install and
+    self-expires once ComfyUI is fixed), and how to apply it."""
+    detail = "" if payload is None else str(payload)
+    if not is_known_comfy_func_regression(detail):
+        return f"ComfyUI execution failed: {detail}"
+    localm_started = spawned_pid(api_url) is not None
+    apply_hint = (
+        "localm can restart the ComfyUI it launched and retry with the fix."
+        if localm_started else
+        "Close your ComfyUI first (localm never touches a ComfyUI it did not "
+        "start), then let localm launch a fixed one (needs comfy_workdir set).")
+    return (
+        "ComfyUI execution failed: " + detail + "\n"
+        "This is a known ComfyUI core regression (Comfy-Org/ComfyUI #12116, "
+        "patientx/ComfyUI-Zluda #424): a node whose function is a plain function "
+        "(the native ACE-Step audio decode) trips an internal __func__ access.\n"
+        "localm can apply an in-memory, localm-side compatibility shim - it patches "
+        "ONLY a ComfyUI that localm itself starts (via a PYTHONPATH env var), writes "
+        "NOTHING into your ComfyUI install, and self-expires once ComfyUI ships its "
+        "own fix. " + apply_hint + "\n"
+        "To stop being asked, turn it on: localm config comfy_func_shim on")
+
+
 def _derive_workdir_from_cmd(launch_cmd: str) -> Optional[str]:
     """The folder of the launcher script, so a .bat / .sh that references paths
     relative to its own location (the ComfyUI + ZLUDA convention, e.g. a copied
@@ -647,6 +699,72 @@ def _amd_rocm_launch_env() -> Optional[dict]:
         return None
     env = dict(os.environ)
     env["PATH"] = rocm_bin + os.pathsep + cur
+    return env
+
+
+# ---------------------------------------------------------------------------
+#  Reactive __func__ shim: apply ONLY to a ComfyUI localm spawns (MEDIA-1)
+# ---------------------------------------------------------------------------
+#
+#  The fix is a localm-owned sitecustomize.py in comfy_shim/. localm never writes it
+#  into the user's ComfyUI install: it only adds the shim DIRECTORY to the PYTHONPATH
+#  of a ComfyUI process localm ITSELF spawns, so the interpreter auto-imports it and
+#  patches the regression in memory. Default = off (no shim on PYTHONPATH). It turns
+#  on only per the reactive offer: `enable_func_shim_once()` for this process, or the
+#  persistent `comfy_func_shim` config for every future localm-spawned ComfyUI. If
+#  localm did not spawn ComfyUI, the shim is simply absent.
+
+# Process-local one-shot: "apply once" for this run without persisting a preference.
+_func_shim_once = False
+
+
+def comfy_shim_dir() -> Path:
+    """The localm-owned directory holding the ComfyUI __func__ compatibility
+    sitecustomize.py. Always inside the localm package, never in a ComfyUI folder."""
+    return Path(__file__).resolve().parent / "comfy_shim"
+
+
+def enable_func_shim_once() -> None:
+    """Arrange for the NEXT ComfyUI that localm spawns to get the shim on its child
+    PYTHONPATH, for this process only (does not persist a preference)."""
+    global _func_shim_once
+    _func_shim_once = True
+
+
+def func_shim_enabled(cfg: Optional[dict] = None) -> bool:
+    """Whether a ComfyUI localm spawns should get the shim on its child PYTHONPATH:
+    the process one-shot, or the persistent ``comfy_func_shim`` config. Default off."""
+    if _func_shim_once:
+        return True
+    if cfg is None:
+        try:
+            from localm.config import load_config
+            cfg = load_config()
+        except Exception:
+            cfg = {}
+    try:
+        return bool(cfg.get("comfy_func_shim"))
+    except AttributeError:
+        return False
+
+
+def comfy_child_env(cfg: Optional[dict] = None) -> Optional[dict]:
+    """The environment for a ComfyUI process localm SPAWNS. Starts from the AMD/ROCm
+    launch env (or the inherited env) and, ONLY when the shim is enabled, PREPENDS the
+    localm-owned shim dir to PYTHONPATH (preserving any pre-existing PYTHONPATH). When
+    the shim is off this returns exactly what the launch used before (None to inherit,
+    or the AMD env), so a normal run is untouched. Never writes anything to disk."""
+    base = _amd_rocm_launch_env()
+    if not func_shim_enabled(cfg):
+        return base
+    env = base if base is not None else dict(os.environ)
+    shim = str(comfy_shim_dir())
+    prev = env.get("PYTHONPATH", "")
+    # Avoid a duplicate entry if we are re-spawning a ComfyUI that already had it.
+    if prev.split(os.pathsep)[:1] == [shim]:
+        env["PYTHONPATH"] = prev
+    else:
+        env["PYTHONPATH"] = shim + (os.pathsep + prev if prev else "")
     return env
 
 
@@ -908,7 +1026,7 @@ def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
         _popen_kw["start_new_session"] = True
     try:
         proc = subprocess.Popen(argv, cwd=workdir,
-                         env=_amd_rocm_launch_env(),
+                         env=comfy_child_env(cfg),
                          stdout=launch_out,
                          stderr=subprocess.STDOUT,
                          **_popen_kw)

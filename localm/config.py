@@ -202,6 +202,14 @@ DEFAULT_CONFIG: dict = {
     # non-breaking. Applies to the image, music, and video plugins (they share
     # one ensure_comfy()).
     "comfy_disable_auto_launch": False,
+    # MEDIA-1: reactive, opt-in in-memory shim for the upstream ComfyUI __func__
+    # regression (Comfy-Org/ComfyUI #12116). Off by default: localm assumes nothing
+    # is broken and touches nothing. When on, a ComfyUI that localm SPAWNS gets a
+    # localm-owned shim dir on its child PYTHONPATH so the interpreter patches the
+    # regression in memory; localm never writes into the user's ComfyUI install and
+    # never shims a ComfyUI it did not start. Set by the reactive offer or by hand
+    # (`localm config comfy_func_shim on`); the shim self-expires when ComfyUI is fixed.
+    "comfy_func_shim": False,
     # Session persistence mode for ALL surfaces (chat, server, GUI, coder):
     #   privacy = no traces written automatically (default)
     #   log     = JSONL audit trail in ~/.localm/sessions/
