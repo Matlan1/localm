@@ -221,8 +221,8 @@ def _rendered_text(store) -> str:
 
 @_router.get("/api/memory")
 async def memory_get(request: Request = None):
-    from localm.inference.http_server import principal_id
-    principal = principal_id(request) if request is not None else None
+    from localm.inference.http_server import memory_principal
+    principal = memory_principal(request) if request is not None else None
     store = _chat_store(principal)
     if _persist_enabled():
         _migrate_legacy(store)
@@ -251,8 +251,8 @@ async def memory_put(req: MemoryUpdate, request: Request = None):
         raise HTTPException(
             413, f"Too many memory records ({len(facts)}); the store keeps at "
             f"most {N_MAX}. Trim the list before saving.")
-    from localm.inference.http_server import principal_id
-    principal = principal_id(request) if request is not None else None
+    from localm.inference.http_server import memory_principal
+    principal = memory_principal(request) if request is not None else None
     store = _chat_store(principal)
 
     _migrate_legacy(store)
@@ -278,8 +278,8 @@ async def memory_append(req: MemoryAppend, request: Request = None):
     fact = _strip_bullet(req.text)
     if not fact:
         raise HTTPException(400, "Nothing to remember")
-    from localm.inference.http_server import principal_id
-    principal = principal_id(request) if request is not None else None
+    from localm.inference.http_server import memory_principal
+    principal = memory_principal(request) if request is not None else None
     store = _chat_store(principal)
 
     _migrate_legacy(store)
@@ -299,8 +299,8 @@ async def memory_append(req: MemoryAppend, request: Request = None):
 async def memory_patch(mem_id: str, req: MemoryPatch, request: Request = None):
     if not _persist_enabled():
         raise HTTPException(403, "Memory writes are off in privacy mode")
-    from localm.inference.http_server import principal_id
-    principal = principal_id(request) if request is not None else None
+    from localm.inference.http_server import memory_principal
+    principal = memory_principal(request) if request is not None else None
     store = _chat_store(principal)
 
     fields = {}
@@ -319,8 +319,8 @@ async def memory_patch(mem_id: str, req: MemoryPatch, request: Request = None):
 async def memory_delete(mem_id: str, request: Request = None):
     if not _persist_enabled():
         raise HTTPException(403, "Memory writes are off in privacy mode")
-    from localm.inference.http_server import principal_id
-    principal = principal_id(request) if request is not None else None
+    from localm.inference.http_server import memory_principal
+    principal = memory_principal(request) if request is not None else None
     store = _chat_store(principal)
 
     return {"status": "deleted" if store.delete(mem_id) else "absent", "id": mem_id}
@@ -343,8 +343,8 @@ async def memory_consolidate(request: Request = None):
         return strip_think("".join(_ENGINE.chat_stream(
             [{"role": "user", "content": prompt}]))).strip()
 
-    from localm.inference.http_server import principal_id
-    principal = principal_id(request) if request is not None else None
+    from localm.inference.http_server import memory_principal
+    principal = memory_principal(request) if request is not None else None
     return synthesize_memory(complete, principal=principal)
 
 
@@ -612,7 +612,13 @@ def _memory_outlet(text, messages, ctx):
     (debounced). Side-effect only: returns the text unchanged. Any failure is
     contained so it can never affect the reply."""
     try:
-        _maybe_auto_consolidate(getattr(ctx, "principal", None))
+        # Owner (ADMIN scope) collapses to the shared "owner" namespace, matching
+        # memory_principal on the request-based paths (AUDIT-MED-14).
+        from localm import scopes as _scopes
+        prin = getattr(ctx, "principal", None)
+        if _scopes.ADMIN in (getattr(ctx, "scopes", ()) or ()):
+            prin = None
+        _maybe_auto_consolidate(prin)
     except Exception as e:
         from localm.debuglog import logger
         logger.debug("memory outlet skipped: %s", e)
