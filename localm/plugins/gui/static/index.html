@@ -255,9 +255,15 @@
             <div class="card-head-text"><h3>Find models</h3></div></div>
           <div id="disc-search-box">
             <div class="row">
-              <input type="text" id="disc-query" placeholder="search HuggingFace for GGUF models - empty shows the most downloaded" spellcheck="false">
+              <input type="text" id="disc-query" placeholder="search HuggingFace - empty shows the most downloaded" spellcheck="false">
               <button class="btn-primary" id="disc-search">Search</button>
             </div>
+            <div class="disc-formats">
+              <span class="sub">Show:</span>
+              <label class="disc-fmt-toggle"><input type="checkbox" id="disc-fmt-gguf" checked> GGUF</label>
+              <label class="disc-fmt-toggle"><input type="checkbox" id="disc-fmt-hf" checked> HF / transformers</label>
+            </div>
+            <div class="sub disc-hf-hint" id="disc-hf-hint" style="display:none"></div>
             <div class="sub" id="disc-vram"></div>
             <div id="disc-results"></div>
           </div>

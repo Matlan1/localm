@@ -238,9 +238,9 @@ def register(app: FastAPI, ctx) -> None:
         return {"status": "typed", "model": req.model, "model_type": req.model_type}
 
     # ------------------------ model discovery --------------------- #
-    # Search HuggingFace for GGUF models and show per-quant "fits your
-    # VRAM" badges. User-initiated prelude to a pull (docs/network.md);
-    # net_mode=off blocks it like everything else.
+    # Search HuggingFace for GGUF and/or HF (transformers) models and show
+    # per-quant "fits your VRAM" badges for GGUF files. User-initiated prelude
+    # to a pull (docs/network.md); net_mode=off blocks it like everything else.
 
     def _discover_status(e: Exception) -> int:
         msg = str(e)
@@ -248,18 +248,25 @@ def register(app: FastAPI, ctx) -> None:
             return 403          # blocked by the network kill switch
         if "request failed" in msg:
             return 502          # HF unreachable
-        return 422              # bad repo / no GGUF files
+        return 422              # bad repo / no GGUF files / bad format token
 
     @app.get("/api/discover/search", dependencies=[Depends(require_scope(scopes.MODELS_READ))])
-    async def discover_search(q: str = "", limit: int = 20):
-        from localm.discover import DiscoverError, hf_search, vram_info
+    async def discover_search(q: str = "", limit: int = 20, formats: str = "gguf"):
+        # `formats` is a CSV of {gguf, hf} from the search-page toggles. Empty
+        # tokens are dropped; hf_search raises DiscoverError if none stay valid.
+        # hf_backend_available lets the GUI warn (not block) that a transformers
+        # model needs the .[gpu] extra to RUN, though it can still be downloaded.
+        from localm.discover import (DiscoverError, hf_backend_available,
+                                     hf_search, vram_info)
+        wanted = [f.strip() for f in formats.split(",") if f.strip()]
         loop = asyncio.get_running_loop()
         try:
             results = await loop.run_in_executor(
-                None, lambda: hf_search(q, limit=limit))
+                None, lambda: hf_search(q, limit=limit, formats=wanted))
         except DiscoverError as e:
             raise HTTPException(_discover_status(e), str(e))
-        return {"query": q, "results": results, "vram": vram_info()}
+        return {"query": q, "results": results, "vram": vram_info(),
+                "hf_backend_available": hf_backend_available()}
 
     @app.get("/api/discover/files", dependencies=[Depends(require_scope(scopes.MODELS_READ))])
     async def discover_files(repo: str):

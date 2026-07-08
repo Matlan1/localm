@@ -251,44 +251,117 @@ export function fmtCount(n) {
 export const FIT_TEXT = { "fits": "fits your VRAM", "tight": "tight fit",
                    "too-big": "needs partial CPU offload" };
 
+export const FMT_LABEL = { gguf: "GGUF", hf: "HF" };
+
+export function discFormats() {
+  // The search-page model-type toggles -> the formats list. Defaults to gguf
+  // when the checkboxes are absent (older DOM) so search never silently returns
+  // nothing. Empty (both unchecked) is a real state the caller handles.
+  const g = $("disc-fmt-gguf"), h = $("disc-fmt-hf");
+  if (!g && !h) return ["gguf"];
+  const out = [];
+  if (!g || g.checked) out.push("gguf");
+  if (h && h.checked) out.push("hf");
+  return out;
+}
+
+function showHfHint() {
+  const hint = $("disc-hf-hint");
+  if (!hint) return;
+  // Non-blocking: HF (transformers) models still DOWNLOAD, they just cannot RUN
+  // until torch + transformers are installed. State that, do not block the pull.
+  hint.textContent = "No transformers runtime detected. HF models will download, "
+    + "but need the [gpu] extra (torch + transformers) installed to run.";
+  hint.style.display = "block";
+}
+function hideHfHint() {
+  const hint = $("disc-hf-hint");
+  if (hint) hint.style.display = "none";
+}
+
+// A bare owner/repo (no :file.gguf) tells `localm pull` to fetch the WHOLE
+// transformers repo -> the HF backend. Prefill the Add box and let the user
+// confirm (they can still just download the files, backend or not).
+function prefillHfPull(repo) {
+  $("pull-spec").value = repo;
+  $("pull-name").value = repo.split("/").pop();
+  const mmprojSelect = $("pull-mmproj");
+  if (mmprojSelect) { mmprojSelect.replaceChildren(); mmprojSelect.style.display = "none"; }
+  const nameInput = $("pull-name");
+  // scrollIntoView is absent in some environments (e.g. jsdom); guard so the
+  // prefill never throws where it is unimplemented. Browsers have it.
+  if (typeof nameInput.scrollIntoView === "function") {
+    nameInput.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+  nameInput.focus();
+  nameInput.select();
+  toast("Review the alias, then click Add to download the full HF model");
+}
+
+// One search-result repo: name + per-format badge(s) + the right pull affordance
+// (GGUF -> a per-quant file list; HF -> a whole-repo add). A repo tagged with
+// both formats gets both.
+function discRepoRow(m) {
+  const row = el("div", "disc-repo");
+  const head = el("div", "head");
+  head.appendChild(iconEl("models", "ic ic-model"));
+  head.appendChild(el("span", "name", m.id));
+  const fmts = Array.isArray(m.formats) ? m.formats : ["gguf"];
+  for (const f of fmts) head.appendChild(el("span", "fmt-badge fmt-" + f, FMT_LABEL[f] || f));
+  // Downloads + likes as inline SVGs (no emoji glyphs on the shipping surface).
+  const meta = el("span", "meta disc-stats");
+  meta.appendChild(iconEl("download", "meta-ic"));
+  meta.appendChild(el("span", "", fmtCount(m.downloads)));
+  meta.appendChild(iconEl("heart", "meta-ic"));
+  meta.appendChild(el("span", "", fmtCount(m.likes)));
+  head.appendChild(meta);
+  const filesBox = el("div", "files");
+  if (fmts.includes("gguf")) {
+    const btn = el("button", "btn-secondary", "files");
+    btn.onclick = () => discoverFiles(m.id, filesBox, btn);
+    head.appendChild(btn);
+  }
+  if (fmts.includes("hf")) {
+    const btn = el("button", "btn-secondary", "add full repo");
+    btn.onclick = () => prefillHfPull(m.id);
+    head.appendChild(btn);
+  }
+  row.appendChild(head);
+  row.appendChild(filesBox);
+  return row;
+}
+
 export async function discoverSearch() {
   const box = $("disc-results");
+  const formats = discFormats();
+  if (!formats.length) {
+    box.replaceChildren(el("div", "sub",
+      "Select at least one model type (GGUF or HF) to search."));
+    hideHfHint();
+    return;
+  }
   box.replaceChildren(el("div", "sub", "searching HuggingFace…"));
   $("disc-search").disabled = true;
   try {
     const q = $("disc-query").value.trim();
-    const r = await fetch("/api/discover/search?q=" + encodeURIComponent(q),
+    const r = await fetch("/api/discover/search?q=" + encodeURIComponent(q)
+                          + "&formats=" + encodeURIComponent(formats.join(",")),
                           { headers: authHeaders() });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
     $("disc-vram").textContent = data.vram.total
       ? `Badges compare each file against your ${(data.vram.total / GIB).toFixed(0)} GB total VRAM (weights + ~1.5 GB overhead).`
       : "No GPU VRAM detected - sizes shown without fit badges.";
+    // Show the HF-runtime hint only when HF is actually being searched and the
+    // runtime is missing (backend flag comes from the server probe).
+    if (formats.includes("hf") && data.hf_backend_available === false) showHfHint();
+    else hideHfHint();
     box.replaceChildren();
     if (!data.results.length) {
-      box.appendChild(el("div", "sub", "(no GGUF repos found)"));
+      box.appendChild(el("div", "sub", "(no matching repos found)"));
       return;
     }
-    for (const m of data.results) {
-      const row = el("div", "disc-repo");
-      const head = el("div", "head");
-      head.appendChild(iconEl("models", "ic ic-model"));
-      head.appendChild(el("span", "name", m.id));
-      // Downloads + likes as inline SVGs (no emoji glyphs on the shipping surface).
-      const meta = el("span", "meta disc-stats");
-      meta.appendChild(iconEl("download", "meta-ic"));
-      meta.appendChild(el("span", "", fmtCount(m.downloads)));
-      meta.appendChild(iconEl("heart", "meta-ic"));
-      meta.appendChild(el("span", "", fmtCount(m.likes)));
-      head.appendChild(meta);
-      const btn = el("button", "btn-secondary", "files");
-      const filesBox = el("div", "files");
-      btn.onclick = () => discoverFiles(m.id, filesBox, btn);
-      head.appendChild(btn);
-      row.appendChild(head);
-      row.appendChild(filesBox);
-      box.appendChild(row);
-    }
+    for (const m of data.results) box.appendChild(discRepoRow(m));
   } catch (e) {
     box.replaceChildren(el("div", "sub", "Search failed: " + e.message));
   } finally {
@@ -389,6 +462,22 @@ $("disc-search").onclick = discoverSearch;
 $("disc-query").addEventListener("keydown", (e) => {
   if (e.key === "Enter") discoverSearch();
 });
+
+// Restore + persist the search format toggles (both default on). Re-run the
+// search on change when results are already showing, so a toggle reflects live.
+function _bindDiscToggle(id, key) {
+  const box = $(id);
+  if (!box) return;
+  const saved = localStorage.getItem(key);
+  if (saved !== null) box.checked = saved === "true";
+  box.addEventListener("change", () => {
+    localStorage.setItem(key, box.checked ? "true" : "false");
+    const results = $("disc-results");
+    if (results && results.childElementCount) discoverSearch();
+  });
+}
+_bindDiscToggle("disc-fmt-gguf", "localm.discFmtGguf");
+_bindDiscToggle("disc-fmt-hf", "localm.discFmtHf");
 
 // add-models-disk: make adding a model already on disk discoverable - pick a
 // folder on this machine and drop its path into the spec field (the /api/models/
