@@ -151,10 +151,42 @@ async function latestRelease(request, env) {
   const assets = (rel.assets || []).map((a) => ({ id: a.id, name: a.name, size: a.size }));
   // Prefer a .zip asset (the build); else the first asset; else none.
   const asset = assets.find((a) => /\.zip$/i.test(a.name)) || assets[0] || null;
+  // Serve the detached Ed25519 signature: it ships as a sibling <build>.zip.sig asset
+  // (small base64 text). The client verifies the downloaded build against its pinned
+  // key. Absent -> null: an enforced client then refuses the unsigned build, a keyless
+  // client applies on transport trust (updater._UPDATE_PUBKEYS / verify_signature).
+  let signature = null;
+  const sigAsset = assets.find((a) => /\.sig$/i.test(a.name));
+  if (sigAsset) {
+    const txt = await fetchAssetText(env, sigAsset.id);
+    if (txt != null) signature = txt.trim();
+  }
   return json({
     ok: true, version: rel.tag_name, name: rel.name,
-    notes: String(rel.body || "").slice(0, 8000), published_at: rel.published_at, asset,
+    notes: String(rel.body || "").slice(0, 8000), published_at: rel.published_at,
+    asset, signature,
   });
+}
+
+// Read a small release asset (the .sig) as text, following GitHub's signed-URL
+// redirect by hand and CONSTRAINING the redirect host (same SSRF guard as the build
+// download). Returns null on any failure or an implausibly large body - a missing
+// signature must degrade to "unsigned", never to an arbitrary fetch.
+async function fetchAssetText(env, id) {
+  const api = `https://api.github.com/repos/${env.TARGET_REPO}/releases/assets/${id}`;
+  const r1 = await fetch(api, {
+    headers: ghHeaders(env.UPDATE_GITHUB_TOKEN, "application/octet-stream"),
+    redirect: "manual",
+  });
+  let upstream = r1;
+  if (r1.status === 301 || r1.status === 302 || r1.status === 307 || r1.status === 308) {
+    const loc = r1.headers.get("location");
+    if (!loc || !redirectHostAllowed(loc)) return null;
+    upstream = await fetch(loc); // signed URL: no auth header
+  }
+  if (!upstream.ok) return null;
+  const txt = await upstream.text();
+  return txt.length <= 4096 ? txt : null;   // a base64 Ed25519 sig is ~88 bytes
 }
 
 // ----------------------- update: stream a build -------------------------
