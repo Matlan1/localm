@@ -10,7 +10,8 @@ import pytest
 
 from localm.discover import (
     DiscoverError, _quant_of, apply_main_gpu, fit_label, hf_backend_available,
-    hf_gguf_files, hf_search, list_gpus, resolve_main_gpu_index, vram_info,
+    hf_gguf_files, hf_param_bytes, hf_search, list_gpus, resolve_main_gpu_index,
+    vram_info,
 )
 
 
@@ -209,6 +210,77 @@ class TestBackendAvailable:
             raise ValueError("half-installed namespace package")
         monkeypatch.setattr(importlib.util, "find_spec", boom)
         assert hf_backend_available() is False
+
+
+# ------------------------------------------------------------------ #
+#  HF VRAM size estimate (safetensors param count -> bf16 footprint)  #
+# ------------------------------------------------------------------ #
+
+class TestHfParamBytes:
+    @pytest.mark.parametrize("st,expected", [
+        ({"total": 134515008}, 269030016),                        # 134.5M * 2 (bf16)
+        ({"total": 1_000_000_000, "parameters": {"BF16": 1_000_000_000}}, 2_000_000_000),
+        (None, None),                                             # no metadata
+        ({}, None),                                               # no total
+        ({"total": 0}, None),                                    # zero -> unknown
+        ({"total": -5}, None),                                   # negative -> unknown
+        ({"total": "big"}, None),                               # non-int -> unknown
+        ({"total": True}, None),                                # bool is not a count
+    ])
+    def test_param_bytes(self, st, expected):
+        assert hf_param_bytes(st) == expected
+
+
+class TestHfSearchSize:
+    def test_hf_results_carry_size_and_request_expand(self, monkeypatch):
+        import json as _json
+        seen_urls = []
+
+        def fake(url, **kw):
+            seen_urls.append(url)
+            payload = [
+                {"id": "org/sized", "downloads": 3, "likes": 1, "lastModified": "",
+                 "safetensors": {"total": 100}},
+                {"id": "org/nometa", "downloads": 2, "likes": 0, "lastModified": ""},
+            ]
+            return url, "application/json", _json.dumps(payload).encode("utf-8")
+
+        monkeypatch.setattr("localm.netpolicy.safe_fetch_bytes", fake)
+        results = hf_search("x", limit=5, formats=["hf"])
+        # Repeated-key (doseq) encoding: distinct expand[] pairs, NOT a list repr.
+        # Asserting a SECOND expand pair (downloads) proves doseq=True is in effect
+        # (a non-doseq urlencode would emit one expand[]=['safetensors',...] blob).
+        assert "expand%5B%5D=safetensors" in seen_urls[0]
+        assert "expand%5B%5D=downloads" in seen_urls[0]
+        by_id = {r["id"]: r for r in results}
+        assert by_id["org/sized"]["size_bytes"] == 200    # 100 params * 2 bytes
+        assert by_id["org/nometa"]["size_bytes"] is None  # unknown -> None, not 0
+
+    def test_gguf_results_have_no_size_key(self, monkeypatch):
+        _mock_fetch(monkeypatch, [{"id": "org/g", "downloads": 1}])
+        results = hf_search("x", formats=["gguf"])
+        assert "size_bytes" not in results[0]   # GGUF is sized per-file, not here
+
+    def test_both_format_repo_keeps_hf_size(self, monkeypatch):
+        """A repo in both formats enters via the gguf list (no size); the hf pass's
+        size estimate must still be carried onto it."""
+        import json as _json
+        import urllib.parse
+
+        gguf = [{"id": "org/both", "downloads": 9}]
+        hf = [{"id": "org/both", "downloads": 9, "safetensors": {"total": 50}}]
+
+        def fake(url, **kw):
+            filt = dict(urllib.parse.parse_qsl(
+                urllib.parse.urlparse(url).query)).get("filter")
+            payload = gguf if filt == "gguf" else hf
+            return url, "application/json", _json.dumps(payload).encode("utf-8")
+
+        monkeypatch.setattr("localm.netpolicy.safe_fetch_bytes", fake)
+        results = hf_search("x", limit=5, formats=["gguf", "hf"])
+        both = next(r for r in results if r["id"] == "org/both")
+        assert sorted(both["formats"]) == ["gguf", "hf"]
+        assert both["size_bytes"] == 100        # 50 params * 2, carried from hf pass
 
 
 # ------------------------------------------------------------------ #

@@ -105,6 +105,39 @@ test("discover: unchecking HF sends only gguf", async () => {
     `only gguf is requested once HF is toggled off (got ${u})`);
 });
 
+test("discover: HF result shows total size + fit badge when known", async () => {
+  const payload = {
+    query: "", vram: { total: 16e9 }, hf_backend_available: true,
+    results: [
+      { id: "org/small", downloads: 1, likes: 0, updated: "", formats: ["hf"],
+        size_bytes: 2_000_000_000, fit: "fits" },
+    ],
+  };
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch(payload, []) });
+  await window.discoverSearch();
+  const row = rowFor(window, "org/small");
+  const size = row.querySelector(".disc-hf-size");
+  assert.ok(size, "a size is shown for the HF result");
+  assert.match(size.textContent, /GB/, "the size is rendered in GB");
+  assert.ok(row.querySelector(".fit.fits"), "a 'fits' VRAM badge is shown");
+});
+
+test("discover: HF result with no size estimate shows 'size unknown', no fit", async () => {
+  const payload = {
+    query: "", vram: {}, hf_backend_available: true,
+    results: [
+      { id: "org/unknown", downloads: 1, likes: 0, updated: "", formats: ["hf"],
+        size_bytes: null },
+    ],
+  };
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch(payload, []) });
+  await window.discoverSearch();
+  const row = rowFor(window, "org/unknown");
+  assert.match(row.querySelector(".disc-hf-size").textContent, /unknown/i,
+    "unknown size is stated, not guessed");
+  assert.ok(!row.querySelector(".fit"), "no fit badge when size is unknown");
+});
+
 test("discover: no type selected prompts and does not query", async () => {
   const calls = [];
   const { window } = loadAppWithPages({ fetchImpl: makeFetch(TWO_RESULTS, calls) });
