@@ -73,6 +73,10 @@ export async function refreshModelsPage() {
   thead.appendChild(hr);
   table.appendChild(thead);
   const tbody = el("tbody");
+  // Selectable model types - mirrors localm.model_manager.registry.MODEL_TYPES
+  // (keep in sync). Powers the per-row one-click set-type control.
+  const MODEL_TYPE_OPTIONS =
+    ["llm", "mmproj", "diffusion-unet", "text-encoder", "vae", "lora", "unknown"];
   for (const m of models) {
     const tr = el("tr");
     const nameTd = el("td", "name-cell");
@@ -86,9 +90,12 @@ export async function refreshModelsPage() {
     else if (m.loaded) nameTd.appendChild(el("span", "active-tag loaded-tag", "loaded"));
     tr.appendChild(nameTd);
     
-    // Role column (using job-state badge layout)
+    // Role column (using job-state badge layout). An 'unknown'-type model (its
+    // type could not be determined) is highlighted so it stands out as needing a
+    // type set via the control below.
     const roleTd = el("td", "mono");
-    roleTd.appendChild(el("span", "job-state", m.model_type || "llm"));
+    const roleClass = "job-state" + (m.model_type === "unknown" ? " st-unknown" : "");
+    roleTd.appendChild(el("span", roleClass, m.model_type || "llm"));
     tr.appendChild(roleTd);
     
     tr.appendChild(el("td", "mono", m.source || ""));
@@ -99,7 +106,35 @@ export async function refreshModelsPage() {
     const detail = el("button", "", "info");
     detail.onclick = () => showModelDetail(m.name);
     actions.appendChild(detail);
-    
+
+    // One-click set-type control on every row (outside the LLM-only gate below):
+    // an 'unknown'/media model otherwise has no controls, and this is how a
+    // mis-detected model is reclassified without the CLI. Changing it POSTs the
+    // chosen type, then re-renders (so an unknown->llm switch reveals use/alias).
+    const typeSel = el("select", "model-type-select");
+    typeSel.title = "Change this model's type";
+    for (const t of MODEL_TYPE_OPTIONS) {
+      const opt = el("option", "", t);
+      opt.value = t;
+      if ((m.model_type || "llm") === t) opt.selected = true;
+      typeSel.appendChild(opt);
+    }
+    typeSel.onchange = async () => {
+      typeSel.disabled = true;
+      try {
+        const r = await fetch("/api/models/type", {
+          method: "POST", headers: authHeaders(),
+          body: JSON.stringify({ model: m.name, model_type: typeSel.value }),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) { toast(data.detail || "Set type failed", true); return; }
+        toast(`Set '${m.name}' type to ${typeSel.value}`);
+        refreshModelsPage();
+        refreshPerfEstimate();
+      } finally { typeSel.disabled = false; }
+    };
+    actions.appendChild(typeSel);
+
     // Only LLMs support use/alias/remove in Phase 1
     const isLlm = !m.model_type || m.model_type === "llm";
     if (isLlm) {

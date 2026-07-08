@@ -195,8 +195,10 @@ def pull_model(
     except OSError:
         is_local_path = False
     if is_local_path:
-        # A local file gets no remote type probe: honour an explicit --type, else llm.
-        local_type = model_type if model_type != "auto" else "llm"
+        # A local file gets no remote type probe: honour an explicit --type, else let
+        # add_local deterministically detect it (GGUF -> llm, HF dir -> config.json,
+        # otherwise the 'unknown' sentinel rather than a silent 'llm').
+        local_type = None if model_type == "auto" else model_type
         return _mm.add_local(str(local), name=name, model_type=local_type, store=store)
 
     # SSRF-PULL: honour the net_mode kill switch for a REMOTE pull. net_mode=off
@@ -218,6 +220,13 @@ def pull_model(
             repo_id = spec.split(":")[0] if ":" in spec else spec
             detected_type = _hf_pipeline_tag_to_type(repo_id)
             logger.info("Auto-detected model type for %s: %s", repo_id, detected_type)
+            if detected_type == "unknown":
+                # Surface the honest result (AGENTS.md rule 5): it won't be
+                # auto-loaded for chat, but it stays runnable by name.
+                console.print(
+                    "[yellow]Could not determine this model's type[/yellow] - "
+                    "registering it as 'unknown'. Run it by name, or set its type "
+                    "later: [bold]localm set-type <name> <type>[/bold]")
         else:
             detected_type = "llm"
     else:
@@ -843,27 +852,43 @@ def _pull_url(
 
 
 def _hf_pipeline_tag_to_type(repo_id: str) -> str:
-    """Query HF API for model metadata and map pipeline_tag to a model_type.
-    Defaults to 'llm' if it looks like a text generation / LLM model or if query fails.
+    """Classify a HuggingFace repo's model type from HARD metadata (pipeline_tag,
+    library_name, and exact tag tokens).
+
+    Matching is EXACT, never substring: a tag that merely CONTAINS 'vae' / 'lora' /
+    'clip' (e.g. 'exploration' contains 'lora') must NOT be misclassified (MED-15).
+    Returns the 'unknown' sentinel - not a silent 'llm' - when no hard signal
+    resolves (including an offline/failed query), so an ambiguous pull is registered
+    honestly and is not auto-loaded as the chat model. Embedding models are
+    provisioned via `setup-embeddings`, not pulled into the chat registry, so there
+    is no 'embedding' type here.
     """
     from localm.discover import _get, HF_API
     try:
         data = _get(f"{HF_API}/api/models/{repo_id}", {"full": "false"})
         if isinstance(data, dict):
             tag = data.get("pipeline_tag")
-            if tag in ("text-to-image", "image-to-image"):
+            library = (data.get("library_name") or "").strip().lower()
+            # Exact, lowercased tag tokens - a set so membership is equality, not
+            # substring containment.
+            tags = {str(t).strip().lower() for t in data.get("tags", []) if isinstance(t, str)}
+
+            # Media / auxiliary types (exact pipeline_tag or exact tag token). These
+            # are checked before the generic text-generation LLM signal because a
+            # LoRA/VAE repo can also carry a text-generation pipeline tag.
+            if tag in ("text-to-image", "image-to-image", "text-to-audio", "audio-to-audio"):
                 return "diffusion-unet"
-            elif tag in ("text-to-audio", "audio-to-audio"):
-                return "diffusion-unet"
-            
-            tags = data.get("tags", [])
-            if any("text-encoder" in t.lower() or "clip" in t.lower() for t in tags):
-                return "text-encoder"
-            if any("vae" in t.lower() for t in tags):
+            if "vae" in tags:
                 return "vae"
-            if any("lora" in t.lower() for t in tags):
+            if "lora" in tags or library == "peft":
                 return "lora"
+            if {"text-encoder", "clip"} & tags:
+                return "text-encoder"
+            # Text generation / chat model.
+            if tag in ("text-generation", "text2text-generation", "conversational"):
+                return "llm"
     except Exception as e:
         logger.debug("HF pipeline tag query failed for %s: %s", repo_id, e)
-    return "llm"
+        return "unknown"
+    return "unknown"
 
