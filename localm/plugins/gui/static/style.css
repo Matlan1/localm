@@ -1780,6 +1780,17 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
 .disc-file .fit.fits { background: rgba(63, 182, 139, 0.18); color: var(--green); }
 .disc-file .fit.tight { background: rgba(222, 179, 73, 0.18); color: var(--yellow); }
 .disc-file .fit.too-big { background: rgba(226, 93, 93, 0.18); color: var(--red); }
+/* search model-type toggles (GGUF / HF) */
+.disc-formats { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 14px; margin: 8px 0 2px; }
+.disc-fmt-toggle { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; cursor: pointer; }
+.disc-fmt-toggle input { cursor: pointer; }
+/* per-result format badge */
+.fmt-badge { font-size: 10.5px; font-weight: 600; padding: 1px 7px; border-radius: 9px;
+  letter-spacing: 0.02em; white-space: nowrap; flex: 0 0 auto; }
+.fmt-badge.fmt-gguf { background: rgba(63, 182, 139, 0.18); color: var(--green); }
+.fmt-badge.fmt-hf { background: rgba(96, 150, 236, 0.18); color: var(--accent); }
+/* non-blocking "no HF runtime" hint under the toggles */
+.disc-hf-hint { border-left: 2px solid var(--yellow); padding-left: 8px; margin: 4px 0; color: var(--text-dim); }
 
 /* theme button */
 .theme-btn { width: 100%; margin-top: 8px; }

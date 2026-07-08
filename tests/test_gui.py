@@ -1511,14 +1511,16 @@ class TestDiscoverEndpoints:
         app, _ = gui_app
         monkeypatch.setattr(
             "localm.discover.hf_search",
-            lambda q, limit=20: [{"id": "org/m", "downloads": 1,
-                                  "likes": 0, "updated": ""}])
+            lambda q, limit=20, formats=("gguf",): [
+                {"id": "org/m", "downloads": 1, "likes": 0, "updated": "",
+                 "formats": ["gguf"]}])
         monkeypatch.setattr("localm.discover.vram_info",
                             lambda: {"total": 16_000_000_000})
         with TestClient(app) as client:
             data = client.get("/api/discover/search?q=llama").json()
         assert data["results"][0]["id"] == "org/m"
         assert data["vram"]["total"] == 16_000_000_000
+        assert "hf_backend_available" in data   # surfaced for the non-blocking HF hint
 
     def test_files_get_fit_badges(self, gui_app, monkeypatch):
         app, _ = gui_app
@@ -1536,7 +1538,7 @@ class TestDiscoverEndpoints:
         from localm.discover import DiscoverError
         app, _ = gui_app
 
-        def blocked(q, limit=20):
+        def blocked(q, limit=20, formats=("gguf",)):
             raise DiscoverError("Network access is disabled (net_mode=off).")
         monkeypatch.setattr("localm.discover.hf_search", blocked)
         with TestClient(app) as client:

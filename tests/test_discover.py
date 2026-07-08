@@ -9,8 +9,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from localm.discover import (
-    DiscoverError, _quant_of, apply_main_gpu, fit_label, hf_gguf_files,
-    hf_search, list_gpus, resolve_main_gpu_index, vram_info,
+    DiscoverError, _quant_of, apply_main_gpu, fit_label, hf_backend_available,
+    hf_gguf_files, hf_search, list_gpus, resolve_main_gpu_index, vram_info,
 )
 
 
@@ -64,14 +64,15 @@ class TestSearch:
         _mock_fetch(monkeypatch, [
             {"id": "org/model-GGUF", "downloads": 5, "likes": 2,
              "lastModified": "2026-01-01"},
-            {"modelId": "org/other"},
+            {"modelId": "org/other", "downloads": 1},
         ], seen)
-        results = hf_search("qwen 7b", limit=5)
+        results = hf_search("qwen 7b", limit=5)   # default formats = gguf only
         assert seen["filter"] == "gguf"
         assert seen["search"] == "qwen 7b"
         assert seen["sort"] == "downloads"
         assert results[0] == {"id": "org/model-GGUF", "downloads": 5,
-                              "likes": 2, "updated": "2026-01-01"}
+                              "likes": 2, "updated": "2026-01-01",
+                              "formats": ["gguf"]}
         assert results[1]["id"] == "org/other"   # modelId fallback
 
     def test_empty_query_is_popular_list(self, monkeypatch):
@@ -80,6 +81,78 @@ class TestSearch:
         hf_search("", limit=3)
         assert "search" not in seen        # no query → most-downloaded view
         assert seen["limit"] == "3"
+
+    def test_hf_format_uses_transformers_filter(self, monkeypatch):
+        seen = {}
+        _mock_fetch(monkeypatch, [
+            {"id": "org/hf-model", "downloads": 9, "likes": 3,
+             "lastModified": "2026-02-02"},
+        ], seen)
+        results = hf_search("gemma", limit=5, formats=["hf"])
+        assert seen["filter"] == "transformers"   # hf -> transformers library tag
+        assert results[0]["id"] == "org/hf-model"
+        assert results[0]["formats"] == ["hf"]
+
+    def test_both_formats_merge_dedupe_and_interleave(self, monkeypatch):
+        """gguf and hf are queried separately; a repo present in both keeps a
+        merged formats list, and the two lists are round-robin interleaved."""
+        import json as _json
+        import urllib.parse
+
+        gguf_payload = [
+            {"id": "org/both", "downloads": 100, "likes": 5},
+            {"id": "org/only-gguf", "downloads": 40, "likes": 1},
+        ]
+        hf_payload = [
+            {"id": "org/both", "downloads": 100, "likes": 5},   # same repo
+            {"id": "org/only-hf", "downloads": 70, "likes": 2},
+        ]
+
+        def fake(url, **kw):
+            filt = dict(urllib.parse.parse_qsl(
+                urllib.parse.urlparse(url).query)).get("filter")
+            payload = gguf_payload if filt == "gguf" else hf_payload
+            return url, "application/json", _json.dumps(payload).encode("utf-8")
+
+        monkeypatch.setattr("localm.netpolicy.safe_fetch_bytes", fake)
+        results = hf_search("x", limit=10, formats=["gguf", "hf"])
+        by_id = {r["id"]: r for r in results}
+        # de-duped: org/both appears once, tagged with both formats
+        assert sorted(by_id["org/both"]["formats"]) == ["gguf", "hf"]
+        assert by_id["org/only-gguf"]["formats"] == ["gguf"]
+        assert by_id["org/only-hf"]["formats"] == ["hf"]
+        # interleaved by per-format rank: gguf[0], hf[0], gguf[1]
+        assert [r["id"] for r in results] == [
+            "org/both", "org/only-hf", "org/only-gguf"]
+
+    def test_interleave_keeps_gguf_visible_when_hf_dominates(self, monkeypatch):
+        """The real-world failure the interleave fixes: HF repos routinely have
+        far higher download counts than GGUF repacks, so a plain sort-by-downloads
+        would push GGUF out of the top `limit` and a 'show GGUF' toggle could
+        return zero GGUF. Interleaving guarantees both formats stay visible."""
+        import json as _json
+        import urllib.parse
+
+        gguf = [{"id": "org/g1", "downloads": 5}, {"id": "org/g2", "downloads": 4}]
+        hf = [{"id": "org/h1", "downloads": 1000}, {"id": "org/h2", "downloads": 999}]
+
+        def fake(url, **kw):
+            filt = dict(urllib.parse.parse_qsl(
+                urllib.parse.urlparse(url).query)).get("filter")
+            payload = gguf if filt == "gguf" else hf
+            return url, "application/json", _json.dumps(payload).encode("utf-8")
+
+        monkeypatch.setattr("localm.netpolicy.safe_fetch_bytes", fake)
+        results = hf_search("x", limit=3, formats=["gguf", "hf"])
+        fmts = {f for r in results for f in r["formats"]}
+        assert "gguf" in fmts and "hf" in fmts   # both visible despite HF's downloads
+        # leads with each format's most popular, interleaved: g1, h1, g2
+        assert [r["id"] for r in results] == ["org/g1", "org/h1", "org/g2"]
+
+    def test_no_valid_format_errors(self, monkeypatch):
+        _mock_fetch(monkeypatch, [])
+        with pytest.raises(DiscoverError, match="model format"):
+            hf_search("x", formats=["bogus"])
 
     def test_net_off_blocks(self, monkeypatch):
         monkeypatch.setenv("LOCALM_NET_MODE", "off")
@@ -103,6 +176,39 @@ class TestSearch:
         monkeypatch.setattr("localm.netpolicy.safe_fetch_bytes", refuse)
         with pytest.raises(DiscoverError, match="request failed"):
             hf_search("x")
+
+
+# ------------------------------------------------------------------ #
+#  HF backend availability probe                                      #
+# ------------------------------------------------------------------ #
+
+class TestBackendAvailable:
+    def test_true_when_both_present(self, monkeypatch):
+        import importlib.util
+        monkeypatch.setattr(importlib.util, "find_spec",
+                            lambda name: object())        # every module resolves
+        assert hf_backend_available() is True
+
+    def test_false_when_torch_missing(self, monkeypatch):
+        import importlib.util
+        monkeypatch.setattr(importlib.util, "find_spec",
+                            lambda name: None if name == "torch" else object())
+        assert hf_backend_available() is False
+
+    def test_false_when_transformers_missing(self, monkeypatch):
+        import importlib.util
+        monkeypatch.setattr(
+            importlib.util, "find_spec",
+            lambda name: None if name == "transformers" else object())
+        assert hf_backend_available() is False
+
+    def test_false_when_probe_raises(self, monkeypatch):
+        import importlib.util
+
+        def boom(name):
+            raise ValueError("half-installed namespace package")
+        monkeypatch.setattr(importlib.util, "find_spec", boom)
+        assert hf_backend_available() is False
 
 
 # ------------------------------------------------------------------ #
