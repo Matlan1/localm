@@ -1789,6 +1789,12 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
   letter-spacing: 0.02em; white-space: nowrap; flex: 0 0 auto; }
 .fmt-badge.fmt-gguf { background: rgba(63, 182, 139, 0.18); color: var(--green); }
 .fmt-badge.fmt-hf { background: rgba(96, 150, 236, 0.18); color: var(--accent); }
+/* HF result inline size + VRAM fit badge (GGUF fit lives in .disc-file rows) */
+.disc-hf-size { font-family: var(--mono); font-size: 12px; color: var(--text-dim); white-space: nowrap; }
+.disc-repo .head .fit { font-size: 11px; padding: 1px 8px; border-radius: 9px; white-space: nowrap; }
+.disc-repo .head .fit.fits { background: rgba(63, 182, 139, 0.18); color: var(--green); }
+.disc-repo .head .fit.tight { background: rgba(222, 179, 73, 0.18); color: var(--yellow); }
+.disc-repo .head .fit.too-big { background: rgba(226, 93, 93, 0.18); color: var(--red); }
 /* non-blocking "no HF runtime" hint under the toggles */
 .disc-hf-hint { border-left: 2px solid var(--yellow); padding-left: 8px; margin: 4px 0; color: var(--text-dim); }
 

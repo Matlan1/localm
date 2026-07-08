@@ -308,6 +308,18 @@ function discRepoRow(m) {
   head.appendChild(el("span", "name", m.id));
   const fmts = Array.isArray(m.formats) ? m.formats : ["gguf"];
   for (const f of fmts) head.appendChild(el("span", "fmt-badge fmt-" + f, FMT_LABEL[f] || f));
+  // HF repos pull whole, so show total size + a VRAM fit badge inline (from the
+  // server's safetensors param estimate). When the estimate is unknown (no
+  // safetensors metadata) say so - never guess a fit. GGUF results are sized
+  // per-quant in the files expander instead.
+  if (fmts.includes("hf")) {
+    if (m.size_bytes) {
+      head.appendChild(el("span", "disc-hf-size", fmtSize(m.size_bytes)));
+      if (m.fit) head.appendChild(el("span", "fit " + m.fit, FIT_TEXT[m.fit]));
+    } else {
+      head.appendChild(el("span", "disc-hf-size sub", "size unknown"));
+    }
+  }
   // Downloads + likes as inline SVGs (no emoji glyphs on the shipping surface).
   const meta = el("span", "meta disc-stats");
   meta.appendChild(iconEl("download", "meta-ic"));

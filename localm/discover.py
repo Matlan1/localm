@@ -76,7 +76,9 @@ def _get(url: str, params: Optional[dict] = None) -> object:
     import urllib.parse
 
     from localm import netpolicy
-    full = url + ("?" + urllib.parse.urlencode(params) if params else "")
+    # doseq=True so a list-valued param (expand[]=safetensors&expand[]=downloads
+    # ...) encodes as repeated keys, which is how the HF models API takes expand.
+    full = url + ("?" + urllib.parse.urlencode(params, doseq=True) if params else "")
     try:
         _final, _ctype, body = netpolicy.safe_fetch_bytes(
             full, max_bytes=32 * 1024 * 1024, timeout=int(_TIMEOUT))
@@ -85,9 +87,29 @@ def _get(url: str, params: Optional[dict] = None) -> object:
         raise DiscoverError(f"HuggingFace request failed: {e}")
 
 
+def hf_param_bytes(safetensors: Optional[dict]) -> Optional[int]:
+    """Estimated GPU weight footprint in bytes for an HF model, from its
+    safetensors param metadata (the ``safetensors`` expand field of the HF models
+    API: ``{"total": <param count>, "parameters": {...}}``).
+
+    localm's HF backend loads in bf16 on GPU with no on-load quantization (see
+    inference/backends/hf.py), so the footprint is ``total_params * 2`` regardless
+    of the STORED dtype - the loader casts to bf16. This is the weight size only;
+    fit_label() adds KV-cache / compute overhead, the same way it does for a GGUF
+    file size. Returns None when the repo has no usable param count so the GUI can
+    show "size unknown" rather than a guessed badge (do-not-hide-problems: an
+    unknown is surfaced as unknown, not silently treated as zero/fits)."""
+    if not isinstance(safetensors, dict):
+        return None
+    total = safetensors.get("total")
+    if not isinstance(total, int) or isinstance(total, bool) or total <= 0:
+        return None
+    return total * 2
+
+
 def _search_one(fmt: str, query: str, limit: int) -> list[dict]:
     """One HF /api/models query for a single format, each item tagged with it."""
-    params = {
+    params: dict = {
         "filter": _FORMAT_FILTER[fmt],
         "sort": "downloads",
         "direction": "-1",
@@ -95,6 +117,12 @@ def _search_one(fmt: str, query: str, limit: int) -> list[dict]:
     }
     if query.strip():
         params["search"] = query.strip()
+    if fmt == "hf":
+        # Expand the safetensors param metadata so each result carries a param
+        # count we can turn into a VRAM fit estimate inline (no per-repo tree
+        # fetch). `expand` is restrictive - it drops the default stat fields - so
+        # re-request downloads/likes/lastModified alongside it.
+        params["expand[]"] = ["safetensors", "downloads", "likes", "lastModified"]
     data = _get(f"{HF_API}/api/models", params)
     if not isinstance(data, list):
         raise DiscoverError("Unexpected response from HuggingFace search")
@@ -103,13 +131,18 @@ def _search_one(fmt: str, query: str, limit: int) -> list[dict]:
         repo = item.get("id") or item.get("modelId")
         if not repo:
             continue
-        out.append({
+        row = {
             "id": repo,
             "downloads": item.get("downloads", 0),
             "likes": item.get("likes", 0),
             "updated": item.get("lastModified", ""),
             "formats": [fmt],
-        })
+        }
+        if fmt == "hf":
+            # bf16 weight footprint from the param count, or None when HF has no
+            # safetensors metadata (the row then shows "size unknown").
+            row["size_bytes"] = hf_param_bytes(item.get("safetensors"))
+        out.append(row)
     return out
 
 
@@ -145,6 +178,10 @@ def hf_search(query: str = "", limit: int = 20,
                 for f in item["formats"]:
                     if f not in existing["formats"]:
                         existing["formats"].append(f)
+                # A repo in both formats enters via the FIRST (gguf) list, which
+                # carried no size; keep its HF size estimate if the hf pass has one.
+                if existing.get("size_bytes") is None and item.get("size_bytes") is not None:
+                    existing["size_bytes"] = item["size_bytes"]
             else:
                 seen[item["id"]] = item
                 lst.append(item)
