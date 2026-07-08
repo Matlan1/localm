@@ -7,9 +7,8 @@ and a venv discoverable under it), read its repo commit + a pip-freeze of their
 venv, clone that same commit into <LOCALM_HOME>/comfyui, create a FRESH localm
 venv, and pip-install the SAME package versions into it (NOT a byte-copy of the
 user's venv). Custom nodes are copied only when asked. Models are shared via S1's
-extra_model_paths.yaml. When NO usable user ComfyUI is present, setup HONESTLY
-reports that the fresh hardware-matched install is stage S3 (not yet built) and
-changes nothing (AGENTS.md rule 5: no facade).
+extra_model_paths.yaml. When NO usable user ComfyUI is present, setup runs the fresh
+hardware-matched install instead (stage S3, tests/test_managed_comfy_s3.py).
 
 The heavy end-to-end test exercises the copy path FOR REAL against a MINIMAL fake:
 a real throwaway git repo (stub main.py committed, so rev-parse works) with a real
@@ -359,22 +358,8 @@ def test_count_user_custom_nodes(fake_user_comfy):
 
 
 # --------------------------------------------------------------------------- #
-#  The dispatcher + CLI: copy path when present, honest S3 report when not.    #
+#  The dispatcher + CLI: copy path when a user ComfyUI is present (fresh when not). #
 # --------------------------------------------------------------------------- #
-
-def test_cli_setup_no_user_comfy_reports_s3_and_changes_nothing(cli_runner):
-    """No usable user ComfyUI -> setup reports the fresh install is S3 (not yet
-    implemented) and creates nothing (AGENTS.md rule 5)."""
-    from localm.cli import main
-    res = cli_runner.invoke(main, ["comfy", "setup"])
-    assert res.exit_code == 0, res.output
-    low = res.output.lower()
-    assert "not yet implemented" in low or "not built" in low
-    assert "s3" in low or "fresh" in low
-    # Nothing provisioned.
-    assert not mc.is_managed_comfy_installed()
-    assert not mc.managed_comfy_paths().root.exists()
-
 
 def test_cli_setup_selects_copy_path_and_passes_flag(cli_runner, fake_user_comfy,
                                                      monkeypatch):

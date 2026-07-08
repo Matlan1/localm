@@ -250,17 +250,19 @@ def test_cli_remove_nothing_installed(cli_runner):
     assert "nothing" in res.output.lower() or "not" in res.output.lower()
 
 
-def test_cli_no_facade_setup(cli_runner):
-    """S1 must NOT ship a setup command that pretends to provision. Either it is
-    absent, or it exists and honestly reports 'not yet implemented' while
-    changing nothing on disk (AGENTS.md rule 5: no facade)."""
-    import localm.config as cfg2
+def test_cli_setup_is_honest_on_failure(cli_runner, monkeypatch):
+    """`localm comfy setup` is a REAL feature now (S2 copy + S3 fresh), not a facade.
+    It is also HONEST about failure (AGENTS.md rule 5): when provisioning fails it
+    exits non-zero and leaves nothing installed. The heavy provisioning is mocked so
+    the test stays inert (no multi-GB clone / torch download)."""
     from localm.cli import main
+    from localm.media import managed_comfy_fresh as fresh
+    from localm.media import managed_comfy_provision as prov
+    # No user ComfyUI (throwaway home) -> the fresh path; mock it to a clean failure.
+    monkeypatch.setattr(fresh, "provision_fresh",
+                        lambda **kw: prov.ProvisionResult(
+                            ok=False, status="error", message="clone failed (mocked)"))
     res = cli_runner.invoke(main, ["comfy", "setup"])
-    if res.exit_code == 2:
-        # click "no such command" - setup is simply absent this stage. Fine.
-        assert "no such command" in res.output.lower() or "usage" in res.output.lower()
-        return
-    # If present, it must be honest and inert.
-    assert "not yet implemented" in res.output.lower() or "stage" in res.output.lower()
+    assert res.exit_code != 0
+    assert "failed" in res.output.lower()
     assert not mc.is_managed_comfy_installed()

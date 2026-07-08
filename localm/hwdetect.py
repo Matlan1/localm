@@ -224,7 +224,16 @@ _TORCH_INDEX = {
     "xpu": "https://download.pytorch.org/whl/xpu",
     "rocm-linux": "https://download.pytorch.org/whl/rocm6.2",
     "rocm-win": "https://download.pytorch.org/whl/rocm6.4",
+    "cpu": "https://download.pytorch.org/whl/cpu",
 }
+
+
+def pytorch_index_url(variant: str) -> "str | None":
+    """The PyTorch wheel index URL for a torch *variant* key ("cuda" | "xpu" |
+    "rocm-linux" | "rocm-win" | "cpu"), or None if unknown. Public accessor so other
+    callers (the managed-ComfyUI fresh install picks the ComfyUI torch here) share
+    this ONE index table instead of duplicating the URLs and drifting from it."""
+    return _TORCH_INDEX.get(variant)
 
 
 def torch_pip_args(backend: str, det: "Detection | None" = None) -> str:
