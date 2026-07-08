@@ -569,6 +569,7 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         "list_models": {
             "description": "List locally registered models with size and source.",
             "inputSchema": {"type": "object", "properties": {}},
+            "annotations": {"readOnlyHint": True, "title": "List models"},
             "handler": list_models,
         },
         "system_stats": {
@@ -580,6 +581,7 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
                 "for a worse-fit one when the task genuinely needs it."
             ),
             "inputSchema": {"type": "object", "properties": {}},
+            "annotations": {"readOnlyHint": True, "title": "System stats"},
             "handler": system_stats,
         },
         "search_models": {
@@ -591,6 +593,7 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
                     "limit": {"type": "integer", "description": "Max results (default 20, max 50)"},
                 },
             },
+            "annotations": {"readOnlyHint": True, "title": "Search models"},
             "handler": search_models,
         },
         "list_model_files": {
@@ -607,6 +610,7 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
                 },
                 "required": ["repo"],
             },
+            "annotations": {"readOnlyHint": True, "title": "List repo GGUF files"},
             "handler": list_model_files,
         },
         "pull_model": {
@@ -719,16 +723,21 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
             },
             "required": ["model"],
         },
+        # Deletes the model file on disk - declare it so an MCP client can prompt
+        # for confirmation before calling (confirmation belongs at the client).
+        "annotations": {"destructiveHint": True, "title": "Remove model"},
         "handler": remove_model,
     }
     tools["run_doctor"] = {
         "description": "Check system requirements and report any issues (runs localm doctor).",
         "inputSchema": {"type": "object", "properties": {}},
+        "annotations": {"readOnlyHint": True, "title": "Run doctor"},
         "handler": run_doctor,
     }
     tools["list_plugins"] = {
         "description": "List engine plugins, their descriptions, and activation status.",
         "inputSchema": {"type": "object", "properties": {}},
+        "annotations": {"readOnlyHint": True, "title": "List plugins"},
         "handler": list_plugins,
     }
     tools["install_plugin"] = {
@@ -775,6 +784,9 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
             },
             "required": ["plugin"],
         },
+        # Removes the plugin (and, with delete_data, its stored data on disk) -
+        # declare it so an MCP client can confirm before calling.
+        "annotations": {"destructiveHint": True, "title": "Uninstall plugin"},
         "handler": uninstall_plugin,
     }
 
@@ -816,12 +828,17 @@ class MCPStdioServer:
             return self._result(mid, {})
 
         if method == "tools/list":
-            listed = [
-                {"name": name,
-                 "description": spec["description"],
-                 "inputSchema": spec["inputSchema"]}
-                for name, spec in self.tools.items()
-            ]
+            listed = []
+            for name, spec in self.tools.items():
+                entry = {"name": name,
+                         "description": spec["description"],
+                         "inputSchema": spec["inputSchema"]}
+                # MCP tool annotations (destructiveHint / readOnlyHint / title):
+                # emit them only when a tool declares them, so clients can decide
+                # when to confirm a destructive call. Dropped before this.
+                if spec.get("annotations"):
+                    entry["annotations"] = spec["annotations"]
+                listed.append(entry)
             return self._result(mid, {"tools": listed})
 
         if method == "tools/call":
