@@ -53,6 +53,7 @@ from . import (  # noqa: F401
     serve as _serve,
     models as _models,
     media as _media,
+    comfy as _comfy,
     rag as _rag,
     completion as _completion,
     keys as _keys,
