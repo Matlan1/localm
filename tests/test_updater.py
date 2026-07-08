@@ -331,3 +331,43 @@ def test_rollback_last_without_backup_raises(tmp_path, monkeypatch):
     from localm.bugreport import LocalmError
     with pytest.raises(LocalmError):
         updater.rollback_last(installed=tmp_path / "inst")
+
+
+def _stage_rollback(tmp_path, monkeypatch, *, manifest):
+    """Build a fake updates dir (backup + optional applied-names manifest) and an install
+    where an update replaced `existing.txt` and ADDED `brand_new/`, so a rollback must
+    restore the old file and (with a manifest) remove the added entry."""
+    home = tmp_path / "home"
+    monkeypatch.setattr("localm.config.home_dir", lambda: home)
+    updir = home / "updates"
+    (updir / "backup").mkdir(parents=True)
+    install = tmp_path / "install"
+    install.mkdir()
+    # pre-existing entry the update replaced: backup holds the OLD (pre-apply) content
+    (install / "existing.txt").write_text("NEW-from-update", encoding="utf-8")
+    (updir / "backup" / "existing.txt").write_text("OLD-preapply", encoding="utf-8")
+    # brand-new top-level entry the update ADDED (nothing was backed up for it)
+    (install / "brand_new").mkdir()
+    (install / "brand_new" / "f.txt").write_text("added by update", encoding="utf-8")
+    if manifest is not None:
+        (updir / "applied_names.json").write_text(json.dumps(manifest), encoding="utf-8")
+    return install
+
+
+def test_rollback_last_removes_newly_added_entry_via_manifest(tmp_path, monkeypatch):
+    # The manifest records the FULL swap set, so rollback removes the brand-new entry too.
+    install = _stage_rollback(tmp_path, monkeypatch,
+                              manifest=["existing.txt", "brand_new"])
+    res = updater.rollback_last(installed=install)
+    assert res["rolled_back"] is True
+    assert (install / "existing.txt").read_text(encoding="utf-8") == "OLD-preapply"  # restored
+    assert not (install / "brand_new").exists()   # added entry removed -> pre-apply state
+
+
+def test_rollback_last_falls_back_to_backup_listing_without_manifest(tmp_path, monkeypatch):
+    # No manifest (an older backup): backed-up entries still restore correctly; the
+    # brand-new entry is not known to the fallback and survives (documented limitation).
+    install = _stage_rollback(tmp_path, monkeypatch, manifest=None)
+    updater.rollback_last(installed=install)
+    assert (install / "existing.txt").read_text(encoding="utf-8") == "OLD-preapply"  # restored
+    assert (install / "brand_new").exists()   # fallback cannot remove an unrecorded new entry

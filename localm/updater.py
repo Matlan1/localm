@@ -322,8 +322,9 @@ def download(asset_id, dest, *, timeout: float = 120.0, opener=None) -> Path:
     # HTTPS end to end. Refuse a non-HTTPS endpoint, and refuse a redirect that
     # downgrades to http, so a MITM / redirect cannot serve the update in cleartext
     # (or pivot it). Redirects that STAY https are still followed (the proxy may
-    # hand off to a release CDN). The signature/checksum half is separate and
-    # pending the release-signing scheme.
+    # hand off to a release CDN). The signature half is separate and ENFORCED in
+    # apply(): verify_signature() checks the build against the pinned Ed25519 key
+    # (fail-closed) BEFORE it is extracted or run.
     if urllib.parse.urlparse(url).scheme != "https":
         raise LocalmError("refusing a non-HTTPS update download",
                           reason="the update endpoint must be https")
@@ -401,6 +402,15 @@ def apply(asset_id, *, signature=None, installed=None, download_opener=None,
     _refuse_downgrade(new_version)
     klass = classify(root, target, read_manifest(root))
     names = au.swap_with_backup(root, target, backup_dir)
+    # Record the FULL swap set (including brand-new top-level entries, which the backup
+    # dir does NOT contain because they had nothing to back up) so a later manual
+    # `update --rollback` removes them too, matching the pre-apply state. Without this,
+    # rollback_last() sees only backed-up (pre-existing) names and would strand new files.
+    try:
+        import json
+        (updir / "applied_names.json").write_text(json.dumps(sorted(names)), encoding="utf-8")
+    except OSError:
+        pass   # best-effort: rollback_last falls back to the backup-dir listing
 
     cmd = au.post_swap_command(klass, backend=_installed_backend())
     if cmd:
@@ -447,9 +457,26 @@ def rollback_last(*, installed=None) -> dict:
     from localm import _apply_update as au
     from localm.bugreport import LocalmError
     target = Path(installed) if installed else repo_root()
-    backup_dir = _updates_dir() / "backup"
+    updir = _updates_dir()
+    backup_dir = updir / "backup"
     if not backup_dir.is_dir() or not any(backup_dir.iterdir()):
         raise LocalmError("no update backup to roll back to", reason=str(backup_dir))
-    names = [p.name for p in backup_dir.iterdir()]
+    # Prefer the recorded full swap set (includes brand-new top-level entries the update
+    # added, which are NOT in the backup dir) so those are removed too; fall back to the
+    # backup listing for an older backup written before the manifest existed. au.rollback
+    # removes each name then restores whatever the backup holds, so a manifest-only (new)
+    # name is removed-not-restored and a backed-up name is removed-then-restored.
+    names = None
+    manifest = updir / "applied_names.json"
+    if manifest.is_file():
+        try:
+            import json
+            loaded = json.loads(manifest.read_text(encoding="utf-8"))
+            if isinstance(loaded, list) and all(isinstance(x, str) for x in loaded):
+                names = loaded
+        except (OSError, ValueError):
+            names = None
+    if names is None:
+        names = [p.name for p in backup_dir.iterdir()]
     au.rollback(backup_dir, target, names)
     return {"rolled_back": True, "backup": str(backup_dir)}
