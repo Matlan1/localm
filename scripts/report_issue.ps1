@@ -1,0 +1,120 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Pure-PowerShell bug reporter: the no-Python fallback that report-issue.bat uses
+# when localm will not start AND no Python is available (e.g. setup failed before
+# uv provisioned one). It reads the proxy URL+token from localm/config.py, shows
+# exactly what will be sent, and files an account-less GitHub issue via the proxy
+# after you confirm. A failed or declined send is NEVER reported as success
+# (AGENTS.md rule 5): it saves the report and points at the maintainer email.
+#
+# Args (passed through by report-issue.bat): --summary --detail --log --yes
+# No param()/[CmdletBinding()] on purpose: the --foo pass-through args must land in
+# $args, which advanced-function binding would instead reject as unknown parameters.
+
+$ErrorActionPreference = 'Stop'
+# scripts/report_issue.ps1 -> repo root is two levels up.
+$root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+$email = 'theilige@gmail.com'
+$fence = '```'
+
+# ---- parse the pass-through args ($args, not PowerShell -params) -----------
+$summary = ''; $detail = ''; $logPath = ''; $yes = $false
+for ($i = 0; $i -lt $args.Count; $i++) {
+  switch ($args[$i]) {
+    '--summary' { $i++; $summary = [string]$args[$i] }
+    '--detail'  { $i++; $detail  = [string]$args[$i] }
+    '--log'     { $i++; $logPath = [string]$args[$i] }
+    '--yes'     { $yes = $true }
+  }
+}
+
+function Read-Proxy {
+  $u = $env:LOCALM_BUGREPORT_URL; $t = $env:LOCALM_BUGREPORT_TOKEN
+  $cfg = Join-Path $root 'localm\config.py'
+  if (Test-Path -LiteralPath $cfg) {
+    $text = Get-Content -Raw -LiteralPath $cfg
+    if (-not $u -and $text -match '"bugreport_upload_url"\s*:\s*"([^"]+)"')   { $u = $Matches[1] }
+    if (-not $t -and $text -match '"bugreport_upload_token"\s*:\s*"([^"]+)"') { $t = $Matches[1] }
+  }
+  return @($u, $t)
+}
+
+function Scrub([string]$t) {
+  if (-not $t) { return $t }
+  # Strip the account name from any Windows home path, and obvious bearer tokens.
+  $t = [regex]::Replace($t, '([A-Za-z]:[\\/]Users[\\/])[^\\/\r\n]+', '${1}<redacted>',
+        [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+  $t = [regex]::Replace($t, '(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}', '${1}<redacted>')
+  return $t
+}
+
+Write-Host ''
+Write-Host '  LocaLM - report a problem (PowerShell fallback; no Python found)'
+Write-Host ''
+
+if (-not $summary) { $summary = Read-Host '  One line - what went wrong?' }
+if (-not $detail)  { $detail  = Read-Host '  Any more detail (optional, Enter to skip)' }
+if (-not $summary) { $summary = 'localm would not start' }
+
+$os = [System.Environment]::OSVersion.VersionString
+$body = "# localm bug report: $summary`n`n" +
+        "## What happened`n$detail`n`n" +
+        "## How it was filed`n- Filed via the standalone PowerShell reporter (no Python on this machine).`n`n" +
+        "## Environment`n- OS: $os`n- PowerShell: $($PSVersionTable.PSVersion)"
+if ($logPath -and (Test-Path -LiteralPath $logPath)) {
+  try {
+    $tail = (Get-Content -LiteralPath $logPath -Tail 120 -ErrorAction Stop) -join "`n"
+    if ($tail) { $body += "`n`n## Recent log tail`n$fence`n" + (Scrub $tail) + "`n$fence" }
+  } catch { }
+}
+$body = Scrub $body
+
+Write-Host ''
+Write-Host '  ----- this is exactly what will be sent -----'
+foreach ($ln in ($body -split "`n")) { Write-Host ('  ' + $ln) }
+Write-Host '  ---------------------------------------------'
+Write-Host ''
+
+$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+function Save-Local {
+  try {
+    $dir = Join-Path $root 'home\bug-reports'
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    $p = Join-Path $dir "bug-$stamp.md"
+    Set-Content -LiteralPath $p -Value $body -Encoding utf8
+    return $p
+  } catch { return $null }
+}
+
+$send = $yes
+if (-not $send) {
+  $ans = Read-Host '  Send this to the maintainer now? [Y/n]'
+  $send = -not ($ans -match '^[Nn]')
+}
+if (-not $send) {
+  $p = Save-Local
+  Write-Host "  Not sent. Saved at $p - email it to $email if you change your mind."
+  exit 0
+}
+
+$pair = Read-Proxy; $url = $pair[0]; $tok = $pair[1]
+if (-not $url) {
+  $p = Save-Local
+  Write-Host "  No bug-report endpoint is configured. Saved at $p; email it to $email."
+  exit 1
+}
+
+$headers = @{ 'Content-Type' = 'application/json'; 'User-Agent' = 'localm-report-issue' }
+if ($tok) { $headers['X-Localm-Token'] = $tok }
+$payload = @{ title = $summary; body = $body } | ConvertTo-Json -Depth 4
+try {
+  $resp = Invoke-RestMethod -Uri $url -Method Post -Headers $headers -Body $payload -TimeoutSec 20
+  Save-Local | Out-Null
+  $link = $null; if ($resp -and $resp.url) { $link = $resp.url }
+  if ($link) { Write-Host "  Sent to the maintainer. Thank you! Tracking issue: $link" }
+  else       { Write-Host '  Sent to the maintainer. Thank you!' }
+  exit 0
+} catch {
+  $p = Save-Local
+  Write-Host "  Could not send it ($($_.Exception.Message)). Saved at $p - email it to $email instead."
+  exit 1
+}

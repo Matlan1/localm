@@ -335,4 +335,12 @@ localm bug-report -m "..."      # generate an editable bug report and offer to s
 localm issues [NUMBER]          # list the project's issues, or show one by number
 ```
 
+`localm bug-report` needs a working localm. When localm will not start at all (a
+failed install, a broken venv, setup itself failing), use the standalone reporter
+instead: double-click `report-issue.bat` (Windows) or run `bash report-issue.sh`
+(Linux/macOS) from the clone. It shows you exactly what will be sent, files an
+account-less GitHub issue via the same proxy (no GitHub login), and works with no
+Python or a broken install. The `setup.bat` / `setup.sh` failure paths and the
+launcher's "Report a problem" button both open it for you.
+
 Updates are always user-initiated: localm never updates itself in the background.
