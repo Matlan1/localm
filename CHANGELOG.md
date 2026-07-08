@@ -5,9 +5,9 @@ All notable changes to localm are documented here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Being pre-1.0,
 minor versions may include breaking changes.
 
-This file is append-only: each release adds its section on top, and existing
-entries are never deleted or rewritten (typo and formatting fixes aside). It is
-the permanent public record of what shipped.
+Each release adds its section on top. Published (versioned) sections are the
+permanent public record of what shipped and are never rewritten; the in-progress
+`[Unreleased]` section is maintained until it is cut into a release.
 
 ## [Unreleased]
 
@@ -36,6 +36,9 @@ Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on
   when the metadata is absent), and pull the whole repo, with a non-blocking hint
   when no transformers runtime is installed (the files still download). Both
   formats are interleaved so one never crowds the other out of the results.
+- **View the changelog in the app.** A "Show changelog" button in Settings >
+  System renders the full release history in-app (backed by a read-only
+  `/api/changelog`), so what changed is visible without leaving localm.
 - **RAG indexes more:** arbitrary text files by content sniffing, zip/tar archive
   extraction, and image description via a vision model. Each chunk is tagged with
   its document format (json, yaml, python, ...), heuristic-first, with the AI
@@ -110,11 +113,17 @@ Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on
 - **MCP** destructive tools are annotated so clients can confirm them.
 
 ### Internal
-- Release tooling: a release-file manifest and verification gate, a build.zip
+- **Release pipeline.** A release-file manifest and verification gate, a build.zip
   assembler and signer, a runtime-completeness smoke gate, a pre-publish CI gate,
   and a live functional-verification gate (cold-install and exercise every
-  changelog item across both inference backends before publish).
-  Contributor-guide and test-cadence clarifications, test isolation via a temp
+  changelog item across both inference backends before publish). The publish path
+  also refuses to reuse an existing version tag or to build from a commit that is
+  not the CI-tested `origin/master`, so the signed artifact always matches what CI
+  validated.
+- **Changelog is a guarded record.** `CHANGELOG.md` is enforced append-only for
+  published (versioned) sections: `check_hygiene.py` fails the build if a shipped
+  entry is deleted or rewritten. The `[Unreleased]` draft stays freely editable.
+- Contributor-guide and test-cadence clarifications, test isolation via a temp
   `LOCALM_HOME` in `conftest.py`, and a documentation pass across the user manual.
 
 ## [0.1.0] - 2026-07-04
