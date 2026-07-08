@@ -257,7 +257,11 @@ def main(argv=None) -> int:
         _require_verification_record()
         require_ci_green(args.ci_ref)
 
-    # 1. assemble from the manifest (refuses a dirty manifest; self-verifies verify_zip)
+    # 1. assemble from the manifest (refuses a dirty manifest; self-verifies verify_zip).
+    #    CHANGELOG.md ships VERBATIM as a manifest release-include: this tooling never
+    #    generates, rewrites, or truncates it. The changelog is APPEND-ONLY and hand-
+    #    maintained (AGENTS.md) - a new version's section is added ABOVE the prior ones
+    #    by hand, and check_hygiene.py fails the build if any shipped entry is removed.
     members = build_release.build(out, force=True)
     # 2. sign it (writes <out>.sig)
     sig_path = Path(str(out) + ".sig")
