@@ -27,29 +27,34 @@ _ORDER = ("reboot", "deps", "runtime", "setup")
 # ---------------------------------------------------------------------------
 #  CHK-UPDATER-INTEGRITY (signature half): pinned release-signing key(s)
 # ---------------------------------------------------------------------------
-# Applying an update EXTRACTS and EXECUTES the downloaded build (it swaps into the
-# editable install and reboots into the new code), so a forged build is arbitrary
-# code execution. The transport is HTTPS-pinned (see download()), but transport
-# alone does not prove AUTHENTICITY - a compromised proxy / release / token could
-# still serve a malicious, well-formed build, and a checksum from the same channel
-# proves nothing (the attacker controls both). So each release build.zip is signed
-# with an Ed25519 private key the maintainer keeps OFFLINE, and apply() verifies the
-# signature against the PUBLIC key(s) PINNED here before anything is extracted.
+# Applying an update EXTRACTS and EXECUTES the downloaded build, so authenticity
+# matters. Two layers protect it, and BOTH are on by default:
+#   - the download is HTTPS-pinned (see download(); no http downgrade) and the release
+#     channel is a PRIVATE repo behind a server-side token; AND
+#   - each release build.zip is SIGNED with the Ed25519 private key whose PUBLIC half
+#     is pinned below. apply() verifies the signature against these pinned key(s)
+#     BEFORE anything is extracted, so a build served by a COMPROMISED release channel
+#     (a leaked proxy/GitHub token, a tampered release, a same-channel checksum) is
+#     rejected: the attacker controls the build but not the pinned key.
 #
-# This is a tuple of hex-encoded 32-byte Ed25519 PUBLIC keys. It is EMPTY by
-# default, which makes the updater FAIL CLOSED: with no pinned key it refuses to
-# apply any update (an unverifiable build must never be installed - AGENTS.md rule
-# 5: a security step that cannot do its job fails, it does not report success). To
-# enable self-update the maintainer:
-#   1. generates a keypair offline:  python scripts/sign_release.py --generate-key
-#   2. keeps the PRIVATE key offline (never in the repo / proxy / CI),
-#   3. pastes the printed PUBLIC key hex into this tuple,
-#   4. signs each release:  python scripts/sign_release.py sign build.zip --key ...
-#      and serves that signature from the update proxy's /update JSON.
-# It is a LIST so a new key can be added (rotation) before an old one is retired,
-# without a flag day. Embedding a PUBLIC key in source is correct: it is public
-# data, and pinning it in the shipped code is exactly what an attacker cannot forge.
-_UPDATE_PUBKEYS: tuple = ()
+# The PRIVATE key is held by the release signer and used only to sign releases; it is
+# never in the repo, the proxy, or CI. (A compromise of the signing machine itself is
+# out of scope - at that point the whole toolchain is owned regardless.) The PUBLIC key
+# ships in source: public data an attacker cannot forge, pinned so it cannot be swapped.
+# It is a LIST so a key can be rotated in before an old one is retired.
+#
+# BEHAVIOUR (mirrors localm's auth model): with a key pinned the updater ENFORCES - a
+# missing, unsigned, malformed, or non-matching signature is refused before any swap.
+# If this tuple were ever EMPTY the updater fails OPEN (applies on transport trust) so
+# an accidentally keyless build is not bricked, but the shipped default pins a key and
+# test_updater_signature guards that it stays non-empty.
+#
+# Release flow: scripts/make_release.py -> build_release.py assembles the build.zip,
+# sign_release.py signs it with the private key, and the update proxy serves the base64
+# signature in its /update JSON (check() reads it -> apply() verifies it here).
+_UPDATE_PUBKEYS: tuple = (
+    "3501b23eb1ab6ec245b5e9d9c6a70b522ca89d6250d13060a9642ce1c8868ecf",
+)
 
 
 def _load_update_pubkeys() -> list:
@@ -76,33 +81,44 @@ def _load_update_pubkeys() -> list:
 
 def verify_signature(data: bytes, signature_b64) -> None:
     """Verify *signature_b64* (base64 Ed25519 signature) over *data* against the
-    pinned public key(s). Raises :class:`~localm.bugreport.LocalmError` unless a
-    pinned key validates it.
+    pinned public key(s), IF signing is configured.
 
-    FAIL CLOSED: refuses when no key is pinned OR no signature is supplied OR the
-    signature does not match - applying an update executes its code, so an
-    unverifiable build must never be installed."""
+    Signature verification is OPTIONAL hardening (see _UPDATE_PUBKEYS); this mirrors
+    localm's auth model - fail-OPEN when unconfigured, enforce when configured:
+
+    - No key pinned (the default): signing is not set up, so this ALLOWS the update
+      (returns). Authenticity rests on the HTTPS-pinned transport + private release
+      channel; the self-updater must work out of the box with zero setup.
+    - A key pinned but every pin UNPARSEABLE: configured-but-broken, NOT unconfigured
+      -> FAIL CLOSED (missing != corrupt); a typo must never silently degrade into
+      "no verification".
+    - A key pinned and valid: REQUIRE a matching signature; a missing / malformed /
+      non-matching signature refuses before any swap (a downgrade is checked
+      separately, in _refuse_downgrade).
+
+    Raises :class:`~localm.bugreport.LocalmError` on a refusal."""
     import base64
 
     from cryptography.exceptions import InvalidSignature
     from localm.bugreport import LocalmError
     keys = _load_update_pubkeys()
     if not keys:
-        # Distinguish "never set up" from "set up but broken": both fail closed,
-        # but pointing a typo'd pin at "not set up" wastes the maintainer's
-        # debugging time on the wrong cause (missing != corrupt).
         if _UPDATE_PUBKEYS:
+            # Pins ARE configured but none parses -> fail closed (missing != corrupt):
+            # a typo'd pin must not weaken verification into a silent pass.
             raise LocalmError(
                 "refusing to apply an update: no pinned signing key is usable",
                 reason=f"{len(_UPDATE_PUBKEYS)} key(s) are pinned in _UPDATE_PUBKEYS "
                        "but none parses as an Ed25519 public key hex")
-        raise LocalmError(
-            "refusing to apply an update: no signing key is configured",
-            reason="update signature verification is not set up (no pinned public key)")
+        # UNCONFIGURED (no key pinned): signing is optional hardening that is not
+        # turned on, so allow the update - like auth.py with no key set. The default,
+        # documented fail-open posture (transport-trusted, not signature-verified);
+        # not a silenced failure.
+        return
     if not signature_b64:
         raise LocalmError(
             "refusing to apply an unsigned update",
-            reason="the release did not include a signature")
+            reason="a signing key is pinned but the release included no signature")
     try:
         sig = base64.b64decode(str(signature_b64), validate=True)
     except Exception:

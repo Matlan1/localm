@@ -8,6 +8,7 @@ minor versions may include breaking changes.
 ## [Unreleased]
 
 ### Added
+- **Release/Updater**: Release builds are assembled from a declared file manifest (`release-manifest.toml` + `scripts/build_release.py`), signed with a pinned Ed25519 key (`scripts/make_release.py` + `sign_release.py`), and the proxy serves the signature; the client verifies each build against the pinned key before applying. Self-update works out of the box (a key is pinned; no per-install setup). A verification gate (`scripts/check_manifest.py`, folded into the hygiene check) keeps the manifest honest.
 - **RAG**: Index arbitrary text files by content sniffing, extract zip/tar archives, and describe images with a vision model.
 - **RAG**: Tag each indexed chunk with its document format (json, yaml, python, ...), derived for free from the extension and a structural sniff. The local AI classifier is now only a tie-break for an unknown extension whose structure is unclear, and only when a chat model is loaded.
 - **Model Browser**: Phase 1 of the unified model browser (registry model types, ComfyUI scan, type-filtered model list).
@@ -15,6 +16,7 @@ minor versions may include breaking changes.
 - **Setup**: When native llama.cpp binaries are already provisioned, prompt to replace them instead of exiting with a note to re-run with `--force`. Non-interactive runs safely keep the existing binaries.
 
 ### Fixed
+- **Updater**: A routine self-update no longer wipes the provisioned native llama.cpp binaries or chokes on a locked DLL while localm is running. The `runtime/localm_llama_runtime/lib` binaries are preserved across both the swap and a rollback (they are local install state, like `.venv`), so an updated install can still load models without re-running `setup-llama`.
 - **RAG**: Indexing no longer fires a chat request (burning the 10s request timeout) for each unknown file extension when no chat model is loaded, so an embedding-only index does not stall.
 - **Inference**: Fix a zero-n_tokens decode failure by setting the batch token count explicitly.
 - **Setup**: Verify a downloaded llama.cpp archive against a published checksum by default.

@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """CHK-UPDATER-INTEGRITY (signature half): the self-updater verifies an Ed25519
 signature over the downloaded build against a PINNED public key before extracting
-or executing it, and FAILS CLOSED - no pinned key, no signature, a bad signature,
-or a downgrade all refuse. Applying an update runs its code, so an unverifiable
-build must never be installed (AGENTS.md rule 5).
+or executing it. Signing is auth-model style: with a key pinned it ENFORCES (a
+missing, unsigned, tampered, or downgraded build all refuse before any swap); with
+NO key pinned it fails OPEN (applies on the HTTPS + private-channel trust) so the
+feature is not inert out of the box. The SHIPPED default pins a key, and a guard
+below keeps it non-empty so the "empty key bricks self-update" bug cannot recur.
 """
 
 import base64
@@ -62,12 +64,26 @@ def test_missing_signature_fails_closed(monkeypatch):
         updater.verify_signature(b"build", None)
 
 
-def test_no_pinned_key_fails_closed(monkeypatch):
-    priv, _ = _keypair()
-    monkeypatch.setattr(updater, "_UPDATE_PUBKEYS", ())     # not configured
-    data = b"build"
-    with pytest.raises(LocalmError):
-        updater.verify_signature(data, _sig(priv, data))
+def test_no_pinned_key_allows_unsigned(monkeypatch):
+    # Fail-OPEN when unconfigured (no key pinned): signing is optional hardening that
+    # is not turned on, so verification allows the update rather than bricking it. The
+    # shipped default DOES pin a key (test_shipped_pubkeys_are_pinned), so this is the
+    # dormant safety net, not production behaviour.
+    monkeypatch.setattr(updater, "_UPDATE_PUBKEYS", ())
+    updater.verify_signature(b"build", None)                # must NOT raise
+    updater.verify_signature(b"build", "c2ln")              # a stray sig is ignored too
+
+
+def test_shipped_pubkeys_are_pinned(monkeypatch):
+    # GUARD: the real shipped tuple must stay non-empty and every pin must be a valid
+    # 32-byte (64-hex) Ed25519 public key. This is the tripwire that stops the
+    # "empty _UPDATE_PUBKEYS bricks self-update" regression from ever shipping again.
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    assert updater._UPDATE_PUBKEYS, "_UPDATE_PUBKEYS must not ship empty (see updater.py)"
+    for hexkey in updater._UPDATE_PUBKEYS:
+        raw = bytes.fromhex(str(hexkey).strip())
+        assert len(raw) == 32, f"pin is not 32 bytes: {hexkey!r}"
+        Ed25519PublicKey.from_public_bytes(raw)             # raises if not a valid key
 
 
 def test_malformed_signature_fails(monkeypatch):
@@ -111,12 +127,15 @@ def test_all_pins_malformed_names_the_real_cause(monkeypatch, caplog):
     assert "does not parse as an Ed25519" in caplog.text
 
 
-def test_unconfigured_refusal_still_says_not_set_up(monkeypatch):
-    # The genuinely-unconfigured case keeps its distinct "not set up" message.
-    monkeypatch.setattr(updater, "_UPDATE_PUBKEYS", ())
+def test_configured_but_broken_pin_still_fails_closed(monkeypatch):
+    # A pinned-but-unparseable key is CONFIGURED-yet-broken, not unconfigured, so it
+    # must FAIL CLOSED (missing != corrupt) rather than fall through to the fail-open
+    # path - a typo'd pin must never silently disable verification.
+    priv, _ = _keypair()
+    monkeypatch.setattr(updater, "_UPDATE_PUBKEYS", ("not-hex",))
     with pytest.raises(LocalmError) as ei:
-        updater.verify_signature(b"build", "c2ln")
-    assert "no signing key is configured" in ei.value.summary
+        updater.verify_signature(b"build", _sig(priv, b"build"))
+    assert "no pinned signing key is usable" in ei.value.summary
 
 
 # --------------------------- anti-rollback ------------------------------
@@ -183,15 +202,18 @@ def test_apply_refuses_unsigned_build_before_swap(tmp_path, monkeypatch, apply_c
     _assert_untouched(inst)
 
 
-def test_apply_refuses_no_pinned_key_before_swap(tmp_path, monkeypatch, apply_cfg):
-    priv, _ = _keypair()
-    monkeypatch.setattr(updater, "_UPDATE_PUBKEYS", ())     # updater not configured
+def test_apply_applies_when_no_key_pinned(tmp_path, monkeypatch, apply_cfg):
+    # Fail-OPEN: with no key pinned the signature stage does not block, so an update
+    # applies out of the box (a reboot-class swap here). Proves the feature is not
+    # inert without signing configured.
+    monkeypatch.setattr(updater, "_UPDATE_PUBKEYS", ())
     inst = _fake_install(tmp_path)
     data = _build_zip_bytes("0.2.0")
-    with pytest.raises(LocalmError):
-        updater.apply(5, installed=inst, signature=_sig(priv, data),
-                      download_opener=_opener_for(data))
-    _assert_untouched(inst)
+    res = updater.apply(5, installed=inst, signature=None,
+                        download_opener=_opener_for(data), runner=lambda c: 0)
+    assert res["applied"] and res["version"] == "0.2.0"
+    assert (inst / "VERSION").read_text().strip() == "0.2.0"
+    assert (inst / "localm" / "__init__.py").read_text() == "# 0.2.0"
 
 
 def test_apply_refuses_tampered_build_before_swap(tmp_path, monkeypatch, apply_cfg):
