@@ -44,6 +44,8 @@ _MUST_SHIP = (
     "VERSION", "pyproject.toml", "localm/__init__.py", "localm/__main__.py",
     "localm/plugins/gui/static/index.html", "assets/localm.svg",
     "scripts/report_issue.py",
+    # Recovery tooling must ship, or a broken update cannot be rolled back.
+    "scripts/rollback_update.py", "rollback.bat", "rollback.sh",
 )
 
 

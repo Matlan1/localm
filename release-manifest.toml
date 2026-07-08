@@ -90,6 +90,16 @@ patterns = [
     "scripts/report_issue.py",
     "scripts/report_issue.ps1",
 
+    # --- standalone update rollback (recover a working app when localm will not
+    #     start) --------------------------------------------------------------
+    # The root shims run scripts/rollback_update.py on ANY Python to restore the
+    # previous build from the last update's backup. Stdlib-only and it loads the
+    # restore helper by file path, so it works even when a bad update left the
+    # localm package unimportable. MUST ship, or a broken install cannot recover.
+    "rollback.bat",
+    "rollback.sh",
+    "scripts/rollback_update.py",
+
     # --- repo metadata carried with the canonical source tree ---
     ".gitignore",
     ".gitattributes",
