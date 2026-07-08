@@ -783,6 +783,22 @@ def _clear_target(target: Path) -> None:
         pass
 
 
+def _fetch_verified(url: str, target: Path, sha: Optional[str], what: str = "release asset") -> None:
+    """Fetch + place an archive, WARNING honestly when no checksum is available
+    to verify it. A security step that silently does not run is a hidden problem
+    (AGENTS.md rule 5): on the dynamic latest-release path the GitHub asset often
+    publishes no `digest` and the pinned-hash table rarely matches the newest
+    tag, so the provenance check would otherwise be skipped in complete silence -
+    while the CHANGELOG tells the user downloads are checksum-verified by default
+    (AUDIT-MED-19). Size + archive-shape checks still apply either way."""
+    if not sha:
+        console.print(
+            f"[yellow]Warning: this {what} publishes no checksum, so the download's "
+            "integrity is not cryptographically verified (its size and archive "
+            "shape are still checked). Pass --sha256 <hex> to pin one.[/yellow]")
+    _fetch_and_place(url, target, sha)
+
+
 def _provision_backend(chosen: str, target: Path, sha256: Optional[str],
                        with_cudart: bool) -> None:
     """Resolve + fetch the prebuilt(s) for *chosen* into *target*. For CUDA with
@@ -797,7 +813,7 @@ def _provision_backend(chosen: str, target: Path, sha256: Optional[str],
             console.print("[yellow]Could not resolve CUDA assets; fetching build only.[/yellow]\n"
                           "[yellow]If it fails to load, use --backend vulkan or install CUDA Toolkit.[/yellow]")
             url, fallback_sha = _resolve_backend_asset("cuda")
-            _fetch_and_place(url, target, sha256 or fallback_sha)
+            _fetch_verified(url, target, sha256 or fallback_sha, "CUDA build asset")
             return
         
         # Resolve build sha256
@@ -807,7 +823,7 @@ def _provision_backend(chosen: str, target: Path, sha256: Optional[str],
             build_sha = _PINNED_FALLBACK_SHA256.get(build["name"])
         
         console.print(f"[dim]CUDA build:[/dim] {build['name']} ({_human_mb(build.get('size'))})")
-        _fetch_and_place(build["browser_download_url"], target, sha256 or build_sha)
+        _fetch_verified(build["browser_download_url"], target, sha256 or build_sha, "CUDA build asset")
         if cudart is not None:
             if sha256:
                 # The pin is a single hash; it can only cover the build. Be honest
@@ -829,7 +845,7 @@ def _provision_backend(chosen: str, target: Path, sha256: Optional[str],
         return
     # Every other backend is a single archive resolved from the chosen name.
     url, fallback_sha = _resolve_backend_asset(chosen)
-    _fetch_and_place(url, target, sha256 or fallback_sha)
+    _fetch_verified(url, target, sha256 or fallback_sha, "release asset")
 
 
 _EXC_HEADER_RE = re.compile(
