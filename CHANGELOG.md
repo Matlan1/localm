@@ -7,35 +7,103 @@ minor versions may include breaking changes.
 
 ## [Unreleased]
 
+Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on
+2026-07-04; that tag was never distributed, so its fixes are folded in here.)
+
 ### Added
-- **Release/Updater**: Release builds are assembled from a declared file manifest (`release-manifest.toml` + `scripts/build_release.py`), signed with a pinned Ed25519 key (`scripts/make_release.py` + `sign_release.py`), and the proxy serves the signature; the client verifies each build against the pinned key before applying. Self-update works out of the box (a key is pinned; no per-install setup). A verification gate (`scripts/check_manifest.py`, folded into the hygiene check) keeps the manifest honest, and `make_release` smoke-runs each build (extract, then import + `--help` from the extracted tree) before publishing, so a release that omits a runtime-needed file cannot be cut. Publishing also gates on a full CI pass over the whole repo (enabling the runners once if disabled) and a clean tree, so a release is never cut over red or un-run CI.
-- **RAG**: Index arbitrary text files by content sniffing, extract zip/tar archives, and describe images with a vision model.
-- **RAG**: Tag each indexed chunk with its document format (json, yaml, python, ...), derived for free from the extension and a structural sniff. The local AI classifier is now only a tie-break for an unknown extension whose structure is unclear, and only when a chat model is loaded.
-- **Model Browser**: Phase 1 of the unified model browser (registry model types, ComfyUI scan, type-filtered model list).
-- **MCP**: Expose setup, model removal, diagnostics, and plugin management tools to the MCP server.
-- **Setup**: When native llama.cpp binaries are already provisioned, prompt to replace them instead of exiting with a note to re-run with `--force`. Non-interactive runs safely keep the existing binaries.
+- **Media: localm can manage its own ComfyUI (opt-in).** For image, music, and
+  video generation, localm can install and run an isolated, hardware-matched
+  ComfyUI kept separate from any existing one, via `localm comfy setup`
+  (copy-path or a fresh install) and GUI setup/status/remove on the media pages;
+  `localm doctor` hints at it. It coexists with a user's own ComfyUI rather than
+  replacing it, and an in-memory shim works around an upstream ComfyUI crash.
+- **Signed, out-of-the-box self-update.** `localm update` works with no
+  per-install setup: builds are assembled from a declared file manifest and
+  signed, and the client verifies the signature before applying (see Security).
+- **Report a problem even when localm will not start.** A standalone,
+  account-less reporter (the `report-issue` entry) files a bug report through the
+  localm proxy with no working install and no GitHub login, previewing exactly
+  what will be sent first.
+- **Unified model browser (phase 1):** registry model types, a ComfyUI model
+  scan, and a type-filtered model list.
+- **RAG indexes more:** arbitrary text files by content sniffing, zip/tar archive
+  extraction, and image description via a vision model. Each chunk is tagged with
+  its document format (json, yaml, python, ...), heuristic-first, with the AI
+  classifier only a tie-break for an unclear extension when a chat model is loaded.
+- **MCP server exposes more tools:** setup, model removal, diagnostics, and plugin
+  management, with annotations so clients can confirm destructive calls.
+- **Model management:** deterministic model type-detection with an explicit
+  `unknown` sentinel and a `.safetensors` directory scan; a `--store` option when
+  adding a model; a main-GPU selector with multi-instance GPU coordination and
+  explicit model unload.
+- **Setup dead-ends removed:** bootstrap `uv` automatically when it is missing,
+  and prompt to replace already-provisioned native binaries instead of exiting
+  (non-interactive runs keep the existing binaries).
+
+### Changed
+- **Media:** managed-ComfyUI status is checked only when it matters, not every 5s.
+- **Inference:** repeated native-stderr lines are de-duplicated during generation,
+  and native stderr redirection is tightened.
+- **RAG:** an embedding-only index no longer stalls or burns the request timeout,
+  because format tagging is heuristic-first and the AI classifier runs only as a
+  tie-break with a chat model loaded.
+- **Media:** legacy in-package personal workflow overrides are migrated to the
+  data directory on startup, so a self-update cannot wipe them.
+- **Dependencies:** huggingface-hub 1.22, transformers 5.x, fastapi 0.139,
+  pillow 12.3, plus dev/tooling bumps; Dependabot now tracks the native `uv`
+  ecosystem.
 
 ### Fixed
-- **Updater**: A routine self-update no longer wipes the provisioned native llama.cpp binaries or chokes on a locked DLL while localm is running. The `runtime/localm_llama_runtime/lib` binaries are preserved across both the swap and a rollback (they are local install state, like `.venv`), so an updated install can still load models without re-running `setup-llama`.
-- **RAG**: Indexing no longer fires a chat request (burning the 10s request timeout) for each unknown file extension when no chat model is loaded, so an embedding-only index does not stall.
-- **Inference**: Fix a zero-n_tokens decode failure by setting the batch token count explicitly.
-- **Setup**: Verify a downloaded llama.cpp archive against a published checksum by default.
-- **Setup**: Do not print the "no data directory configured" warning during the setup phase itself.
-- **Inference**: Fix the lenient tool-call JSON parser mishandling unescaped backslashes (Windows paths).
+- **VRAM and multi-model handling:** safe multi-model VRAM eviction; idle-unload
+  keeps the engine for a lazy reload; concurrent loads of different models no
+  longer preempt each other; the active model is marked in `/v1/models` and
+  attached to instead of the first entry; `/v1/embeddings` no longer force-loads
+  the chat model; a stale VRAM estimate and a cross-instance conversation leak are
+  fixed.
+- **Inference:** a zero-n_tokens decode failure, batch memory-safety and
+  token-position bugs, and a tool-call grammar that let small models loop; the
+  lenient tool-call JSON parser no longer mangles backslashes (Windows paths).
+- **RAG safety:** archive extraction is bounded (zip/tar bombs), compressed tars
+  are handled, and a folder index skips model weights and secrets and does not
+  index member-read errors.
+- **Models and API:** a local model file registers fully offline with no
+  HuggingFace path leak; `/api/models` no longer 500s on a forward reference; a
+  hidden native-load failure cause is surfaced.
+- **Do not hide problems:** removed production code paths that detected
+  pytest/mocks and fabricated behavior; a swallowed VRAM-gate failure is now logged.
+- **Bug reporter:** removed the only path that could ask for a GitHub login; the
+  non-interactive path now names the account-less send channel.
+- **Memory:** the owner's chat memory stays in the shared `owner` namespace.
+- **GUI:** an empty ComfyUI scan shows the reason instead of a bare "Added 0"; the
+  GUI no longer sends a chat request when no model is loaded.
+- **Setup:** warn when a llama.cpp download has no checksum to verify (and verify
+  against a published checksum by default); discard stray keyboard input before the
+  CUDA prompt; skip console-window hiding in debug mode; skip draft releases with
+  no uploaded asset.
+- **CLI:** `localm.bat` argument forwarding; a `localm serve` start path that
+  skipped the bind-security gates; an `UnboundLocalError` in the chat runner; and
+  `coder_confirm_timeout=0` now means wait forever.
+- **Chat:** trimmed the injected web-access prompts so weak models stop fixating on them.
 
-## [0.1.1] - 2026-07-04
+### Security
+- **Authenticated self-update.** Each release build is signed with an offline
+  Ed25519 key and verified against a pinned public key before it is extracted or
+  executed, so a compromised release channel cannot push a forged build.
+  Anti-rollback refuses an older signed build, the download stays HTTPS-pinned, and
+  a self-update no longer wipes the provisioned native runtime. Publishing is gated
+  on a clean tree, a full CI pass over the repo, and a build that imports and runs.
+- **Job API privilege escalation fixed:** correct principal-ID hashing for
+  admin/owner keys, so owner-created jobs are no longer reachable by
+  loopback-anonymous roles.
+- **ComfyUI launch** no longer has a shell-injection vector on Windows.
+- **RAG folder index** skips model weights and secrets rather than indexing them.
+- **MCP** destructive tools are annotated so clients can confirm them.
 
-### Fixed
-- **Inference**: Fixed a threading race/concurrency crash in lazy grammar sampling by ensuring mock Llama structures consistently initialize the underlying `_inference_lock`.
-- **Security**: Hardened background job API routes by restoring correct principal ID hashing for admin/owner keys, preventing a privilege escalation regression where owner-created jobs became accessible/owned by loopback anonymous roles.
-- **CLI**: Resolved a server start delegation issue in `localm serve` where fail-fast binding security gates were skipped due to late port-bind warning evaluations.
-- **CLI**: Fixed a potential `UnboundLocalError` for `sys` in the chat runner module.
-- **CLI**: Avoid ComfyUI launch shell injection vectors on Windows platform.
-- **Setup**: Discarded stray buffered keyboard inputs prior to interactive CUDA configuration prompts to prevent accidental selections.
-- **Setup**: Skip console window hiding behavior in debug mode on Windows.
-- **Setup**: Fixed release tag asset resolution logic to skip draft releases with un-uploaded binary archives.
-- **Plugins**: Ensure builtin `chat` dependency is pre-installed/self-healed prior to running CLI plugin dependency checks.
-- **Tests**: Isolated all suite environments using a temp directory `LOCALM_HOME` in `conftest.py` to prevent local configuration state leakages from polluting test executions.
+### Internal
+- Release tooling: a release-file manifest and verification gate, a build.zip
+  assembler and signer, a runtime-completeness smoke gate, and a pre-publish CI
+  gate. Contributor-guide and test-cadence clarifications, and test isolation via a
+  temp `LOCALM_HOME` in `conftest.py`.
 
 ## [0.1.0] - 2026-07-04
 
@@ -77,5 +145,5 @@ First tagged release. A self-contained, offline local-LLM platform.
 - The NVIDIA GPU path is validated by design and CI-adjacent testing; the primary
   development hardware is AMD.
 
-[0.1.1]: https://github.com/Matlan1/localm/releases/tag/v0.1.1
+[Unreleased]: https://github.com/Matlan1/localm/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/Matlan1/localm/releases/tag/v0.1.0
