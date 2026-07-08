@@ -23,8 +23,11 @@ from __future__ import annotations
 import argparse
 import base64
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
+import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))   # sibling scripts
@@ -32,6 +35,60 @@ import build_release  # noqa: E402
 import sign_release    # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
+
+# Critical non-.py files a working release must carry (a spot-check on top of the
+# import smoke below - these are the "omitted and unnoticed until later" class).
+_MUST_SHIP = (
+    "VERSION", "pyproject.toml", "localm/__init__.py", "localm/__main__.py",
+    "localm/plugins/gui/static/index.html", "assets/localm.svg",
+    "scripts/report_issue.py",
+)
+
+
+def smoke_test(zip_path: Path) -> None:
+    """Prove the built release IMPORTS AND RUNS on its own, so a runtime-needed file
+    that was omitted (mis-classified as dev-only, or gitignored) is caught HERE at
+    build time, not by a user later.
+
+    Extracts the build.zip to a throwaway dir and, importing ONLY from that tree
+    (cwd + PYTHONPATH = the extracted release, so it shadows any dev/editable install):
+    runs ``python -m localm --help`` (imports the whole CLI command tree) and imports
+    the heavy runtime modules (server app, plugin loader, updater, setup). Also spot-
+    checks a few critical assets. Raises SystemExit on any failure - the manifest gate
+    proves every file is CLASSIFIED; this proves the included set is actually COMPLETE.
+
+    Uses the current interpreter (sys.executable), which must be able to import localm's
+    dependencies - i.e. run make_release from the project venv."""
+    tmp = Path(tempfile.mkdtemp(prefix="localm-relcheck-"))
+    try:
+        with zipfile.ZipFile(zip_path) as z:
+            z.extractall(tmp)
+        missing = [m for m in _MUST_SHIP if not (tmp / m).is_file()]
+        if missing:
+            raise SystemExit(f"release smoke: missing critical file(s) from the build: {missing}")
+        if not any((tmp / "localm/plugins/gui/static").rglob("*.js")):
+            raise SystemExit("release smoke: no GUI JavaScript shipped")
+        if not any((tmp / "docs").glob("*.md")):
+            raise SystemExit("release smoke: no docs shipped")
+
+        env = {**os.environ, "PYTHONPATH": str(tmp), "LOCALM_HOME": str(tmp / "_home")}
+        checks = (
+            (["-m", "localm", "--help"], "localm --help (CLI command tree)"),
+            (["-c", "from localm.inference.http_server import create_app; "
+                    "from localm.plugins.loader import discover_plugins; "
+                    "import localm.setup_llama, localm.updater, localm._apply_update, localm.bugreport"],
+             "runtime modules (server + loader + updater + setup)"),
+        )
+        for args, what in checks:
+            r = subprocess.run([sys.executable, *args], cwd=str(tmp), env=env,
+                               capture_output=True, text=True, timeout=180)
+            if r.returncode != 0:
+                raise SystemExit(
+                    f"release smoke FAILED - the extracted release does not run [{what}].\n"
+                    "A runtime-needed file may be omitted (mis-classified dev-only, or "
+                    f"gitignored). Details:\n{(r.stderr or r.stdout)[-1600:]}")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _pinned_pubkeys() -> tuple:
@@ -95,8 +152,11 @@ def main(argv=None) -> int:
         raise SystemExit("signing failed")
     # 3. self-check: the signed build must verify against the SHIPPED pinned key
     _verify_against_pinned(out, sig_path)
+    # 4. smoke: the release must IMPORT AND RUN on its own (catches an omitted runtime
+    #    file before it reaches a user). Gates publish - refuses a build that will not run.
+    smoke_test(out)
     print(f"built + signed {out} ({len(members)} files) and {sig_path.name}")
-    print("signature verifies against the pinned key in updater._UPDATE_PUBKEYS")
+    print("signature verifies against the pinned key; release imports + runs (smoke OK)")
 
     tag = f"v{version}"
     if args.publish:
