@@ -5,21 +5,15 @@
    name exactly as before. */
 "use strict";
 
-/* ================================================================ */
-/*  Shared helpers                                                   */
-/* ================================================================ */
-
 export const $ = (id) => document.getElementById(id);
 
 // Read a JSON value from localStorage without letting a CORRUPT entry crash the
-// caller. A plain `JSON.parse(localStorage.getItem(k) || "[]")` collapses two
-// different cases into one: a MISSING key (normal first run) and a PRESENT-but-
-// malformed value (partial/truncated write, quota loss, a manual/extension edit).
-// The `|| "[]"` only covers the missing case; a corrupt value still throws
-// SyntaxError. When that parse runs at module top level (chat.js state init), the
-// throw aborts the whole ES-module graph and the app boots to a blank shell with
-// no in-app way to recover. Branch the two cases and surface corruption (rule 5:
-// warn, do not silently swallow) instead of failing the boot.
+// caller. `JSON.parse(getItem(k) || "[]")` collapses two cases: a MISSING key
+// (normal first run) and a PRESENT-but-malformed value (truncated write, quota
+// loss, manual/extension edit). The `|| "[]"` only covers missing; a corrupt
+// value still throws SyntaxError, and at module top level (chat.js state init)
+// that aborts the whole ES-module graph, booting a blank shell with no recovery.
+// Branch the two cases and surface corruption (rule 5: warn, do not swallow).
 export function readStoredJSON(key, fallback) {
   let raw;
   try { raw = localStorage.getItem(key); }
@@ -33,16 +27,13 @@ export function readStoredJSON(key, fallback) {
   }
 }
 
-// AUD-INSTANCEID: localStorage is scoped by browser ORIGIN (protocol+host+port)
-// only - never by which backend DATA DIRECTORY is actually running behind it.
-// localm's default port only changes when it is already busy, so a fresh
-// install opened after a prior instance closed typically reuses the same
-// origin, and therefore the SAME localStorage bucket, as a totally unrelated
-// data directory. Every key below holds data that is only meaningful for
-// whichever backend is actually connected, so all of them are wiped together
-// the moment the connected backend's instance id (served on /v1/config) does
-// not match the one last confirmed for this origin - see reconcileInstanceId.
-// (localm.theme, localm.logoStyle, and the TTS voice picks are genuine
+// AUD-INSTANCEID (canonical: see reconcileInstanceId below). localStorage is
+// scoped by browser ORIGIN only, never by which backend DATA DIRECTORY runs
+// behind it, and localm reuses the default port, so a fresh install can inherit
+// a prior instance's origin and its localStorage bucket. Every key below is only
+// meaningful for the connected backend, so all are wiped together when its
+// instance id (served on /v1/config) does not match this origin's last-confirmed
+// one. (localm.theme, localm.logoStyle, and the TTS voice picks are genuine
 // device/browser preferences and are deliberately NOT in this list.)
 export const INSTANCE_SCOPED_KEYS = [
   "localm.conversations",
@@ -60,12 +51,11 @@ export const INSTANCE_SCOPED_KEYS = [
 
 const INSTANCE_ID_KEY = "localm.instanceId";
 
-/** True when this browser origin already confirmed the id of whichever backend
- *  is currently connected, on some EARLIER successful /v1/config round trip.
- *  Used to gate every instance-scoped localStorage read that runs at boot
- *  BEFORE this page load's own round trip resolves (see init.js): a browser
- *  that has never confirmed pairing with this exact backend must not trust,
- *  render, or upload data left behind by a different one at the same
+/** True when this browser origin already confirmed the connected backend's id on
+ *  an EARLIER /v1/config round trip. Gates every instance-scoped localStorage
+ *  read that runs at boot BEFORE this page load's own round trip resolves (see
+ *  init.js): a browser that never confirmed pairing with this exact backend must
+ *  not trust, render, or upload data left by a different one at the same
  *  origin/port (AUD-INSTANCEID). */
 export function instanceCacheTrusted() {
   try { return !!localStorage.getItem(INSTANCE_ID_KEY); }
@@ -97,23 +87,21 @@ export function reconcileInstanceId(serverInstanceId) {
   return matched;
 }
 
-// S2: the API key is no longer kept in JS-readable localStorage. Open-mode
-// management uses the per-process shell token (injected as a global, sent as a
-// bearer HEADER); protected mode rides the HttpOnly session cookie (an opaque
-// session id, auto-sent same-origin) plus a session-DERIVED CSRF token that
-// authHeaders() reads from window.__LOCALM_CSRF__ (fetched from GET /api/session).
+// S2: the API key is no longer kept in JS-readable localStorage. Open mode uses
+// the per-process shell token (global, sent as a bearer HEADER); protected mode
+// rides the HttpOnly session cookie (opaque session id, auto-sent same-origin)
+// plus a session-DERIVED CSRF token authHeaders() reads from window.__LOCALM_CSRF__
+// (fetched from GET /api/session).
 export const SHELL_TOKEN = window.__LOCALM_SHELL_TOKEN__ || "";
 
 export function readCookie(name) {
   const m = document.cookie.match(new RegExp("(?:^|; )" + name + "=([^;]*)"));
   if (!m) return "";
-  // A cookie value is untrusted input. decodeURIComponent throws a URIError on a
-  // malformed percent-encoding; letting that propagate makes authHeaders() throw,
-  // so EVERY `fetch(url, {headers: authHeaders()})` rejects before the request is
-  // even sent - and bootAuthProbe then reports a perfectly reachable server as
-  // "unreachable" and shows the reconnect overlay with no way out. A bad cookie
-  // must never brick the client, so decode best-effort and fall back to the raw
-  // value (what the server stored) on failure.
+  // A cookie value is untrusted input. decodeURIComponent throws a URIError on
+  // malformed percent-encoding; if that propagates authHeaders() throws, EVERY
+  // fetch rejects unsent, and bootAuthProbe reports a reachable server as
+  // "unreachable" (reconnect overlay, no way out). A bad cookie must never brick
+  // the client, so decode best-effort and fall back to the raw value on failure.
   try { return decodeURIComponent(m[1]); }
   catch (e) { return m[1]; }
 }
@@ -122,12 +110,11 @@ export function authHeaders(extra = {}) {
   const h = { "Content-Type": "application/json", ...extra };
   const csrf = window.__LOCALM_CSRF__ || "";
   if (csrf) {
-    // Session (cookie) mode: authenticate via the HttpOnly session cookie
-    // (auto-sent same-origin) + a CSRF header. The token is DERIVED from the
-    // session server-side and fetched from GET /api/session (stashed here), NOT a
-    // readable cookie that could be cleared independently and desync from the
-    // session (which 403'd every write - the reported bug). Do NOT also send the
-    // shell-token bearer: the Authorization header wins over the cookie
+    // Session (cookie) mode: HttpOnly session cookie (auto-sent same-origin) + a
+    // CSRF header. The token is DERIVED from the session server-side (fetched from
+    // GET /api/session), NOT a readable cookie that could be cleared and desync
+    // from the session (which 403'd every write - the reported bug). Do NOT also
+    // send the shell-token bearer: the Authorization header wins over the cookie
     // server-side, and the open-mode shell token is rejected once auth is on.
     h["X-CSRF-Token"] = csrf;
   } else if (SHELL_TOKEN) {
@@ -183,16 +170,13 @@ export function stripThink(text) {
   return (text || "").replace(/<think>[\s\S]*?(<\/think>|$)/g, "").trim();
 }
 
-/** Replace a raw tool-call block with a compact human-readable note. Runs in the
- *  DISPLAY and on the assistant history RE-SENT to the model, so a model never
- *  sees its own raw control tokens echoed back (feeding `<|tool_call>` markers into
- *  the context destabilised some finetunes into repetition - CHAT-TOOL-1).
- *
- *  Matches every dialect `parseWebCall` EXECUTES, not just the canonical tag:
- *  `<tool_call>`, the |-piped `<|tool_call|>` finetune wrappers, and the Gemma
- *  `call:{...}` prefix. The name/query are pulled with tolerant regexes (the inner
- *  JSON is often single-quoted / trailing-comma'd), so anything that ran is also
- *  defanged instead of leaking raw to the screen and the next prompt. */
+/** Replace a raw tool-call block with a compact note. Runs in the DISPLAY and on
+ *  the assistant history RE-SENT to the model, so a model never sees its own raw
+ *  control tokens echoed back (feeding `<|tool_call>` markers back destabilised
+ *  some finetunes into repetition - CHAT-TOOL-1). Matches every dialect
+ *  `parseWebCall` EXECUTES (`<tool_call>`, the |-piped `<|tool_call|>` wrappers,
+ *  the Gemma `call:{...}` prefix); name/query use tolerant regexes (inner JSON is
+ *  often single-quoted / trailing-comma'd) so anything that ran is defanged too. */
 export function formatToolCalls(text) {
   return (text || "").replace(
     /<\|?\/?tool_call\|?>[\s\S]*?<\|?\/?tool_call\|?>/g,
@@ -236,13 +220,11 @@ export function renderMarkdown(target, text, opts = {}) {
   const { think, open, rest: rawRest } = splitThink(scrubMarkers(text));
   const rest = formatToolCalls(rawRest);
 
-  // Think block: update IN PLACE rather than rebuilding it every token. The old
-  // code wiped target.innerHTML on each streamed chunk and recreated the
-  // <details>, which reset its open/closed state every tick - so the reasoning
-  // bubble could not be toggled WHILE the model was working. Keeping the same
-  // element lets the user open/collapse it mid-stream and have that stick.
-  // Default: open while still thinking, collapse once done - until the user
-  // clicks it (data-userset), after which their choice is left alone.
+  // Think block: update IN PLACE rather than rebuild every token. Recreating the
+  // <details> per chunk reset its open/closed state each tick, so the reasoning
+  // bubble could not be toggled mid-stream; keeping the same element makes a
+  // user toggle stick. Default: open while thinking, collapse once done - until
+  // the user clicks it (data-userset), after which their choice is left alone.
   let det = target.querySelector("details.think-block");
   if (think) {
     if (!det) {
@@ -271,11 +253,10 @@ export function renderMarkdown(target, text, opts = {}) {
   }
   main.innerHTML = DOMPurify.sanitize(marked.parse(rest || ""));
   // Never leave a blank reply bubble. On a SETTLED render (opts.final - a reload
-  // or the post-stream renderChat, never a mid-stream shell) a body that rendered
-  // to nothing visible gets a plain note instead of an empty box, so "no matter
-  // how small the model, it does not just break" (the real case: a 1B model whose
-  // <think> works but whose answer is a bare empty ```code fence). Gated on final
-  // so a slow model is never flashed a false "no reply" before its first token.
+  // or post-stream renderChat, never a mid-stream shell) a body that rendered to
+  // nothing visible gets a plain note instead of an empty box (real case: a 1B
+  // model whose <think> works but whose answer is a bare empty ```code fence).
+  // Gated on final so a slow model is never flashed a false "no reply" early.
   if (opts.final && !mainHasVisibleContent(main)) {
     main.replaceChildren(el("div", "md-empty", "(no reply text)"));
   }
@@ -310,13 +291,11 @@ export function renderMarkdown(target, text, opts = {}) {
   target.querySelectorAll("pre").forEach(enhanceCodeBlock);
 }
 
-/* ---- Artifacts canvas (A3) --------------------------------------------- *
- * A self-contained HTML/SVG block in a reply can be rendered live in a side
- * pane. The render is HARD-sandboxed: an <iframe sandbox="allow-scripts">
- * (NO allow-same-origin, so no access to this app's origin/cookies/storage)
- * whose srcdoc carries a Content-Security-Policy that blocks ALL network. So
- * an artifact can be interactive yet cannot phone home or read the app -
- * consistent with the privacy contract / "do not hide problems".            */
+/* Artifacts canvas (A3): a self-contained HTML/SVG reply block rendered live in
+ * a side pane, HARD-sandboxed - an <iframe sandbox="allow-scripts"> (NO
+ * allow-same-origin, so no access to this app's origin/cookies/storage) whose
+ * srcdoc carries a CSP that blocks ALL network. Interactive yet cannot phone
+ * home or read the app (privacy contract / "do not hide problems"). */
 
 /** The artifact language for a <code> element, or null if it is not a
  *  renderable self-contained block. Reads the captured data-lang first, then

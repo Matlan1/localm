@@ -15,11 +15,9 @@ _UNDOABLE_TOOLS: frozenset[str] = frozenset({
     "write_file", "edit_file", "patch_file", "edit_notebook_cell",
 })
 
-# File-access tools whose target path must match the active scope glob.
-# The check keys on the `path` arg; for tools whose primary target is a
-# `glob` or `output_path` arg instead (or as well), that arg is checked too
-# (see _SCOPE_PATH_ARGS). run_shell is intentionally NOT scoped: it runs
-# arbitrary commands, so a path-arg check cannot meaningfully confine it.
+# File-access tools whose target path must match the active scope glob. Keys on
+# the `path` arg; a tool whose real target is a `glob`/`output_path` arg has that
+# checked too (see _SCOPE_PATH_ARGS). run_shell is unscoped (see _INTENTIONALLY_UNSCOPED).
 _SCOPED_TOOLS: frozenset[str] = frozenset({
     "read_file", "write_file", "edit_file", "patch_file",
     "list_dir", "tree",
@@ -28,22 +26,20 @@ _SCOPED_TOOLS: frozenset[str] = frozenset({
     "edit_notebook_cell", "generate_image",
 })
 
-# File-touching tools deliberately NOT confined by the scope glob: git_diff /
-# git_log take a git PATHSPEC (repo history, not a filesystem path to confine),
-# and run_tests / run_shell EXECUTE a process (a path-arg check cannot
-# meaningfully confine arbitrary code). Any OTHER registry tool that exposes a
-# path-like argument MUST appear in _SCOPED_TOOLS above; the contract test
-# test_coder_scope_default_deny enforces this, so a newly-added file tool is a
-# test failure rather than "unconfined by omission" (AUD-CODERTOOLS: the scope
-# allowlist is default-deny at authoring time, not reliant on a human remembering).
+# Tools deliberately NOT confined by the scope glob: git_diff / git_log take a git
+# PATHSPEC (not a filesystem path), and run_tests / run_shell EXECUTE a process (a
+# path-arg check cannot confine arbitrary code). Any OTHER registry tool with a
+# path-like arg MUST be in _SCOPED_TOOLS above; the contract test
+# test_coder_scope_default_deny enforces this, so a new file tool is a test failure,
+# not "unconfined by omission" (AUD-CODERTOOLS: default-deny at authoring time, not
+# reliant on a human remembering).
 _INTENTIONALLY_UNSCOPED: frozenset[str] = frozenset({
     "run_shell", "run_tests", "git_diff", "git_log",
 })
 
-# For each scoped tool, the argument names that name a path/glob to enforce the
-# scope against. Order matters only for which value is reported first; any
-# present arg that falls outside the scope rejects the call. Tools default to
-# checking "path"; entries here add (or replace with) the tool's real target.
+# For each scoped tool, the arg names holding a path/glob to enforce scope against.
+# Any present arg outside the scope rejects the call (order only sets which value is
+# reported first). Tools default to "path"; entries here add/replace the real target.
 _SCOPE_PATH_ARGS: dict[str, tuple[str, ...]] = {
     "grep":           ("path", "glob"),
     "search_files":   ("path", "pattern"),
@@ -51,16 +47,14 @@ _SCOPE_PATH_ARGS: dict[str, tuple[str, ...]] = {
     "generate_image": ("output_path", "input_image"),
 }
 
-# MCP tools (mcp_<server>_<tool>) AND plugin tools (plugin_<plugin>_<export>) are
-# registered dynamically with unknown arg schemas, so they are not in
-# _SCOPED_TOOLS / _SCOPE_PATH_ARGS (the default-deny contract test cannot see them
-# at authoring time). When a scope is active we still apply it to their common
-# path-like args, so an owner's declared --scope is honoured by these dynamic file
-# tools too (CHK-MCP-SCOPE + CHK-SCOPE-PLUGIN, defense-in-depth). Best-effort: a
-# tool using an unusual path-arg name is not caught (its author is the owner's own
-# MCP / plugin config). Restricted, shareable keys cannot reach either family at
-# all (both are disabled for a restricted session), so this only tightens an
-# owner's self-imposed --scope, never a cross-trust boundary.
+# MCP (mcp_<server>_<tool>) and plugin (plugin_<plugin>_<export>) tools register
+# dynamically with unknown arg schemas, so they are not in _SCOPED_TOOLS /
+# _SCOPE_PATH_ARGS (the default-deny test cannot see them). When a scope is active
+# we still apply it to their common path-like args (CHK-MCP-SCOPE + CHK-SCOPE-PLUGIN,
+# defense-in-depth); best-effort, so an unusual path-arg name is not caught (its
+# author is the owner's own MCP / plugin config). Restricted, shareable keys cannot
+# reach either family at all (both disabled for a restricted session), so this only
+# tightens an owner's own --scope, never a cross-trust boundary.
 _MCP_SCOPE_PATH_ARGS: tuple[str, ...] = (
     "path", "file", "filename", "filepath", "file_path", "source", "source_path",
     "src", "target", "target_path", "dest", "destination", "dir", "directory",
@@ -78,25 +72,22 @@ _COMPACT_AUTO_RATIO  = 0.90   # silently compact in non-interactive mode
 
 _DEFAULT_CTX_TOKENS  = 4096   # fallback when n_ctx is unknown
 
-# How many times to re-prompt when a response looks like a tool call but cannot be
-# parsed. After this, the raw attempt is SURFACED (never silently finalised as a
-# hidden <tool_call> block - which rendered as an empty bubble + no file written).
+# Re-prompt count when a response looks like a tool call but cannot be parsed.
+# After this the raw attempt is SURFACED, never silently finalised as a hidden
+# <tool_call> block (which rendered as an empty bubble + no file written).
 _MAX_TOOL_REPAIRS = 2
 
-# Abort a task after this many tool calls fail in a row across ANY tools. The
-# per-tool breaker only catches N IDENTICAL failures; a weak model can spin on
-# VARIED failing calls (e.g. git_show with invented hashes) and burn the whole
-# turn/token budget. Any successful tool call resets the streak.
+# Abort after this many tool calls fail in a row across ANY tools. The per-tool
+# breaker only catches N IDENTICAL failures; a weak model can spin on VARIED failing
+# calls (e.g. git_show with invented hashes) and burn the budget. Any success resets.
 _GLOBAL_ERROR_ABORT = 6
 
-# Abort when the model emits the SAME response this many times in a row - the
-# "Message 1..4 / I will now wait" scaffold-repetition where it narrates without
-# making progress. The error-streak breakers above only catch FAILED tool calls
-# and the repair path re-prompts a malformed call; this catches identical
-# NON-failing repetition. Kept ABOVE _GLOBAL_ERROR_ABORT-adjacent thresholds and
-# the repair cap so those more-specific guards fire first for a failing/broken
-# loop; this is the last-resort catch for a succeeding-but-pointless one
-# (REC-CODER-LOOPBREAK).
+# Abort when the model emits the SAME response this many times in a row (the
+# "Message 1..4 / I will now wait" scaffold-repetition: narrates without progress).
+# Catches identical NON-failing repetition, which the error-streak breakers (FAILED
+# calls) and the repair path (malformed call) miss. Kept above the error/repair
+# thresholds so those more-specific guards fire first for a broken loop; this is the
+# last-resort catch for a succeeding-but-pointless one (REC-CODER-LOOPBREAK).
 _REPEAT_RESPONSE_ABORT = 5
 
 # Code file extensions that should be verified (tests / syntax) after writes

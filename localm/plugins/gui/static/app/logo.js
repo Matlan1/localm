@@ -1,16 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-/* localm GUI - logo style (split from app.js). Classic script: it
-   shares the one global lexical environment with the other app/* and
-   pages/* scripts, so every cross-section reference resolves by bare
-   name exactly as before. */
+/* localm GUI - logo style (split from app.js). Classic script sharing the one
+   global lexical scope with the other app/* + pages/* scripts (bare-name refs). */
 "use strict";
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { $, authHeaders } from "./helpers.js";
-
-/* ================================================================ */
-/*  Logo style                                                       */
-/* ================================================================ */
 
 // The sidebar wordmark can be drawn three ways. The choice is SHARED via server
 // config (logo_style), so the web GUI and the desktop launcher agree; the

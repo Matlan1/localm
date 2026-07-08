@@ -6,14 +6,10 @@
 
 "use strict";
 
-/* ================================================================ */
-/*  Client error capture (for bug reports)                           */
-/*  A small in-memory ring of recent JS errors so the "Report a bug" */
-/*  control can attach what actually went wrong in the browser. Kept */
-/*  client-side only; it leaves the machine solely inside a report   */
-/*  the user reviews and sends. Installed first so it catches early  */
-/*  failures.                                                        */
-/* ================================================================ */
+// Client error capture (for bug reports): an in-memory ring of recent JS errors
+// the "Report a bug" control can attach. Client-side only; leaves the machine
+// solely inside a report the user reviews and sends. Installed first to catch
+// early failures.
 
 window.__localmClientLog = window.__localmClientLog || [];
 export function __localmPushClientError(msg) {

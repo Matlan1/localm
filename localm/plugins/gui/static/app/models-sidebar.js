@@ -10,10 +10,6 @@ import { chat } from "./chat.js";
 import { $, GIB, authHeaders, el, instanceCacheTrusted, toast } from "./helpers.js";
 import { refreshPerfEstimate } from "./settings-perf.js";
 
-/* ================================================================ */
-/*  Models (sidebar selector)                                        */
-/* ================================================================ */
-
 export const modelSelect = $("model-select");
 
 export function setStatus(state, text) {
@@ -21,10 +17,10 @@ export function setStatus(state, text) {
   $("status-text").textContent = text;
 }
 
-// ---- live hardware monitor in the status bar (CPU/RAM/VRAM/GPU) ----------
-// Renders whatever /api/stats reports; any section the box can't measure is
-// simply absent (e.g. no psutil -> no CPU/RAM; AMD -> no GPU%). VRAM shows
-// used/total when free is known, otherwise just total.
+// Live hardware monitor in the status bar (CPU/RAM/VRAM/GPU). Renders whatever
+// /api/stats reports; any section the box can't measure is simply absent (no
+// psutil -> no CPU/RAM; AMD -> no GPU%). VRAM shows used/total when free is
+// known, otherwise just total.
 export function renderHwStats(data) {
   const el = $("hw-stats");
   if (!el) return;
@@ -69,23 +65,22 @@ export function startHwStats(intervalMs = 2500) {
   });
 }
 
-// In-page API-key gate. Shown when an authed boot request returns 401 and this
-// browser has no working key - the network/phone case, where the loopback key
-// is never auto-seeded. Replaces window.prompt() (suppressed by mobile/PWA
-// browsers, the NET-1 white-page cause). Idempotent: safe to call repeatedly.
+// In-page API-key gate. Shown when an authed boot returns 401 and this browser
+// has no working key - the network/phone case, where the loopback key is never
+// auto-seeded. Replaces window.prompt() (suppressed by mobile/PWA browsers, the
+// NET-1 white-page cause). Idempotent.
 export function showKeyGate(message) {
   const gate = $("key-gate");
   if (!gate) return;
   if (message) { const m = $("key-gate-msg"); if (m) m.textContent = message; }
   gate.style.display = "flex";
-  // Show/hide the one-tap "Install certificate" step (see updateKeyGateCertStep):
-  // only when the local CA is genuinely NOT trusted yet, so a returning trusted
-  // device is never told to "reinstall the certificate" every time the gate
-  // appears (the SEAMLESS fix).
+  // Show the "Install certificate" step only when the local CA is genuinely NOT
+  // trusted yet (see updateKeyGateCertStep), so a returning trusted device is
+  // never told to reinstall it each time the gate appears.
   updateKeyGateCertStep();
-  // Offer "Scan QR code" wherever the browser can open a camera (a secure
-  // context). Decoding uses the native BarcodeDetector when present, else the
-  // bundled jsQR fallback, so it is not limited to Android Chrome.
+  // Offer "Scan QR code" wherever the browser can open a camera (secure context).
+  // Decoding uses the native BarcodeDetector when present, else the bundled jsQR
+  // fallback, so it is not limited to Android Chrome.
   const scan = $("key-gate-scan");
   if (scan) scan.style.display = scanSupported() ? "inline-block" : "none";
   const input = $("key-gate-input");
@@ -95,8 +90,7 @@ export function showKeyGate(message) {
   }
 }
 
-// Decide whether the key gate should offer "Install certificate". 
-// The user requested this to be always visible on the API key authentication page.
+// Decide whether the key gate should offer "Install certificate".
 export function updateKeyGateCertStep() {
   const cert = $("key-gate-cert");
   if (!cert) return;
@@ -109,9 +103,9 @@ export function updateKeyGateCertStep() {
     // <a download> would save as the "cert" (J2).
     const certLink = $("key-gate-cert-link");
     if (certLink) certLink.href = "https://" + location.host + "/localm-ca.crt";
-    // Firefox keeps its OWN certificate store and ignores the Windows/OS one, so a
-    // system install leaves the warning here - the most common "I installed it but
-    // it still warns" case. Surface the Firefox-specific step prominently.
+    // Firefox keeps its OWN certificate store and ignores the OS one, so a system
+    // install still warns here (the common "I installed it but it still warns"
+    // case). Surface the Firefox-specific step prominently.
     const ff = $("key-gate-cert-ff");
     if (ff) {
       const isFirefox = /firefox\//i.test(navigator.userAgent || "");
@@ -122,9 +116,9 @@ export function updateKeyGateCertStep() {
 window.updateKeyGateCertStep = updateKeyGateCertStep;
 
 // POST the entered key to /api/session so the server sets the HttpOnly session
-// cookie (the key never lives in JS) and returns the session's CSRF token, then
-// reload so the boot re-runs authenticated. Stash the token so a write issued
-// before the reload already has it (the boot re-fetches it via refreshCsrf too).
+// cookie (the key never lives in JS) and returns the session CSRF token. Stash
+// the token so a write issued before the reload already has it (the boot
+// re-fetches it via refreshCsrf too), then reload to re-run authenticated.
 export async function loginWithKey(key) {
   try {
     const r = await fetch("/api/session", {
@@ -178,12 +172,11 @@ export function addRevealToggle(input) {
 }
 window.addRevealToggle = addRevealToggle;
 
-// --- Pairing QR scanner (phone) -------------------------------------------
-// Reads the key QR shown in the computer's Settings (Companion app) with the
-// camera and saves the key without typing. Decoding prefers the native
-// BarcodeDetector and falls back to the bundled jsQR, so it works on browsers
-// that lack BarcodeDetector (Firefox, Brave, Opera, iOS Safari, ...) - any
-// browser that can open a camera in a secure context.
+// Pairing QR scanner (phone): read the key QR shown in the computer's Settings
+// (Companion app) with the camera, saving the key without typing. Decoding
+// prefers the native BarcodeDetector and falls back to the bundled jsQR, so it
+// works on any browser that can open a camera in a secure context (Firefox,
+// Brave, Opera, iOS Safari, ...), not just Android Chrome.
 export function scanSupported() {
   return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
 }
@@ -287,13 +280,12 @@ export async function startQrScan() {
   }, detector ? 300 : 200);
 }
 
-// --- PWA install affordance (P2c) -----------------------------------------
-// The browser "Install app" path differs per platform, so the Settings card
-// shows the right thing: Android/desktop Chrome fire `beforeinstallprompt` and
-// get a real Install button; iOS Safari fires nothing (the only path is the
-// Share sheet -> Add to Home Screen), so it gets written steps; an already
-// installed launch (standalone display) just confirms it. applyInstallUI() is
-// the single decision point and is unit-tested by branch.
+// PWA install affordance (P2c): the "Install app" path differs per platform, so
+// the Settings card shows the right thing - Android/desktop Chrome fire
+// `beforeinstallprompt` and get a real Install button; iOS Safari fires nothing
+// (only Share sheet -> Add to Home Screen) so it gets written steps; a standalone
+// launch just confirms it. applyInstallUI() is the single decision point,
+// unit-tested by branch.
 
 export function pwaDisplayMode() {
   try {
@@ -345,19 +337,17 @@ export function applyInstallUI(env) {
   hint.style.display = "";   // generic browser-menu hint (default)
 }
 
-// --- Onboarding install gate (mobile, P-mobile) ----------------------------
-// After auth, a phone that has not installed localm yet lands on a one-time
-// install screen first (Install on Android / Add-to-Home-Screen steps on iOS),
-// then taps "Continue" to enter the app. Desktop, an already-installed launch,
-// and a return visit skip it. This is the "land on a setup page, reach localm
-// via Continue" flow - the install affordance was previously buried in Settings.
+// Onboarding install gate (mobile, P-mobile): after auth, a not-yet-installed
+// phone lands on a one-time install screen (Install on Android / Add-to-Home-
+// Screen steps on iOS), then taps "Continue" to enter the app. Desktop, an
+// already-installed launch, and a return visit skip it.
 export function shouldShowInstallGate() {
   if (pwaDisplayMode() === "standalone") return false;       // already installed
   try {
-    // AUD-INSTANCEID: only trust a cached "already onboarded" flag once this
-    // origin has confirmed pairing with the connected backend - otherwise a
-    // fresh install reusing a prior instance's browser origin would silently
-    // skip its own onboarding because a DIFFERENT install was dismissed here.
+    // AUD-INSTANCEID (see helpers.js reconcileInstanceId): only trust a cached
+    // "already onboarded" flag once this origin confirmed pairing with the
+    // connected backend, else a fresh install reusing a prior instance's origin
+    // would skip its own onboarding because a DIFFERENT install dismissed it here.
     if (instanceCacheTrusted() && localStorage.getItem("localm.onboarded") === "1") return false;
   } catch (e) { /* storage blocked - treat as not onboarded */ }
   // Phones/tablets only: a touch device with a coarse pointer. A desktop
@@ -417,17 +407,17 @@ export async function refreshModels() {
     const r = await fetch("/api/models?type=llm", { headers: authHeaders() });
     if (r.status === 401) {
       // No working key (e.g. a network bind, where the loopback key is never
-      // auto-seeded). Show the in-page key gate instead of window.prompt() -
-      // mobile/PWA browsers suppress prompt(), which left a phone/LAN client on
-      // a blank page (NET-1). The gate stores the key and reloads on submit.
+      // auto-seeded). Show the in-page key gate, not window.prompt() - mobile/PWA
+      // browsers suppress prompt(), leaving a phone/LAN client on a blank page
+      // (NET-1). The gate stores the key and reloads on submit.
       showKeyGate("This LocaLM server requires an API key.");
       return;
     }
     if (!r.ok) {
-      // A non-401 error (500, 503, ...) returns a JSON body with no `models`
-      // array (e.g. FastAPI's {"detail": ...}), so the empty-list fallback below
-      // would silently show an empty dropdown + an "ok / no model" status,
-      // masking the server error. Surface it instead.
+      // A non-401 error (500, 503, ...) returns a body with no `models` array
+      // (e.g. FastAPI's {"detail": ...}); the empty-list fallback below would
+      // then silently show an empty dropdown + "ok / no model" status, masking
+      // the server error. Surface it instead.
       setStatus("err", `models unavailable (HTTP ${r.status})`);
       return;
     }
@@ -456,12 +446,12 @@ export async function refreshModels() {
   }
 }
 
-// Switch the active model. Returns the server's status object
+// Switch the active model. Returns the server status object
 // ({status: "loaded" | "already_active" | "superseded", model, ...}).
-// A "superseded" result means the user selected another model while this one was
-// still loading: the server aborted this load and the newer selection now owns
-// the UI, so we do NOT claim success or reset the status here (that would flash
-// the abandoned model's name). Callers should skip their success toast for it.
+// "superseded" means another model was selected while this one was still loading:
+// the server aborted this load and the newer selection owns the UI, so we do NOT
+// claim success or reset status here (that would flash the abandoned model's
+// name). Callers should skip their success toast for it.
 export async function switchModel(model) {
   setStatus("busy", "loading " + model + "…");
   const r = await fetch("/api/models/load", {

@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 /* localm GUI - shared inline-SVG icon set.
 
-   The file/folder picker set the bar: crisp 24x24 stroke SVGs drawn with
-   stroke="currentColor", so every icon inherits its context's text colour and
-   both themes for free. This promotes that pattern app-wide so the rest of the
-   GUI can drop its blurry, un-themeable emoji/HTML-entity glyphs.
+   Crisp 24x24 stroke SVGs drawn with stroke="currentColor" (from the file/folder
+   picker), so every icon inherits its context's text colour and both themes for
+   free; promoted app-wide to replace blurry, un-themeable emoji/entity glyphs.
 
    Two ways to use it:
      - JS-built DOM: iconEl("send", "cls") -> a <span class="cls"> with the SVG.

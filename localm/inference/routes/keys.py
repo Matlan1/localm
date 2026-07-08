@@ -93,15 +93,13 @@ def register(app: FastAPI, ctx) -> None:
             if warns:
                 created = {**created, "warnings": warns}
         # Lockout guard (S3): in open mode the loopback GUI is trusted via the
-        # per-process shell token, which the server STOPS honouring the instant
-        # auth turns on (a key now exists). Without this, minting your first key
-        # from the local GUI orphans the browser session and can lock the owner
-        # out of their own install. So when the FIRST key is minted from a
-        # loopback bind, seed a persistent owner key and hand THIS browser an
-        # owner session cookie, so the local owner keeps full access and future
-        # `localm gui` loads re-establish the session automatically (web.py).
-        # Loopback + open-mode only: a network bind already requires a key up
-        # front, so this never fires there and grants no authority the local user
+        # per-process shell token, which the server STOPS honouring the instant auth
+        # turns on (a key now exists). Without this, minting your first key from the
+        # local GUI would orphan the browser session and lock the owner out. So on the
+        # FIRST key minted from a loopback bind, seed a persistent owner key and hand
+        # THIS browser an owner session cookie (future `localm gui` loads re-establish
+        # it; web.py). Loopback + open-mode only: a network bind already requires a key
+        # up front, so this never fires there and grants no authority the local user
         # did not already hold via the shell token.
         if was_open and _is_loopback(getattr(app.state, "bind_host", "127.0.0.1")):
             owner = auth.get_api_key() or auth.regenerate_key()

@@ -95,12 +95,10 @@ def register(app: FastAPI, ctx) -> None:
                     async with sem:
                         await loop.run_in_executor(None, engine.load)
                 if not engine.supports_images:
-                    # Capability-aware, install-specific guidance: route to a vision
-                    # model this install actually has, instead of a flat dead-end.
-                    # supports_images is False here, so if an mmproj_path is set on the
-                    # backend the projector FAILED to load (a working one would have made
-                    # supports_images True) - report that honest cause, not "text-only"
-                    # and not the stale "GGUF vision is not implemented".
+                    # Capability-aware guidance: route to a vision model this install
+                    # has. supports_images is False here, so an mmproj_path set on the
+                    # backend means the projector FAILED to load (rule 5: report that
+                    # honest cause, not "text-only").
                     from localm.model_manager import vision_input_guidance
                     mmproj_failed = bool(
                         getattr(getattr(engine, "_backend", None), "mmproj_path", None))
@@ -147,21 +145,15 @@ def register(app: FastAPI, ctx) -> None:
             if not streaming_handoff:
                 _hs._unpin(engine)
 
-    # ---------------------------------------------------------------- #
-    #  Embeddings  (/v1/embeddings)                                     #
-    # ---------------------------------------------------------------- #
-
     @app.post("/v1/embeddings", dependencies=[Depends(_require_auth)])
     async def embeddings(req: EmbeddingRequest):
         if not req.model:
             raise HTTPException(400, "Model parameter is required and cannot be empty")
             
         # Resolve WITHOUT forcing a chat-model load. A GGUF backend
-        # (can_embed=False, the default runtime) embeds via the dedicated small
-        # embedder and never needs the multi-GB chat model resident, so loading
-        # it - and, under VRAM pressure, evicting the active chat model - is pure
-        # waste (AUDIT-MED-13). Only a backend that embeds its OWN weights (HF,
-        # can_embed) actually needs a real load.
+        # (can_embed=False) embeds via the dedicated small embedder, so loading the
+        # multi-GB chat model (and, under VRAM pressure, evicting the active one) is
+        # pure waste (AUDIT-MED-13). Only a can_embed backend (HF) needs a real load.
         engine = await _hs.get_engine(req.model, load=False)
         if getattr(getattr(engine, "_backend", None), "can_embed", True):
             engine = await _hs.get_engine(req.model)
@@ -211,10 +203,6 @@ def register(app: FastAPI, ctx) -> None:
             "model": req.model,
             "usage": {"prompt_tokens": total_tokens, "total_tokens": total_tokens},
         }
-
-    # ---------------------------------------------------------------- #
-    #  Raw text completions  (/v1/completions)                          #
-    # ---------------------------------------------------------------- #
 
     @app.post("/v1/completions", dependencies=[Depends(_require_auth)])
     async def completions(req: CompletionRequest, request: Request):
