@@ -22,6 +22,16 @@ import shutil
 _test_home_dir = tempfile.mkdtemp(prefix="localm_test_home_")
 os.environ["LOCALM_HOME"] = _test_home_dir
 
+# Same protection for the media-plugin legacy-workflow migration: on startup it
+# MOVES a personal override OUT of the in-package source dir (localm/image_gen/
+# flux_workflow.json etc.) into home/workflows. That source is the real repo
+# checkout, NOT under the tmp LOCALM_HOME above, so letting it run during the
+# suite - especially inside a localm SUBPROCESS a test spawns, where "pytest" is
+# not in sys.modules - would move a developer's real workflow out of their
+# working tree. This flag (inherited by spawned subprocesses) disables it
+# everywhere; the migration logic is exercised directly in test_media_workflows.
+os.environ["LOCALM_SKIP_LEGACY_WORKFLOW_MIGRATION"] = "1"
+
 
 def pytest_sessionfinish(session, exitstatus):
     shutil.rmtree(_test_home_dir, ignore_errors=True)
