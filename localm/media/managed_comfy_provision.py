@@ -19,11 +19,13 @@ user's existing ComfyUI stack (design decisions 2 + 3):
      ComfyUI sees the user's models dir AND localm's managed models dir, no copy.
 
 The user's own ComfyUI is READ ONLY here - cloned/frozen, never modified. When no
-usable user ComfyUI exists, this module is not used: the CLI dispatcher reports that
-the fresh hardware-matched install (stage S3) is not built yet and changes nothing.
+usable user ComfyUI exists, this module is not used: the setup dispatcher
+(managed_comfy_fresh.setup_managed_comfy) runs the FRESH hardware-matched install
+(stage S3, managed_comfy_fresh.py) instead.
 
-Not built here (later stages): S3 fresh hardware-matched install, S4 version pin +
-localm patch set + `localm comfy update`, S5 GUI button / doctor hint / bug re-offer.
+Not built here (later stages): S4 version pin + localm patch set + `localm comfy
+update`, S5 GUI button / bug re-offer (the S3 fresh install lives in
+managed_comfy_fresh.py; the S5 doctor hint already shipped).
 """
 
 from __future__ import annotations
@@ -78,7 +80,7 @@ class ProvisionResult:
     """Outcome of a provision attempt. ``ok`` is True only when the managed ComfyUI
     ended up actually installed (main.py + venv present)."""
     ok: bool
-    status: str = ""             # "copied" | "exists" | "error" | "fresh_not_implemented"
+    status: str = ""             # "copied" | "exists" | "error"
     message: str = ""
     managed_root: Optional[Path] = None
     commit: Optional[str] = None
@@ -186,7 +188,7 @@ def discover_user_comfy(cfg: Optional[dict] = None) -> Optional[UserComfyStack]:
     "Usable" means: comfy_workdir is set, is a directory, has ComfyUI's ``main.py``,
     AND a venv interpreter is discoverable under it (we replicate that venv's package
     set, so a ComfyUI with no venv is not copyable). None here is the dispatcher's
-    signal to report that the fresh install (S3) is not built yet."""
+    signal to run the fresh hardware-matched install (S3) instead."""
     cfg = cfg if cfg is not None else load_config()
     workdir = cfg.get("comfy_workdir")
     if not workdir:
