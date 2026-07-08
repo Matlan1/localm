@@ -26,6 +26,12 @@ Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on
   what will be sent first.
 - **Unified model browser (phase 1):** registry model types, a ComfyUI model
   scan, and a type-filtered model list.
+- **Search HuggingFace for HF (transformers) models, not just GGUF.** The Models
+  page search has GGUF / HF format toggles; HF results show a total size and a
+  VRAM fit badge estimated from the model's parameter count (or "size unknown"
+  when the metadata is absent), and pull the whole repo, with a non-blocking hint
+  when no transformers runtime is installed (the files still download). Both
+  formats are interleaved so one never crowds the other out of the results.
 - **RAG indexes more:** arbitrary text files by content sniffing, zip/tar archive
   extraction, and image description via a vision model. Each chunk is tagged with
   its document format (json, yaml, python, ...), heuristic-first, with the AI
@@ -101,9 +107,11 @@ Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on
 
 ### Internal
 - Release tooling: a release-file manifest and verification gate, a build.zip
-  assembler and signer, a runtime-completeness smoke gate, and a pre-publish CI
-  gate. Contributor-guide and test-cadence clarifications, and test isolation via a
-  temp `LOCALM_HOME` in `conftest.py`.
+  assembler and signer, a runtime-completeness smoke gate, a pre-publish CI gate,
+  and a live functional-verification gate (cold-install and exercise every
+  changelog item across both inference backends before publish).
+  Contributor-guide and test-cadence clarifications, test isolation via a temp
+  `LOCALM_HOME` in `conftest.py`, and a documentation pass across the user manual.
 
 ## [0.1.0] - 2026-07-04
 
