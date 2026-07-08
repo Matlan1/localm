@@ -9,11 +9,13 @@ minor versions may include breaking changes.
 
 ### Added
 - **RAG**: Index arbitrary text files by content sniffing, extract zip/tar archives, and describe images with a vision model.
+- **RAG**: Tag each indexed chunk with its document format (json, yaml, python, ...), derived for free from the extension and a structural sniff. The local AI classifier is now only a tie-break for an unknown extension whose structure is unclear, and only when a chat model is loaded.
 - **Model Browser**: Phase 1 of the unified model browser (registry model types, ComfyUI scan, type-filtered model list).
 - **MCP**: Expose setup, model removal, diagnostics, and plugin management tools to the MCP server.
 - **Setup**: When native llama.cpp binaries are already provisioned, prompt to replace them instead of exiting with a note to re-run with `--force`. Non-interactive runs safely keep the existing binaries.
 
 ### Fixed
+- **RAG**: Indexing no longer fires a chat request (burning the 10s request timeout) for each unknown file extension when no chat model is loaded, so an embedding-only index does not stall.
 - **Inference**: Fix a zero-n_tokens decode failure by setting the batch token count explicitly.
 - **Setup**: Verify a downloaded llama.cpp archive against a published checksum by default.
 - **Setup**: Do not print the "no data directory configured" warning during the setup phase itself.
