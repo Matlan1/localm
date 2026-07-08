@@ -1446,6 +1446,16 @@ export async function sendChat() {
     return;
   }
 
+  // No model loaded: do not emit a chat request the server can only answer with
+  // a 503 "No model loaded". modelCache.active is "" until a model is loaded, so
+  // this is the client-side gate the empty-model design discussion agreed on -
+  // an empty-model request is a client bug, caught here instead of round-tripped
+  // (AUDIT). Slash commands (handled above) still work with no model.
+  if (!modelCache.active) {
+    toast("No model loaded - load a model on the sidebar before chatting.", true);
+    return;
+  }
+
   if (!currentConv()) newConversation();
   const conv = currentConv();
   const isFirstMessage = conv.messages.length === 0;
