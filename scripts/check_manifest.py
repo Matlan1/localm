@@ -57,7 +57,13 @@ def _match(pattern: str, rel: str) -> bool:
         prefix = pattern[:-1]
         return rel == prefix or rel.startswith(pattern)
     if any(c in pattern for c in "*?["):
-        return fnmatch.fnmatch(rel, pattern) or fnmatch.fnmatch(rel.rsplit("/", 1)[-1], pattern)
+        # fnmatchcase (NOT fnmatch): case-SENSITIVE, matching git/Linux and the
+        # case-sensitive exact/dir-prefix rules above. Plain fnmatch case-folds via
+        # os.path.normcase on Windows, which would make glob matching alone
+        # OS-dependent (a leak-pattern could match on the maintainer's Windows box
+        # but not in Linux CI). Match against the full path OR the basename so
+        # e.g. *_signing_key.pem catches a/b/x_signing_key.pem too.
+        return fnmatch.fnmatchcase(rel, pattern) or fnmatch.fnmatchcase(rel.rsplit("/", 1)[-1], pattern)
     return rel == pattern
 
 
@@ -159,13 +165,18 @@ def load_manifest(path: Path = MANIFEST) -> dict:
 
 def tracked_files(repo: Path = REPO) -> list[str] | None:
     """Repo-relative POSIX paths of every git-tracked file, or None when git is
-    unavailable / this is not a checkout (the gate then simply does not apply)."""
+    unavailable / this is not a checkout (the gate then simply does not apply).
+
+    Uses ``-z`` (NUL-delimited, binary) so a non-ASCII path is read VERBATIM. Plain
+    ``git ls-files`` wraps a non-ASCII path in quotes with octal escapes (default
+    core.quotePath), which would defeat the pattern match and spuriously flag a
+    legitimate file as unclassified. Mirrors the -z handling in check-ignore below."""
     try:
-        out = subprocess.run(["git", "ls-files"], cwd=repo, capture_output=True,
-                             text=True, check=True).stdout
+        out = subprocess.run(["git", "ls-files", "-z"], cwd=repo,
+                             capture_output=True, check=True).stdout
     except (subprocess.CalledProcessError, FileNotFoundError):
         return None
-    return [line for line in out.splitlines() if line]
+    return [p for p in out.decode("utf-8", "surrogateescape").split("\0") if p]
 
 
 def _local_ignore_problems(local_only: list[str], repo: Path = REPO) -> list[str]:
@@ -201,22 +212,38 @@ def _local_ignore_problems(local_only: list[str], repo: Path = REPO) -> list[str
 
 def _probe_path(pattern: str) -> str:
     """A concrete path that should match *pattern*, for `git check-ignore`.
-    Directory -> a child; glob -> substitute a token for wildcards; else the path."""
+    Directory -> a child; glob -> substitute a satisfying literal for each wildcard;
+    else the path itself. A ``[...]`` class becomes a representative member (its first
+    listed literal, or a range's start) so the probe actually matches the class -
+    a naive substitution like ``[0-9]`` -> ``x0-9`` would not, and would spuriously
+    report the pattern as un-ignored."""
     if pattern.endswith("/"):
         return pattern + "__manifest_probe__"
-    if any(c in pattern for c in "*?["):
-        out = []
-        for ch in pattern:
-            if ch in "*?":
-                out.append("x")
-            elif ch == "[":
-                out.append("x")   # crude but fine for the simple globs we use
-            elif ch == "]":
-                continue
-            else:
+    if not any(c in pattern for c in "*?["):
+        return pattern
+    _CANDIDATES = "abcdefghijklmnopqrstuvwxyz0123456789_-."
+    out, i = [], 0
+    while i < len(pattern):
+        ch = pattern[i]
+        if ch in "*?":
+            out.append("x")
+            i += 1
+        elif ch == "[":
+            j = pattern.find("]", i + 1)
+            if j == -1:                 # unterminated '[' -> treat literally
                 out.append(ch)
-        return "".join(out)
-    return pattern
+                i += 1
+                continue
+            cls = pattern[i:j + 1]      # the whole [...] token (incl. any !/^ negation)
+            # Let fnmatch pick a member: the first candidate char the one-char class
+            # accepts. Correct for sets, ranges, AND negation ([!z] -> 'a') without
+            # reimplementing a class parser.
+            out.append(next((c for c in _CANDIDATES if fnmatch.fnmatchcase(c, cls)), "x"))
+            i = j + 1
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
 
 
 def check_manifest(repo: Path = REPO, manifest: Path = MANIFEST) -> list[str]:

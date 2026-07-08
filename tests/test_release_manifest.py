@@ -143,6 +143,24 @@ def test_probe_path_forms():
     assert cm._probe_path("*.env") == "x.env"
 
 
+def test_probe_path_bracket_class_picks_a_real_member():
+    # A '[...]' class must become a member that actually satisfies it, so the
+    # check-ignore cross-check does not spuriously fail on a bracket pattern.
+    import fnmatch
+    for pat in ("file[0-9].pem", "key[abc].env", "x[!z].env"):
+        probe = cm._probe_path(pat)
+        assert fnmatch.fnmatchcase(probe, pat), (pat, probe)
+
+
+def test_match_is_case_sensitive_uniformly():
+    # Exact, dir-prefix, and glob all match case-sensitively (git/Linux semantics),
+    # so behavior does not flip between a Windows box and Linux CI.
+    assert cm._match("README.md", "readme.md") is False
+    assert cm._match("docs/", "DOCS/x.md") is False
+    assert cm._match("*.env", "PROD.ENV") is False
+    assert cm._match("*.env", "prod.env") is True
+
+
 # --------------------------------------------------------------------------- #
 #  load_manifest: fails loud on missing / malformed                           #
 # --------------------------------------------------------------------------- #
@@ -164,6 +182,31 @@ def test_load_real_manifest_has_three_lists():
     assert man["include"] and man["exclude"] and man["local_only"]
     # sanity: the updater-required files are declared release-include.
     assert "VERSION" in man["include"] and "pyproject.toml" in man["include"]
+
+
+# --------------------------------------------------------------------------- #
+#  rule-5 sensitive branches: surface real failures, do not hide them         #
+# --------------------------------------------------------------------------- #
+
+def test_check_ignore_hard_error_is_surfaced(monkeypatch):
+    """A git check-ignore FATAL error (exit 128) must surface as a problem, never a
+    silent pass (AGENTS.md rule 5)."""
+    class _Res:
+        returncode = 128
+        stdout = b""
+        stderr = b"fatal: bad thing"
+    monkeypatch.setattr(cm.subprocess, "run", lambda *a, **k: _Res())
+    problems = cm._local_ignore_problems(["issues/"])
+    assert any("git check-ignore failed" in p for p in problems), problems
+
+
+def test_git_absent_skips_gate_without_masking(monkeypatch):
+    """When git is unavailable the gate does not apply (returns []), the one
+    documented silent case - but it must not swallow a real classification drift that
+    a working git would have caught. With tracked_files -> None, check_manifest returns
+    [] even though the manifest itself is well-formed."""
+    monkeypatch.setattr(cm, "tracked_files", lambda *a, **k: None)
+    assert cm.check_manifest() == []
 
 
 # --------------------------------------------------------------------------- #

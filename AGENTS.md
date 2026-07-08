@@ -186,6 +186,15 @@ character, and personal identifiers, and exits non-zero on a violation. Wire it
 as a pre-commit hook (`scripts/check_hygiene.py --install-hook`) so a commit
 that breaks these rules is blocked, not merely discouraged.
 
+The same command also runs the release-file manifest gate
+(`scripts/check_manifest.py`, from `release-manifest.toml`): every tracked file
+must be classified release-include (ships in a release build.zip / self-update)
+or release-exclude (tracked but dev-only), nothing declared local-only may be
+committed, and no manifest pattern may go stale. So adding a new top-level file
+or directory means classifying it in `release-manifest.toml`, or the gate fails.
+`scripts/build_release.py` assembles the build.zip from the same release-include
+list (then `scripts/sign_release.py` signs it).
+
 If you discover a violation already in git history, do not only fix it forward.
 A non-sensitive bad path can be fixed in a normal commit, but a genuine
 disclosure in history (a secret, a personal email, or a real-user absolute path
