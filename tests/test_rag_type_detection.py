@@ -63,26 +63,33 @@ def test_extract_zip_archive(tmp_path):
     assert "binary.exe" not in text
     assert "hidden doc" not in text
 
-def test_cached_llm_classification(tmp_path):
+def test_cached_llm_classification(monkeypatch):
+    # The format label is derived by classify_format (heuristic-first); the LLM
+    # tie-break only fires for an unknown extension whose structure is unclear,
+    # and its guess is cached per extension so a same-extension corpus classifies
+    # at most once. (Extraction no longer takes a classify_fn - that dead path,
+    # which computed a guess and discarded it, was removed in audit Branch F.)
+    from localm.rag.extract import classify_format
+    import localm.config as cfg
+    monkeypatch.setattr(cfg, "load_config",
+                        lambda: {"rag_classify_unknown_files": True})
     _EXT_CLASSIFICATION_CACHE.clear()
-    f1 = tmp_path / "file1.custom_code"
-    f1.write_text("function add(a, b) { return a + b; }", encoding="utf-8")
-    f2 = tmp_path / "file2.custom_code"
-    f2.write_text("function sub(a, b) { return a - b; }", encoding="utf-8")
-    
+
     calls = []
     def dummy_classify(snippet):
         calls.append(snippet)
         return "javascript"
-        
-    text1 = extract_text(f1, classify_fn=dummy_classify)
-    assert "function add" in text1
+
+    fmt1 = classify_format("function add(a, b) { return a + b; }",
+                           "file1.custom_code", classify_fn=dummy_classify)
+    assert fmt1 == "javascript"
     assert len(calls) == 1
-    
-    # Second file with same extension should hit the cache and not invoke dummy_classify again
-    text2 = extract_text(f2, classify_fn=dummy_classify)
-    assert "function sub" in text2
-    assert len(calls) == 1  # Still 1 call
+
+    # Second file, same extension -> served from cache, classifier not re-invoked.
+    fmt2 = classify_format("function sub(a, b) { return a - b; }",
+                           "file2.custom_code", classify_fn=dummy_classify)
+    assert fmt2 == "javascript"
+    assert len(calls) == 1
     assert _EXT_CLASSIFICATION_CACHE[".custom_code"] == "javascript"
 
 

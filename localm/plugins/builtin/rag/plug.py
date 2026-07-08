@@ -132,8 +132,18 @@ def _make_self_embed(self_url: str, active_model):
 
 
 def _make_self_classify(self_url: str, active_model):
-    """Classify via this server's own /v1/chat/completions."""
+    """A gated LLM tie-break for a document's format label, via this server's own
+    /v1/chat/completions. Used ONLY when the free structural heuristic is unsure
+    (see rag.extract.classify_format).
+
+    Short-circuits to None when NO chat model is loaded (``active_model()`` is
+    falsy): indexing is frequently embedding-only, and firing a chat request with
+    no model would just burn the 10s request timeout per unknown extension for
+    nothing. The caller then falls back to the plain "text" label - no stall."""
     def _self_classify(text_snippet: str) -> Optional[str]:
+        model = active_model()
+        if not model:
+            return None
         import requests as _rq
         headers = {}
         key = os.environ.get("LOCALM_API_KEY")
@@ -150,7 +160,7 @@ def _make_self_classify(self_url: str, active_model):
         try:
             r = _rq.post(f"{self_url}/chat/completions",
                          json={
-                             "model": active_model() or "localm",
+                             "model": model,
                              "messages": [{"role": "user", "content": prompt}],
                              "temperature": 0.0,
                              "max_tokens": 10,

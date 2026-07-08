@@ -104,8 +104,186 @@ _SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__",
               ".pytest_cache", ".mypy_cache", "dist", "build", ".idea",
               ".vscode"}
 
-# Cache for LLM guesses: extension -> content format / extension mapping
+# Cache for the LLM format tie-break, keyed by unknown extension. Only a genuine
+# guess (heuristic-unsure + a chat model loaded) ever lands here, so a corpus of
+# same-extension files classifies at most once per process.
 _EXT_CLASSIFICATION_CACHE: dict[str, str] = {}
+
+# Canonical, lowercase format labels for the file types localm indexes. A KNOWN
+# extension is the authoritative, FREE signal; the structural sniff below only
+# runs for an UNKNOWN extension whose bytes decoded as text (the odd-extension
+# case the LLM classifier used to guess - and then discard). This label feeds
+# retrieval-filtering / display, not parsing.
+_SUFFIX_FORMAT = {
+    ".txt": "text", ".log": "text", ".rst": "text",
+    ".md": "markdown", ".markdown": "markdown",
+    ".csv": "csv", ".tsv": "csv",
+    ".json": "json", ".jsonl": "json",
+    ".yaml": "yaml", ".yml": "yaml", ".toml": "toml",
+    ".ini": "ini", ".cfg": "ini",
+    ".xml": "xml", ".html": "html", ".htm": "html", ".css": "css",
+    ".py": "python", ".js": "javascript", ".jsx": "javascript",
+    ".ts": "typescript", ".tsx": "typescript",
+    ".java": "java", ".c": "c", ".h": "c", ".cpp": "cpp", ".hpp": "cpp",
+    ".cs": "csharp", ".go": "go", ".rs": "rust", ".rb": "ruby",
+    ".php": "php", ".swift": "swift", ".kt": "kotlin",
+    ".sh": "shell", ".ps1": "powershell", ".bat": "batch",
+    ".sql": "sql", ".r": "r", ".lua": "lua",
+    ".pdf": "pdf", ".docx": "docx", ".ipynb": "notebook",
+    ".png": "image", ".jpg": "image", ".jpeg": "image",
+    ".webp": "image", ".gif": "image",
+    ".zip": "archive", ".tar": "archive", ".gz": "archive", ".bz2": "archive",
+    ".xz": "archive", ".tgz": "archive", ".tbz": "archive", ".txz": "archive",
+}
+
+
+# A structural sniff only ever needs the start of a document, so it works on a
+# bounded prefix (cheap and fixed-cost even for an 8 MB file); JSON above this
+# size is confirmed by matching the closing bracket rather than parsing megabytes.
+_SNIFF_PREFIX = 65_536
+_JSON_PARSE_MAX = 1_000_000
+# Tag names that mark HTML rather than generic XML (single-letter/ambiguous names
+# like <a> are deliberately excluded so a real XML element does not read as HTML).
+_HTML_TAG_RE = re.compile(
+    r"</?(?:div|span|body|table|tr|td|th|ul|ol|li|h[1-6]|section|article|"
+    r"head|title|nav|header|footer|button|form|input|img|p)\b")
+
+
+def sniff_text_format(text: str) -> Optional[str]:
+    """Best-effort STRUCTURAL format label for already-decoded text, using only
+    cheap deterministic shape over a bounded prefix - no model call, no network,
+    no stall. Returns a lowercase label when the structure is unambiguous, or
+    ``None`` when unsure so the caller can fall back (to the extension, a gated
+    LLM tie-break, or "text").
+    """
+    s = text.lstrip()
+    if not s:
+        return None
+    head = s[:1]
+
+    # JSON: confirm rather than guess - a bare leading '{'/'[' is also a markdown
+    # link or a '[section]' header. Parse when the document is small; for a very
+    # large one, match the closing bracket instead of parsing megabytes.
+    if head in "{[":
+        if len(s) <= _JSON_PARSE_MAX:
+            try:
+                json.loads(s)
+                return "json"
+            except Exception:
+                pass
+        else:
+            close = "}" if head == "{" else "]"
+            if s.rstrip()[-1:] == close:
+                return "json"
+
+    prefix = s[:_SNIFF_PREFIX]
+
+    # HTML / XML: a leading angle bracket. An explicit XML declaration is
+    # definitive; otherwise recognisable HTML tag names (incl. bare fragments)
+    # beat the generic-tag fall-through to XML.
+    if head == "<":
+        low = prefix.lower()
+        if low.startswith("<?xml"):
+            return "xml"
+        if "<!doctype html" in low or "<html" in low or _HTML_TAG_RE.search(low):
+            return "html"
+        if re.match(r"<[a-z][\w:.-]*[\s/>]", low):
+            return "xml"
+
+    # The remaining line-shape heuristics look at the first handful of non-blank
+    # lines of the prefix only.
+    lines = [ln for ln in prefix.splitlines() if ln.strip()][:20]
+
+    # INI / TOML: a "[section]" header plus at least one "key = value" line.
+    if head == "[" and any(re.match(r"\[[^\]]+\]\s*$", ln.strip()) for ln in lines[:5]):
+        if any("=" in ln for ln in lines):
+            return "ini"
+
+    # CSV: a consistent, non-zero comma count across the first rows, with enough
+    # evidence to not mislabel prose/code that merely contains commas - either
+    # >=3 columns or >=3 rows, and no obvious code/prose punctuation in a row.
+    if len(lines) >= 2 and "," in lines[0]:
+        rows = lines[:10]
+        counts = [ln.count(",") for ln in rows]
+        looks_code = any(ch in ln for ln in rows for ch in "(){};")
+        if (counts[0] >= 1 and len(set(counts)) == 1
+                and (counts[0] >= 2 or len(rows) >= 3) and not looks_code):
+            return "csv"
+
+    # Markdown: an ATX heading at the very top, corroborated by another markdown
+    # marker so a lone '#'-comment in code/yaml/ini is not mislabeled markdown.
+    if lines and re.match(r"#{1,6}\s+\S", lines[0]):
+        corroborated = (
+            any(re.match(r"#{1,6}\s+\S", ln) for ln in lines[1:])
+            or any(ln.lstrip().startswith(("- ", "* ", "```", "> ")) for ln in lines)
+            or "](" in prefix
+        )
+        if corroborated:
+            return "markdown"
+
+    # YAML: "key: value" block-mapping lines must be the DOMINANT shape and carry
+    # no assignment/call punctuation (so colon-annotated code - "x: int = 1" - is
+    # not read as YAML).
+    kv = [ln for ln in lines
+          if re.match(r"[A-Za-z0-9_.-]+\s*:(\s+\S|\s*$)", ln)
+          and not any(ch in ln for ch in "={(")]
+    if len(kv) >= 2 and len(kv) >= 0.6 * len(lines):
+        return "yaml"
+
+    return None
+
+
+def _normalise_label(guess: str) -> str:
+    """Reduce a raw LLM classification to a single clean lowercase token."""
+    g = (guess or "").strip().lower().replace("`", "")
+    parts = g.split()
+    g = parts[0] if parts else ""
+    return re.sub(r"[^a-z0-9_+#.-]", "", g)[:32]
+
+
+def classify_format(text: str, filename: str = "", *,
+                    classify_fn: Optional[Callable[[str], Optional[str]]] = None) -> str:
+    """Return a short, lowercase format label for an already-extracted document.
+
+    Free and deterministic first: a KNOWN extension is authoritative, then a
+    structural content sniff (:func:`sniff_text_format`). Only when BOTH are
+    inconclusive is *classify_fn* (an LLM tie-break) consulted - and only when the
+    user left ``rag_classify_unknown_files`` on. *classify_fn* must itself be a
+    no-op when no chat model is loaded (see the rag plugin's ``_make_self_classify``),
+    so an embedding-only index never stalls on a chat call. Always returns a label
+    (falling back to "text") so every chunk can carry one for filtering / display.
+    """
+    if not text.strip():
+        return "text"
+    suffix = Path(filename).suffix.lower()
+    known = _SUFFIX_FORMAT.get(suffix)
+    if known:
+        return known
+    sniffed = sniff_text_format(text)
+    if sniffed:
+        return sniffed
+    # Unknown extension AND inconclusive structure: the ONLY place a model may be
+    # consulted, and only when the toggle is on. The OUTCOME (a real guess, or the
+    # "text" fallback) is cached per extension so a same-extension corpus attempts
+    # the tie-break AT MOST ONCE per process - never re-firing a chat call per file
+    # (the "not even cached, retries per file" cost). This also bounds the case the
+    # classify_fn short-circuit alone cannot: a non-chat engine (e.g. an HF encoder
+    # embedder) being resident makes active_model() truthy, so the first such file
+    # would still issue one failing chat call; caching the outcome stops the rest.
+    if classify_fn is not None:
+        cached = _EXT_CLASSIFICATION_CACHE.get(suffix)
+        if cached is not None:
+            return cached
+        try:
+            from localm.config import load_config
+            enabled = bool(load_config().get("rag_classify_unknown_files", True))
+        except Exception:
+            enabled = True
+        if enabled:
+            label = _normalise_label(classify_fn(text[:1000]) or "") or "text"
+            _EXT_CLASSIFICATION_CACHE[suffix] = label
+            return label
+    return "text"
 
 
 def sniff_format(data: bytes, filename: str) -> Optional[str]:
@@ -222,7 +400,7 @@ def _decode_text(data: bytes) -> str:
         return data.decode("cp1252", errors="replace")
 
 
-def extract_text(path: Path, classify_fn: Optional[Callable[[str], Optional[str]]] = None,
+def extract_text(path: Path,
                  describe_image_fn: Optional[Callable[[bytes, str], Optional[str]]] = None) -> str:
     """Return the plain text of *path*. Raises ExtractError on failure."""
     path = Path(path)
@@ -232,11 +410,10 @@ def extract_text(path: Path, classify_fn: Optional[Callable[[str], Optional[str]
         data = path.read_bytes()
     except OSError as e:
         raise ExtractError(f"Cannot read {path.name}: {e}")
-    return extract_bytes(data, path.name, classify_fn=classify_fn, describe_image_fn=describe_image_fn)
+    return extract_bytes(data, path.name, describe_image_fn=describe_image_fn)
 
 
 def extract_bytes(data: bytes, filename: str,
-                  classify_fn: Optional[Callable[[str], Optional[str]]] = None,
                   describe_image_fn: Optional[Callable[[bytes, str], Optional[str]]] = None) -> str:
     """Extract plain text from in-memory file content (chat attachments) -
     nothing is written to disk, so privacy mode stays trace-free."""
@@ -253,9 +430,9 @@ def extract_bytes(data: bytes, filename: str,
         inferred_ext = inferred
 
     if inferred_ext == ".zip":
-        text = _extract_zip(data, filename, classify_fn, describe_image_fn)
+        text = _extract_zip(data, filename, describe_image_fn)
     elif inferred_ext in _TAR_LIKE_SUFFIXES:
-        text = _extract_tar_or_stream(data, filename, classify_fn, describe_image_fn)
+        text = _extract_tar_or_stream(data, filename, describe_image_fn)
     elif inferred_ext in _IMAGE_SUFFIXES:
         if not describe_image_fn:
             raise ExtractError(
@@ -278,17 +455,10 @@ def extract_bytes(data: bytes, filename: str,
             raise ExtractError(f"Active model returned empty description for {filename}")
         text = desc
     elif inferred_ext in _PLAIN_SUFFIXES:
+        # The document's format label is derived separately, heuristic-first, by
+        # classify_format() at index time (rag/store.py) and carried into chunk
+        # metadata - not guessed-and-discarded here, and never a blocking chat call.
         text = _decode_text(data)
-        # Optional LLM classification if custom extension
-        if classify_fn and suffix not in _PLAIN_SUFFIXES:
-            from localm.config import load_config
-            if load_config().get("rag_classify_unknown_files", True):
-                guessed = _EXT_CLASSIFICATION_CACHE.get(suffix)
-                if not guessed:
-                    # Sniff first 1000 chars for classification
-                    guessed = classify_fn(text[:1000])
-                    if guessed:
-                        _EXT_CLASSIFICATION_CACHE[suffix] = guessed
     elif inferred_ext in (".html", ".htm"):
         from localm.netpolicy import html_to_text
         text = html_to_text(_decode_text(data))
@@ -331,7 +501,6 @@ def _join_archive(texts: list, truncated: bool) -> str:
 
 
 def _extract_zip(data: bytes, filename: str,
-                 classify_fn: Optional[Callable[[str], Optional[str]]] = None,
                  describe_image_fn: Optional[Callable[[bytes, str], Optional[str]]] = None) -> str:
     """Extract and merge text from a ZIP archive, BOUNDED in total output and
     member count so a many-member archive cannot amplify into a RAM DoS
@@ -362,7 +531,7 @@ def _extract_zip(data: bytes, filename: str,
                     inferred = sniff_format(member_data, member)
                     # Skip nested archives (zip / tar-family) to avoid loops.
                     if inferred and inferred != ".zip" and inferred not in _TAR_LIKE_SUFFIXES:
-                        txt = extract_bytes(member_data, member, classify_fn, describe_image_fn)
+                        txt = extract_bytes(member_data, member, describe_image_fn)
                         if txt.strip():
                             block = f"[file: {member}]\n{txt}"
                             texts.append(block)
@@ -376,7 +545,6 @@ def _extract_zip(data: bytes, filename: str,
 
 
 def _extract_tar_or_stream(data: bytes, filename: str,
-                           classify_fn: Optional[Callable[[str], Optional[str]]] = None,
                            describe_image_fn: Optional[Callable[[bytes, str], Optional[str]]] = None) -> str:
     """Extract a tar-family payload. Handles plain and compressed TARBALLS
     (.tar/.tgz/.tbz/.txz/.tar.gz) via tarfile; when the payload is a SINGLE
@@ -390,14 +558,14 @@ def _extract_tar_or_stream(data: bytes, filename: str,
     except tarfile.ReadError:
         inner = _decompress_single_stream(data, filename)
         return extract_bytes(inner, _strip_compression_suffix(filename),
-                             classify_fn, describe_image_fn)
+                             describe_image_fn)
     try:
-        return _extract_tar_members(tf, filename, classify_fn, describe_image_fn)
+        return _extract_tar_members(tf, filename, describe_image_fn)
     finally:
         tf.close()
 
 
-def _extract_tar_members(tf, filename: str, classify_fn, describe_image_fn) -> str:
+def _extract_tar_members(tf, filename: str, describe_image_fn) -> str:
     texts: list = []
     total = 0
     processed = 0
@@ -424,7 +592,7 @@ def _extract_tar_members(tf, filename: str, classify_fn, describe_image_fn) -> s
                     continue
                 inferred = sniff_format(member_data, member.name)
                 if inferred and inferred != ".zip" and inferred not in _TAR_LIKE_SUFFIXES:
-                    txt = extract_bytes(member_data, member.name, classify_fn, describe_image_fn)
+                    txt = extract_bytes(member_data, member.name, describe_image_fn)
                     if txt.strip():
                         block = f"[file: {member.name}]\n{txt}"
                         texts.append(block)
