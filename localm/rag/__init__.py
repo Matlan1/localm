@@ -19,8 +19,8 @@ Design constraints that shaped this package:
 """
 
 from .chunk import chunk_text
-from .extract import (EXTRACTABLE_SUFFIXES, ExtractError, extract_bytes,
-                      extract_text)
+from .extract import (EXTRACTABLE_SUFFIXES, ExtractError, classify_format,
+                      extract_bytes, extract_text, sniff_text_format)
 from .store import Collection, collection_names, delete_collection, rag_dir
 
 __all__ = [
@@ -28,9 +28,11 @@ __all__ = [
     "ExtractError",
     "EXTRACTABLE_SUFFIXES",
     "chunk_text",
+    "classify_format",
     "collection_names",
     "delete_collection",
     "extract_bytes",
     "extract_text",
     "rag_dir",
+    "sniff_text_format",
 ]

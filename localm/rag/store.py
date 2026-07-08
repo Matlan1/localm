@@ -32,8 +32,8 @@ from typing import Callable, Optional
 from localm.debuglog import logger as _log
 from .bm25 import BM25
 from .chunk import chunk_text
-from .extract import (BLACKLISTED_SUFFIXES, ExtractError, extract_bytes,
-                      extract_text, is_secret_index_name)
+from .extract import (BLACKLISTED_SUFFIXES, ExtractError, classify_format,
+                      extract_bytes, extract_text, is_secret_index_name)
 
 ClassifyFn = Callable[[str], Optional[str]]
 DescribeImageFn = Callable[[bytes, str], Optional[str]]
@@ -504,14 +504,19 @@ class Collection:
                 skipped += 1
                 continue
             try:
-                text = extract_text(f, classify_fn=classify_fn, describe_image_fn=describe_image_fn)
+                text = extract_text(f, describe_image_fn=describe_image_fn)
             except ExtractError as e:
                 failed.append({"path": key, "error": str(e)})
                 say(f"skip {f.name}: {e}")
                 continue
             new_chunks = chunk_text(text)
+            # Label the document's format heuristic-first (free); the LLM tie-break
+            # is only consulted for an unknown extension whose structure is unclear
+            # AND a chat model is loaded (classify_fn short-circuits otherwise).
+            fmt = classify_format(text, f.name, classify_fn=classify_fn)
             for c in new_chunks:
                 c["source"] = key
+                c["format"] = fmt
 
             vectors: list = [None] * len(new_chunks)
             if not embed_broken and new_chunks:
@@ -621,14 +626,17 @@ class Collection:
                 skipped += 1
                 continue
             try:
-                text = extract_bytes(data, filename, classify_fn=classify_fn, describe_image_fn=describe_image_fn)
+                text = extract_bytes(data, filename, describe_image_fn=describe_image_fn)
             except ExtractError as e:
                 failed.append({"path": key, "error": str(e)})
                 say(f"skip {filename}: {e}")
                 continue
             new_chunks = chunk_text(text)
+            # Same heuristic-first labeling as add_paths (see there).
+            fmt = classify_format(text, filename, classify_fn=classify_fn)
             for c in new_chunks:
                 c["source"] = key
+                c["format"] = fmt
 
             vectors: list = [None] * len(new_chunks)
             if not embed_broken and new_chunks:

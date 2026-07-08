@@ -252,11 +252,14 @@ DEFAULT_CONFIG: dict = {
     "rag_indexing_mode": "whitelist",
     "rag_allowed_roots": [],   # extra folders allowed in whitelist mode
     "rag_denied_roots": [],    # folders refused in blacklist mode
-    # Classify custom/unknown text file extensions with the LLM (AI). Uses the
-    # active model to prompt-guess the file format (e.g. JSON, YAML, Javascript) from
-    # a text snippet. Guesses are cached per extension for the running server's
-    # lifetime (a module-level cache in rag/extract.py), so a given unknown
-    # extension is classified at most once per process.
+    # An indexed document's format label (json/yaml/python/...) is derived
+    # heuristic-FIRST and for free: a known extension is authoritative, else a
+    # structural sniff of the text (rag/extract.classify_format). This toggle only
+    # governs the LLM TIE-BREAK: when both are inconclusive (an unknown extension
+    # with unclear structure) AND a chat model is loaded, prompt-guess the format
+    # from a snippet. Off -> such files are simply labeled "text"; a guess is never
+    # fired during an embedding-only index. Guesses are cached per extension for
+    # the process lifetime. The label is stored in each chunk's metadata.
     "rag_classify_unknown_files": True,
     # Seconds a GUI coder approval card may sit unanswered before it is
     # auto-rejected and the agent moves on.

@@ -376,8 +376,10 @@ CORE_FIELDS: list = [
                  "else is allowed). Ignored in whitelist mode.",
                  group="Knowledge", owner="rag", admin_only=True),
     SettingField("rag_classify_unknown_files", Widget.TOGGLE, "Classify unknown files with AI",
-                 "Use the local LLM to guess the programming language or format (e.g. JSON, YAML) "
-                 "of text files with unknown extensions to enable syntax-aware chunking.",
+                 "Files are tagged with a format (JSON, YAML, ...) for free from their "
+                 "extension and content. Turn this on to let the local LLM guess the "
+                 "format of an unknown extension it can't tell structurally - only when "
+                 "a chat model is loaded. Off, such files are tagged plain text.",
                  group="Knowledge", owner="rag"),
     # ---- Media (ComfyUI: image / music / video plugins) ----
     SettingField("comfy_workdir", Widget.FOLDER, "ComfyUI folder",
