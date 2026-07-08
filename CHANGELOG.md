@@ -24,6 +24,10 @@ Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on
 - **Signed, out-of-the-box self-update.** `localm update` works with no
   per-install setup: builds are assembled from a declared file manifest and
   signed, and the client verifies the signature before applying (see Security).
+- **Recover from a bad update.** `localm update --rollback` restores the previous
+  build from the last update's backup; and a standalone `rollback.bat` /
+  `rollback.sh` in the install folder does the same WITHOUT needing localm to
+  start, so an update that breaks the app can always be undone to a working one.
 - **Report a problem even when localm will not start.** A standalone,
   account-less reporter (the `report-issue` entry) files a bug report through the
   localm proxy with no working install and no GitHub login, previewing exactly

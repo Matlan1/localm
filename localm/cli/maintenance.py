@@ -225,6 +225,9 @@ def update_cmd(check_only: bool, yes: bool, do_rollback: bool) -> None:
     else:
         console.print("[bold]Restart localm to load the new version.[/bold]  "
                       "[dim](undo: localm update --rollback)[/dim]")
+        console.print("[dim]If the new version will not start, run the rollback script "
+                      "in the install folder (rollback.bat / rollback.sh) to restore "
+                      "this one.[/dim]")
 
 
 
