@@ -18,16 +18,8 @@ import { refreshSettingsPage } from "./settings.js";
 import { refreshMusicHistory, refreshVideoHistory } from "./video.js";
 import { refreshWorkflowPanel } from "./workflow.js";
 
-/* ================================================================ */
-/*  View refresh dispatcher                                          */
-/* ================================================================ */
-
-/** ComfyUI status check for the "Media module opened" trigger (one of the 5
- *  points it gets checked at - see comfy_client.py's readiness-cache
- *  docstring). Fire-and-forget: primes the backend's readiness cache so the
- *  page's own first generate request does not have to re-check; there is no
- *  status badge on these pages (unlike Settings), so the result is not read
- *  here. */
+/** Fire-and-forget prime of the backend ComfyUI readiness cache on media-module
+ *  open (one of 5 check points - see comfy_client.py). Result not read here. */
 function warmComfyStatus() {
   fetch("/v1/comfy/status", { headers: authHeaders() }).catch(() => {});
 }

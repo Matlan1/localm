@@ -46,12 +46,10 @@ self.addEventListener("install", (e) => {
 });
 
 self.addEventListener("activate", (e) => {
-  // Drop old shell versions so an updated app does not serve stale assets, but
-  // ONLY our own shell caches (localm-shell-*). The transformers.js model cache
-  // ("transformers-cache" - the Kokoro TTS weights, tens of MB) must SURVIVE a
-  // shell-version bump: the old `k !== CACHE` filter deleted every non-current
-  // cache, so the model was re-downloaded after every app/shell update
-  // (REC-KOKORO-RELOAD).
+  // Drop old shell versions (ONLY our own localm-shell-* caches) so an updated
+  // app never serves stale assets. The transformers.js model cache
+  // ("transformers-cache", the Kokoro TTS weights) must SURVIVE a shell bump; a
+  // blanket k !== CACHE filter re-downloaded it every update (REC-KOKORO-RELOAD).
   e.waitUntil(
     caches.keys()
       .then((keys) => Promise.all(
@@ -66,11 +64,10 @@ self.addEventListener("fetch", (e) => {
   if (req.method !== "GET") return;                       // never touch writes
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;        // only our own origin
-  // API / model / plugin traffic, and the CA cert, are ALWAYS live - never
-  // served from cache. /localm-ca.crt must come straight from the network: if the
-  // SW handled it, a navigate-mode download could fall back to the cached
-  // index.html (HTML) instead of the cert, so the "Install certificate" link
-  // would save an .html file (J2).
+  // API / model / plugin traffic and the CA cert are ALWAYS live, never cached.
+  // /localm-ca.crt must hit the network: if the SW handled it, a navigate-mode
+  // download could fall back to cached index.html instead of the cert, saving an
+  // .html file from the "Install certificate" link (J2).
   if (/^\/(api|v1|plugins|localm-ca\.crt)(\/|$)/.test(url.pathname)) return;
 
   // Navigations: network-first so the app updates; fall back to the cached

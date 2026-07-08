@@ -1,17 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-/* localm GUI - tabs (split from app.js). Classic script: it
-   shares the one global lexical environment with the other app/* and
-   pages/* scripts, so every cross-section reference resolves by bare
-   name exactly as before. */
+/* localm GUI - tabs (split from app.js). Classic script sharing the one global
+   lexical scope with the other app/* + pages/* scripts (bare-name refs). */
 "use strict";
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { chat } from "./chat.js";
 import { $ } from "./helpers.js";
-
-/* ================================================================ */
-/*  Tabs                                                             */
-/* ================================================================ */
 
 // Kernel pages are always present; plugin views (coder, images, music, video,
 // knowledge) are added to VIEWS by renderNav() while their plugin is active.

@@ -92,8 +92,7 @@ class Agent(
     ) -> None:
         # Live-attribute access so tests patching agent.load_memory /
         # load_custom_instructions / make_audit_log are honoured (these names moved
-        # into this submodule when agent.py became a package; the _init_* helpers
-        # below unpack the rest).
+        # into this submodule when agent.py became a package).
         load_memory = _agent.load_memory
         load_custom_instructions = _agent.load_custom_instructions
         make_audit_log = _agent.make_audit_log
@@ -119,10 +118,10 @@ class Agent(
         # at dispatch so a minted scoped key cannot run them (RCE / data exfil).
         self.disabled_tools = frozenset(disabled_tools or ())
         self.self_verify    = self_verify  # nudge agent to verify code changes before finishing
-        # Per-task turn budget for uncertainty escalation. None → 2/3 of max_turns.
+        # Per-task turn budget for uncertainty escalation. None -> 2/3 of max_turns.
         self.turn_budget    = turn_budget if turn_budget is not None else max(3, (max_turns * 2) // 3)
         # Structured event sink (GUI/web sessions). Called with a dict per event:
-        # token, tool_call, tool_result, turn, info. None → terminal-only display.
+        # token, tool_call, tool_result, turn, info. None -> terminal-only display.
         self.on_event       = on_event
         # External approval hook: Callable[[ToolCall], bool]. When set it is used
         # for destructive-tool confirmation instead of the terminal prompt, in
@@ -135,7 +134,7 @@ class Agent(
         self._turns: int = 0
         self._total_tokens: int = 0
         self._last_turn_tokens: int = 0   # tokens used in the most recently completed turn
-        self._consecutive_errors: dict[str, int] = {}  # tool_name → failure streak
+        self._consecutive_errors: dict[str, int] = {}  # tool_name -> failure streak
         self._abort_streak_tool: Optional[str] = None  # set when the circuit breaker trips
         self._global_error_streak: int = 0     # consecutive failed tool calls (ANY tool)
         self._abort_no_progress: bool = False  # set when the no-progress breaker trips
@@ -145,7 +144,7 @@ class Agent(
         self._last_run_ok: bool = True    # False when the last _loop hit max_turns
         self._undo_stack: list[dict] = []
         self._unverified_writes: set[str] = set()  # code files changed since last test run
-        # Changed-files tracker: rel path → {original: bytes|None, writes: int,
+        # Changed-files tracker: rel path -> {original: bytes|None, writes: int,
         # last_tool: str}. The first-seen original is kept so session_diff()
         # can show the cumulative change, not just the last edit.
         self._changed_files: dict[str, dict] = {}
@@ -157,11 +156,11 @@ class Agent(
         # Family-detection identity: enrich the (possibly opaque) alias with its
         # registry source (e.g. "hf:google/gemma-4-4b") so family-specific prompt
         # tuning keys off the model's REAL identity, not the alias (REC-CODER-FAMILY).
-        # Display / logging still use the bare alias (self._model_name).
+        # Display / logging still use the bare alias.
         self._family_id: str = self._model_name
         try:
             # The registry entry (not get_model_info, which returns a (path, hint)
-            # tuple) carries "source" e.g. "hf:google/gemma-4-4b" (REC-CODER-FAMILY).
+            # tuple) carries "source" (REC-CODER-FAMILY).
             from localm.model_manager import load_registry
             _entry = load_registry().get(self._model_name) or {}
             _src = _entry.get("source", "") if isinstance(_entry, dict) else ""
@@ -170,18 +169,17 @@ class Agent(
         except Exception:
             pass
         # Per-model harness profile: fill gen-kwarg defaults the caller did not set
-        # (e.g. a steadier temperature for a small model). Explicit caller values
-        # always win. max_tokens is handled in the CLI, not here (see
-        # harness_profiles for why).
+        # (e.g. a steadier temperature for a small model); explicit caller values win.
+        # max_tokens is handled in the CLI, not here (see harness_profiles).
         from ..harness_profiles import agent_gen_overrides
         self.gen_kwargs = {**agent_gen_overrides(self._model_name), **self.gen_kwargs}
         self._audit: AuditLogT = make_audit_log(mode, label=name)
         self._project_map: ProjectMap = self._build_project_map(cwd)
         self._memory: str = load_memory(cwd)
-        # User-authored custom instructions (rec#584): an explicit string (the CLI
-        # --system flag) overrides the .localcoder/system.md file; None means "read
-        # the file". The override is kept so it survives a later set_cwd, where the
-        # file is re-read from the new cwd. Distinct from project memory above.
+        # User-authored custom instructions (rec#584): an explicit string (CLI
+        # --system) overrides the .localcoder/system.md file; None means "read the
+        # file". The override is kept so it survives a later set_cwd (file re-read
+        # from the new cwd). Distinct from project memory above.
         self._system_override: Optional[str] = custom_instructions
         self._custom_instructions: str = (
             custom_instructions if custom_instructions is not None
@@ -214,20 +212,17 @@ class Agent(
                 if d.get("function", {}).get("name") not in self.disabled_tools
             ])
 
-    # ------------------------------------------------------------------ #
-    #  Construction helpers (split out of __init__; see __init__)
-    # ------------------------------------------------------------------ #
+    #  Construction helpers (split out of __init__).
 
     def _init_episodic_memory(self, cwd: Path) -> None:
         # Episodic memory: recall lessons from past sessions on this project, and
         # (at session close) distil this session into a new lesson. Disabled for
-        # restricted, shareable-key sessions - they must neither read the owner's
-        # lessons nor write a trace. In privacy mode it is off too (like the chat
-        # memory) UNLESS the user opted into read-only recall for the coder
-        # (memory_recall_in_privacy + ..._coder): then past lessons are RECALLED but
-        # the close-time write stays blocked (session.py gates it on privacy), so no
-        # new trace is created. The store path resolves under the localm home dir,
-        # never the project tree.
+        # restricted, shareable-key sessions (neither read the owner's lessons nor
+        # write a trace). In privacy mode it is off too UNLESS the user opted into
+        # read-only recall (memory_recall_in_privacy + ..._coder): past lessons are
+        # RECALLED but the close-time write stays blocked (session.py gates it on
+        # privacy), so no new trace is created. The store path resolves under the
+        # localm home dir, never the project tree.
         self._episode_task: str = ""
         self._episode_store = None
         try:
@@ -343,12 +338,12 @@ class Agent(
 
     def _apply_restricted_toolset(self) -> None:
         TOOL_REGISTRY = _agent.TOOL_REGISTRY
-        # A shareable, non-owner session gets NO external (MCP/plugin/skill)
-        # tools and ONLY the SAFE_RESTRICTED_TOOLS allowlist. Drop the external
-        # docs and disable every tool not in the allowlist (run_shell, run_tests,
-        # git_commit/push, fetch_url, generate_image, read_env, spawn_agent, and
-        # any registered external tool) so the model is neither offered nor able
-        # to execute them. Default-deny: a newly-added tool is disabled here too.
+        # A shareable, non-owner session gets NO external (MCP/plugin/skill) tools
+        # and ONLY the SAFE_RESTRICTED_TOOLS allowlist. Drop the external docs and
+        # disable every tool not in the allowlist (run_shell, run_tests, git_commit/
+        # push, fetch_url, generate_image, read_env, spawn_agent, any external tool)
+        # so the model is neither offered nor able to execute them. Default-deny: a
+        # newly-added tool is disabled here too.
         self._mcp_docs = self._plugin_docs = self._skill_docs = ""
         self.disabled_tools = self.disabled_tools | (
             frozenset(TOOL_REGISTRY) - SAFE_RESTRICTED_TOOLS)

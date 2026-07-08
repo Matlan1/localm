@@ -32,16 +32,13 @@ from __future__ import annotations
 
 import ctypes
 
-# ---------------------------------------------------------------------------
 # Primitive aliases
-# ---------------------------------------------------------------------------
 
 llama_token   = ctypes.c_int32   # token id
 llama_pos     = ctypes.c_int32   # position in sequence
 llama_seq_id  = ctypes.c_int32   # sequence id
 
 
-# ---------------------------------------------------------------------------
 # llama_model_params  (72 bytes - probed)
 #
 # This is the NEW layout that includes 'devices' and 'tensor_buft_overrides'
@@ -65,7 +62,6 @@ llama_seq_id  = ctypes.c_int32   # sequence id
 #   - [69]    bool use_extra_bufts        = True
 #   - [70]    bool no_host                = False
 #   - [71]    bool no_alloc               = False
-# ---------------------------------------------------------------------------
 
 class LlamaModelParams(ctypes.Structure):
     _fields_ = [
@@ -100,13 +96,11 @@ assert ctypes.sizeof(LlamaModelParams) == 104, (
 )
 
 
-# ---------------------------------------------------------------------------
 # llama_context_params  (152 bytes - probed)
 #
 # Added vs the old layout:
 #   n_rs_seq, n_outputs_max, ctx_type, flash_attn_type,
 #   op_offload, swa_full, kv_unified, samplers, n_samplers
-# ---------------------------------------------------------------------------
 
 class LlamaContextParams(ctypes.Structure):
     _fields_ = [
@@ -174,9 +168,7 @@ assert ctypes.sizeof(LlamaContextParams) == 224, (
 )
 
 
-# ---------------------------------------------------------------------------
 # llama_sampler_chain_params  (1 byte + padding)
-# ---------------------------------------------------------------------------
 
 class LlamaSamplerChainParams(ctypes.Structure):
     _fields_ = [
@@ -184,7 +176,6 @@ class LlamaSamplerChainParams(ctypes.Structure):
     ]
 
 
-# ---------------------------------------------------------------------------
 # llama_batch  (56 bytes)
 #
 # struct llama_batch {
@@ -207,11 +198,8 @@ class LlamaSamplerChainParams(ctypes.Structure):
 #   [40]  ptr    seq_id   (llama_seq_id**)
 #   [48]  ptr    logits
 # Total: 56 bytes
-# ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
 # llama_chat_message  (used by llama_chat_apply_template)
-# ---------------------------------------------------------------------------
 
 class LlamaChatMessage(ctypes.Structure):
     """
@@ -226,7 +214,6 @@ class LlamaChatMessage(ctypes.Structure):
     ]
 
 
-# ---------------------------------------------------------------------------
 # llama_batch  (56 bytes)
 #
 class LlamaBatch(ctypes.Structure):

@@ -58,23 +58,20 @@ _inference_sems: dict[str, asyncio.Semaphore] = {}
 _engine: Engine | None = None
 _inference_sem: asyncio.Semaphore | None = None
 
-# Preemptive model switching (see switch_engine). `_switch_desired` is the model
-# name of the MOST RECENT switch request; `_switch_loading` is the model whose
-# load is currently in flight; `_switch_cancel` aborts that in-flight load. These
-# are read/written only on the event-loop thread inside switch_engine, except the
-# cancel event, which the native load-progress callback reads from the loader
-# thread (threading.Event is thread-safe).
+# Preemptive model switching (see switch_engine). _switch_desired = most-recent
+# switch request; _switch_loading = model whose load is in flight; _switch_cancel
+# aborts it. Touched only on the event-loop thread inside switch_engine, except the
+# cancel event, which the loader-thread load-progress callback reads
+# (threading.Event is thread-safe).
 _switch_desired: Optional[str] = None
 _switch_loading: Optional[str] = None
 _switch_cancel: Optional["threading.Event"] = None
 
-# Cross-install GPU/VRAM coordination (multi-instance cooperation, see
-# localm.gpu_registry). None until the lifespan startup below populates it -
-# which only happens for a REAL, non-isolated, instances.advertise()'d server
-# (app.state.instance_id set and app.state.instance_isolated falsy). A plain
-# create_app() test app, or an --isolated run, never sets this, so it never
-# touches the shared machine-wide registry directory: this instance then
-# behaves exactly as it always has (zero-daemon-required). Shape:
+# Cross-install GPU/VRAM coordination (multi-instance, see localm.gpu_registry).
+# None until lifespan startup populates it, and ONLY for a real, non-isolated,
+# instances.advertise()'d server (app.state.instance_id set, instance_isolated
+# falsy). A plain create_app() test app or an --isolated run never sets it, so it
+# never touches the shared machine-wide registry (zero-daemon). Shape:
 # {"instance_id", "port", "host", "scheme", "token"}.
 _gpu_coord: Optional[dict] = None
 
@@ -94,10 +91,6 @@ def _default_engine_factory(name: str) -> Engine:
 
 _engine_factory = _default_engine_factory
 
-
-# ------------------------------------------------------------------ #
-#  Cross-install GPU/VRAM coordination (see localm.gpu_registry)      #
-# ------------------------------------------------------------------ #
 
 def _model_file_size(name: str) -> Optional[int]:
     """Best-effort on-disk size for registered model *name*, or None when not
@@ -225,12 +218,11 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
     global _engines, _engines_lru, _active_model_name, _engine_factory
     global _switch_desired, _switch_loading, _switch_cancel, _engine, _inference_sem
 
-    # Preemption (a newer selection aborts an in-flight load) is a SINGLE-slot
-    # notion that belongs to an explicit user model-switch, not to API-routed
-    # loads: with preempt=True two concurrent requests for DIFFERENT models
-    # cancel each other and the earlier one fails 503 "superseded" (AUDIT-HIGH-3).
-    # get_engine therefore loads with preempt=False so independent model loads
-    # coexist/queue; only the GUI/CLI switch_model path preempts.
+    # Preemption (a newer selection aborts an in-flight load) is SINGLE-slot and
+    # belongs to an explicit user switch, not API-routed loads: with preempt=True
+    # two concurrent DIFFERENT-model requests cancel each other and the earlier
+    # 503s "superseded" (AUDIT-HIGH-3). So get_engine loads preempt=False (loads
+    # coexist/queue); only the GUI/CLI switch_model path preempts.
     if preempt:
         _switch_desired = name
         if _switch_cancel is not None and _switch_loading != name:
@@ -273,12 +265,11 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
             p = Path(m_path)
             file_size = p.stat().st_size if p.is_file() else (sum(f.stat().st_size for f in p.rglob("*") if f.is_file()) if p.is_dir() else 4 * 1024 ** 3)
         elif registry:
-            # Registered/requested against a real registry but its files are not
-            # on disk. This is the shipped 404 contract - previously it was
-            # papered over with a fabricated model path + 4 GB size whenever
-            # pytest was importable, which made the 404 path untestable and ran
-            # all in-test eviction math on fiction (AUDIT rule 5 / no facade).
-            # Now the same path runs under tests as in production.
+            # Registered against a real registry but the files are not on disk:
+            # the shipped 404 contract. (Previously papered over with a fabricated
+            # path + 4 GB size when pytest was importable, making the 404 path
+            # untestable and running eviction math on fiction - AUDIT rule 5 / no
+            # facade.)
             raise HTTPException(404, f"Model files not found: {name}")
         # else: empty registry (single-model / direct-path startup) - no size to
         # compute; the eviction block below is skipped for an empty registry.
@@ -296,13 +287,11 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                 if measurable and free_vram >= vram_required + headroom:
                     break
 
-                # Need to make room. When VRAM is measurable we evict idle models
-                # until the new one fits. When it is NOT measurable (the default
-                # GGUF-only / non-NVIDIA install, where discover.vram_info reports
-                # no "free"), we cannot prove the new model fits ALONGSIDE the
-                # others, so we fall back to single-resident behaviour - evict
-                # every idle model before loading - rather than stacking models
-                # until the driver OOMs (AUDIT-CRIT-2).
+                # Make room. Measurable VRAM: evict idle models until the new one
+                # fits. NOT measurable (default GGUF-only / non-NVIDIA, no "free"
+                # from discover.vram_info): cannot prove it fits alongside others,
+                # so fall back to single-resident (evict every idle model first)
+                # rather than stacking until the driver OOMs (AUDIT-CRIT-2).
                 evict_name = None
                 for candidate in _engines_lru:
                     if candidate == name:
@@ -316,16 +305,14 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                     # Nothing idle left to evict.
                     if not measurable:
                         # Unmeasurable and every remaining model is busy (or none
-                        # is loaded): we have freed what we safely can - proceed to
-                        # load best-effort, exactly the pre-multi-model behaviour.
+                        # loaded): freed what we safely can, load best-effort (the
+                        # pre-multi-model behaviour).
                         break
-                    # Local eviction is exhausted: before giving up, try a
-                    # best-effort ask to a sibling localm instance on this machine
-                    # (multi-instance GPU coordination, see localm.gpu_registry) to
-                    # release ITS VRAM. Off the event loop since it may make a
-                    # blocking loopback HTTP call. Advisory only: any failure falls
-                    # straight through to the 503 below - never a harder failure
-                    # than the pre-existing baseline.
+                    # Local eviction exhausted: before giving up, best-effort ask a
+                    # sibling localm instance to release ITS VRAM (multi-instance
+                    # coordination, see localm.gpu_registry). Off the event loop (it
+                    # may make a blocking loopback call). Advisory: any failure falls
+                    # through to the 503 below, never a harder failure than baseline.
                     cooperated = await loop.run_in_executor(None, _attempt_cooperative_unload)
                     if cooperated:
                         continue
@@ -340,20 +327,18 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                 free_before = free_vram
                 # Safe to unload without the victim's own semaphore: active_requests
                 # == 0 means no request is pinned on it (a request pins its engine
-                # for its whole lifetime, from get_engine through stream end -
-                # AUDIT-CRIT-1), so no decode is in flight to race the native free.
-                # Acquiring the victim sem here while holding the target sem would
-                # also risk a two-switch lock-ordering deadlock.
+                # for its whole lifetime - AUDIT-CRIT-1), so no decode races the
+                # native free. Taking the victim sem while holding the target sem
+                # would also risk a two-switch lock-ordering deadlock.
                 await loop.run_in_executor(None, evict_engine.unload)
                 del _engines[evict_name]
                 _engines_lru.remove(evict_name)
                 if evict_name in _inference_sems:
                     del _inference_sems[evict_name]
 
-                # Wait for the native VRAM free to actually land before re-checking,
-                # so the next iteration does not see a stale-low reading and
-                # over-evict (the driver-hang guard used everywhere else -
-                # AUDIT-MED-11). Only meaningful when VRAM is measurable.
+                # Wait for the native VRAM free to land before re-checking, so the
+                # next iteration does not see a stale-low reading and over-evict
+                # (driver-hang guard, AUDIT-MED-11). Only meaningful when measurable.
                 if measurable and free_before is not None:
                     await loop.run_in_executor(
                         None,
@@ -367,10 +352,9 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
             
         cancel = threading.Event()
         if preempt:
-            # Only an explicit switch registers a load-cancel hook, so only an
-            # explicit newer switch can abort this load. API-routed loads
-            # (preempt=False) run to completion and are never cancelled by a
-            # concurrent load of a different model.
+            # Only an explicit switch registers a load-cancel hook, so only a newer
+            # explicit switch can abort this load; API-routed loads (preempt=False)
+            # run to completion, never cancelled by a concurrent different-model load.
             _switch_cancel = cancel
             _switch_loading = name
             if hasattr(new_engine, "set_load_cancel"):
@@ -391,10 +375,9 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
         _inference_sem = sem
         if on_active is not None:
             on_active(name)
-        # Cross-install GPU coordination: reflect the newly-active model in
-        # the registry so a sibling instance's next VRAM check (or eviction
-        # decision) sees fresh state. No-op when not registered for
-        # coordination (see _gpu_registry_sync).
+        # Cross-install GPU coordination: reflect the newly-active model so a
+        # sibling's next VRAM/eviction check sees fresh state. No-op when not
+        # registered (see _gpu_registry_sync).
         _gpu_registry_sync()
         return {"status": "loaded", "model": name}
 
@@ -521,9 +504,8 @@ async def unload_all_models() -> dict:
     if before is not None:
         result.update(vram_freed=released,
                       vram_before_bytes=before, vram_after_bytes=after)
-    # Cross-install GPU coordination: reflect the now-empty (or changed) model
-    # state so a sibling instance's next eviction decision sees fresh state.
-    # No-op when not registered for coordination.
+    # Cross-install GPU coordination: reflect the now-empty/changed state for a
+    # sibling's next eviction decision. No-op when not registered.
     _gpu_registry_sync()
     return result
 
@@ -669,14 +651,12 @@ async def _idle_unload_once(ttl: int) -> bool:
             idle_s = int(time.monotonic() - last_act)
             await loop.run_in_executor(None, engine.unload)
 
-            # Keep the (now-unloaded) Engine object in _engines so the next
-            # request reloads it lazily WITH ITS ORIGINAL CONSTRUCTOR SETTINGS
-            # (n_ctx / n_gpu_layers / device / mmproj), and so a direct-path
-            # served model - whose display name is not in the registry and cannot
-            # be rebuilt by the default factory - is not lost forever (AUDIT-HIGH-5;
-            # matches this function's own "reloads on the next request" contract).
-            # Only drop it from the LRU (it holds no VRAM while unloaded); keep its
-            # inference semaphore so a concurrent reload reuses the same lock.
+            # Keep the (now-unloaded) Engine in _engines so the next request
+            # reloads it lazily with its ORIGINAL constructor settings (n_ctx /
+            # n_gpu_layers / device / mmproj), and so a direct-path served model
+            # (display name not in the registry, unbuildable by the factory) is
+            # not lost forever (AUDIT-HIGH-5). Only drop it from the LRU (no VRAM
+            # while unloaded); keep its inference semaphore for a concurrent reload.
             if name in _engines_lru:
                 _engines_lru.remove(name)
 
@@ -691,8 +671,8 @@ async def _idle_unload_once(ttl: int) -> bool:
             _dbg.info("idle-unload: freed %s after %ds idle (ttl=%ds); it reloads "
                       "on the next request", engine.display_name, idle_s, ttl)
             unloaded_any = True
-            # Cross-install GPU coordination: reflect the freed model so a
-            # sibling instance sees fresh state. No-op when not registered.
+            # Cross-install GPU coordination: reflect the freed model. No-op when
+            # not registered.
             _gpu_registry_sync()
 
     return unloaded_any
@@ -739,31 +719,28 @@ async def _gpu_registry_heartbeat_loop() -> None:
 _bearer_scheme = HTTPBearer(auto_error=False)
 
 # S2: the browser GUI authenticates with an HttpOnly session cookie whose value is
-# an OPAQUE session id (localm.sessions), NOT the API key - the page JS can never
-# read it, and rolling the key does not invalidate it. Cookie-sourced auth on a
-# state-changing method must additionally carry a CSRF token in this header; the
-# token is an HMAC DERIVED from the session (csrf_token_for / _csrf_ok), fetched by
-# the client from GET /api/session, so it is always in lockstep with the session and
-# cannot desync (there is NO separate CSRF cookie). The Authorization-header path
-# (CLI / SDK / coder) cannot be forged cross-site and is therefore CSRF-exempt.
+# an OPAQUE session id (localm.sessions), NOT the API key - page JS cannot read it,
+# and rolling the key does not invalidate it. Cookie-sourced auth on a state change
+# must also carry a CSRF token in this header, an HMAC DERIVED from the session
+# (csrf_token_for / _csrf_ok) fetched via GET /api/session, so it is always in
+# lockstep with the session and cannot desync (there is NO separate CSRF cookie).
+# The Authorization-header path (CLI / SDK / coder) cannot be forged cross-site and
+# is therefore CSRF-exempt.
 SESSION_COOKIE = "localm_session"
 CSRF_HEADER = "X-CSRF-Token"
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
 
-# Hard cap on any request body, rejected (413) from the Content-Length BEFORE the
-# body is buffered or parsed - so a large base64 upload cannot be materialized in
-# memory ahead of a route's own size checks (a decode-time OOM DoS on
-# /api/rag/upload + /extract, CWE-400). 160 MB comfortably fits the largest
-# legitimate upload (100 MB decoded ~= 133 MB base64 + the JSON wrapper) while
-# rejecting anything larger up front. Nothing else the server accepts is remotely
-# this big. Read at request time so a test can monkeypatch it.
+# Hard cap on any request body, rejected (413) from Content-Length BEFORE the body
+# is buffered or parsed, so a large base64 upload cannot be materialized ahead of a
+# route's own checks (decode-time OOM DoS on /api/rag/upload + /extract, CWE-400).
+# 160 MB fits the largest legitimate upload (100 MB decoded ~= 133 MB base64 + JSON
+# wrapper) and rejects larger up front. Read at request time so a test can patch it.
 MAX_REQUEST_BODY_BYTES = 160_000_000
 # SEAMLESS: the session cookie PERSISTS so the user stays signed in across a browser
-# or PWA restart, instead of being a session cookie the browser drops on close
-# (which made the key gate - and its "Install certificate" step - reappear every
-# time, the "install a new cert / re-enter the key every restart" report). Browsers
-# clamp cookie lifetime to ~400 days, so we ask for that ceiling; the escape hatch is
-# /api/session/logout (Settings: leave the key blank and Save).
+# or PWA restart (a drop-on-close cookie made the key gate and its "Install
+# certificate" step reappear every restart). Browsers clamp lifetime to ~400 days,
+# so we ask for that ceiling; escape hatch is /api/session/logout (Settings: blank
+# the key and Save).
 SESSION_MAX_AGE = 400 * 24 * 3600  # ~400 days (the browser cap)
 
 
@@ -809,12 +786,12 @@ def _principal_from_token(token, source):
             return None
         held = set(rec.get("scopes", []))
         if scopes.ADMIN not in held:
-            # A SCOPED-key session lives only as long as its underlying key does:
-            # re-validate the owning key against the live keystore every request, so
-            # revoking or expiring the key cuts the session off too (parity with the
-            # bearer path, where verify() re-checks the keystore each request). An
-            # owner/ADMIN session is intentionally exempt - it is decoupled from the
-            # key VALUE so an owner-key ROLL does not log the owner out (the S1 fix).
+            # A SCOPED-key session lives only as long as its key: re-validate the
+            # owning key against the live keystore every request, so revoking or
+            # expiring it cuts the session off (parity with the bearer path's
+            # per-request verify()). An owner/ADMIN session is exempt - decoupled
+            # from the key VALUE so an owner-key ROLL does not log the owner out
+            # (the S1 fix).
             from localm.auth import key_hash_live
             if not key_hash_live(rec.get("key_hash")):
                 return None
@@ -1031,9 +1008,7 @@ def _is_loopback_host(host: str) -> bool:
         return False
 
 
-# ------------------------------------------------------------------ #
-#  Surface mounting (H6 phase 5: on-demand GUI on a running instance)  #
-# ------------------------------------------------------------------ #
+# Surface mounting (H6 phase 5: on-demand GUI on a running instance).
 
 def mount_gui_surface(app) -> bool:
     """Add the GUI surface (its /api routes + the SPA static mount) to a running
@@ -1072,9 +1047,9 @@ def mount_gui_surface(app) -> bool:
             raise ValueError(f"Model not found: {name}")
         m_path, m_hint = info
         # VIS-1: a GUI/registry switch must not drop vision. Carry the model's
-        # mmproj (a registry-recorded one, else a sibling projector auto-detected
-        # next to the GGUF) into the new Engine, the same way the CLI --mmproj flag
-        # does - otherwise switching models silently loses image support.
+        # mmproj (registry-recorded, else a sibling projector next to the GGUF)
+        # into the new Engine like the CLI --mmproj flag, else switching silently
+        # loses image support.
         mmproj = get_model_mmproj(name)
         return Engine(
             str(m_path),
@@ -1088,11 +1063,10 @@ def mount_gui_surface(app) -> bool:
         return await switch_engine(name, _build_engine)
 
     from localm.plugins.gui.web import attach_gui
-    # Claim the mount BEFORE attaching so a re-entrant (or, after some future
-    # refactor, a concurrent) call cannot double-register the GUI routes; roll the
-    # flag back if the attach itself fails. Today mount_gui_surface + attach_gui
-    # run fully synchronously inside the request handler, so the event loop never
-    # interleaves two of them - this just makes the invariant explicit and robust.
+    # Claim the mount BEFORE attaching so a re-entrant/concurrent call cannot
+    # double-register the GUI routes; roll the flag back if attach fails. (Today
+    # this runs fully synchronously in the request handler, so nothing interleaves;
+    # this just makes the invariant explicit.)
     app.state.gui_mounted = True
     try:
         manager = attach_gui(
@@ -1116,10 +1090,6 @@ def mount_gui_surface(app) -> bool:
         _dbg.warning("registry mode not updated to full: %s", e)
     return True
 
-
-# ------------------------------------------------------------------ #
-#  App factory                                                         #
-# ------------------------------------------------------------------ #
 
 def _do_shutdown() -> None:
     """SRV-4: the actual stop sequence. Unload the model FIRST so the native
@@ -1295,9 +1265,9 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         _engine = None
         _inference_sem = None
 
-    # Session-persistence mode for this server (privacy → no traces).
-    # One audit log / transcript covers the server lifetime; GUI chat and
-    # any API client traffic flow through /v1/chat/completions and land here.
+    # Session-persistence mode for this server (privacy -> no traces). One audit
+    # log / transcript covers the server lifetime; GUI + API chat traffic flows
+    # through /v1/chat/completions and lands here.
     from localm.audit import effective_mode, make_audit_log, make_transcript
     _mode = effective_mode("server")
     _audit = make_audit_log(_mode, label="server")
@@ -1328,10 +1298,10 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
             except Exception:
                 pass
         # Plugins register() before this loop existed, so loop-dependent plugin
-        # work (the jobs scheduler) is queued on the manager; run it now that
-        # the loop is up. Without this, no scheduled job ever fired on a stock
-        # server start (memory-audit 2026-07-02, critical C2). attach_engine
-        # runs after create_app, so the manager is resolved at lifespan time.
+        # work (the jobs scheduler) is queued on the manager; run it now the loop
+        # is up - without this no scheduled job fired on a stock start (memory-audit
+        # 2026-07-02, critical C2). attach_engine runs after create_app, so the
+        # manager resolves at lifespan time.
         _pm = getattr(app.state, "plugin_manager", None)
         if _pm is not None:
             _pm.run_startup_callbacks()
@@ -1340,16 +1310,13 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         # outlives the app.
         idle_task = asyncio.create_task(_idle_unload_loop())
 
-        # Cross-install GPU/VRAM coordination (see localm.gpu_registry):
-        # register this instance in the machine-wide registry, but ONLY for a
-        # real, non-isolated, instances.advertise()'d server - app.state.
-        # instance_id (+ port/scheme) are set by advertise() before uvicorn
-        # starts accepting connections, i.e. before this lifespan runs; a bare
-        # create_app() test app or an --isolated run never sets instance_id
-        # (or sets instance_isolated), so this stays a no-op there and never
-        # touches the shared machine-wide directory. Best-effort throughout:
-        # a failure here must never block server startup (RULE 5: logged, not
-        # silenced).
+        # Cross-install GPU/VRAM coordination (see localm.gpu_registry): register
+        # this instance in the machine-wide registry, but ONLY for a real,
+        # non-isolated, advertise()'d server (instance_id + port/scheme are set by
+        # advertise() before uvicorn accepts connections; a bare create_app() test
+        # app or --isolated run never sets instance_id, so this is a no-op that
+        # never touches the shared directory). Best-effort: a failure must never
+        # block startup (RULE 5: logged, not silenced).
         global _gpu_coord
         gpu_task = None
         _instance_id = getattr(app.state, "instance_id", None)
@@ -1407,14 +1374,12 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         lifespan=lifespan,
     )
 
-    # SRV-2: one backstop so an unexpected error in ANY route returns a
-    # consistent JSON 500 and is logged, instead of leaking a traceback or a
-    # bare body. Starlette already keeps a Python exception from killing the
-    # server; this standardises the response shape and the logging so a single
-    # failing request is a clean 500, never a crash and never an info leak. (A
-    # native fault - a C-extension segfault - cannot be caught in-process; those
-    # are prevented at the source, e.g. voice audio is decoded/validated before
-    # the native path, and surfaced via the crash marker on restart.)
+    # SRV-2: one backstop so an unexpected error in ANY route returns a consistent
+    # JSON 500 and is logged, instead of leaking a traceback or bare body. This
+    # standardises the response shape and logging so a failing request is a clean
+    # 500, never a crash or info leak. (A native fault - a C-extension segfault -
+    # cannot be caught in-process; those are prevented at the source, e.g. voice
+    # audio is validated before the native path, and surfaced via the crash marker.)
     @app.exception_handler(Exception)
     async def _unhandled_error(request, exc):  # noqa: ANN001 - framework signature
         from localm.debuglog import logger as _dbg
@@ -1435,12 +1400,11 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     # never persisted.
     app.state.shell_token = secrets.token_urlsafe(32)
 
-    # Per-process CSRF secret. The CSRF token is a deterministic HMAC of the
-    # session id (below), so it is provably present exactly when the session is and
-    # CANNOT desync from it (the old design used a SEPARATE readable cookie that a
-    # client reset could clear while the HttpOnly session survived, 403-ing every
-    # write). Per-process so it dies on restart (the client re-fetches the token
-    # from /api/session on the next boot); never persisted.
+    # Per-process CSRF secret. The CSRF token is a deterministic HMAC of the session
+    # id (below), so it is present exactly when the session is and CANNOT desync
+    # (the old design used a SEPARATE readable cookie a client reset could clear
+    # while the HttpOnly session survived, 403-ing every write). Per-process so it
+    # dies on restart (client re-fetches from /api/session); never persisted.
     app.state.csrf_secret = secrets.token_urlsafe(32)
 
     # api-mode landing: a bare `localm serve` has no GUI shell, so GET / would
@@ -1492,33 +1456,28 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     # origin, so without this a malicious local web page (a dev server, an npm
     # postinstall server) could drive state-changing endpoints from the user's
     # browser - mint a key, flip require_auth, install a plugin, load/unload the
-    # model, browse the filesystem, OR index-and-read arbitrary files through a
-    # plugin data route like /api/rag, or drive the coder agent via /api/coder -
-    # even on a keyless install (open-mode scope collapse). We require every
-    # unsafe-method request to be same-origin (or an explicitly configured CORS
-    # origin), EXCEPT the OpenAI-compatible inference API, which is deliberately
-    # left cross-origin callable so a local app can use it. Guarding by default
-    # (allowlist, not denylist) means a new plugin route is protected the moment
-    # it is added, without anyone remembering to register it here. Non-browser
-    # clients (CLI / SDK) send no Origin; "cors_origins": "*" opts out entirely.
+    # model, browse the filesystem, read files via a plugin route like /api/rag,
+    # or drive the coder via /api/coder - even keyless (open-mode scope collapse).
+    # So every unsafe-method request must be same-origin (or a configured CORS
+    # origin), EXCEPT the OpenAI-compatible inference API, left cross-origin
+    # callable for local apps. Allowlist-by-default means a new plugin route is
+    # protected the moment it is added. Non-browser clients (CLI / SDK) send no
+    # Origin; "cors_origins": "*" opts out entirely.
     _UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
     _CROSS_ORIGIN_OK = (
         "/v1/chat/completions", "/v1/completions", "/v1/embeddings",
         # Surface management (phase 5 on-demand GUI mount) is driven by a local
-        # process (the attaching `localm gui`), not the browser shell: it sends
-        # no Origin and has no shell_token. The route does its OWN strict auth
-        # (this instance's attach token, or an owner API key), which - not the
-        # same-origin gate - is the real credential, so it is exempt here. A
-        # cross-origin browser page still cannot set the Authorization header
-        # without a secret it cannot read, so the exemption adds no CSRF surface.
+        # process (the attaching `localm gui`), not the browser shell: no Origin,
+        # no shell_token. The route does its OWN strict auth (this instance's
+        # attach token, or an owner API key) - that, not the same-origin gate, is
+        # the real credential, so it is exempt. A cross-origin page still cannot
+        # set Authorization without a secret it cannot read, so no CSRF surface.
         "/v1/surfaces/",
-        # Multi-instance GPU coordination (localm.gpu_registry): a SIBLING
-        # localm instance on this machine calls this loopback-only, exactly
-        # like the surface-management case above - it sends no Origin and has
-        # no shell_token (it is a different process). Its own coordination_
-        # token (never the real API key/shell token) is the real credential,
-        # checked inside the route itself, so the same-origin gate is exempt
-        # here for the same reason.
+        # Multi-instance GPU coordination (localm.gpu_registry): a SIBLING localm
+        # instance calls this loopback-only, like surface-management above - no
+        # Origin, no shell_token (different process). Its own coordination_token
+        # (never the API key/shell token) is the real credential, checked in the
+        # route, so the same-origin gate is exempt for the same reason.
         "/v1/instances/",
     )
     _cors_allowlist = cors_cfg if isinstance(cors_cfg, list) else []
@@ -1528,11 +1487,9 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     async def _origin_guard(request, call_next):
         if (request.method in _UNSAFE_METHODS
                 and not request.url.path.startswith(_CROSS_ORIGIN_OK)):
-            # Same-origin / CORS-allowlist check. "cors_origins": "*" opts OUT
-            # of THIS check only (an explicit "any origin may call me") - it
-            # must NOT also waive the open-mode shell-token gate below, which is
-            # a separate credential requirement, not a same-origin check
-            # (AUD-CORSWILD).
+            # Same-origin / CORS-allowlist check. "cors_origins": "*" opts OUT of
+            # THIS check only; it must NOT also waive the open-mode shell-token
+            # gate below, a separate credential requirement (AUD-CORSWILD).
             if not _cors_wildcard:
                 origin = request.headers.get("origin")
                 allowlisted = bool(origin) and origin in _cors_allowlist
@@ -1548,14 +1505,13 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                         )
             # H5: open-mode management gate. With no key configured, management
             # routes still require the per-process shell token (injected into the
-            # loopback GUI shell), so a no-Origin local client - curl, a script -
+            # loopback GUI shell), so a no-Origin local client (curl, a script)
             # can no longer mint a key, flip config, install a plugin, load a
             # model, or browse the filesystem unauthenticated. Protected mode (a
-            # key exists) is handled by bearer auth on the route; a require_auth-
-            # without-key install 503s at the route. The token is required even
-            # for an allowlisted CORS origin (F2): an Origin header is forgeable
-            # by a non-browser client, so it is not a management credential - a
-            # configured external origin must use an API key for state changes.
+            # key exists) is bearer-auth'd on the route. The token is required even
+            # for an allowlisted CORS origin (F2): an Origin header is forgeable, so
+            # it is not a management credential - a configured external origin must
+            # use an API key for state changes.
         is_unsafe = request.method in _UNSAFE_METHODS
         is_metadata_get = (
             request.method == "GET"
@@ -1580,10 +1536,9 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
 
     @app.middleware("http")
     async def _limit_body_size(request, call_next):
-        # Reject an over-large body from its Content-Length, BEFORE Starlette reads
-        # and parses it, so a giant base64 upload cannot be buffered into memory
-        # ahead of a route's own caps (the /api/rag/upload + /extract decode-time
-        # OOM DoS). Read the module global at call time so it stays monkeypatchable.
+        # Reject an over-large body from Content-Length before Starlette parses it
+        # (see MAX_REQUEST_BODY_BYTES). Read the global at call time so it stays
+        # monkeypatchable.
         cl = request.headers.get("content-length")
         if cl is not None:
             try:
@@ -1598,14 +1553,13 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
 
     # Security response headers (R41 defense-in-depth). The user-content render
     # path is already XSS-safe via DOMPurify (see dev-notes/SECURITY-xss-render-
-    # review-2026-06-23.md); the one gap that review found was the absence of a
-    # Content-Security-Policy backstop on the GUI shell. nosniff is enforced
-    # everywhere (stops a response being MIME-sniffed into executable HTML). The
-    # CSP ships in REPORT-ONLY mode: it never blocks, so it cannot break the GUI
-    # (the inline shell-token script, the TTS CDN/HF fetches, the sandboxed
-    # artifact iframe, workers), but it documents the intended policy and surfaces
-    # any violation for the maintainer to resolve before a later coordinated flip
-    # to an enforcing policy (which needs a nonce on the inline shell script).
+    # review-2026-06-23.md); the gap it found was no Content-Security-Policy
+    # backstop on the GUI shell. nosniff is enforced everywhere (blocks MIME-sniff
+    # into executable HTML). The CSP ships REPORT-ONLY: it never blocks (so it
+    # cannot break the inline shell-token script, TTS CDN/HF fetches, the sandboxed
+    # artifact iframe, workers) but documents the intended policy and surfaces
+    # violations before a later flip to enforcing (which needs a nonce on the
+    # inline shell script).
     _CSP_REPORT_ONLY = (
         "default-src 'self'; "
         "script-src 'self'; "
@@ -1630,16 +1584,13 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         return resp
 
     # API-surface disclosure guard. FastAPI's built-in docs (/docs, /redoc,
-    # /openapi.json) enumerate every route plus its request/response schema. That
-    # is fine on a loopback bind (the local owner), but on a NETWORK bind it hands
-    # an UNAUTHENTICATED remote client a full map of the attack surface - every
-    # endpoint stays scope-gated, so it grants no access, but it is needless
-    # disclosure and inconsistent with how /whoami hides root_dir off-loopback.
-    # Serve the docs only on a loopback bind, keyed on the CONFIGURED bind host
-    # (never the peer - portmux makes the peer always look loopback). 404, not
-    # 403, so the endpoints simply do not exist off-loopback and reveal nothing.
-    # bind_host is unset in tests / a standalone mount -> default loopback ->
-    # docs stay available there, matching prior behaviour.
+    # /openapi.json) enumerate every route + schema. Fine on a loopback bind, but
+    # on a NETWORK bind it hands an unauthenticated remote a full attack-surface
+    # map (every endpoint stays scope-gated, so no access is granted, but it is
+    # needless disclosure). Serve docs only on a loopback bind, keyed on the
+    # CONFIGURED bind host (never the peer - portmux makes the peer always look
+    # loopback). 404 not 403, so they simply do not exist off-loopback. bind_host
+    # unset in tests / standalone mount -> default loopback -> docs stay available.
     _DOCS_PATHS = frozenset(
         {"/openapi.json", "/docs", "/redoc", "/docs/oauth2-redirect"})
 
@@ -1651,15 +1602,13 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                 return JSONResponse(status_code=404, content={"detail": "Not Found"})
         return await call_next(request)
 
-    # ---------------------------------------------------------------- #
-    #  Route groups (extracted to localm/inference/routes/*.py)          #
-    # ---------------------------------------------------------------- #
+    # Route groups (extracted to localm/inference/routes/*.py).
     # The engine + inference semaphore are module globals read live by the route
     # modules (via `import localm.inference.http_server as _hs`), so a model swap
     # that reassigns them is seen there. Only these session-scoped objects are
     # create_app locals, so they travel to the route groups on ctx. Registration
     # order is irrelevant: FastAPI matches exact path templates by method, and no
-    # group has a same-method literal-vs-param path collision with another.
+    # group has a same-method literal-vs-param path collision.
     from types import SimpleNamespace
     ctx = SimpleNamespace(audit=_audit, transcript=_transcript, mode=_mode)
     from localm.inference.routes import models as _routes_models
@@ -1681,7 +1630,7 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     from localm.inference.routes import chat as _routes_chat
     _routes_chat.register(app, ctx)
 
-    # ---- plugin engine: load enabled plugins + management API ------- #
+    # Plugin engine: load enabled plugins + management API.
     # Wrapped so a plugin-engine failure can never stop the server starting.
     try:
         from localm.plugins.engine import attach_engine
@@ -1696,10 +1645,6 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
 
     return app
 
-
-# ------------------------------------------------------------------ #
-#  Performance metric helpers                                          #
-# ------------------------------------------------------------------ #
 
 def _engine_finish_reason(engine) -> str:
     """Why the last generation ended - "stop" unless the backend reported a
@@ -1721,10 +1666,6 @@ def _tokens_per_sec(completion_tokens: int, elapsed: float) -> Optional[float]:
         return None
     return round(completion_tokens / elapsed, 2)
 
-
-# ------------------------------------------------------------------ #
-#  SSE streaming                                                       #
-# ------------------------------------------------------------------ #
 
 def _last_user_text(messages: list) -> str:
     """Text of the most recent user message (for the audit trail)."""
@@ -1834,8 +1775,8 @@ async def _stream_sse(
 
     prompt_tokens = engine.count_messages_tokens(messages)
 
-    # Context Limit Handling: Trigger compact_messages if we are dangerously close to the limit.
-    # We reserve a buffer of 2048 tokens for compaction overhead and response generation.
+    # Context-limit handling: compact_messages when close to the limit; reserve a
+    # 2048-token buffer for compaction overhead + response generation.
     capacity = engine.context_capacity()
     if capacity is not None and len(messages) > 3:
         buffer = max(2048, int(capacity * 0.10))
@@ -1867,12 +1808,12 @@ async def _stream_sse(
             for token in engine.chat_stream(messages, **gen_kwargs):
                 loop.call_soon_threadsafe(token_queue.put_nowait, token)
         except Exception as e:
-            # Log it (with full traceback, to the debug log) and surface it to the
-            # client - a silent thread death looks like an empty reply. We deliberately
-            # do NOT traceback.print_exc() here: _dbg.exception already records the
-            # trace, and an expected condition (e.g. the conversation outgrew n_ctx_max)
-            # should reach the user as a clean message, not a raw console traceback.
-            # Printing it was also the historical WinError-6 crash source on Windows.
+            # Log (full traceback to the debug log) and surface to the client - a
+            # silent thread death looks like an empty reply. Deliberately NOT
+            # traceback.print_exc(): _dbg.exception already records the trace, an
+            # expected condition (e.g. outgrew n_ctx_max) should reach the user as a
+            # clean message, and printing it was the historical WinError-6 crash on
+            # Windows.
             from localm.debuglog import logger as _dbg
             _dbg.exception("generation thread failed")
             loop.call_soon_threadsafe(
@@ -1940,21 +1881,15 @@ async def _stream_sse(
         tokens_per_sec=_tokens_per_sec(completion_tokens, gen_elapsed),
         context_capacity=engine.context_capacity(),
     )
-    # Honesty: a generation that errored mid-stream must not report a clean
-    # "stop" on the terminal frame. The error text was already streamed as a
-    # visible chunk above, but a PROGRAMMATIC client keys off finish_reason and
-    # would otherwise read the failure as a successful completion. Mark it
-    # "error" so the failure is machine-detectable, not only human-readable.
+    # Honesty: a mid-stream error must not report a clean "stop" on the terminal
+    # frame. The error text was already streamed, but a PROGRAMMATIC client keys
+    # off finish_reason, so mark it "error" to make the failure machine-detectable.
     finish_reason = "error" if gen_error is not None else _engine_finish_reason(engine)
     done = ChatChunk.done(model_id, chunk_id, ts, usage=usage,
                           finish_reason=finish_reason)
     yield f"data: {done.model_dump_json()}\n\n"
     yield "data: [DONE]\n\n"
 
-
-# ------------------------------------------------------------------ #
-#  SSE streaming for /v1/completions                                   #
-# ------------------------------------------------------------------ #
 
 async def _stream_sse_completion(
     engine: Engine,
@@ -1982,9 +1917,9 @@ async def _stream_sse_completion(
                 loop.call_soon_threadsafe(token_queue.put_nowait, token)
         except Exception as e:
             # Surface an inference failure to the client instead of letting this
-            # daemon thread die - an uncaught thread death fires a crash report and
-            # looks to the user like an empty reply. _dbg.exception logs the full
-            # trace to the debug log (same contract as the chat-completions path).
+            # daemon thread die (an uncaught death fires a crash report and looks
+            # like an empty reply). _dbg.exception logs the full trace (same
+            # contract as the chat-completions path).
             from localm.debuglog import logger as _dbg
             _dbg.exception("completion generation thread failed")
             loop.call_soon_threadsafe(token_queue.put_nowait, RuntimeError(str(e)))
@@ -2063,10 +1998,6 @@ async def _stream_sse_completion(
     yield "data: [DONE]\n\n"
 
 
-# ------------------------------------------------------------------ #
-#  Non-streaming completion                                            #
-# ------------------------------------------------------------------ #
-
 async def _complete(
     engine: Engine,
     messages: list,
@@ -2080,12 +2011,11 @@ async def _complete(
 ):
     loop = asyncio.get_running_loop()
 
-    # Call the engine's real methods directly. Every Engine implements these;
-    # the previous hasattr-guarded fallbacks (100 prompt tokens, 4096 capacity,
-    # a literal "ok" completion, 10 completion tokens) existed only so a
-    # method-less mock engine would pass through this real endpoint - which
-    # meant a genuinely broken/wrong engine object returned a fabricated 200
-    # instead of surfacing the failure (AUDIT rule 5 / no facade).
+    # Call the engine's real methods directly. The previous hasattr-guarded
+    # fallbacks (100 prompt tokens, 4096 capacity, an "ok" completion, 10
+    # completion tokens) let a method-less mock pass through, so a broken engine
+    # returned a fabricated 200 instead of surfacing the failure (AUDIT rule 5 /
+    # no facade).
     prompt_tokens = engine.count_messages_tokens(messages)
 
     capacity = engine.context_capacity()
@@ -2144,10 +2074,6 @@ async def _complete(
     return JSONResponse(response.model_dump())
 
 
-# ------------------------------------------------------------------ #
-#  Helpers                                                             #
-# ------------------------------------------------------------------ #
-
 def _protocol_messages_to_dicts(messages: List[Message]) -> list:
     """Convert Pydantic Message objects to plain dicts for backends."""
     result = []
@@ -2176,10 +2102,6 @@ def _protocol_messages_to_dicts(messages: List[Message]) -> list:
     return result
 
 
-# ------------------------------------------------------------------ #
-#  Entry point                                                         #
-# ------------------------------------------------------------------ #
-
 def serve(engine: Engine, host: str = "127.0.0.1", port: int = 8642,
           ssl_certfile: Optional[str] = None,
           ssl_keyfile: Optional[str] = None,
@@ -2206,15 +2128,12 @@ def serve(engine: Engine, host: str = "127.0.0.1", port: int = 8642,
     scheme = "https" if ssl_certfile else "http"
 
     # SRV-CTRLC: no custom Win32 Ctrl+C handler here. A previous one resolved the
-    # loop with get_event_loop_policy().get_event_loop() on the control-handler OS
-    # thread - which is NOT the serving loop (portmux's asyncio.run makes a fresh
-    # loop with no set_event_loop), so loop.stop() never fired - yet it returned
-    # True, consuming the event and DEFEATING uvicorn's own SIGINT/KeyboardInterrupt
-    # shutdown too. Net effect: it ATE Ctrl+C and the server hung. Removing it lets
-    # Ctrl+C flow through uvicorn's standard signal handling (KeyboardInterrupt is
-    # caught in portmux.run_server), which portmux's SRV-6 loop-wakeup task keeps
-    # responsive on Windows. Verified live (Ctrl+Break) that the server now stops
-    # instead of no-opping; a graceful vs abrupt human Ctrl+C is uvicorn's own path.
+    # loop on the control-handler OS thread - NOT the serving loop (portmux's
+    # asyncio.run makes a fresh loop) - so loop.stop() never fired, yet it returned
+    # True, eating the event and defeating uvicorn's own SIGINT shutdown: it ATE
+    # Ctrl+C and the server hung. Removing it lets Ctrl+C flow through uvicorn
+    # (KeyboardInterrupt caught in portmux.run_server), kept responsive on Windows
+    # by portmux's SRV-6 loop-wakeup. Verified live (Ctrl+Break).
 
     with instances.advertise(app, home_dir(), host=host, port=port, mode="api",
                              scheme=scheme, project=project, isolated=isolated):

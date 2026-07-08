@@ -17,9 +17,7 @@ All grammars use ``root`` as the entry rule, which is what
 
 from __future__ import annotations
 
-# ---------------------------------------------------------------------------
 #  JSON grammars
-# ---------------------------------------------------------------------------
 
 # Any valid JSON value at the root
 JSON_VALUE = r"""
@@ -57,23 +55,19 @@ ws     ::= ([ \t\n\r])*
 """.strip()
 
 
-# ---------------------------------------------------------------------------
 #  Tool-call grammar (coder XML format)
-# ---------------------------------------------------------------------------
 
-# Constrains the entire response to one or more <tool_call>…</tool_call> blocks
+# Constrains the whole response to one or more <tool_call>...</tool_call> blocks
 # separated by optional whitespace.
 #
 # STRICT mode (grammar=TOOL_CALLS_ONLY alone) forces tool-only output from the
-# first token: no thinking, no prose. Live-tested 2026-07-02: a thinking model
-# masked away from its <think> opener stalls into the unlimited leading `ws`
-# (a whitespace-only reply), so strict mode suits only a "must call a tool
-# NOW" routing step, never a general turn.
+# first token (no thinking/prose). Live-tested 2026-07-02: a thinking model
+# masked off its <think> opener stalls into the leading `ws` (whitespace-only
+# reply), so strict suits only a "must call a tool NOW" routing step.
 #
 # LAZY mode (grammar_lazy=True + TOOL_CALL_TRIGGER) is the general-turn form:
-# free text and <think> blocks flow unconstrained, and the grammar engages
-# only when the model itself starts a <tool_call> - from there the call must
-# be structurally valid JSON. This is the "text-or-tool" enforcement.
+# free text and <think> flow unconstrained; the grammar engages only when the
+# model starts a <tool_call>, from where the call must be valid JSON.
 TOOL_CALLS_ONLY = r"""
 root       ::= opt-ws tool-block+ opt-ws
 tool-block ::= "<tool_call>" opt-ws json-obj opt-ws "</tool_call>" opt-ws
