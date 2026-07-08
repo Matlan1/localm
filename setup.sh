@@ -29,6 +29,19 @@ ask() {  # ask "prompt" "default"  ->  echoes the answer (the default in --yes m
   read -r -p "$prompt" ans || ans=""
   echo "${ans:-$def}"
 }
+offer_report() {  # offer_report "summary" "detail"
+  # Offer to file a bug report for a setup failure via the standalone reporter
+  # (report-issue.sh), which works even though setup did not finish (it needs no
+  # working install). The caller still exits non-zero afterwards - reporting never
+  # masks the failure ("we do not hide problems"). Skipped in --yes mode (no prompt).
+  local here ans
+  here="$(cd "$(dirname "$0")" && pwd)"
+  [ -f "$here/report-issue.sh" ] || return 0
+  [ "$YES" = 1 ] && return 0
+  ans="$(ask "  Report this problem to the maintainer (no GitHub account needed)? [Y/n]: " Y)"
+  case "$ans" in [Nn]*) return 0 ;; esac
+  bash "$here/report-issue.sh" --summary "$1" --detail "$2" || true
+}
 
 say ""
 say "  LocaLM setup - self-contained install in: $(pwd)"
@@ -113,6 +126,7 @@ if ! command -v uv >/dev/null 2>&1; then
     say "      Open a new shell (so the updated PATH applies) and run setup.sh again,"
     say "      or install uv manually first:"
     say "      curl -LsSf https://astral.sh/uv/install.sh | sh"
+    offer_report "localm setup could not install uv" "setup.sh tried Astral's installer but uv was still not callable afterwards."
     exit 1
   fi
 fi
@@ -213,7 +227,13 @@ fi
 
 # ---- install localm (editable) ----------------------------------------------
 say "  Installing localm into .venv ..."
-uv pip install -p .venv -e ".[coder,voice,monitor]"
+# Catch a hard install failure (set -e would otherwise abort silently) so we can
+# offer a bug report before exiting - and still exit non-zero, never masking it.
+uv pip install -p .venv -e ".[coder,voice,monitor]" || {
+  say "  [!] Installing localm failed - see the error above."
+  offer_report "localm install failed during setup" "uv pip install -e .[coder,voice,monitor] failed - see the error output above."
+  exit 1
+}
 
 # Verify the CLI entry point actually landed. Reported live: on a WSL2 clone under
 # a Windows-drive mount (/mnt/c, /mnt/d, ...) the install can report success while
@@ -282,6 +302,7 @@ if [ "$BACKEND" = own ]; then
       # exit instead of silently continuing into the torch/data-dir steps as if
       # the runtime were installed (NEW-CUDADECLINE).
       say "  [!] setup-llama failed - run later:  .venv/bin/localm setup-llama --from <dir>"
+      offer_report "localm setup-llama failed" "Provisioning the native llama.cpp runtime with --from failed during setup."
       exit 1
     }
   else
@@ -292,6 +313,7 @@ else
     # Mirror setup.bat's `if errorlevel 1 (... exit /b 1)`: stop on a declined or
     # failed runtime provision rather than falling through silently (NEW-CUDADECLINE).
     say "  [!] setup-llama failed - run later:  .venv/bin/localm setup-llama --backend $BACKEND"
+    offer_report "localm setup-llama failed" "Provisioning the native llama.cpp runtime (--backend $BACKEND) failed during setup."
     exit 1
   }
 fi

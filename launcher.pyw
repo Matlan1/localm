@@ -542,6 +542,11 @@ class Launcher(tk.Tk):
         self.launch_btn = ttk.Button(footer, text="Launch", style="Launch.TButton",
                                      command=self._launch)
         self.launch_btn.pack(side="right")
+        # Always-available escape hatch: file a bug report even when a mode fails to
+        # launch (or localm will not start at all). Opens the standalone reporter,
+        # which needs no running server.
+        ttk.Button(footer, text="Report a problem", style="Quiet.TButton",
+                   command=self._report_problem).pack(side="right", padx=(0, 8))
 
         # Populate the model list last - on a fresh install with an empty
         # registry this shows a hint in the status label built just above.
@@ -689,6 +694,21 @@ class Launcher(tk.Tk):
 
     def _toggle_key(self) -> None:
         self.key_entry.configure(show="" if self.show_key.get() else "•")
+
+    def _report_problem(self) -> None:
+        """Open the standalone bug reporter in its own console. Works even when a
+        mode just failed to launch or localm will not start - it needs no running
+        server (it files an account-less GitHub issue via the localm proxy after
+        showing you what will be sent)."""
+        script = REPO_DIR / "scripts" / "report_issue.py"
+        if not script.is_file():
+            self.status_msg("Reporter not found (scripts/report_issue.py)", error=True)
+            return
+        try:
+            _spawn_detached([python_exe(), str(script)], cwd=str(REPO_DIR))
+            self.status_msg("Opened the problem reporter in a new window")
+        except Exception as e:
+            self.status_msg(f"Could not open the reporter: {e}", error=True)
 
     # ------------------------------------------------------------- #
 

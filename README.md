@@ -64,6 +64,8 @@ localm serve mymodel                        # OpenAI-compatible API server
 
 Run `localm doctor` after installing to check Python, the native library, GPU driver, VRAM, and optional packages in one shot.
 
+If localm ever fails to start (or setup itself fails), you can still file a bug report: double-click `report-issue.bat` (Windows) or run `bash report-issue.sh` (Linux/macOS) from the clone. It shows you exactly what will be sent, files an account-less GitHub issue (no GitHub login needed), and works even with a broken or missing install.
+
 ---
 
 ## Install
