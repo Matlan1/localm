@@ -70,15 +70,10 @@ def comfy_remove(yes: bool, with_models: bool) -> None:
     Removes <LOCALM_HOME>/comfyui. Your own ComfyUI (comfy_workdir) is NEVER
     touched. Add --models to also delete the managed models folder.
     """
-    from ..media.managed_comfy import managed_comfy_paths, rmtree_robust
+    from ..media.managed_comfy import (managed_comfy_remove_targets,
+                                       remove_managed_comfy)
 
-    paths = managed_comfy_paths()
-    targets = []
-    if paths.root.exists():
-        targets.append(paths.root)
-    if with_models and paths.models_dir.exists():
-        targets.append(paths.models_dir)
-
+    targets = managed_comfy_remove_targets(with_models)
     if not targets:
         console.print("[dim]Nothing to remove - no managed ComfyUI is installed.[/dim]")
         return
@@ -89,13 +84,9 @@ def comfy_remove(yes: bool, with_models: bool) -> None:
         console.print("[dim]Cancelled.[/dim]")
         return
 
-    failed = []
-    for t in targets:
-        try:
-            rmtree_robust(t)
-        except OSError as e:
-            # Do not claim success for a delete that failed (rule 5): report it.
-            failed.append(f"{t} ({e})")
+    # remove_managed_comfy is the shared removal (also used by the GUI route); it
+    # reports any path it could NOT delete (rule 5) instead of claiming success.
+    _, failed = remove_managed_comfy(with_models)
     if failed:
         console.print("[red]Could not remove:[/red]\n  " + "\n  ".join(failed))
         raise SystemExit(1)

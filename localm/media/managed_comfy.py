@@ -125,6 +125,39 @@ def is_managed_comfy_installed() -> bool:
         return False
 
 
+def managed_comfy_remove_targets(with_models: bool = False) -> list:
+    """The on-disk paths ``remove`` would delete: the managed ComfyUI checkout, and
+    (only with ``with_models``) the managed models folder. Pure path checks, deletes
+    nothing - the CLI uses this to show what a remove WILL do before confirming, and
+    the GUI/route uses it (via ``remove_managed_comfy``) for the actual delete. The
+    user's own ComfyUI (comfy_workdir) is never a target."""
+    paths = managed_comfy_paths()
+    targets = []
+    if paths.root.exists():
+        targets.append(paths.root)
+    if with_models and paths.models_dir.exists():
+        targets.append(paths.models_dir)
+    return targets
+
+
+def remove_managed_comfy(with_models: bool = False) -> tuple:
+    """Delete the managed ComfyUI (and its models folder with ``with_models``) under
+    the localm data dir. Returns ``(removed, failed)`` - the paths deleted and, per
+    rule 5, the ones that could NOT be removed with the reason, so a caller never
+    reports success for a delete that failed. Both empty means nothing was installed
+    (an honest no-op, not a success). The single source of truth for the removal that
+    ``localm comfy remove`` and the GUI remove route share."""
+    removed = []
+    failed = []
+    for t in managed_comfy_remove_targets(with_models):
+        try:
+            rmtree_robust(t)
+            removed.append(t)
+        except OSError as e:
+            failed.append(f"{t} ({e})")
+    return removed, failed
+
+
 def managed_comfy_api_url() -> str:
     """The managed instance's base URL. No-op-safe: returns the fixed managed
     loopback URL without touching disk or config (callers gate on

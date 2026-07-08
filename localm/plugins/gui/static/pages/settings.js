@@ -7,7 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { pickDirectory, pickFile } from "../app/picker.js";
-import { $, authHeaders, el, toast } from "../app/helpers.js";
+import { $, authHeaders, confirmDanger, el, streamJob, toast } from "../app/helpers.js";
 import { emptyState } from "../app/icons.js";
 import { caps } from "../app/settings-perf.js";
 
@@ -1013,7 +1013,120 @@ export async function buildMediaSection(form) {
   for (const name of MEDIA_PLUGIN_ORDER) {
     if (_mediaSubs[name]) renderMediaSubsection(name);
   }
+
+  // S5: localm's OWN managed ComfyUI (set up / status / remove). Section-level
+  // (it applies to all media plugins), off by default. The S1 coexistence toggle
+  // (comfy_target / managed_comfy_enabled) is a schema field rendered with the
+  // other Media settings above, NOT duplicated here - this only adds the actions.
+  const managed = el("div", "managed-comfy");
+  panel.appendChild(managed);
+  renderManagedComfyPanel(managed);
+
   form.appendChild(panel);
+}
+
+/** (Re)render the "localm's own ComfyUI" panel in *host*: read
+ *  /api/comfy/managed-status, then show either a Set-up button (which POSTs
+ *  /api/comfy/setup and streams the install job) or the installed path + a Remove
+ *  button (POST /api/comfy/remove). Re-renders itself in place after a setup
+ *  finishes or a remove, so the view always matches what is on disk. Off by
+ *  default: nothing here runs until the user clicks Set up. */
+export async function renderManagedComfyPanel(host) {
+  host.replaceChildren();
+  host.appendChild(el("h4", "media-sub-head", "localm's own ComfyUI"));
+  host.appendChild(el("div", "sub",
+    "Optional: let localm run its OWN ComfyUI under the localm data folder so it "
+    + "can pin a known-good version and carry fixes. Off by default; your own "
+    + "ComfyUI is never modified. Pick which one localm uses with the fields above."));
+
+  let st;
+  try {
+    const r = await fetch("/api/comfy/managed-status", { headers: authHeaders() });
+    if (!r.ok) throw new Error(r.statusText);
+    st = await r.json();
+  } catch (e) {
+    // Surface, do not hide (rule 5): if the managed state cannot be read, say so
+    // rather than defaulting to a possibly-wrong (e.g. Set-up) view.
+    host.appendChild(el("div", "sub",
+      "Could not read the managed ComfyUI status (" + e.message + ")."));
+    return;
+  }
+
+  if (st.installed) {
+    const info = el("div", "sub");
+    info.append("Installed at ");
+    info.appendChild(el("code", null, st.path || ""));
+    host.appendChild(info);
+    const remove = el("button", "btn-secondary comfy-managed-remove-btn", "Remove");
+    remove.type = "button";
+    remove.onclick = () => confirmDanger(
+      "Remove localm's ComfyUI?",
+      "This deletes localm's own ComfyUI under the data folder. Your own ComfyUI is "
+      + "not touched, and downloaded models are kept.",
+      "Remove",
+      async () => {
+        remove.disabled = true;
+        try {
+          const r = await fetch("/api/comfy/remove",
+                                { method: "POST", headers: authHeaders() });
+          const d = await r.json().catch(() => ({}));
+          toast(r.ok ? "Removed localm's ComfyUI" : (d.detail || "Remove failed"), !r.ok);
+        } catch (e) {
+          toast("Remove failed", true);
+        }
+        renderManagedComfyPanel(host);
+      });
+    host.appendChild(remove);
+    return;
+  }
+
+  // Not installed: offer to set it up. Provisioning is long (multi-GB), so it runs
+  // as a background job whose log streams into <pre> below - the request never blocks.
+  const setup = el("button", "btn-secondary comfy-managed-setup-btn",
+                   "Set up localm's own ComfyUI");
+  setup.type = "button";
+  const log = el("pre", "comfy-managed-log");
+  log.style.display = "none";
+  log.style.maxHeight = "220px";
+  log.style.overflow = "auto";
+  const reset = () => {
+    setup.disabled = false;
+    setup.textContent = "Set up localm's own ComfyUI";
+  };
+  setup.onclick = async () => {
+    setup.disabled = true;
+    setup.textContent = "Setting up...";
+    log.style.display = "";
+    log.textContent = "";
+    let jobId;
+    try {
+      const r = await fetch("/api/comfy/setup",
+                            { method: "POST", headers: authHeaders() });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        toast(d.detail || "Setup failed", true);
+        reset();
+        log.style.display = "none";
+        return;
+      }
+      jobId = d.job_id;
+    } catch (e) {
+      toast("Setup failed", true);
+      reset();
+      return;
+    }
+    const end = await streamJob(jobId, (line) => {
+      log.textContent += line + "\n";
+      log.scrollTop = log.scrollHeight;
+    });
+    const ok = !!(end && end.status === "done");
+    toast(ok ? "localm's ComfyUI is ready" : "Setup did not finish (see the log)", !ok);
+    // Re-read status: installed on success (swaps to the Remove view), or back to
+    // the Set-up button so the user can retry.
+    renderManagedComfyPanel(host);
+  };
+  host.appendChild(setup);
+  host.appendChild(log);
 }
 
 // R11/R12: live media subsection registry, so we can re-render just the saved one
