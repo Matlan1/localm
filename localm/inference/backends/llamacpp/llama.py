@@ -710,13 +710,6 @@ class LlamaCpp:
     def _create_batch(self, tokens: List[int], start_pos: int, logits_at_last_only: bool = True) -> LlamaBatch:
         n = len(tokens)
         batch = api.llama_batch_init(n, 0, 1)
-        
-        # If llama.api is mocked in tests, llama_batch_get_one is a mock object.
-        # We call it dummy-style to satisfy mock call assertions in unit tests.
-        if type(api.llama_batch_get_one).__name__ in ("MagicMock", "Mock", "NonCallableMagicMock"):
-            return api.llama_batch_get_one(None, n)
-
-            
         batch.n_tokens = n
         
         # cast pointers
@@ -872,35 +865,45 @@ class LlamaCpp:
                                 self.last_finish_reason = "error"
                                 break
                             batch = self._create_batch([token], pos, logits_at_last_only=True)
-                            ret = api.llama_decode(self._ctx_ptr, batch)
-                            if ret != 0:
-                                # KV cache full or error.
-                                # Attempt mid-generation context growth if there is headroom.
-                                current_needed = pos + 512
-                                target = self._target_ctx(current_needed)
-                                if target > self._ctx_capacity:
-                                    # We can grow! Re-prefill the context.
-                                    prompt_and_gen = self._cached_tokens.copy()
-                                    self._prefill_fresh_context(prompt_and_gen, current_needed)
-                                    # Retry decode on the newly grown context
-                                    # Note: the old batch references the old context capacity or old layout,
-                                    # so we must free the old batch and create a new batch for the retry!
-                                    api.llama_batch_free(batch)
-                                    batch = self._create_batch([token], pos, logits_at_last_only=True)
-                                    ret = api.llama_decode(self._ctx_ptr, batch)
-
+                            try:
+                                ret = api.llama_decode(self._ctx_ptr, batch)
                                 if ret != 0:
-                                    # The reply was cut short and we cannot grow further.
-                                    # The cache bookkeeping has diverged from native KV
-                                    # state, so invalidate it.
-                                    self.last_finish_reason = "length"
-                                    self._cached_tokens = []
+                                    # KV cache full or error.
+                                    # Attempt mid-generation context growth if there is headroom.
+                                    current_needed = pos + 512
+                                    target = self._target_ctx(current_needed)
+                                    if target > self._ctx_capacity:
+                                        # We can grow! Re-prefill the context. Free the
+                                        # old batch (its layout matches the OLD context)
+                                        # BEFORE the re-prefill, because
+                                        # _prefill_fresh_context can raise (NULL context,
+                                        # a decode failure, an unload) and the native
+                                        # batch must not leak if it does. AUDIT: a
+                                        # llama_batch_init allocation is freed only by
+                                        # llama_batch_free.
+                                        api.llama_batch_free(batch)
+                                        batch = None
+                                        prompt_and_gen = self._cached_tokens.copy()
+                                        self._prefill_fresh_context(prompt_and_gen, current_needed)
+                                        # Retry decode on the newly grown context.
+                                        batch = self._create_batch([token], pos, logits_at_last_only=True)
+                                        ret = api.llama_decode(self._ctx_ptr, batch)
+
+                                    if ret != 0:
+                                        # The reply was cut short and we cannot grow further.
+                                        # The cache bookkeeping has diverged from native KV
+                                        # state, so invalidate it.
+                                        self.last_finish_reason = "length"
+                                        self._cached_tokens = []
+                                        break
+                                self._cached_tokens.append(token)
+                                pos += 1
+                                tokens_generated += 1
+                            finally:
+                                # Always release the native batch - including when
+                                # _prefill_fresh_context above raises mid-growth.
+                                if batch is not None:
                                     api.llama_batch_free(batch)
-                                    break
-                            api.llama_batch_free(batch)
-                            self._cached_tokens.append(token)
-                            pos += 1
-                            tokens_generated += 1
                     else:
                         # Budget exhausted without the model finishing its turn
                         self.last_finish_reason = "length"
