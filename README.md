@@ -42,13 +42,13 @@ localm serve mymodel                        # OpenAI-compatible API server
 
 - **A coding agent that does the work (coder plugin).** `localm coder` works through a task with tools for files, the shell, search, and tests; you can redirect it mid-run or review what it touched with session diffs. It speaks MCP both ways, so localm can expose your models to clients like Claude Desktop, and the coder can pull in external MCP tool servers.
 
-- **Media generation (image/music/video plugins).** localm drives a local media-generation server (**ComfyUI is the supported backend today**, with a seam for others later). You bring the server and models; localm orchestrates generation and VRAM handover from the LLM, and surfaces it as the Images/Music/Video pages and chat commands.
+- **Media generation (image/music/video plugins).** localm drives a local media-generation server (**ComfyUI is the supported backend today**, with a seam for others later). Point it at your own ComfyUI, or let localm run its **own** managed ComfyUI (opt-in) so it can pin a known-good version and carry fixes without touching your install ([guide](docs/managed-comfyui.md)). Either way localm orchestrates generation and VRAM handover from the LLM, and surfaces it as the Images/Music/Video pages and chat commands.
 
 - **Bring your own data (rag, voice, and tts plugins).** Attach files or index whole folders and chat against them with citations (Knowledge), dictate with local Whisper speech-to-text, or have replies read back to you with in-browser Kokoro text-to-speech.
 
 - **Schedule it (jobs plugin).** Run a chat or coder prompt on an interval or a cron schedule from an in-app scheduler, the terminal, or a REST API ([guide](docs/jobs.md)).
 
-- **Model management that stays out of the way.** Pull from HuggingFace with aliases and SHA256 dedup, browse quants with a note on whether they fit your VRAM, and let localm register whatever you drop into the models folder.
+- **Model management that stays out of the way.** Pull from HuggingFace with aliases and SHA256 dedup, browse quants with a note on whether they fit your VRAM, and let localm register whatever you drop into the models folder. Types are detected deterministically from the file itself; anything it cannot classify is left as `unknown` (still runnable by name, never auto-loaded for chat) and you can correct it with `localm set-type`.
 
 - **Offline first.** Nothing leaves your machine unless you allow it. The optional online parts (cloud providers for the coder, web access for fetching pages) are opt-in and run through one network policy you set.
 
@@ -206,6 +206,7 @@ localm coder [TASK]               # AI coding agent
 localm benchmark MODEL            # TTFT and tok/s measurements
 localm doctor                      # check installation
 localm info                        # paths and config
+localm update                      # apply a signed update (you always initiate it)
 ```
 
 Model management:
@@ -215,7 +216,8 @@ localm pull SPEC                  # download from HuggingFace or URL
 localm search QUERY               # search HuggingFace for GGUF models
 localm add PATH                   # register a local model (--store copy|move to import it into ~/.localm/models)
 localm alias MODEL NEWNAME        # add a second name
-localm list                        # registered models
+localm set-type MODEL TYPE        # fix a model's detected type (llm, vae, lora, unknown, ...)
+localm list [--type TYPE]        # registered models, optionally filtered by type
 localm rm MODEL                   # remove a model
 ```
 
@@ -316,6 +318,7 @@ See [docs/llamacpp-binding.md](docs/llamacpp-binding.md) for the binding interna
 | [docs/gpu-setup.md](docs/gpu-setup.md) | GPU/DLL setup |
 | [docs/linux-setup.md](docs/linux-setup.md) | Running localm on Linux: venv, runtime, GPU notes |
 | [docs/flux-setup.md](docs/flux-setup.md) | ComfyUI FLUX image pipeline (shared by music/video) |
+| [docs/managed-comfyui.md](docs/managed-comfyui.md) | localm's own managed ComfyUI: `localm comfy setup`, coexistence, shared models |
 | [docs/video.md](docs/video.md) | Wan 2.2 video generation: model setup, timing, workflow override |
 | [docs/rag.md](docs/rag.md) | Knowledge: chat with your documents, collections, retrieval design |
 | [docs/network.md](docs/network.md) | Internet access for coder and chat: modes, domain rules, SSRF guard |

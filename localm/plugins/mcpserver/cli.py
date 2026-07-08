@@ -30,9 +30,12 @@ def main(model, no_images, no_coder, print_config):
         localm mcp --print-config
 
     \b
-    Exposed tools: chat, list_models, system_stats, search_models,
-    list_model_files, pull_model, embed, generate_image, and (only when
-    the coder plugin is installed+enabled) run_coder_task.
+    Exposed tools: chat, model management (list_models, search_models,
+    list_model_files, pull_model, remove_model, setup_embeddings),
+    system_stats, run_doctor, plugin management (list/install/enable/
+    disable/uninstall_plugin), and, conditionally, embed, generate_image
+    (unless --no-images), and run_coder_task (coder plugin active, unless
+    --no-coder). remove_model and uninstall_plugin are marked destructive.
     All output except the protocol goes to stderr; logs never corrupt
     the JSON-RPC stream.
     """

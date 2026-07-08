@@ -131,16 +131,40 @@ localm add D:\models\mymodel.gguf --store move   # relocate into ~/.localm/model
 
 `--store` moves/copies a split GGUF's every part and a sibling mmproj vision-projector file together with the model, so multi-part loading and vision capability survive the move. It refuses (no changes made) if a different file already occupies that name in `~/.localm/models`, if there isn't enough free disk space, or if a copy's SHA256 doesn't match the original afterward.
 
+### Model type
+
+Every registered model has a type, detected deterministically from the file
+itself, never from fuzzy tag matching: a GGUF or Ollama blob is an `llm`; a
+HuggingFace directory is read from its `config.json` architectures (or
+`adapter_config.json` for a `lora`). Anything without a hard signal is left as
+`unknown` rather than guessed. The types are `llm`, `mmproj`, `diffusion-unet`,
+`text-encoder`, `vae`, `lora`, and `unknown`.
+
+An `unknown` model still runs when you name it explicitly (`localm run NAME`, or an
+API request naming it), but is never auto-picked as the default chat model, so a
+diffusion checkpoint or text encoder cannot get loaded as if it were a chat model.
+Correct a misdetected or `unknown` type at any time:
+
+```bash
+localm set-type MODEL llm        # types: llm mmproj diffusion-unet text-encoder vae lora unknown
+```
+
+Registering a lone `.safetensors` file scans its parent directory: if that folder
+is a real HuggingFace model (config plus weights and tokenizer), the folder is
+registered; otherwise the file is rejected with an "incomplete model" message
+rather than added as a half-model.
+
 ### List and remove
 
 ```bash
-localm list                     # registered models
+localm list [--type TYPE]       # registered models, optionally filtered by type
 localm models                   # available shortcuts
 localm rm MODEL [--yes]         # alias-aware removal
 localm relocate MODEL NEW_PATH  # re-point a registered model after you moved its file
+localm unload [MODEL]           # free VRAM on the running server: all models, or just one
 ```
 
-`localm rm` only deletes the file when the last alias pointing at it is removed, and the confirmation prompt states exactly what will happen.
+`localm rm` only deletes the file when the last alias pointing at it is removed, and the confirmation prompt states exactly what will happen. `localm unload` talks to the server serving the current directory (or `LOCALM_URL`); with no argument it unloads every model, and a named model that is not loaded is a no-op.
 
 ---
 
@@ -153,6 +177,29 @@ localm image "A cat on a sunny beach" -s 1024 1024
 localm music "lofi, jazzy, mellow" --lyrics song.txt -d 180
 localm video "a fox runs through snow" --duration 5
 ```
+
+### localm's own ComfyUI (optional)
+
+localm can run its own managed ComfyUI instead of depending on your install, so it
+can pin a known-good version and carry fixes. Off by default; your own ComfyUI is
+never modified. Full guide: [docs/managed-comfyui.md](../docs/managed-comfyui.md).
+
+```bash
+localm comfy setup                 # provision it (copies your ComfyUI, or a fresh hardware-matched install)
+localm config managed_comfy_enabled true   # then route media to the managed instance
+localm comfy status                # is one installed, and which ComfyUI is targeted now
+localm comfy update                # advance to the shipped pinned version, re-apply localm's patches
+localm comfy remove [--models]     # delete it (keeps the managed models unless --models)
+```
+
+`localm comfy setup` takes `--copy-custom-nodes` / `--no-custom-nodes` (copy path
+only; you are asked when custom nodes are present). `localm comfy update` takes
+`--reinstall-requirements` and, for testing, `--commit <sha>`.
+
+Whether localm targets the managed instance is decided by two settings:
+`managed_comfy_enabled` (default off) and `comfy_target` (`own` by default, or
+`user` to force your own ComfyUI). localm uses the managed instance only when both
+line up and an instance is installed; otherwise it uses your own ComfyUI.
 
 ---
 
@@ -297,10 +344,12 @@ Give the agent standing guidance (conventions, style, constraints) with a `.loca
 
 ```bash
 localm mcp --print-config     # JSON block for Claude Desktop and friends
-localm mcp [--stdio]          # stdio transport (default)
+localm mcp                    # run as an MCP server over stdio (launched by the client)
+localm mcp --no-images        # do not expose generate_image
+localm mcp --no-coder         # do not expose run_coder_task
 ```
 
-Exposes your local models (chat, list_models, embed, generate_image) to Claude Desktop and other MCP clients. See [docs/mcp.md](../docs/mcp.md) for both directions: localm as an MCP server, and the coder consuming external MCP tool servers.
+Exposes your local models and localm management (chat, model and plugin management, diagnostics, and more) to Claude Desktop and other MCP clients, with tool annotations so a client can confirm destructive calls. See [docs/mcp.md](../docs/mcp.md) for the full tool list and both directions: localm as an MCP server, and the coder consuming external MCP tool servers.
 
 ---
 
@@ -330,10 +379,16 @@ See [docs/gpu-setup.md](../docs/gpu-setup.md) for the full GPU setup guide.
 ```bash
 localm update                   # check for and apply a newer localm build (you always initiate it)
 localm update --check           # only report whether an update is available; do not apply
+localm update -y                # apply without the confirmation prompt
 localm update --rollback        # restore the previous build from the last update backup
 localm bug-report -m "..."      # generate an editable bug report and offer to send it to the maintainer
 localm issues [NUMBER]          # list the project's issues, or show one by number
 ```
+
+Updates are signed: localm verifies an Ed25519 signature against a key pinned in
+its own source before applying anything, and refuses a build that is not newer.
+See [SECURITY.md](../SECURITY.md) for the update trust model. The GUI Models page
+has an "Update now" button for the same flow.
 
 `localm bug-report` needs a working localm. When localm will not start at all (a
 failed install, a broken venv, setup itself failing), use the standalone reporter
