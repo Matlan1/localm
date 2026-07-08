@@ -395,6 +395,34 @@ _FAKE_REGISTRY = {
 # not register a second one - a duplicate would shadow the canonical route.
 
 
+def test_set_model_type_endpoint(gui_app, monkeypatch):
+    """Branch A: POST /api/models/type flips a model's registry type (the one-click
+    GUI set-type control's backend). 404 for an unknown model, 400 for an
+    out-of-vocab type. On master the route does not exist (404)."""
+    from localm import model_manager as mm
+    app, _ = gui_app
+    store = {"m1": {"path": "C:/x/m1.gguf", "source": "local", "model_type": "unknown"}}
+    monkeypatch.setattr("localm.config.load_registry", lambda: dict(store))
+    monkeypatch.setattr(mm, "load_registry", lambda: dict(store))
+
+    def _update(mutator):
+        reg = dict(store)
+        mutator(reg)
+        store.clear()
+        store.update(reg)
+        return dict(store)
+
+    monkeypatch.setattr(mm, "update_registry", _update)
+    with TestClient(app) as client:
+        r = client.post("/api/models/type", json={"model": "m1", "model_type": "llm"})
+        assert r.status_code == 200, r.text
+        assert store["m1"]["model_type"] == "llm"
+        assert client.post("/api/models/type",
+                           json={"model": "nope", "model_type": "llm"}).status_code == 404
+        assert client.post("/api/models/type",
+                           json={"model": "m1", "model_type": "bogus"}).status_code == 400
+
+
 class TestLogExportEndpoint:
     """R30: copy every instance log into a user-chosen folder."""
 

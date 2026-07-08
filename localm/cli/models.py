@@ -6,8 +6,8 @@ import click
 
 from ..config import HOME_DIR, find_binary_dir, load_config, save_config
 from ..model_manager import (
-    get_model_info, list_models, pull_model, relocate_model,
-    remove_model, show_shortcuts, sync_models_dir,
+    get_model_info, list_models, MODEL_TYPES, pull_model, relocate_model,
+    remove_model, set_model_type, show_shortcuts, sync_models_dir,
 )
 from ._core import console, main, _complete_model_name
 
@@ -251,6 +251,25 @@ def relocate_cmd(model, new_path):
     """
     import sys
     if not relocate_model(model, str(new_path)):
+        sys.exit(1)
+
+
+@main.command("set-type")
+@click.argument("model", shell_complete=_complete_model_name)
+@click.argument("model_type",
+                type=click.Choice(sorted(MODEL_TYPES), case_sensitive=False))
+def set_type_cmd(model, model_type):
+    """Change a registered MODEL's type to MODEL_TYPE.
+
+    Type is not frozen at registration: an ambiguous import (registered as
+    'unknown') or a mis-detected model is corrected here. A model set to 'unknown'
+    stays runnable by name but is not auto-loaded as the default chat model.
+
+    \b
+    Example:
+      localm set-type my-model llm
+    """
+    if not set_model_type(model, model_type.lower()):
         sys.exit(1)
 
 

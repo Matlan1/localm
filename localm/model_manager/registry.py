@@ -25,6 +25,59 @@ from .gguf import split_gguf_parts
 
 MODEL_TYPES = frozenset({'llm', 'mmproj', 'diffusion-unet', 'text-encoder', 'vae', 'lora', 'unknown'})
 
+# HuggingFace architecture class-name suffixes that deterministically mark a text
+# generation (chat) model: LlamaForCausalLM, T5ForConditionalGeneration,
+# GPT2LMHeadModel, etc. This follows HF's own stable class-naming convention (a
+# hard signal), NOT fuzzy substring tag matching. An architecture not matched here
+# is left 'unknown' rather than silently assumed to be an LLM.
+_HF_LLM_ARCH_SUFFIXES = ("ForCausalLM", "ForConditionalGeneration", "LMHeadModel")
+
+
+def is_auto_chat_eligible(entry: dict) -> bool:
+    """True when a registry *entry* may be auto-selected as the default chat model.
+
+    A type='unknown' model (its type could not be determined) is never auto-loaded
+    as chat, though it stays runnable when named explicitly (``localm run NAME``, an
+    API request naming it) and its type can be corrected with ``localm set-type``. A
+    legacy entry with no ``model_type`` key is treated as 'llm' (eligible), preserving
+    pre-Branch-A behaviour.
+    """
+    return isinstance(entry, dict) and entry.get("model_type", "llm") != "unknown"
+
+
+def _detect_local_model_type(path: Path, *, is_gguf: bool, is_hf: bool,
+                             is_blob: bool = False) -> str:
+    """Deterministically classify a LOCAL model's type from HARD metadata only.
+
+    A .gguf file or Ollama blob is a llama.cpp text model (the format itself is the
+    hard signal) -> 'llm'. An HF directory is classified from config.json: a
+    LoRA/adapter dir -> 'lora'; an ``architectures`` class ending in ForCausalLM /
+    LMHeadModel / ForConditionalGeneration -> 'llm'; anything we cannot resolve ->
+    'unknown' (never a silent 'llm'). Embedding models are provisioned via
+    ``setup-embeddings``, not the chat registry, so there is no separate 'embedding'
+    registry type here.
+    """
+    try:
+        if is_gguf or is_blob:
+            return "llm"
+        if is_hf:
+            if (path / "adapter_config.json").exists():
+                return "lora"
+            cfg_path = path / "config.json"
+            if cfg_path.exists():
+                conf = json.loads(cfg_path.read_text(encoding="utf-8"))
+                archs = conf.get("architectures") or []
+                if isinstance(archs, list) and any(
+                    isinstance(a, str) and a.endswith(_HF_LLM_ARCH_SUFFIXES)
+                    for a in archs
+                ):
+                    return "llm"
+    except Exception as e:
+        # Detection is best-effort metadata reading; an unreadable/odd config.json
+        # means "no hard signal", which is exactly 'unknown' - surfaced, not muted.
+        logger.debug("local model-type detection failed for %s: %s", path, e)
+    return "unknown"
+
 
 
 
@@ -366,6 +419,31 @@ def relocate_model(name: str, new_path: str) -> bool:
             e.pop("missing", None)          # it is present again at the new path
     _mm.update_registry(_apply)
     console.print(f"[green]Relocated[/green] [bold]{name}[/bold] -> {p}")
+    return True
+
+
+def set_model_type(name: str, new_type: str) -> bool:
+    """Change a registered model's type (llm / mmproj / diffusion-unet / text-encoder
+    / vae / lora / unknown). Type is MUTABLE at any time: a bulk import or a forgotten
+    ``--type`` is corrected here, not frozen at registration. Returns True on success,
+    False if the model is not registered or *new_type* is not a MODEL_TYPES value."""
+    reg = _mm.load_registry()
+    if name not in reg:
+        console.print(f"[red]No such registered model:[/red] {name}")
+        return False
+    if new_type not in MODEL_TYPES:
+        console.print(f"[red]Invalid type {new_type!r}.[/red] "
+                      f"Choose one of: {', '.join(sorted(MODEL_TYPES))}")
+        return False
+
+    def _apply(r: dict) -> None:
+        e = r.get(name)
+        if isinstance(e, dict):
+            e["model_type"] = new_type
+
+    # Atomic read-modify-write so a concurrent registry writer is not clobbered.
+    _mm.update_registry(_apply)
+    console.print(f"[green]Set[/green] [bold]{name}[/bold] type -> {new_type}")
     return True
 
 
@@ -1174,12 +1252,19 @@ def add_local(
     on_duplicate: str = "ask",
     no_hash: bool = False,
     fast: bool = False,
-    model_type: str = "llm",
+    model_type: Optional[str] = None,
     store: Optional[str] = None,
 ) -> bool:
     """Register a local .gguf / HF dir / Ollama blob. Returns True on a successful
     registration or a benign no-op (alias / user-skipped duplicate), False when the
     path is not a usable model, so `localm pull <path>` can set its exit code.
+
+    *model_type* None (the default) means "detect it": the type is resolved
+    deterministically from hard metadata (GGUF -> llm, HF config.json architectures)
+    and falls back to the 'unknown' sentinel rather than a silent 'llm'. Pass an
+    explicit MODEL_TYPES value to force it. A lone .safetensors file is not a model on
+    its own: if it sits inside an HF model dir that directory is registered instead,
+    otherwise it is rejected with a precise, actionable reason (A3).
 
     *store* is ``"copy"``, ``"move"``, or ``None`` (default: register in place,
     today's behavior). When set and the path is OUTSIDE ~/.localm/models, the
@@ -1213,9 +1298,11 @@ def add_local(
         # Ollama blob filenames already ARE the sha256 digest - store it free
         digest = blob_path.name.removeprefix("sha256-") \
             if blob_path.name.startswith("sha256-") else None
+        # An Ollama blob is a GGUF text model, so an unspecified type is 'llm'.
         _mm._register_with_dedup(
             model_name, blob_path, "ollama",
-            on_duplicate=on_duplicate, digest=digest, model_type=model_type,
+            on_duplicate=on_duplicate, digest=digest,
+            model_type=(model_type if model_type is not None else "llm"),
         )
         return True
 
@@ -1234,6 +1321,25 @@ def add_local(
     is_hf   = _is_hf_dir(str(p))  # config.json AND real weights/tokenizer
     is_blob = p.is_file() and p.name.startswith("sha256-")  # raw Ollama blob by path
 
+    # A lone .safetensors file is not loadable on its own: llama.cpp loads .gguf, and
+    # the HF backend loads a DIRECTORY (config.json + weights/tokenizer). If the file
+    # sits inside a real HF model dir, register that DIRECTORY (deterministic type
+    # detection below then classifies it); otherwise reject with a precise, actionable
+    # reason instead of the bare "Not a model" (A3).
+    if p.is_file() and p.suffix.lower() == ".safetensors" and not (is_gguf or is_hf or is_blob):
+        parent = p.parent
+        if _is_hf_dir(str(parent)):
+            p = parent
+            is_hf = True
+        else:
+            console.print(
+                f"[red]Incomplete model:[/red] {p}\n"
+                "A .safetensors weight file loads only as part of a HuggingFace model "
+                "directory. Point at the model's folder (the one holding config.json "
+                "plus a tokenizer), or use a single-file .gguf."
+            )
+            return False
+
     # A directory of loose .gguf files (not a single model, not an HF model dir,
     # not an Ollama manifest) - register each one, the way sync_models_dir does
     # for the models folder (H2). An HF dir (is_hf) falls through to the
@@ -1248,7 +1354,12 @@ def add_local(
                 if stored is None:
                     return False
                 first_parts = stored
-            return _add_local_gguf_dir(first_parts, name, on_duplicate, no_hash, fast, model_type=model_type)
+            # Loose .gguf files are llama.cpp text models, so an unspecified type
+            # is 'llm' (detection per-file would only ever return 'llm' anyway).
+            return _add_local_gguf_dir(
+                first_parts, name, on_duplicate, no_hash, fast,
+                model_type=(model_type if model_type is not None else "llm"),
+            )
 
     if not (is_gguf or is_hf or is_blob):
         console.print(
@@ -1313,6 +1424,11 @@ def add_local(
         digest = None
         if not already_known or needs_backfill:
             digest = _mm._hash_with_progress(p)
+
+    # Resolve an unspecified type deterministically (GGUF -> llm, HF config.json ->
+    # architectures, else 'unknown') instead of silently defaulting to 'llm'.
+    if model_type is None:
+        model_type = _detect_local_model_type(p, is_gguf=is_gguf, is_hf=is_hf, is_blob=is_blob)
 
     _mm._register_with_dedup(
         model_name, p, kind, on_duplicate=on_duplicate, digest=digest, size=size, model_type=model_type,

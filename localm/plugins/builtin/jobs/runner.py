@@ -155,9 +155,12 @@ def _load_engine(model: Optional[str]):
         cfg = load_config()
         name = cfg.get("default_model") or cfg.get("model")
     if not name:
+        from localm.model_manager import is_auto_chat_eligible
         reg = load_registry()
-        if reg:
-            name = sorted(reg)[0]
+        # Auto-pick the first chat-eligible model; skip a type='unknown' model so a
+        # background chat/memory job never silently loads one (it stays runnable when
+        # a job explicitly configures default_model/model above).
+        name = next((n for n in sorted(reg) if is_auto_chat_eligible(reg[n])), None)
     if not name:
         return None
     info = get_model_info(name)
