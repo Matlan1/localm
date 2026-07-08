@@ -17,6 +17,12 @@ def _warn_unconfigured_home(path: Path) -> None:
     """Surface (once) that no data dir was configured, so a missing / lost config
     is VISIBLE instead of silently masked (do-not-hide-problems). stderr, not the
     logger: this runs at import time before logging is wired."""
+    # setup.bat / setup.sh run setup-llama BEFORE the data-dir is chosen, so they
+    # set LOCALM_SETUP=1 to suppress this one warning during that phase only (it
+    # would otherwise fire spuriously mid-setup). This is the ONLY suppressor; if
+    # LOCALM_SETUP lingers in a shell environment past setup it would mask a real
+    # lost-config warning at runtime, so it must never be set outside the setup
+    # scripts (do-not-hide-problems).
     if os.environ.get("LOCALM_SETUP") == "1":
         return
     global _warned_unconfigured_home
