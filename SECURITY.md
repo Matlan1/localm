@@ -78,6 +78,33 @@ These are deliberate grants to *you*: a scoped key (or an exposed GUI) grants it
 holder that capability on your machine, so only issue keys to - or expose the GUI to -
 clients you trust.
 
+## Software updates
+
+localm never updates itself. An update runs only when you initiate it (`localm
+update`, or the GUI "Update now" button). The client is signature-verifying:
+
+- **Signed builds.** A downloaded build is verified against an **Ed25519** public
+  key **pinned in localm's own source** before anything is extracted or executed.
+  A missing, invalid, or tampered signature is refused before any file is swapped
+  (fail closed). The pinned key is a list, so a key can be rotated in before an
+  old one retires.
+- **No downgrades.** A validly signed but older, equal, or version-less build is
+  refused: a signature proves authenticity, not freshness.
+- **HTTPS only.** The download endpoint must be HTTPS and a redirect that would
+  downgrade to plain HTTP is blocked.
+- **Your data is never in the swap.** The updater never touches the venv, `.git`,
+  your data directory (models, config, sessions), or `.localcoder`; provisioned
+  native binaries (the llama.cpp runtime) are preserved across the swap. It backs
+  up first and rolls back on failure rather than leaving a half-applied tree.
+
+Honest limits: signature verification enforces only while a key is pinned. Shipped
+builds do pin one (a test keeps the pin non-empty), but if the pin were ever empty
+the updater would fall back to transport trust (HTTPS plus the private channel)
+rather than brick itself. And there is no post-restart health check: a build that
+applies cleanly but misbehaves after restart is recovered with `localm update
+--rollback` (or by restoring the backup directory the update left behind), not
+automatically.
+
 ## Supported versions
 
 localm is pre-1.0; security fixes land on the latest `master`.

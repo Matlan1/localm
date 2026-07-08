@@ -10,17 +10,27 @@ CRITICAL INVARIANT: stdout carries ONLY protocol messages. Everything in
 this process that would normally print (model loading banners, VRAM info,
 rich progress) must go to stderr - see _redirect_consoles_to_stderr().
 
-Tools exposed:
-    chat            - generate a response with a local model
-    list_models     - registered model names with type and size
-    system_stats    - live CPU/RAM/VRAM/GPU load, for judging model/quant fit
-    search_models   - search HuggingFace for GGUF repos
-    list_model_files - a repo's GGUF files with quant/size/VRAM-fit
-    pull_model      - download + register + (optionally) load a GGUF
-    embed           - embedding vectors (models that support it)
-    generate_image  - local FLUX via ComfyUI (omit with --no-images)
-    run_coder_task  - delegate a whole coding task to the local coder agent
-                      (only when the coder plugin is installed+enabled)
+Tools exposed (always, unless noted):
+    chat             - generate a response with a local model
+    list_models      - registered model names with type and size (read-only)
+    system_stats     - live CPU/RAM/VRAM/GPU load, for judging model/quant fit (read-only)
+    search_models    - search HuggingFace for GGUF repos (read-only)
+    list_model_files - a repo's GGUF files with quant/size/VRAM-fit (read-only)
+    pull_model       - download + register + (optionally) load a GGUF
+    setup_embeddings - install the on-device embedding model
+    remove_model     - remove a model, deleting its file if under the models dir (destructive)
+    run_doctor       - run localm doctor and return the report (read-only)
+    list_plugins     - engine plugins and their active state (read-only)
+    install_plugin / enable_plugin / disable_plugin - manage engine plugins
+    uninstall_plugin - uninstall a plugin (and its data with delete_data) (destructive)
+Conditional:
+    embed            - embedding vectors (only when the backend can embed)
+    run_coder_task   - delegate a coding task to the coder agent
+                       (coder plugin active, unless --no-coder)
+    generate_image   - local FLUX via ComfyUI (unless --no-images)
+
+read-only tools carry readOnlyHint; the two destructive tools carry
+destructiveHint, so an MCP client can confirm before a destructive call.
 """
 
 from __future__ import annotations

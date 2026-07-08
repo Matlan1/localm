@@ -14,20 +14,49 @@ Both sides use stdio transport (JSON-RPC 2.0, newline-delimited). No network por
 
 ## Exposed tools
 
-All MCP clients see the same tools from localm:
+localm exposes local-model operations and localm management as MCP tools. Most are
+always present; three are conditional (marked below).
 
-| Tool | What it does |
-|---|---|
-| `chat` | Generate with a local model. Per-call `model`, `system`, `seed`, `temperature`, `max_tokens` |
-| `list_models` | Your registry with sources and sizes |
-| `embed` | Embedding vectors from the local model |
-| `generate_image` | Local FLUX via ComfyUI (omit with `--no-images`) |
+| Tool | What it does | Annotation |
+|---|---|---|
+| `chat` | Generate with a local model. Per-call `model`, `system`, `seed`, `temperature`, `max_tokens` | |
+| `list_models` | Your registry with sizes and sources | read-only |
+| `system_stats` | Live CPU/RAM/VRAM/GPU load, for judging model/quant fit | read-only |
+| `search_models` | Search HuggingFace for GGUF repos | read-only |
+| `list_model_files` | A repo's GGUF files with quant, size, and VRAM-fit | read-only |
+| `pull_model` | Download, register, and (by default) load a GGUF | |
+| `setup_embeddings` | Install the on-device embedding model | |
+| `remove_model` | Remove a model and delete its file if under the models dir | **destructive** |
+| `run_doctor` | Run `localm doctor` and return the report | read-only |
+| `list_plugins` | List engine plugins and whether each is active | read-only |
+| `install_plugin` | Install and enable an engine plugin | |
+| `enable_plugin` | Enable an installed plugin | |
+| `disable_plugin` | Disable an installed plugin | |
+| `uninstall_plugin` | Uninstall a plugin (and its data with `delete_data`) | **destructive** |
+| `embed` | Embedding vectors from the local model (only when the backend can embed) | |
+| `run_coder_task` | Delegate a whole coding task to the local coder agent (only when the coder plugin is active and not `--no-coder`) | |
+| `generate_image` | Local FLUX via ComfyUI (omit with `--no-images`; needs a reachable ComfyUI) | |
+
+### Tool annotations
+
+Each tool carries MCP annotations: read-only tools are marked `readOnlyHint`, and
+the two that delete things (`remove_model`, `uninstall_plugin`) are marked
+`destructiveHint`, so an annotation-aware client can prompt for confirmation before
+a destructive call. The annotations are advisory metadata the server advertises;
+the server itself does not prompt. Coverage is deliberately narrow: only those two
+carry `destructiveHint`. Other state-changing tools (for example `pull_model`,
+`setup_embeddings`, the plugin install/enable/disable tools, and the conditional
+`run_coder_task` and `generate_image`, which run code and write files) carry no
+annotation, so an annotation-only client cannot tell they mutate. localm's own
+coder client (below) does not read these hints from remote servers; it gates on the
+`trusted` config flag instead.
 
 Options for the server:
 
 ```bash
 localm mcp --model NAME      # default model (else LOCALM_MODEL env, else first registered)
-localm mcp --no-images       # hide the image tool
+localm mcp --no-images       # do not expose generate_image
+localm mcp --no-coder        # do not expose run_coder_task
 ```
 
 The model loads on the first tool call, so client startup stays instant. All logging goes to stderr; stdout carries only protocol frames.
@@ -71,7 +100,7 @@ Open the config file in your editor and paste the block from Step 2 (if the file
 
 ### Step 4: Restart Claude Desktop
 
-Close and reopen Claude Desktop. The app will launch localm on startup. You should see the localm tools (chat, list_models, embed, generate_image if ComfyUI is running) available in the tool menu.
+Close and reopen Claude Desktop. The app will launch localm on startup. You should see the localm tools (chat, the model and plugin management tools, and generate_image when ComfyUI is reachable) available in the tool menu. See [Exposed tools](#exposed-tools) for the full list.
 
 ### Step 5: Try a tool
 
