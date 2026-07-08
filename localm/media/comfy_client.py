@@ -405,12 +405,26 @@ def sanitize_comfy_url(url: str) -> str:
 
 
 def default_api_url() -> str:
-    """ComfyUI base URL: FLUX_API_URL env override, then the ``comfy_api_url``
-    config key, else the ComfyUI default port. A link-local / cloud-metadata
-    target is refused and falls back to loopback (CHK-COMFY-APIURL)."""
+    """ComfyUI base URL: FLUX_API_URL env override, then a localm-MANAGED
+    instance when one is installed and selected (coexistence, decision 6), then
+    the ``comfy_api_url`` config key, else the ComfyUI default port. A link-local
+    / cloud-metadata target is refused and falls back to loopback
+    (CHK-COMFY-APIURL).
+
+    The managed-ComfyUI hook is the ONLY managed touch in this module and is
+    confined to TARGET RESOLUTION (never the launch/spawn path): it returns None
+    - byte-identical to before - until a managed instance actually exists on
+    disk, so nothing changes for a user who has not opted in."""
     env = os.environ.get("FLUX_API_URL")
     if env:
         return sanitize_comfy_url(env.rstrip("/"))
+    try:
+        from localm.media.managed_comfy import managed_comfy_api_url_if_active
+        managed = managed_comfy_api_url_if_active()
+        if managed:
+            return managed
+    except Exception:
+        pass
     try:
         from localm.config import load_config
         cfg_url = load_config().get("comfy_api_url")

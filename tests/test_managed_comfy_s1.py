@@ -1,0 +1,266 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""STAGE S1 (scaffolding) for the localm-managed ComfyUI feature.
+
+Covers the OFF-by-default no-op contract, the coexistence resolver
+(decision 6), the extra_model_paths.yaml generator (decision 9), and the
+`localm comfy status/remove` CLI - all WITHOUT provisioning anything (S1 is
+scaffolding; S2/S3 provision). The cardinal rule tested here: with the flag
+off and nothing installed, ComfyUI targeting is byte-identical to today and no
+managed directory is ever created.
+
+Design + locked decisions: dev-notes/DESIGN-localm-managed-comfyui-2026-07-08.md
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+import localm.config as cfg
+from localm.media import comfy_client
+from localm.media import managed_comfy as mc
+
+
+# --------------------------------------------------------------------------- #
+#  Isolation: a throwaway LOCALM_HOME wired through both the lazy home_dir()   #
+#  AND the import-frozen config.CONFIG_FILE, so load_config/save_config and    #
+#  managed_comfy path resolution agree on the same tmp dir (see the memory     #
+#  note "Test home isolation (import-time)"). FLUX_API_URL is cleared so the   #
+#  "byte-identical when off" baseline is deterministic.                        #
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def home(tmp_path, monkeypatch):
+    h = tmp_path / ".localm"
+    h.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("LOCALM_HOME", str(h))
+    monkeypatch.setattr(cfg, "HOME_DIR", h)
+    monkeypatch.setattr(cfg, "MODELS_DIR", h / "models")
+    monkeypatch.setattr(cfg, "CONFIG_FILE", h / "config.json")
+    monkeypatch.setattr(cfg, "REGISTRY_FILE", h / "registry.json")
+    monkeypatch.delenv("FLUX_API_URL", raising=False)
+    return h
+
+
+def _install_managed(home_dir: Path) -> mc.ManagedComfyPaths:
+    """Create the minimal on-disk layout that makes is_managed_comfy_installed()
+    true, using the module's OWN path accessors so the test is platform-agnostic
+    (venv interpreter path differs on Windows vs POSIX)."""
+    paths = mc.managed_comfy_paths()
+    paths.main_py.parent.mkdir(parents=True, exist_ok=True)
+    paths.main_py.write_text("# stand-in for ComfyUI main.py\n", encoding="utf-8")
+    paths.venv_python.parent.mkdir(parents=True, exist_ok=True)
+    paths.venv_python.write_text("", encoding="utf-8")
+    assert mc.is_managed_comfy_installed()
+    return paths
+
+
+# --------------------------------------------------------------------------- #
+#  OFF by default: no-op, byte-identical to today, no dirs created.            #
+# --------------------------------------------------------------------------- #
+
+def test_defaults_are_off(home):
+    c = cfg.load_config()
+    assert c["managed_comfy_enabled"] is False
+    assert c["comfy_target"] == "own"          # decision 6: prefer own WHEN one exists
+
+
+def test_off_by_default_is_not_installed(home):
+    assert mc.is_managed_comfy_installed() is False
+    assert mc.managed_comfy_active() is False
+
+
+def test_off_resolver_returns_users_comfy_exactly(home):
+    """With the flag off and nothing installed, the resolver must return the
+    user's ComfyUI - identical to default_api_url() today - and NOT the managed
+    target."""
+    target = mc.resolve_comfy_target()
+    assert target.managed is False
+    assert target.api_url == comfy_client.default_api_url()
+    assert target.api_url == "http://127.0.0.1:8188"     # today's loopback default
+    assert target.workdir == cfg.load_config().get("comfy_workdir")  # None here
+
+
+def test_off_honours_user_config_url(home):
+    """The user's comfy_api_url still flows through unchanged when off."""
+    cfg.save_config({**cfg.load_config(), "comfy_api_url": "http://127.0.0.1:9191"})
+    assert comfy_client.default_api_url() == "http://127.0.0.1:9191"
+    assert mc.resolve_comfy_target().api_url == "http://127.0.0.1:9191"
+    assert mc.resolve_comfy_target().managed is False
+
+
+def test_off_does_not_create_managed_dirs(home):
+    """A normal target resolution must not materialize any managed directory."""
+    _ = mc.resolve_comfy_target()
+    _ = comfy_client.default_api_url()
+    paths = mc.managed_comfy_paths()
+    assert not paths.root.exists()
+    assert not paths.models_dir.exists()
+
+
+def test_enabled_but_not_installed_still_targets_user(home):
+    """Enabling the flag without an installed instance must NOT reroute: a
+    missing managed instance means the user's ComfyUI, regardless of the flag."""
+    cfg.save_config({**cfg.load_config(),
+                     "managed_comfy_enabled": True, "comfy_target": "own"})
+    assert mc.managed_comfy_active() is False
+    t = mc.resolve_comfy_target()
+    assert t.managed is False
+    assert t.api_url == "http://127.0.0.1:8188"
+    assert comfy_client.default_api_url() == "http://127.0.0.1:8188"
+
+
+# --------------------------------------------------------------------------- #
+#  Coexistence routing (decision 6).                                          #
+# --------------------------------------------------------------------------- #
+
+def test_installed_and_own_targets_managed(home):
+    paths = _install_managed(home)
+    cfg.save_config({**cfg.load_config(),
+                     "managed_comfy_enabled": True, "comfy_target": "own"})
+    assert mc.managed_comfy_active() is True
+    t = mc.resolve_comfy_target()
+    assert t.managed is True
+    assert t.api_url == mc.managed_comfy_api_url()
+    assert t.api_url == mc.MANAGED_COMFY_API_URL
+    assert t.workdir == str(paths.root)
+    # The wiring: every existing caller of default_api_url() now hits the
+    # managed instance without touching the launch/spawn path.
+    assert comfy_client.default_api_url() == mc.MANAGED_COMFY_API_URL
+
+
+def test_installed_but_target_user_targets_user(home):
+    _install_managed(home)
+    cfg.save_config({**cfg.load_config(),
+                     "managed_comfy_enabled": True, "comfy_target": "user"})
+    assert mc.managed_comfy_active() is False
+    t = mc.resolve_comfy_target()
+    assert t.managed is False
+    assert t.api_url == "http://127.0.0.1:8188"
+    assert comfy_client.default_api_url() == "http://127.0.0.1:8188"
+
+
+def test_managed_port_differs_from_user_default(home):
+    """Coexistence requires the managed instance on its OWN port, never the
+    user's ComfyUI default (8188), or both could not run at once."""
+    assert mc.managed_comfy_api_url() != "http://127.0.0.1:8188"
+
+
+def test_flux_env_still_overrides_when_managed_off(home):
+    """FLUX_API_URL stays the top override when managed is inactive (today's
+    contract preserved)."""
+    import os
+    os.environ["FLUX_API_URL"] = "http://127.0.0.1:7777"
+    try:
+        assert comfy_client.default_api_url() == "http://127.0.0.1:7777"
+    finally:
+        del os.environ["FLUX_API_URL"]
+
+
+# --------------------------------------------------------------------------- #
+#  extra_model_paths.yaml generator (decision 9).                             #
+# --------------------------------------------------------------------------- #
+
+def test_extra_model_paths_includes_both_dirs(home, tmp_path):
+    """With comfy_workdir known, the generated yaml points at BOTH the user's
+    existing ComfyUI models dir and the localm-managed models dir."""
+    import yaml   # guaranteed present transitively via huggingface-hub (core dep)
+
+    user_comfy = tmp_path / "user-comfy"
+    (user_comfy / "models").mkdir(parents=True)
+    cfg.save_config({**cfg.load_config(), "comfy_workdir": str(user_comfy)})
+
+    paths = mc.managed_comfy_paths()
+    paths.root.mkdir(parents=True, exist_ok=True)   # generator writes into the install dir
+    out = mc.write_extra_model_paths()
+    assert out == paths.extra_model_paths
+    assert out.is_file()
+
+    data = yaml.safe_load(out.read_text(encoding="utf-8"))
+    base_paths = {entry["base_path"] for entry in data.values()
+                  if isinstance(entry, dict) and "base_path" in entry}
+    assert str(paths.models_dir) in base_paths                 # managed models dir
+    assert str(user_comfy / "models") in base_paths            # user's models dir
+
+
+def test_extra_model_paths_managed_only_without_workdir(home):
+    """No comfy_workdir -> only the managed models dir is referenced (fresh path)."""
+    import yaml
+
+    paths = mc.managed_comfy_paths()
+    paths.root.mkdir(parents=True, exist_ok=True)
+    out = mc.write_extra_model_paths()
+    data = yaml.safe_load(out.read_text(encoding="utf-8"))
+    base_paths = {entry["base_path"] for entry in data.values()
+                  if isinstance(entry, dict) and "base_path" in entry}
+    assert str(paths.models_dir) in base_paths
+    # the only base_path is the managed one (no user entry)
+    assert base_paths == {str(paths.models_dir)}
+
+
+# --------------------------------------------------------------------------- #
+#  CLI: localm comfy status / remove                                          #
+# --------------------------------------------------------------------------- #
+
+def test_cli_status_not_set_up(cli_runner):
+    from localm.cli import main
+    res = cli_runner.invoke(main, ["comfy", "status"])
+    assert res.exit_code == 0, res.output
+    low = res.output.lower()
+    assert "not set up" in low or "not installed" in low
+    assert "target" in low            # reports the current target
+
+
+def test_cli_status_reports_managed_when_installed(cli_runner, monkeypatch):
+    import localm.config as cfg2
+    from localm.cli import main
+    _install_managed(cfg2.home_dir())
+    cfg2.save_config({**cfg2.load_config(),
+                      "managed_comfy_enabled": True, "comfy_target": "own"})
+    res = cli_runner.invoke(main, ["comfy", "status"])
+    assert res.exit_code == 0, res.output
+    assert mc.MANAGED_COMFY_API_URL in res.output
+
+
+def test_cli_remove_deletes_only_managed_dir(cli_runner):
+    """remove deletes <HOME>/comfyui and NEVER touches the user's comfy_workdir."""
+    import localm.config as cfg2
+    from localm.cli import main
+
+    # A user ComfyUI folder that must be left completely alone.
+    user_comfy = cfg2.home_dir().parent / "user-comfy"
+    (user_comfy / "models").mkdir(parents=True)
+    (user_comfy / "main.py").write_text("# user's own ComfyUI\n", encoding="utf-8")
+    cfg2.save_config({**cfg2.load_config(), "comfy_workdir": str(user_comfy)})
+
+    paths = _install_managed(cfg2.home_dir())
+    assert paths.root.exists()
+
+    res = cli_runner.invoke(main, ["comfy", "remove", "--yes"])
+    assert res.exit_code == 0, res.output
+    assert not paths.root.exists()                 # managed install gone
+    assert user_comfy.exists()                     # user's ComfyUI untouched
+    assert (user_comfy / "main.py").is_file()
+
+
+def test_cli_remove_nothing_installed(cli_runner):
+    from localm.cli import main
+    res = cli_runner.invoke(main, ["comfy", "remove", "--yes"])
+    assert res.exit_code == 0, res.output
+    assert "nothing" in res.output.lower() or "not" in res.output.lower()
+
+
+def test_cli_no_facade_setup(cli_runner):
+    """S1 must NOT ship a setup command that pretends to provision. Either it is
+    absent, or it exists and honestly reports 'not yet implemented' while
+    changing nothing on disk (AGENTS.md rule 5: no facade)."""
+    import localm.config as cfg2
+    from localm.cli import main
+    res = cli_runner.invoke(main, ["comfy", "setup"])
+    if res.exit_code == 2:
+        # click "no such command" - setup is simply absent this stage. Fine.
+        assert "no such command" in res.output.lower() or "usage" in res.output.lower()
+        return
+    # If present, it must be honest and inert.
+    assert "not yet implemented" in res.output.lower() or "stage" in res.output.lower()
+    assert not mc.is_managed_comfy_installed()
