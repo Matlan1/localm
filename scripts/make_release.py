@@ -22,11 +22,13 @@ from __future__ import annotations
 
 import argparse
 import base64
+import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -123,6 +125,85 @@ def _verify_against_pinned(zip_path: Path, sig_path: Path) -> None:
         "shipped clients would reject.")
 
 
+def _gh(args):
+    """Run a gh subcommand; return the CompletedProcess (never raises)."""
+    return subprocess.run(["gh", *args], capture_output=True, text=True)
+
+
+def _run_ids(runner, workflow):
+    """The set of existing run databaseIds for *workflow* (empty on any error)."""
+    r = runner(["run", "list", "--workflow", workflow, "--limit", "15", "--json", "databaseId"])
+    if getattr(r, "returncode", 1) != 0:
+        return set()
+    try:
+        return {int(x["databaseId"]) for x in json.loads(r.stdout or "[]")}
+    except Exception:
+        return set()
+
+
+def require_ci_green(ref: str = "master", *, workflow: str = "ci.yml", runner=_gh,
+                     sleeper=time.sleep, poll_s: int = 15, appear_timeout_s: int = 180) -> None:
+    """RULE: before a release is PUBLISHED, run ONE full CI pass over the whole repo and
+    require it green. Enables the workflow first if a maintainer disabled it (once). A
+    release is never published over red or un-run CI.
+
+    Raises SystemExit if gh is unavailable, CI cannot be started, the run never appears,
+    or it does not conclude success. *runner*/*sleeper* are injectable so the flow is
+    unit-tested without any live GitHub call."""
+    if shutil.which("gh") is None:
+        raise SystemExit("release CI gate: the gh CLI (authenticated) is required to run CI before publishing.")
+    # 1. enable the CI workflow if it was disabled
+    q = runner(["api", "repos/{owner}/{repo}/actions/workflows"])
+    if getattr(q, "returncode", 1) != 0:
+        raise SystemExit(f"release CI gate: could not query workflows: {getattr(q, 'stderr', '').strip()}")
+    try:
+        wfs = json.loads(q.stdout).get("workflows", [])
+    except Exception as e:
+        raise SystemExit(f"release CI gate: could not parse the workflows list: {e}")
+    ci = next((w for w in wfs if str(w.get("path", "")).endswith("/" + workflow)), None)
+    if ci is None:
+        raise SystemExit(f"release CI gate: no {workflow} workflow found in the repo.")
+    if ci.get("state") != "active":
+        en = runner(["workflow", "enable", workflow])
+        if getattr(en, "returncode", 1) != 0:
+            raise SystemExit(f"release CI gate: could not enable CI (was {ci.get('state')}): "
+                             f"{getattr(en, 'stderr', '').strip()}")
+        print(f"release CI gate: enabled the CI workflow (was {ci.get('state')}).")
+    # 2. snapshot existing runs, then trigger a run on *ref*
+    before = _run_ids(runner, workflow)
+    tr = runner(["workflow", "run", workflow, "--ref", ref])
+    if getattr(tr, "returncode", 1) != 0:
+        raise SystemExit(f"release CI gate: could not start CI on '{ref}': {getattr(tr, 'stderr', '').strip()}")
+    print(f"release CI gate: started a full CI run on '{ref}'; waiting for it to finish ...")
+    # 3. wait for the newly-triggered run to register
+    run_id, waited = None, 0
+    while waited < appear_timeout_s:
+        sleeper(poll_s)
+        waited += poll_s
+        new = _run_ids(runner, workflow) - before
+        if new:
+            run_id = max(new)
+            break
+    if run_id is None:
+        raise SystemExit("release CI gate: the CI run did not appear in time; check GitHub Actions.")
+    # 4. block until it completes; require success
+    w = runner(["run", "watch", str(run_id), "--exit-status"])
+    if getattr(w, "returncode", 1) != 0:
+        raise SystemExit(f"release CI gate: CI did NOT pass (run {run_id}). Refusing to publish - "
+                         "fix CI, then re-run make_release --publish.")
+    print(f"release CI gate: full CI passed (run {run_id}).")
+
+
+def _require_clean_tree() -> None:
+    """A release must be cut from a clean tree so CI tests the SAME code that ships.
+    Refuse --publish when there are uncommitted TRACKED changes."""
+    r = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"],
+                       cwd=str(REPO), capture_output=True, text=True)
+    if r.returncode == 0 and r.stdout.strip():
+        raise SystemExit("release: the working tree has uncommitted tracked changes. Cut a release "
+                         "from a clean, pushed tree so CI validates the same code. Commit or stash first.")
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description="Assemble + sign a localm release build.")
     p.add_argument("--key", type=Path, default=None,
@@ -130,7 +211,9 @@ def main(argv=None) -> int:
     p.add_argument("--out", type=Path, default=None,
                    help="build.zip path (default: dist/localm-<version>.zip)")
     p.add_argument("--publish", action="store_true",
-                   help="gh release create vX.Y.Z with the zip + .sig")
+                   help="gh release create vX.Y.Z with the zip + .sig (runs the CI gate first)")
+    p.add_argument("--ci-ref", default="master",
+                   help="git ref the pre-publish CI run targets (default: master)")
     args = p.parse_args(argv)
 
     keypath = args.key
@@ -143,6 +226,14 @@ def main(argv=None) -> int:
 
     version = (REPO / "VERSION").read_text(encoding="utf-8").strip()
     out = args.out or (REPO / "dist" / f"localm-{version}.zip")
+
+    # RULE: CI is the FIRST gate. Before assembling ANY release files, cut from a clean
+    # tree and run ONE full CI pass over the whole repo (enabling the runners if a
+    # maintainer disabled them). Fail fast here on red/un-run CI - no point building,
+    # signing, and smoke-testing a release the repo cannot even pass CI for.
+    if args.publish:
+        _require_clean_tree()
+        require_ci_green(args.ci_ref)
 
     # 1. assemble from the manifest (refuses a dirty manifest; self-verifies verify_zip)
     members = build_release.build(out, force=True)
@@ -160,6 +251,8 @@ def main(argv=None) -> int:
 
     tag = f"v{version}"
     if args.publish:
+        # CI already passed (the FIRST gate above) and the artifact is built + signed +
+        # smoke-verified; publish it.
         cmd = ["gh", "release", "create", tag, str(out), str(sig_path),
                "--title", version, "--notes", f"localm {version}"]
         print("publishing:", " ".join(cmd))

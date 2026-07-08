@@ -12,7 +12,9 @@ scripts/make_release.py on every release cut.
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
+import types
 import zipfile
 from pathlib import Path
 
@@ -70,3 +72,77 @@ class TestReleaseSmokeGate:
         _rebuild_without(out, stripped, "localm/plugins/gui/static/index.html")
         with pytest.raises(SystemExit, match="missing critical file"):
             make_release.smoke_test(stripped)
+
+
+# --------------------------------------------------------------------------- #
+#  pre-publish CI gate (require_ci_green) - injected gh runner, NO live CI     #
+# --------------------------------------------------------------------------- #
+
+class _FakeGh:
+    """A scripted `gh` runner for require_ci_green: records calls and returns canned
+    results per subcommand, with no network. `run list` returns empty on the first
+    (snapshot) call, then a new run id, so the 'wait for the run to appear' loop ends."""
+    def __init__(self, *, state="active", watch_rc=0, appear=True):
+        self.state, self.watch_rc, self.appear = state, watch_rc, appear
+        self.calls, self._lists = [], 0
+
+    def __call__(self, args):
+        self.calls.append(list(args))
+        def res(rc=0, out="", err=""):
+            return types.SimpleNamespace(returncode=rc, stdout=out, stderr=err)
+        if args[:1] == ["api"]:
+            return res(out=json.dumps({"workflows": [
+                {"path": ".github/workflows/ci.yml", "name": "CI", "state": self.state, "id": 1}]}))
+        if args[:2] == ["workflow", "enable"]:
+            return res()
+        if args[:2] == ["workflow", "run"]:
+            return res()
+        if args[:2] == ["run", "list"]:
+            self._lists += 1
+            if self._lists == 1:
+                return res(out="[]")                       # snapshot: no runs yet
+            return res(out=json.dumps([{"databaseId": 999}] if self.appear else []))
+        if args[:2] == ["run", "watch"]:
+            return res(rc=self.watch_rc)
+        return res()
+
+    def called(self, *prefix):
+        return any(c[:len(prefix)] == list(prefix) for c in self.calls)
+
+
+def test_ci_gate_passes_on_active_green_ci(monkeypatch):
+    monkeypatch.setattr(make_release.shutil, "which", lambda _x: "gh")
+    fake = _FakeGh(state="active", watch_rc=0)
+    make_release.require_ci_green("master", runner=fake, sleeper=lambda _s: None)
+    assert not fake.called("workflow", "enable")           # already active -> not re-enabled
+    assert fake.called("workflow", "run")                  # a run was started
+    assert fake.called("run", "watch")                     # and waited on to completion
+
+
+def test_ci_gate_enables_disabled_workflow_once(monkeypatch):
+    monkeypatch.setattr(make_release.shutil, "which", lambda _x: "gh")
+    fake = _FakeGh(state="disabled_manually", watch_rc=0)
+    make_release.require_ci_green("master", runner=fake, sleeper=lambda _s: None)
+    assert fake.called("workflow", "enable")               # disabled -> enabled first
+    assert fake.called("workflow", "run")
+
+
+def test_ci_gate_blocks_publish_on_red_ci(monkeypatch):
+    monkeypatch.setattr(make_release.shutil, "which", lambda _x: "gh")
+    fake = _FakeGh(state="active", watch_rc=1)              # CI run fails
+    with pytest.raises(SystemExit, match="did NOT pass"):
+        make_release.require_ci_green("master", runner=fake, sleeper=lambda _s: None)
+
+
+def test_ci_gate_requires_gh(monkeypatch):
+    monkeypatch.setattr(make_release.shutil, "which", lambda _x: None)
+    with pytest.raises(SystemExit, match="gh CLI"):
+        make_release.require_ci_green("master")
+
+
+def test_ci_gate_errors_if_run_never_appears(monkeypatch):
+    monkeypatch.setattr(make_release.shutil, "which", lambda _x: "gh")
+    fake = _FakeGh(state="active", appear=False)            # triggered run never registers
+    with pytest.raises(SystemExit, match="did not appear"):
+        make_release.require_ci_green("master", runner=fake, sleeper=lambda _s: None,
+                                      appear_timeout_s=30, poll_s=10)
