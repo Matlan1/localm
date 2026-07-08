@@ -15,6 +15,7 @@ from localm.inference.backends.llamacpp.llama import (
     _build_sampler,
     _common_prefix_len,
 )
+from tests._fake_batch import fake_batch_init
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +136,9 @@ class TestPrefillWithReuse:
         mock_api.llama_get_memory.return_value = 333
         mock_api.llama_memory_seq_rm.return_value = True
         mock_api.llama_decode.return_value = 0
+        # Real ctypes-backed batch so _create_batch's native fill loop actually
+        # runs (no mock-detection facade in production any more).
+        mock_api.llama_batch_init.side_effect = fake_batch_init
         for k, v in overrides.items():
             setattr(mock_api, k, v)
         return patch(
@@ -152,8 +156,8 @@ class TestPrefillWithReuse:
         mock_api.llama_memory_seq_rm.assert_not_called()
         # Exactly one decode call for the 2-token suffix
         assert mock_api.llama_decode.call_count == 1
-        args = mock_api.llama_batch_get_one.call_args[0]
-        assert args[1] == 2  # n_tokens of the suffix batch
+        args = mock_api.llama_batch_init.call_args[0]
+        assert args[0] == 2  # n_tokens of the suffix batch
         assert llm._cached_tokens == [1, 2, 3, 4, 5, 6]
 
     def test_diverging_cache_trimmed(self):
@@ -176,8 +180,8 @@ class TestPrefillWithReuse:
             llm._prefill_with_reuse([1, 2, 3])
 
         mock_api.llama_memory_seq_rm.assert_called_once_with(333, 0, 2, -1)
-        args = mock_api.llama_batch_get_one.call_args[0]
-        assert args[1] == 1  # only the final token decoded
+        args = mock_api.llama_batch_init.call_args[0]
+        assert args[0] == 1  # only the final token decoded
 
     def test_seq_rm_failure_falls_back_to_full_clear(self):
         llm = _bare_llama()
@@ -189,8 +193,8 @@ class TestPrefillWithReuse:
 
         mock_api.llama_memory_clear.assert_called_once()
         # Full prompt decoded from position 0
-        args = mock_api.llama_batch_get_one.call_args[0]
-        assert args[1] == 3
+        args = mock_api.llama_batch_init.call_args[0]
+        assert args[0] == 3
         assert llm._cached_tokens == [1, 2, 3]
 
     def test_empty_cache_clears_stale_native_kv_before_reuse(self):
@@ -207,8 +211,8 @@ class TestPrefillWithReuse:
 
         mock_api.llama_memory_seq_rm.assert_called_once_with(333, 0, 0, -1)
         # Full prompt decoded from position 0 after the wipe.
-        args = mock_api.llama_batch_get_one.call_args[0]
-        assert args[1] == 3
+        args = mock_api.llama_batch_init.call_args[0]
+        assert args[0] == 3
         assert llm._cached_tokens == [1, 2, 3]
 
     def test_empty_cache_seq_rm_failure_falls_back_to_clear(self):
@@ -222,8 +226,8 @@ class TestPrefillWithReuse:
             llm._prefill_with_reuse([1, 2, 3])
 
         mock_api.llama_memory_clear.assert_called_once()
-        args = mock_api.llama_batch_get_one.call_args[0]
-        assert args[1] == 3
+        args = mock_api.llama_batch_init.call_args[0]
+        assert args[0] == 3
         assert llm._cached_tokens == [1, 2, 3]
 
     def test_decode_failure_wipes_cache_state(self):
@@ -258,6 +262,7 @@ class TestFreshContextPath:
         mock_api.llama_context_default_params.return_value = MagicMock()
         mock_api.llama_init_from_model.return_value = 444
         mock_api.llama_decode.return_value = 0
+        mock_api.llama_batch_init.side_effect = fake_batch_init
         with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
             llm._prefill_fresh_context([1, 2, 3], needed=5000)
 
@@ -273,6 +278,7 @@ class TestFreshContextPath:
         mock_api.llama_context_default_params.return_value = MagicMock()
         mock_api.llama_init_from_model.return_value = 444
         mock_api.llama_decode.return_value = -1
+        mock_api.llama_batch_init.side_effect = fake_batch_init
         with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
             with pytest.raises(RuntimeError, match="prefill"):
                 llm._prefill_fresh_context([1, 2, 3], needed=100)
@@ -290,12 +296,13 @@ class TestFreshContextPath:
         mock_api.llama_context_default_params.return_value = cp
         mock_api.llama_init_from_model.return_value = 444
         mock_api.llama_decode.return_value = 0
+        mock_api.llama_batch_init.side_effect = fake_batch_init
         with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
             llm._prefill_fresh_context(list(range(5000)), needed=6000)
 
         # n_batch is capped at 2048 → 5000 tokens need 3 decode calls
         assert mock_api.llama_decode.call_count == 3
-        batch_sizes = [c[0][1] for c in mock_api.llama_batch_get_one.call_args_list]
+        batch_sizes = [c[0][0] for c in mock_api.llama_batch_init.call_args_list]
         assert batch_sizes == [2048, 2048, 904]
         assert all(size <= 2048 for size in batch_sizes)
         assert llm._cached_tokens == list(range(5000))
@@ -363,7 +370,8 @@ class TestInferenceLock:
         mock_api.llama_sampler_sample.return_value = 42
         mock_api.llama_sampler_free = MagicMock()
         mock_api.llama_decode.return_value = 0
-        
+        mock_api.llama_batch_init.side_effect = fake_batch_init
+
         # Make the tokenizer return False for is_eog so it generates some tokens
         llm._tokenizer.is_eog.return_value = False
         

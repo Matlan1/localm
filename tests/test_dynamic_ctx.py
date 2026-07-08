@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from localm.inference.backends.llamacpp.llama import LlamaCpp
+from tests._fake_batch import fake_batch_init
 
 
 def _llm(n_ctx=4096, n_ctx_max=16384, n_ctx_grow=4096):
@@ -80,6 +81,7 @@ class TestFreshContextUsesPolicy:
         mock_api.llama_context_default_params.return_value = cp
         mock_api.llama_init_from_model.return_value = 444
         mock_api.llama_decode.return_value = 0
+        mock_api.llama_batch_init.side_effect = fake_batch_init
         with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
             llm._prefill_fresh_context(list(range(100)), needed=5000)
         assert cp.n_ctx == 8192          # rounded up, not exact-fit 5000
@@ -93,6 +95,7 @@ class TestFreshContextUsesPolicy:
         mock_api.llama_context_default_params.return_value = cp
         mock_api.llama_init_from_model.return_value = 444
         mock_api.llama_decode.return_value = 0
+        mock_api.llama_batch_init.side_effect = fake_batch_init
         with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
             llm._prefill_fresh_context(list(range(100)), needed=5500)
         assert cp.n_ctx == 6000
