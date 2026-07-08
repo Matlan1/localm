@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """`localm comfy` - manage localm's OWN (optional) ComfyUI instance.
 
-STAGE S1 (scaffolding): `status` reports whether a managed instance exists and
-which ComfyUI localm targets; `remove` deletes the managed instance under the
-localm data dir (reversible, self-contained). `setup` is present but HONEST -
-provisioning is not built yet (stages S2/S3), so it changes nothing and says so
-(AGENTS.md rule 5: no facade). The user's own ComfyUI is never touched.
+`status` reports whether a managed instance exists and which ComfyUI localm
+targets. `remove` deletes the managed instance under the localm data dir
+(reversible, self-contained). `setup` provisions one by REPLICATING the user's
+existing ComfyUI (stage S2, the COPY path): it clones their ComfyUI at the same
+commit, makes a fresh localm venv, installs the same packages, and shares their
+models - the user's own ComfyUI is never touched. When the user has NO ComfyUI to
+copy, setup honestly reports that the fresh hardware-matched install (stage S3) is
+not built yet and changes nothing (AGENTS.md rule 5: no facade).
 """
-
-import shutil
 
 import click
 
@@ -49,7 +50,7 @@ def comfy_status() -> None:
         console.print(f"  Managed models    : {paths.models_dir}")
     else:
         console.print("  Installed         : no - not set up "
-                      "(provisioning arrives in a later stage)")
+                      "(run 'localm comfy setup' to replicate your ComfyUI)")
 
     target = resolve_comfy_target(cfg)
     which = "localm's managed ComfyUI" if target.managed else "your own ComfyUI"
@@ -69,7 +70,7 @@ def comfy_remove(yes: bool, with_models: bool) -> None:
     Removes <LOCALM_HOME>/comfyui. Your own ComfyUI (comfy_workdir) is NEVER
     touched. Add --models to also delete the managed models folder.
     """
-    from ..media.managed_comfy import managed_comfy_paths
+    from ..media.managed_comfy import managed_comfy_paths, rmtree_robust
 
     paths = managed_comfy_paths()
     targets = []
@@ -91,7 +92,7 @@ def comfy_remove(yes: bool, with_models: bool) -> None:
     failed = []
     for t in targets:
         try:
-            shutil.rmtree(t)
+            rmtree_robust(t)
         except OSError as e:
             # Do not claim success for a delete that failed (rule 5): report it.
             failed.append(f"{t} ({e})")
@@ -102,16 +103,68 @@ def comfy_remove(yes: bool, with_models: bool) -> None:
 
 
 @comfy_group.command("setup")
-def comfy_setup() -> None:
-    """Set up localm's own ComfyUI. NOT YET IMPLEMENTED (stages S2/S3).
+@click.option("--copy-custom-nodes/--no-custom-nodes", "copy_custom_nodes",
+              default=None,
+              help="Copy your ComfyUI custom_nodes into localm's ComfyUI "
+                   "(--copy-custom-nodes) or start clean (--no-custom-nodes). If "
+                   "omitted, you are asked when custom nodes are present.")
+def comfy_setup(copy_custom_nodes) -> None:
+    """Set up localm's own ComfyUI by REPLICATING your existing one (stage S2).
 
-    This is a deliberate honest placeholder: it provisions nothing and changes
-    nothing, so `localm comfy` is discoverable without pretending to do work it
-    cannot yet do.
+    When you already have a working ComfyUI (comfy_workdir set, with a venv under
+    it), localm clones it at the same commit into the localm data folder, makes a
+    FRESH localm venv, installs the same packages, and shares your models via
+    extra_model_paths - your own ComfyUI is never touched. You are asked before any
+    custom nodes are copied. A fresh, hardware-matched install for users WITHOUT a
+    ComfyUI is a later stage (S3) and is not built yet.
     """
-    console.print(
-        "[yellow]Managed-ComfyUI provisioning is not yet implemented "
-        "(stage S2/S3).[/yellow]")
-    console.print(
-        "localm keeps using your own ComfyUI (comfy_workdir). Nothing was "
-        "changed. Track progress in dev-notes/DESIGN-localm-managed-comfyui-*.")
+    import sys
+
+    from ..config import load_config
+    from ..media import managed_comfy_provision as prov
+
+    cfg = load_config()
+    stack = prov.discover_user_comfy(cfg)
+
+    if stack is None:
+        # Dispatcher: nothing usable to copy. The fresh hardware-matched install is
+        # stage S3 and is NOT built yet - say so honestly and change nothing.
+        workdir = cfg.get("comfy_workdir")
+        if workdir:
+            console.print(
+                f"[yellow]Found comfy_workdir ({workdir}) but no usable ComfyUI to "
+                "copy - it needs a main.py and a venv (venv/ or .venv/) under "
+                "it.[/yellow]")
+        else:
+            console.print("[yellow]No existing ComfyUI is configured "
+                          "(comfy_workdir is unset).[/yellow]")
+        console.print(
+            "A fresh, hardware-matched ComfyUI install is not yet implemented "
+            "(stage S3), so nothing was changed. To replicate an existing ComfyUI, "
+            'point localm at it first: localm config comfy_workdir "<path>".')
+        return
+
+    n_nodes = prov.count_user_custom_nodes(stack.workdir)
+    do_copy = prov.resolve_copy_custom_nodes(
+        copy_custom_nodes, n_nodes=n_nodes, interactive=sys.stdin.isatty(),
+        confirm=lambda: click.confirm(
+            f"Copy your {n_nodes} custom node(s) into localm's ComfyUI?",
+            default=False))
+
+    src = f"commit {stack.commit[:12]}" if stack.commit else stack.version_marker
+    console.print(f"Replicating your ComfyUI ({src}) into localm's data folder. "
+                  "This can take a while (a fresh venv + the same packages)...")
+    result = prov.provision_by_copy(
+        stack, cfg, copy_custom_nodes=do_copy,
+        on_progress=lambda line: console.print(line, style="dim", markup=False))
+
+    if not result.ok:
+        console.print(f"[red]{result.message}[/red]")
+        raise SystemExit(1)
+
+    console.print(f"[green]{result.message}[/green]")
+    console.print(f"  Packages replicated : {result.installed_packages}")
+    console.print(f"  Custom nodes copied : {result.custom_nodes_copied}")
+    console.print("Turn it on so localm uses it: "
+                  "localm config managed_comfy_enabled true "
+                  "(comfy_target=own already targets it).")

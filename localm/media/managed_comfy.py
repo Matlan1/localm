@@ -29,6 +29,8 @@ Layout under LOCALM_HOME:
 from __future__ import annotations
 
 import os
+import shutil
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -91,6 +93,21 @@ def managed_comfy_paths() -> ManagedComfyPaths:
         venv_python=_venv_python_path(root),
         extra_model_paths=root / "extra_model_paths.yaml",
     )
+
+
+def rmtree_robust(path: Path) -> None:
+    """``shutil.rmtree`` that also removes read-only files. A managed ComfyUI is a
+    git checkout (S2), and git marks its object store read-only - on Windows plain
+    rmtree then raises PermissionError (WinError 5) and the delete half-fails. Both
+    ``localm comfy remove`` and S2's rollback-on-failed-provision must be able to
+    remove such a tree, or a partial/old install lingers and reversibility breaks.
+    Re-raises the underlying OSError when a file genuinely cannot be removed (rule 5:
+    a delete that fails must NOT be reported as success by the caller)."""
+    def _onerror(func, p, _exc_info):
+        # Clear the read-only bit and retry; let a genuine failure propagate.
+        os.chmod(p, stat.S_IWRITE)
+        func(p)
+    shutil.rmtree(str(path), onerror=_onerror)
 
 
 def is_managed_comfy_installed() -> bool:
