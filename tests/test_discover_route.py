@@ -93,3 +93,25 @@ def test_bad_format_token_is_422(gui_app, monkeypatch):
     with TestClient(app) as c:
         r = c.get("/api/discover/search?q=x&formats=bogus", headers=_hdr())
     assert r.status_code == 422, r.text
+
+
+def test_hf_result_gets_fit_from_size(gui_app, monkeypatch):
+    app, disc = gui_app
+
+    def spy(query, limit=20, formats=("gguf",)):
+        return [
+            {"id": "org/small", "downloads": 1, "likes": 0, "updated": "",
+             "formats": ["hf"], "size_bytes": 2_000_000_000},   # ~2 GB weights
+            {"id": "org/unknown", "downloads": 1, "likes": 0, "updated": "",
+             "formats": ["hf"], "size_bytes": None},            # no estimate
+        ]
+
+    monkeypatch.setattr(disc, "hf_search", spy)
+    monkeypatch.setattr(disc, "hf_backend_available", lambda: True)
+    monkeypatch.setattr(disc, "vram_info", lambda: {"total": 16_000_000_000})
+    with TestClient(app) as c:
+        r = c.get("/api/discover/search?q=x&formats=hf", headers=_hdr())
+    assert r.status_code == 200, r.text
+    by_id = {x["id"]: x for x in r.json()["results"]}
+    assert by_id["org/small"]["fit"] == "fits"    # 2 GB on 16 GB VRAM -> fits
+    assert "fit" not in by_id["org/unknown"]       # no size -> no fit (GUI: unknown)
