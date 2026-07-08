@@ -189,6 +189,11 @@ class AliasRequest(BaseModel):
     alias: str
 
 
+class SetTypeRequest(BaseModel):
+    model: str
+    model_type: str
+
+
 class ShareClearRequest(BaseModel):
     ids: list[str] = []
 

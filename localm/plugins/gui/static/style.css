@@ -1217,6 +1217,22 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
   color: var(--yellow); border-color: var(--yellow);
   background: color-mix(in srgb, var(--yellow) 15%, transparent);
 }
+/* A model whose type could not be determined ('unknown'): highlighted so it reads
+   as needing a type set via the per-row control. */
+.job-state.st-unknown {
+  color: var(--yellow); border-color: var(--yellow);
+  background: color-mix(in srgb, var(--yellow) 15%, transparent);
+}
+/* The per-row model type <select> in the Models table actions cell. */
+.model-type-select {
+  font-size: 11px;
+  padding: 2px 4px;
+  margin: 0 2px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface, transparent);
+  color: var(--text);
+}
 .job-state.st-running { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
 /* pending / paused: quiet neutral (base pill look), named so the vocabulary is complete. */
 .job-state.st-pending, .job-state.st-paused { color: var(--text-dim); }

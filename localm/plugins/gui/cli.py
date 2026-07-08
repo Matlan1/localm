@@ -256,7 +256,8 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
             return
 
     from localm.config import load_registry, pick_port
-    from localm.model_manager import get_model_info, sync_models_dir
+    from localm.model_manager import (get_model_info, is_auto_chat_eligible,
+                                      sync_models_dir)
 
     # Pick up models added to (or gone missing from) the models folder since last run.
     _sync = sync_models_dir()
@@ -294,14 +295,16 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         else:
             # Pick the first entry that still resolves to a real model file or
             # directory, skipping rows whose file is missing or is not a model,
-            # so one bad registry entry never blocks startup.
-            model = next((n for n in sorted(registry) if get_model_info(n)), None)
+            # so one bad registry entry never blocks startup. A type='unknown' model
+            # is skipped here (never auto-loaded as chat) but stays runnable by name.
+            model = next((n for n in sorted(registry)
+                          if get_model_info(n) and is_auto_chat_eligible(registry[n])), None)
             if model is None:
                 model_less = True
                 console.print(
-                    "[yellow]No loadable models in the registry "
-                    "(files missing or not a model).[/yellow] "
-                    "Opening the GUI - fix or add one on the Models page.")
+                    "[yellow]No loadable chat models in the registry "
+                    "(files missing, not a model, or type 'unknown').[/yellow] "
+                    "Opening the GUI - fix, add, or set a model's type on the Models page.")
 
     # Refuse to bind past loopback without auth unless explicitly forced: the GUI
     # exposes not just the chat API but the coder agent, which can run shell

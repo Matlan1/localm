@@ -45,8 +45,11 @@ def test_local_path_pull_does_not_call_hf_detect(tmp_path, monkeypatch):
         "registering a local file must NOT call huggingface.co "
         f"(leaked: {hf_calls})")
     assert add_local_calls, "local file should be registered via add_local"
-    # Local files default to llm when type is auto (no remote probe).
-    assert add_local_calls[0][1].get("model_type") == "llm"
+    # Local files carry NO remote type probe: an 'auto' type passes None to add_local
+    # so it detects the type OFFLINE (GGUF -> llm, HF dir -> config.json, else the
+    # 'unknown' sentinel), never a huggingface.co lookup. The guard above (hf_calls
+    # == []) is the privacy property; None here is the deterministic-detection route.
+    assert add_local_calls[0][1].get("model_type") is None
 
 
 def test_local_path_pull_offline_when_net_off(tmp_path, monkeypatch):

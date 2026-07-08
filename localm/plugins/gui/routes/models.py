@@ -20,7 +20,8 @@ from localm.inference.http_server import (principal_id, require_scope,
                                           unload_all_models, unload_one_model)
 import localm.inference.http_server as _hs
 from localm.plugins.gui.web import (AliasRequest, LoadModelRequest, PullRequest,
-                                    RemoveModelRequest, UnloadModelRequest)
+                                    RemoveModelRequest, SetTypeRequest,
+                                    UnloadModelRequest)
 
 
 def register(app: FastAPI, ctx) -> None:
@@ -216,6 +217,25 @@ def register(app: FastAPI, ctx) -> None:
         except Exception as e:
             raise HTTPException(400, f"Alias failed: {e}")
         return {"status": "aliased", "model": req.model, "alias": req.alias}
+
+    @app.post("/api/models/type", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
+    async def model_set_type(req: SetTypeRequest):
+        """Change a registered model's type (the one-click set-type control). A
+        type='unknown' model is not auto-loaded as chat but stays runnable by name;
+        this corrects a mis-detected or bulk-imported model's type."""
+        from localm.config import load_registry
+        from localm.model_manager import MODEL_TYPES, set_model_type
+        if req.model not in load_registry():
+            raise HTTPException(404, f"Model not registered: {req.model}")
+        if req.model_type not in MODEL_TYPES:
+            raise HTTPException(
+                400, f"Invalid type: {req.model_type}. "
+                     f"One of: {', '.join(sorted(MODEL_TYPES))}")
+        loop = asyncio.get_running_loop()
+        ok = await loop.run_in_executor(None, set_model_type, req.model, req.model_type)
+        if not ok:
+            raise HTTPException(400, f"Could not set type for {req.model}")
+        return {"status": "typed", "model": req.model, "model_type": req.model_type}
 
     # ------------------------ model discovery --------------------- #
     # Search HuggingFace for GGUF models and show per-quant "fits your
