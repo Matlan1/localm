@@ -17,12 +17,21 @@ preflight: weights + ~1.5 GB overhead for KV cache and compute buffers.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from typing import Optional
 
 from localm.debuglog import logger
 
 HF_API = "https://huggingface.co"
 _TIMEOUT = 20
+
+# HuggingFace library-tag filter for each discoverable model format. GGUF repos
+# carry the "gguf" tag; transformers-native (safetensors / pytorch) repos carry
+# the "transformers" library tag, which is exactly the set localm's HF backend
+# loads. Both are real HF /api/models filter values, so classification comes from
+# WHICH query a repo answered, not from parsing per-result tag fields the list
+# response may omit.
+_FORMAT_FILTER = {"gguf": "gguf", "hf": "transformers"}
 
 # Mirrors GgufBackend._VRAM_OVERHEAD_BYTES (KV cache + compute buffers)
 _OVERHEAD_BYTES = int(1.5e9)
@@ -76,13 +85,10 @@ def _get(url: str, params: Optional[dict] = None) -> object:
         raise DiscoverError(f"HuggingFace request failed: {e}")
 
 
-def hf_search(query: str = "", limit: int = 20) -> list[dict]:
-    """Search HF for GGUF model repos. Empty query = most downloaded.
-    Returns [{id, downloads, likes, updated}] sorted by downloads."""
-    _ensure_online()
-    limit = max(1, min(int(limit), 50))
+def _search_one(fmt: str, query: str, limit: int) -> list[dict]:
+    """One HF /api/models query for a single format, each item tagged with it."""
     params = {
-        "filter": "gguf",
+        "filter": _FORMAT_FILTER[fmt],
         "sort": "downloads",
         "direction": "-1",
         "limit": str(limit),
@@ -102,8 +108,81 @@ def hf_search(query: str = "", limit: int = 20) -> list[dict]:
             "downloads": item.get("downloads", 0),
             "likes": item.get("likes", 0),
             "updated": item.get("lastModified", ""),
+            "formats": [fmt],
         })
     return out
+
+
+def hf_search(query: str = "", limit: int = 20,
+              formats: Sequence[str] = ("gguf",)) -> list[dict]:
+    """Search HF for model repos in the requested *formats* (a subset of
+    {"gguf", "hf"}). Empty query = most downloaded.
+
+    One HF query runs per requested format (gguf -> the bundled GGUF backend,
+    hf -> the transformers backend); the results are merged de-duped by repo id
+    (a repo that surfaces under both formats keeps a merged ``formats`` list),
+    sorted by downloads, and trimmed to *limit*.
+
+    Returns [{id, downloads, likes, updated, formats}]. Defaults to gguf-only so
+    the CLI ``localm search`` is unchanged; the GUI passes both formats
+    explicitly from its toggles."""
+    _ensure_online()
+    limit = max(1, min(int(limit), 50))
+    wanted = [f for f in formats if f in _FORMAT_FILTER]
+    if not wanted:
+        raise DiscoverError(
+            "No valid model format requested (choose gguf and/or hf).")
+    # One list per format (each already download-sorted by the API), de-duped by
+    # repo id: a repo that surfaces under both formats stays in the FIRST list it
+    # appeared in and its tags are unioned there.
+    seen: dict[str, dict] = {}
+    per_format: list[list[dict]] = []
+    for fmt in wanted:
+        lst: list[dict] = []
+        for item in _search_one(fmt, query, limit):
+            existing = seen.get(item["id"])
+            if existing:
+                for f in item["formats"]:
+                    if f not in existing["formats"]:
+                        existing["formats"].append(f)
+            else:
+                seen[item["id"]] = item
+                lst.append(item)
+        per_format.append(lst)
+    # Round-robin interleave by per-format rank, then trim to `limit`. A plain
+    # merge-then-sort-by-downloads would let the higher-download format (HF repos
+    # routinely dwarf GGUF repacks) crowd the other out of the top `limit`
+    # entirely, so a "show GGUF" toggle could return zero GGUF. Interleaving keeps
+    # every enabled format visible while still leading each with its most popular.
+    out: list[dict] = []
+    rank = 0
+    while len(out) < limit and any(rank < len(lst) for lst in per_format):
+        for lst in per_format:
+            if rank < len(lst):
+                out.append(lst[rank])
+                if len(out) >= limit:
+                    break
+        rank += 1
+    return out
+
+
+def hf_backend_available() -> bool:
+    """True when the HF/transformers runtime can actually RUN a model here: both
+    torch and transformers are importable. Uses importlib.util.find_spec, a cheap
+    capability probe with no heavy import side effect.
+
+    When False, an HF (transformers-format) model can still be DOWNLOADED via
+    pull - it simply cannot be loaded until the ``.[gpu]`` extra (torch +
+    transformers) is installed. The GUI surfaces exactly that, and does NOT block
+    the download (a user may only want the files)."""
+    import importlib.util
+    try:
+        return bool(importlib.util.find_spec("torch")
+                    and importlib.util.find_spec("transformers"))
+    except (ImportError, ValueError):
+        # find_spec can raise on a half-installed namespace package; treat an
+        # unresolvable probe as "not available" rather than crash discovery.
+        return False
 
 
 def hf_gguf_files(repo: str) -> list[dict]:
