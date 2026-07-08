@@ -148,3 +148,54 @@ def comfy_setup(copy_custom_nodes) -> None:
     console.print("Turn it on so localm uses it: "
                   "localm config managed_comfy_enabled true "
                   "(comfy_target=own already targets it).")
+
+
+@comfy_group.command("update")
+@click.option("--reinstall-requirements", "reinstall_requirements", is_flag=True,
+              default=False,
+              help="Also reinstall ComfyUI's requirements into the managed venv "
+                   "(use when the new pin changed ComfyUI's dependencies). Off by "
+                   "default: a partial dependency upgrade cannot be rolled back "
+                   "exactly, so update stays within the safe git rollback unless "
+                   "you ask.")
+@click.option("--commit", "commit", default=None,
+              help="Advanced: update to a specific ComfyUI commit instead of the "
+                   "shipped pin (for testing a candidate before it is pinned).")
+def comfy_update(reinstall_requirements: bool, commit) -> None:
+    """Advance localm's managed ComfyUI to the shipped pinned ComfyUI version and
+    re-apply localm's patch set.
+
+    localm pins a known-good ComfyUI commit and carries a small set of its own
+    fixes on top (e.g. the ACE-Step __func__ tolerance). This moves the managed
+    checkout to the current pin and re-applies those fixes. It is safe: on any
+    failure it rolls the managed ComfyUI back to its previous version. Your own
+    ComfyUI is never touched.
+    """
+    from ..config import load_config
+    from ..media import managed_comfy as mc
+    from ..media import managed_comfy_update as upd
+    from ..media.managed_comfy_fresh import (COMFYUI_PINNED_COMMIT,
+                                             COMFYUI_PINNED_VERSION)
+
+    cfg = load_config()
+    if not mc.is_managed_comfy_installed():
+        console.print("No managed ComfyUI is installed - nothing to update. Run "
+                      "'localm comfy setup' first.")
+        raise SystemExit(1)
+
+    if commit is None:
+        console.print(f"Updating to the pinned ComfyUI {COMFYUI_PINNED_VERSION} "
+                      f"({COMFYUI_PINNED_COMMIT[:12]}) and re-applying localm's "
+                      "patches. This can take a while...")
+    else:
+        console.print(f"Updating to ComfyUI {commit[:12]} (advanced override) and "
+                      "re-applying localm's patches...")
+
+    result = upd.update_managed_comfy(
+        cfg, target_commit=commit, reinstall_requirements=reinstall_requirements,
+        on_progress=lambda line: console.print(line, style="dim", markup=False))
+
+    if not result.ok:
+        console.print(f"[red]{result.message}[/red]")
+        raise SystemExit(1)
+    console.print(f"[green]{result.message}[/green]")
