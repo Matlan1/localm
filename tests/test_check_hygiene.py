@@ -97,3 +97,167 @@ def test_github_pat_mention_without_token_is_clean(tmp_path, monkeypatch):
                  encoding="utf-8")
     problems = ch._scan(p)
     assert not [x for x in problems if "disclosure" in x], problems
+
+
+# ---- CHANGELOG append-only guard -------------------------------------------
+# The changelog is the permanent public record of what shipped: a release ADDS a
+# section on top; existing entries are never deleted or rewritten. The guard diffs
+# the working CHANGELOG against the last committed version and fails if any shipped
+# entry line disappeared. Headers and link-reference definitions are exempt (they
+# legitimately change when a release is cut).
+
+import subprocess
+
+_BASE_CHANGELOG = (
+    "# Changelog\n\n"
+    "This file is append-only.\n\n"
+    "## [Unreleased]\n\n"
+    "### Added\n"
+    "- work in progress\n\n"
+    "## [0.1.0] - 2026-07-04\n\n"
+    "First tagged release.\n\n"
+    "### Added\n"
+    "- inference and CLI\n"
+    "- the GUI\n\n"
+    "[Unreleased]: https://example.invalid/compare/v0.1.0...HEAD\n"
+    "[0.1.0]: https://example.invalid/releases/tag/v0.1.0\n"
+)
+
+
+def test_changelog_removed_lines_no_change_is_clean():
+    """No change to the changelog -> nothing removed."""
+    ch = _load_check_hygiene()
+    assert ch._changelog_removed_lines(_BASE_CHANGELOG, _BASE_CHANGELOG) == []
+
+
+def test_changelog_removed_lines_add_section_on_top_is_clean():
+    """Adding a brand-new version section on top (the normal release) removes
+    nothing: every prior entry line is still present. MUST NOT false-positive."""
+    ch = _load_check_hygiene()
+    new = _BASE_CHANGELOG.replace(
+        "## [Unreleased]\n\n### Added\n- work in progress\n",
+        "## [Unreleased]\n\n## [0.2.0] - 2026-08-01\n\n### Added\n"
+        "- work in progress\n- another shipped thing\n")
+    assert ch._changelog_removed_lines(_BASE_CHANGELOG, new) == []
+
+
+def test_changelog_removed_lines_deleting_an_entry_fails():
+    """NEGATIVE: deleting an existing shipped entry line is flagged."""
+    ch = _load_check_hygiene()
+    new = _BASE_CHANGELOG.replace("- the GUI\n", "")
+    removed = ch._changelog_removed_lines(_BASE_CHANGELOG, new)
+    assert removed == ["- the GUI"], removed
+
+
+def test_changelog_removed_lines_release_rename_is_clean():
+    """Cutting a release renames the `## [Unreleased]` header, adds a version
+    header, and rewrites the compare link + adds a new tag link. Only headers and
+    link-reference lines change; no content entry is removed -> clean."""
+    ch = _load_check_hygiene()
+    new = (_BASE_CHANGELOG
+           .replace("## [Unreleased]\n\n### Added\n- work in progress\n",
+                    "## [Unreleased]\n\n## [0.2.0] - 2026-08-01\n\n### Added\n"
+                    "- work in progress\n")
+           .replace("[Unreleased]: https://example.invalid/compare/v0.1.0...HEAD\n",
+                    "[Unreleased]: https://example.invalid/compare/v0.2.0...HEAD\n"
+                    "[0.2.0]: https://example.invalid/releases/tag/v0.2.0\n"))
+    assert ch._changelog_removed_lines(_BASE_CHANGELOG, new) == []
+
+
+def _init_changelog_repo(tmp_path, text):
+    """A throwaway git repo with CHANGELOG.md committed, so the git-wired guard has
+    a real HEAD baseline to diff the working tree against."""
+    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+    import os
+    run_env = {**os.environ, **env}
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True, env=run_env)
+    (tmp_path / "CHANGELOG.md").write_text(text, encoding="utf-8")
+    subprocess.run(["git", "add", "CHANGELOG.md"], cwd=tmp_path, check=True, env=run_env)
+    subprocess.run(["git", "commit", "-qm", "add changelog"], cwd=tmp_path,
+                   check=True, env=run_env)
+
+
+def test_changelog_append_only_guard_flags_a_committed_baseline_deletion(tmp_path, monkeypatch):
+    """The git-wired entrypoint: with CHANGELOG committed, deleting a shipped entry
+    line in the working tree is flagged; no-change and add-on-top pass."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    _init_changelog_repo(tmp_path, _BASE_CHANGELOG)
+    cl = tmp_path / "CHANGELOG.md"
+
+    # no change -> clean
+    assert ch._changelog_append_only() == []
+
+    # add a section on top -> clean (the normal release; must not false-positive)
+    cl.write_text(_BASE_CHANGELOG.replace(
+        "## [Unreleased]\n",
+        "## [Unreleased]\n\n## [0.2.0] - 2026-08-01\n\n### Added\n- shipped\n"),
+        encoding="utf-8")
+    assert ch._changelog_append_only() == []
+
+    # delete an existing entry -> FAIL
+    cl.write_text(_BASE_CHANGELOG.replace("- the GUI\n", ""), encoding="utf-8")
+    problems = ch._changelog_append_only()
+    assert problems and any("append-only" in p for p in problems), problems
+
+
+def test_changelog_append_only_guard_catches_a_committed_deletion_in_ci(tmp_path, monkeypatch):
+    """CI / clean-checkout path: even after the deletion is COMMITTED (working ==
+    HEAD, so a plain working-vs-HEAD diff would see nothing), a shipped entry
+    dropped relative to origin/master is still caught via the merge-base baseline.
+    An add-on-top commit on the same clean tree must still pass (no false-positive
+    on a new release landing on the branch)."""
+    import os
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=tmp_path, check=True, env=env,
+                              capture_output=True, text=True)
+
+    git("init", "-q")
+    cl = tmp_path / "CHANGELOG.md"
+    cl.write_text(_BASE_CHANGELOG, encoding="utf-8")
+    git("add", "CHANGELOG.md")
+    git("commit", "-qm", "published record")
+    base_sha = git("rev-parse", "HEAD").stdout.strip()
+    # simulate the published master WITHOUT needing a real remote
+    git("update-ref", "refs/remotes/origin/master", base_sha)
+
+    # add a new section on top and COMMIT it: clean tree, but append-only -> clean
+    cl.write_text(_BASE_CHANGELOG.replace(
+        "## [Unreleased]\n",
+        "## [Unreleased]\n\n## [0.2.0] - 2026-08-01\n\n### Added\n- shipped\n"),
+        encoding="utf-8")
+    git("add", "CHANGELOG.md")
+    git("commit", "-qm", "cut 0.2.0")
+    assert ch._changelog_append_only() == [], "add-on-top commit must pass"
+
+    # now DELETE a shipped entry and COMMIT it: working == HEAD, but it is gone
+    # relative to the origin/master baseline -> must be flagged
+    cl.write_text((tmp_path / "CHANGELOG.md").read_text(encoding="utf-8")
+                  .replace("- the GUI\n", ""), encoding="utf-8")
+    git("add", "CHANGELOG.md")
+    git("commit", "-qm", "oops deleted a line")
+    problems = ch._changelog_append_only()
+    assert problems and any("append-only" in p for p in problems), problems
+
+
+def test_changelog_append_only_guard_passes_without_a_git_baseline(tmp_path, monkeypatch):
+    """A brand-new (never-committed) CHANGELOG has no baseline to diff against, so
+    the guard passes rather than crashing or blocking the first commit."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "CHANGELOG.md").write_text(_BASE_CHANGELOG, encoding="utf-8")
+    assert ch._changelog_append_only() == []
+
+
+def test_real_changelog_is_append_only_against_head():
+    """The real repo CHANGELOG must itself satisfy the guard (this PR only adds a
+    header note on top, removing nothing)."""
+    ch = _load_check_hygiene()
+    assert ch._changelog_append_only() == []
