@@ -5,6 +5,10 @@ All notable changes to localm are documented here. The format follows
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Being pre-1.0,
 minor versions may include breaking changes.
 
+This file is append-only: each release adds its section on top, and existing
+entries are never deleted or rewritten (typo and formatting fixes aside). It is
+the permanent public record of what shipped.
+
 ## [Unreleased]
 
 Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on

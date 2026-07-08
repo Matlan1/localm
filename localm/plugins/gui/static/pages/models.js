@@ -7,7 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { pickDirectory } from "../app/picker.js";
-import { $, GIB, authHeaders, confirmDanger, downloadRate, el, fmtBytes, fmtDuration, openModal, streamJob, toast } from "../app/helpers.js";
+import { $, GIB, authHeaders, confirmDanger, downloadRate, el, fmtBytes, fmtDuration, openModal, renderMarkdown, streamJob, toast } from "../app/helpers.js";
 import { onServerUnreachable } from "../app/init.js";
 import { emptyState } from "../app/icons.js";
 import { modelCache, refreshModels, switchModel } from "../app/models-sidebar.js";
@@ -676,6 +676,28 @@ export async function updateApply() {
 }
 if ($("update-check")) $("update-check").onclick = updateCheck;
 if ($("update-apply")) $("update-apply").onclick = updateApply;
+
+// Changelog: show the full release history (newest first) in the shared modal.
+// Fetched from /api/changelog and rendered via renderMarkdown - the same
+// DOMPurify(marked) path chat uses, so it is XSS-safe. Always available (it ships
+// in every build); a missing/failed fetch is shown in the modal, never left blank.
+export async function showChangelog() {
+  openModal("Changelog", (body) => {
+    const md = el("div", "changelog-md");
+    md.textContent = "Loading the changelog...";
+    body.appendChild(md);
+    fetch("/api/changelog", { headers: authHeaders() })
+      .then(async (r) => {
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.detail || r.statusText);
+        if (!d.available) { md.textContent = "No changelog is available in this build."; return; }
+        md.textContent = "";
+        renderMarkdown(md, d.markdown || "");
+      })
+      .catch((e) => { md.textContent = "Could not load the changelog: " + e.message; });
+  });
+}
+if ($("changelog-show")) $("changelog-show").onclick = showChangelog;
 
 // Issues: read-only list (textContent only - never raw innerHTML for proxy data).
 export async function issuesRefresh() {

@@ -131,6 +131,23 @@ def register(app: FastAPI, ctx) -> None:
             return {"available": True,
                     "error": f"{e.summary}: {e.reason}".strip().strip(":").strip()}
 
+    @app.get("/api/changelog", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
+    async def changelog_ep():
+        """Serve the release CHANGELOG.md so the Settings "Show changelog" button can
+        show the full version history (newest first) in-app, without leaving for
+        GitHub. Read-only, public build content; scoped like its Updates sibling. The
+        path is resolved via updater.repo_root() so it is correct in dev AND in an
+        installed release. Returns {available, version, markdown}, or {available:
+        false} when the file is absent from this build - an honest signal, never a
+        faked empty success (we do not hide problems)."""
+        import localm
+        from localm import updater
+        try:
+            markdown = (updater.repo_root() / "CHANGELOG.md").read_text(encoding="utf-8")
+        except OSError:
+            return {"available": False}
+        return {"available": True, "version": localm.__version__, "markdown": markdown}
+
     @app.post("/api/update/apply", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def update_apply_ep():
         """Apply the latest update (download + swap + class step), then restart in

@@ -195,6 +195,24 @@ or directory means classifying it in `release-manifest.toml`, or the gate fails.
 `scripts/build_release.py` assembles the build.zip from the same release-include
 list (then `scripts/sign_release.py` signs it).
 
+### The release changelog is append-only
+
+`CHANGELOG.md` is the permanent public record of what shipped. It is APPEND-ONLY:
+each release ADDS its section at the top (newest first); existing entries are NEVER
+deleted or rewritten - typo and formatting corrections aside. Do not "tidy",
+condense, re-summarize, or drop old release notes: once a version's entry is
+published it stays, as written, as the record of what that version shipped.
+
+This is enforced, not merely asked. The same `check_hygiene.py` pass diffs the
+working `CHANGELOG.md` against the last committed version and fails if any shipped
+entry line was removed or rewritten. Markdown headers and the link-reference
+definitions at the bottom are exempt, because cutting a release legitimately
+renames the `[Unreleased]` header to a version and updates the compare link. The
+release tooling honors the same invariant: `scripts/make_release.py` /
+`build_release.py` never generate or rewrite the changelog - it is hand-maintained
+and shipped verbatim, so a new version's section is added by hand ABOVE the prior
+ones, never in place of them.
+
 If you discover a violation already in git history, do not only fix it forward.
 A non-sensitive bad path can be fixed in a normal commit, but a genuine
 disclosure in history (a secret, a personal email, or a real-user absolute path

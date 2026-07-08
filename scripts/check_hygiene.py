@@ -10,6 +10,9 @@ Scans tracked files and fails on:
      published for bug reports (see localm/bugreport.py) and is NOT flagged.
   3. An absolute or machine-specific path used in code/config (not docs), which
      a default must never assume.
+  4. A CHANGELOG.md that is not append-only: a shipped entry line removed or
+     rewritten (vs the published-record baseline) instead of new entries added on
+     top. The changelog is the permanent public record of what shipped (AGENTS.md).
 
 It also runs the release-file manifest gate (scripts/check_manifest.py,
 NEW-RELEASE-FILEMANIFEST): every tracked file must be classified release-include
@@ -125,6 +128,103 @@ def _scan(path: Path) -> list[str]:
     return problems
 
 
+# ---- check 4: CHANGELOG is append-only -------------------------------------
+# The release changelog is the permanent public record of what shipped: each
+# release ADDS its section on top; existing entries are never deleted or rewritten
+# (typo/formatting fixes aside - see AGENTS.md). Enforced by diffing the working
+# CHANGELOG against the published-record baseline (the merge-base with
+# origin/master, else the last commit) and failing if any shipped ENTRY line
+# disappeared. Markdown HEADERS ("# ...") and link-reference definitions
+# ("[label]: url") are exempt: cutting a release legitimately renames the Unreleased
+# header to a version and rewrites the compare link without touching an entry.
+# Compared as a multiset, so MOVING entries under a new version header is fine -
+# only an actual deletion or rewrite of an entry line is caught.
+_CHANGELOG = "CHANGELOG.md"
+_CHANGELOG_LINKREF = re.compile(r"\[[^\]]+\]:\s")
+
+
+def _changelog_protected_lines(text: str) -> list[str]:
+    """Changelog lines whose loss would rewrite history: non-blank lines that are
+    not a markdown header and not a link-reference definition. rstrip()'d so a
+    CRLF/LF or trailing-space difference is not mistaken for a real change."""
+    out = []
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        stripped = line.lstrip()
+        if not stripped or stripped.startswith("#") or _CHANGELOG_LINKREF.match(stripped):
+            continue
+        out.append(line)
+    return out
+
+
+def _changelog_removed_lines(old_text: str, new_text: str) -> list[str]:
+    """Protected content lines present in *old_text* but no longer present (with
+    multiplicity) in *new_text*: shipped changelog entries that were DELETED or
+    REWRITTEN rather than left intact with new entries added above them."""
+    from collections import Counter
+    old = Counter(_changelog_protected_lines(old_text))
+    new = Counter(_changelog_protected_lines(new_text))
+    removed = []
+    for line, count in old.items():
+        removed.extend([line] * (count - new.get(line, 0)))
+    return removed
+
+
+def _git(*args: str) -> subprocess.CompletedProcess | None:
+    """Run a git subcommand under REPO; None if git is unavailable at all."""
+    try:
+        return subprocess.run(["git", *args], cwd=REPO, capture_output=True, text=True)
+    except (FileNotFoundError, OSError):
+        return None
+
+
+def _changelog_baseline_ref() -> str | None:
+    """The commit whose CHANGELOG the working tree must not delete entries from.
+
+    Prefer the merge-base with ``origin/master`` - the published record at THIS
+    branch's point. Comparing against it means the guard bites in BOTH places:
+    pre-commit (working tree vs the base) AND in CI on a clean checkout (the
+    committed HEAD vs the base, so a deletion sneaked past the hook / committed via
+    a web edit is still caught). It also never false-positives on new releases that
+    landed on master AFTER this branch (those are not in the merge-base). Falls back
+    to HEAD when origin/master is unavailable (offline, a fresh clone), which is the
+    plain "vs the last commit" pre-commit check. None => no git at all."""
+    mb = _git("merge-base", "HEAD", "origin/master")
+    if mb is None:
+        return None
+    if mb.returncode == 0 and mb.stdout.strip():
+        return mb.stdout.strip()
+    head = _git("rev-parse", "HEAD")            # no origin/master: last commit
+    return head.stdout.strip() if head and head.returncode == 0 else None
+
+
+def _changelog_append_only() -> list[str]:
+    """CHANGELOG.md must be APPEND-ONLY (AGENTS.md): report every shipped entry line
+    removed or rewritten relative to the baseline (see _changelog_baseline_ref). A
+    CHANGELOG not yet in the baseline (never committed) or a repo without git has
+    nothing to compare against, so it passes - the guard catches deletions from an
+    established record, it does not block the first commit."""
+    ref = _changelog_baseline_ref()
+    if ref is None:
+        return []                       # no git available: nothing to diff against
+    base = _git("show", f"{ref}:{_CHANGELOG}")
+    if base is None or base.returncode != 0:
+        return []                       # CHANGELOG not in the baseline yet: no record
+    try:
+        working = (REPO / _CHANGELOG).read_text(encoding="utf-8")
+    except OSError:
+        working = ""                    # deleted from the tree: every entry is gone
+    removed = _changelog_removed_lines(base.stdout, working)
+    if not removed:
+        return []
+    shown = "; ".join(repr(x.strip()) for x in removed[:4])
+    more = f" (+{len(removed) - 4} more)" if len(removed) > 4 else ""
+    return [f"{_CHANGELOG}: append-only violation - {len(removed)} shipped entry "
+            "line(s) removed or rewritten. The changelog is the permanent public "
+            "record: add new entries ABOVE, never delete or rewrite existing ones. "
+            f"Removed: {shown}{more}"]
+
+
 def _install_hook() -> int:
     hook = REPO / ".git" / "hooks" / "pre-commit"
     if not hook.parent.is_dir():
@@ -161,6 +261,7 @@ def main(argv: list[str]) -> int:
     problems: list[str] = []
     for f in _tracked_files():
         problems.extend(_scan(f))
+    problems.extend(_changelog_append_only())
     manifest = _manifest_problems()
     if problems or manifest:
         if problems:

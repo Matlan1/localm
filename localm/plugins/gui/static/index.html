@@ -677,6 +677,20 @@
               <div id="bug-result" class="sub" hidden></div>
             </section>
 
+            <!-- Changelog: always available (it ships in every build), so it is NOT
+                 gated behind the updater proxy like the Updates card below. The full
+                 version history is fetched from /api/changelog and rendered in the
+                 shared modal via the same DOMPurify markdown path as chat. -->
+            <section class="card settings-section" id="sec-changelog" data-group="system" data-sec-label="Changelog">
+              <div class="card-head"><span class="ic cat-ic cat-slate" data-icon="clock"></span>
+                <div class="card-head-text"><h3>Changelog</h3></div></div>
+              <div class="sub">See what changed in each localm release - the full version
+              history, newest first.</div>
+              <div class="actions">
+                <button class="btn-secondary" id="changelog-show">Show changelog</button>
+              </div>
+            </section>
+
             <!-- Updates + Issues: shown only when the proxy is configured for them
                  (capabilities.update_available / .issues_available). localm never
                  self-updates; applying is always this explicit button. -->
