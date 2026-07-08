@@ -79,10 +79,9 @@ class HttpEngine:
         """The loaded model's RESOLVED context ceiling from the server's
         /v1/config (VRAM-derived under ctx_auto), cached after the first
         successful fetch. Best-effort: None on any error."""
-        if hasattr(self, "_ctx_capacity_cached") and self._ctx_capacity_cached:
+        if getattr(self, "_ctx_capacity_cached", False):
             return self._ctx_capacity
-        self._ctx_capacity_cached = True
-        self._ctx_capacity = None
+        cap = None
         try:
             import requests
             resp = requests.get(f"{self._base}/config",
@@ -90,10 +89,17 @@ class HttpEngine:
             if resp.status_code == 200:
                 v = resp.json().get("effective_ctx_max")
                 if isinstance(v, int) and v > 0:
-                    self._ctx_capacity = v
+                    cap = v
         except Exception:
-            self._ctx_capacity = None
-        return self._ctx_capacity
+            cap = None
+        # Cache ONLY a successful resolution (matching the docstring). A
+        # transient / early failure - the model not loaded yet, a non-200, a
+        # network blip - must not permanently latch None; a later call retries
+        # once /v1/config can answer (AUDIT-LOW).
+        if cap is not None:
+            self._ctx_capacity = cap
+            self._ctx_capacity_cached = True
+        return cap
 
     # --- chat --------------------------------------------------------------- #
     def _headers(self) -> dict:
