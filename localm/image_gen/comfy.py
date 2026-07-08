@@ -52,6 +52,7 @@ from localm.media.comfy_client import (
     _venv_python,
     _with_warning,
     clear_comfy_history,
+    comfy_exec_error_message,
     comfy_fetch_output,
     comfy_http_error_detail,
     comfy_object_info,
@@ -99,6 +100,7 @@ __all__ = [
     "_image_dimensions", "_is_link", "_link_source_id", "_localm_unload",
     "_looks_like_model_files", "_normalize_model_base", "_pick_variant",
     "_upload_image", "_venv_python", "_with_warning", "clear_comfy_history",
+    "comfy_exec_error_message",
     "comfy_fetch_output", "comfy_http_error_detail", "comfy_object_info",
     "comfy_poll_until_done", "comfy_submit_prompt", "contain_comfy_artifacts",
     "default_api_url", "discover_launch_cmd", "ensure_comfy",
@@ -652,7 +654,7 @@ def generate_image(
     if status == POLL_CANCELLED:
         return False, "Generation cancelled."
     if status == POLL_EXEC_ERROR:
-        return False, f"ComfyUI execution failed: {payload}"
+        return False, comfy_exec_error_message(payload, api_url)
     if status == POLL_TIMEOUT:
         # Surface the last poll error (if any) so an unreachable ComfyUI reads
         # differently from one that was simply still working when time ran out.

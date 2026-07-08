@@ -42,6 +42,7 @@ from localm.media.comfy_client import (
     _localm_unload,
     _upload_image,
     _with_warning,
+    comfy_exec_error_message,
     comfy_fetch_output,
     comfy_http_error_detail,
     comfy_poll_until_done,
@@ -431,7 +432,7 @@ def generate_video(
     if status == POLL_CANCELLED:
         return False, "Generation cancelled."
     if status == POLL_EXEC_ERROR:
-        return False, f"ComfyUI execution failed: {payload}"
+        return False, comfy_exec_error_message(payload, api_url)
     if status == POLL_TIMEOUT:
         msg = (
             f"Video generation timed out after {max_poll_seconds // 60} minutes."

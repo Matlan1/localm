@@ -422,6 +422,17 @@ CORE_FIELDS: list = [
                  "forwards args to main.py (the stock run_*.bat and 'python "
                  "main.py' do); a launcher that drops args just ignores it.",
                  group="Media", owner="image"),
+    SettingField("comfy_func_shim", Widget.TOGGLE,
+                 "Fix ComfyUI ACE-Step __func__ crash (in-memory)",
+                 "Reactive fix for a known ComfyUI core regression "
+                 "(Comfy-Org/ComfyUI #12116) that crashes native ACE-Step audio "
+                 "with \"'function' object has no attribute '__func__'\". Off by "
+                 "default; localm normally touches nothing. When on, a ComfyUI that "
+                 "localm STARTS gets an in-memory compatibility patch via a "
+                 "PYTHONPATH env var - localm writes nothing into your ComfyUI "
+                 "install and never patches a ComfyUI it did not start. The patch "
+                 "self-expires once ComfyUI ships its own fix.",
+                 group="Media", owner="image"),
     SettingField("reload_llm_after_imagine", Widget.TOGGLE,
                  "Reload chat model after generating",
                  "Free the media model's VRAM and reload the chat model after a "

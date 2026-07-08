@@ -24,6 +24,14 @@ def _open_file(path: Path) -> None:
 
 
 
+def _is_interactive() -> bool:
+    """True when we have an interactive terminal to prompt on (not piped/scripted)."""
+    try:
+        return bool(sys.stdin and sys.stdin.isatty())
+    except Exception:
+        return False
+
+
 def _offer_open(path: Path) -> None:
     """In an interactive terminal, offer to open/play the just-generated media.
 
@@ -31,10 +39,7 @@ def _offer_open(path: Path) -> None:
     on disk - so we offer to open it in the OS default app. Skipped silently in
     a non-interactive shell (piped/scripted), where we only print the path.
     """
-    try:
-        if not (sys.stdin and sys.stdin.isatty()):
-            return
-    except Exception:
+    if not _is_interactive():
         return
     try:
         ans = console.input("  Open it now? [Y/n] ").strip().lower()
@@ -43,6 +48,71 @@ def _offer_open(path: Path) -> None:
         return
     if ans in ("", "y", "yes"):
         _open_file(path)
+
+
+def _remember_func_shim() -> None:
+    """Persist comfy_func_shim=True so every future localm-spawned ComfyUI gets the
+    in-memory __func__ shim automatically (the "remember, stop asking" choice)."""
+    from ..config import load_config, save_config
+    cfg = load_config()
+    cfg["comfy_func_shim"] = True
+    save_config(cfg)
+
+
+def _maybe_apply_func_shim_and_retry(message: str, api_url: str, retry):
+    """React to a media generation that failed with the known ComfyUI __func__
+    regression (MEDIA-1). On an interactive terminal, offer localm's in-memory,
+    localm-side shim and, on consent, apply it to a ComfyUI localm SPAWNS and retry
+    ONCE. Returns the (possibly retried) ``(ok, message)``; a decline, an unrelated
+    error, or a non-interactive shell returns ``(False, message)`` unchanged. Never
+    touches a ComfyUI localm did not start.
+
+    *retry* is a zero-arg callable that re-runs the exact same generation and returns
+    its own ``(ok, message)``."""
+    from ..media.comfy_client import (enable_func_shim_once,
+                                       is_known_comfy_func_regression,
+                                       restart_comfy, spawned_pid)
+    if not is_known_comfy_func_regression(message):
+        return False, message
+    if not _is_interactive():
+        return False, message
+    console.print(
+        "[yellow]This looks like the known ComfyUI __func__ regression "
+        "(Comfy-Org/ComfyUI #12116).[/yellow] localm can apply an in-memory, "
+        "localm-side fix to a ComfyUI it starts: it writes nothing into your "
+        "ComfyUI install and self-expires once ComfyUI ships its own fix.")
+    try:
+        ans = console.input(
+            "  Apply localm's fix? [o]nce / [r]emember (stop asking) / [N]o: "
+        ).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        console.print("")
+        return False, message
+    if ans in ("o", "once"):
+        enable_func_shim_once()
+    elif ans in ("r", "remember"):
+        enable_func_shim_once()
+        _remember_func_shim()
+    else:
+        return False, message
+    # Apply to a ComfyUI localm spawns only. If localm launched the live one, restart
+    # it with the fix; otherwise we must not touch the user's own instance - ask them
+    # to close it, then localm will start a fixed one on the retry.
+    if spawned_pid(api_url) is not None:
+        console.print("[dim]Restarting the ComfyUI localm launched, with the fix...[/dim]")
+        restart_comfy(api_url)
+    else:
+        console.print(
+            "[yellow]localm did not start this ComfyUI, so it will not touch it. "
+            "Close your ComfyUI, then press Enter and localm will start a fixed one "
+            "(needs comfy_workdir set).[/yellow]")
+        try:
+            console.input("  Press Enter when ComfyUI is closed (Ctrl-C to skip): ")
+        except (EOFError, KeyboardInterrupt):
+            console.print("")
+            return False, message
+    console.print("[dim]Retrying generation with the fix...[/dim]")
+    return retry()
 
 
 
@@ -99,12 +169,18 @@ def image_cmd(prompt, negative, guidance, cfg, seed, input_image, denoise,
         kwargs["input_image"] = Path(input_image)
 
     console.print("[dim]Generating image via ComfyUI (this can take a minute)...[/dim]")
+    _write_sidecar = effective_mode("server") != SessionMode.PRIVACY
     ok, message = generate_image(
         prompt, out_path,
         api_url=api_url,
-        write_sidecar=effective_mode("server") != SessionMode.PRIVACY,
+        write_sidecar=_write_sidecar,
         **kwargs,
     )
+    if not ok:
+        ok, message = _maybe_apply_func_shim_and_retry(
+            message, api_url,
+            lambda: generate_image(prompt, out_path, api_url=api_url,
+                                   write_sidecar=_write_sidecar, **kwargs))
     console.print(f"[{'green' if ok else 'red'}]{message}[/{'green' if ok else 'red'}]")
     if not ok:
         sys.exit(1)
@@ -140,6 +216,7 @@ def music_cmd(tags, lyrics, duration, out, seed, steps, cfg):
     import time as _time
     from rich.console import Console
     from ..audit import SessionMode, effective_mode
+    from ..media.comfy_client import default_api_url
     from ..music_gen import generate_music
     console = Console()
 
@@ -147,19 +224,28 @@ def music_cmd(tags, lyrics, duration, out, seed, steps, cfg):
     # comfy_launch_cmd/comfy_workdir, or a clear error when unset), so the CLI
     # honours the same config the GUI uses (H1).
 
+    api_url = default_api_url()
     out_path = Path(out) if out \
         else Path(f"music_{_time.strftime('%Y%m%d_%H%M%S')}.flac")
     lyr = Path(lyrics).read_text(encoding="utf-8") if lyrics else None
     kwargs = {k: v for k, v in
               (("seed", seed), ("steps", steps), ("cfg", cfg)) if v is not None}
-    ok, message = generate_music(
-        tags, out_path,
-        lyrics=lyr,
-        duration_seconds=duration,
-        on_progress=lambda t: console.print(f"  [dim]{t}[/dim]"),
-        write_sidecar=effective_mode("server") != SessionMode.PRIVACY,
-        **kwargs,
-    )
+    _write_sidecar = effective_mode("server") != SessionMode.PRIVACY
+
+    def _gen_music():
+        return generate_music(
+            tags, out_path,
+            lyrics=lyr,
+            duration_seconds=duration,
+            api_url=api_url,
+            on_progress=lambda t: console.print(f"  [dim]{t}[/dim]"),
+            write_sidecar=_write_sidecar,
+            **kwargs,
+        )
+
+    ok, message = _gen_music()
+    if not ok:
+        ok, message = _maybe_apply_func_shim_and_retry(message, api_url, _gen_music)
     console.print(f"[{'green' if ok else 'red'}]{message}[/{'green' if ok else 'red'}]")
     if not ok:
         sys.exit(1)
@@ -206,6 +292,7 @@ def video_cmd(prompt, negative, duration, fps, width, height, input_image,
     import time as _time
     from rich.console import Console
     from ..audit import SessionMode, effective_mode
+    from ..media.comfy_client import default_api_url
     from ..video_gen import generate_video
     console = Console()
 
@@ -213,21 +300,30 @@ def video_cmd(prompt, negative, duration, fps, width, height, input_image,
     # comfy_launch_cmd/comfy_workdir, or a clear error when unset), so the CLI
     # honours the same config the GUI uses (H1).
 
+    api_url = default_api_url()
     out_path = Path(out) if out \
         else Path(f"video_{_time.strftime('%Y%m%d_%H%M%S')}.mp4")
     kwargs = {k: v for k, v in
               (("negative_prompt", negative), ("width", width),
                ("height", height), ("seed", seed), ("steps", steps),
                ("cfg", cfg)) if v is not None}
-    ok, message = generate_video(
-        prompt, out_path,
-        seconds=duration,
-        fps=fps,
-        input_image=Path(input_image) if input_image else None,
-        on_progress=lambda t: console.print(f"  [dim]{t}[/dim]"),
-        write_sidecar=effective_mode("server") != SessionMode.PRIVACY,
-        **kwargs,
-    )
+    _write_sidecar = effective_mode("server") != SessionMode.PRIVACY
+
+    def _gen_video():
+        return generate_video(
+            prompt, out_path,
+            seconds=duration,
+            fps=fps,
+            api_url=api_url,
+            input_image=Path(input_image) if input_image else None,
+            on_progress=lambda t: console.print(f"  [dim]{t}[/dim]"),
+            write_sidecar=_write_sidecar,
+            **kwargs,
+        )
+
+    ok, message = _gen_video()
+    if not ok:
+        ok, message = _maybe_apply_func_shim_and_retry(message, api_url, _gen_video)
     console.print(f"[{'green' if ok else 'red'}]{message}[/{'green' if ok else 'red'}]")
     if not ok:
         sys.exit(1)
