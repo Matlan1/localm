@@ -125,6 +125,7 @@ patterns = [
     "scripts/sign_release.py",
     "scripts/check_manifest.py",
     "scripts/build_release.py",
+    "scripts/make_release.py",
     "release-manifest.toml",   # this file classifies itself: release tooling metadata
 ]
 

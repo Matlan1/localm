@@ -200,6 +200,53 @@ test("update: latest release uses the UPDATE token and prefers the .zip asset", 
   } finally { restore(); }
 });
 
+test("update: serves the detached .sig signature alongside the .zip asset", async () => {
+  const restore = stubFetch(async (url) => {
+    if (url.endsWith("/releases/latest")) {
+      return new Response(JSON.stringify({
+        tag_name: "v0.2.0", name: "0.2.0", body: "n", published_at: "2026-07-01T00:00:00Z",
+        assets: [
+          { id: 2, name: "localm-0.2.0.zip", size: 1234 },
+          { id: 3, name: "localm-0.2.0.zip.sig", size: 89 },
+        ],
+      }), { status: 200 });
+    }
+    if (url.includes("/releases/assets/3")) {   // the .sig asset API -> signed redirect
+      return { status: 302, ok: false, headers: { get: (k) =>
+        k.toLowerCase() === "location" ? "https://objects.githubusercontent.com/sig" : null } };
+    }
+    if (url === "https://objects.githubusercontent.com/sig") {
+      return new Response("Base64SigValue==\n", { status: 200 });
+    }
+    return new Response("{}", { status: 404 });
+  });
+  try {
+    const r = await worker.fetch(
+      req(undefined, { method: "GET", path: "/update", headers: { "X-Localm-Token": "s3cret" } }), ENV_UP);
+    const out = await r.json();
+    assert.equal(out.asset.id, 2, "the .zip is the build asset");
+    assert.equal(out.signature, "Base64SigValue==", "the .sig content is served, trimmed");
+  } finally { restore(); }
+});
+
+test("update: no .sig asset -> signature is null (client decides enforce vs open)", async () => {
+  const restore = stubFetch(async (url) => {
+    if (url.endsWith("/releases/latest")) {
+      return new Response(JSON.stringify({
+        tag_name: "v0.2.0", name: "0.2.0", body: "n", published_at: "x",
+        assets: [{ id: 2, name: "localm-0.2.0.zip", size: 1234 }],
+      }), { status: 200 });
+    }
+    return new Response("{}", { status: 404 });
+  });
+  try {
+    const r = await worker.fetch(
+      req(undefined, { method: "GET", path: "/update", headers: { "X-Localm-Token": "s3cret" } }), ENV_UP);
+    const out = await r.json();
+    assert.equal(out.signature, null);
+  } finally { restore(); }
+});
+
 test("update: no releases yet -> ok with version null", async () => {
   const restore = stubFetch(async () => new Response("{}", { status: 404 }));
   try {
