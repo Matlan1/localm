@@ -946,6 +946,24 @@ def principal_id(request: Request) -> Optional[str]:
     return None
 
 
+def memory_principal(request: Request) -> Optional[str]:
+    """The identity used to NAMESPACE this caller's chat memory. The owner (an
+    ADMIN-scoped key or the owner session) collapses to the shared "owner"
+    namespace (returns None -> memory.principal_of maps None to "owner"), so the
+    owner's saved memories are not stranded in a per-key-hash namespace that a
+    key rotation would orphan (AUDIT-MED-14).
+
+    This is deliberately NOT principal_id: principal_id must keep returning the
+    key hash so a background job stays bound to the key that created it
+    (KEY-SCOPE-2). Only the memory principal collapses ADMIN/owner to "owner"; a
+    non-owner scoped key keeps its own hash namespace here too."""
+    from localm import scopes
+    held = caller_scopes(request)
+    if held is not None and scopes.ADMIN in held:
+        return None
+    return principal_id(request)
+
+
 def job_owner_ok(request: Request, job_owner: Optional[str]) -> bool:
     """Whether the caller may stream/cancel a job created by *job_owner*. A job
     with NO recorded owner (created in open mode) is unrestricted; an admin/owner
