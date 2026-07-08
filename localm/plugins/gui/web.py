@@ -398,6 +398,8 @@ def attach_gui(
     _routes_share.register(app, ctx)
     from .routes import uploads as _routes_uploads
     _routes_uploads.register(app, ctx)
+    from .routes import comfy as _routes_comfy
+    _routes_comfy.register(app, ctx)
 
     # R47: the "/api/bug-report" POST lives on the core server (http_server.py) so
     # it works in headless `localm serve` too; the GUI button targets that single
