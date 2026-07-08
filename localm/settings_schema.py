@@ -447,9 +447,9 @@ CORE_FIELDS: list = [
                  "Use localm's own managed ComfyUI",
                  "Let localm run its OWN ComfyUI (installed under the localm data "
                  "folder) instead of your install. Off by default and inert until "
-                 "one is set up - your own ComfyUI is never modified. Provisioning "
-                 "is not built yet; this only routes to a managed instance once it "
-                 "exists.",
+                 "one is set up - your own ComfyUI is never modified. Set one up "
+                 "with 'localm comfy setup', then turn this on to route media to it "
+                 "(comfy_target must be 'own').",
                  group="Media", owner="image", applies=Applies.RESTART),
     SettingField("comfy_target", Widget.SELECT, "ComfyUI to use",
                  "When a managed ComfyUI is installed: own = use localm's managed "

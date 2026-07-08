@@ -7,6 +7,12 @@ retrieval are automatic); you do not need to learn the ComfyUI UI, just ask
 for images through localm's chat, CLI, or MCP interface. This guide covers the
 setup for a 16 GB VRAM card and how localm drives it.
 
+> This guide is for pointing localm at **your own** ComfyUI. localm can also
+> install and run its **own** managed ComfyUI for you (opt-in), which sets the
+> models up automatically and pins a known-good version; see
+> [managed-comfyui.md](managed-comfyui.md). The model and workflow notes below
+> apply to both.
+
 ## ComfyUI setup
 
 ### 1. Install ComfyUI

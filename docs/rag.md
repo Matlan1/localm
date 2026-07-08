@@ -45,8 +45,28 @@ things you ask for.
   .ts .java .c .cpp .go .rs .sh .sql …`
 - `.html` (tags stripped), `.docx` (stdlib zip+xml), `.ipynb` (cells)
 - `.pdf` - needs the one optional package: `pip install "localm[rag]"`
+- **Archives** `.zip` / `.tar` (and `.gz .bz2 .xz .tgz .tbz .txz`) are unpacked in
+  memory and each text member is indexed.
+- **Images** `.png .jpg .jpeg .webp .gif` are indexed by their description: localm
+  asks the active model to describe the image, so a vision-capable model (or a
+  chat model with an mmproj projector) must be loaded. Without one, the image is
+  skipped with a message telling you to load a vision model.
+- A file with an unfamiliar extension is content-sniffed: if its bytes decode as
+  text it is indexed as text, otherwise a genuinely binary file is refused rather
+  than indexed as mojibake.
 
-Binary formats are refused rather than indexed as mojibake.
+### Document format labels
+
+Every chunk is tagged with the format of its source document (`json`, `yaml`,
+`python`, `markdown`, `text`, `image`, `archive`, ...). The label is derived
+heuristic-first and free: a known file extension is authoritative, then a
+structural sniff of the content. Only when both are inconclusive (an odd extension
+whose shape is unclear) does localm consult the loaded chat model as a one-off
+tie-break, cached per extension so it fires at most once per indexing run, and
+never at all when no chat model is loaded. So an embedding-only index never stalls
+on a chat call. Turn the tie-break off entirely with `rag_classify_unknown_files
+false` (it is on by default); unclassifiable chunks then fall back to the `text`
+label.
 
 ## How retrieval works (and why it's lexical-first)
 
