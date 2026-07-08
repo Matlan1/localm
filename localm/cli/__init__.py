@@ -19,15 +19,12 @@ suite rely on:
     this package at call time (see chat._handle_command, doctor.doctor,
     models.add) so a patch on ``localm.cli.<name>`` reaches the call site.
 """
-# Expose sys / click on the package so tests can monkeypatch localm.cli.sys
-# and localm.cli.click, matching the old single-module surface. (F401: kept on
-# the package surface on purpose, not for use here.)
+# sys/click on the package surface for test monkeypatch (contract: docstring).
+# (F401: kept on purpose, not used here.)
 import sys  # noqa: F401
 import click  # noqa: F401
 
-# Config + model-manager names live on the package so tests can monkeypatch
-# localm.cli.<name> and so the call sites that resolve them via this package
-# (chat._handle_command, doctor.doctor, models.add) see the patched value.
+# Config + model-manager names on the package for test monkeypatch (docstring).
 from ..config import (  # noqa: F401
     HOME_DIR, find_binary_dir, load_config, save_config,
 )
@@ -36,18 +33,17 @@ from ..model_manager import (  # noqa: F401
     remove_model, show_shortcuts, sync_models_dir,
 )
 
-# Shared core: the root group + the cross-cutting helpers. ``main`` and
-# ``console`` are used below; the others are re-exported (gui/cli.py imports
-# _exposed_bind_warning / _setup_tls_or_exit from here).
+# Shared core: root group + cross-cutting helpers. gui/cli.py imports
+# _exposed_bind_warning / _setup_tls_or_exit from here.
 from ._core import (  # noqa: F401
     main, console_main, console, _GracefulGroup, _read_version_for_cli,
     _exposed_bind_warning, _resolve_tls, _setup_tls_or_exit,
     _complete_model_name,
 )
 
-# Import the command submodules for their import-time side effect of
-# registering commands on ``main``. Aliased to avoid clashing with the names we
-# re-export below; the side-effect-only ones are flagged unused by ruff.
+# Command submodules imported for their import-time side effect: registering
+# commands on ``main``. Aliased to avoid clashing with the re-exports below;
+# side-effect-only, so ruff flags them unused (noqa F401).
 from . import (  # noqa: F401
     chat as _chat,
     serve as _serve,
@@ -72,14 +68,14 @@ doctor = _doctor.doctor
 add = _models.add
 plugin_setup = _plugins.plugin_setup
 _parse_plugin_selection = _plugins._parse_plugin_selection
-# Resolved from the package by the plugin commands (so tests that monkeypatch
-# localm.cli._engine_manager reach the call sites in plugins.py).
+# Resolved from the package by plugins.py so a monkeypatch on
+# localm.cli._engine_manager reaches the call site.
 _engine_manager = _plugins._engine_manager
 
 
 # Register external plugin commands at import time so they show in --help.
-# A broken plugin must never take down the CLI - warnings only. This MUST run
-# last, after every built-in command submodule above has registered on ``main``.
+# A broken plugin must never take down the CLI (warnings only). MUST run last,
+# after every built-in submodule above has registered on ``main``.
 try:
     from ..plugins.loader import register_external_plugins as _register_ext
 

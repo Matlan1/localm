@@ -157,10 +157,6 @@ def _set_session_cookies(response, key: str, *, secure: bool) -> None:
                         samesite="strict", path="/", max_age=SESSION_MAX_AGE)
 
 
-# ------------------------------------------------------------------ #
-#  Request models                                                     #
-# ------------------------------------------------------------------ #
-
 class LoadModelRequest(BaseModel):
     model: str
 
@@ -328,10 +324,6 @@ def _unique_upload_target(base: Path, safe_name: str) -> Path:
         n += 1
 
 
-# ------------------------------------------------------------------ #
-#  Attach                                                             #
-# ------------------------------------------------------------------ #
-
 def attach_gui(
     app: FastAPI,
     *,
@@ -401,27 +393,16 @@ def attach_gui(
     from .routes import comfy as _routes_comfy
     _routes_comfy.register(app, ctx)
 
-    # R47: the "/api/bug-report" POST lives on the core server (http_server.py) so
-    # it works in headless `localm serve` too; the GUI button targets that single
-    # canonical route. Duplicating it here would shadow it (first route registered
-    # wins) and silently drop the user's description + include_log flag.
+    # R47: "/api/bug-report" POST lives on the core server (http_server.py) so it
+    # works in headless `localm serve`; the GUI button targets that one canonical
+    # route. Duplicating it here would shadow it (first route wins) and silently drop
+    # the user's description + include_log flag.
 
-    # Media generation (image /api/imagine*, music /api/music*, video /api/video*)
-    # moved to standalone builtin plugins (localm/plugins/builtin/{image,music,
-    # video}) in Phase 3; each ships disabled by default and reads its own
-    # per-plugin backend config (the shared ComfyUI launch/reload helpers moved
-    # into those plugins' backends).
+    # Media gen (/api/imagine*, /api/music*, /api/video*), chat persistence
+    # (/api/conversations, /api/memory, /api/prompts), and RAG (/api/rag/*) live in
+    # builtin plugins under localm/plugins/builtin/. The chat turn
+    # (/v1/chat/completions) stays in the kernel inference server.
 
-    # Chat persistence (/api/conversations, /api/memory, /api/prompts) moved
-    # to the builtin "chat" plugin (localm/plugins/builtin/chat) - the
-    # preinstalled, protected, default-enabled plugin #0. The chat turn
-    # itself (/v1/chat/completions) stays in the kernel inference server.
-
-    # Knowledge / RAG (/api/rag/*) moved to the builtin "rag" plugin
-    # (localm/plugins/builtin/rag) in Phase 3; it ships disabled by default and
-    # reaches the shared job manager + self-embed URL via request.app.state.
-
-    # ------------------------- static ----------------------------- #
     # Mounted last: API routes above take precedence over the SPA files.
     # Pin the MIME types the PWA relies on (some Windows registries map .js to
     # text/plain, and .webmanifest is unknown to mimetypes) so the service
@@ -452,18 +433,15 @@ def attach_gui(
         # token and references the current assets, so always revalidate (a new
         # app.js / index.html is then picked up without the user clearing caches).
         headers = {"Cache-Control": "no-cache"}
-        # One-time launch handoff: the launcher/CLI opens /?localm_token=<grant>.
-        # A valid single-use grant establishes a session and 303-redirects to the
-        # clean path (token stripped from URL/history), so the browser lands
-        # authenticated via a REAL navigation that a stale tab or a warm SW cannot
-        # short-circuit. This is redeemed on ANY bind (loopback OR network): the grant
-        # is a 256-bit single-use secret only the launcher knows and only ever places
-        # in the URL it opens on THIS machine, so possessing it IS the authorization -
-        # a network client never receives it and cannot guess it. (This is exactly why
-        # the grant works where the keyless auto-seed below cannot: the auto-seed has
-        # no secret and so must stay loopback-bind-only, but the grant carries its own
-        # proof.) A bad/used/expired grant just falls through to the normal shell (no
-        # error, nothing leaked).
+        # One-time launch handoff: the launcher/CLI opens /?localm_token=<grant>. A
+        # valid single-use grant establishes a session and 303-redirects to the clean
+        # path (token stripped), so the browser lands authenticated via a REAL
+        # navigation a stale tab or warm SW cannot short-circuit. Redeemed on ANY bind:
+        # the grant is a 256-bit single-use secret only the launcher knows and only
+        # places in the URL it opens on THIS machine, so possessing it IS the
+        # authorization (a network client never receives or guesses it) - which is why
+        # it works where the keyless loopback-only auto-seed below cannot. A bad/used/
+        # expired grant falls through to the normal shell (no error, nothing leaked).
         grant = request.query_params.get("localm_token")
         if grant and key and _consume_launch_grant(request.app, grant):
             from urllib.parse import urlencode

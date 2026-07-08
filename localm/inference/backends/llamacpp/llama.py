@@ -116,18 +116,12 @@ def _make_chunk_id() -> str:
     return "chatcmpl-" + uuid.uuid4().hex[:12]
 
 
-# ---------------------------------------------------------------------------
-#  Tokenisation helpers
-# ---------------------------------------------------------------------------
-
 class _Tokenizer:
     """Thin wrapper for the vocab / tokenisation layer."""
 
     def __init__(self, model_ptr: int, ctx_ptr: int) -> None:
         self._vocab = api.llama_model_get_vocab(model_ptr)
         self._ctx   = ctx_ptr
-
-    # -- encode ----------------------------------------------------------------
 
     def encode(self, text: str, add_bos: bool = True) -> List[int]:
         raw = text.encode("utf-8", errors="replace")
@@ -149,8 +143,6 @@ class _Tokenizer:
         if n < 0:
             raise RuntimeError(f"Tokenisation failed (returned {n})")
         return [buf[i] for i in range(n)]
-
-    # -- decode ----------------------------------------------------------------
 
     def token_to_piece_bytes(self, token: int) -> bytes:
         """Raw UTF-8 bytes of a single token, UNDECODED. A multibyte character
@@ -183,14 +175,8 @@ class _Tokenizer:
         return api.llama_vocab_is_eog(self._vocab, token)
 
 
-# ---------------------------------------------------------------------------
-#  Stop strings - supplement llama_vocab_is_eog()
-#
-#  Some models don't register their end-of-turn token in the vocabulary's EOG
-#  list.  Checking the decoded text of each token against this set handles the
-#  remaining cases gracefully.
-# ---------------------------------------------------------------------------
-
+# Stop strings supplement llama_vocab_is_eog(): some models don't register their
+# end-of-turn token in the vocab EOG list, so we also check each token's text.
 _STOP_STRINGS: frozenset = frozenset({
     "<|im_end|>",       # ChatML  (Mistral, Qwen, etc.)
     "<end_of_turn>",    # Gemma 1-3
@@ -202,10 +188,6 @@ _STOP_STRINGS: frozenset = frozenset({
     "<|end|>",          # Phi
 })
 
-
-# ---------------------------------------------------------------------------
-#  Chat-template helpers
-# ---------------------------------------------------------------------------
 
 def _extract_text(content) -> str:
     """Return the plain-text portion of a message content field."""
@@ -273,16 +255,11 @@ def _apply_model_template(model_ptr: int, messages: List[Dict]) -> str:
     return buf.raw[:needed].decode("utf-8", errors="replace")
 
 
-# ---------------------------------------------------------------------------
-#  UTF-8-safe token-bytes -> text stream (R46)
-#
-#  A single multibyte character (accented letters, CJK, emoji, the bullet/arrow
-#  glyphs models love) is frequently emitted as two or more vocabulary tokens,
-#  so its UTF-8 bytes straddle a token boundary. Decoding each token's bytes in
-#  isolation turns the split halves into U+FFFD replacement characters - the
-#  mojibake the user saw mid-word. An incremental decoder buffers an incomplete
-#  trailing sequence until the next token's bytes complete it.
-# ---------------------------------------------------------------------------
+# UTF-8-safe token-bytes -> text stream (R46): a multibyte character is often
+# emitted across two or more tokens, so its bytes straddle a token boundary.
+# Decoding each token in isolation yields U+FFFD at the split (mid-word mojibake);
+# an incremental decoder buffers an incomplete trailing sequence until the next
+# token's bytes complete it.
 
 def _utf8_pieces(token_bytes: Iterator[bytes]) -> Iterator[str]:
     """Decode a stream of per-token byte pieces into text, never splitting a
@@ -300,14 +277,9 @@ def _utf8_pieces(token_bytes: Iterator[bytes]) -> Iterator[str]:
         yield tail
 
 
-# ---------------------------------------------------------------------------
-#  Streaming stop-string filter
-#
-#  Many models signal end-of-turn with a token sequence like <|im_end|> that
-#  is spread across multiple vocabulary tokens (e.g. '<', '|', 'im', '_',
-#  'end', '|>').  A per-token text check can never catch these, so we filter
-#  the accumulated text stream instead.
-# ---------------------------------------------------------------------------
+# Streaming stop-string filter: an end-of-turn marker like <|im_end|> is often
+# spread across multiple tokens ('<','|','im','_','end','|>'), so a per-token
+# check can never catch it; we filter the accumulated text stream instead.
 
 _MAX_STOP_LEN: int = max(len(s) for s in _STOP_STRINGS)
 
@@ -350,20 +322,13 @@ def _filtered_stream(pieces: Iterator[str]) -> Iterator[str]:
         yield buf
 
 
-# ---------------------------------------------------------------------------
-#  Internal-marker scrubbing
-#
-#  Some finetunes emit their training-format control markers as plain text:
-#  harmony-style channel tags (<|channel|>analysis … <|message|>), the
-#  Gemma 4 turn/tool dialect (<|turn>model … <turn|>, <|tool_call> …
-#  <tool_call|>, <|"|> quote tokens), or reserved vocabulary placeholders
-#  (<unused7>).  These are model internals, not content.  Chat output is
-#  ALWAYS scrubbed; debug mode (LOCALM_DEBUG) additionally writes the raw
-#  unscrubbed text to the debug log for analysis.
-#
-#  Thinking-channel markers are not dropped but normalised to canonical
-#  <think> … </think> so every frontend can handle reasoning one way.
-# ---------------------------------------------------------------------------
+# Internal-marker scrubbing: some finetunes emit training-format control markers
+# as plain text - harmony channel tags (<|channel|>analysis ... <|message|>), the
+# Gemma 4 turn/tool dialect (<|turn>model ... <turn|>, <|tool_call> ... <tool_call|>,
+# <|"|> quote tokens), reserved vocab placeholders (<unused7>). These are model
+# internals, not content, so chat output is ALWAYS scrubbed; debug mode
+# (LOCALM_DEBUG) also writes the raw unscrubbed text to the debug log. Thinking-
+# channel markers are not dropped but normalised to canonical <think> ... </think>.
 
 # Marker scrubbing now lives in a shared module so every backend normalises the
 # same way and the engine can apply it once for all of them. It is re-imported
@@ -371,10 +336,6 @@ def _filtered_stream(pieces: Iterator[str]) -> Iterator[str]:
 # second pass at the engine layer is idempotent.
 from localm.inference.textnorm import scrub_stream as _scrub_stream  # noqa: E402
 
-
-# ---------------------------------------------------------------------------
-#  KV cache helpers
-# ---------------------------------------------------------------------------
 
 # Suffix tokens are prefilled in chunks of this size (matches n_batch ceiling)
 _PREFILL_CHUNK = 2048
@@ -388,10 +349,6 @@ def _common_prefix_len(a: List[int], b: List[int]) -> int:
             return i
     return n
 
-
-# ---------------------------------------------------------------------------
-#  Sampler chain builder
-# ---------------------------------------------------------------------------
 
 def _build_sampler(
     vocab: int,
@@ -476,10 +433,6 @@ def _build_sampler(
 
     return chain
 
-
-# ---------------------------------------------------------------------------
-#  LlamaCpp - main public class
-# ---------------------------------------------------------------------------
 
 class LlamaCpp:
     """
@@ -571,11 +524,10 @@ class LlamaCpp:
             mp.progress_callback = ctypes.cast(_load_progress, ctypes.c_void_p)
 
         # Capture native stderr for the load span (non-verbose only) so a NULL
-        # return still carries its cause (OOM / no-backends / bad-quant); without
-        # this the only native diagnostic is discarded to devnull and the error is
-        # blind. Success path stays clean: the captured text is just discarded.
-        # In verbose mode the native stream already reaches the terminal/debug
-        # log, so we leave it (nullcontext) and the failure detail comes via .tail.
+        # return still carries its cause (OOM / no-backends / bad-quant); else the
+        # only native diagnostic is discarded to devnull and the error is blind
+        # (rule 5). Success path stays clean (captured text discarded). Verbose mode
+        # leaves it (nullcontext); the native stream already reaches terminal/debug.
         _load_ctx = _capture_stderr if not verbose else contextlib.nullcontext
         with _load_ctx() as captured:
             self._model_ptr = api.llama_load_model_from_file(model_path, mp)
@@ -594,10 +546,9 @@ class LlamaCpp:
             raise RuntimeError(
                 f"Failed to load model: {model_path}{hint}{suffix}")
 
-        # REC-GPULAYERS-CLAMP: llama.cpp already offloads min(n_gpu_layers, actual)
-        # internally, so an over-large value is harmless - but a silent clamp is
-        # confusing when a user set a SPECIFIC number, so surface a clear
-        # gpu_layers message. 99 is the "offload all" default, so skip it.
+        # REC-GPULAYERS-CLAMP: llama.cpp already offloads min(n_gpu_layers, actual),
+        # so an over-large value is harmless - but silently clamping a SPECIFIC
+        # number is confusing, so surface a message. 99 = "offload all", so skip it.
         if 0 < n_gpu_layers < 99:
             try:
                 actual = api.llama_model_n_layer(self._model_ptr)
@@ -650,10 +601,6 @@ class LlamaCpp:
         """True when an mmproj is loaded and the projector supports vision."""
         return getattr(self, "_mtmd", None) is not None
 
-    # ------------------------------------------------------------------ #
-    #  Lifecycle                                                           #
-    # ------------------------------------------------------------------ #
-
     def close(self) -> None:
         """Release GPU/CPU memory held by this instance.
 
@@ -693,9 +640,7 @@ class LlamaCpp:
         except Exception:
             pass
 
-    # ------------------------------------------------------------------ #
-    #  Tokenisation (public helpers used by tests / introspection)        #
-    # ------------------------------------------------------------------ #
+    # Tokenisation (public helpers used by tests / introspection)
 
     def tokenize(self, text: str, add_bos: bool = True) -> List[int]:
         return self._tokenizer.encode(text, add_bos=add_bos)
@@ -731,10 +676,6 @@ class LlamaCpp:
                 logits_ptr[idx] = 1
                 
         return batch
-
-    # ------------------------------------------------------------------ #
-    #  Core generation loop                                               #
-    # ------------------------------------------------------------------ #
 
     def _generate(
         self,
@@ -910,10 +851,6 @@ class LlamaCpp:
             finally:
                 api.llama_sampler_free(sampler)
 
-    # ------------------------------------------------------------------ #
-    #  Dynamic context window                                              #
-    # ------------------------------------------------------------------ #
-
     @staticmethod
     def _messages_with_markers(messages: List[Dict], marker: str):
         """Return (text_messages, images): a copy of *messages* where each image
@@ -1053,10 +990,6 @@ class LlamaCpp:
             target = min(target, self._n_ctx_max)
         return target
 
-    # ------------------------------------------------------------------ #
-    #  KV cache management                                                 #
-    # ------------------------------------------------------------------ #
-
     def _memory_api_available(self) -> bool:
         """Probe once for the llama_memory_* function family."""
         if self._kv_supported is None:
@@ -1088,15 +1021,13 @@ class LlamaCpp:
             prefix -= 1
 
         # Drop cached tokens past the common prefix. The empty-bookkeeping case
-        # (``not self._cached_tokens``) is NOT redundant with ``prefix <
-        # len(...)``: an image turn (_generate_image never appends its generated
-        # tokens) and a mid-generate decode failure both leave the NATIVE KV
-        # cache populated while self._cached_tokens is []. Without this branch the
-        # guard is 0 < 0 (False), the wipe is skipped, and the new prompt is
-        # decoded onto that stale KV at shifted positions - so the model attends
-        # to the previous turn's context (U-1: "sees earlier text out of order").
-        # When the bookkeeping is empty prefix is 0, so seq_rm(0, 0, -1) drops the
-        # whole residual cache and the suffix decodes cleanly from position 0.
+        # (``not self._cached_tokens``) is NOT redundant with ``prefix < len(...)``:
+        # an image turn (_generate_image never appends its tokens) and a mid-generate
+        # decode failure both leave the NATIVE KV populated while _cached_tokens is [].
+        # Without this branch the guard is 0 < 0 (False), the wipe is skipped, and the
+        # new prompt decodes onto stale KV at shifted positions (U-1: "sees earlier
+        # text out of order"). When empty, prefix is 0, so seq_rm(0, 0, -1) drops the
+        # residual and the suffix decodes cleanly from position 0.
         if prefix < len(self._cached_tokens) or not self._cached_tokens:
             if not api.llama_memory_seq_rm(mem, 0, prefix, -1):
                 # Partial removal unsupported (e.g. SWA cache) - start over
@@ -1178,9 +1109,7 @@ class LlamaCpp:
                 pass
         self._prefill_fresh_context([], self._n_ctx)   # empty fresh context
 
-    # ------------------------------------------------------------------ #
-    #  Public API compatible with llama-cpp-python                        #
-    # ------------------------------------------------------------------ #
+    # Public API compatible with llama-cpp-python
 
     def create_chat_completion(
         self,

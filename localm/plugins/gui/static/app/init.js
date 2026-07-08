@@ -14,18 +14,14 @@ import { addRevealToggle, applyInstallGateUI, dismissInstallGate, isIOSSafari, r
 import { loadClientPlugins, onVoicePick, populateVoicePicker, refreshKbSelect, refreshMemory, refreshPersonas, refreshPluginCommands, refreshVoiceStatus, setupPerfCard } from "./settings-perf.js";
 import { VIEWS, showView } from "./tabs.js";
 
-/* ================================================================ */
-/*  Init                                                             */
-/* ================================================================ */
-
 // CSRF self-heal: a cookie-authed write can 403 if the in-memory CSRF token went
-// stale (e.g. the server restarted and rotated its per-process secret; or a POST
-// fired before the boot token fetch resolved). On such a 403, refresh the token
-// from /api/session and retry the write ONCE. Safe: a 403 is rejected before the
-// handler runs, so nothing is duplicated. Same-origin only, and only when we
-// actually sent an X-CSRF-Token (one of our own writes). Installed before any
-// fetch so it covers boot too. This, plus deriving the token from the session
-// (never a separate cookie), is what makes "missing CSRF token" unreachable.
+// stale (server restart rotated the per-process secret; or a POST fired before
+// the boot token fetch resolved). On such a 403, refresh from /api/session and
+// retry the write ONCE. Safe: a 403 is rejected before the handler runs, so
+// nothing is duplicated. Same-origin only, and only when WE sent an X-CSRF-Token
+// (our own write). Installed before any fetch so it covers boot too. This, plus
+// deriving the token from the session (never a separate cookie), is what makes
+// "missing CSRF token" unreachable.
 const _rawFetch = window.fetch.bind(window);
 window.fetch = async function (input, init) {
   const res = await _rawFetch(input, init);
@@ -49,14 +45,12 @@ window.fetch = async function (input, init) {
   return res;
 };
 
-// AUD-INSTANCEID: whether this browser origin already confirmed the id of the
-// backend it is about to talk to, on some earlier successful boot. Only then
-// are the instance-scoped localStorage reads below (which all run BEFORE this
-// page load's own /v1/config round trip can resolve) trusted for the very
-// FIRST paint - a brand-new pairing (no confirmed id yet, e.g. a fresh install
-// reusing a prior instance's browser origin) must never flash or reuse data
-// left behind by a different backend; refreshCtxLimit()/initServerConversations()
-// correct/repopulate everything for real once their round trip lands.
+// AUD-INSTANCEID (see helpers.js reconcileInstanceId): whether this origin
+// already confirmed the backend's id on an earlier boot. Only then are the
+// instance-scoped localStorage reads below (all run BEFORE this load's /v1/config
+// round trip resolves) trusted for the FIRST paint; a brand-new pairing must not
+// flash foreign data. refreshCtxLimit()/initServerConversations() then correct
+// everything once their round trip lands.
 const _instanceTrusted = instanceCacheTrusted();
 
 $("setup-cwd").value = _instanceTrusted ? (localStorage.getItem("localm.coderCwd") || "") : "";
@@ -101,14 +95,13 @@ export function unlockUI() {
   if (app) app.style.display = "";
 }
 
-// Recovery (AUTH-1b): when the auth state is WEDGED - the user logged in
-// successfully but the page still boots 401 - a stale service-worker shell (or a
-// cached navigation that bypassed the loopback cookie re-seed) is the cause, NOT
-// the key. Do automatically what the user otherwise has to do by hand (clear
-// site data): unregister the SW and drop its caches, then reload once. A
-// sessionStorage guard bounds it to a single attempt so it can never loop. We do
-// NOT touch SameSite (the cookie IS sent on same-origin fetch; the rejected
-// misdiagnosis would only open CSRF).
+// Recovery (AUTH-1b): when auth is WEDGED - logged in successfully but the page
+// still boots 401 - the cause is a stale service-worker shell (or a cached
+// navigation that bypassed the loopback cookie re-seed), NOT the key. Do
+// automatically what the user otherwise does by hand (clear site data):
+// unregister the SW, drop its caches, reload once. A sessionStorage guard bounds
+// it to one attempt so it can never loop. Do NOT touch SameSite (the cookie IS
+// sent same-origin; that misdiagnosis would only open CSRF).
 export async function resetServiceWorkerAndCaches() {
   try {
     if ("serviceWorker" in navigator) {
@@ -128,8 +121,8 @@ window.resetServiceWorkerAndCaches = resetServiceWorkerAndCaches;
 // Manual escape hatch (offered on the reconnect overlay): wipe EVERY client-side
 // artifact that could wedge boot/auth, then reload to a clean state (the key
 // gate). Each step is independently guarded so one failure never blocks the rest.
-// (The HttpOnly localm_session cookie cannot be cleared from JS, but it never
-// wedges the client - a stale one simply yields a 401 -> the key gate.)
+// (The HttpOnly localm_session cookie cannot be cleared from JS, but a stale one
+// never wedges the client - it simply yields a 401 -> the key gate.)
 export async function resetClientState() {
   try {
     document.cookie.split(";").forEach((c) => {
@@ -144,11 +137,10 @@ export async function resetClientState() {
 }
 window.resetClientState = resetClientState;
 
-// Server-unreachable lock (AUTH-1b): the server is DOWN (e.g. it crashed - that
-// is Lane A's territory), NOT an auth failure. Show a distinct "reconnecting"
-// overlay and auto-retry instead of the key gate, so a dead server is not
-// mistaken for a bad key and re-entered in a loop. When the server answers
-// again, reload for a clean boot (which then handles 200 vs 401 freshly).
+// Server-unreachable lock (AUTH-1b): the server is DOWN, NOT an auth failure.
+// Show a distinct "reconnecting" overlay and auto-retry instead of the key gate,
+// so a dead server is not mistaken for a bad key and re-entered in a loop. When
+// it answers again, reload for a clean boot (which handles 200 vs 401 freshly).
 export let _reconnectTimer = null;
 export function showReconnectOverlay() {
   let ov = $("reconnect-overlay");
@@ -176,11 +168,11 @@ export function hideReconnectOverlay() {
   if (ov) ov.style.display = "none";
 }
 
-// R25: first-load progress. Shown immediately at boot so the cold-start wait (the
-// first /api/models can block for many seconds while the model loads) shows that
-// load is in progress instead of a blank / half-rendered shell. Distinct in copy
-// from the reconnect overlay, which means the server is DOWN. Hidden once the
-// model list resolves (or fails), so it never stacks over the gate or the app.
+// R25: first-load progress. Shown immediately at boot so the cold-start wait
+// (the first /api/models can block many seconds while the model loads) reads as
+// in-progress, not a blank shell. Distinct in copy from the reconnect overlay
+// (server DOWN). Hidden once the model list resolves or fails, so it never stacks
+// over the gate or the app.
 export function showStartupOverlay() {
   let ov = $("startup-overlay");
   if (!ov) {
@@ -202,11 +194,10 @@ export function hideStartupOverlay() {
 window.showStartupOverlay = showStartupOverlay;
 window.hideStartupOverlay = hideStartupOverlay;
 
-// Reachability probe that carries NO auth headers, so it can NEVER fail for a
+// Reachability probe carrying NO auth headers, so it can NEVER fail for a
 // client-side reason (a bad cookie/header that makes authHeaders throw). ANY HTTP
-// response - even 401 - proves the server is reachable; only a thrown fetch (no
-// response at all) means it is genuinely down. This is what makes the
-// "server unreachable" verdict actually mean unreachable, never a client problem.
+// response - even 401 - proves the server is reachable; only a thrown fetch means
+// it is genuinely down. Makes the "server unreachable" verdict actually mean it.
 export async function serverReachable() {
   try {
     await fetch("/api/models", { cache: "no-store" });
@@ -245,9 +236,9 @@ export async function bootAuthProbe() {
     status = r.status;
   } catch (e) {
     // The authed request could not complete. Before declaring the server
-    // unreachable (a dead-end overlay with no recovery), confirm with a header-free
-    // probe: if the server answers at all it is UP and the failure was client-side,
-    // so treat it as "needs auth" (the recoverable key gate), NOT a dead server.
+    // unreachable (a dead-end overlay), confirm with a header-free probe: if the
+    // server answers at all it is UP and the failure was client-side, so treat it
+    // as "needs auth" (the recoverable key gate), NOT a dead server.
     status = (await serverReachable()) ? 401 : 0;
   }
   if (status === 0) { onServerUnreachable(); return false; }
@@ -296,21 +287,14 @@ window.bootAuthProbe = bootAuthProbe;
   const modelsReady = refreshModels().then(() => populateSetupModels());
   // Server persistence depends on knowing the privacy state first.
   const convReady = refreshCtxLimit().then(initServerConversations);
-  // AUD-INSTANCEID: the startup overlay fully covers #app - including the
-  // conversation sidebar (.reconnect-overlay/.startup-overlay is position:fixed,
-  // inset:0, an opaque background, above everything) - so keeping it up until
-  // refreshCtxLimit's instance-id reconciliation has actually RESOLVED (not
-  // merely until refreshModels resolves) closes the remaining flash-of-
-  // stale-content window. A browser that had already confirmed pairing with a
-  // DIFFERENT prior backend (instanceCacheTrusted() true, but for the WRONG id
-  // - exactly a fresh install reusing a previously-paired browser origin/port)
-  // renders that backend's cached conversation list into the DOM synchronously
-  // at boot (the common-case fast path below this IIFE), and the OLD code hid
-  // the overlay as soon as refreshModels alone resolved - a race against
-  // refreshCtxLimit, not a guarantee, that could reveal the foreign list before
-  // the mismatch was detected and the DOM corrected. Waiting on BOTH keeps any
-  // stale content hidden behind the overlay in every case, not just when timing
-  // happens to favour it.
+  // AUD-INSTANCEID (see helpers.js reconcileInstanceId): the startup overlay is
+  // position:fixed/inset:0/opaque, fully covering #app and the conversation
+  // sidebar. A browser confirmed for a DIFFERENT prior backend (instanceCacheTrusted
+  // true but WRONG id) paints that backend's cached conv list synchronously at boot
+  // (fast path below this IIFE). So wait on BOTH modelsReady AND convReady (whose
+  // refreshCtxLimit runs the instance-id reconciliation) before hiding the overlay,
+  // not refreshModels alone - otherwise the foreign list can flash before the
+  // mismatch is detected and the DOM corrected.
   Promise.allSettled([modelsReady, convReady]).finally(hideStartupOverlay);
 })();
 // Reveal toggles on the API-key inputs (AUTH-2): the in-page gate and the
@@ -331,12 +315,11 @@ refreshPluginCommands();
 // toggled in another terminal/tab while sitting on the chat view is reflected
 // without a reload (the view-switch path in pages.js covers navigation).
 window.addEventListener("focus", refreshPluginCommands);
-// R50: when a plugin is enabled/disabled in ANOTHER tab, that tab bumps a shared
-// localStorage rev; the storage event fires in every OTHER same-origin tab, so we
-// re-sync the nav/commands promptly. A tab parked on the now-disabled plugin's
-// (static) page is then redirected to chat by reconcileActiveView instead of
-// erroring on the plugin's unmounted routes. visibilitychange covers the case
-// where the tab becomes visible without a focus event firing.
+// R50: a plugin toggled in ANOTHER tab bumps a shared localStorage rev; the
+// storage event fires in every OTHER same-origin tab, so we re-sync nav/commands
+// promptly. A tab parked on the now-disabled plugin's page is redirected to chat
+// by reconcileActiveView instead of erroring on its unmounted routes.
+// visibilitychange covers a tab becoming visible without a focus event.
 window.addEventListener("storage", (e) => {
   if (e.key === "localm.pluginsRev") refreshPluginCommands();
 });
@@ -349,13 +332,12 @@ setupPerfCard();  // Settings: GPU-layers/context sliders + live VRAM estimate
 // The resolved ctx ceiling only exists once a model has loaded - keep the
 // compaction threshold in sync as models load or switch.
 setInterval(refreshCtxLimit, 30000);
-// AUD-INSTANCEID: never paint the raw, unverified localStorage cache before a
-// same-instance confirmation exists for this origin (see _instanceTrusted
-// above) - a brand-new browser<->backend pairing starts from an empty list;
-// the async refreshCtxLimit()/initServerConversations() chain below populates
-// it for real (from the server, or by re-confirming the cache) once its round
-// trip lands, so the very first frame a user can see never shows another
-// install's conversations.
+// AUD-INSTANCEID (see helpers.js reconcileInstanceId): never paint the raw,
+// unverified localStorage cache before a same-instance confirmation exists for
+// this origin (see _instanceTrusted above). A brand-new pairing starts from an
+// empty list; the async refreshCtxLimit()/initServerConversations() chain below
+// populates it for real once its round trip lands, so the first visible frame
+// never shows another install's conversations.
 if (!_instanceTrusted) {
   chat.conversations = [];
   chat.activeId = null;
@@ -400,9 +382,9 @@ reattachSessions();
     }, 0);
   } else {
     // Restore the last active page (set in non-privacy mode only). Gated on a
-    // confirmed same-instance cache (AUD-INSTANCEID): an unverified pairing
-    // ignores the stored view and stays on the chat default rather than
-    // trusting a value that may belong to a different backend.
+    // confirmed same-instance cache (AUD-INSTANCEID, see helpers.js): an
+    // unverified pairing ignores the stored view and stays on the chat default
+    // rather than trust a value that may belong to a different backend.
     const savedView = _instanceTrusted ? localStorage.getItem("localm.activeView") : null;
     if (savedView && savedView !== "chat") {
       setTimeout(() => { if (!window.__localmLocked) showView(savedView); }, 0);

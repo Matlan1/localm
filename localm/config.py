@@ -109,16 +109,13 @@ DEFAULT_CONFIG: dict = {
     "n_ctx": 4096,         # initial context window (grows on demand)
     "n_ctx_max": 16384,    # ceiling the window may grow to (0 = unlimited)
     "n_ctx_grow": 4096,    # growth step - window expands in multiples of this
-    # Size the context ceiling from free VRAM at model load (clamped to
-    # 4k-64k). The window still starts at n_ctx and grows on demand; set
-    # to false to use the fixed n_ctx_max instead.
+    # Size ctx ceiling from free VRAM at load (clamped 4k-64k); window still
+    # starts at n_ctx and grows on demand. False = use fixed n_ctx_max.
     "ctx_auto": True,
     "n_gpu_layers": 99,    # 99 = offload everything to GPU
-    # Which GPU device to load models onto (and read VRAM from) on a
-    # multi-GPU system. None = no explicit selection: device 0, today's
-    # behaviour. An index that no longer matches a detected device falls back
-    # to device 0 with a logged warning rather than silently using the wrong
-    # GPU or handing llama.cpp's native loader an out-of-range index (see
+    # GPU device to load onto / read VRAM from on a multi-GPU box. None = no
+    # explicit selection (device 0). A stale index falls back to device 0 with
+    # a logged warning, not a wrong/out-of-range GPU (see
     # discover.resolve_main_gpu_index).
     "main_gpu_index": None,
     # Default system prompt for chat. The GUI's per-chat System prompt field
@@ -128,29 +125,27 @@ DEFAULT_CONFIG: dict = {
     "top_p": 0.95,
     "top_k": 40,
     "repeat_penalty": 1.1,
-    # Generation budget per reply. Thinking models (qwen3, deepseek-r1, …)
-    # spend most of it on reasoning, so 1024 silently cut answers mid-thought;
-    # the cap exists only as a runaway guard, not a cost control.
+    # Generation budget per reply. Thinking models (qwen3, deepseek-r1) spend
+    # most of it reasoning, so 1024 cut answers mid-thought; this is a runaway
+    # guard, not a cost control.
     "max_tokens": 4096,
     "confirm_remove": True,   # ask before localm rm deletes files
-    # Sidebar wordmark treatment, shared by the web GUI and the desktop launcher
-    # (the web logo picker writes it here; the launcher reads it). One of:
-    # local-m (LocaL white + M blue, the default), loca-lm (Loca white + LM blue),
-    # localm (lowercase, m blue). The console command, app icon, and desktop
-    # shortcut are fixed and unaffected by this.
+    # Sidebar wordmark, shared by web GUI and desktop launcher (picker writes,
+    # launcher reads). One of: local-m (LocaL white + M blue, default),
+    # loca-lm (Loca white + LM blue), localm (lowercase, m blue). Console
+    # command, app icon, and shortcut are fixed regardless.
     "logo_style": "local-m",
     "import_max_depth": 3,    # `localm add <dir>` recurses up to this many levels
     "port": 8642,             # default inference server port (auto-bumps if busy)
     "cors_origins": None,     # None = localhost only; list of origins; or "*"
-    # Require a configured API key on protected endpoints. When true the server
-    # refuses requests until a key is set (see localm/auth.py); env override:
-    # LOCALM_REQUIRE_AUTH. Default false = open in local/dev mode on loopback.
+    # Require a configured API key on protected endpoints: true refuses requests
+    # until a key is set (see localm/auth.py); env override LOCALM_REQUIRE_AUTH.
+    # False (default) = open in local/dev mode on loopback.
     "require_auth": False,
-    # Quick-select scope bundles for the "Keys & devices" manager (Settings).
-    # Each is {name, scopes}; the GUI offers them as one-tap presets when minting
-    # a key. Re-seeded only when this key is ABSENT (an emptied list stays empty).
-    # coder:full / admin in a preset only take effect when an OWNER mints the key
-    # (privileged scopes stay owner-only regardless of the preset).
+    # Quick-select scope bundles for the "Keys & devices" manager (Settings),
+    # each {name, scopes}, offered as one-tap presets when minting a key.
+    # Re-seeded only when ABSENT (an emptied list stays empty). Privileged
+    # scopes (coder:full / admin) apply only when an OWNER mints the key.
     "key_presets": [
         {"name": "Minimal", "scopes": ["chat"]},
         {"name": "Companion", "scopes": ["chat", "image", "music", "video",
@@ -161,126 +156,103 @@ DEFAULT_CONFIG: dict = {
         {"name": "Admin", "scopes": ["admin"]},
     ],
     # Command that starts your ComfyUI install (e.g. a launch .bat). When set,
-    # the image/music/video generators start ComfyUI automatically if it is
-    # not running - from the GUI, the CLI, or the coder's generate_image tool.
+    # image/music/video generators auto-start ComfyUI if not running (GUI, CLI,
+    # or the coder's generate_image tool).
     "comfy_launch_cmd": None,
-    # Working directory for comfy_launch_cmd (launchers that assume their own
-    # folder, e.g. plain "python main.py" inside a ComfyUI checkout). When left
-    # blank and comfy_launch_cmd points at a launcher file, localm runs it from
-    # that file's own folder - the ComfyUI / ZLUDA .bat convention.
+    # Working directory for comfy_launch_cmd (launchers assuming their own folder,
+    # e.g. "python main.py" in a ComfyUI checkout). Blank + a launcher-file cmd =
+    # run from that file's folder (the ComfyUI / ZLUDA .bat convention).
     "comfy_workdir": None,
-    # How long to wait for ComfyUI to answer after launching it, in seconds. A
-    # ZLUDA / ROCm cold start compiles GPU kernels on first run and can take
-    # several minutes, so the default is generous.
+    # Seconds to wait for ComfyUI to answer after launch. A ZLUDA / ROCm cold
+    # start compiles GPU kernels and can take minutes, so the default is generous.
     "comfy_launch_timeout": 300,
     # ComfyUI's own output directory (e.g. StabilityMatrix's Images folder).
-    # Only needed if you enable comfy_delete_outputs: localm uses it to find and
-    # delete ComfyUI's duplicate copy. Left blank, localm derives it from the
-    # ComfyUI folder when it needs it.
+    # Only needed with comfy_delete_outputs, to find and delete ComfyUI's
+    # duplicate copy. Blank = derived from the ComfyUI folder on demand.
     "comfy_output_dir": None,
-    # Whether to delete ComfyUI's OWN copy (and /history entry) of a generation
-    # after localm has saved its own. Default False: KEEP them, because a user
-    # may run ComfyUI for its own gallery and want the files. Privacy mode forces
-    # deletion regardless (no traces). Per-plugin config can override this.
+    # Delete ComfyUI's OWN copy (and /history entry) after localm saves its own.
+    # False (default) KEEPs them (a user may want ComfyUI's gallery). Privacy
+    # mode forces deletion (no traces). Per-plugin config can override.
     "comfy_delete_outputs": False,
     # ComfyUI base URL localm talks to. None/blank uses the FLUX_API_URL env
     # override when set, else http://127.0.0.1:8188 (the ComfyUI default).
     "comfy_api_url": None,
     # Rewrite a slow `dequant_dtype: "float32"` in a Flux GGUF UNet loader to the
-    # fast default (fp16/bf16) when the workflow is submitted. float32 dequant
-    # doubles the unpacked model size and forces CPU offload on a VRAM-limited
-    # card - the ~36 s/it vs ~6-7 s/it gap. True (default) auto-corrects it; set
-    # False to submit your workflow's dequant choice verbatim.
+    # fast default (fp16/bf16) on submit: float32 doubles unpacked model size and
+    # forces CPU offload on a VRAM-limited card (~36 s/it vs ~6-7 s/it). True
+    # (default) auto-corrects; False submits your dequant choice verbatim.
     "comfy_fast_dequant": True,
     # Suppress ComfyUI opening its own web page when localm auto-launches it.
-    # Off by default (keep the current behavior: ComfyUI opens its tab). When
-    # True, localm appends ComfyUI's --disable-auto-launch to the launch command
-    # so it starts headless (localm has its own GUI, so the ComfyUI tab is just
-    # noise for most localm users). The stock run_*.bat / comfyui.* launchers and
-    # a bare "python main.py" forward the flag through to main.py; a custom
-    # launcher that drops extra args simply ignores it (no error), so this is
-    # non-breaking. Applies to the image, music, and video plugins (they share
-    # one ensure_comfy()).
+    # False (default) keeps ComfyUI's tab. True appends --disable-auto-launch so
+    # it starts headless; stock run_*.bat / comfyui.* / bare "python main.py"
+    # forward the flag, a launcher that drops extra args just ignores it
+    # (non-breaking). Applies to image/music/video (shared ensure_comfy()).
     "comfy_disable_auto_launch": False,
     # MEDIA-1: reactive, opt-in in-memory shim for the upstream ComfyUI __func__
-    # regression (Comfy-Org/ComfyUI #12116). Off by default: localm assumes nothing
-    # is broken and touches nothing. When on, a ComfyUI that localm SPAWNS gets a
-    # localm-owned shim dir on its child PYTHONPATH so the interpreter patches the
-    # regression in memory; localm never writes into the user's ComfyUI install and
-    # never shims a ComfyUI it did not start. Set by the reactive offer or by hand
-    # (`localm config comfy_func_shim on`); the shim self-expires when ComfyUI is fixed.
+    # regression (Comfy-Org/ComfyUI #12116). Off by default (touches nothing).
+    # When on, a ComfyUI localm SPAWNS gets a localm-owned shim dir on its child
+    # PYTHONPATH to patch the regression in memory; localm never writes into the
+    # user's install nor shims a ComfyUI it did not start. Set by the reactive
+    # offer or `localm config comfy_func_shim on`; self-expires once Comfy is fixed.
     "comfy_func_shim": False,
     # localm-managed ComfyUI (opt-in, off by default). When ON *and* a managed
-    # instance is actually installed under <LOCALM_HOME>/comfyui *and*
-    # comfy_target is "own", localm's image/music/video generation targets its
-    # OWN managed ComfyUI instead of the user's. Inert until an instance exists;
-    # the user's ComfyUI is never modified either way. Provisioning is not built
-    # yet (stages S2/S3); this flag only routes. See localm/media/managed_comfy.py.
+    # instance is installed under <LOCALM_HOME>/comfyui *and* comfy_target is
+    # "own", image/music/video target the OWN managed ComfyUI, not the user's.
+    # Inert until an instance exists; user's ComfyUI never modified. This flag
+    # only routes (provisioning is stages S2/S3). See localm/media/managed_comfy.py.
     "managed_comfy_enabled": False,
-    # Which ComfyUI localm targets when a managed instance exists (coexistence
-    # toggle). "own" (default) = prefer localm's managed instance when installed;
-    # "user" = always use the user's ComfyUI (comfy_workdir / comfy_api_url), even
-    # if a managed instance is installed. With no managed instance, both behave
-    # identically (the user's ComfyUI).
+    # Which ComfyUI localm targets when a managed instance exists (coexistence).
+    # "own" (default) = prefer the managed instance when installed; "user" =
+    # always use the user's ComfyUI (comfy_workdir / comfy_api_url). With no
+    # managed instance, both behave identically.
     "comfy_target": "own",
     # Session persistence mode for ALL surfaces (chat, server, GUI, coder):
     #   privacy = no traces written automatically (default)
     #   log     = JSONL audit trail in ~/.localm/sessions/
     #   full    = log + markdown transcript
-    # chat_mode / coder_mode override the global mode per surface (None =
-    # inherit). CLI --mode flags override everything.
+    # chat_mode / coder_mode override per surface (None = inherit); CLI --mode
+    # overrides everything.
     "mode": "privacy",
     "chat_mode": None,
     "coder_mode": None,
-    # Long-term chat memory: recall the user's durable facts/preferences and
-    # inject them (server-side) into the system prompt each turn. Recall is free
-    # (BM25 over a small structured store). Set False to stop injecting remembered
-    # facts (existing memories are kept, just not used).
+    # Long-term chat memory: recall durable facts/preferences and inject them
+    # (server-side) into the system prompt each turn. Recall is free (BM25 over a
+    # small store). False stops injecting (existing memories kept, just unused).
     "memory_enabled": True,
-    # Grow the memory automatically: after a chat turn (in log/full mode, never
-    # privacy), if enough time has passed since the last run, distil durable
-    # facts from the recent conversation into the store IN THE BACKGROUND, so
-    # memory accumulates with no manual step. Debounced to at most once per
-    # MEMORY_AUTO_MIN_INTERVAL (see the chat plugin). Still skipped entirely in
-    # privacy mode (no new traces). Set False to require the manual "Synthesize
-    # now" button / the jobs "memory" task / POST /api/memory/consolidate.
+    # Grow memory automatically: after a chat turn (log/full mode, never privacy)
+    # distil durable facts into the store in the background, debounced to once per
+    # MEMORY_AUTO_MIN_INTERVAL (see the chat plugin). Skipped in privacy (no new
+    # traces). False requires the manual "Synthesize now" button / jobs "memory"
+    # task / POST /api/memory/consolidate.
     "memory_auto_consolidate": True,
-    # Privacy mode normally disables memory ENTIRELY (no recall + no writes). Turn
-    # this on to allow READING existing memories into the prompt while in privacy
-    # mode (writing new memories stays off - privacy never creates a trace). Off by
-    # default so privacy stays fully inert unless the user opts in. Per-surface:
+    # Privacy mode normally disables memory ENTIRELY (no recall + no writes). On =
+    # allow READING existing memories into the prompt in privacy mode (writing
+    # stays off - privacy never creates a trace). Off by default. Per-surface:
     "memory_recall_in_privacy": False,
     "memory_recall_in_privacy_chat": True,      # applies only when the master is on
     "memory_recall_in_privacy_coder": True,     # applies only when the master is on
     # On-device embedding model for semantic search (RAG hybrid retrieval + agent
-    # memory). A small dedicated GGUF (loaded separately from the chat model) so
-    # embeddings work on the default runtime. Value is a known key
-    # (bge-small-en-v1.5, nomic-embed-text-v1.5), a registered model name, or a
-    # path to a GGUF. A known model is fetched into <home>/models/embeddings on
-    # first use (auto only under net_mode=allow; else run 'localm setup-embeddings').
-    # Until an embedding model is present, memory/RAG fall back to lexical BM25.
+    # memory): a small dedicated GGUF, loaded separately from the chat model.
+    # Value = a known key (bge-small-en-v1.5, nomic-embed-text-v1.5), a registered
+    # model name, or a GGUF path. A known model is fetched into
+    # <home>/models/embeddings on first use (auto only under net_mode=allow, else
+    # run 'localm setup-embeddings'). Until present, memory/RAG fall back to BM25.
     "embedding_model": "bge-small-en-v1.5",
-    # Which host folders the document-indexing (RAG) API may READ. A confinement
-    # over a filesystem-read boundary, so all three keys are OWNER-ONLY: a
-    # non-owner config:write key can neither see nor set them (enforced at PATCH
-    # /v1/config; see settings_schema.admin_only). The localm data dir and
-    # credential folders (.ssh, .aws, ...) stay denied in EVERY mode - a hard floor
-    # no toggle turns off (rag/store.py confine_index_path). Read by
-    # rag/store.py indexing_policy().
-    #   whitelist (default) = index only your home folder, the working dir, and
-    #                         the rag_allowed_roots below.
-    #   blacklist           = index anywhere EXCEPT the rag_denied_roots below.
+    # Which host folders the document-indexing (RAG) API may READ. All three keys
+    # are OWNER-ONLY: a non-owner config:write key can neither see nor set them
+    # (enforced at PATCH /v1/config; see settings_schema.admin_only). The localm
+    # data dir and credential folders (.ssh, .aws, ...) stay denied in EVERY mode
+    # (hard floor; rag/store.py confine_index_path). Read by indexing_policy().
+    #   whitelist (default) = only home, the working dir, and rag_allowed_roots.
+    #   blacklist           = anywhere EXCEPT rag_denied_roots.
     "rag_indexing_mode": "whitelist",
     "rag_allowed_roots": [],   # extra folders allowed in whitelist mode
     "rag_denied_roots": [],    # folders refused in blacklist mode
-    # An indexed document's format label (json/yaml/python/...) is derived
-    # heuristic-FIRST and for free: a known extension is authoritative, else a
-    # structural sniff of the text (rag/extract.classify_format). This toggle only
-    # governs the LLM TIE-BREAK: when both are inconclusive (an unknown extension
-    # with unclear structure) AND a chat model is loaded, prompt-guess the format
-    # from a snippet. Off -> such files are simply labeled "text"; a guess is never
-    # fired during an embedding-only index. Guesses are cached per extension for
-    # the process lifetime. The label is stored in each chunk's metadata.
+    # A document's format label (json/yaml/python/...) is derived heuristic-FIRST:
+    # known extension wins, else a structural sniff (rag/extract.classify_format).
+    # This toggle only governs the LLM TIE-BREAK: when both are inconclusive AND a
+    # chat model is loaded, prompt-guess from a snippet (cached per extension for
+    # the process). Off -> labeled "text"; never fired during embedding-only index.
     "rag_classify_unknown_files": True,
     # Seconds a GUI coder approval card may sit unanswered before it is
     # auto-rejected and the agent moves on.
@@ -289,65 +261,55 @@ DEFAULT_CONFIG: dict = {
     # disables the deadline (scan to completion however long it takes).
     "coder_index_timeout": 20,
     # Episodic memory: the coder recalls lessons from past sessions on a project
-    # (what worked / what failed) and, at session close, distils the finished
-    # session into a new lesson. Recall is free (BM25); the reflection is one
-    # extra model call per session that changed files. Writes are skipped in
-    # privacy mode and for restricted (shareable-key) sessions, and stored under
-    # the localm home dir, never the project tree. Set False to disable both halves.
+    # (BM25, free) and at session close distils the session into a new lesson (one
+    # model call per session that changed files). Writes skipped in privacy mode
+    # and for restricted (shareable-key) sessions, stored under the home dir not
+    # the project tree. False disables both halves.
     "coder_episodic_memory": True,
     # Provenance tagging: re-frame coder tool results from untrusted (network /
-    # MCP) tools as data-not-instructions and harden their boundary, so a fetched
-    # page or external server cannot inject instructions into the model loop
-    # (indirect prompt injection). Defense in depth - it blocks nothing, only
-    # labels. Leave ON unless you have a specific reason to drop the framing.
+    # MCP) tools as data-not-instructions, so a fetched page or external server
+    # cannot inject into the model loop (indirect prompt injection). Defense in
+    # depth (blocks nothing, only labels). Leave ON absent a specific reason.
     "coder_untrusted_provenance": True,
-    # Pre-done self-review: before the coder declares a task done, a reviewer model
-    # reads the diff and feeds blocking issues back for one more fix pass. Off by
-    # default (it adds a model round-trip per task that changed files).
+    # Pre-done self-review: before the coder declares done, a reviewer model reads
+    # the diff and feeds blocking issues back for one more fix pass. Off by default
+    # (adds a model round-trip per task that changed files).
     "coder_review": False,
-    # Reviewer target: "" = the agent's own model (local, private); "local" = a
-    # different small model loaded ON CPU in the coder's own process (heterogeneous
-    # AND private - set coder_reviewer_model to the model name/path; adds CPU
-    # load+inference latency); "openai"/"anthropic" = a cloud model; an http(s) URL =
-    # a 2nd OpenAI-compatible endpoint (e.g. a second local server). A NETWORK
-    # reviewer (cloud / non-loopback URL) is skipped in privacy mode and for shared
-    # keys (it would send the diff off-machine) - those use the local model. The
-    # "local" CPU reviewer stays on-machine, so it is allowed in privacy mode.
+    # Reviewer target: "" = the agent's own model (local); "local" = a different
+    # small model on CPU in the coder's process (set coder_reviewer_model; adds CPU
+    # latency); "openai"/"anthropic" = cloud; an http(s) URL = a 2nd
+    # OpenAI-compatible endpoint. A NETWORK reviewer (cloud / non-loopback URL) is
+    # skipped in privacy mode and for shared keys (would send the diff off-machine)
+    # and falls back to the local model; the "local" CPU reviewer stays on-machine.
     "coder_reviewer": "",
     # Model name (or path) for a heterogeneous reviewer ("local"/cloud/URL); blank
     # uses a sensible provider default or the agent's own model name.
     "coder_reviewer_model": "",
-    # Constrain coder tool calls with a LAZY GBNF grammar: thinking and prose
-    # flow unconstrained, but once the model starts a <tool_call> the call is
-    # forced to be structurally valid JSON (no more malformed tool calls to
-    # repair). ON by default for grammar-capable local backends since
-    # 2026-07-02 (REC-CODER-GRAMMAR; the old "runtime sampler faults" blocker
-    # was our own double-accept bug). External API backends and grammar-less
-    # builds are unaffected (supports_grammar gate + runtime soft-degrade).
-    # NOTE: a config.json written before the flip carries the old dumped False
-    # and keeps it (saved values win over this default) - flip it in Settings.
+    # Constrain coder tool calls with a LAZY GBNF grammar: thinking/prose flow
+    # free, but a started <tool_call> is forced to valid JSON (no malformed calls
+    # to repair). ON by default for grammar-capable local backends since 2026-07-02
+    # (REC-CODER-GRAMMAR; the old "runtime sampler faults" blocker was our own
+    # double-accept bug). External API / grammar-less builds unaffected
+    # (supports_grammar gate + runtime soft-degrade). NOTE: a config.json written
+    # before the flip keeps the old dumped False (saved wins) - flip it in Settings.
     "coder_tool_grammar": True,
-    # After an image is generated, ask ComfyUI to release its VRAM and reload
-    # the chat model so the next reply is instant. Turn off when generating
-    # many images in a row - the chat model then reloads lazily on the next
-    # chat message instead.
+    # After an image is generated, ask ComfyUI to release VRAM and reload the chat
+    # model so the next reply is instant. Off = the chat model reloads lazily on
+    # the next message instead (better for many images in a row).
     "reload_llm_after_imagine": True,
-    # VRAM-aware media model swap. Before an image/music/video generation the chat
-    # LLM is unloaded so the media model gets the GPU; on a big card both fit, so
-    # the swap is pure latency.
-    #   auto   = keep chat loaded when the media model demonstrably fits alongside
-    #            it (free VRAM >= estimate + headroom), else swap (default)
-    #   always = always unload the chat model (the historical behaviour)
-    #   never  = never unload; keep chat hot (media may run out of VRAM on a small
-    #            card - an explicit choice for a big workstation card)
-    # The legacy reload_llm_after_imagine flag is a SEPARATE axis: it controls
-    # eager-vs-lazy reload AFTER a gen, not this unload-before decision.
+    # VRAM-aware media model swap: before an image/music/video gen the chat LLM is
+    # unloaded so the media model gets the GPU (on a big card both fit).
+    #   auto   = keep chat loaded when the media model fits alongside it (free VRAM
+    #            >= estimate + headroom), else swap (default)
+    #   always = always unload the chat model (historical behaviour)
+    #   never  = never unload; keep chat hot (media may OOM on a small card)
+    # reload_llm_after_imagine is a SEPARATE axis (eager-vs-lazy reload AFTER a
+    # gen, not this unload-before decision).
     "model_swap_policy": "auto",
-    # Free the loaded model from VRAM after this many seconds with no inference
-    # request, so a localm server left running stops holding the GPU. The next
-    # chat/completion reloads it lazily (a one-time load latency). 0 = disabled
-    # (default): the model stays resident until an explicit unload or a model
-    # swap. Measured from the last request, like Ollama's keep_alive.
+    # Free the loaded model from VRAM after this many idle seconds, so a running
+    # server stops holding the GPU; the next request reloads it lazily. 0 =
+    # disabled (default): resident until an explicit unload or swap. Measured from
+    # the last request, like Ollama's keep_alive.
     "idle_unload_seconds": 0,
     # Network policy for model-initiated requests (coder fetch_url/web_search,
     # chat web access). See localm/netpolicy.py and docs/network.md.
@@ -359,69 +321,60 @@ DEFAULT_CONFIG: dict = {
     "net_deny": [],             # domains always refused (wins over allow)
     "net_allow_private": False, # True = permit loopback/private targets (SSRF guard off)
     "net_search_url": None,     # SearXNG base URL; None = DuckDuckGo (no key)
-    # Reach localm by NAME, not just IP, when bound to the network (see
-    # localm/netname.py and docs/naming.md). On a network bind, mDNS/Bonjour
-    # advertises "<mdns_name>.local" so a phone or laptop opens
-    # https://localm.local:PORT with no IP to type; the name is also folded into
-    # the TLS certificate, and the Tailscale MagicDNS name is detected +
-    # certified automatically. Loopback binds never advertise.
+    # Reach localm by NAME, not just IP, on a network bind (see localm/netname.py
+    # and docs/naming.md). mDNS/Bonjour advertises "<mdns_name>.local" so a phone
+    # opens https://localm.local:PORT with no IP; the name is folded into the TLS
+    # cert and the Tailscale MagicDNS name is detected + certified automatically.
+    # Loopback binds never advertise.
     "mdns_name": "localm",      # the .local name; sanitized to a DNS label on use
     "mdns_enabled": True,       # advertise the name over mDNS on network binds
     # Speech-to-text (GUI mic button; needs the [voice] extra).
     # Model sizes: tiny / base / small / medium - bigger = better + slower.
     "voice_stt_model": "base",
-    "voice_stt_language": None,  # None = auto-detect; or "en", "de", …
+    "voice_stt_language": None,  # None = auto-detect; or "en", "de", ...
     # When a registered model's file has gone missing, False (default) flags the
     # entry as "missing" (kept, shown in the list); True deletes the entry.
     # Only files under the models folder are ever auto-deleted.
     "autoprune_missing_models": False,
-    # When the user invokes a command that belongs to a known first-party plugin
-    # that is not installed/enabled (e.g. /generate-image with the image plugin
-    # off), suggest installing it ("that needs the image plugin - install it?")
-    # instead of "unknown command". False silences the hint; a truly unknown
-    # command always errors regardless.
+    # When a command belongs to a known first-party plugin that is not
+    # installed/enabled (e.g. /generate-image with image off), suggest installing
+    # it instead of "unknown command". False silences the hint; a truly unknown
+    # command always errors.
     "suggest_plugins": True,
-    # When a plugin that declares pip extras (requires_extras) is installed or
-    # enabled by the local operator, auto-install those extras on the HOST. A
-    # remote client never triggers a server-side pip regardless of this flag;
-    # only the CLI or a loopback GUI request does. `localm plugin setup` asks and
-    # records the choice here. Default True. Read via .get(..., True) since a
-    # user config saved before this key existed will not contain it.
+    # When a plugin declaring pip extras (requires_extras) is installed/enabled by
+    # the local operator, auto-install those extras on the HOST. A remote client
+    # never triggers a server-side pip (only CLI or a loopback GUI request does).
+    # `localm plugin setup` records the choice here. Default True (read via
+    # .get(..., True) for configs saved before this key existed).
     "auto_install_plugin_deps": True,
     # Bug reports, the read-only Issues view, and the self-updater all talk to ONE
     # small Cloudflare Worker (the localm proxy; see tools/bugreport-proxy/) that
-    # holds the GitHub tokens SERVER-SIDE. These ship as DEFAULTS so a fresh download
-    # works with ZERO setup: the "Report a bug" button, the Issues view, and the
-    # update check are live out of the box (update_url/token below fall back to
-    # these). No GitHub token is in the app - only the public Worker URL and a
-    # low-value client token. That token is intentionally PUBLIC (like a Sentry DSN),
-    # NOT a secret: it just gates the endpoint against drive-by spam (Cloudflare rate
-    # limiting is the real control), can ONLY file an issue through the proxy (never
-    # read the repo), and is rotatable at the Worker. Set either to "" (or null) in
-    # config.json to opt a build out of the hosted channel (a report then just saves
-    # to a file / opens email).
+    # holds the GitHub tokens SERVER-SIDE. Shipped as DEFAULTS so a fresh download
+    # works with ZERO setup (update_url/token below fall back to these). No GitHub
+    # token is in the app - only the public Worker URL and a low-value client
+    # token that is intentionally PUBLIC (like a Sentry DSN), NOT a secret: it only
+    # gates against drive-by spam (Cloudflare rate limiting is the real control),
+    # can ONLY file an issue (never read the repo), and is rotatable at the Worker.
+    # Set either to "" (or null) to opt a build out of the hosted channel.
     "bugreport_upload_url": "https://localm-bugreport-proxy.localm.workers.dev",
     "bugreport_upload_token": "3x_HA2UXbwNDnNfdDmpFBvvfcl2S-I-9t7XLQRAShM4",
     # Update channel + read-only issues tracker. One Worker hosts report + issues +
-    # update, so these default to the bug-report proxy above; set update_url/token
-    # ONLY to point updates at a different Worker. The updater needs a Contents:read
-    # token on the proxy (separate from the Issues token) and the shared secret.
-    # None = no update channel (the "Update available" banner + `localm update` are
-    # simply hidden). See tools/bugreport-proxy/ and dev-notes/self-updater-design.
+    # update, so these default to the proxy above; set update_url/token ONLY to
+    # point updates at a different Worker (needs a Contents:read token, separate
+    # from Issues, plus the shared secret). None = no update channel (banner +
+    # `localm update` hidden). See tools/bugreport-proxy/ and dev-notes/self-updater-design.
     "update_url": None,
     "update_token": None,
     # Names of enabled engine plugins (WordPress-style). Managed by the plugin
-    # engine (localm plugin enable/disable and the GUI Plugins page) via
-    # update_config, NOT the settings form. Declared here so it has a documented
-    # home and a default - without it the settings-save endpoint rejected it as
-    # an unknown key. A plugin is active only when installed (on disk) AND in
-    # this list; see docs/plugins.md.
+    # engine (plugin enable/disable, GUI Plugins page) via update_config, NOT the
+    # settings form. Declared here for a documented home + default (else the
+    # settings-save endpoint rejects it as unknown). A plugin is active only when
+    # installed on disk AND in this list; see docs/plugins.md.
     "plugins_enabled": [],
     # Per-plugin config namespace (e.g. plugins["image"]["comfy"]["output_dir"]).
     # Written by the plugin engine and media backends via update_config, NOT the
-    # flat settings form. Declared here so the settings-save endpoint does not
-    # reject it as an unknown key, and so the per-plugin media-containment knob
-    # is reachable through a full-config round-trip (mirrors plugins_enabled).
+    # flat settings form. Declared here so settings-save accepts it and the
+    # per-plugin media-containment knob survives a full-config round-trip.
     "plugins": {},
 }
 

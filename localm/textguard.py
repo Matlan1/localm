@@ -42,21 +42,18 @@ _FRAME_RE = re.compile(
 # Chat-template CONTROL TOKENS for the model families localm serves. Both backends
 # tokenise the templated prompt with special-token parsing ON (GGUF llama_tokenize
 # parse_special=True; HF tokenizer without split_special_tokens), so a literal
-# control token sitting in an untrusted body is parsed as a REAL role delimiter and
-# can forge a system/assistant turn. We defang the leading delimiter so the byte
-# sequence no longer matches the tokenizer's special-token trie, while keeping the
-# text legible. This is a best-effort, family-aware text defense (the deeper fix is
-# tokenising untrusted spans with special parsing off, a backend-level change); it
-# covers ChatML, Llama-2/3, Mistral, Gemma, Qwen, Phi, and GPT-style markers.
-# The pipe delimiter is matched as a CLASS of both the ASCII bar (U+007C) and the
-# FULLWIDTH bar (U+FF5C), which DeepSeek-R1 uses in its control tokens (the
-# fullwidth-pipe form of <|Assistant|>). Requiring a pipe immediately after "<" and
-# immediately before ">" precisely targets the <|...|> special-token family
-# (ChatML, Llama-3, Qwen, GPT, Phi, Cohere, DeepSeek) WITHOUT matching ordinary
-# generics like Map<string, A|B> (where the pipe is not adjacent to a bracket).
-# This is a text-level, family-robust defense; an exotic pipe confusable or a
-# non-pipe special token of a future family would need adding here - the fully
-# general fix is tokenising untrusted spans with special parsing off (backend-level).
+# control token in an untrusted body is parsed as a REAL role delimiter and can
+# forge a system/assistant turn. We defang the leading delimiter so the byte
+# sequence no longer matches the tokenizer's special-token trie, keeping the text
+# legible. Best-effort and family-aware, covering ChatML, Llama-2/3, Mistral,
+# Gemma, Qwen, Phi, and GPT-style markers; the general fix is tokenising untrusted
+# spans with special parsing off (a backend-level change).
+# The pipe delimiter is matched as a CLASS of the ASCII bar (U+007C) and the
+# FULLWIDTH bar (U+FF5C) that DeepSeek-R1 uses (the fullwidth <|Assistant|>).
+# Requiring a pipe right after "<" and right before ">" precisely targets the
+# <|...|> family (ChatML, Llama-3, Qwen, GPT, Phi, Cohere, DeepSeek) WITHOUT
+# matching generics like Map<string, A|B>. An exotic pipe confusable or a
+# non-pipe special token of a future family would need adding here.
 _PIPE = r"[|｜]"   # ASCII bar U+007C and fullwidth bar U+FF5C (DeepSeek)
 _SPECIAL_RE = re.compile(
     r"<" + _PIPE + r"[^<>\n]{0,200}?" + _PIPE + r">"  # <|...|> incl fullwidth pipe
