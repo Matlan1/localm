@@ -76,6 +76,7 @@ echo      Open a NEW terminal (so the updated PATH applies) and run setup.bat ag
 echo      or install uv manually first, then re-run setup.bat:
 echo        powershell -ExecutionPolicy Bypass -c "irm https://astral.sh/uv/install.ps1 | iex"
 echo        winget install astral-sh.uv
+call :offer_report "localm setup could not install uv" "setup.bat tried Astral's installer but uv was still not callable afterwards."
 echo.
 pause
 exit /b 1
@@ -158,6 +159,7 @@ if errorlevel 1 (
     choice /c YN /n /m "  Try again? [Y/n]: "
     if errorlevel 2 (
         echo  Setup aborted. Install Python %PYVER% if it is missing, or close processes and try again.
+        echo      ^(Double-click report-issue.bat to send a report about this.^)
         pause
         exit /b 1
     )
@@ -174,11 +176,12 @@ rem  downloaded after the user consents in the GUI.
 echo.
 echo  Installing localm into .venv ...
 uv pip install -p .venv -e ".[coder,voice,monitor]"
-if errorlevel 1 (
-    echo  [!] Install failed - see the error above.
-    pause
-    exit /b 1
-)
+if not errorlevel 1 goto install_ok
+echo  [!] Install failed - see the error above.
+call :offer_report "localm install failed during setup" "uv pip install -e .[coder,voice,monitor] failed - see the error output above."
+pause
+exit /b 1
+:install_ok
 
 rem ---- install the native-runtime wheel (self-contained inference) ----------
 rem  localm-llama-runtime carries llama.dll + ggml inside this venv so the
@@ -269,6 +272,7 @@ if /i "%BACKEND%"=="own" (
         .venv\Scripts\localm setup-llama --from "!LLAMABUILD!"
         if errorlevel 1 (
             echo  [!] Provisioning failed - run later: .venv\Scripts\localm setup-llama --from "!LLAMABUILD!"
+            echo      ^(Double-click report-issue.bat to send a report about this.^)
             pause
             exit /b 1
         )
@@ -279,6 +283,7 @@ if /i "%BACKEND%"=="own" (
     .venv\Scripts\localm setup-llama --backend %BACKEND%
     if errorlevel 1 (
         echo  [!] Provisioning failed - run later: .venv\Scripts\localm setup-llama --backend %BACKEND%
+        echo      ^(Double-click report-issue.bat to send a report about this.^)
         pause
         exit /b 1
     )
@@ -457,6 +462,23 @@ echo.
 echo  Done. To reinstall: setup.bat
 pause
 exit /b 0
+
+rem ===========================================================================
+rem  :offer_report "summary" "detail" - offer to file a bug report for a setup
+rem  failure via the standalone reporter (report-issue.bat), which works even
+rem  though setup did not finish (it needs no working install). Returns so the
+rem  CALLER still exits non-zero with its original error - reporting never masks the
+rem  failure ("we do not hide problems"). No-op if the reporter is missing.
+rem ===========================================================================
+:offer_report
+if not exist "%~dp0report-issue.bat" goto :eof
+echo.
+set "DOREP="
+set /p "DOREP=  Report this problem to the maintainer (no GitHub account needed)? [Y/n]: "
+if not defined DOREP set "DOREP=Y"
+if /i "!DOREP:~0,1!"=="N" goto :eof
+call "%~dp0report-issue.bat" --summary "%~1" --detail "%~2"
+goto :eof
 
 rem ===========================================================================
 rem  :do_custom_home - prompt for a custom data directory and confirm it.

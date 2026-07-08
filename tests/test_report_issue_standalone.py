@@ -1,0 +1,193 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""Tests for scripts/report_issue.py - the standalone reporter used when localm
+will not start. Focus: the privacy scrub (never leak a username/token), honest
+failure (a failed/declined send is never reported as success), reading the proxy
+config from source, and the report body."""
+
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+
+import pytest
+
+# Load the standalone script by path (scripts/ is not an importable package).
+_MOD_PATH = Path(__file__).resolve().parents[1] / "scripts" / "report_issue.py"
+_spec = importlib.util.spec_from_file_location("report_issue_standalone", _MOD_PATH)
+ri = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(ri)
+
+
+# ----------------------------- read_proxy --------------------------------- #
+
+def test_read_proxy_extracts_url_and_token(tmp_path):
+    cfg = tmp_path / "config.py"
+    cfg.write_text(
+        'DEFAULT_CONFIG = {\n'
+        '    "bugreport_upload_url": "https://proxy.example.workers.dev",\n'
+        '    "bugreport_upload_token": "tok_ABC-123",\n'
+        '}\n', encoding="utf-8")
+    url, token = ri.read_proxy(cfg)
+    assert url == "https://proxy.example.workers.dev"
+    assert token == "tok_ABC-123"
+
+
+def test_read_proxy_missing_file_is_none(tmp_path):
+    assert ri.read_proxy(tmp_path / "nope.py") == (None, None)
+
+
+def test_read_proxy_reads_the_real_shipped_config():
+    # The real localm/config.py must carry a usable proxy URL so the standalone
+    # reporter works with no install; if this ever regresses, the whole tool is dead.
+    url, token = ri.read_proxy()
+    assert url and url.startswith("https://")
+
+
+# ------------------------------- scrub ------------------------------------ #
+
+def test_scrub_redacts_windows_username():
+    out = ri.scrub(r"error at C:\Users\alice\localm\home\logs\x.log")
+    assert "alice" not in out
+    assert "<redacted>" in out or "~" in out
+
+
+def test_scrub_redacts_posix_username():
+    out = ri.scrub("Traceback: /home/bob/localm/setup.sh line 3")
+    assert "bob" not in out
+    assert "<redacted>" in out or "~" in out
+
+
+def test_scrub_redacts_macos_username():
+    out = ri.scrub("/Users/carol/localm crashed")
+    assert "carol" not in out
+
+
+def test_scrub_strips_bearer_and_api_keys():
+    out = ri.scrub("auth Bearer abcdef1234567890 and sk-abcdef0123456789xyz")
+    assert "abcdef1234567890" not in out
+    assert "sk-abcdef0123456789xyz" not in out
+    assert "<redacted>" in out
+
+
+def test_scrub_empty_is_safe():
+    assert ri.scrub("") == ""
+    assert ri.scrub(None) is None
+
+
+# ----------------------------- build_body --------------------------------- #
+
+def test_build_body_includes_description_and_scrubbed_log():
+    diag = {"platform": "Windows-11", "python": "3.12.1", "venv_present": False,
+            "localm_version": "0.1.1"}
+    body = ri.build_body("setup failed", "uv would not install", diag,
+                         Path("home/logs/x.log"), "some tail line")
+    assert "setup failed" in body
+    assert "uv would not install" in body
+    assert "some tail line" in body
+    assert "Venv present: no" in body
+
+
+def test_build_body_handles_empty_description():
+    body = ri.build_body("x", "", {}, None, "")
+    assert "(no description given)" in body
+
+
+# ----------------------------- post_report -------------------------------- #
+
+def test_post_report_success_returns_json():
+    def opener(u, data, hdrs, to):
+        assert hdrs.get("X-Localm-Token") == "tok"
+        return 201, '{"ok": true, "url": "https://github.com/o/r/issues/7"}'
+    res = ri.post_report("https://proxy", "tok", "title", "body", opener=opener)
+    assert res["url"].endswith("/issues/7")
+
+
+def test_post_report_non_2xx_raises():
+    def opener(u, data, hdrs, to):
+        return 500, "boom"
+    with pytest.raises(RuntimeError):
+        ri.post_report("https://proxy", "tok", "t", "b", opener=opener)
+
+
+def test_post_report_network_error_raises():
+    def opener(u, data, hdrs, to):
+        raise RuntimeError("could not reach the server: timed out")
+    with pytest.raises(RuntimeError):
+        ri.post_report("https://proxy", None, "t", "b", opener=opener)
+
+
+def test_post_report_omits_token_header_when_none():
+    seen = {}
+    def opener(u, data, hdrs, to):
+        seen.update(hdrs)
+        return 201, "{}"
+    ri.post_report("https://proxy", None, "t", "b", opener=opener)
+    assert "X-Localm-Token" not in seen
+
+
+# ------------------------------- save_report ------------------------------ #
+
+def test_save_report_writes_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(ri, "REPO_ROOT", tmp_path)
+    path = ri.save_report("hello report", "20260101-000000")
+    assert path is not None and path.exists()
+    assert path.read_text(encoding="utf-8") == "hello report"
+
+
+# --------------------------- main honest failure -------------------------- #
+
+def _no_tty(monkeypatch):
+    monkeypatch.setattr(ri.sys, "stdin", type("S", (), {"isatty": staticmethod(lambda: False)})())
+
+
+def test_main_noninteractive_without_yes_saves_and_never_sends(tmp_path, monkeypatch, capsys):
+    _no_tty(monkeypatch)
+    monkeypatch.setattr(ri, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(ri, "read_proxy", lambda: ("https://proxy", "tok"))
+    called = {"sent": False}
+    def _boom(*a, **k):
+        called["sent"] = True
+        raise AssertionError("must not send without confirmation")
+    monkeypatch.setattr(ri, "post_report", _boom)
+    rc = ri.main(["--summary", "x"])
+    assert rc == 0
+    assert called["sent"] is False
+    out = capsys.readouterr().out
+    assert "Sent to the maintainer" not in out
+
+
+def test_main_yes_send_failure_returns_1_and_does_not_claim_success(tmp_path, monkeypatch, capsys):
+    _no_tty(monkeypatch)
+    monkeypatch.setattr(ri, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(ri, "read_proxy", lambda: ("https://proxy", "tok"))
+    def _fail(*a, **k):
+        raise RuntimeError("HTTP 502: bad gateway")
+    monkeypatch.setattr(ri, "post_report", _fail)
+    rc = ri.main(["--yes", "--summary", "x"])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "Sent to the maintainer" not in out
+    assert "Could not send" in out
+
+
+def test_main_yes_send_success_returns_0(tmp_path, monkeypatch, capsys):
+    _no_tty(monkeypatch)
+    monkeypatch.setattr(ri, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(ri, "read_proxy", lambda: ("https://proxy", "tok"))
+    monkeypatch.setattr(ri, "post_report",
+                        lambda *a, **k: {"url": "https://github.com/o/r/issues/9"})
+    rc = ri.main(["--yes", "--summary", "x"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Sent to the maintainer" in out
+    assert "issues/9" in out
+
+
+def test_main_yes_no_endpoint_configured_saves_and_returns_1(tmp_path, monkeypatch, capsys):
+    _no_tty(monkeypatch)
+    monkeypatch.setattr(ri, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(ri, "read_proxy", lambda: (None, None))
+    rc = ri.main(["--yes", "--summary", "x"])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "No bug-report endpoint" in out
