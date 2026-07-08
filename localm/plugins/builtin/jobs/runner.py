@@ -141,8 +141,15 @@ def _load_engine(model: Optional[str]):
                 _vram.wait_for_vram_release(
                     lambda: vram_info().get("free"),
                     before_bytes=free)
-    except Exception:
-        pass
+    except Exception as e:
+        # Best-effort live-engine reuse + VRAM gate. If anything here fails
+        # (http_server not importable in this context, vram_info unavailable on
+        # this platform, etc.) we fall through to loading a fresh engine below -
+        # a degraded but correct path, not a hard failure. Surface the cause
+        # (AGENTS.md rule 5: log, do not silently swallow) rather than muting it.
+        from localm.debuglog import logger as _dbg
+        _dbg.debug("jobs: live-engine reuse / VRAM gate skipped (%s); "
+                   "loading a fresh engine instead", e)
 
     if not name:
         cfg = load_config()
