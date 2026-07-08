@@ -194,6 +194,14 @@ def require_ci_green(ref: str = "master", *, workflow: str = "ci.yml", runner=_g
     print(f"release CI gate: full CI passed (run {run_id}).")
 
 
+def _git(args, runner=None):
+    """Run a git subcommand in the repo; returns the CompletedProcess. *runner* is
+    injectable (tests pass a fake) so the release gates need no live git."""
+    run = runner or (lambda a: subprocess.run(["git", *a], cwd=str(REPO),
+                                              capture_output=True, text=True))
+    return run(args)
+
+
 def _require_clean_tree() -> None:
     """A release must be cut from a clean tree so CI tests the SAME code that ships.
     Refuse --publish when there are uncommitted TRACKED changes."""
@@ -202,6 +210,58 @@ def _require_clean_tree() -> None:
     if r.returncode == 0 and r.stdout.strip():
         raise SystemExit("release: the working tree has uncommitted tracked changes. Cut a release "
                          "from a clean, pushed tree so CI validates the same code. Commit or stash first.")
+
+
+def _require_head_matches_origin(ref: str = "master", *, runner=None) -> None:
+    """The release build is assembled from the LOCAL working tree, but the CI gate runs
+    on origin/<ref> and the verification record + tag key on local HEAD. If local HEAD
+    is not origin/<ref>, CI could pass on code that is NOT what ships. Enforce that they
+    are the SAME commit, so CI validated exactly the built artifact. *runner* injectable."""
+    _git(["fetch", "origin", ref], runner)   # refresh; a fetch failure surfaces as a mismatch below
+    head = (getattr(_git(["rev-parse", "HEAD"], runner), "stdout", "") or "").strip()
+    remote = (getattr(_git(["rev-parse", f"origin/{ref}"], runner), "stdout", "") or "").strip()
+    if not head or not remote:
+        raise SystemExit(f"release: could not resolve HEAD or origin/{ref} to confirm they match; "
+                         f"cut the release from a checkout of the pushed {ref} branch.")
+    if head != remote:
+        raise SystemExit(
+            f"release: HEAD ({head[:12]}) is not origin/{ref} ({remote[:12]}). CI runs on "
+            f"origin/{ref} while the build is your LOCAL tree, so they must be the same commit. "
+            f"Check out and pull origin/{ref} (or push HEAD to {ref}) before publishing.")
+
+
+def _tag_commit(tag: str, *, runner=None) -> str:
+    """The COMMIT a tag points at (peeled through an annotated tag), preferring origin
+    and falling back to a local tag; "" when the tag does not exist. Peeling matters so
+    an annotated tag compares equal to the HEAD commit, not to its tag object."""
+    ls = _git(["ls-remote", "--tags", "origin", tag], runner)
+    remote = ""
+    for line in (getattr(ls, "stdout", "") or "").splitlines():
+        sha, _, name = line.partition("\t")
+        # The peeled "refs/tags/<tag>^{}" line (annotated tags) comes second and wins.
+        if name.strip() in (f"refs/tags/{tag}", f"refs/tags/{tag}^{{}}"):
+            remote = sha.strip()
+    if remote:
+        return remote
+    loc = _git(["rev-parse", "-q", "--verify", f"refs/tags/{tag}^{{commit}}"], runner)
+    return (getattr(loc, "stdout", "") or "").strip() if getattr(loc, "returncode", 1) == 0 else ""
+
+
+def _require_tag_available(tag: str, *, runner=None) -> None:
+    """A fresh release must not reuse an existing tag that points at a DIFFERENT commit
+    (e.g. the never-distributed v0.1.1 micro-tag): publishing would attach the signed
+    build to a stale commit. Refuse when *tag* already exists at a commit other than
+    HEAD; a tag already AT HEAD is fine (idempotent re-publish)."""
+    existing = _tag_commit(tag, runner=runner)
+    if not existing:
+        return
+    head = (getattr(_git(["rev-parse", "HEAD"], runner), "stdout", "") or "").strip()
+    if head and existing != head:
+        raise SystemExit(
+            f"release: tag {tag} already exists at {existing[:12]}, not the release commit "
+            f"{head[:12]}. localm cuts {tag} fresh at the release commit, so delete the stale "
+            f"tag first:\n  git push origin --delete {tag}\n  git tag -d {tag}\n"
+            "then re-run make_release --publish.")
 
 
 def _require_verification_record() -> None:
@@ -246,14 +306,21 @@ def main(argv=None) -> int:
 
     version = (REPO / "VERSION").read_text(encoding="utf-8").strip()
     out = args.out or (REPO / "dist" / f"localm-{version}.zip")
+    tag = f"v{version}"
 
-    # Pre-publish gates, cheapest-first: a clean tree, then a live functional-
-    # verification record for THIS commit (cold-install + exercise every changelog item
-    # by hand - the gate CI cannot cover), then the FIRST heavy gate: ONE full CI pass
-    # over the whole repo (enabling the runners if a maintainer disabled them). Fail fast
-    # before assembling, signing, and smoke-testing anything.
+    # Pre-publish gates, cheapest-first, fail fast before the heavy build/sign/CI:
+    #   1. clean tree (no uncommitted tracked changes),
+    #   2. HEAD == origin/<ci-ref> (so the CI run below validates the EXACT built commit,
+    #      not a diverged local tree),
+    #   3. the tag is free at the release commit (no collision with an old/reused tag),
+    #   4. a live functional-verification record for THIS commit (cold-install + exercise
+    #      every changelog item by hand - the gate CI cannot cover),
+    #   5. the FIRST heavy gate: ONE full CI pass over the whole repo (enabling the
+    #      runners if a maintainer disabled them).
     if args.publish:
         _require_clean_tree()
+        _require_head_matches_origin(args.ci_ref)
+        _require_tag_available(tag)
         _require_verification_record()
         require_ci_green(args.ci_ref)
 
@@ -275,7 +342,6 @@ def main(argv=None) -> int:
     print(f"built + signed {out} ({len(members)} files) and {sig_path.name}")
     print("signature verifies against the pinned key; release imports + runs (smoke OK)")
 
-    tag = f"v{version}"
     if args.publish:
         # CI already passed (the FIRST gate above) and the artifact is built + signed +
         # smoke-verified; publish it.
