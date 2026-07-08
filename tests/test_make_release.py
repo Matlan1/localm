@@ -34,6 +34,7 @@ def _load(name: str):
 
 cm = _load("check_manifest")
 build_release = _load("build_release")
+release_verify = _load("release_verify")
 make_release = _load("make_release")
 
 
@@ -146,3 +147,42 @@ def test_ci_gate_errors_if_run_never_appears(monkeypatch):
     with pytest.raises(SystemExit, match="did not appear"):
         make_release.require_ci_green("master", runner=fake, sleeper=lambda _s: None,
                                       appear_timeout_s=30, poll_s=10)
+
+
+# --------------------------------------------------------------------------- #
+#  pre-publish live-verification record gate                                  #
+# --------------------------------------------------------------------------- #
+
+def _write_record(root, sha, verdict):
+    d = root / "dev-notes" / "release-verify"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{sha}.md").write_text(f"# Release verification\nVERDICT: {verdict}\n", encoding="utf-8")
+
+
+def test_record_read_verdict_pass_fail_missing(tmp_path):
+    _write_record(tmp_path, "abc", "PASS")
+    _write_record(tmp_path, "def", "FAIL")
+    assert release_verify.read_verdict("abc", tmp_path) == "PASS"
+    assert release_verify.has_passing_record("abc", tmp_path)
+    assert release_verify.read_verdict("def", tmp_path) == "FAIL"
+    assert not release_verify.has_passing_record("def", tmp_path)
+    assert release_verify.read_verdict("missing", tmp_path) is None
+    assert not release_verify.has_passing_record("missing", tmp_path)
+
+
+def test_publish_blocks_without_passing_record(monkeypatch):
+    monkeypatch.setattr(release_verify, "current_sha", lambda *a, **k: "deadbeef")
+    monkeypatch.setattr(release_verify, "has_passing_record", lambda *a, **k: False)
+    with pytest.raises(SystemExit, match="no PASSING functional-verification record"):
+        make_release._require_verification_record()
+
+
+def test_publish_allows_with_passing_record(monkeypatch):
+    monkeypatch.setattr(release_verify, "current_sha", lambda *a, **k: "deadbeef")
+    monkeypatch.setattr(release_verify, "has_passing_record", lambda *a, **k: True)
+    make_release._require_verification_record()   # must not raise
+
+
+def test_changed_areas_empty_when_no_diff():
+    # HEAD..HEAD has no changes -> empty list. Deterministic; exercises the git parse.
+    assert release_verify.changed_areas("HEAD", REPO_ROOT) == []

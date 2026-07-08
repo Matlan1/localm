@@ -115,9 +115,10 @@ patterns = [
     # --- server-side infra, deployed separately (NOT the localm client) ---
     "tools/",                  # tools/bugreport-proxy: the Cloudflare Worker
 
-    # --- contributor / agent guides (not the running product) ---
+    # --- contributor / agent guides + release process (not the running product) ---
     "AGENTS.md",
     "CLAUDE.md",
+    "RELEASE.md",
 
     # --- dev + release tooling ---
     "scripts/check_hygiene.py",
@@ -126,6 +127,7 @@ patterns = [
     "scripts/check_manifest.py",
     "scripts/build_release.py",
     "scripts/make_release.py",
+    "scripts/release_verify.py",
     "release-manifest.toml",   # this file classifies itself: release tooling metadata
 ]
 

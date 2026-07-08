@@ -204,6 +204,26 @@ def _require_clean_tree() -> None:
                          "from a clean, pushed tree so CI validates the same code. Commit or stash first.")
 
 
+def _require_verification_record() -> None:
+    """RULE: a release must not publish until the build has been COLD-INSTALLED and every
+    changelog feature exercised for REAL (a model loads AND things actually work front to
+    back, not just import). CI cannot cover that; a human/agent does it per
+    RELEASE.md and records the verdict. Publishing refuses unless
+    a PASSING record exists for the EXACT release commit (a stale record for older code is
+    keyed to a different sha and does not count)."""
+    import release_verify as rv   # sibling; already on sys.path (build_release import above)
+    sha = rv.current_sha(REPO)
+    if not sha:
+        raise SystemExit("release verify: cannot determine HEAD sha (not a git checkout).")
+    if not rv.has_passing_record(sha, REPO):
+        raise SystemExit(
+            f"release verify: no PASSING functional-verification record for {sha[:12]} at "
+            f"{rv.record_path(sha, REPO)}.\nCold-install the build and exercise every changelog "
+            "item per RELEASE.md (real use, not just 'it loads'), record "
+            "the verdict, then re-run make_release --publish.")
+    print(f"release verify: functional-verification record found for {sha[:12]} (PASS).")
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description="Assemble + sign a localm release build.")
     p.add_argument("--key", type=Path, default=None,
@@ -227,12 +247,14 @@ def main(argv=None) -> int:
     version = (REPO / "VERSION").read_text(encoding="utf-8").strip()
     out = args.out or (REPO / "dist" / f"localm-{version}.zip")
 
-    # RULE: CI is the FIRST gate. Before assembling ANY release files, cut from a clean
-    # tree and run ONE full CI pass over the whole repo (enabling the runners if a
-    # maintainer disabled them). Fail fast here on red/un-run CI - no point building,
-    # signing, and smoke-testing a release the repo cannot even pass CI for.
+    # Pre-publish gates, cheapest-first: a clean tree, then a live functional-
+    # verification record for THIS commit (cold-install + exercise every changelog item
+    # by hand - the gate CI cannot cover), then the FIRST heavy gate: ONE full CI pass
+    # over the whole repo (enabling the runners if a maintainer disabled them). Fail fast
+    # before assembling, signing, and smoke-testing anything.
     if args.publish:
         _require_clean_tree()
+        _require_verification_record()
         require_ci_green(args.ci_ref)
 
     # 1. assemble from the manifest (refuses a dirty manifest; self-verifies verify_zip)
