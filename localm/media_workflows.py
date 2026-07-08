@@ -13,6 +13,12 @@ keeps working untouched:
      (flux_workflow.json / ace_workflow_local.json / wan_workflow_local.json), then
   3. the committed example template.
 
+Tier 2 is superseded: a self-update whole-tree-replaces the ``localm/`` package
+dir, so an override left there is destroyed on update. ``migrate_legacy_override``
+(called once from each media plugin's ``register()``) moves any such file up into
+tier 1 - which lives under the updater's NEVER_TOUCH ``home/`` and survives -
+selecting it so the user's active workflow is unchanged.
+
 Backend-agnostic: this only reads/writes files + the config marker. Path-safety
 is enforced with ``localm.pathsafe`` so an uploaded/selected name can never escape
 the per-media directory.
@@ -20,7 +26,11 @@ the per-media directory.
 
 from __future__ import annotations
 
+import filecmp
 import json
+import os
+import shutil
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -150,6 +160,136 @@ def delete_workflow(media: str, name: str) -> None:
     if selected_name(media) == p.name:
         raise ValueError("cannot delete the active workflow; select another first")
     p.unlink()
+
+
+# ---------------------------------------------------------------------------
+#  Legacy override migration
+# ---------------------------------------------------------------------------
+#
+# Before the per-plugin workflow picker existed, a user customised a media plugin
+# by committing a personal workflow next to its generator, INSIDE the localm/
+# package dir. A self-update whole-tree-replaces that dir (localm/_apply_update.py
+# swaps the "localm" entry: rmtree + copytree), so an override left at one of
+# these legacy paths is DESTROYED on update. The primary location - the SELECTED
+# file under home_dir()/workflows/<media>/ - lives under the updater's NEVER_TOUCH
+# "home/" and survives, so we move any legacy override there once, at startup.
+_LEGACY_OVERRIDES = {
+    "image": Path(__file__).parent / "image_gen" / "flux_workflow.json",
+    "music": Path(__file__).parent / "music_gen" / "ace_workflow_local.json",
+    "video": Path(__file__).parent / "video_gen" / "wan_workflow_local.json",
+}
+
+
+def _dedup_name(dest_dir: Path, name: str) -> Path:
+    """A path inside *dest_dir* whose name does not collide with an existing file
+    (``x.json`` -> ``x-1.json`` -> ``x-2.json`` ...), so migrating a legacy
+    override can never clobber a differently-authored workflow the user already
+    saved under the same name."""
+    stem, suffix = Path(name).stem, Path(name).suffix
+    candidate = dest_dir / name
+    i = 1
+    while candidate.exists():
+        candidate = dest_dir / f"{stem}-{i}{suffix}"
+        i += 1
+    return candidate
+
+
+def _existing_copy(dest_dir: Path, legacy: Path) -> Optional[Path]:
+    """An existing workflow in *dest_dir* whose bytes already match *legacy* (this
+    override was migrated on an earlier run, possibly under a dedup name), or None.
+    Scanning by CONTENT - not just the base name - means a persistently
+    unremovable in-package original cannot spawn a fresh dedup copy every startup."""
+    if not dest_dir.is_dir():
+        return None
+    for p in sorted(dest_dir.glob("*.json")):
+        try:
+            if p.is_file() and filecmp.cmp(legacy, p, shallow=False):
+                return p
+        except OSError:
+            continue
+    return None
+
+
+def _finalize_migration(media: str, legacy: Path, dest: Path) -> tuple:
+    """Keep the migrated *dest* the active workflow, then remove the in-package
+    *legacy* original. Returns ``(ok, note)``.
+
+    Auto-select is gated on ``active_workflow_path`` (the EFFECTIVE resolution),
+    not merely on a selection marker: when no valid workflow is active the legacy
+    file WAS the active one (resolution is selected -> legacy -> example, and a
+    selection whose file has gone falls through to the legacy), so the moved copy
+    must become the selection or generation would silently drop to the example.
+
+    Fail-safe (AGENTS.md rule 5): the original is removed ONLY once the override
+    is safely active from home, so a failed select/remove never silently
+    deactivates or loses the user's workflow."""
+    if active_workflow_path(media) is None:
+        try:
+            select_workflow(media, dest.name)
+        except Exception as e:
+            return False, (f"{media}: saved legacy {legacy.name} to workflows/"
+                           f"{media}/{dest.name} but could not select it ({e}); "
+                           f"left the in-package copy in place")
+    try:
+        legacy.unlink()
+    except OSError as e:
+        return False, (f"{media}: migrated legacy {legacy.name} to workflows/"
+                       f"{media}/{dest.name} but could not remove the in-package "
+                       f"copy ({e}); a later update will")
+    return True, f"{media}: migrated legacy {legacy.name} to workflows/{media}/{dest.name}"
+
+
+def _migrate_one(media: str, legacy: Path) -> Optional[tuple]:
+    """Move one media's legacy in-package override into home/workflows/<media>/.
+    Returns None when there is nothing to migrate, else ``(ok, note)``. Pure with
+    respect to the configured home (the caller injects the source path), so it is
+    unit-testable without touching the real repo checkout."""
+    if not legacy.is_file():
+        return None
+    dest_dir = workflows_dir(media)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    # Already migrated (identical bytes already under home, base name or a dedup
+    # name)? Retire the in-package duplicate instead of copying it again.
+    existing = _existing_copy(dest_dir, legacy)
+    if existing is not None:
+        return _finalize_migration(media, legacy, existing)
+    # A DIFFERENT workflow already owns that name - keep both under a fresh name.
+    dest = dest_dir / legacy.name
+    if dest.exists():
+        dest = _dedup_name(dest_dir, legacy.name)
+    shutil.copy2(legacy, dest)          # home copy is safe before we touch the original
+    return _finalize_migration(media, legacy, dest)
+
+
+def migrate_legacy_override(media: str) -> Optional[str]:
+    """Startup entry point (called from each media plugin's ``register()``): move
+    *media*'s legacy in-package workflow override to the update-surviving
+    home/workflows location, once. A no-op when there is nothing to migrate.
+
+    Skipped under the automated test suite - in-process via ``"pytest" in
+    sys.modules``, and inside a localm SUBPROCESS a test spawns (where pytest is
+    absent) via the ``LOCALM_SKIP_LEGACY_WORKFLOW_MIGRATION`` flag conftest sets
+    and children inherit. The in-package sources are the real repository checkout,
+    NOT the test's tmp home, so migrating there would move a developer's personal
+    workflow out of their working tree. (The migration logic itself is exercised
+    directly via ``_migrate_one`` on temp paths.) Logs and returns the outcome
+    note (None when nothing happened)."""
+    if "pytest" in sys.modules or os.environ.get("LOCALM_SKIP_LEGACY_WORKFLOW_MIGRATION"):
+        return None
+    legacy = _LEGACY_OVERRIDES.get(media)
+    if legacy is None:
+        return None
+    try:
+        result = _migrate_one(media, legacy)
+    except Exception as e:
+        result = (False, f"{media}: legacy workflow migration failed ({e}); "
+                         f"left it in place")
+    if result is None:
+        return None
+    ok, note = result
+    from localm.debuglog import logger
+    (logger.info if ok else logger.warning)("workflow migration: %s", note)
+    return note
 
 
 def make_workflow_router(media: str):

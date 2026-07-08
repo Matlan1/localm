@@ -336,8 +336,12 @@ def register(host) -> None:
     host.mount_router(_router)
     # Workflow management (list/upload/select/delete) for the Video page, scoped
     # to this plugin's capability.
-    from localm.media_workflows import make_workflow_router
+    from localm.media_workflows import make_workflow_router, migrate_legacy_override
     host.mount_router(make_workflow_router("video"))
+    # One-time: rescue any legacy personal override left INSIDE the package
+    # (localm/video_gen/wan_workflow_local.json) into home/workflows, which
+    # survives a self-update (the localm/ dir is whole-tree-replaced). No-op when absent.
+    migrate_legacy_override("video")
 
     # Register model roles
     from localm.plugins.contract import ModelRoleDescriptor
