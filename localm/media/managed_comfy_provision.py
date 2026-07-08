@@ -41,6 +41,7 @@ from typing import Callable, Optional
 from localm.config import load_config
 from localm.debuglog import logger
 from localm.media import managed_comfy as mc
+from localm.media.comfy_patches import apply_patches as _apply_localm_patches
 
 # Progress sink: one human-readable line at a time (a subprocess line, or a note).
 # Best-effort - a raising sink never aborts a provision.
@@ -346,7 +347,8 @@ def _copy_custom_nodes(user_workdir: Path, managed_root: Path,
 
 
 def _write_marker(managed_root: Path, stack: UserComfyStack,
-                  custom_nodes_copied: int, installed_packages: int) -> None:
+                  custom_nodes_copied: int, installed_packages: int,
+                  patch_outcomes=None) -> None:
     marker = {
         "source": "copy",
         "stage": "S2",
@@ -355,6 +357,8 @@ def _write_marker(managed_root: Path, stack: UserComfyStack,
         "user_workdir": str(stack.workdir),
         "installed_packages": installed_packages,
         "custom_nodes_copied": custom_nodes_copied,
+        # The localm patch set applied on top of the replicated source (S4, decision 7).
+        "localm_patches": {o.name: o.status for o in (patch_outcomes or [])},
     }
     try:
         (managed_root / MARKER_FILENAME).write_text(
@@ -453,13 +457,23 @@ def provision_by_copy(stack: UserComfyStack, cfg: Optional[dict] = None, *,
         else:
             _say("Starting with a clean custom_nodes (your nodes were not copied).")
 
+        # 4b) Apply localm's own patch set to the managed core (S4, decision 7). This
+        #     patches localm's OWNED copy, never the user's ComfyUI. A failed compat
+        #     patch is SURFACED but non-fatal (it only breaks the workflow needing it).
+        patch_outcomes = _apply_localm_patches(root)
+        for o in patch_outcomes:
+            if o.ok:
+                _say(f"localm patch {o.name}: {o.status}")
+            else:
+                _say(f"WARNING: localm patch {o.name} failed: {o.detail}")
+
         # 5) Models via S1's extra_model_paths.yaml (decision 9): the user's models
         #    dir + localm's managed models dir, ComfyUI-native, no copy.
         mc.write_extra_model_paths(cfg)
         _say("Wrote extra_model_paths.yaml (your models + localm's managed models).")
 
         # 6) Provenance marker (documentation for S4; not load-bearing).
-        _write_marker(root, stack, n_nodes, n_pkgs)
+        _write_marker(root, stack, n_nodes, n_pkgs, patch_outcomes)
 
         # 7) Prove it actually installed (S1's contract), or roll back and say it did not.
         if not mc.is_managed_comfy_installed():

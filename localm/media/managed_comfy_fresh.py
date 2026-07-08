@@ -42,6 +42,7 @@ from localm.config import load_config
 from localm.debuglog import logger
 from localm.media import managed_comfy as mc
 from localm.media import managed_comfy_provision as _prov
+from localm.media.comfy_patches import apply_patches as _apply_localm_patches
 from localm.media.managed_comfy_provision import (
     MARKER_FILENAME, ProgressCb, ProvisionResult, _emit, _run, _tail)
 
@@ -322,7 +323,8 @@ def _install_custom_nodes(managed_root: Path, nodes, managed_python: Path,
 
 
 def _write_fresh_marker(managed_root: Path, commit: str, spec: ComfyTorchSpec,
-                        n_nodes: int, node_failures: list) -> None:
+                        n_nodes: int, node_failures: list,
+                        patch_outcomes=None) -> None:
     marker = {
         "source": "fresh",
         "stage": "S3",
@@ -335,6 +337,8 @@ def _write_fresh_marker(managed_root: Path, commit: str, spec: ComfyTorchSpec,
         "torch_note": spec.note,
         "custom_nodes_installed": n_nodes,
         "custom_node_failures": node_failures,
+        # The localm patch set applied on top of the pin (S4, decision 7).
+        "localm_patches": {o.name: o.status for o in (patch_outcomes or [])},
     }
     try:
         (managed_root / MARKER_FILENAME).write_text(
@@ -443,13 +447,24 @@ def provision_fresh(cfg: Optional[dict] = None, *, on_progress: ProgressCb = Non
         for f in node_failures:
             _say(f"WARNING: {f}")
 
+        # 5b) Apply localm's own patch set to the managed core (S4, decision 7): direct
+        #     core edits localm carries on top of the pin (the __func__ tolerance). A
+        #     failed compat patch is SURFACED but non-fatal - like a custom-node failure,
+        #     it only breaks the workflow that needs it, not the whole install (rule 5).
+        patch_outcomes = _apply_localm_patches(root)
+        for o in patch_outcomes:
+            if o.ok:
+                _say(f"localm patch {o.name}: {o.status}")
+            else:
+                _say(f"WARNING: localm patch {o.name} failed: {o.detail}")
+
         # 6) Models via S1's extra_model_paths.yaml (decision 9). No user comfy_workdir
         #    on the fresh path -> localm's managed models dir (the user can add more).
         mc.write_extra_model_paths(cfg)
         _say("Wrote extra_model_paths.yaml (localm's managed models dir).")
 
         # 7) Provenance marker (documentation for S4; not load-bearing).
-        _write_fresh_marker(root, commit, spec, n_nodes, node_failures)
+        _write_fresh_marker(root, commit, spec, n_nodes, node_failures, patch_outcomes)
 
         # 8) Prove it installed (S1's contract), or roll back and say it did not.
         if not mc.is_managed_comfy_installed():
