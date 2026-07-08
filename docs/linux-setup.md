@@ -27,17 +27,18 @@ cd localm
 bash setup.sh
 ```
 
-`setup.sh` is interactive: it detects your accelerator, creates the venv,
-installs localm, optionally installs the PyTorch stack for your GPU, lets you
-copy in a llama.cpp build, picks a data directory, and adds an app-menu entry.
-Pass `--yes` for defaults.
+`setup.sh` is interactive: it installs `uv` for you if you do not have it,
+detects your accelerator, creates the venv, installs localm, optionally installs
+the PyTorch stack for your GPU, lets you copy in a llama.cpp build, picks a data
+directory, and adds an app-menu entry. Pass `--yes` for defaults.
 
 The PyTorch stack is only needed to run HuggingFace (non-GGUF) Transformers
 models; GGUF chat through the llama.cpp backend needs none of it, so answer no
 if you only run GGUF models (you can add it later, see the README extras).
 
 Prerequisites:
-- `uv` - `curl -LsSf https://astral.sh/uv/install.sh | sh`
+- `uv` - `setup.sh` installs it for you if missing; only needed by hand if you
+  skip `setup.sh`: `curl -LsSf https://astral.sh/uv/install.sh | sh`
 - For the graphical launcher: Tk - `sudo apt install python3-tk` (Debian/Ubuntu),
   `sudo dnf install python3-tkinter` (Fedora), etc. The web GUI needs only a browser.
 
