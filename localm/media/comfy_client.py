@@ -611,6 +611,81 @@ def comfy_exec_error_message(payload, api_url: Optional[str] = None) -> str:
         "To stop being asked, turn it on: localm config comfy_func_shim on")
 
 
+# ---------------------------------------------------------------------------
+#  S5 BUG-REOFFER: the __func__ regression re-offers managed ComfyUI ONCE
+# ---------------------------------------------------------------------------
+#
+#  The T1 shim (above) fixes THIS run in memory. As a durable answer, decision 1
+#  + 8 of the managed-ComfyUI design let the __func__ crash ALSO offer localm's
+#  own managed, patched ComfyUI (`localm comfy setup`) - the fix-for-good - but at
+#  most ONCE (a persisted flag), never when a managed instance already exists (it
+#  is moot: localm routes to the patched managed one, decision 6), and never for an
+#  unrelated error. This is a pure decision + message; the CLI offer point
+#  (cli/media.py) presents it alongside the shim offer.
+
+_MANAGED_SETUP_OFFERED_KEY = "comfy_managed_setup_offered"
+
+
+def should_offer_managed_comfy_setup(detail, cfg: Optional[dict] = None) -> bool:
+    """True when the ONE-TIME durable-fix offer (set up localm's own managed,
+    patched ComfyUI) should be surfaced for a media error.
+
+    Gated on all three (design decisions 1 + 8): the error is the known upstream
+    ``__func__`` regression, NO managed ComfyUI is installed yet (else the offer is
+    moot - localm already routes to the patched managed instance, decision 6), and
+    localm has not already made this offer (the persisted
+    ``comfy_managed_setup_offered`` flag). Any one false -> no offer, so it never
+    nags. A managed-install check that itself errors fails SAFE toward not offering
+    (never surface something the user may already have)."""
+    if not is_known_comfy_func_regression(detail):
+        return False
+    try:
+        from localm.media.managed_comfy import is_managed_comfy_installed
+        if is_managed_comfy_installed():
+            return False
+    except Exception:
+        return False
+    if cfg is None:
+        try:
+            from localm.config import load_config
+            cfg = load_config()
+        except Exception:
+            cfg = {}
+    try:
+        return not bool(cfg.get(_MANAGED_SETUP_OFFERED_KEY))
+    except AttributeError:
+        return False
+
+
+def managed_comfy_setup_offer_message() -> str:
+    """The one-time durable-fix offer text: set up localm's OWN managed, patched
+    ComfyUI so the recurring upstream regression cannot recur. Points at the
+    explicit opt-in command (`localm comfy setup`); the user's own ComfyUI is left
+    untouched. Framed as the fix-for-good next to the shim's fix-this-run."""
+    return (
+        "This is a recurring upstream ComfyUI bug. For a durable fix - not just a "
+        "patch for this run - localm can set up its OWN managed, patched ComfyUI so "
+        "it cannot recur; your own ComfyUI is left untouched. To set it up:\n"
+        "  localm comfy setup")
+
+
+def mark_managed_comfy_setup_offered() -> None:
+    """Persist ``comfy_managed_setup_offered=True`` so the durable-fix offer is made
+    at most ONCE (it never nags). Written directly (like the shim's
+    ``comfy_func_shim``), not through the settings form. Best-effort: a failure to
+    persist must not break the media error path (worst case the offer reappears next
+    time - annoying, not harmful), so it is logged at debug, never muted blind."""
+    try:
+        from localm.config import load_config, save_config
+        cfg = load_config()
+        cfg[_MANAGED_SETUP_OFFERED_KEY] = True
+        save_config(cfg)
+    except Exception:
+        from localm.debuglog import logger
+        logger.debug("could not persist %s (the managed-ComfyUI offer may show "
+                     "again next time)", _MANAGED_SETUP_OFFERED_KEY, exc_info=True)
+
+
 def _derive_workdir_from_cmd(launch_cmd: str) -> Optional[str]:
     """The folder of the launcher script, so a .bat / .sh that references paths
     relative to its own location (the ComfyUI + ZLUDA convention, e.g. a copied
