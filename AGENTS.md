@@ -304,6 +304,15 @@ ever turned off, delete the remote branch guarded so it never errors:
 `git ls-remote --exit-code --heads origin <branch> >/dev/null 2>&1 && git push
 origin --delete <branch>`.
 
+Keep `master` in the main checkout, not in a worktree. The top-level clone stays
+checked out on `master` at all times, and feature work happens in worktrees on
+their own branches. Do not check `master` out into a worktree, and do not switch
+the main clone off `master`: that is what pins `master` in a side worktree and
+triggers the merge error above. If you find `master` checked out somewhere else,
+free it (detach the clean squatting worktree, never one with uncommitted work)
+and restore it in the main clone. Only relocate `master` for a compelling,
+deliberate reason.
+
 Guardrails that still apply:
 
 - Never merge a PR with failing CI, merge conflicts, or unfinished or unverified
