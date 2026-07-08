@@ -812,6 +812,37 @@ if (tabNav) {
   }
 }
 
+// Turn a ComfyUI ScanResult (added / skipped / method) into a human toast. The
+// scanner's `method` field carries WHY an empty scan found nothing ("none
+// (comfy_workdir not configured)", "none (models folder not found under
+// {path})"); surfacing that reason instead of a bare "Added 0" keeps a
+// misconfigured scan from failing silently (AGENTS.md rule 5). The internal
+// "folder-walk" / "hybrid" method jargon stays out of the visible text.
+export function scanResultMessage(data) {
+  const added = data.added || 0;
+  const skipped = data.skipped || 0;
+  const method = String(data.method || "");
+  if (method.startsWith("none")) {
+    if (method.includes("comfy_workdir not configured")) {
+      return "No ComfyUI workdir configured - set it in Settings.";
+    }
+    const under = "models folder not found under ";
+    const i = method.indexOf(under);
+    if (i !== -1) {
+      const path = method.slice(i + under.length).replace(/\)\s*$/, "");
+      return `ComfyUI models folder not found at ${path}.`;
+    }
+    // Any other "none (...)" reason: still say something specific, never hide it.
+    return "Scan found no ComfyUI models. Check the ComfyUI setup in Settings.";
+  }
+  if (added === 0 && skipped === 0) {
+    // A real scan (folder-walk / hybrid) that turned up nothing: the folders
+    // exist but held no models. Not a misconfig, but clearer than "Added 0".
+    return "Scan complete. No new ComfyUI models found.";
+  }
+  return `Scan complete. Added ${added} models, skipped ${skipped} existing.`;
+}
+
 // Bind Scan button click handler
 const scanBtn = $("models-scan-btn");
 if (scanBtn) {
@@ -825,7 +856,7 @@ if (scanBtn) {
       });
       const data = await r.json().catch(() => ({}));
       if (r.ok) {
-        toast(`Scan complete. Added ${data.added || 0} models, skipped ${data.skipped || 0} existing.`);
+        toast(scanResultMessage(data));
         refreshModelsPage();
       } else {
         toast(data.detail || "Scan failed", true);
