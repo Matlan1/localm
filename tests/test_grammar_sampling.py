@@ -59,6 +59,10 @@ def test_generate_never_calls_accept_after_sample():
     mock_api = MagicMock()
     mock_api.llama_sampler_sample.side_effect = [11, 12, 13]
     mock_api.llama_decode.return_value = 0
+    # Real ctypes-backed batch so _create_batch's native fill loop runs (the
+    # mock-detection facade was removed from production).
+    from tests._fake_batch import fake_batch_init
+    mock_api.llama_batch_init.side_effect = fake_batch_init
     llm._tokenizer.is_eog.side_effect = lambda t: t == 13
 
     with patch("localm.inference.backends.llamacpp.llama.api", mock_api), \
