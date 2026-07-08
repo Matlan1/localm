@@ -75,7 +75,7 @@ Run `localm doctor` after installing to check Python, the native library, GPU dr
 
 ### Recommended (Windows): self-contained setup
 
-Clone anywhere and double-click `setup.bat`. It creates a private `.venv` inside the clone (always Python 3.12), installs localm into it, detects your GPU and provisions the matching llama.cpp backend (see [GPU setup](#gpu-setup)), and asks where data should live:
+Clone anywhere and double-click `setup.bat`. It installs `uv` (the Python package manager it builds on) for you if you do not already have it, creates a private `.venv` inside the clone (always Python 3.12), installs localm into it, detects your GPU and provisions the matching llama.cpp backend (see [GPU setup](#gpu-setup)), and asks where data should live:
 
 - **inside the clone** (`.\home`) - fully portable and self-contained; multiple clones on one machine are completely independent (this is the default), or
 - **a custom path** (recorded in `localm-home.cfg`) - e.g. a shared models drive.
@@ -83,6 +83,11 @@ Clone anywhere and double-click `setup.bat`. It creates a private `.venv` inside
 There is no silent per-user fallback: if nothing is configured, localm keeps its data in a contained `.\home` inside the install and says so, never a shared `~/.localm` outside it. It then builds a native `LocaLM.exe` launcher (so the running server shows as `LocaLM.exe` in Task Manager, not `python.exe`, and carries the LocaLM icon - see [native app](docs/native-app.md)), offers an optional desktop shortcut and global `localm` command, and walks you through which plugins to enable (`localm plugin setup`). Nothing is installed globally, and your PATH is left untouched unless you opt into the global `localm` command. The `LOCALM_HOME` environment variable overrides the data location at any time.
 
 ### Manual (any OS)
+
+This path uses `uv` directly, so it assumes `uv` is installed (the `setup.bat` /
+`setup.sh` installers add it for you; standalone: `powershell -c "irm
+https://astral.sh/uv/install.ps1 | iex"` on Windows, or `curl -LsSf
+https://astral.sh/uv/install.sh | sh` on Linux/macOS).
 
 ```bash
 uv venv --python 3.12 .venv

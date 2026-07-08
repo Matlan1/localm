@@ -82,12 +82,39 @@ if [ "$UNINSTALL" = 1 ]; then
   exit 0
 fi
 
-# ---- uv is required ---------------------------------------------------------
+# ---- uv is required; bootstrap it ourselves if it is missing ----------------
+# uv (Astral's fast Python package manager) builds the venv and resolves the GPU
+# wheels. Instead of dead-ending with "install it yourself", fetch it via Astral's
+# official installer and make it callable in THIS process (the installer updates a
+# shell profile, not the PATH of an already-running shell). In --yes mode this is
+# automatic (like the one-click install.sh); interactively it asks first (default
+# Yes) since it runs a script fetched from the network. A bootstrap failure is
+# surfaced, not hidden (rule 5): we re-check that uv is callable and exit if not.
 if ! command -v uv >/dev/null 2>&1; then
-  say "  [!] uv is not installed. Install it first:"
-  say "      curl -LsSf https://astral.sh/uv/install.sh | sh"
-  say "      then re-open your shell and run setup.sh again."
-  exit 1
+  say "  [!] uv (the Python package manager localm builds on) is not installed."
+  getuv="$(ask "  Install it now with Astral's official installer? [Y/n]: " Y)"
+  case "$getuv" in
+    [Nn]*)
+      say "  Setup needs uv. Install it, then re-run setup.sh:"
+      say "      curl -LsSf https://astral.sh/uv/install.sh | sh"
+      exit 1
+      ;;
+  esac
+  say "  Installing uv ..."
+  # || true so a curl/install failure does not trip set -e before our own check;
+  # the re-check below decides honestly whether the bootstrap actually worked.
+  curl -LsSf https://astral.sh/uv/install.sh | sh || true
+  # uv lands in ~/.local/bin (older builds used ~/.cargo/bin); the installer edits a
+  # shell profile, not this running shell, so add both to PATH for the rest of setup.
+  export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+  if ! command -v uv >/dev/null 2>&1; then
+    say ""
+    say "  [!] uv still is not callable after the install attempt."
+    say "      Open a new shell (so the updated PATH applies) and run setup.sh again,"
+    say "      or install uv manually first:"
+    say "      curl -LsSf https://astral.sh/uv/install.sh | sh"
+    exit 1
+  fi
 fi
 
 # ---- detect GPU acceleration ------------------------------------------------
