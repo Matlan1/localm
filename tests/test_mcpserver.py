@@ -74,6 +74,52 @@ class TestProtocol:
         assert "generate_image" not in names
 
 
+class TestToolAnnotations:
+    """MCP tool annotations (audit finding C). Confirmation for destructive
+    tools belongs at the CLIENT, so the server must DECLARE intent via the
+    standard MCP annotations (destructiveHint / readOnlyHint) in tools/list.
+    Without this, an MCP client has no signal that remove_model / uninstall_plugin
+    delete files."""
+
+    def _annotations_by_name(self, server):
+        return {t["name"]: t.get("annotations")
+                for t in _req(server, "tools/list")["result"]["tools"]}
+
+    def test_destructive_tools_declare_destructive_hint(self):
+        """The primary oracle: the two file-deleting tools carry
+        annotations.destructiveHint == true with a human-readable title. Fails
+        on pre-fix master, where tools/list emits no annotations at all."""
+        server, _ = _server()
+        ann = self._annotations_by_name(server)
+        for name in ("remove_model", "uninstall_plugin"):
+            assert ann[name] is not None, f"{name} advertises no annotations"
+            assert ann[name]["destructiveHint"] is True, f"{name} not destructiveHint"
+            assert ann[name].get("title"), f"{name} has no human title"
+
+    def test_read_only_tools_declare_read_only_hint(self):
+        server, _ = _server()
+        ann = self._annotations_by_name(server)
+        for name in ("list_models", "list_plugins", "list_model_files",
+                     "search_models", "system_stats", "run_doctor"):
+            assert ann[name] is not None, f"{name} advertises no annotations"
+            assert ann[name]["readOnlyHint"] is True, f"{name} not readOnlyHint"
+
+    def test_destructive_tools_are_not_marked_read_only(self):
+        """Negative guard: a destructive tool must never also claim readOnlyHint
+        (readOnlyHint true would tell the client destructiveHint is meaningless)."""
+        server, _ = _server()
+        ann = self._annotations_by_name(server)
+        for name in ("remove_model", "uninstall_plugin"):
+            assert ann[name].get("readOnlyHint") is not True
+
+    def test_plain_tools_have_no_annotations_key_leaked(self):
+        """A tool with no annotations (e.g. chat) must not carry an empty/None
+        annotations field - the key is present only when there is a hint."""
+        server, _ = _server()
+        entries = {t["name"]: t for t in _req(server, "tools/list")["result"]["tools"]}
+        assert "annotations" not in entries["chat"]
+
+
 class TestToolCalls:
     def test_chat_returns_model_output(self):
         server, _ = _server()
