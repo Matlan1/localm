@@ -146,6 +146,102 @@ def test_rollback_restores_exact_pre_apply_state(tmp_path):
     assert (inst / "home" / "config.json").read_text() == "user data"
 
 
+# --------- preserve provisioned native binaries across a swap -----------
+# The runtime wheel's lib/ holds the .dll/.so that `localm setup-llama` provisions.
+# They are gitignored, so a build.zip carries only the empty scaffold; a blunt
+# whole-tree replace of runtime/ would DELETE them (breaking inference) and, while
+# localm is running, choke on the loaded (locked) DLL. PRESERVE_WITHIN keeps them.
+
+_LIB = "runtime/localm_llama_runtime/lib"
+
+
+def _install_with_runtime(root):
+    (root / "localm").mkdir(parents=True)
+    (root / "localm" / "__init__.py").write_text("old", encoding="utf-8")
+    (root / "VERSION").write_text("0.1.0", encoding="utf-8")
+    rt = root / "runtime" / "localm_llama_runtime"
+    (rt).mkdir(parents=True)
+    (rt / "__init__.py").write_text("SCAFFOLD_V1", encoding="utf-8")
+    (root / "runtime" / "README.md").write_text("rt v1", encoding="utf-8")
+    lib = rt / "lib"
+    lib.mkdir()
+    (lib / ".gitkeep").write_text("", encoding="utf-8")
+    (lib / "llama.dll").write_bytes(b"PROVISIONED-NATIVE-BINARY")   # setup-llama output
+    (lib / "ggml-base.dll").write_bytes(b"GGML")
+
+
+def _staged_with_runtime(root):
+    (root / "localm").mkdir(parents=True)
+    (root / "localm" / "__init__.py").write_text("new", encoding="utf-8")
+    (root / "VERSION").write_text("0.2.0", encoding="utf-8")
+    (root / "pyproject.toml").write_text("[project]", encoding="utf-8")
+    rt = root / "runtime" / "localm_llama_runtime"
+    (rt).mkdir(parents=True)
+    (rt / "__init__.py").write_text("SCAFFOLD_V2", encoding="utf-8")   # scaffold CHANGED
+    (root / "runtime" / "README.md").write_text("rt v2", encoding="utf-8")
+    lib = rt / "lib"
+    lib.mkdir()
+    (lib / ".gitkeep").write_text("", encoding="utf-8")                 # scaffold only, NO binary
+
+
+def test_preserve_within_helpers():
+    assert au._within_preserved(_LIB) is True
+    assert au._within_preserved(_LIB + "/llama.dll") is True
+    assert au._within_preserved("runtime/localm_llama_runtime/__init__.py") is False
+    assert au._name_has_preserved("runtime") is True
+    assert au._name_has_preserved("localm") is False
+
+
+def test_swap_preserves_provisioned_binaries_and_updates_scaffold(tmp_path):
+    inst, staged, bdir = tmp_path / "i", tmp_path / "s", tmp_path / "b"
+    inst.mkdir(); staged.mkdir()
+    _install_with_runtime(inst)
+    _staged_with_runtime(staged)
+
+    au.swap_with_backup(staged, inst, bdir)
+
+    # Provisioned binaries SURVIVE (the bug: a whole-tree replace would wipe them).
+    assert (inst / _LIB / "llama.dll").read_bytes() == b"PROVISIONED-NATIVE-BINARY"
+    assert (inst / _LIB / "ggml-base.dll").exists()
+    # ... while the rest of runtime/ (scaffold source) still updates.
+    assert (inst / "runtime/localm_llama_runtime/__init__.py").read_text() == "SCAFFOLD_V2"
+    assert (inst / "runtime" / "README.md").read_text() == "rt v2"
+    # backup skips the preserved binaries (nothing to restore; avoids copying them).
+    assert not (bdir / _LIB / "llama.dll").exists()
+
+
+def test_rollback_keeps_provisioned_binaries_and_restores_scaffold(tmp_path):
+    inst, staged, bdir = tmp_path / "i", tmp_path / "s", tmp_path / "b"
+    inst.mkdir(); staged.mkdir()
+    _install_with_runtime(inst)
+    _staged_with_runtime(staged)
+
+    names = au.swap_with_backup(staged, inst, bdir)
+    au.rollback(bdir, inst, names)
+
+    # Binaries never left; scaffold restored to its pre-apply content.
+    assert (inst / _LIB / "llama.dll").read_bytes() == b"PROVISIONED-NATIVE-BINARY"
+    assert (inst / "runtime/localm_llama_runtime/__init__.py").read_text() == "SCAFFOLD_V1"
+    assert (inst / "runtime" / "README.md").read_text() == "rt v1"
+
+
+def test_swap_does_not_choke_on_a_held_open_binary(tmp_path):
+    """Regression: while localm runs, a loaded DLL is file-locked on Windows; a swap
+    that deletes it raises WinError 32 and can strand a half-applied tree. The preserve
+    keeps the swap off the binary entirely, so it completes with the binary intact.
+    (On POSIX an open file is deletable, so this also pins that the binary is preserved
+    rather than replaced by the empty scaffold.)"""
+    inst, staged, bdir = tmp_path / "i", tmp_path / "s", tmp_path / "b"
+    inst.mkdir(); staged.mkdir()
+    _install_with_runtime(inst)
+    _staged_with_runtime(staged)
+
+    with open(inst / _LIB / "llama.dll", "rb") as _held:   # simulate the running process
+        au.swap_with_backup(staged, inst, bdir)            # must not raise
+    assert (inst / _LIB / "llama.dll").read_bytes() == b"PROVISIONED-NATIVE-BINARY"
+    assert (inst / "runtime/localm_llama_runtime/__init__.py").read_text() == "SCAFFOLD_V2"
+
+
 # --------------------------- post-swap cmd ------------------------------
 
 def test_post_swap_command_per_class():

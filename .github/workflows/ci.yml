@@ -74,7 +74,10 @@ jobs:
           pip install -e ".[dev,rag]"
 
       # The mandated repo-hygiene gate (AGENTS.md): no em/en dashes, no personal
-      # disclosure, no machine-absolute paths in code.
+      # disclosure, no machine-absolute paths in code. It also runs the release-file
+      # manifest gate (scripts/check_manifest.py, folded into check_hygiene): every
+      # tracked file must be classified release-include/-exclude in release-manifest.toml,
+      # nothing local-only may be committed, and no pattern may go stale.
       - name: Hygiene gate
         run: python scripts/check_hygiene.py
 
