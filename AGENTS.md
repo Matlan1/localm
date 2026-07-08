@@ -284,19 +284,25 @@ worktrees, with `master` checked out in one of them. Git refuses to check out a
 branch that is already active in another worktree, so `gh pr merge
 --delete-branch` and `git checkout master` both fail here with `fatal: 'master'
 is already used by worktree ...` (the API merge still lands, but the local
-cleanup errors and leaves the remote branch undeleted). Merge and clean up
-WITHOUT ever checking out master, from the worktree that is on the PR branch:
+cleanup errors and leaves the remote branch undeleted). This repo also has
+`delete_branch_on_merge` enabled, so the remote branch is auto-deleted by the
+merge; running `git push origin --delete` yourself then errors with `remote ref
+does not exist`. Merge and clean up WITHOUT ever checking out master and WITHOUT
+an unconditional remote delete, from the worktree that is on the PR branch:
 
 ```
-gh pr merge <N> --squash            # remote squash-merge only (no --delete-branch)
-git push origin --delete <branch>   # delete the remote branch (does not move HEAD)
-git switch --detach                 # step off the PR branch without checking out master
-git branch -D <branch>              # delete the local branch (no worktree collision)
+gh pr merge <N> --squash    # squash-merge; GitHub auto-deletes the remote branch
+git switch --detach         # step off the PR branch without checking out master
+git branch -D <branch>      # delete the local branch (no worktree collision)
 ```
 
 Confirm with `git ls-remote --heads origin <branch>` (empty means the remote
-branch is gone) and verify the merge landed via `git fetch origin master &&
-git log origin/master -1`, not a local checkout.
+branch is gone) and `git branch --list <branch>` (empty means the local branch
+is gone); verify the merge landed via `git fetch origin master && git log
+origin/master -1`, not a local checkout. Only if `delete_branch_on_merge` is
+ever turned off, delete the remote branch guarded so it never errors:
+`git ls-remote --exit-code --heads origin <branch> >/dev/null 2>&1 && git push
+origin --delete <branch>`.
 
 Guardrails that still apply:
 
