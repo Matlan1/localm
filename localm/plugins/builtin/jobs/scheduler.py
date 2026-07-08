@@ -229,7 +229,6 @@ class JobScheduler:
         except (ValueError, TypeError):
             return False
         return False
-        return False
 
     def _resolve_run(self) -> Callable:
         if self._run_job is not None:

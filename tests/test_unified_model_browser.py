@@ -143,37 +143,51 @@ def test_scan_folder_walk(tmp_path, temp_registry):
     assert reg["flux_unet"]["model_type"] == "diffusion-unet"
 
 
+_UNET_OBJECT_INFO = {
+    "UNETLoader": {
+        "input": {"required": {"unet_name": [["some_model.safetensors"]]}}
+    }
+}
+
+
 def test_scan_object_info_reconcile(tmp_path, temp_registry):
-    """Walk folders, query object_info, and reconcile types dynamically."""
+    """The /object_info reconcile pass classifies a file that folder-walk cannot.
+
+    NOTE: the previous version put the file in a `checkpoints/` folder, which
+    folder-walk already maps via SUBFOLDER_MAPPING, and patched `requests.get` -
+    which this code path never calls (it fetches /object_info via urllib). So the
+    reconcile was never exercised: the test passed on folder-walk alone. Here the
+    file lives in a folder NOT in SUBFOLDER_MAPPING (folder-walk -> "unknown"), so
+    only the reconcile can produce "diffusion-unet", and we patch the ACTUAL
+    fetcher `comfy_object_info`.
+    """
     _, _, registry_file = temp_registry
     comfy_dir = tmp_path / "comfy"
-    
-    # Create a generic folder model (e.g. checkpoints)
-    ckpt_dir = comfy_dir / "models" / "checkpoints"
-    ckpt_dir.mkdir(parents=True)
-    model_file = ckpt_dir / "some_model.safetensors"
-    model_file.write_bytes(b"CKPT")
-
-    # Mock object_info mapping some_model.safetensors to a specific node type that indicates it is a diffusion-unet
-    mock_info = {
-        "UNETLoader": {
-            "input": {
-                "required": {
-                    "unet_name": [["some_model.safetensors"]]
-                }
-            }
-        }
-    }
-
-    mock_resp = MagicMock()
-    mock_resp.ok = True
-    mock_resp.json = lambda: mock_info
+    generic_dir = comfy_dir / "models" / "my_custom_nodes"
+    generic_dir.mkdir(parents=True)
+    (generic_dir / "some_model.safetensors").write_bytes(b"CKPT")
 
     with patch("localm.model_manager.scan.get_comfy_workdir", return_value=str(comfy_dir)):
-        with patch("requests.get", return_value=mock_resp):
+        with patch("localm.model_manager.scan.comfy_object_info",
+                   return_value=_UNET_OBJECT_INFO):
             scan_comfy_models(comfy_url="http://localhost:8188")
 
-    # Reconciled checkpoint mapping should now classify it as diffusion-unet
     reg = mm.load_registry()
     assert "some_model" in reg
     assert reg["some_model"]["model_type"] == "diffusion-unet"
+
+
+def test_scan_without_object_info_leaves_generic_file_unknown(tmp_path, temp_registry):
+    """Guard proving the reconcile is load-bearing: with /object_info unavailable,
+    the same generic-folder file stays 'unknown' (folder-walk cannot classify it)."""
+    comfy_dir = tmp_path / "comfy"
+    generic_dir = comfy_dir / "models" / "my_custom_nodes"
+    generic_dir.mkdir(parents=True)
+    (generic_dir / "some_model.safetensors").write_bytes(b"CKPT")
+
+    with patch("localm.model_manager.scan.get_comfy_workdir", return_value=str(comfy_dir)):
+        with patch("localm.model_manager.scan.comfy_object_info", return_value=None):
+            scan_comfy_models(comfy_url="http://localhost:8188")
+
+    reg = mm.load_registry()
+    assert reg["some_model"]["model_type"] == "unknown"
