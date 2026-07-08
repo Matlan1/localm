@@ -1,0 +1,190 @@
+# Release-file manifest (NEW-RELEASE-FILEMANIFEST). See AGENTS.md and
+# scripts/check_manifest.py.
+#
+# WHAT THIS IS. A single, machine-readable source of truth that classifies every
+# git-tracked file along two independent axes:
+#
+#   1. release.include / release.exclude - of the files that ARE in git, which
+#      ones ship in a release build (the self-updater's build.zip, and any hand-cut
+#      release tarball) and which are tracked-but-dev-only and must NEVER ship.
+#   2. local_only - which paths must NEVER be in git at all (the github-vs-local
+#      boundary), formalizing what .gitignore's section comments only say in prose.
+#
+# WHY IT EXISTS. Two gaps this closes:
+#   - The self-updater (localm/_apply_update.py) swaps EVERY top-level entry of a
+#     downloaded build.zip (except a hard NEVER_TOUCH set) into the install. So the
+#     build.zip contents ARE the de-facto release artifact - yet nothing declared or
+#     verified what belongs in it. release.include is that declaration, and doubles
+#     as the spec scripts/build_release.py uses to actually assemble the build.zip.
+#   - .gitignore's intent ("issues/ and qa/ are local-only", "these workflow JSONs
+#     are personal") lived only in comments: nothing failed if a dev-only file landed
+#     in git without an ignore rule, and nothing re-checked a declared-local pattern
+#     after a rename. local_only + the git check-ignore cross-check make it a gate.
+#
+# HOW IT IS KEPT HONEST. scripts/check_manifest.py (run inside the one CI "Hygiene
+# gate" step and the --install-hook pre-commit hook, via scripts/check_hygiene.py)
+# diffs the real `git ls-files` tree against these lists on every commit/PR and exits
+# non-zero on ANY drift: a tracked file matching neither list (unclassified) or both
+# (ambiguous), a tracked file that matches a local_only pattern (a leak), an
+# include/exclude pattern that matches no tracked file (stale after a rename), or a
+# local_only pattern git no longer ignores (drift vs .gitignore).
+#
+# PATTERN SYNTAX (see _match in scripts/check_manifest.py):
+#   - "foo/"            directory prefix: matches foo/ and everything under it.
+#   - "path/to/file"    exact repo-relative path match.
+#   - "*.pem", "a?b"    glob: fnmatch against the full path OR the basename.
+# Paths are POSIX (forward slashes) and repo-root-relative.
+#
+# WHEN YOU ADD A FILE. A new file under an already-classified tree (e.g. localm/,
+# tests/) needs no change here - the directory pattern covers it. A new TOP-LEVEL
+# file or directory will be flagged "unclassified" until you add it to include or
+# exclude below. That prompt is the whole point: classification is a conscious act.
+
+[release.include]
+# Ships in a release build.zip / self-update. This is the running product: the
+# package, the native-runtime scaffold, branding assets, the user manual, the
+# top-level entry points/installers, and the standalone bug reporter (which must be
+# present even when the install is too broken to import localm).
+patterns = [
+    # --- the product ---
+    "localm/",                 # the Python package (all of it)
+    "runtime/",                # native llama.cpp runtime scaffold; setup-llama
+                               # provisions binaries INTO runtime/.../lib/ (those
+                               # binaries are gitignored; only the scaffold ships)
+    "assets/",                 # localm.ico + localm.svg (app icon / launcher / GUI)
+    "docs/",                   # the user manual. MUST ship: runtime error messages
+                               # point users at docs/ paths ("See docs/gpu-setup.md",
+                               # docs/video.md, ...); dropping it dangles them.
+
+    # --- required by the updater's own gates ---
+    "VERSION",                 # updater.verify_zip requires it; anti-rollback reads it
+    "pyproject.toml",          # verify_zip requires it; classify() diffs deps from it
+    "uv.lock",                 # the pinned set a "deps"-class update reinstalls with
+
+    # --- license / notices / policy (AGPL: ship the license + notices) ---
+    "LICENSE",
+    "THIRD-PARTY-NOTICES.md",
+    "SECURITY.md",
+    "README.md",
+    "CHANGELOG.md",
+
+    # --- installers / setup (re-run on a "setup"-class update) ---
+    "setup.bat",
+    "setup.sh",
+    "install.sh",
+
+    # --- top-level entry shims + native launcher ---
+    "localm.py",
+    "localm.bat",
+    "localm.sh",
+    "localm-launcher.bat",
+    "localm-launcher.sh",
+    "launcher.pyw",
+
+    # --- standalone "report a problem" entry points + reporter -----------------
+    # The root shims run scripts/report_issue.* on ANY Python (or a pure-PowerShell/
+    # curl fallback) so a user can file a bug even when localm will not start. The
+    # reporter is stdlib-only and needs no working install, so it ships.
+    "report-issue.bat",
+    "report-issue.sh",
+    "scripts/report_issue.py",
+    "scripts/report_issue.ps1",
+
+    # --- repo metadata carried with the canonical source tree ---
+    ".gitignore",
+    ".gitattributes",
+]
+
+[release.exclude]
+# Tracked, but has no business in a release artifact: the test suites, CI config,
+# the server-side bug-report proxy, the GUI test harness, and the dev/release
+# tooling (including this manifest and its own checker/builder). Present in the repo
+# and in a dev clone; deliberately left out of build.zip by scripts/build_release.py.
+patterns = [
+    # --- test suites + their harnesses ---
+    "tests/",                  # the Python test suite
+    "tests-js/",               # jsdom GUI tests
+    "tests-e2e/",              # Playwright end-to-end tests
+    "package.json",            # "localm-gui-tests": the JS/e2e harness manifest
+    "package-lock.json",
+    "playwright.config.mjs",
+
+    # --- CI / repo governance ---
+    ".github/",                # workflows, CODEOWNERS, dependabot, PR template
+
+    # --- server-side infra, deployed separately (NOT the localm client) ---
+    "tools/",                  # tools/bugreport-proxy: the Cloudflare Worker
+
+    # --- contributor / agent guides (not the running product) ---
+    "AGENTS.md",
+    "CLAUDE.md",
+
+    # --- dev + release tooling ---
+    "scripts/check_hygiene.py",
+    "scripts/check_llama_abi.py",
+    "scripts/sign_release.py",
+    "scripts/check_manifest.py",
+    "scripts/build_release.py",
+    "release-manifest.toml",   # this file classifies itself: release tooling metadata
+]
+
+[local_only]
+# Paths that must NEVER be committed - the github-vs-local boundary that .gitignore
+# enforces and whose INTENT lived only in .gitignore comments until now. The checker
+# asserts (1) no tracked file matches any pattern here (a leak), and (2) git actually
+# ignores each pattern (so a removed/renamed .gitignore rule is caught, not just the
+# prose drifting from reality).
+#
+# SCOPE. This list is the private/personal/secret CONTENT boundary: local working
+# state, personal choices, and secrets. It intentionally does NOT enumerate transient
+# build artifacts (.venv/, dist/, build/, *.pyc, __pycache__/, node_modules/, the
+# provisioned runtime/.../lib/ binaries, coverage files, playwright caches, *.png
+# screenshots). Those are generated/large and also gitignored, but they are not the
+# "should this be on GitHub" content question this axis is about.
+patterns = [
+    # --- maintainer's private working state (PROTECTED - see AGENTS.md) ---
+    "issues/",                 # the maintainer's backlog (lost once already)
+    "qa/",                     # by-hand test campaign
+    "dev-notes/",              # agent/maintainer worklogs, plans, this file's PLAN.md
+    "scratch/",
+    "_qa_scratch/",
+    "chatlogs_errorlogs/",     # local crash/chat logs
+
+    # --- portable data dir + custom-location marker + install ledger ---
+    "home/",
+    "config.json",
+    "registry.json",
+    "localm-home.cfg",
+    ".localm-install.json",
+
+    # --- editor / assistant configs ---
+    ".claude/",
+    ".localcoder/",
+    ".vscode/",
+    ".idea/",
+
+    # --- internal planning docs kept off the public repo ---
+    "TODO.md",
+    "docs/archive/",
+    "docs/plugin-architecture-plan.md",
+    "task.md",
+    "walkthrough.md",
+    "implementation_plan.md",
+    "flux_local_setup_guide.md",
+    ".commitmsg.txt",
+
+    # --- personal ComfyUI workflows (which models/encoders we use stays private;
+    #     the committed *.example.json templates ship instead) ---
+    "localm/image_gen/flux_workflow.json",
+    "localm/music_gen/ace_workflow_local.json",
+    "localm/video_gen/wan_workflow_local.json",
+
+    # --- machine-specific local integration test + generated launcher ---
+    "tests/test_flux_generation.py",
+    "LocaLM.desktop",
+
+    # --- secrets (never, under any name) ---
+    "*_signing_key.pem",       # e.g. update_signing_key.pem (the release signing key)
+    "*.env",
+    ".env.local",
+]

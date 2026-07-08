@@ -11,6 +11,12 @@ Scans tracked files and fails on:
   3. An absolute or machine-specific path used in code/config (not docs), which
      a default must never assume.
 
+It also runs the release-file manifest gate (scripts/check_manifest.py,
+NEW-RELEASE-FILEMANIFEST): every tracked file must be classified release-include
+or release-exclude, nothing local-only may be committed, and no manifest pattern
+may go stale. Folding it in here means the ONE CI "Hygiene gate" step and the
+--install-hook pre-commit hook cover both without a separate step to remember.
+
 Run before committing:   python scripts/check_hygiene.py
 Install as a git hook:    python scripts/check_hygiene.py --install-hook
 
@@ -137,19 +143,39 @@ def _install_hook() -> int:
     return 0
 
 
+def _manifest_problems() -> list[str]:
+    """The release-file manifest gate's findings (NEW-RELEASE-FILEMANIFEST), run as
+    part of this one hygiene pass. check_manifest lives beside this file; a missing or
+    malformed manifest is reported as a problem, never a silent skip (rule 5)."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    try:
+        import check_manifest
+        return check_manifest.check_manifest()
+    except (FileNotFoundError, ValueError, RuntimeError) as e:
+        return [f"release manifest check could not run: {e}"]
+
+
 def main(argv: list[str]) -> int:
     if "--install-hook" in argv:
         return _install_hook()
     problems: list[str] = []
     for f in _tracked_files():
         problems.extend(_scan(f))
-    if problems:
-        print("Hygiene check FAILED (see AGENTS.md):\n", file=sys.stderr)
-        for p in problems:
-            print("  " + p, file=sys.stderr)
-        print(f"\n{len(problems)} issue(s).", file=sys.stderr)
+    manifest = _manifest_problems()
+    if problems or manifest:
+        if problems:
+            print("Hygiene check FAILED (see AGENTS.md):\n", file=sys.stderr)
+            for p in problems:
+                print("  " + p, file=sys.stderr)
+            print(f"\n{len(problems)} hygiene issue(s).", file=sys.stderr)
+        if manifest:
+            print("\nRelease manifest check FAILED (see release-manifest.toml):\n",
+                  file=sys.stderr)
+            for p in manifest:
+                print("  " + p, file=sys.stderr)
+            print(f"\n{len(manifest)} manifest issue(s).", file=sys.stderr)
         return 1
-    print("Hygiene check passed.")
+    print("Hygiene check passed (content + release manifest).")
     return 0
 
 
