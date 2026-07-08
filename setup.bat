@@ -29,15 +29,67 @@ if /i "%~1"=="uninstall"   goto uninstall
 if /i "%~1"=="--uninstall" goto uninstall
 if /i "%~1"=="--rollback"  goto uninstall
 
-rem ---- uv is required (fast, reliable resolver; handles the GPU wheels) ------
+rem ---- uv is required; bootstrap it ourselves if it is missing --------------
+rem  uv (Astral's fast Python package manager) drives the whole install: it builds
+rem  the venv and resolves the GPU wheels. Rather than dead-ending with "go install
+rem  it yourself", fetch it via Astral's official installer, then make it callable in
+rem  THIS process. The installer updates the persistent USER PATH, but not the PATH
+rem  of a shell that was already running, so we prepend its install dir here. We do
+rem  not hide a bootstrap failure (AGENTS.md rule 5): we re-check that uv is actually
+rem  callable and, if it is not, say so and show the manual options.
 where uv >nul 2>nul
-if errorlevel 1 (
-    echo  [!] uv is not installed. Install it first.
-    echo      winget install astral-sh.uv
-    echo.
-    pause
-    exit /b 1
-)
+if not errorlevel 1 goto uv_ready
+
+echo  [!] uv (the Python package manager localm builds on) is not installed.
+set "GETUV="
+set /p "GETUV=  Install it now with Astral's official installer? [Y/n]: "
+if not defined GETUV set "GETUV=Y"
+if /i "!GETUV:~0,1!"=="N" goto uv_manual
+
+echo.
+echo  Installing uv ...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 | iex"
+rem  Make the freshly installed uv callable for the rest of THIS run (the installer
+rem  updates the persistent USER PATH, not this already-running shell). Prepend every
+rem  dir Astral's installer might have used: an explicit %UV_INSTALL_DIR%, its
+rem  %USERPROFILE%\.local\bin default, the older .cargo\bin, and the domain
+rem  redirected-home %HOMEDRIVE%%HOMEPATH% form. If uv still is not found (an exotic
+rem  install dir), the honest "open a new terminal" fallback below recovers via the
+rem  persistent PATH the installer set.
+rem  Harmless caveat (AGENTS.md rule 5): under this file's EnableDelayedExpansion a
+rem  `!` inside the user's INHERITED PATH is dropped when PATH is re-assigned here.
+rem  Proven harmless: this runs only in the uv-missing branch, the change is
+rem  process-local (never the persistent PATH), and every tool the rest of setup runs
+rem  resolves via an explicit path (.venv\Scripts, System32) or the uv dirs prepended
+rem  above, none of which live in a `!`-named directory. A dir literally named with
+rem  `!` is exotic, and a bulletproof-preserving assignment needs fragile batch not
+rem  worth it here (an endlocal-transport re-enables expansion and strips it anyway).
+set "UVDIRS=%USERPROFILE%\.local\bin;%USERPROFILE%\.cargo\bin;%HOMEDRIVE%%HOMEPATH%\.local\bin"
+if defined UV_INSTALL_DIR set "UVDIRS=%UV_INSTALL_DIR%;%UVDIRS%"
+set "PATH=%UVDIRS%;%PATH%"
+where uv >nul 2>nul
+if not errorlevel 1 goto uv_ready
+
+echo.
+echo  [!] uv still is not callable after the install attempt.
+echo      Open a NEW terminal (so the updated PATH applies) and run setup.bat again,
+echo      or install uv manually first, then re-run setup.bat:
+echo        powershell -ExecutionPolicy Bypass -c "irm https://astral.sh/uv/install.ps1 | iex"
+echo        winget install astral-sh.uv
+echo.
+pause
+exit /b 1
+
+:uv_manual
+echo.
+echo  Setup needs uv. Install it, then re-run setup.bat:
+echo    powershell -ExecutionPolicy Bypass -c "irm https://astral.sh/uv/install.ps1 | iex"
+echo    winget install astral-sh.uv
+echo.
+pause
+exit /b 1
+
+:uv_ready
 
 rem ---- portable vs shared: where the Python runtime + downloads live --------
 rem  Portable pulls uv's managed Python AND its wheel cache INTO this folder, so
