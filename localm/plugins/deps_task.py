@@ -12,9 +12,9 @@ loopback request) may trigger a server-side pip. A remote client is refused.
 
 from __future__ import annotations
 
-import ipaddress
 import threading
 
+from localm.bindhost import is_loopback_host  # noqa: F401  (re-export for back-compat)
 from localm.debuglog import logger
 
 
@@ -67,18 +67,6 @@ def run_dep_install(manager, name: str, task: DepInstallTask) -> None:
         task.emit(f"internal error: {e}")
         result = deps.InstallResult(ok=False, error=str(e))
     task.finish(result)
-
-
-def is_loopback_host(host: str) -> bool:
-    """True for a loopback host (127.0.0.0/8, ::1, localhost)."""
-    if not host:
-        return False
-    if host == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
 
 
 def host_pip_allowed(app) -> bool:

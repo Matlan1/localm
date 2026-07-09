@@ -34,6 +34,7 @@ from fastapi.responses import (
 from fastapi.security import HTTPBearer
 
 from localm import scopes
+from localm.bindhost import is_loopback_host as _is_loopback_host  # noqa: F401  (re-export for back-compat)
 from localm.inference.backends.base import ModelLoadCancelled
 from localm.inference.chat_pipeline import ChatPipeline
 from localm.inference.engine import Engine
@@ -736,6 +737,139 @@ _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
 # 160 MB fits the largest legitimate upload (100 MB decoded ~= 133 MB base64 + JSON
 # wrapper) and rejects larger up front. Read at request time so a test can patch it.
 MAX_REQUEST_BODY_BYTES = 160_000_000
+
+
+class _BodyStreamCapMiddleware:
+    """Enforce MAX_REQUEST_BODY_BYTES on the actual bytes received over the
+    wire, not the client-supplied Content-Length header. ``Transfer-Encoding:
+    chunked`` sends no Content-Length at all, so a plain header check (as a
+    ``@app.middleware("http")``/BaseHTTPMiddleware handler would have to do)
+    never fires - live-verified: a chunked POST to a CORS-exempt route like
+    /v1/chat/completions was fully buffered by FastAPI's own body handling
+    (ahead of any auth dependency or pydantic validation) up to ~5.9 GB RSS
+    from one unauthenticated connection before this fix (AUD-CHUNKED). A pure
+    ASGI middleware class (not the BaseHTTPMiddleware pattern used elsewhere in
+    this file) so it wraps the raw ``receive`` callable BEFORE Starlette/
+    FastAPI's own body-buffering step ever runs; a BaseHTTPMiddleware handler
+    that itself called ``request.body()`` would just reproduce the same
+    unbounded read it is trying to bound.
+
+    Once the cap is crossed this does NOT just raise and let the exception
+    unwind through FastAPI's own body-parsing (that was tried first): FastAPI
+    wraps ANY exception from body reading into a generic 400 "error parsing
+    the body" - worse, raising from deep inside receive() surfaces to it as an
+    ``ExceptionGroup`` (from the anyio task group `BaseHTTPMiddleware` runs the
+    downstream app in), which doesn't match FastAPI's own
+    ``except HTTPException: raise`` passthrough, so the 413 never reaches the
+    client at all - only a bare TCP reset (confirmed live: uvicorn had unread
+    bytes still sitting in the socket's receive buffer when it closed, so the
+    OS sent RST instead of completing the response). Instead: tell the inner
+    app the body simply ENDED at the cap (bounding what it can ever buffer),
+    swallow whatever confused response it tries to send for that truncated
+    body, drain and discard the rest of the real stream so the OS can close
+    the connection cleanly, and send exactly one authoritative 413 ourselves."""
+
+    def __init__(self, app):
+        self._app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+
+        cl = None
+        for name, value in scope.get("headers") or ():
+            if name == b"content-length":
+                try:
+                    cl = int(value)
+                except ValueError:
+                    cl = None
+                break
+        if cl is not None and cl > MAX_REQUEST_BODY_BYTES:
+            # Fast path: reject BEFORE reading any body bytes off the wire.
+            await JSONResponse(
+                status_code=413,
+                content={"detail": "Request body too large."},
+            )(scope, receive, send)
+            return
+
+        total = 0
+        exceeded = False
+        real_stream_done = False
+
+        async def _capped_receive():
+            nonlocal total, exceeded, real_stream_done
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                real_stream_done = True
+                return message
+            if message["type"] == "http.request":
+                if not message.get("more_body", False):
+                    real_stream_done = True
+                total += len(message.get("body") or b"")
+                if total > MAX_REQUEST_BODY_BYTES:
+                    exceeded = True
+                    # Tell the inner app the body ends HERE, even though the
+                    # real client may still be sending - bounds what it can
+                    # ever accumulate instead of leaving it to keep reading a
+                    # never-ending stream via this same wrapped receive.
+                    return {"type": "http.request", "body": b"", "more_body": False}
+            return message
+
+        async def _suppressing_send(message):
+            # The inner app now believes it got a (truncated) body and will
+            # try to respond to it - never let that response reach the real
+            # client; the 413 below is authoritative once exceeded.
+            if not exceeded:
+                await send(message)
+
+        try:
+            await self._app(scope, _capped_receive, _suppressing_send)
+        except Exception:
+            if not exceeded:
+                raise
+            # Suppressed: the inner app choked on a body we deliberately cut
+            # short (e.g. invalid JSON at the truncation point) - irrelevant,
+            # the request is rejected as too large regardless of what its
+            # first MAX_REQUEST_BODY_BYTES happened to contain.
+
+        if exceeded:
+            # Drain the rest of the real stream (if the client had not already
+            # finished sending it) so the OS does not RST the connection on
+            # close over unread bytes still in its receive buffer, which would
+            # silently discard the 413 response below. Bytes are discarded
+            # immediately, not accumulated, so this cannot reproduce the
+            # unbounded-memory bug - but a client that goes silent mid-stream
+            # (stops sending, never signals more_body=False, never disconnects)
+            # would otherwise leave this loop's `await receive()` blocked
+            # forever, trading the memory-exhaustion bug for a connection/task
+            # left open indefinitely (AUD-CHUNKED follow-up). Bound BOTH bytes
+            # drained AND wall-clock time spent draining; past either ceiling,
+            # give up on the graceful drain (a possible RST instead of a clean
+            # 413 response is an acceptable trade for not hanging a task).
+            drained = 0
+            drain_ceiling = MAX_REQUEST_BODY_BYTES * 4
+            drain_deadline = time.monotonic() + 30.0
+            while not real_stream_done and drained <= drain_ceiling:
+                remaining = drain_deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    message = await asyncio.wait_for(receive(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    break
+                if message["type"] == "http.disconnect":
+                    real_stream_done = True
+                    break
+                drained += len(message.get("body") or b"")
+                if not message.get("more_body", False):
+                    real_stream_done = True
+            await JSONResponse(
+                status_code=413,
+                content={"detail": "Request body too large."},
+            )(scope, receive, send)
+
+
 # SEAMLESS: the session cookie PERSISTS so the user stays signed in across a browser
 # or PWA restart (a drop-on-close cookie made the key gate and its "Install
 # certificate" step reappear every restart). Browsers clamp lifetime to ~400 days,
@@ -987,25 +1121,6 @@ def require_fs_host(request: Request) -> None:
         raise HTTPException(
             status_code=403,
             detail="This key does not have host filesystem access")
-
-
-def _is_loopback_host(host: str) -> bool:
-    """True for a loopback bind host (127.0.0.0/8, ::1, localhost).
-
-    Decisions that must distinguish a local-only server from a network-exposed
-    one key off the CONFIGURED bind host, never the request peer: portmux relays
-    every connection through an internal loopback socket, so the peer always looks
-    like 127.0.0.1 even for a genuinely remote client (see portmux.py, and
-    gui/web.py which makes the same choice for open-mode key seeding)."""
-    import ipaddress
-    if not host:
-        return False
-    if host == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
 
 
 # Surface mounting (H6 phase 5: on-demand GUI on a running instance).
@@ -1483,26 +1598,39 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     _cors_allowlist = cors_cfg if isinstance(cors_cfg, list) else []
     _cors_wildcard = cors_cfg == "*"
 
+    def _cross_origin_refused(request) -> bool:
+        """True when this request carries an Origin header that is neither
+        same-origin nor CORS-allow-listed. Shared by the CSRF check (unsafe
+        methods) and the open-mode shell-token gate (AUD-CORSTOKEN): the default
+        CORS policy lets any http(s)://localhost:PORT / 127.0.0.1:PORT origin
+        READ a matching response, so a hostile local page can steal the shell
+        token from a plain cross-origin ``GET /`` and replay it - token
+        possession alone does not prove the caller IS the loopback GUI shell.
+        "cors_origins": "*" opts OUT of this specific check (AUD-CORSWILD), same
+        as it already did for the CSRF check; it does not waive the shell-token
+        requirement itself."""
+        if _cors_wildcard:
+            return False
+        origin = request.headers.get("origin")
+        if not origin:
+            return False
+        allowlisted = origin in _cors_allowlist
+        host = request.headers.get("host", "")
+        same_origin = origin.split("://", 1)[-1] == host
+        return not (same_origin or allowlisted)
+
     @app.middleware("http")
     async def _origin_guard(request, call_next):
         if (request.method in _UNSAFE_METHODS
                 and not request.url.path.startswith(_CROSS_ORIGIN_OK)):
-            # Same-origin / CORS-allowlist check. "cors_origins": "*" opts OUT of
-            # THIS check only; it must NOT also waive the open-mode shell-token
-            # gate below, a separate credential requirement (AUD-CORSWILD).
-            if not _cors_wildcard:
-                origin = request.headers.get("origin")
-                allowlisted = bool(origin) and origin in _cors_allowlist
-                if origin:
-                    host = request.headers.get("host", "")
-                    same_origin = origin.split("://", 1)[-1] == host
-                    if not (same_origin or allowlisted):
-                        return JSONResponse(
-                            status_code=403,
-                            content={"detail": "Cross-origin request refused "
-                                     "(only same-origin requests or a configured "
-                                     "'cors_origins' may use this endpoint)."},
-                        )
+            # Same-origin / CORS-allowlist check.
+            if _cross_origin_refused(request):
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "Cross-origin request refused "
+                             "(only same-origin requests or a configured "
+                             "'cors_origins' may use this endpoint)."},
+                )
             # H5: open-mode management gate. With no key configured, management
             # routes still require the per-process shell token (injected into the
             # loopback GUI shell), so a no-Origin local client (curl, a script)
@@ -1524,31 +1652,23 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
             if not any_key_configured() and not require_auth_enabled():
                 token = getattr(request.app.state, "shell_token", None)
                 presented = _bearer_token(request)
-                if not (token and presented
-                        and hmac.compare_digest(presented, token)):
+                token_ok = bool(token and presented
+                                 and hmac.compare_digest(presented, token))
+                # AUD-CORSTOKEN: an unsafe-method request already passed the
+                # same-origin check above (or is exempt as _CROSS_ORIGIN_OK,
+                # which never reaches here); a metadata GET never went through
+                # that block at all, so it must pass the identical check here -
+                # otherwise a token stolen via CORS (the default policy trusts
+                # every localhost:PORT origin to READ a response) is directly
+                # replayable cross-origin against every /api/*, /v1/* read.
+                cross_origin = is_metadata_get and _cross_origin_refused(request)
+                if not token_ok or cross_origin:
                     return JSONResponse(
                         status_code=403,
                         content={"detail": "Open-mode management requires the "
                                  "localm GUI shell on this machine, or an API key "
                                  "(run 'localm key generate')."},
                     )
-        return await call_next(request)
-
-    @app.middleware("http")
-    async def _limit_body_size(request, call_next):
-        # Reject an over-large body from Content-Length before Starlette parses it
-        # (see MAX_REQUEST_BODY_BYTES). Read the global at call time so it stays
-        # monkeypatchable.
-        cl = request.headers.get("content-length")
-        if cl is not None:
-            try:
-                too_big = int(cl) > MAX_REQUEST_BODY_BYTES
-            except ValueError:
-                too_big = False
-            if too_big:
-                return JSONResponse(
-                    status_code=413,
-                    content={"detail": "Request body too large."})
         return await call_next(request)
 
     # Security response headers (R41 defense-in-depth). The user-content render
@@ -1601,6 +1721,10 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
             if not _is_loopback_host(host):
                 return JSONResponse(status_code=404, content={"detail": "Not Found"})
         return await call_next(request)
+
+    # Added LAST (== outermost, sees the raw ASGI receive() before every other
+    # middleware/BaseHTTPMiddleware handler above, none of which touch the body).
+    app.add_middleware(_BodyStreamCapMiddleware)
 
     # Route groups (extracted to localm/inference/routes/*.py).
     # The engine + inference semaphore are module globals read live by the route
