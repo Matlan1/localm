@@ -110,6 +110,49 @@ def test_all_skips_malformed_lines(home, tmp_path):
     assert len(store.all()) == 1        # the bad line is skipped, not fatal
 
 
+def test_concurrent_add_and_all_survive_a_racing_replace(home, tmp_path):
+    """A writer looping add() and readers looping all() hit the same file
+    concurrently (this is the real shape of a GUI poll racing a session-close
+    reflection write). On Windows, add()'s atomic temp-file replace can
+    momentarily deny a concurrent open of the destination and vice versa; both
+    sides must retry through the transient PermissionError, not raise it."""
+    import threading
+    import time
+
+    store_w = EpisodeStore(tmp_path)
+    errors: list = []
+    stop = threading.Event()
+
+    def writer():
+        n = 0
+        while not stop.is_set():
+            try:
+                store_w.add(Episode(task=f"t{n}", lesson="L"))
+            except Exception as e:                       # pragma: no cover - failure path
+                errors.append(("write", e))
+            n += 1
+            time.sleep(0.005)
+
+    def reader():
+        store_r = EpisodeStore(tmp_path)
+        while not stop.is_set():
+            try:
+                store_r.all()
+            except Exception as e:                        # pragma: no cover - failure path
+                errors.append(("read", e))
+            time.sleep(0.005)
+
+    threads = [threading.Thread(target=writer)] + [threading.Thread(target=reader) for _ in range(3)]
+    for t in threads:
+        t.start()
+    time.sleep(1.0)
+    stop.set()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert errors == []
+
+
 # --------------------------------------------------------------------------- #
 #  Retrieval (BM25)                                                           #
 # --------------------------------------------------------------------------- #
