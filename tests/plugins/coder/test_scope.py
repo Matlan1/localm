@@ -9,6 +9,8 @@ outside the glob pattern must be rejected without reaching the tool function.
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from localm.plugins.coder.agent import Agent, _SCOPED_TOOLS
 
 
@@ -164,20 +166,16 @@ class TestScopeEnforcement:
 # ---------------------------------------------------------------------------
 
 class TestScopedToolsSet:
-    def test_read_file_in_scoped_tools(self):
-        assert "read_file" in _SCOPED_TOOLS
-
-    def test_write_file_in_scoped_tools(self):
-        assert "write_file" in _SCOPED_TOOLS
-
-    def test_edit_file_in_scoped_tools(self):
-        assert "edit_file" in _SCOPED_TOOLS
-
-    def test_patch_file_in_scoped_tools(self):
-        assert "patch_file" in _SCOPED_TOOLS
-
-    def test_run_shell_not_in_scoped_tools(self):
-        assert "run_shell" not in _SCOPED_TOOLS
-
-    def test_fetch_url_not_in_scoped_tools(self):
-        assert "fetch_url" not in _SCOPED_TOOLS
+    @pytest.mark.parametrize(
+        "tool,expected",
+        [
+            ("read_file", True),
+            ("write_file", True),
+            ("edit_file", True),
+            ("patch_file", True),
+            ("run_shell", False),
+            ("fetch_url", False),
+        ],
+    )
+    def test_tool_in_scoped_tools(self, tool, expected):
+        assert (tool in _SCOPED_TOOLS) == expected

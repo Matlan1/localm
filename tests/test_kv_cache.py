@@ -22,21 +22,18 @@ from tests._fake_batch import fake_batch_init
 #  _common_prefix_len
 # ---------------------------------------------------------------------------
 
-class TestCommonPrefixLen:
-    def test_identical(self):
-        assert _common_prefix_len([1, 2, 3], [1, 2, 3]) == 3
-
-    def test_disjoint(self):
-        assert _common_prefix_len([1, 2], [9, 8]) == 0
-
-    def test_partial(self):
-        assert _common_prefix_len([1, 2, 3, 4], [1, 2, 9]) == 2
-
-    def test_one_is_prefix_of_other(self):
-        assert _common_prefix_len([1, 2], [1, 2, 3, 4]) == 2
-
-    def test_empty(self):
-        assert _common_prefix_len([], [1, 2]) == 0
+@pytest.mark.parametrize(
+    "a,b,expected",
+    [
+        pytest.param([1, 2, 3], [1, 2, 3], 3, id="identical"),
+        pytest.param([1, 2], [9, 8], 0, id="disjoint"),
+        pytest.param([1, 2, 3, 4], [1, 2, 9], 2, id="partial"),
+        pytest.param([1, 2], [1, 2, 3, 4], 2, id="one_is_prefix_of_other"),
+        pytest.param([], [1, 2], 0, id="empty"),
+    ],
+)
+def test_common_prefix_len(a, b, expected):
+    assert _common_prefix_len(a, b) == expected
 
 
 # ---------------------------------------------------------------------------

@@ -29,23 +29,21 @@ from localm.plugins.coder.audit import (
 # ---------------------------------------------------------------------------
 
 class TestSessionMode:
-    def test_privacy_value(self):
-        assert SessionMode.PRIVACY.value == "privacy"
+    @pytest.mark.parametrize("mode,expected", [
+        (SessionMode.PRIVACY, "privacy"),
+        (SessionMode.LOG, "log"),
+        (SessionMode.FULL, "full"),
+    ])
+    def test_value(self, mode, expected):
+        assert mode.value == expected
 
-    def test_log_value(self):
-        assert SessionMode.LOG.value == "log"
-
-    def test_full_value(self):
-        assert SessionMode.FULL.value == "full"
-
-    def test_parse_privacy(self):
-        assert parse_mode("privacy") == SessionMode.PRIVACY
-
-    def test_parse_log(self):
-        assert parse_mode("log") == SessionMode.LOG
-
-    def test_parse_full(self):
-        assert parse_mode("full") == SessionMode.FULL
+    @pytest.mark.parametrize("raw,expected", [
+        ("privacy", SessionMode.PRIVACY),
+        ("log", SessionMode.LOG),
+        ("full", SessionMode.FULL),
+    ])
+    def test_parse(self, raw, expected):
+        assert parse_mode(raw) == expected
 
     def test_parse_uppercase(self):
         assert parse_mode("LOG") == SessionMode.LOG
@@ -149,15 +147,10 @@ class TestMakeAuditLog:
         result = make_audit_log(SessionMode.PRIVACY)
         assert isinstance(result, NullAuditLog)
 
-    def test_log_returns_real(self, tmp_path):
+    @pytest.mark.parametrize("mode", [SessionMode.LOG, SessionMode.FULL])
+    def test_non_privacy_returns_real(self, mode, tmp_path):
         with patch("localm.plugins.coder.audit._SESSIONS_DIR", tmp_path):
-            result = make_audit_log(SessionMode.LOG, label="x")
-        assert isinstance(result, AuditLog)
-        result.close()
-
-    def test_full_returns_real(self, tmp_path):
-        with patch("localm.plugins.coder.audit._SESSIONS_DIR", tmp_path):
-            result = make_audit_log(SessionMode.FULL, label="x")
+            result = make_audit_log(mode, label="x")
         assert isinstance(result, AuditLog)
         result.close()
 
@@ -181,13 +174,9 @@ def _make_agent(tmp_path, mode):
 
 
 class TestAgentClose:
-    def test_privacy_close_returns_none(self, tmp_path):
-        agent = _make_agent(tmp_path, SessionMode.PRIVACY)
-        result = agent.close()
-        assert result is None
-
-    def test_log_close_returns_none(self, tmp_path):
-        agent = _make_agent(tmp_path, SessionMode.LOG)
+    @pytest.mark.parametrize("mode", [SessionMode.PRIVACY, SessionMode.LOG])
+    def test_non_full_close_returns_none(self, mode, tmp_path):
+        agent = _make_agent(tmp_path, mode)
         result = agent.close()
         assert result is None
 

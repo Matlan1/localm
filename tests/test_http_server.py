@@ -150,12 +150,9 @@ class TestChatCompletionsNonStreaming(unittest.TestCase):
         }
         return self.client.post("/v1/chat/completions", json=payload)
 
-    def test_non_streaming_returns_200(self):
-        r = self._post()
-        self.assertEqual(r.status_code, 200)
-
     def test_non_streaming_has_content(self):
         r = self._post()
+        self.assertEqual(r.status_code, 200)
         data = r.json()
         content = data["choices"][0]["message"]["content"]
         self.assertIn("Hello", content)
@@ -211,11 +208,6 @@ class TestChatCompletionsStreaming(unittest.TestCase):
         usage = done_chunks[0].get("usage")
         self.assertIsNotNone(usage)
         self.assertGreater(usage["total_tokens"], 0)
-
-    def test_streaming_final_chunk_finish_reason_stop(self):
-        chunks = self._stream_chunks()
-        finish_reasons = [c["choices"][0].get("finish_reason") for c in chunks]
-        self.assertIn("stop", finish_reasons)
 
 
 if __name__ == "__main__":

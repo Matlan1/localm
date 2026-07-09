@@ -60,6 +60,10 @@ def test_direct_first_part_stays_correct(tmp_path, isolated_home):
 
 
 def test_non_split_single_file_unaffected(tmp_path, isolated_home):
+    # Re-asserts the same baseline as test_pull_local_path.py's
+    # test_gguf_returns_true_and_registers, on purpose: it is the "unaffected"
+    # control alongside this file's split-part normalize/edge cases above, not
+    # new coverage of add_local itself.
     d = tmp_path / "models"
     d.mkdir()
     solo = _gguf(d, "solo.gguf")

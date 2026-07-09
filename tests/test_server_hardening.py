@@ -4,6 +4,7 @@
 import os
 from unittest.mock import MagicMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from localm.cli import _exposed_bind_warning
@@ -39,17 +40,12 @@ class TestCorsLockdown:
                        headers={"Origin": "https://evil.example"})
         assert "access-control-allow-origin" not in r.headers
 
-    def test_localhost_origin_allowed_by_default(self):
+    @pytest.mark.parametrize("origin", ["http://localhost:5173", "http://127.0.0.1:8642"])
+    def test_default_local_origin_allowed(self, origin):
         with _client() as c:
             r = c.post("/v1/chat/completions", json=CHAT,
-                       headers={"Origin": "http://localhost:5173"})
-        assert r.headers.get("access-control-allow-origin") == "http://localhost:5173"
-
-    def test_127_origin_allowed_by_default(self):
-        with _client() as c:
-            r = c.post("/v1/chat/completions", json=CHAT,
-                       headers={"Origin": "http://127.0.0.1:8642"})
-        assert r.headers.get("access-control-allow-origin") == "http://127.0.0.1:8642"
+                       headers={"Origin": origin})
+        assert r.headers.get("access-control-allow-origin") == origin
 
     def test_wildcard_opt_in_allows_everything(self):
         with _client(cors_cfg="*") as c:

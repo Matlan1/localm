@@ -81,8 +81,20 @@ def test_settings_combines_share_config_and_backend_warnings():
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.parametrize("plugin", ["image", "music", "video"])
-def test_unknown_backend_still_routes_to_comfy(plugin):
+def test_unknown_backend_still_routes_to_comfy(plugin, monkeypatch):
     backend = importlib.import_module(f"localm.plugins.builtin.{plugin}.backend")
     assert backend._impl({"backend": "nope"}) is backend._COMFY_REF
     assert backend._impl({"backend": "comfy"}) is backend._COMFY_REF
     assert backend._impl({}) is backend._COMFY_REF
+
+    # Prove load_backend is actually invoked (not just skipped because the
+    # plugin dir happens to lack a 'nope.py') by forcing the real failure mode.
+    calls = []
+
+    def boom(package, name):
+        calls.append((package, name))
+        raise ModuleNotFoundError(name)
+
+    monkeypatch.setattr(media_config, "load_backend", boom)
+    assert backend._impl({"backend": "ghost"}) is backend._COMFY_REF
+    assert calls == [(f"localm.plugins.builtin.{plugin}", "ghost")]

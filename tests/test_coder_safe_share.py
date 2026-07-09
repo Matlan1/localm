@@ -175,6 +175,9 @@ def _coder_app(tmp_path, monkeypatch, *, api_key):
 
 
 def test_scoped_coder_key_is_locked_to_safe_tools_and_confined(tmp_path, monkeypatch):
+    # Also serves as the coder:full non-regression check: proves a plain coder
+    # key's restricted behavior (run_shell disabled, cwd confined) held after
+    # coder:full was introduced.
     proj = tmp_path / "proj"; proj.mkdir()
     other = tmp_path / "other"; other.mkdir()
     app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
@@ -398,23 +401,6 @@ def test_coder_full_key_gets_the_unrestricted_coder(tmp_path, monkeypatch):
         sess = app.state.coder_sessions.get(r.json()["id"])
         assert not sess.agent.disabled_tools              # run_shell intact
         assert sess.restricted is False
-
-
-def test_plain_coder_key_stays_restricted(tmp_path, monkeypatch):
-    # Regression: a plain coder key (no coder:full) is still restricted.
-    proj = tmp_path / "proj"; proj.mkdir()
-    app = _coder_app(tmp_path, monkeypatch, api_key="ownersecret")
-    app.state.root_dir = str(proj)
-    from localm import auth
-    plain = auth.create_key("phone", ["coder"])
-
-    with TestClient(app) as client:
-        r = client.post("/api/coder/sessions",
-                        headers={"Authorization": f"Bearer {plain['key']}"},
-                        json={"cwd": str(proj)})
-        sess = app.state.coder_sessions.get(r.json()["id"])
-        assert sess.restricted is True
-        assert "run_shell" in sess.agent.disabled_tools
 
 
 # ------------------------------------------------------------------ #

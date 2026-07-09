@@ -104,15 +104,20 @@ class TestClassifyProblems:
         # It is both unclassified AND a leak; the leak message must be present.
         assert any("update_signing_key.pem" in p and "local-only" in p for p in problems), problems
 
-    def test_stale_include_pattern_is_flagged(self):
-        inc = self.INC + ["gone/"]
-        problems = cm.classify_problems(self._clean_tree(), inc, self.EXC, self.LOC)
-        assert any("gone/" in p and "stale" in p for p in problems), problems
-
-    def test_stale_exclude_pattern_is_flagged(self):
-        exc = self.EXC + ["removed_dir/"]
-        problems = cm.classify_problems(self._clean_tree(), self.INC, exc, self.LOC)
-        assert any("removed_dir/" in p and "stale" in p for p in problems), problems
+    @pytest.mark.parametrize(
+        ("list_attr", "extra_pattern", "expect_substr"),
+        [
+            ("INC", "gone/", "release.include"),
+            ("EXC", "removed_dir/", "release.exclude"),
+        ],
+    )
+    def test_stale_pattern_is_flagged(self, list_attr, extra_pattern, expect_substr):
+        inc = self.INC + [extra_pattern] if list_attr == "INC" else self.INC
+        exc = self.EXC + [extra_pattern] if list_attr == "EXC" else self.EXC
+        problems = cm.classify_problems(self._clean_tree(), inc, exc, self.LOC)
+        assert any(
+            extra_pattern in p and "stale" in p and expect_substr in p for p in problems
+        ), problems
 
     def test_rename_fires_both_ends(self):
         # tests/ renamed to test/: the tests/ exclude goes stale AND the new files

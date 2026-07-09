@@ -55,35 +55,18 @@ class TestLoadProjectConfig:
     def test_empty_when_no_file(self, tmp_path):
         assert load_project_config(tmp_path) == {}
 
-    def test_loads_model(self, tmp_path):
-        self._write_cfg(tmp_path, 'model = "gemma4-4b"\n')
+    @pytest.mark.parametrize("toml_line,key,expected", [
+        ('model = "gemma4-4b"\n', "model", "gemma4-4b"),
+        ("max_turns = 25\n", "max_turns", 25),
+        ("auto_approve = true\n", "auto_approve", True),
+        ("max_tokens = 4096\n", "max_tokens", 4096),
+        ("temperature = 0.5\n", "temperature", pytest.approx(0.5)),
+        ('memory_file = ".localcoder/notes.md"\n', "memory_file", ".localcoder/notes.md"),
+    ])
+    def test_loads_single_key(self, tmp_path, toml_line, key, expected):
+        self._write_cfg(tmp_path, toml_line)
         cfg = load_project_config(tmp_path)
-        assert cfg["model"] == "gemma4-4b"
-
-    def test_loads_max_turns(self, tmp_path):
-        self._write_cfg(tmp_path, "max_turns = 25\n")
-        cfg = load_project_config(tmp_path)
-        assert cfg["max_turns"] == 25
-
-    def test_loads_auto_approve(self, tmp_path):
-        self._write_cfg(tmp_path, "auto_approve = true\n")
-        cfg = load_project_config(tmp_path)
-        assert cfg["auto_approve"] is True
-
-    def test_loads_max_tokens(self, tmp_path):
-        self._write_cfg(tmp_path, "max_tokens = 4096\n")
-        cfg = load_project_config(tmp_path)
-        assert cfg["max_tokens"] == 4096
-
-    def test_loads_temperature(self, tmp_path):
-        self._write_cfg(tmp_path, "temperature = 0.5\n")
-        cfg = load_project_config(tmp_path)
-        assert cfg["temperature"] == pytest.approx(0.5)
-
-    def test_loads_memory_file(self, tmp_path):
-        self._write_cfg(tmp_path, 'memory_file = ".localcoder/notes.md"\n')
-        cfg = load_project_config(tmp_path)
-        assert cfg["memory_file"] == ".localcoder/notes.md"
+        assert cfg[key] == expected
 
     def test_ignores_unknown_keys(self, tmp_path):
         self._write_cfg(tmp_path, 'unknown_key = "hello"\nmodel = "phi4"\n')

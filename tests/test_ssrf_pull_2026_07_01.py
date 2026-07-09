@@ -17,20 +17,16 @@ def test_pull_model_refused_when_net_mode_off(monkeypatch):
     assert pullmod.pull_model("https://example.com/model.gguf") is False
 
 
-def test_ssrf_resolver_refuses_loopback(monkeypatch):
+@pytest.mark.parametrize("url", [
+    pytest.param("http://127.0.0.1:8000/model.gguf", id="loopback"),
+    pytest.param("http://169.254.169.254/latest/meta-data/", id="cloud-metadata"),
+])
+def test_ssrf_resolver_refuses_private_targets(monkeypatch, url):
     from localm.model_manager.pull import _ssrf_resolve_final_url
     from localm.netpolicy import NetworkPolicyError
     monkeypatch.setenv("LOCALM_NET_MODE", "allow")     # isolate the IP-class check
     with pytest.raises(NetworkPolicyError):
-        _ssrf_resolve_final_url("http://127.0.0.1:8000/model.gguf")
-
-
-def test_ssrf_resolver_refuses_cloud_metadata(monkeypatch):
-    from localm.model_manager.pull import _ssrf_resolve_final_url
-    from localm.netpolicy import NetworkPolicyError
-    monkeypatch.setenv("LOCALM_NET_MODE", "allow")
-    with pytest.raises(NetworkPolicyError):
-        _ssrf_resolve_final_url("http://169.254.169.254/latest/meta-data/")
+        _ssrf_resolve_final_url(url)
 
 
 def test_pull_url_refuses_loopback_returns_false(monkeypatch, tmp_path):

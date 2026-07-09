@@ -117,15 +117,6 @@ class TestHTTPBackendChatStream(unittest.TestCase):
         list(backend.chat_stream([{"role": "user", "content": "hi"}]))
         self.assertEqual(backend.last_usage, {})
 
-    @patch("requests.post")
-    def test_stream_empty_usage_when_not_provided(self, mock_post):
-        """If the server omits usage, last_usage should be empty dict (not crash)."""
-        mock_post.return_value = self._make_stream_response(["hello"], {})
-        backend = _make_backend()
-        list(backend.chat_stream([{"role": "user", "content": "hi"}]))
-        # {} means the server didn't send usage - that's fine
-        self.assertIsInstance(backend.last_usage, dict)
-
 
 if __name__ == "__main__":
     unittest.main()

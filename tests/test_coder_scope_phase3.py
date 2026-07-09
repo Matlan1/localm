@@ -143,28 +143,56 @@ class TestScopedToolCoverage:
     def test_run_shell_stays_unscoped(self):
         assert "run_shell" not in _SCOPED_TOOLS
 
-    def test_grep_path_outside_scope_rejected(self, tmp_path):
-        agent = _make_agent(tmp_path, scope="src/*.py")
+    @pytest.mark.parametrize(
+        "scope,tool_name,kwargs",
+        [
+            pytest.param(
+                "src/*.py", "grep",
+                {"pattern": "TODO", "path": "docs"},
+                id="grep_path",
+            ),
+            # grep keys on the glob arg too, not just path
+            pytest.param(
+                "src/*.py", "grep",
+                {"pattern": "TODO", "glob": "docs/*.md"},
+                id="grep_glob",
+            ),
+            # search_replace's primary scope target is the glob arg
+            pytest.param(
+                "src/*.py", "search_replace",
+                {"pattern": "a", "replacement": "b", "glob": "tests/**/*.py"},
+                id="search_replace_glob",
+            ),
+            # generate_image's primary scope target is output_path
+            pytest.param(
+                "art/*.png", "generate_image",
+                {"prompt": "a cat", "output_path": "out/x.png"},
+                id="generate_image_output_path",
+            ),
+            # img2img input_image re-audit residual: it was previously unscoped,
+            # so a scoped agent could read any file as an img2img source
+            pytest.param(
+                "art/*.png", "generate_image",
+                {"prompt": "a cat", "output_path": "art/ok.png",
+                 "input_image": "secret/private.png"},
+                id="generate_image_input_image",
+            ),
+            pytest.param(
+                "src/*.py", "edit_notebook_cell",
+                {"path": "nb/x.ipynb", "cell_index": 0, "source": "x=1"},
+                id="edit_notebook_cell",
+            ),
+            pytest.param(
+                "src/*.py", "read_env",
+                {"path": "secrets/.env"},
+                id="read_env",
+            ),
+        ],
+    )
+    def test_outside_scope_rejected(self, tmp_path, scope, tool_name, kwargs):
+        agent = _make_agent(tmp_path, scope=scope)
         result = agent._execute_tool(
-            _call("grep", pattern="TODO", path="docs"), interactive=False
-        )
-        assert _rejected(result)
-
-    def test_grep_glob_outside_scope_rejected(self, tmp_path):
-        """grep keys on the glob arg too - a glob outside scope is rejected."""
-        agent = _make_agent(tmp_path, scope="src/*.py")
-        result = agent._execute_tool(
-            _call("grep", pattern="TODO", glob="docs/*.md"), interactive=False
-        )
-        assert _rejected(result)
-
-    def test_search_replace_glob_outside_scope_rejected(self, tmp_path):
-        """search_replace's primary target is the glob arg."""
-        agent = _make_agent(tmp_path, scope="src/*.py")
-        result = agent._execute_tool(
-            _call("search_replace", pattern="a", replacement="b",
-                  glob="tests/**/*.py"),
-            interactive=False,
+            _call(tool_name, **kwargs), interactive=False
         )
         assert _rejected(result)
 
@@ -176,42 +204,6 @@ class TestScopedToolCoverage:
             interactive=False,
         )
         assert "outside the active scope" not in result.output
-
-    def test_generate_image_output_path_outside_scope_rejected(self, tmp_path):
-        """generate_image's primary target is output_path."""
-        agent = _make_agent(tmp_path, scope="art/*.png")
-        result = agent._execute_tool(
-            _call("generate_image", prompt="a cat", output_path="out/x.png"),
-            interactive=False,
-        )
-        assert _rejected(result)
-
-    def test_generate_image_input_image_outside_scope_rejected(self, tmp_path):
-        """img2img input_image is also scope-checked (re-audit residual: it was
-        not, so a scoped agent could read any file as an img2img source)."""
-        agent = _make_agent(tmp_path, scope="art/*.png")
-        result = agent._execute_tool(
-            _call("generate_image", prompt="a cat",
-                  output_path="art/ok.png", input_image="secret/private.png"),
-            interactive=False,
-        )
-        assert _rejected(result)
-
-    def test_edit_notebook_cell_outside_scope_rejected(self, tmp_path):
-        agent = _make_agent(tmp_path, scope="src/*.py")
-        result = agent._execute_tool(
-            _call("edit_notebook_cell", path="nb/x.ipynb",
-                  cell_index=0, source="x=1"),
-            interactive=False,
-        )
-        assert _rejected(result)
-
-    def test_read_env_outside_scope_rejected(self, tmp_path):
-        agent = _make_agent(tmp_path, scope="src/*.py")
-        result = agent._execute_tool(
-            _call("read_env", path="secrets/.env"), interactive=False
-        )
-        assert _rejected(result)
 
     def test_run_shell_not_scope_filtered(self, tmp_path):
         """run_shell is intentionally unscoped - never scope-rejected."""

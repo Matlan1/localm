@@ -16,6 +16,7 @@ import sys
 import pytest
 from unittest.mock import MagicMock, patch
 
+from localm.plugins.coder.audit import SessionMode
 from localm.plugins.coder.privacy import (
     subprocess_privacy_env,
     suppress_readline_history,
@@ -66,30 +67,22 @@ class TestSuppressReadlineHistory:
 # ---------------------------------------------------------------------------
 
 class TestSubprocessPrivacyEnv:
-    def test_returns_dict(self):
-        result = subprocess_privacy_env()
+    @pytest.fixture
+    def result(self):
+        return subprocess_privacy_env()
+
+    def test_returns_dict(self, result):
         assert isinstance(result, dict)
 
-    def test_histfile_is_devnull(self):
-        result = subprocess_privacy_env()
-        import os
-        expected = "NUL" if sys.platform == "win32" else os.devnull
-        assert result["HISTFILE"] == expected
-
-    def test_histsize_is_zero(self):
-        assert subprocess_privacy_env()["HISTSIZE"] == "0"
-
-    def test_histfilesize_is_zero(self):
-        assert subprocess_privacy_env()["HISTFILESIZE"] == "0"
-
-    def test_histignore_blocks_all(self):
-        assert subprocess_privacy_env()["HISTIGNORE"] == "*"
-
-    def test_lesshistfile_is_devnull(self):
-        result = subprocess_privacy_env()
-        import os
-        expected = "NUL" if sys.platform == "win32" else os.devnull
-        assert result["LESSHISTFILE"] == expected
+    @pytest.mark.parametrize("key,expected", [
+        ("HISTFILE", "NUL" if sys.platform == "win32" else os.devnull),
+        ("HISTSIZE", "0"),
+        ("HISTFILESIZE", "0"),
+        ("HISTIGNORE", "*"),
+        ("LESSHISTFILE", "NUL" if sys.platform == "win32" else os.devnull),
+    ])
+    def test_privacy_env_values(self, result, key, expected):
+        assert result[key] == expected
 
     def test_includes_existing_env_vars(self):
         """Should be a copy of os.environ with overrides, not an empty dict."""
@@ -113,25 +106,20 @@ class TestWarnExternalProvider:
     # console is imported at module level in privacy.py - patch it there
     _PATCH = "localm.plugins.coder.privacy.console"
 
-    def test_prints_warning_for_openai(self):
+    @pytest.mark.parametrize("provider,expected_substr", [
+        ("openai", "OpenAI"),
+        ("anthropic", "Anthropic"),
+        ("mycloud", None),  # unknown provider falls back to a generic notice
+    ])
+    def test_prints_warning(self, provider, expected_substr):
         with patch(self._PATCH) as mock_console:
-            warn_external_provider("openai")
+            warn_external_provider(provider)
         mock_console.print.assert_called_once()
         text = mock_console.print.call_args[0][0]
-        assert "OpenAI" in text
-
-    def test_prints_warning_for_anthropic(self):
-        with patch(self._PATCH) as mock_console:
-            warn_external_provider("anthropic")
-        text = mock_console.print.call_args[0][0]
-        assert "Anthropic" in text
-
-    def test_prints_warning_for_unknown_provider(self):
-        with patch(self._PATCH) as mock_console:
-            warn_external_provider("mycloud")
-        mock_console.print.assert_called_once()
-        text = mock_console.print.call_args[0][0]
-        assert "mycloud" in text or "privacy" in text.lower()
+        if expected_substr is not None:
+            assert expected_substr in text
+        else:
+            assert "mycloud" in text or "privacy" in text.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -383,13 +371,13 @@ class TestSpawnAgentModeInheritance:
     # Agent is imported locally inside tool_spawn_agent - patch at definition
     _PATCH = "localm.plugins.coder.agent.Agent"
 
-    def test_child_inherits_privacy_mode(self, tmp_path):
+    @pytest.mark.parametrize("mode", [SessionMode.PRIVACY, SessionMode.LOG])
+    def test_child_inherits_mode(self, tmp_path, mode):
         """spawn_agent must pass parent.mode to the child Agent."""
-        from localm.plugins.coder.audit import SessionMode
         from localm.plugins.coder.tools import tool_spawn_agent
 
         parent = MagicMock()
-        parent.mode = SessionMode.PRIVACY
+        parent.mode = mode
         parent.backend.model_id = "test"
         parent.cwd = tmp_path
 
@@ -400,21 +388,4 @@ class TestSpawnAgentModeInheritance:
 
         assert MockAgent.call_count == 1
         _, kwargs = MockAgent.call_args
-        assert kwargs.get("mode") == SessionMode.PRIVACY
-
-    def test_child_inherits_log_mode(self, tmp_path):
-        from localm.plugins.coder.audit import SessionMode
-        from localm.plugins.coder.tools import tool_spawn_agent
-
-        parent = MagicMock()
-        parent.mode = SessionMode.LOG
-        parent.backend.model_id = "test"
-        parent.cwd = tmp_path
-
-        with patch(self._PATCH) as MockAgent:
-            MockAgent.return_value.run_task.return_value = "done"
-            MockAgent.return_value.turns = 1
-            tool_spawn_agent(tmp_path, "task", _parent_agent=parent)
-
-        _, kwargs = MockAgent.call_args
-        assert kwargs.get("mode") == SessionMode.LOG
+        assert kwargs.get("mode") == mode

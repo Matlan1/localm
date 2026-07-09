@@ -716,7 +716,8 @@ class TestModelEndpoints:
                 r = client.post("/api/models/pull", json={"spec": bad})
                 assert r.status_code == 400
 
-    def test_pull_store_copy_forwarded_to_cli(self, gui_app, monkeypatch):
+    @pytest.mark.parametrize("store", ["copy", "move"])
+    def test_pull_store_forwarded_to_cli(self, gui_app, monkeypatch, store):
         """The GUI's 'Copy into library' / 'Move into library' picker (index.html
         #pull-store) reaches the CLI as --store, so a browsed-to local path is
         actually imported into MODELS_DIR, not just registered where it sits."""
@@ -725,21 +726,10 @@ class TestModelEndpoints:
         with TestClient(app) as client:
             r = client.post(
                 "/api/models/pull",
-                json={"spec": "D:\\models\\mymodel.gguf", "store": "copy"})
+                json={"spec": "D:\\models\\mymodel.gguf", "store": store})
         assert r.status_code == 200
         assert captured["args"] == [
-            "pull", "--store", "copy", "--", "D:\\models\\mymodel.gguf"]
-
-    def test_pull_store_move_forwarded_to_cli(self, gui_app, monkeypatch):
-        app, _ = gui_app
-        captured = self._capture_pull_args(monkeypatch)
-        with TestClient(app) as client:
-            r = client.post(
-                "/api/models/pull",
-                json={"spec": "D:\\models\\mymodel.gguf", "store": "move"})
-        assert r.status_code == 200
-        assert captured["args"] == [
-            "pull", "--store", "move", "--", "D:\\models\\mymodel.gguf"]
+            "pull", "--store", store, "--", "D:\\models\\mymodel.gguf"]
 
     def test_pull_store_omitted_when_not_requested(self, gui_app, monkeypatch):
         """Default 'Register in place' sends no store field - --store must not
@@ -2158,12 +2148,6 @@ class TestImageManagement:
         with TestClient(app) as client:
             assert client.delete("/api/imagine/file/nope.png").status_code == 404
 
-    def test_delete_rejects_path_traversal(self, img_app):
-        app, _ = img_app
-        with TestClient(app) as client:
-            r = client.delete("/api/imagine/file/..%5Cconfig.json")
-        assert r.status_code in (400, 404)
-
     @pytest.mark.parametrize("name", [
         "..%5Cconfig.json",       # ..\config.json
         "..%2Fconfig.json",       # ../config.json (decodes to /, off-route)
@@ -2248,25 +2232,6 @@ class TestImageGeneration:
             r = client.post("/api/imagine",
                             json={"prompt": "x", "input_image": "Z:/nope.png"})
         assert r.status_code == 400
-
-    def test_imagine_without_gui_jobs_is_503(self, tmp_path, monkeypatch):
-        """Image gen needs the GUI's job manager (app.state.jobs). With the plugin
-        enabled on a bare app (no attach_gui), the route returns a clear 503 rather
-        than a 500."""
-        home = tmp_path / ".localm"
-        monkeypatch.setenv("LOCALM_HOME", str(home))
-        monkeypatch.delenv("LOCALM_API_KEY", raising=False)
-        import localm.config as _cfg
-        monkeypatch.setattr(_cfg, "HOME_DIR", home)
-        monkeypatch.setattr(_cfg, "MODELS_DIR", home / "models")
-        monkeypatch.setattr(_cfg, "CONFIG_FILE", home / "config.json")
-        monkeypatch.setattr(_cfg, "REGISTRY_FILE", home / "registry.json")
-        from localm.plugins.engine import PluginManager
-        app = FastAPI()
-        PluginManager(app, external_root=tmp_path / "noplugins").install("image")
-        with TestClient(app) as client:
-            r = client.post("/api/imagine", json={"prompt": "a fox"})
-        assert r.status_code == 503
 
     def test_imagine_job_generates_and_returns_result(self, img_app, monkeypatch):
         app, images = img_app
@@ -2414,22 +2379,6 @@ class TestMusicPlugin:
             assert r.status_code == 200
             assert (dest / "t.flac").is_file() and (dest / "t.flac.json").is_file()
             assert client.delete("/api/music/file/nope.flac").status_code == 404
-
-    def test_music_without_gui_jobs_is_503(self, tmp_path, monkeypatch):
-        home = tmp_path / ".localm"
-        monkeypatch.setenv("LOCALM_HOME", str(home))
-        monkeypatch.delenv("LOCALM_API_KEY", raising=False)
-        import localm.config as _cfg
-        monkeypatch.setattr(_cfg, "HOME_DIR", home)
-        monkeypatch.setattr(_cfg, "MODELS_DIR", home / "models")
-        monkeypatch.setattr(_cfg, "CONFIG_FILE", home / "config.json")
-        monkeypatch.setattr(_cfg, "REGISTRY_FILE", home / "registry.json")
-        from localm.plugins.engine import PluginManager
-        app = FastAPI()
-        PluginManager(app, external_root=tmp_path / "noplugins").install("music")
-        with TestClient(app) as client:
-            r = client.post("/api/music", json={"tags": "lofi"})
-        assert r.status_code == 503
 
 
 # ------------------------------------------------------------------ #
@@ -2590,21 +2539,30 @@ class TestVideoEndpoints:
         assert end.get("result", "").endswith(".mp4")
         assert list(videos.glob("*.mp4"))
 
-    def test_video_without_gui_jobs_is_503(self, tmp_path, monkeypatch):
-        home = tmp_path / ".localm"
-        monkeypatch.setenv("LOCALM_HOME", str(home))
-        monkeypatch.delenv("LOCALM_API_KEY", raising=False)
-        import localm.config as _cfg
-        monkeypatch.setattr(_cfg, "HOME_DIR", home)
-        monkeypatch.setattr(_cfg, "MODELS_DIR", home / "models")
-        monkeypatch.setattr(_cfg, "CONFIG_FILE", home / "config.json")
-        monkeypatch.setattr(_cfg, "REGISTRY_FILE", home / "registry.json")
-        from localm.plugins.engine import PluginManager
-        app = FastAPI()
-        PluginManager(app, external_root=tmp_path / "noplugins").install("video")
-        with TestClient(app) as client:
-            r = client.post("/api/video", json={"prompt": "a fox"})
-        assert r.status_code == 503
+
+@pytest.mark.parametrize("plugin_name,endpoint,payload", [
+    ("image", "/api/imagine", {"prompt": "a fox"}),
+    ("music", "/api/music", {"tags": "lofi"}),
+    ("video", "/api/video", {"prompt": "a fox"}),
+])
+def test_generation_without_gui_jobs_is_503(tmp_path, monkeypatch, plugin_name, endpoint, payload):
+    """Image/music/video gen all need the GUI's job manager (app.state.jobs).
+    With the plugin enabled on a bare app (no attach_gui), each route returns a
+    clear 503 rather than a 500."""
+    home = tmp_path / ".localm"
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    import localm.config as _cfg
+    monkeypatch.setattr(_cfg, "HOME_DIR", home)
+    monkeypatch.setattr(_cfg, "MODELS_DIR", home / "models")
+    monkeypatch.setattr(_cfg, "CONFIG_FILE", home / "config.json")
+    monkeypatch.setattr(_cfg, "REGISTRY_FILE", home / "registry.json")
+    from localm.plugins.engine import PluginManager
+    app = FastAPI()
+    PluginManager(app, external_root=tmp_path / "noplugins").install(plugin_name)
+    with TestClient(app) as client:
+        r = client.post(endpoint, json=payload)
+    assert r.status_code == 503
 
 
 class TestPairingQR:

@@ -127,7 +127,12 @@ class TestLaunchGrantHandoff:
     """One-time ?localm_token= handoff: the launcher opens the browser at a fresh
     URL that forces a real navigation (a stale tab / warm SW cannot short-circuit
     it); the server redeems the single-use grant, establishes a session, and 303s
-    to the clean path. Each test carries its negative case."""
+    to the clean path. Each test carries its negative case.
+
+    The boundary the grant does not cross (a plain GET / on a network bind, no
+    grant, still seeds no session) is covered by
+    TestShellRoute.test_lan_bind_never_seeds, which asserts the same 200/
+    no-cookie outcome plus the page-text and shell-token checks."""
 
     def _grant(self, app):
         from localm.plugins.gui.web import mint_launch_grant
@@ -182,12 +187,3 @@ class TestLaunchGrantHandoff:
         assert r.status_code == 303                          # redeemed on the LAN bind
         assert "localm_session=" in _set_cookies(r)
         assert "REALKEY123" not in _set_cookies(r)           # opaque session, not the key
-
-    def test_network_bind_without_a_grant_still_seeds_nothing(self, monkeypatch):
-        # The security boundary the grant does NOT cross: a plain GET / on a network
-        # bind (a network client, no grant) is still handed NO session - only the
-        # secret-bearing grant, or a loopback bind, auto-authenticates.
-        monkeypatch.setenv("LOCALM_API_KEY", "REALKEY123")
-        r = TestClient(_app("0.0.0.0")).get("/", follow_redirects=False)
-        assert r.status_code == 200
-        assert "localm_session=" not in _set_cookies(r)

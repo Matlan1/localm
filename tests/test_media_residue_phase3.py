@@ -53,14 +53,17 @@ def _cfg_with_output_dir(name: str, output_dir: str) -> dict:
     }
 
 
-def test_music_settings_exposes_output_dir():
-    s = music_backend.settings(_cfg_with_output_dir("music", "/tmp/comfy-music-out"))
-    assert s.get("output_dir") == "/tmp/comfy-music-out"
-
-
-def test_video_settings_exposes_output_dir():
-    s = video_backend.settings(_cfg_with_output_dir("video", "/tmp/comfy-video-out"))
-    assert s.get("output_dir") == "/tmp/comfy-video-out"
+@pytest.mark.parametrize(
+    "backend_mod,plugin_name,output_dir",
+    [
+        (music_backend, "music", "/tmp/comfy-music-out"),
+        (video_backend, "video", "/tmp/comfy-video-out"),
+    ],
+    ids=["music", "video"],
+)
+def test_backend_settings_exposes_output_dir(backend_mod, plugin_name, output_dir):
+    s = backend_mod.settings(_cfg_with_output_dir(plugin_name, output_dir))
+    assert s.get("output_dir") == output_dir
 
 
 def test_music_backend_publishes_output_dir_to_generate(monkeypatch):
@@ -219,7 +222,15 @@ def test_video_input_image_outside_root_rejected(tmp_path, monkeypatch):
     assert "input" in str(ei.value.detail).lower()
 
 
-def test_image_input_image_inside_home_accepted(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "request_cls,handler_coro_fn",
+    [
+        (image_plug.ImagineRequest, image_plug.imagine),
+        (video_plug.VideoRequest, video_plug.video),
+    ],
+    ids=["image", "video"],
+)
+def test_input_image_inside_home_accepted(tmp_path, monkeypatch, request_cls, handler_coro_fn):
     """A file INSIDE the localm home passes confinement (it still 503s later for
     lack of a job manager, which proves we got past the input check)."""
     home = tmp_path / "home"
@@ -229,24 +240,10 @@ def test_image_input_image_inside_home_accepted(tmp_path, monkeypatch):
     inside = home / "ref.png"
     inside.write_bytes(b"\x89PNG\r\n\x1a\nMINE")
 
-    req = image_plug.ImagineRequest(prompt="x", input_image=str(inside))
+    req = request_cls(prompt="x", input_image=str(inside))
     with pytest.raises(HTTPException) as ei:
-        _run(image_plug.imagine(req, _fake_request()))
+        _run(handler_coro_fn(req, _fake_request()))
     # passed confinement; failed later on the missing GUI job manager
-    assert ei.value.status_code == 503
-
-
-def test_video_input_image_inside_home_accepted(tmp_path, monkeypatch):
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("LOCALM_HOME", str(home))
-
-    inside = home / "ref.png"
-    inside.write_bytes(b"\x89PNG\r\n\x1a\nMINE")
-
-    req = video_plug.VideoRequest(prompt="x", input_image=str(inside))
-    with pytest.raises(HTTPException) as ei:
-        _run(video_plug.video(req, _fake_request()))
     assert ei.value.status_code == 503
 
 

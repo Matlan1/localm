@@ -421,40 +421,30 @@ class TestGenerateImageSafety:
             "jsonrpc": "2.0", "id": 1, "method": "tools/call",
             "params": {"name": "generate_image", "arguments": args}})
 
-    def test_output_path_confined_to_home(self, tmp_path):
-        """SEC-7: an output_path outside the localm data dir is refused."""
+    @pytest.mark.parametrize("arg_key", ["output_path", "input_image"])
+    def test_path_confined_to_home(self, tmp_path, arg_key):
+        """SEC-7: an output_path/input_image outside the localm data dir is refused."""
         server, _ = _server()
         outside = str(tmp_path / "evil.png")        # sibling of LOCALM_HOME (.localm)
         with patch("localm.image_gen.comfy.generate_image") as mock_gen:
-            r = self._call(server, {"prompt": "x", "output_path": outside})
+            r = self._call(server, {"prompt": "x", arg_key: outside})
         assert r["result"]["isError"] is True
-        assert "data dir" in r["result"]["content"][0]["text"]
+        if arg_key == "output_path":
+            assert "data dir" in r["result"]["content"][0]["text"]
         mock_gen.assert_not_called()
 
-    def test_input_image_confined_to_home(self, tmp_path):
-        server, _ = _server()
-        outside = str(tmp_path / "secret.png")
-        with patch("localm.image_gen.comfy.generate_image") as mock_gen:
-            r = self._call(server, {"prompt": "x", "input_image": outside})
-        assert r["result"]["isError"] is True
-        mock_gen.assert_not_called()
-
-    def test_privacy_mode_suppresses_sidecar(self, monkeypatch):
+    @pytest.mark.parametrize("mode,expected_write_sidecar", [
+        ("privacy", False),
+        ("log", True),
+    ])
+    def test_mode_controls_sidecar(self, monkeypatch, mode, expected_write_sidecar):
         """BUG-14: privacy mode must pass write_sidecar=False to generate_image."""
-        monkeypatch.setenv("LOCALM_MODE", "privacy")
+        monkeypatch.setenv("LOCALM_MODE", mode)
         server, _ = _server()
         with patch("localm.image_gen.comfy.generate_image",
                    return_value=(True, "ok")) as mock_gen:
             self._call(server, {"prompt": "x"})
-        assert mock_gen.call_args.kwargs.get("write_sidecar") is False
-
-    def test_logmode_keeps_sidecar(self, monkeypatch):
-        monkeypatch.setenv("LOCALM_MODE", "log")
-        server, _ = _server()
-        with patch("localm.image_gen.comfy.generate_image",
-                   return_value=(True, "ok")) as mock_gen:
-            self._call(server, {"prompt": "x"})
-        assert mock_gen.call_args.kwargs.get("write_sidecar") is True
+        assert mock_gen.call_args.kwargs.get("write_sidecar") is expected_write_sidecar
 
     def test_generate_image_keeps_stdout_clean(self, capsys):
         """BUG-11: comfy progress output must go to stderr, not the JSON-RPC stdout."""
@@ -532,17 +522,15 @@ class TestModelDiscoveryTools:
         assert r["result"]["isError"] is True
         assert "not a repo" in r["result"]["content"][0]["text"]
 
-    def test_pull_model_missing_repo_is_error(self):
+    @pytest.mark.parametrize("args,expected_missing", [
+        ({"name": "m"}, "repo"),
+        ({"repo": "owner/repo"}, "name"),
+    ])
+    def test_pull_model_missing_field_is_error(self, args, expected_missing):
         server, _ = _server()
-        r = self._call(server, "pull_model", {"name": "m"})
+        r = self._call(server, "pull_model", args)
         assert r["result"]["isError"] is True
-        assert "repo" in r["result"]["content"][0]["text"]
-
-    def test_pull_model_missing_name_is_error(self):
-        server, _ = _server()
-        r = self._call(server, "pull_model", {"repo": "owner/repo"})
-        assert r["result"]["isError"] is True
-        assert "name" in r["result"]["content"][0]["text"]
+        assert expected_missing in r["result"]["content"][0]["text"]
 
     def test_pull_model_success_loads_by_default(self):
         server, engines = _server()
@@ -623,18 +611,18 @@ class TestRunCoderTask:
         names = {t["name"] for t in _req(server, "tools/list")["result"]["tools"]}
         assert "run_coder_task" not in names
 
-    def test_missing_task_is_error(self, coder_active, tmp_path):
+    @pytest.mark.parametrize("missing_field", ["task", "cwd"])
+    def test_missing_field_is_error(self, coder_active, tmp_path, missing_field):
         server, _ = _server()
-        r = self._call(server, {"cwd": str(tmp_path)})
+        args = {"task": "do a thing", "cwd": str(tmp_path)}
+        del args[missing_field]
+        r = self._call(server, args)
         assert r["result"]["isError"] is True
-        assert "task" in r["result"]["content"][0]["text"]
+        assert missing_field in r["result"]["content"][0]["text"]
 
-    def test_missing_cwd_is_error(self, coder_active):
-        server, _ = _server()
-        r = self._call(server, {"task": "do a thing"})
-        assert r["result"]["isError"] is True
-        assert "cwd" in r["result"]["content"][0]["text"]
-
+    # kept separate from the missing-field cases above: this arg dict is
+    # complete, so it exercises a different code path (existing-but-invalid
+    # cwd) rather than the missing-required-field check.
     def test_nonexistent_cwd_is_error(self, coder_active, tmp_path):
         server, _ = _server()
         r = self._call(server, {"task": "x", "cwd": str(tmp_path / "nope")})
@@ -812,23 +800,18 @@ class TestNewToolCalls:
         assert "installed" in resp["result"]["content"][0]["text"]
         mock_install.assert_called_once_with("coder", True)
 
-    def test_enable_plugin(self):
+    @pytest.mark.parametrize("tool_name,expected_bool,expected_substring", [
+        ("enable_plugin", True, "enabled"),
+        ("disable_plugin", False, "disabled"),
+    ])
+    def test_enable_disable_plugin(self, tool_name, expected_bool, expected_substring):
         server, _ = _server()
-        with patch("localm.plugins.engine.PluginManager.set_enabled_state") as mock_enable:
+        with patch("localm.plugins.engine.PluginManager.set_enabled_state") as mock_set:
             resp = _req(server, "tools/call",
-                        {"name": "enable_plugin", "arguments": {"plugin": "coder"}})
+                        {"name": tool_name, "arguments": {"plugin": "coder"}})
         assert resp["result"]["isError"] is False
-        assert "enabled" in resp["result"]["content"][0]["text"]
-        mock_enable.assert_called_once_with("coder", True)
-
-    def test_disable_plugin(self):
-        server, _ = _server()
-        with patch("localm.plugins.engine.PluginManager.set_enabled_state") as mock_disable:
-            resp = _req(server, "tools/call",
-                        {"name": "disable_plugin", "arguments": {"plugin": "coder"}})
-        assert resp["result"]["isError"] is False
-        assert "disabled" in resp["result"]["content"][0]["text"]
-        mock_disable.assert_called_once_with("coder", False)
+        assert expected_substring in resp["result"]["content"][0]["text"]
+        mock_set.assert_called_once_with("coder", expected_bool)
 
     def test_uninstall_plugin(self):
         server, _ = _server()
