@@ -20,7 +20,6 @@ These exercise the multi-model switch/eviction path in http_server.switch_engine
           before re-checking, so it does not over-evict on a stale-low reading.
 """
 
-import pytest
 from fastapi.testclient import TestClient
 
 from localm.inference import http_server as hs
