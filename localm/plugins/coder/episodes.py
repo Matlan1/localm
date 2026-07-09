@@ -143,11 +143,24 @@ class EpisodeStore:
 
     def all(self) -> list:
         """Every stored episode, oldest first. Malformed lines are skipped (a
-        partial write must not break recall)."""
+        partial write must not break recall). Retries briefly on a transient
+        PermissionError: on Windows, a concurrent add()'s atomic replace can
+        momentarily deny an open of the same path while the rename is in flight."""
         if not self._file.is_file():
             return []
+        text = None
+        for attempt in range(5):
+            try:
+                text = self._file.read_text(encoding="utf-8")
+                break
+            except FileNotFoundError:
+                return []          # removed/replaced between the is_file() check and the read
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.02)
         out: list = []
-        for line in self._file.read_text(encoding="utf-8").splitlines():
+        for line in text.splitlines():
             line = line.strip()
             if not line:
                 continue
@@ -159,7 +172,9 @@ class EpisodeStore:
 
     def add(self, ep: Episode) -> Episode:
         """Append *ep*, capping the log to the newest ``_MAX_EPISODES``. Written
-        atomically (temp + replace) so a crash mid-write cannot corrupt the log."""
+        atomically (temp + replace) so a crash mid-write cannot corrupt the log.
+        Retries briefly on a transient PermissionError: on Windows, a concurrent
+        reader with the destination open can momentarily deny the rename."""
         eps = self.all()
         eps.append(ep)
         eps = eps[-_MAX_EPISODES:]
@@ -167,7 +182,14 @@ class EpisodeStore:
         body = "\n".join(json.dumps(e.to_dict(), ensure_ascii=False) for e in eps)
         tmp = self._file.with_name(self._file.name + ".tmp")
         tmp.write_text(body + "\n", encoding="utf-8")
-        tmp.replace(self._file)
+        for attempt in range(5):
+            try:
+                tmp.replace(self._file)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.02)
         return ep
 
     def _vectors(self, texts: list, ef) -> Optional[list]:
