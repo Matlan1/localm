@@ -29,19 +29,14 @@ def _backend():
     return HTTPBackend("http://127.0.0.1:8080/v1", "test-model")
 
 
-def test_chat_401_raises_actionable_auth_error():
-    with patch(_PATCH, return_value=_resp(401)):
+@pytest.mark.parametrize("status", [401, 403])
+def test_chat_auth_status_raises_actionable_auth_error(status):
+    with patch(_PATCH, return_value=_resp(status)):
         with pytest.raises(CoderAuthError) as ei:
             _backend().chat([{"role": "user", "content": "hi"}])
     msg = str(ei.value)
     assert "localm key show --reveal" in msg
     assert "LOCALM_API_KEY" in msg
-
-
-def test_chat_403_raises_auth_error():
-    with patch(_PATCH, return_value=_resp(403)):
-        with pytest.raises(CoderAuthError):
-            _backend().chat([{"role": "user", "content": "hi"}])
 
 
 def test_chat_stream_401_raises_auth_error():

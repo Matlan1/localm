@@ -369,19 +369,6 @@ class TestCollection:
         data = json.loads((base / "kb" / "vectors.json").read_text(encoding="utf-8"))
         assert data["dim"] == 3
 
-    def test_switched_embed_model_does_not_crash(self, tmp_path, docs_dir):
-        # BUG-5: query vectors of a different dim than stored must degrade to
-        # lexical, never crash (numpy) or silently truncate (no-numpy).
-        base = tmp_path / "rag"
-        c = Collection("kb", base=base).create()
-        c.add_paths([docs_dir], embed_fn=lambda ts: [[1.0, 0.0] for _ in ts])  # dim 2
-
-        def bigger_model(texts):
-            return [[1.0, 0.0, 0.0, 0.0] for _ in texts]                       # dim 4
-
-        hits = c.query("ROCm DLLs", k=1, embed_fn=bigger_model)   # must not raise
-        assert hits and "gpu.md" in hits[0]["source"]             # lexical fallback
-
     # --- L6: a corrupt / stale / mismatched vectors index is SURFACED, not ---- #
     # --- silently swallowed into BM25-only (AGENTS rule 5). ------------------- #
 
@@ -430,7 +417,8 @@ class TestCollection:
     def test_query_embedding_model_change_warns(self, tmp_path, docs_dir, caplog):
         """Querying with an embedding model of a different dimensionality than the
         stored vectors surfaces a 'model changed' warning + a stats reason (and
-        still answers lexically)."""
+        still answers lexically). Also covers BUG-5 (dim mismatch must degrade to
+        lexical, never crash or silently truncate)."""
         base = tmp_path / "rag"
         c = Collection("kb", base=base).create()
         c.add_paths([docs_dir],
@@ -539,12 +527,6 @@ class TestCollection:
         assert c.stats()["has_vectors"] is True
 
         hits = c.query("ROCm DLLs", k=1, embed_fn=fake_embed)
-        assert "gpu.md" in hits[0]["source"]
-
-        # Broken embedder at query time degrades to lexical, not an error
-        def boom(texts):
-            raise RuntimeError("no embeddings")
-        hits = c.query("ROCm DLLs", k=1, embed_fn=boom)
         assert "gpu.md" in hits[0]["source"]
 
     def test_embed_failure_during_indexing_degrades(self, tmp_path, docs_dir):

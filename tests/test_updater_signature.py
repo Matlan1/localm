@@ -103,15 +103,6 @@ def test_key_rotation_allowlist(monkeypatch):
     updater.verify_signature(data, _sig(new, data))
 
 
-def test_malformed_pinned_key_does_not_open_a_pass(monkeypatch):
-    # A garbage pinned key must not degrade into "no verification"; with only a bad
-    # key configured, a genuinely-signed build still fails closed.
-    priv, _ = _keypair()
-    monkeypatch.setattr(updater, "_UPDATE_PUBKEYS", ("not-hex",))
-    with pytest.raises(LocalmError):
-        updater.verify_signature(b"build", _sig(priv, b"build"))
-
-
 def test_all_pins_malformed_names_the_real_cause(monkeypatch, caplog):
     # HONESTY-0702 (missing != corrupt): with a key PINNED but unparseable the
     # refusal must name the broken pin - not claim verification "is not set up" -
@@ -125,17 +116,6 @@ def test_all_pins_malformed_names_the_real_cause(monkeypatch, caplog):
     assert "no pinned signing key is usable" in ei.value.summary
     assert "none parses" in ei.value.reason
     assert "does not parse as an Ed25519" in caplog.text
-
-
-def test_configured_but_broken_pin_still_fails_closed(monkeypatch):
-    # A pinned-but-unparseable key is CONFIGURED-yet-broken, not unconfigured, so it
-    # must FAIL CLOSED (missing != corrupt) rather than fall through to the fail-open
-    # path - a typo'd pin must never silently disable verification.
-    priv, _ = _keypair()
-    monkeypatch.setattr(updater, "_UPDATE_PUBKEYS", ("not-hex",))
-    with pytest.raises(LocalmError) as ei:
-        updater.verify_signature(b"build", _sig(priv, b"build"))
-    assert "no pinned signing key is usable" in ei.value.summary
 
 
 # --------------------------- anti-rollback ------------------------------

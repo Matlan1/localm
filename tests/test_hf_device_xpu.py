@@ -4,6 +4,8 @@ silently falling back to CPU, WITHOUT regressing the cuda/cpu paths. _auto_devic
 torch as an argument so the routing is testable without any real GPU (GPU EXECUTION still
 needs a real Arc box - out of scope here)."""
 
+import pytest
+
 from localm.inference.backends.hf import _auto_device
 
 
@@ -22,23 +24,17 @@ class _FakeTorch:
             self.xpu = _Avail(xpu)
 
 
-def test_explicit_override_wins():
-    assert _auto_device(_FakeTorch(cuda=True, xpu=True), "cpu") == "cpu"
-
-
-def test_cuda_preferred_over_xpu():
-    assert _auto_device(_FakeTorch(cuda=True, xpu=True)) == "cuda"
-
-
-def test_intel_xpu_used_when_no_cuda():
-    # THE fix: before, an Intel box with no CUDA fell through to "cpu".
-    assert _auto_device(_FakeTorch(cuda=False, xpu=True)) == "xpu"
-
-
-def test_cpu_when_no_gpu():
-    assert _auto_device(_FakeTorch(cuda=False, xpu=False)) == "cpu"
-
-
-def test_cpu_when_torch_has_no_xpu_attr():
-    # Older PyTorch without torch.xpu must not crash - falls back to cpu.
-    assert _auto_device(_FakeTorch(cuda=False, xpu=None)) == "cpu"
+@pytest.mark.parametrize(
+    "cuda,xpu,override,expected",
+    [
+        pytest.param(True, True, "cpu", "cpu", id="explicit_override_wins"),
+        pytest.param(True, True, None, "cuda", id="cuda_preferred_over_xpu"),
+        # THE fix: before, an Intel box with no CUDA fell through to "cpu".
+        pytest.param(False, True, None, "xpu", id="intel_xpu_used_when_no_cuda"),
+        pytest.param(False, False, None, "cpu", id="cpu_when_no_gpu"),
+        # Older PyTorch without torch.xpu must not crash - falls back to cpu.
+        pytest.param(False, None, None, "cpu", id="cpu_when_torch_has_no_xpu_attr"),
+    ],
+)
+def test_auto_device(cuda, xpu, override, expected):
+    assert _auto_device(_FakeTorch(cuda=cuda, xpu=xpu), override) == expected

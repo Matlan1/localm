@@ -15,13 +15,9 @@ def test_bad_magic_rejected_even_when_large(tmp_path):
     assert _has_gguf_magic(f) is False
 
 
-def test_magic_but_header_only_stub_rejected(tmp_path):
-    f = tmp_path / "stub.gguf"
-    f.write_bytes(b"GGUF" + b"\x00" * 8)
-    assert _has_gguf_magic(f) is False
-
-
 def test_magic_just_below_floor_rejected(tmp_path):
+    # Covers the header-only-stub case too: any size < floor takes this same
+    # `<` branch, and the floor-1 boundary is the strictly more precise check.
     f = tmp_path / "below.gguf"
     f.write_bytes(b"GGUF".ljust(_GGUF_MIN_BYTES - 1, b"\x00"))
     assert _has_gguf_magic(f) is False

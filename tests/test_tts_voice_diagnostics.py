@@ -19,20 +19,22 @@ from localm.voice import VoiceError
 
 
 class TestTtsTemplateDiagnostics:
-    def test_corrupt_template_logs_and_falls_back(self, tmp_path, monkeypatch, caplog):
-        bad = tmp_path / "tts.example.json"
-        bad.write_text("{ not json", encoding="utf-8")
-        monkeypatch.setattr(tts_plug, "_TEMPLATE", bad)
+    @pytest.mark.parametrize(
+        "filename, write_corrupt",
+        [("tts.example.json", True), ("absent.json", False)],
+        ids=["corrupt", "missing"],
+    )
+    def test_broken_template_logs_and_falls_back(
+        self, filename, write_corrupt, tmp_path, monkeypatch, caplog
+    ):
+        path = tmp_path / filename
+        if write_corrupt:
+            path.write_text("{ not json", encoding="utf-8")
+        monkeypatch.setattr(tts_plug, "_TEMPLATE", path)
         with caplog.at_level(logging.WARNING, logger="localm"):
             assert tts_plug._defaults() == {}
-        assert any("tts.example.json" in r.message for r in caplog.records), \
-            "the corrupt shipped template leaves a warning naming the file"
-
-    def test_missing_template_logs_and_falls_back(self, tmp_path, monkeypatch, caplog):
-        monkeypatch.setattr(tts_plug, "_TEMPLATE", tmp_path / "absent.json")
-        with caplog.at_level(logging.WARNING, logger="localm"):
-            assert tts_plug._defaults() == {}
-        assert any("absent.json" in r.message for r in caplog.records)
+        assert any(filename in r.message for r in caplog.records), \
+            "the broken shipped template leaves a warning naming the file"
 
     def test_healthy_template_stays_silent(self, caplog):
         # The real shipped template parses; no warning on the happy path.

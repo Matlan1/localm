@@ -86,13 +86,8 @@ test("scan-reason: scanResultMessage maps method reasons directly (unit)", async
   const fn = window.scanResultMessage;
   assert.equal(typeof fn, "function", "scanResultMessage is exported for reuse/testing");
 
+  // The notfound and success mappings are already exercised end to end via the
+  // click-driven tests above; this unit layer keeps one representative case.
   const unconfigured = fn({ added: 0, skipped: 0, method: "none (comfy_workdir not configured)" });
   assert.ok(!/Added 0/.test(unconfigured) && /workdir/i.test(unconfigured) && /Settings/i.test(unconfigured));
-
-  const notfound = fn({ added: 0, skipped: 0, method: "none (models folder not found under /srv/comfy)" });
-  assert.ok(notfound.includes("/srv/comfy") && /not found/i.test(notfound));
-
-  const ok = fn({ added: 5, skipped: 1, method: "folder-walk" });
-  assert.match(ok, /Added 5 models, skipped 1 existing/);
-  assert.ok(!/folder-walk/i.test(ok));
 });

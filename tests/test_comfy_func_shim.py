@@ -198,23 +198,19 @@ def test_shim_patches_plain_function_node_sync_and_async(tmp_path):
     assert shim._patch_module(mod) is False
 
 
-def test_shim_noops_when_already_tolerant(tmp_path):
-    mod = _import_fake(tmp_path, _TOLERANT_SRC, "tolerant_mod")
+@pytest.mark.parametrize("src,name", [
+    (_TOLERANT_SRC, "tolerant_mod"),
+    (_WRONGSHAPE_SRC, "wrongshape_mod"),
+    (_NO_LOCKCLASS_SRC, "nolock_mod"),
+], ids=["already_tolerant", "unexpected_shape", "no_lock_class"])
+def test_shim_noops_on_unpatchable_module(tmp_path, src, name):
+    mod = _import_fake(tmp_path, src, name)
     shim = _load_shim_module()
     assert shim._build_tolerant(mod) is None
-    assert shim._patch_module(mod) is False
-
-
-def test_shim_noops_on_unexpected_shape(tmp_path):
-    mod = _import_fake(tmp_path, _WRONGSHAPE_SRC, "wrongshape_mod")
-    shim = _load_shim_module()
-    assert shim._build_tolerant(mod) is None
-
-
-def test_shim_noops_without_lock_class(tmp_path):
-    mod = _import_fake(tmp_path, _NO_LOCKCLASS_SRC, "nolock_mod")
-    shim = _load_shim_module()
-    assert shim._build_tolerant(mod) is None
+    if name == "tolerant_mod":
+        # only the already-tolerant source also exercises _patch_module (the other two
+        # sources are not full modules _patch_module would attempt to patch).
+        assert shim._patch_module(mod) is False
 
 
 def _tree_snapshot(root):

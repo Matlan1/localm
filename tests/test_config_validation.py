@@ -49,16 +49,15 @@ class TestValidateUpdate:
             ss.validate_update({"n_gpu_layers": 1111})
         assert ss.validate_update({"n_gpu_layers": 99}) == {"n_gpu_layers": 99}
 
-    def test_main_gpu_index_coerces_cli_string_to_int(self):
-        # `localm config main_gpu_index 1` arrives as the string "1"; it must
-        # be stored as a real int, not left stringly-typed (HIDDEN widgets
-        # skip the generic number coercion, so this key is special-cased).
-        assert ss.validate_update({"main_gpu_index": "1"}) == {"main_gpu_index": 1}
-        assert isinstance(ss.validate_update({"main_gpu_index": "1"})["main_gpu_index"], int)
-
-    def test_main_gpu_index_accepts_json_int(self):
-        # PATCH /v1/config from the GUI sends a native JSON int.
-        assert ss.validate_update({"main_gpu_index": 1}) == {"main_gpu_index": 1}
+    @pytest.mark.parametrize("value", ["1", 1])
+    def test_main_gpu_index_coerces_to_int(self, value):
+        # `localm config main_gpu_index 1` arrives as the string "1" (HIDDEN
+        # widgets skip the generic number coercion, so this key is
+        # special-cased); PATCH /v1/config from the GUI sends a native JSON
+        # int. Both must be stored as a real int.
+        result = ss.validate_update({"main_gpu_index": value})
+        assert result == {"main_gpu_index": 1}
+        assert isinstance(result["main_gpu_index"], int)
 
     def test_main_gpu_index_null_clears_it(self):
         assert ss.validate_update({"main_gpu_index": None}) == {"main_gpu_index": None}

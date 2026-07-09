@@ -72,18 +72,6 @@ class _PopenSpy:
         return self.calls[-1][1]
 
 
-def test_helper_exists(launcher_mod):
-    """The spawn must be factored into a module-level, testable helper.
-
-    (The launch logic was buried in a Tk button handler; BUG-15's fix extracts
-    it so the cross-platform behavior can be asserted without a display.)
-    """
-    assert hasattr(launcher_mod, "_spawn_detached"), (
-        "expected a module-level _spawn_detached() helper to test the "
-        "cross-platform spawn"
-    )
-
-
 def test_posix_spawn_omits_creationflags(launcher_mod, monkeypatch):
     """On POSIX the child is spawned WITHOUT creationflags and WITHOUT touching
     subprocess.CREATE_NEW_CONSOLE (the attribute that does not exist there)."""

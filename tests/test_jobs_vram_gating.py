@@ -1,34 +1,24 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for VRAM gating and engine reuse in scheduled jobs."""
 
+import pytest
 from unittest.mock import MagicMock, patch
 
 from localm.plugins.builtin.jobs.runner import _load_engine
 
 
 class TestJobsVramGating:
-    def test_reuses_live_engine_when_same_model(self, monkeypatch):
+    @pytest.mark.parametrize("name", ["gemma-2b", None])
+    def test_reuses_live_engine_when_same_model_or_unspecified(self, monkeypatch, name):
         # Mock the live engine in http_server
         live = MagicMock()
         live.loaded = True
         live.display_name = "gemma-2b"
-        
-        monkeypatch.setattr("localm.inference.http_server._engine", live)
-        
-        # When calling _load_engine with the same name, it should return the live engine directly
-        res = _load_engine("gemma-2b")
-        assert res is live
-        assert live.unload.call_count == 0
 
-    def test_reuses_live_engine_when_no_model_specified(self, monkeypatch):
-        live = MagicMock()
-        live.loaded = True
-        live.display_name = "gemma-2b"
-        
         monkeypatch.setattr("localm.inference.http_server._engine", live)
-        
-        # When calling _load_engine with None/empty, it should return the live engine
-        res = _load_engine(None)
+
+        # When calling _load_engine with the same name or None, it should return the live engine directly
+        res = _load_engine(name)
         assert res is live
         assert live.unload.call_count == 0
 

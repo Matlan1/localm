@@ -6,29 +6,27 @@ from localm.rag import extract_text, ExtractError
 from localm.rag.extract import sniff_format, _EXT_CLASSIFICATION_CACHE
 from tests.test_rag import _tiny_pdf
 
-def test_sniff_format_pdf():
-    pdf_data = _tiny_pdf("hello")
-    assert sniff_format(pdf_data, "file.bin") == ".pdf"
-
-def test_sniff_format_docx():
-    docx_data = io.BytesIO()
-    with zipfile.ZipFile(docx_data, "w") as zf:
+def _docx_bytes():
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
         zf.writestr("word/document.xml", "xml")
-    assert sniff_format(docx_data.getvalue(), "file.dat") == ".docx"
+    return buf.getvalue()
 
-def test_sniff_format_zip():
-    zip_data = io.BytesIO()
-    with zipfile.ZipFile(zip_data, "w") as zf:
+def _zip_bytes():
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
         zf.writestr("notes.txt", "some notes")
-    assert sniff_format(zip_data.getvalue(), "file.custom") == ".zip"
+    return buf.getvalue()
 
-def test_sniff_format_plain_text():
-    text_data = b"Hello, this is plain text!"
-    assert sniff_format(text_data, "file.xyz") == ".txt"
-
-def test_sniff_format_binary():
-    binary_data = b"\x00\x01\x02\x03\x04\xff"
-    assert sniff_format(binary_data, "file.xyz") is None
+@pytest.mark.parametrize("data,filename,expected", [
+    (_tiny_pdf("hello"), "file.bin", ".pdf"),
+    (_docx_bytes(), "file.dat", ".docx"),
+    (_zip_bytes(), "file.custom", ".zip"),
+    (b"Hello, this is plain text!", "file.xyz", ".txt"),
+    (b"\x00\x01\x02\x03\x04\xff", "file.xyz", None),
+], ids=["pdf", "docx", "zip", "plain_text", "binary"])
+def test_sniff_format(data, filename, expected):
+    assert sniff_format(data, filename) == expected
 
 def test_extract_custom_extension_text(tmp_path):
     f = tmp_path / "notes.custom_ext"

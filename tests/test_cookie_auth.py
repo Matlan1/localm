@@ -238,27 +238,17 @@ def test_cookie_unsafe_method_without_csrf_is_refused(client):
 
 
 def test_cookie_unsafe_method_with_csrf_allowed(client):
-    assert _login(client).status_code == 200
-    token = _csrf(client)
-    assert token, "no csrf token from /api/session after login"
-    r = client.post("/v1/models/unload", headers={CSRF_HEADER: token})
-    assert r.status_code == 200, r.text
-
-
-def test_csrf_token_survives_clearing_readable_cookies(client):
-    """THE S3 fix: the CSRF token is derived from the session, not a separate
+    """Also THE S3 fix: the CSRF token is derived from the session, not a separate
     readable cookie, so a client that clears all readable cookies (what
     resetClientState did, which could NOT clear the HttpOnly session) still gets a
     usable token from /api/session and its writes keep working - no 403 storm."""
     assert _login(client).status_code == 200
     # There is no readable localm_csrf cookie to clear in the first place.
     assert not client.cookies.get(CSRF_COOKIE)
-    # The session cookie (HttpOnly) survives; the token is re-derivable and writes
-    # succeed with it.
     token = _csrf(client)
-    assert token
-    assert client.post("/v1/models/unload",
-                       headers={CSRF_HEADER: token}).status_code == 200
+    assert token, "no csrf token from /api/session after login"
+    r = client.post("/v1/models/unload", headers={CSRF_HEADER: token})
+    assert r.status_code == 200, r.text
 
 
 def test_cookie_unsafe_method_with_wrong_csrf_refused(client):

@@ -136,6 +136,15 @@ dev = [
     # Coverage measurement (TEST-1). Visibility only for now: CI publishes a
     # number, there is no --cov-fail-under gate. See [tool.coverage] below.
     "pytest-cov>=5.0",
+    # Parallel test execution (TEST-2): the suite is single-process by default
+    # (~4200 tests, ~7-8 min sequential). Every test already gets its own
+    # LOCALM_HOME via the autouse tmp_path fixture in tests/conftest.py, and the
+    # handful of tests that bind a real socket use an OS-assigned ephemeral port
+    # (0), so distributing across worker processes is safe. Run with `-n auto`;
+    # not forced on by default via addopts so a plain `pytest` still works
+    # everywhere (e.g. under a debugger, or -k a single test) without surprise
+    # worker overhead.
+    "pytest-xdist>=3.6",
     # Feature parsers whose extraction code has tests that otherwise SILENTLY SKIP
     # when the optional extra is absent (the default install is .[coder,voice,
     # monitor], no rag). pypdf gates tests/test_rag.py's real PDF round-trip; keep

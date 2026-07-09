@@ -86,8 +86,20 @@ class TestVerifySyntaxPython:
     def _path(self, tmp_path, name="test.py"):
         return tmp_path / name
 
-    def test_valid_python_returns_none(self, tmp_path):
-        result = _verify_syntax(self._path(tmp_path), "x = 1\nprint(x)\n")
+    @pytest.mark.parametrize(
+        "src",
+        [
+            "x = 1\nprint(x)\n",
+            (
+                "from typing import Optional\n\n"
+                "def greet(name: Optional[str] = None) -> str:\n"
+                "    return f'hello {name or \"world\"}'\n"
+            ),
+        ],
+        ids=["simple", "complex_typed"],
+    )
+    def test_valid_python_returns_none(self, tmp_path, src):
+        result = _verify_syntax(self._path(tmp_path), src)
         assert result is None
 
     def test_invalid_python_returns_error_string(self, tmp_path):
@@ -103,15 +115,6 @@ class TestVerifySyntaxPython:
 
     def test_empty_file_is_valid(self, tmp_path):
         result = _verify_syntax(self._path(tmp_path), "")
-        assert result is None
-
-    def test_complex_valid_python(self, tmp_path):
-        code = (
-            "from typing import Optional\n\n"
-            "def greet(name: Optional[str] = None) -> str:\n"
-            "    return f'hello {name or \"world\"}'\n"
-        )
-        result = _verify_syntax(self._path(tmp_path), code)
         assert result is None
 
 

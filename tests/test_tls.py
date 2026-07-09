@@ -52,12 +52,6 @@ def test_san_targets_routes_extras_and_drops_wildcard():
     assert "0.0.0.0" not in ips and "0.0.0.0" not in hosts   # all-interfaces, dropped
 
 
-def test_is_tailscale_ip():
-    assert tls.is_tailscale_ip("100.101.102.103")
-    assert not tls.is_tailscale_ip("192.168.1.1")
-    assert not tls.is_tailscale_ip("not-an-ip")
-
-
 # ------------------------------------------------------------------ #
 #  requests_verify (loopback self-call CA trust)                     #
 # ------------------------------------------------------------------ #
@@ -227,7 +221,7 @@ def test_key_files_are_owner_only_on_posix(tmp_path):
 #  companion_addresses (the phone-reachable LAN / Tailscale address)  #
 # ------------------------------------------------------------------ #
 
-def test_is_tailscale_ip_cgnat_range():
+def test_is_tailscale_ip():
     assert tls.is_tailscale_ip("100.101.102.103") is True   # 100.64.0.0/10
     assert tls.is_tailscale_ip("100.63.255.255") is False   # just below CGNAT
     assert tls.is_tailscale_ip("192.168.1.50") is False

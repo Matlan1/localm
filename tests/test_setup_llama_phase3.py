@@ -291,24 +291,18 @@ def test_url_load_failure_exits_nonzero(wired, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 
-def test_guard_auto_short_circuits_when_present(wired, monkeypatch):
-    """Plain `setup-llama` (auto) with a library already present does nothing -
-    something works, so there is no re-download."""
+# Two disjuncts of the same guard (want == "auto" or have == want); keep both
+# args as separate parametrize rows so each disjunct still gets its own
+# reported case, distinct from the different-backend / unrecorded-backend
+# tests below.
+@pytest.mark.parametrize("args", [[], ["--backend", "vulkan"]])
+def test_guard_short_circuits_when_present(wired, args):
+    """A library already present with a matching recorded backend does
+    nothing - something works, so there is no re-download."""
     target, trace = wired
     (target / "llama.dll").write_bytes(b"present")
     setup_llama._record_provisioned_backend(target, "vulkan")
-    result = _run([])
-    assert result.exit_code == 0, result.output
-    assert "Already provisioned" in result.output
-    assert not trace.extracted
-
-
-def test_guard_same_explicit_backend_short_circuits(wired):
-    """An explicit backend that matches the recorded one short-circuits."""
-    target, trace = wired
-    (target / "llama.dll").write_bytes(b"present")
-    setup_llama._record_provisioned_backend(target, "vulkan")
-    result = _run(["--backend", "vulkan"])
+    result = _run(args)
     assert result.exit_code == 0, result.output
     assert "Already provisioned" in result.output
     assert not trace.extracted

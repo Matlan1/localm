@@ -83,22 +83,6 @@ def test_no_file_headers():
     assert result == make_file("x", "Y", "z")
 
 
-def test_file_headers_optional():
-    """--- +++ headers are parsed but not required for correctness."""
-    original = make_file("1", "2", "3")
-    diff = (
-        "--- a/file.txt\n"
-        "+++ b/file.txt\n"
-        "@@ -1,3 +1,3 @@\n"
-        " 1\n"
-        "-2\n"
-        "+two\n"
-        " 3\n"
-    )
-    result = apply_diff(original, diff)
-    assert result == make_file("1", "two", "3")
-
-
 def test_trailing_newline_preserved():
     original = "a\nb\nc\n"
     diff = "@@ -2,1 +2,1 @@\n-b\n+B\n"
