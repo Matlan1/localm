@@ -249,12 +249,12 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         if not repo:
             return _text_result("'repo' is required (e.g. 'bartowski/Qwen2.5-7B-Instruct-GGUF')",
                                  is_error=True)
-        from localm.discover import DiscoverError, fit_label, hf_gguf_files, vram_info
+        from localm.discover import DiscoverError, fit_label, hf_gguf_files, vram_capacity
         try:
             files = hf_gguf_files(repo)
         except DiscoverError as e:
             return _text_result(str(e), is_error=True)
-        total_vram = vram_info().get("total")
+        total_vram = vram_capacity().get("total")
         for f in files:
             f["fit"] = fit_label(f["size_bytes"], total_vram)
         return _text_result(json.dumps(files))

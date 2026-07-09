@@ -252,7 +252,7 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
 
         # Perform VRAM check and eviction
         from pathlib import Path
-        from localm.discover import vram_info
+        from localm.discover import vram_capacity
         from localm.model_manager import get_model_info
         from localm.config import load_registry
         
@@ -282,7 +282,7 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
             headroom = 1024 ** 3  # 1GB VRAM headroom
 
             while True:
-                v_info = vram_info()
+                v_info = vram_capacity()
                 free_vram = v_info.get("free")
                 measurable = free_vram is not None
                 if measurable and free_vram >= vram_required + headroom:
@@ -344,7 +344,7 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                     await loop.run_in_executor(
                         None,
                         lambda: wait_for_vram_release(
-                            lambda: vram_info().get("free"), before_bytes=free_before))
+                            lambda: vram_capacity().get("free"), before_bytes=free_before))
 
         if name in _engines:
             new_engine = _engines[name]

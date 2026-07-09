@@ -131,15 +131,20 @@ def _load_engine(model: Optional[str]):
             if not name or _live.display_name == name:
                 return _live          # reuse - no VRAM cost, no load time
             
-            # VRAM gate: unload the live engine if VRAM is tight
+            # VRAM gate: unload the live engine if VRAM is tight. Uses
+            # vram_capacity() (combined free across a configured multi-GPU
+            # split, else the same single-GPU vram_info() number) - the same
+            # "will this fit" ceiling switch_engine's eviction gate uses, so a
+            # split-configured machine doesn't needlessly evict the live chat
+            # engine when the combined capacity already covers the media job.
             from localm import vram as _vram
-            from localm.discover import vram_info
-            free = vram_info().get("free")
+            from localm.discover import vram_capacity
+            free = vram_capacity().get("free")
             est = _vram.media_estimate_bytes("chat")
             if _vram.should_swap_for_media(free, est):
                 _live.unload()
                 _vram.wait_for_vram_release(
-                    lambda: vram_info().get("free"),
+                    lambda: vram_capacity().get("free"),
                     before_bytes=free)
     except Exception as e:
         # Best-effort live-engine reuse + VRAM gate. If anything here fails
