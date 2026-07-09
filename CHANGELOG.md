@@ -83,6 +83,13 @@ Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on
 - **RAG safety:** archive extraction is bounded (zip/tar bombs), compressed tars
   are handled, and a folder index skips model weights and secrets and does not
   index member-read errors.
+- **RAG API under `localm serve` (api-mode):** indexing, upload, and embedding
+  setup used to crash with an opaque HTTP 500 when hit directly (not through the
+  GUI) because they read GUI-only server state; they now degrade to a clean 503
+  ("run `localm gui`"), and querying falls back to lexical-only search instead of
+  crashing. Attachment extraction (`/api/rag/extract`) no longer runs
+  synchronously on the event loop, so a large or crafted archive attachment can
+  no longer freeze every other request on the server while it extracts.
 - **Models and API:** a local model file registers fully offline with no
   HuggingFace path leak; `/api/models` no longer 500s on a forward reference; a
   hidden native-load failure cause is surfaced.
