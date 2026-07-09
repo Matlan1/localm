@@ -200,3 +200,68 @@ class TestBodySizeGuard:
             # A normal small request is NOT blocked by the size guard.
             ok = c.patch("/v1/config", json={"n_ctx": 8192})
             assert ok.status_code != 413, ok.text
+
+    def test_chunked_body_without_content_length_still_capped(
+            self, tmp_path, monkeypatch):
+        # AUD-CHUNKED regression (finding 2, 2026-07-09 audit): the
+        # Content-Length check above is bypassed entirely by
+        # Transfer-Encoding: chunked, which never sends a Content-Length at
+        # all - live-verified pre-fix to buffer a 250MB body into ~5.9GB of
+        # process memory from one unauthenticated connection via the
+        # CORS-exempt /v1/chat/completions route. A generator body drives
+        # TestClient's ASGI transport to omit Content-Length and use chunked
+        # transfer, the same as a real chunked POST (confirmed:
+        # request.headers["transfer-encoding"] == "chunked" and no
+        # content-length key reaches the app in this mode) - so this exercises
+        # the SAME streaming-cap code path the live exploit did, not just the
+        # Content-Length fast path already covered above.
+        import localm.inference.http_server as hs
+        import localm.config as cfg
+        localm = tmp_path / ".localm"
+        localm.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("LOCALM_HOME", str(localm))
+        monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+        monkeypatch.setattr(cfg, "HOME_DIR", localm)
+        monkeypatch.setattr(cfg, "MODELS_DIR", localm / "models")
+        monkeypatch.setattr(cfg, "CONFIG_FILE", localm / "config.json")
+        monkeypatch.setattr(cfg, "REGISTRY_FILE", localm / "registry.json")
+        monkeypatch.setattr(hs, "MAX_REQUEST_BODY_BYTES", 1000)
+        app = hs.create_app(None)
+
+        def oversized_chunks():
+            for _ in range(20):            # 20 * 200 = 4000 bytes > 1000 cap
+                yield b"a" * 200
+
+        with TestClient(app) as c:
+            r = c.post("/v1/chat/completions", content=oversized_chunks(),
+                       headers={"Content-Type": "application/json"})
+            assert r.status_code == 413, r.text
+            assert "too large" in r.text.lower()
+            # The server must stay healthy for the next request - the cap
+            # must reject cleanly, not leave the app/connection wedged.
+            ok = c.get("/health")
+            assert ok.status_code in (200, 503)
+
+    def test_chunked_body_within_cap_not_blocked(self, tmp_path, monkeypatch):
+        # Negative case: a legitimately small chunked (no Content-Length)
+        # request must not be rejected by the streaming cap.
+        import localm.inference.http_server as hs
+        import localm.config as cfg
+        localm = tmp_path / ".localm"
+        localm.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("LOCALM_HOME", str(localm))
+        monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+        monkeypatch.setattr(cfg, "HOME_DIR", localm)
+        monkeypatch.setattr(cfg, "MODELS_DIR", localm / "models")
+        monkeypatch.setattr(cfg, "CONFIG_FILE", localm / "config.json")
+        monkeypatch.setattr(cfg, "REGISTRY_FILE", localm / "registry.json")
+        app = hs.create_app(None)
+
+        def small_chunks():
+            yield b'{"model":"x","messages":[{"role":"user",'
+            yield b'"content":"hi"}]}'
+
+        with TestClient(app) as c:
+            r = c.post("/v1/chat/completions", content=small_chunks(),
+                       headers={"Content-Type": "application/json"})
+            assert r.status_code != 413, r.text

@@ -123,3 +123,95 @@ def test_configured_cors_origin_passes_cross_origin_but_still_needs_token(
                       headers={"Origin": "https://app.example",
                                "Authorization": f"Bearer {app.state.shell_token}"})
     assert ok.status_code == 200
+
+
+class TestShellTokenMetadataGetOriginGate:
+    """AUD-CORSTOKEN regression (finding 1, 2026-07-09 audit): the default CORS
+    policy trusts any http(s)://localhost:PORT / 127.0.0.1:PORT origin to READ a
+    response, so a hostile local page can steal the open-mode shell token from a
+    plain cross-origin GET / and replay it. The metadata-GET branch of
+    _origin_guard must reject that replay the same way the unsafe-method branch
+    already rejects a cross-origin state change - token possession alone is not
+    a same-origin proof."""
+
+    def test_cross_origin_metadata_get_with_stolen_token_refused(self, client):
+        token = client.app.state.shell_token
+        r = client.get("/v1/keys",
+                        headers={"Origin": "http://localhost:9999",
+                                 "Authorization": f"Bearer {token}"})
+        assert r.status_code == 403
+        assert "open-mode management" in r.json()["detail"].lower()
+
+    def test_cross_origin_fs_places_with_stolen_token_refused(self, client):
+        # the specific route the live exploit used to disclose the real
+        # filesystem layout (AUD-CORSTOKEN evidence item 4)
+        token = client.app.state.shell_token
+        r = client.get("/api/fs/places",
+                        headers={"Origin": "http://localhost:9999",
+                                 "Authorization": f"Bearer {token}"})
+        assert r.status_code == 403
+
+    def test_same_origin_metadata_get_with_token_still_allowed(self, client):
+        # the legitimate loopback GUI shell case must keep working
+        token = client.app.state.shell_token
+        r = client.get("/v1/keys",
+                        headers={"Origin": "http://testserver", "Host": "testserver",
+                                 "Authorization": f"Bearer {token}"})
+        assert r.status_code == 200
+
+    def test_no_origin_metadata_get_with_token_still_allowed(self, client):
+        # a non-browser client (curl/CLI) sends no Origin at all - unaffected
+        token = client.app.state.shell_token
+        r = client.get("/v1/keys", headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 200
+
+    def test_cross_origin_metadata_get_without_token_still_refused(self, client):
+        # sanity: the gate was never bypassable by omitting the token either
+        r = client.get("/v1/keys", headers={"Origin": "http://localhost:9999"})
+        assert r.status_code == 403
+
+    def test_allowlisted_cors_origin_metadata_get_with_token_allowed(
+            self, tmp_path, monkeypatch):
+        # an explicitly configured cors_origins entry is trusted the same way
+        # the unsafe-method branch already trusts it (F2's counterpart for GET)
+        import localm.config as cfg
+        home = tmp_path / ".localm"
+        home.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("LOCALM_HOME", str(home))
+        monkeypatch.setattr(cfg, "HOME_DIR", home)
+        monkeypatch.setattr(cfg, "CONFIG_FILE", home / "config.json")
+        monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
+        from localm.config import save_config
+        save_config({"cors_origins": ["https://app.example"]})
+        app = create_app(None)
+        client = TestClient(app)
+        token = app.state.shell_token
+        ok = client.get("/v1/keys",
+                        headers={"Origin": "https://app.example",
+                                 "Authorization": f"Bearer {token}"})
+        assert ok.status_code == 200
+
+    def test_wildcard_cors_metadata_get_with_token_still_allowed(
+            self, tmp_path, monkeypatch):
+        # AUD-CORSWILD: "cors_origins": "*" opts out of the origin check (an
+        # explicit operator choice to trust every origin) but the token itself
+        # remains mandatory - preserved for the metadata-GET branch too.
+        import localm.config as cfg
+        home = tmp_path / ".localm"
+        home.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("LOCALM_HOME", str(home))
+        monkeypatch.setattr(cfg, "HOME_DIR", home)
+        monkeypatch.setattr(cfg, "CONFIG_FILE", home / "config.json")
+        monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
+        from localm.config import save_config
+        save_config({"cors_origins": "*"})
+        app = create_app(None)
+        client = TestClient(app)
+        token = app.state.shell_token
+        ok = client.get("/v1/keys",
+                        headers={"Origin": "http://localhost:9999",
+                                 "Authorization": f"Bearer {token}"})
+        assert ok.status_code == 200
+        # still refused without the token even under wildcard CORS
+        refused = client.get("/v1/keys", headers={"Origin": "http://localhost:9999"})
+        assert refused.status_code == 403
