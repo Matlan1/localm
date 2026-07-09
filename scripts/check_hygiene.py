@@ -13,6 +13,18 @@ Scans tracked files and fails on:
   4. A CHANGELOG.md that is not append-only: a shipped entry line removed or
      rewritten (vs the published-record baseline) instead of new entries added on
      top. The changelog is the permanent public record of what shipped (AGENTS.md).
+  5. A raw call to a single-resource accessor from outside its designated
+     aggregate-capacity wrapper (see _RAW_ACCESSOR_GUARDS below). When a feature's
+     whole value is "combine capacity across N resources" (multi-GPU VRAM split is
+     the first case; the same shape applies to any future multi-disk,
+     multi-model-instance, or multi-connection-pool feature), every "does this
+     fit" decision must go through the wrapper - not just the one call site a PR
+     happened to update. This is deliberately an ENFORCED check, not a written
+     review note: a note relies on a human remembering to re-grep every call site
+     next time, which is exactly the discipline that already failed once (see
+     dev-notes/gpu-split-capacity-fix/ for the incident this check was written
+     for - vram_info() was single-GPU-only and 8 call sites read it as if it
+     were the aggregate ceiling before discover.vram_capacity() existed).
 
 It also runs the release-file manifest gate (scripts/check_manifest.py,
 NEW-RELEASE-FILEMANIFEST): every tracked file must be classified release-include
@@ -32,6 +44,7 @@ Stdlib only, so it runs in any environment without installing anything.
 
 from __future__ import annotations
 
+import ast
 import re
 import subprocess
 import sys
@@ -255,6 +268,72 @@ def _changelog_append_only() -> list[str]:
             f"Removed: {shown}{more}"]
 
 
+# ---- check 5: raw single-resource accessor guard ----------------------------
+# Each entry maps a raw single-resource function name to the wrapper that must
+# be used instead, and the file(s) allowed to still call the raw function
+# directly - the function's own home module (definition + the wrapper's own
+# fallback calls), plus any call site that is NOT a "does this fit" capacity
+# decision (a before/after delta measurement on one device, a status-bar
+# widget deliberately reporting one device) with a documented reason. `tests/`
+# is exempt everywhere: tests legitimately call/mock the raw function directly
+# to test IT, not just its consumers.
+#
+# Add a new entry here whenever a similar "single -> combined N resources"
+# capability ships (see dev-notes/gpu-split-capacity-fix/ for the multi-GPU
+# VRAM case this was written for) - do not just write a review note.
+_RAW_ACCESSOR_GUARDS = {
+    "vram_info": {
+        "wrapper": "localm/discover.py's vram_capacity()",
+        "allowed": {
+            # home module: the definition, plus vram_capacity()'s own
+            # documented fallback to the single-GPU number.
+            "localm/discover.py",
+            # before/after free-VRAM DELTA measurements on one reading
+            # (detecting that an unload actually landed) - not a capacity/fit
+            # decision, so combined-vs-single does not apply.
+            "localm/inference/http_server.py",
+            "localm/plugins/mcpserver/server.py",
+            # hardware-monitor status-bar widget: deliberately reports the
+            # single main GPU's live utilisation for display, not an
+            # aggregate "does it fit" number (a combined used/total would
+            # hide which physical card is actually full).
+            "localm/sysstats.py",
+        },
+    },
+}
+
+
+def _raw_accessor_violations(files: list[Path]) -> list[str]:
+    problems = []
+    for name, spec in _RAW_ACCESSOR_GUARDS.items():
+        allowed = spec["allowed"]
+        for path in files:
+            if path.suffix != ".py":
+                continue
+            rel = path.relative_to(REPO).as_posix()
+            if rel.startswith("tests/") or rel in allowed:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+                tree = ast.parse(text, filename=rel)
+            except (UnicodeDecodeError, OSError, SyntaxError):
+                continue
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                called = (func.id if isinstance(func, ast.Name) else
+                          func.attr if isinstance(func, ast.Attribute) else None)
+                if called == name:
+                    problems.append(
+                        f"{rel}:{node.lineno}: calls {name}() directly - use "
+                        f"{spec['wrapper']} instead (or add {rel!r} to "
+                        f"_RAW_ACCESSOR_GUARDS in check_hygiene.py with a "
+                        f"documented reason if this really is a legitimate "
+                        f"single-resource exception)")
+    return problems
+
+
 def _install_hook() -> int:
     hook = REPO / ".git" / "hooks" / "pre-commit"
     if not hook.parent.is_dir():
@@ -288,10 +367,12 @@ def _manifest_problems() -> list[str]:
 def main(argv: list[str]) -> int:
     if "--install-hook" in argv:
         return _install_hook()
+    tracked = _tracked_files()
     problems: list[str] = []
-    for f in _tracked_files():
+    for f in tracked:
         problems.extend(_scan(f))
     problems.extend(_changelog_append_only())
+    problems.extend(_raw_accessor_violations(tracked))
     manifest = _manifest_problems()
     if problems or manifest:
         if problems:
