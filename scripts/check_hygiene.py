@@ -318,15 +318,29 @@ def _raw_accessor_violations(files: list[Path]) -> list[str]:
                 tree = ast.parse(text, filename=rel)
             except (UnicodeDecodeError, OSError, SyntaxError):
                 continue
+            # Local names this module binds the raw accessor to: the literal
+            # name itself, PLUS any `from ... import <name> as <alias>` -
+            # an import alias is a demonstrated, real bypass of a literal-name
+            # match (verified with `... import vram_info as vi; vi()`), not
+            # a hypothetical one. A bare module-attribute call (`disc.vram_info()`)
+            # is already caught regardless of what the MODULE is aliased to,
+            # since ast.Attribute.attr is still the literal accessor name.
+            bound_names = {name}
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom):
+                    for imp_alias in node.names:
+                        if imp_alias.name == name:
+                            bound_names.add(imp_alias.asname or imp_alias.name)
             for node in ast.walk(tree):
                 if not isinstance(node, ast.Call):
                     continue
                 func = node.func
                 called = (func.id if isinstance(func, ast.Name) else
                           func.attr if isinstance(func, ast.Attribute) else None)
-                if called == name:
+                if called in bound_names:
+                    via = f" (imported as {called!r})" if called != name else ""
                     problems.append(
-                        f"{rel}:{node.lineno}: calls {name}() directly - use "
+                        f"{rel}:{node.lineno}: calls {name}(){via} directly - use "
                         f"{spec['wrapper']} instead (or add {rel!r} to "
                         f"_RAW_ACCESSOR_GUARDS in check_hygiene.py with a "
                         f"documented reason if this really is a legitimate "
