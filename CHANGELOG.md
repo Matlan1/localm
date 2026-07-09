@@ -123,10 +123,21 @@ Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on
   changelog item across both inference backends before publish). The publish path
   also refuses to reuse an existing version tag or to build from a commit that is
   not the CI-tested `origin/master`, so the signed artifact always matches what CI
-  validated.
+  validated. Fixed a TOCTOU gap where the build step read file bytes from the live
+  working tree *after* the (multi-minute) pre-publish CI wait: `--publish` now pins
+  the verified `HEAD` sha right before that wait and assembles `build.zip` from the
+  git tree at that exact commit (`git archive`), so a tracked-file edit landing
+  during the wait can no longer ship in the signed artifact. The manifest itself
+  (`release-manifest.toml`'s include/exclude patterns, which decide which pinned
+  files ship) is also read from that same pinned commit (`git show`), not live
+  disk, closing the same window for a manifest-pattern edit; and a tracked symlink
+  can no longer be silently corrupted into a small text file containing its raw
+  target-path string, since the pinned-commit build now rejects it loudly instead.
 - **Changelog is a guarded record.** `CHANGELOG.md` is enforced append-only for
   published (versioned) sections: `check_hygiene.py` fails the build if a shipped
-  entry is deleted or rewritten. The `[Unreleased]` draft stays freely editable.
+  entry is deleted or rewritten - now including a published section's own version
+  header line (number/date) and any `### Added`-style subsection header inside it,
+  not only bullet entries. The `[Unreleased]` draft stays freely editable.
 - Contributor-guide and test-cadence clarifications, test isolation via a temp
   `LOCALM_HOME` in `conftest.py`, and a documentation pass across the user manual.
 

@@ -16,6 +16,12 @@ The signing-key PATH comes from --key or $LOCALM_SIGNING_KEY - deliberately NOT 
 into this tracked file (which must stay machine-path-free). Before publishing, this
 SELF-CHECKS that the signature verifies against the key pinned in
 updater._UPDATE_PUBKEYS, so a build the shipped clients would reject is never released.
+
+With --publish, the build is assembled from the exact commit pinned by the HEAD==
+origin gate (via build_release.build(..., commit=...) / git archive), not from the
+live working tree - so nothing edited on disk during the multi-minute pre-publish CI
+wait can end up in the signed artifact. A plain (non-publish) build still reads the
+working tree, for quick local iteration.
 """
 
 from __future__ import annotations
@@ -313,15 +319,24 @@ def main(argv=None) -> int:
     # Pre-publish gates, cheapest-first, fail fast before the heavy build/sign/CI:
     #   1. clean tree (no uncommitted tracked changes),
     #   2. HEAD == origin/<ci-ref> (so the CI run below validates the EXACT built commit,
-    #      not a diverged local tree),
+    #      not a diverged local tree) - and PIN that commit's sha right here, so the
+    #      build below reads from the git object database at this exact commit, not
+    #      from the working tree as it happens to look after the CI wait below (TOCTOU:
+    #      CI takes minutes; a tracked-file edit landing on disk during that wait must
+    #      never silently ship in the signed artifact),
     #   3. the tag is free at the release commit (no collision with an old/reused tag),
     #   4. a live functional-verification record for THIS commit (cold-install + exercise
     #      every changelog item by hand - the gate CI cannot cover),
     #   5. the FIRST heavy gate: ONE full CI pass over the whole repo (enabling the
     #      runners if a maintainer disabled them).
+    release_sha = None
     if args.publish:
         _require_clean_tree()
         _require_head_matches_origin(args.ci_ref)
+        head = _git(["rev-parse", "HEAD"])
+        release_sha = (getattr(head, "stdout", "") or "").strip()
+        if not release_sha:
+            raise SystemExit("release: could not resolve HEAD to pin the build commit.")
         _require_tag_available(tag)
         _require_verification_record()
         require_ci_green(args.ci_ref)
@@ -331,7 +346,12 @@ def main(argv=None) -> int:
     #    generates, rewrites, or truncates it. The changelog is APPEND-ONLY and hand-
     #    maintained (AGENTS.md) - a new version's section is added ABOVE the prior ones
     #    by hand, and check_hygiene.py fails the build if any shipped entry is removed.
-    members = build_release.build(out, force=True)
+    #    --publish: build.zip is assembled from release_sha (the commit pinned above,
+    #    the SAME one CI just validated), via git archive, not from live disk - so the
+    #    signed artifact provably matches the verified commit regardless of what has
+    #    since changed on disk. A plain (non-publish) build still reads the working
+    #    tree, for quick local iteration.
+    members = build_release.build(out, force=True, commit=release_sha)
     # 2. sign it (writes <out>.sig)
     sig_path = Path(str(out) + ".sig")
     if sign_release._sign(out, keypath, sig_path) != 0:

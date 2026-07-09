@@ -131,17 +131,18 @@ def _scan(path: Path) -> list[str]:
 # ---- check 4: CHANGELOG is append-only -------------------------------------
 # The release changelog is the permanent public record of what shipped. Only the
 # PUBLISHED (versioned "## [x.y.z]") sections are frozen: a release ADDS its section
-# on top and its entries are then never deleted or rewritten (typo/formatting fixes
-# aside - see AGENTS.md). The "## [Unreleased]" draft (and any intro text before the
-# first version header) is the in-progress record and is FREELY rewritable until it
-# is cut into a version. Enforced by diffing the working CHANGELOG against the
-# published-record baseline (the merge-base with origin/master, else the last commit)
-# and failing if any PUBLISHED entry line disappeared. Markdown HEADERS ("# ...") and
-# link-reference definitions ("[label]: url") are exempt: cutting a release
-# legitimately renames the Unreleased header to a version and rewrites the compare
-# link. Compared as a multiset, so MOVING an entry from [Unreleased] under a new
-# version header is fine - only a deletion or rewrite of an already-PUBLISHED entry
-# line is caught.
+# on top and its entries (INCLUDING its own version header and any "### " subsection
+# headers within it, e.g. "### Added") are then never deleted or rewritten (typo/
+# formatting fixes aside - see AGENTS.md). The "## [Unreleased]" draft's own header
+# (and any intro text before the first version header) is the in-progress record and
+# is FREELY rewritable until it is cut into a version. Enforced by diffing the working
+# CHANGELOG against the published-record baseline (the merge-base with origin/master,
+# else the last commit) and failing if any PUBLISHED entry line disappeared. Only the
+# "## [Unreleased]" header itself and link-reference definitions ("[label]: url") are
+# exempt: cutting a release legitimately renames the Unreleased header to a version
+# and rewrites the compare link. Compared as a multiset, so MOVING an entry from
+# [Unreleased] under a new version header is fine - only a deletion or rewrite of an
+# already-PUBLISHED entry line (body OR header) is caught.
 _CHANGELOG = "CHANGELOG.md"
 _CHANGELOG_LINKREF = re.compile(r"\[[^\]]+\]:\s")
 # An H2 section header opening a PUBLISHED version section, e.g. "## [0.1.1] - date".
@@ -151,25 +152,36 @@ _CHANGELOG_VERSION_HEADER = re.compile(r"^##\s+\[\d")
 
 def _changelog_protected_lines(text: str) -> list[str]:
     """Lines of the PUBLISHED (versioned) changelog sections whose loss would rewrite
-    history: non-blank, non-header, non-link-reference lines sitting UNDER a
-    ``## [x.y.z]`` header. Lines under ``## [Unreleased]`` (or before the first version
-    header) are the in-progress draft and are NOT protected - they may be rewritten
-    freely until the release is cut (AGENTS.md). rstrip()'d so a CRLF/LF or trailing-
-    space difference is not mistaken for a real change."""
+    history: the ``## [x.y.z]`` header line itself, plus every non-blank, non-link-
+    reference line sitting under it - INCLUDING a ``### Added``-style subsection
+    header, not just its bullet entries. Lines under ``## [Unreleased]`` (or before
+    the first version header) are the in-progress draft and are NOT protected - they
+    may be rewritten freely until the release is cut (AGENTS.md). rstrip()'d so a
+    CRLF/LF or trailing-space difference is not mistaken for a real change.
+
+    Both the version header line AND subsection headers within a published section
+    are protected, not just bullet entries: a version header carries the version
+    number and ship date, and a subsection header carries WHICH CATEGORY an entry
+    shipped under (e.g. distinguishing "Added" from "Removed" for the same bullet
+    text) - silently rewriting either is exactly the kind of history rewrite this
+    guard exists to catch, the same as editing a bullet's wording."""
     out = []
     published = False   # intro + [Unreleased] (before the first version header) are editable
     for raw in text.splitlines():
         line = raw.rstrip()
         stripped = line.lstrip()
         # An H2 section header ("## ...") switches zones: a versioned header opens the
-        # protected published record; [Unreleased] (or any other H2) closes it. Deeper
-        # headers ("### Added") are subsections and do NOT change the zone.
+        # protected published record; [Unreleased] (or any other H2) closes it. Once
+        # published, a DEEPER header ("### Added") does NOT change the zone, but is
+        # still protected content (handled by the generic append below).
         if stripped.startswith("## "):
             published = bool(_CHANGELOG_VERSION_HEADER.match(stripped))
+            if published:
+                out.append(line)   # the header itself is part of the published record
             continue
         if not published:
             continue
-        if not stripped or stripped.startswith("#") or _CHANGELOG_LINKREF.match(stripped):
+        if not stripped or _CHANGELOG_LINKREF.match(stripped):
             continue
         out.append(line)
     return out

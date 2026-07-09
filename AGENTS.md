@@ -213,7 +213,10 @@ into a version at release time.
 This is enforced, not merely asked. The same `check_hygiene.py` pass diffs the
 working `CHANGELOG.md` against the published-record baseline (the merge-base with
 `origin/master`, else the last commit) and fails if any PUBLISHED entry line was
-removed or rewritten; `[Unreleased]` lines, markdown headers, and the link-reference
+removed or rewritten - INCLUDING a published section's own `## [x.y.z]` version
+header (its number and ship date) and any `### Added`-style subsection header
+within it, not just its bullet entries. Only lines under `## [Unreleased]` (its own
+header, and any intro text before the first version header) and the link-reference
 definitions at the bottom are exempt (cutting a release legitimately renames the
 `[Unreleased]` header to a version and updates the compare link). The release
 tooling honors the same invariant: `scripts/make_release.py` / `build_release.py`
