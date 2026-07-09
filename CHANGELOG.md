@@ -92,7 +92,11 @@ Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on
   non-interactive path now names the account-less send channel.
 - **Memory:** the owner's chat memory stays in the shared `owner` namespace.
 - **GUI:** an empty ComfyUI scan shows the reason instead of a bare "Added 0"; the
-  GUI no longer sends a chat request when no model is loaded.
+  GUI no longer sends a chat request when no model is loaded; a background job's
+  progress stream (model pull, ComfyUI setup, image/music/video generation) now
+  fans out to every viewer independently, so reloading the page or opening the
+  same job in two tabs no longer splits its events between them (one tab could
+  end up hanging forever with no completion event).
 - **Setup:** warn when a llama.cpp download has no checksum to verify (and verify
   against a published checksum by default); discard stray keyboard input before the
   CUDA prompt; skip console-window hiding in debug mode; skip draft releases with
