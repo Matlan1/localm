@@ -90,6 +90,9 @@ Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on
   crashing. Attachment extraction (`/api/rag/extract`) no longer runs
   synchronously on the event loop, so a large or crafted archive attachment can
   no longer freeze every other request on the server while it extracts.
+- **RAG on Windows:** a transient `PermissionError` during a collection write's
+  atomic rename (antivirus or the search indexer briefly holding the file handle)
+  is now retried instead of failing the write.
 - **Models and API:** a local model file registers fully offline with no
   HuggingFace path leak; `/api/models` no longer 500s on a forward reference; a
   hidden native-load failure cause is surfaced.
