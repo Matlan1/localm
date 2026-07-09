@@ -170,7 +170,14 @@ def _scrub_history_file(path: Path, pattern: re.Pattern) -> bool:
     """
     try:
         data = path.read_bytes()
-    except (OSError, PermissionError):
+    except (OSError, PermissionError) as exc:
+        # Surface, don't silence: an unreadable history file means we cannot
+        # know whether it holds secret-bearing command lines, so the privacy
+        # guarantee did not hold for it. Mirrors the write-failure warning below.
+        console.print(
+            f"\n[bold yellow]Warning:[/bold yellow] could not read history "
+            f"file [yellow]{path}[/yellow] ({exc}); it was not scrubbed."
+        )
         return False
 
     # Read bytes (not read_text) so the original newline style is observable:
