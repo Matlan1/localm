@@ -138,21 +138,18 @@ def release_files(tracked: list[str], include: list[str], exclude: list[str]) ->
 #  git-backed wrapper                                                         #
 # --------------------------------------------------------------------------- #
 
-def load_manifest(path: Path = MANIFEST) -> dict:
-    """Parse release-manifest.toml into ``{include, exclude, local_only}`` lists.
-
-    Raises FileNotFoundError if the manifest is missing and ValueError if a required
-    table/key is absent - a broken manifest must fail loudly, never degrade into a
-    silent pass (AGENTS.md rule 5)."""
+def _parse_manifest_toml(text: str, *, source: str) -> dict:
+    """Shared TOML-to-``{include, exclude, local_only}`` parsing for both
+    load_manifest() (live disk) and load_manifest_at() (a pinned commit), so the two
+    read paths can never silently disagree on the required table/key shape. *source*
+    is only used to name the manifest in an error message."""
     try:
         import tomllib
     except ModuleNotFoundError as e:   # Python < 3.11; the repo targets 3.12
         raise RuntimeError(
             "release manifest check needs tomllib (Python 3.11+); this interpreter "
             f"is too old ({sys.version.split()[0]})") from e
-    if not path.is_file():
-        raise FileNotFoundError(path)
-    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    data = tomllib.loads(text)
     try:
         return {
             "include": list(data["release"]["include"]["patterns"]),
@@ -160,7 +157,40 @@ def load_manifest(path: Path = MANIFEST) -> dict:
             "local_only": list(data["local_only"]["patterns"]),
         }
     except (KeyError, TypeError) as e:
-        raise ValueError(f"release-manifest.toml is missing a required table/key: {e}") from e
+        raise ValueError(f"{source} is missing a required table/key: {e}") from e
+
+
+def load_manifest(path: Path = MANIFEST) -> dict:
+    """Parse release-manifest.toml into ``{include, exclude, local_only}`` lists.
+
+    Raises FileNotFoundError if the manifest is missing and ValueError if a required
+    table/key is absent - a broken manifest must fail loudly, never degrade into a
+    silent pass (AGENTS.md rule 5)."""
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    return _parse_manifest_toml(path.read_text(encoding="utf-8"),
+                                source="release-manifest.toml")
+
+
+def load_manifest_at(commit: str, repo: Path = REPO) -> dict:
+    """The manifest as it exists in the git tree at *commit* (via ``git show``), not
+    live disk - the pinned-commit counterpart to load_manifest().
+
+    release-manifest.toml is itself a tracked file: without this, a build pinned to
+    *commit* would still read its INCLUDE/EXCLUDE PATTERNS (which files ship) from
+    whatever the manifest looks like on disk right now, so an edit to the manifest
+    landing after the commit was gated (the same TOCTOU window closed for file
+    bytes/list) could still change what ships. Raises FileNotFoundError if the
+    manifest does not exist at *commit*, ValueError if it fails to parse - same
+    fail-loud contract as load_manifest()."""
+    r = subprocess.run(["git", "show", f"{commit}:release-manifest.toml"],
+                       cwd=repo, capture_output=True)
+    if r.returncode != 0:
+        raise FileNotFoundError(
+            f"release-manifest.toml not found at commit {commit!r}: "
+            f"{r.stderr.decode('utf-8', 'replace').strip()}")
+    return _parse_manifest_toml(r.stdout.decode("utf-8"),
+                                source=f"release-manifest.toml at {commit}")
 
 
 def tracked_files(repo: Path = REPO) -> list[str] | None:
@@ -174,6 +204,25 @@ def tracked_files(repo: Path = REPO) -> list[str] | None:
     try:
         out = subprocess.run(["git", "ls-files", "-z"], cwd=repo,
                              capture_output=True, check=True).stdout
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+    return [p for p in out.decode("utf-8", "surrogateescape").split("\0") if p]
+
+
+def tracked_files_at(commit: str, repo: Path = REPO) -> list[str] | None:
+    """Repo-relative POSIX paths of every file in the git TREE at *commit* - the
+    committed state, not the working tree / index ``tracked_files()`` reads. None
+    when git is unavailable or *commit* cannot be resolved.
+
+    This is the pinned-commit counterpart ``scripts/build_release.py`` uses for a
+    signed release build: the release file LIST, like the file BYTES, must come from
+    the exact verified commit, not from whatever is staged or edited on disk right
+    now (closes the release TOCTOU where a tracked-file edit made after the commit
+    was gated could otherwise change which files end up in the artifact). Same ``-z``
+    non-ASCII-path handling as tracked_files()."""
+    try:
+        out = subprocess.run(["git", "ls-tree", "-r", "-z", "--name-only", commit],
+                             cwd=repo, capture_output=True, check=True).stdout
     except (subprocess.CalledProcessError, FileNotFoundError):
         return None
     return [p for p in out.decode("utf-8", "surrogateescape").split("\0") if p]

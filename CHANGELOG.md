@@ -216,7 +216,10 @@ Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on
   executed, so a compromised release channel cannot push a forged build.
   Anti-rollback refuses an older signed build, the download stays HTTPS-pinned, and
   a self-update no longer wipes the provisioned native runtime. Publishing is gated
-  on a clean tree, a full CI pass over the repo, and a build that imports and runs.
+  on a clean tree, a full CI pass over the repo, and a build that imports and runs;
+  the build itself is now assembled from that exact CI-validated commit (not a
+  live disk snapshot taken after CI finishes), so a change landing on disk during
+  the wait can no longer ship unreviewed.
 - **ComfyUI launch** no longer has a shell-injection vector on Windows.
 - **RAG folder index** skips model weights and secrets rather than indexing them.
 - **MCP** destructive tools are annotated so clients can confirm them.
