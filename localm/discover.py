@@ -16,6 +16,7 @@ preflight: weights + ~1.5 GB overhead for KV cache and compute buffers.
 
 from __future__ import annotations
 
+import ctypes
 import re
 from collections.abc import Sequence
 from typing import Optional
@@ -397,6 +398,189 @@ def apply_main_gpu(mp, *, config: Optional[dict] = None) -> None:
     if configured is None:
         return
     mp.main_gpu = resolve_main_gpu_index(configured)
+
+
+# llama.cpp's LLAMA_SPLIT_MODE_LAYER (see llamacpp/_structs.py / _abi.py's
+# split_mode notes: 0=NONE/single-GPU, 1=LAYER, 2=ROW, 3=TENSOR). LAYER splits
+# whole layers across devices proportional to tensor_split - the right default
+# for "spread a too-big model over N cards" (as opposed to ROW/TENSOR, which
+# split individual tensors and generally need fast inter-GPU interconnect to
+# be worthwhile).
+_LLAMA_SPLIT_MODE_LAYER = 1
+
+# Fallback tensor_split array capacity when llama_max_devices() cannot be
+# probed (an older build without the symbol). Matches LLAMA_MAX_DEVICES from
+# the pre-dynamic-backend-registry era this build's own _structs.py docstring
+# says it predates. tensor_split is a raw `const float*` with no length of its
+# own, so under-allocating would be a genuine out-of-bounds read - this is a
+# best-effort safety net, not a verified value (no multi-GPU hardware or
+# provisioned native runtime was available to confirm it against the actual
+# bundled build; see apply_gpu_split).
+_TENSOR_SPLIT_FALLBACK_CAPACITY = 16
+
+# Sanity ceiling for a gpu_split_indices entry - no real machine has anywhere
+# near this many GPU devices, so an index above it is a config error, never a
+# legitimate one. Bounds the ctypes tensor_split allocation apply_gpu_split
+# eventually drives: without this, [0, 500000] would attempt a 500,001-element
+# allocation before the native loader is ever invoked. settings_schema.py's
+# MAX_GPU_SPLIT_INDEX applies the same value at config WRITE time; this is the
+# independent check at READ time, so a hand-edited config.json that bypasses
+# schema validation entirely is still bounded here.
+_MAX_GPU_SPLIT_INDEX = 127
+
+
+def resolve_gpu_split(configured_indices, configured_ratios=None, *,
+                       gpus: Optional[list] = None) -> list:
+    """Validate a configured multi-GPU split (``gpu_split_indices`` /
+    ``gpu_split_ratios``) against the devices ``list_gpus()`` (or the injected
+    *gpus*, for tests) currently sees, returning ``[(index, ratio), ...]``
+    ready to write into ``tensor_split``.
+
+    Mirrors :func:`resolve_main_gpu_index`'s posture: an index that does not
+    match a currently-detected device is dropped with a WARNING rather than
+    trusted blindly (rule 5, do-not-hide-problems) - a stale config
+    referencing a since-removed GPU degrades to single-GPU instead of
+    mis-targeting VRAM or crashing a load. Duplicate indices keep their first
+    occurrence. Fewer than 2 valid indices after validation means "no split"
+    (returns ``[]``) - the single-GPU path driven by ``apply_main_gpu`` is
+    unaffected.
+
+    ``configured_ratios``, when given, must be the SAME LENGTH as
+    ``configured_indices`` (before validation) to be honoured - a length
+    mismatch is a real misconfiguration (WARNED), not something to silently
+    truncate/pad, so it falls back to an equal split across the surviving
+    indices. ``None`` (or any non-positive entry) also means an equal split;
+    llama.cpp treats tensor_split entries as relative proportions, not values
+    that must sum to 1, so "equal" here is simply the same weight per device.
+    """
+    if not configured_indices:
+        return []
+    try:
+        raw_indices = [int(i) for i in configured_indices]
+    except (TypeError, ValueError):
+        logger.warning(
+            "gpu_split_indices=%r is not a list of integers; ignoring the "
+            "split (single-GPU behavior)", configured_indices)
+        return []
+    if any(i < 0 for i in raw_indices):
+        logger.warning(
+            "gpu_split_indices=%r contains a negative index; ignoring the "
+            "split (single-GPU behavior)", configured_indices)
+        return []
+    if any(i > _MAX_GPU_SPLIT_INDEX for i in raw_indices):
+        logger.warning(
+            "gpu_split_indices=%r contains an index above the sanity ceiling "
+            "(%d); ignoring the split (single-GPU behavior)",
+            configured_indices, _MAX_GPU_SPLIT_INDEX)
+        return []
+
+    seen: set = set()
+    deduped: list = []
+    for i in raw_indices:
+        if i not in seen:
+            seen.add(i)
+            deduped.append(i)
+
+    if gpus is None:
+        gpus = list_gpus()
+    if gpus:
+        known = {g.get("index") for g in gpus}
+        valid = [i for i in deduped if i in known]
+        dropped = [i for i in deduped if i not in known]
+        if dropped:
+            logger.warning(
+                "gpu_split_indices contains %d device(s) not currently "
+                "detected (%s); dropping them from the split",
+                len(dropped), dropped)
+    else:
+        # Detection unmeasurable (no torch, no nvidia-smi): same documented
+        # boundary as resolve_main_gpu_index - cannot cross-check either way,
+        # so the configured indices pass through rather than discarding an
+        # explicit user choice we have no way to disprove.
+        valid = deduped
+
+    if len(valid) < 2:
+        return []
+
+    ratios: Optional[list] = None
+    if configured_ratios:
+        try:
+            raw_ratios = [float(r) for r in configured_ratios]
+        except (TypeError, ValueError):
+            raw_ratios = None
+        if raw_ratios is not None and any(r <= 0 for r in raw_ratios):
+            raw_ratios = None
+        if raw_ratios is not None and len(raw_ratios) == len(raw_indices):
+            # Re-pair by ORIGINAL position so a ratio still lines up with its
+            # index even when another index was dropped/de-duped above.
+            by_index = dict(zip(raw_indices, raw_ratios))
+            ratios = [by_index[i] for i in valid]
+        else:
+            logger.warning(
+                "gpu_split_ratios (%d entries) does not match gpu_split_indices "
+                "(%d entries); falling back to an equal split",
+                len(configured_ratios), len(raw_indices))
+
+    if ratios is None:
+        ratios = [1.0] * len(valid)
+
+    return list(zip(valid, ratios))
+
+
+def _tensor_split_capacity(min_len: int) -> int:
+    """Float-slot count to allocate for ``tensor_split``: the native loader's
+    own answer when available (authoritative - see the capacity comment
+    above), else the documented fallback. Never smaller than *min_len* (the
+    caller's highest configured device index + 1)."""
+    try:
+        from localm.inference.backends.llamacpp import _api
+        if _api.has_max_devices():
+            return max(_api.llama_max_devices(), min_len)
+    except Exception as e:
+        logger.debug(
+            "llama_max_devices() probe failed (%s); using the fallback "
+            "tensor_split capacity", type(e).__name__)
+    return max(_TENSOR_SPLIT_FALLBACK_CAPACITY, min_len)
+
+
+def apply_gpu_split(mp, *, config: Optional[dict] = None):
+    """Set ``mp.split_mode``/``mp.tensor_split`` from the configured
+    ``gpu_split_indices``/``gpu_split_ratios``, validated via
+    :func:`resolve_gpu_split`. Leaves native defaults (a single active GPU -
+    whatever :func:`apply_main_gpu` already set) untouched when fewer than 2
+    valid devices are configured. Shared by the llama.cpp chat backend and the
+    embedder, same as ``apply_main_gpu``.
+
+    Returns the ctypes float array backing ``mp.tensor_split`` (or ``None``
+    when no split was applied) - the CALLER MUST keep this referenced until
+    after the ``llama_load_model_from_file()`` call that consumes *mp*:
+    llama.cpp copies ``tensor_split``'s contents at load time (it is not held
+    as a live pointer afterward), so the buffer only needs to survive that one
+    call, not the loaded model's lifetime."""
+    from localm.config import load_config
+    cfg = config if config is not None else load_config()
+    pairs = resolve_gpu_split(cfg.get("gpu_split_indices"), cfg.get("gpu_split_ratios"))
+    if len(pairs) < 2:
+        return None
+
+    capacity = _tensor_split_capacity(max(idx for idx, _ in pairs) + 1)
+    arr = (ctypes.c_float * capacity)()
+    for idx, ratio in pairs:
+        arr[idx] = ratio
+
+    mp.tensor_split = ctypes.cast(arr, ctypes.c_void_p)
+    mp.split_mode = _LLAMA_SPLIT_MODE_LAYER
+
+    split_indices = {idx for idx, _ in pairs}
+    if mp.main_gpu not in split_indices:
+        new_main = pairs[0][0]
+        logger.warning(
+            "main_gpu_index=%d is not one of the configured gpu_split_indices "
+            "%s; using device %d (the first split device) as the primary "
+            "instead", mp.main_gpu, sorted(split_indices), new_main)
+        mp.main_gpu = new_main
+
+    return arr
 
 
 def vram_info() -> dict:

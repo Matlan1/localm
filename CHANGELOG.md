@@ -27,6 +27,12 @@ Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on
   `unknown` sentinel and a `.safetensors` directory scan; a `--store` option when
   adding a model; a main-GPU selector with multi-instance GPU coordination and
   explicit model unload.
+- **Split a model across multiple GPUs.** A model too large for any single
+  card's VRAM can now load using the combined VRAM of 2 or more GPUs
+  (`localm config gpu_split_indices 0,1`, or the "Split across GPUs"
+  checkboxes next to the Main GPU selector in Settings), alongside the
+  existing single-GPU selector. The model search results also hint when a
+  model would fit split across your GPUs but not on the largest one alone.
 - **Media: localm can manage its own ComfyUI (opt-in).** For image, music, and
   video generation, localm can install and run an isolated, hardware-matched
   ComfyUI kept separate from any existing one, via `localm comfy setup`

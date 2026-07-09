@@ -579,6 +579,60 @@ class TestGpusEndpoint:
         assert data["gpus"] == []
         assert data["main_gpu_index"] is None
 
+    def test_gpu_split_indices_none_by_default(self, gui_app, tmp_path):
+        """Multi-GPU tensor-split wiring: with no config file at all (a fresh
+        install), GET /api/gpus must surface a "gpu_split_indices" key
+        alongside "gpus"/"main_gpu_index", defaulting to None (single-GPU).
+        Isolates via a real tmp_path config file (same technique as
+        TestPlatformEndpoints.test_config_roundtrip) rather than mocking
+        load_config, so this exercises the real DEFAULT_CONFIG merge."""
+        app, _ = gui_app
+        cfg_file = tmp_path / "config.json"
+        with patch("localm.config.CONFIG_FILE", cfg_file), \
+             patch("localm.config.HOME_DIR", tmp_path), \
+             patch("localm.config.MODELS_DIR", tmp_path / "models"), \
+             patch("localm.discover.list_gpus", return_value=[]):
+            with TestClient(app) as client:
+                r = client.get("/api/gpus")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["gpu_split_indices"] is None
+
+    def test_gpu_split_indices_reflects_config_after_patch(self, gui_app, tmp_path):
+        """After a real PATCH /v1/config persists gpu_split_indices - exercised
+        here via the exact validate_update + load_config/save_config sequence
+        localm/inference/routes/config.py's patch_config route runs, not a
+        mock of it - a subsequent GET /api/gpus must echo the persisted value
+        back. gui_gpus() (localm/plugins/gui/routes/models.py) does not
+        cross-check the indices against list_gpus(); it returns
+        cfg.get("gpu_split_indices") verbatim, so list_gpus is monkeypatched
+        here only to supply the two devices the split names (per the route's
+        actual, verbatim-echo behavior)."""
+        app, _ = gui_app
+        cfg_file = tmp_path / "config.json"
+        fake_gpus = [
+            {"index": 0, "name": "RTX 4090", "total": 24 * 1024 ** 3, "free": 20 * 1024 ** 3},
+            {"index": 1, "name": "RTX 3060", "total": 12 * 1024 ** 3, "free": 10 * 1024 ** 3},
+        ]
+        with patch("localm.config.CONFIG_FILE", cfg_file), \
+             patch("localm.config.HOME_DIR", tmp_path), \
+             patch("localm.config.MODELS_DIR", tmp_path / "models"), \
+             patch("localm.discover.list_gpus", return_value=fake_gpus):
+            from localm.config import load_config, save_config
+            from localm.settings_schema import validate_update
+            validated = validate_update({"gpu_split_indices": [0, 1]})
+            cfg = load_config()
+            cfg.update(validated)
+            save_config(cfg)
+            assert json.loads(cfg_file.read_text())["gpu_split_indices"] == [0, 1]
+
+            with TestClient(app) as client:
+                r = client.get("/api/gpus")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["gpu_split_indices"] == [0, 1]
+        assert data["gpus"] == fake_gpus
+
 
 class TestCompanionEndpoint:
     """The Companion-app card's phone-reachable address feed (LAN / Tailscale).

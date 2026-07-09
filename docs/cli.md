@@ -273,6 +273,21 @@ localm config main_gpu_index 1     # load models onto device 1 instead
 
 The GUI has the same control: Settings > Live tuning shows a "Main GPU" dropdown once more than one GPU is detected. An index that no longer matches a currently-detected device falls back to device 0 with a logged warning rather than silently loading onto the wrong card.
 
+### Multi-GPU: splitting one model across several cards
+
+A model too large for any single card's VRAM can load using the combined VRAM of 2 or more GPUs, instead of picking just one:
+
+```bash
+localm gpus                              # (split) marks any device in the split
+localm config gpu_split_indices 0,1      # split the model across devices 0 and 1
+localm config gpu_split_ratios 3,1       # optional: weight device 0 three times device 1 (default: even split)
+localm config gpu_split_indices ""       # clear the split - back to a single GPU (main_gpu_index)
+```
+
+GGUF models use llama.cpp's native layer-split; HF (transformers) models use accelerate's `device_map="auto"` restricted to just the listed devices. Fewer than 2 currently-detected devices in `gpu_split_indices` (a stale index, or only one still present) falls back to the single-GPU behavior above, with a logged warning - it never crashes a load. The GUI has the same control: Settings > Live tuning shows "Split across GPUs" checkboxes next to the Main GPU dropdown, and the model search results hint when a model would fit split across your GPUs but not on the largest one alone.
+
+**Note:** this is a newer feature; the ratio/index validation and parameter wiring are unit-tested, but end-to-end multi-GPU load behavior has not been verified on real multi-GPU hardware. Report an issue if a split load misbehaves.
+
 ---
 
 ## API keys
