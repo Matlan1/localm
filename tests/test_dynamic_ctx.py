@@ -21,6 +21,7 @@ def _llm(n_ctx=4096, n_ctx_max=16384, n_ctx_grow=4096):
     llm._model_ptr = None
     llm._ctx_ptr = None
     llm._tokenizer = MagicMock()
+    llm._vram_check = None
     return llm
 
 
@@ -99,6 +100,69 @@ class TestFreshContextUsesPolicy:
         with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
             llm._prefill_fresh_context(list(range(100)), needed=5500)
         assert cp.n_ctx == 6000
+
+
+class TestFreshContextVramCheck:
+    """CHK-KVCACHE-OVERFLOW (growth path): _prefill_fresh_context() recreates a
+    BIGGER context whenever a conversation outgrows the live one - which
+    happens on literally the first prompt for anyone on default settings,
+    since the default max_tokens (4096) already exceeds the default base n_ctx
+    (4096), forcing a grow to 8192. That native (re)allocation had NO VRAM
+    preflight at all before this fix - only a NULL-pointer check after the
+    fact - the same missing-check class of bug _check_vram() fixed for the
+    initial load, just at a different, unguarded call site. An optional
+    vram_check callback (wired by GgufBackend._check_context_fit) closes it."""
+
+    def test_vram_check_called_with_target_ctx_before_growing(self):
+        llm = _llm()
+        llm._ctx_ptr = 222
+        calls = []
+        llm._vram_check = lambda n_ctx: calls.append(n_ctx)
+        mock_api = MagicMock()
+        cp = MagicMock()
+        mock_api.llama_context_default_params.return_value = cp
+        mock_api.llama_init_from_model.return_value = 444
+        mock_api.llama_decode.return_value = 0
+        mock_api.llama_batch_init.side_effect = fake_batch_init
+        with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
+            llm._prefill_fresh_context(list(range(100)), needed=5000)
+        assert calls == [8192]   # the rounded-up target, matching cp.n_ctx
+
+    def test_vram_check_veto_preserves_old_context(self):
+        # A refusal must leave the OLD, still-working context alone rather
+        # than freeing it first and only THEN discovering the replacement
+        # cannot fit - that would leave the conversation with no context at
+        # all instead of a smaller one that still works.
+        llm = _llm()
+        llm._ctx_ptr = 222
+
+        def _refuse(n_ctx):
+            raise RuntimeError(f"Context too large for available VRAM: {n_ctx}")
+
+        llm._vram_check = _refuse
+        mock_api = MagicMock()
+        with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
+            with pytest.raises(RuntimeError, match="too large"):
+                llm._prefill_fresh_context(list(range(100)), needed=5000)
+        assert llm._ctx_ptr == 222          # old context untouched
+        mock_api.llama_free.assert_not_called()
+        mock_api.llama_init_from_model.assert_not_called()
+
+    def test_no_vram_check_configured_is_a_noop(self):
+        # Backward compat: a LlamaCpp built without a vram_check (the default,
+        # e.g. every other test in this file) behaves exactly as before.
+        llm = _llm()
+        llm._ctx_ptr = 222
+        assert llm._vram_check is None
+        mock_api = MagicMock()
+        cp = MagicMock()
+        mock_api.llama_context_default_params.return_value = cp
+        mock_api.llama_init_from_model.return_value = 444
+        mock_api.llama_decode.return_value = 0
+        mock_api.llama_batch_init.side_effect = fake_batch_init
+        with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
+            llm._prefill_fresh_context(list(range(100)), needed=5000)
+        assert cp.n_ctx == 8192
 
 
 class TestAutoCtxMax:
