@@ -259,9 +259,14 @@ def test_provision_copy_end_to_end(home, fake_user_comfy, monkeypatch):
     managed_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(paths.root),
                                   capture_output=True, text=True, check=True).stdout.strip()
     assert managed_head == fake_user_comfy.commit
-    # 2) A FRESH localm venv (its own interpreter, NOT the user's).
+    # 2) A FRESH localm venv (its own directory tree, NOT the user's). Compare the
+    # venv-relative paths, not resolve() through them: on POSIX, `python -m venv`
+    # symlinks the venv's python back to the shared BASE interpreter, so two
+    # distinct venvs built from the same base legitimately resolve() to the
+    # identical real binary - that collapse is normal venv behavior, not a sign
+    # provisioning reused the user's venv.
     assert paths.venv_python.is_file()
-    assert Path(paths.venv_python).resolve() != Path(fake_user_comfy.venv_python).resolve()
+    assert Path(paths.venv_python) != Path(fake_user_comfy.venv_python)
     # 3) The replicated venv has the SAME tiny package version (real pip install ran).
     managed_freeze = _freeze(paths.venv_python)
     assert any(fake_user_comfy.pkg_name in ln for ln in managed_freeze), managed_freeze
