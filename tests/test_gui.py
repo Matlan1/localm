@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for the GUI plugin: coder sessions, agent event hooks, web endpoints."""
 
+import asyncio
 import json
 import queue
 import threading
@@ -1191,26 +1192,30 @@ class TestGuiNoModel:
 
 
 class TestJobs:
-    def test_cli_job_streams_lines_and_ends(self):
+    @pytest.mark.anyio
+    async def test_cli_job_streams_lines_and_ends(self):
         from localm.plugins.gui.jobs import JobManager
         mgr = JobManager()
         # Use python -m localm --help via start_cli's own python: cheap + real
         job = mgr.start_cli("pull", ["--help"])
+        q = job.subscribe()
         events = []
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             try:
-                ev = job.events.get(timeout=0.5)
-            except queue.Empty:
+                ev = await asyncio.wait_for(q.get(), timeout=0.5)
+            except asyncio.TimeoutError:
                 continue
             events.append(ev)
             if ev["type"] == "end":
                 break
+        job.unsubscribe(q)
         assert events[-1]["type"] == "end"
         assert events[-1]["status"] == "done"
         assert any("localm" in e.get("text", "") for e in events if e["type"] == "line")
 
-    def test_pull_flaglike_spec_fails_not_help(self):
+    @pytest.mark.anyio
+    async def test_pull_flaglike_spec_fails_not_help(self):
         """End-to-end: `pull -- -h` treats -h as the spec (unknown) and exits
         non-zero, so the job is 'failed' and no Click help text is dumped."""
         from localm.plugins.gui.jobs import JobManager
@@ -1218,23 +1223,26 @@ class TestJobs:
         # cli_args is the full argv after "-m localm" (the endpoint passes the
         # "pull" subcommand itself), so this runs: localm pull -- -h
         job = mgr.start_cli("pull", ["pull", "--", "-h"])
+        q = job.subscribe()
         events = []
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             try:
-                ev = job.events.get(timeout=0.5)
-            except queue.Empty:
+                ev = await asyncio.wait_for(q.get(), timeout=0.5)
+            except asyncio.TimeoutError:
                 continue
             events.append(ev)
             if ev["type"] == "end":
                 break
+        job.unsubscribe(q)
         assert events[-1]["type"] == "end"
         assert events[-1]["status"] == "failed"
         text = " ".join(e.get("text", "") for e in events if e["type"] == "line")
         assert "Usage:" not in text          # help was NOT dumped
         assert "Unknown spec" in text        # treated as a (bad) model spec
 
-    def test_fn_job_success_and_failure(self):
+    @pytest.mark.anyio
+    async def test_fn_job_success_and_failure(self):
         from localm.plugins.gui.jobs import JobManager
         mgr = JobManager()
 
@@ -1243,16 +1251,18 @@ class TestJobs:
         boom_job = mgr.start_fn("imagine", lambda job: (_ for _ in ()).throw(RuntimeError("x")))
 
         for job, status in ((ok_job, "done"), (fail_job, "failed"), (boom_job, "failed")):
+            q = job.subscribe()
             end = None
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 try:
-                    ev = job.events.get(timeout=0.5)
-                except queue.Empty:
+                    ev = await asyncio.wait_for(q.get(), timeout=0.5)
+                except asyncio.TimeoutError:
                     continue
                 if ev["type"] == "end":
                     end = ev
                     break
+            job.unsubscribe(q)
             assert end is not None
             assert end["status"] == status
 
