@@ -243,6 +243,12 @@ Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on
 - **ComfyUI launch** no longer has a shell-injection vector on Windows.
 - **RAG folder index** skips model weights and secrets rather than indexing them.
 - **MCP** destructive tools are annotated so clients can confirm them.
+- **Phone pairing with a VPN active:** a VPN client's virtual tunnel adapter can
+  become the machine's default route and hand out an ordinary private address,
+  which used to get picked as the "LAN" address for the Companion pairing card
+  and the `<name>.local` mDNS advertisement - pointing a phone at an address
+  only reachable through the VPN. VPN-like adapters are now excluded, so the
+  real LAN address is shown (and advertised) instead.
 
 ## [0.1.0] - 2026-07-04
 

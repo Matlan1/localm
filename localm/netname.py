@@ -353,7 +353,12 @@ def start_advertiser(port: int, *, tls: bool,
     from localm import tls as _tls
     ips = [ip for ip in (addresses or []) if ip]
     if not ips:
-        prim = _tls._primary_lan_ip()
+        # companion_addresses()'s "lan" pick, not the raw _primary_lan_ip()
+        # probe directly: it already falls back across multiple probes and
+        # excludes a VPN's virtual tunnel adapter, so <name>.local keeps
+        # advertising the real, phone-reachable LAN address even when a VPN
+        # is active and has become this machine's default route.
+        prim = _tls.companion_addresses().get("lan") or ""
         if prim:
             ips.append(prim)
     packed = []

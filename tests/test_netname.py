@@ -275,9 +275,45 @@ def test_start_advertiser_disabled_returns_none(monkeypatch):
 def test_start_advertiser_no_lan_returns_none(monkeypatch):
     monkeypatch.setattr("localm.config.load_config", lambda: {"mdns_enabled": True,
                                                               "mdns_name": "localm"})
-    monkeypatch.setattr("localm.tls._primary_lan_ip", lambda: "")
-    # No addresses supplied and no primary LAN IP -> nothing to advertise.
+    # start_advertiser falls back to companion_addresses()'s "lan" pick, not
+    # the raw outbound-probe, so patch that: no LAN address -> nothing to
+    # advertise.
+    monkeypatch.setattr("localm.tls.companion_addresses",
+                        lambda: {"lan": "", "tailscale": ""})
     assert netname.start_advertiser(8642, tls=True, addresses=[]) is None
+
+
+def test_start_advertiser_falls_back_to_companion_lan(monkeypatch):
+    """No explicit addresses supplied: uses companion_addresses()'s "lan" pick
+    (which already excludes a VPN's virtual tunnel adapter), not the raw
+    outbound-route probe directly - regression for the "localm doesn't like
+    it when I have a VPN active" bug (a VPN becoming the default route used
+    to make the mDNS <name>.local advertisement point at the unreachable
+    VPN tunnel IP instead of the real LAN address)."""
+    monkeypatch.setattr("localm.config.load_config", lambda: {"mdns_enabled": True,
+                                                              "mdns_name": "localm"})
+    monkeypatch.setattr("localm.tls.companion_addresses",
+                        lambda: {"lan": "192.168.1.50", "tailscale": ""})
+
+    captured = {}
+
+    class _FakeServiceInfo:
+        def __init__(self, *a, addresses=None, **kw):
+            captured["addresses"] = addresses
+
+    class _FakeZeroconf:
+        def register_service(self, info):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("zeroconf.ServiceInfo", _FakeServiceInfo)
+    monkeypatch.setattr("zeroconf.Zeroconf", _FakeZeroconf)
+
+    adv = netname.start_advertiser(8642, tls=True)
+    assert adv is not None
+    assert captured["addresses"] == [socket.inet_aton("192.168.1.50")]
 
 
 def test_start_advertiser_live_round_trip(monkeypatch):
