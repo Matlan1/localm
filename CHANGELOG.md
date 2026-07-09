@@ -156,6 +156,18 @@ Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on
   all) bypassed it entirely - reachable pre-auth on the CORS-exempt inference
   routes, and capable of buffering a multi-gigabyte body into memory from one
   connection. The cap is now enforced on the actual byte stream.
+- **Plugin/tool calls (rag, web, voice, coder sessions, GUI model routes) can no
+  longer starve chat completions.** Every blocking offload in the server -
+  inference (model load/unload, chat/completion generation) and plugin tool
+  calls alike - drew from the SAME process-wide thread pool
+  (`min(32, cpu_count+4)` workers). A caller holding only a narrow plugin
+  scope (or any loopback caller under open/no-key mode) could pipeline enough
+  slow tool calls (e.g. archive extraction, which can legitimately run
+  8-30s+ per file) to occupy every worker thread in that pool, which starved
+  the SAME pool's inference slot and stalled chat replies for every user of
+  the server, including the admin. Plugin/tool work now runs on its own
+  dedicated, equally-sized pool (`localm/plugins/executor.py`), completely
+  isolated from the pool inference relies on.
 - **Privacy mode now deletes ComfyUI's own on-disk output copy everywhere media
   is generated, not just from the GUI/API.** ComfyUI keeps its own copy of every
   generated image/track/clip with the full prompt and workflow embedded as

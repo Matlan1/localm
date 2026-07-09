@@ -39,6 +39,7 @@ from pydantic import BaseModel
 
 from localm.pathsafe import confined_file as _confined_file
 from localm.plugins.coder.sessions import CoderSession
+from localm.plugins.executor import get_plugin_executor
 
 _router = APIRouter()
 
@@ -212,7 +213,7 @@ async def create_session(req: CreateSessionRequest, request: Request):
 
     loop = asyncio.get_running_loop()
     # Agent construction scans the project (map build) - keep it off the loop
-    session = await loop.run_in_executor(None, lambda: CoderSession(
+    session = await loop.run_in_executor(get_plugin_executor(), lambda: CoderSession(
         cwd,
         backend,
         auto_approve=req.auto_approve,
@@ -231,7 +232,8 @@ async def create_session(req: CreateSessionRequest, request: Request):
     # load the owner's prior conversation. The checkpoint read runs off the loop.
     resumed = False
     if req.resume and not restricted:
-        resumed = await loop.run_in_executor(None, session.resume_from_checkpoint)
+        resumed = await loop.run_in_executor(
+            get_plugin_executor(), session.resume_from_checkpoint)
     return {**session.info(), "resumed": resumed}
 
 
@@ -258,7 +260,7 @@ async def session_events(session_id: str, request: Request, replay: bool = False
         while True:
             try:
                 event = await loop.run_in_executor(
-                    None, session.events.get, True, _KEEPALIVE_S)
+                    get_plugin_executor(), session.events.get, True, _KEEPALIVE_S)
             except queue.Empty:
                 yield ": keepalive\n\n"
                 continue
@@ -286,7 +288,7 @@ async def session_undo(session_id: str, request: Request):
 async def session_compact(session_id: str, request: Request):
     session = _get_session(request, session_id)
     loop = asyncio.get_running_loop()
-    compacted = await loop.run_in_executor(None, session.compact)
+    compacted = await loop.run_in_executor(get_plugin_executor(), session.compact)
     if not compacted:
         raise HTTPException(409, "Nothing to compact (or agent is busy)")
     return {"status": "compacted"}
@@ -348,7 +350,7 @@ async def session_files_diff(session_id: str, request: Request, path: str = ""):
     session = _get_session(request, session_id)
     loop = asyncio.get_running_loop()
     diff = await loop.run_in_executor(
-        None, session.session_diff, path or None)
+        get_plugin_executor(), session.session_diff, path or None)
     if path and not diff:
         raise HTTPException(404, f"'{path}' was not changed this session")
     return {"diff": diff}
