@@ -206,28 +206,6 @@ Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on
   cannot be *read* for scrubbing, matching the existing warning when it cannot
   be *written* - an unreadable file is no longer silently treated as clean.
 
-### Internal
-- **Release pipeline.** A release-file manifest and verification gate, a build.zip
-  assembler and signer, a runtime-completeness smoke gate, a pre-publish CI gate,
-  and a live functional-verification gate (cold-install and exercise every
-  changelog item across both inference backends before publish). The publish path
-  also refuses to reuse an existing version tag or to build from a commit that is
-  not the CI-tested `origin/master`, so the signed artifact always matches what CI
-  validated.
-- **Changelog is a guarded record.** `CHANGELOG.md` is enforced append-only for
-  published (versioned) sections: `check_hygiene.py` fails the build if a shipped
-  entry is deleted or rewritten. The `[Unreleased]` draft stays freely editable.
-- Contributor-guide and test-cadence clarifications, test isolation via a temp
-  `LOCALM_HOME` in `conftest.py`, and a documentation pass across the user manual.
-- **Loopback-host check hoisted to one shared module** (`localm/bindhost.py`),
-  replacing five independent copies (one of which had already drifted to a
-  non-identical implementation) - mirrors how `textguard.py` was hoisted for
-  the same reason.
-- **De-duplicated the image/music/video plugins:** the VRAM chat-model handoff
-  and the ComfyUI backend-dispatch facade, each copy-pasted three times near
-  verbatim, are now shared helpers (`localm.vram`, `localm.plugins.media_config`)
-  - no behavior change, structure only.
-
 ## [0.1.0] - 2026-07-04
 
 First tagged release. A self-contained, offline local-LLM platform.
