@@ -17,6 +17,8 @@ import base64
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from localm.plugins.executor import get_plugin_executor
+
 _router = APIRouter()
 
 
@@ -48,7 +50,8 @@ async def voice_transcribe(req: TranscribeRequest):
     loop = asyncio.get_running_loop()
     try:
         text = await loop.run_in_executor(
-            None, lambda: transcribe_bytes(data, language=req.language))
+            get_plugin_executor(),
+            lambda: transcribe_bytes(data, language=req.language))
     except VoiceError as e:
         # Branch on the structured failure class, not the human message:
         # rewording a message must never flip the status code. 501 = the

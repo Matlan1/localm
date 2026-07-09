@@ -21,11 +21,13 @@ GAP-CLI-2  The GGUF/URL filename was used as a dest path with no traversal guard
 """
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
 from localm import model_manager as mm
+from localm.model_manager import pull as pull_mod
 
 
 @pytest.fixture()
@@ -200,6 +202,130 @@ class TestHfShaIsNotAFacade:
         monkeypatch.setattr(mm, "_pull_hf_snapshot", _fake_snap)
         mm.pull_model("owner/repo", expected_sha256="beef" * 16)
         assert captured["sha256"] == "beef" * 16
+
+
+# ---------------------------------------------------------------------------
+# HIGH-15: an HF snapshot pull must preflight disk space (like _pull_gguf_file
+# / _pull_url do) and must not register an interrupted snapshot as complete
+# just because config.json - usually one of the smallest, earliest files - is
+# present, while a weight shard is still missing.
+# ---------------------------------------------------------------------------
+
+def _fake_hf_api(siblings):
+    class _FakeInfo:
+        pass
+    info = _FakeInfo()
+    info.siblings = siblings
+
+    class _FakeHfApi:
+        def model_info(self, repo_id, files_metadata=True):
+            return info
+    return _FakeHfApi
+
+
+class TestSnapshotDiskSpaceAndCompleteness:
+    def test_snapshot_pull_refuses_on_disk_space(
+            self, fake_registry, monkeypatch, capsys):
+        """A large HF snapshot must preflight-check free disk space and fail
+        cleanly - the same 'Not enough disk space' message _pull_gguf_file and
+        _pull_url produce - instead of running until the OS hits ENOSPC."""
+        store, models_dir = fake_registry
+
+        siblings = [
+            SimpleNamespace(rfilename="config.json", size=100),
+            SimpleNamespace(rfilename="model.safetensors", size=5_000_000_000),
+        ]
+        import huggingface_hub
+        monkeypatch.setattr(huggingface_hub, "HfApi", _fake_hf_api(siblings))
+
+        # Undo fake_registry's blanket `_check_disk_space -> True` stub so the
+        # REAL check runs (and prints its real message) against a tiny free-space.
+        # `mm.shutil` is the actual shutil module (re-exported for patching), so
+        # patching .disk_usage on it also affects pull.py's own `shutil` binding.
+        monkeypatch.setattr(mm, "_check_disk_space", pull_mod._check_disk_space)
+        monkeypatch.setattr(mm.shutil, "disk_usage",
+                             lambda p: SimpleNamespace(free=1_000_000))
+
+        downloaded = []
+        monkeypatch.setattr(
+            huggingface_hub, "snapshot_download",
+            lambda **kw: downloaded.append(1))
+
+        ok = mm._pull_hf_snapshot("owner/repo", "big-repo")
+
+        assert ok is False
+        assert downloaded == []             # refused before any transfer started
+        assert "big-repo" not in store
+        out = capsys.readouterr().out.lower()
+        assert "not enough disk space" in out
+
+    def test_snapshot_pull_retry_does_not_register_incomplete(
+            self, fake_registry, monkeypatch, capsys):
+        """Simulate a disk-full mid-download: config.json landed, the weight
+        shard did not. A retry must detect the missing shard and re-run the
+        download - never silently register the partial directory as ready."""
+        store, models_dir = fake_registry
+
+        dest = models_dir / "partial-repo"
+        dest.mkdir(parents=True)
+        (dest / "config.json").write_text("{}", encoding="utf-8")
+        # model.safetensors intentionally absent - the interrupted shard.
+
+        siblings = [
+            SimpleNamespace(rfilename="config.json", size=2),
+            SimpleNamespace(rfilename="model.safetensors", size=1000),
+        ]
+        import huggingface_hub
+        monkeypatch.setattr(huggingface_hub, "HfApi", _fake_hf_api(siblings))
+
+        downloaded = []
+
+        def _fake_snapshot_download(repo_id, local_dir, **kw):
+            d = Path(local_dir)
+            (d / "model.safetensors").write_bytes(b"x" * 1000)
+            downloaded.append(repo_id)
+            return str(d)
+
+        monkeypatch.setattr(huggingface_hub, "snapshot_download", _fake_snapshot_download)
+
+        ok = mm._pull_hf_snapshot("owner/repo", "partial-repo")
+
+        assert ok is True
+        assert downloaded == ["owner/repo"]   # retried instead of short-circuiting
+        assert (dest / "model.safetensors").exists()
+        out = capsys.readouterr().out.lower()
+        assert "already downloaded" not in out
+
+    def test_snapshot_pull_recognizes_genuinely_complete_download(
+            self, fake_registry, monkeypatch, capsys):
+        """A snapshot where every listed file is present with a matching size
+        IS treated as already downloaded (no unnecessary re-download)."""
+        store, models_dir = fake_registry
+
+        dest = models_dir / "full-repo"
+        dest.mkdir(parents=True)
+        (dest / "config.json").write_text("{}", encoding="utf-8")
+        (dest / "model.safetensors").write_bytes(b"x" * 1000)
+
+        siblings = [
+            SimpleNamespace(rfilename="config.json", size=2),
+            SimpleNamespace(rfilename="model.safetensors", size=1000),
+        ]
+        import huggingface_hub
+        monkeypatch.setattr(huggingface_hub, "HfApi", _fake_hf_api(siblings))
+
+        downloaded = []
+        monkeypatch.setattr(
+            huggingface_hub, "snapshot_download",
+            lambda **kw: downloaded.append(1))
+
+        ok = mm._pull_hf_snapshot("owner/repo", "full-repo")
+
+        assert ok is True
+        assert downloaded == []              # nothing re-downloaded
+        assert store["full-repo"]["source"] == "hf:owner/repo"
+        out = capsys.readouterr().out.lower()
+        assert "already downloaded" in out
 
 
 # ---------------------------------------------------------------------------

@@ -404,7 +404,14 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     open_url = base_url
     if pull_spec:
         from urllib.parse import quote
-        open_url = f"{base_url}?view=models&pull={quote(pull_spec, safe='')}"
+        from .web import mint_pull_grant
+        # SEC-PULL-CONFIRM: mint a single-use, spec-bound secret so THIS deep
+        # link can auto-start its own download with zero clicks, while a
+        # forged `?pull=` link elsewhere (which cannot know the secret) falls
+        # back to an explicit human confirmation (see init.js / web.py).
+        pull_token = mint_pull_grant(app, pull_spec)
+        open_url = (f"{base_url}?view=models&pull={quote(pull_spec, safe='')}"
+                    f"&pull_token={quote(pull_token, safe='')}")
     elif model_less:
         open_url = f"{base_url}?view=models"
     # One-time launch handoff: when auth is on, hand the auto-opened browser a

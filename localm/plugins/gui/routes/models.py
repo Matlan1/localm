@@ -19,9 +19,11 @@ from localm import scopes
 from localm.inference.http_server import (principal_id, require_scope,
                                           unload_all_models, unload_one_model)
 import localm.inference.http_server as _hs
-from localm.plugins.gui.web import (AliasRequest, LoadModelRequest, PullRequest,
+from localm.plugins.executor import get_plugin_executor
+from localm.plugins.gui.web import (AliasRequest, LoadModelRequest,
+                                    PullRequest, PullTokenRedeemRequest,
                                     RemoveModelRequest, SetTypeRequest,
-                                    UnloadModelRequest)
+                                    UnloadModelRequest, consume_pull_grant)
 
 
 def register(app: FastAPI, ctx) -> None:
@@ -77,7 +79,7 @@ def register(app: FastAPI, ctx) -> None:
         import asyncio
         loop = asyncio.get_running_loop()
         try:
-            res = await loop.run_in_executor(None, scan_comfy_models)
+            res = await loop.run_in_executor(get_plugin_executor(), scan_comfy_models)
             return {
                 "added": res.added,
                 "skipped": res.skipped,
@@ -162,6 +164,18 @@ def register(app: FastAPI, ctx) -> None:
 
     # ----------------------- model ops + jobs --------------------- #
 
+    @app.post("/api/models/pull-token/redeem",
+              dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
+    async def model_pull_token_redeem(req: PullTokenRedeemRequest, request: Request):
+        """SEC-PULL-CONFIRM: redeem the single-use grant `localm gui --pull`
+        minted for its own deep link (see mint_pull_grant/init.js). Only a
+        genuine, unused, unexpired grant bound to this EXACT spec succeeds - a
+        forged `?pull=` link cannot know the secret, so it 403s here and the
+        frontend falls back to requiring an explicit human confirmation."""
+        if not consume_pull_grant(request.app, req.spec.strip(), req.token):
+            raise HTTPException(403, "Invalid or expired pull token")
+        return {"ok": True}
+
     @app.post("/api/models/pull", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def model_pull(req: PullRequest, request: Request):
         spec = req.spec.strip()
@@ -213,7 +227,8 @@ def register(app: FastAPI, ctx) -> None:
         from localm.model_manager import alias_model
         loop = asyncio.get_running_loop()
         try:
-            await loop.run_in_executor(None, alias_model, req.model, req.alias)
+            await loop.run_in_executor(
+                get_plugin_executor(), alias_model, req.model, req.alias)
         except Exception as e:
             raise HTTPException(400, f"Alias failed: {e}")
         return {"status": "aliased", "model": req.model, "alias": req.alias}
@@ -232,7 +247,8 @@ def register(app: FastAPI, ctx) -> None:
                 400, f"Invalid type: {req.model_type}. "
                      f"One of: {', '.join(sorted(MODEL_TYPES))}")
         loop = asyncio.get_running_loop()
-        ok = await loop.run_in_executor(None, set_model_type, req.model, req.model_type)
+        ok = await loop.run_in_executor(
+            get_plugin_executor(), set_model_type, req.model, req.model_type)
         if not ok:
             raise HTTPException(400, f"Could not set type for {req.model}")
         return {"status": "typed", "model": req.model, "model_type": req.model_type}
@@ -262,7 +278,8 @@ def register(app: FastAPI, ctx) -> None:
         loop = asyncio.get_running_loop()
         try:
             results = await loop.run_in_executor(
-                None, lambda: hf_search(q, limit=limit, formats=wanted))
+                get_plugin_executor(),
+                lambda: hf_search(q, limit=limit, formats=wanted))
         except DiscoverError as e:
             raise HTTPException(_discover_status(e), str(e))
         vram = vram_info()
@@ -284,7 +301,7 @@ def register(app: FastAPI, ctx) -> None:
         loop = asyncio.get_running_loop()
         try:
             files = await loop.run_in_executor(
-                None, lambda: hf_gguf_files(repo))
+                get_plugin_executor(), lambda: hf_gguf_files(repo))
         except DiscoverError as e:
             raise HTTPException(_discover_status(e), str(e))
         vram = vram_info()

@@ -16,6 +16,7 @@ from fastapi.responses import Response
 
 import localm.inference.http_server as _hs
 from localm import scopes
+from localm.bindhost import is_loopback_host
 
 
 def register(app: FastAPI, ctx) -> None:
@@ -57,14 +58,7 @@ def register(app: FastAPI, ctx) -> None:
         root = getattr(st, "root_dir", None)
         if root is not None:
             bind = getattr(st, "bind_host", "127.0.0.1")
-            loopback = bind in ("127.0.0.1", "localhost", "::1")
-            if not loopback:
-                try:
-                    import ipaddress
-                    loopback = ipaddress.ip_address(bind).is_loopback
-                except ValueError:
-                    loopback = False
-            if not loopback:
+            if not is_loopback_host(bind):
                 root = None
         return instances.whoami_payload(
             instance_id=getattr(st, "instance_id", None),

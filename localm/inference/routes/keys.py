@@ -6,7 +6,6 @@ Extracted verbatim from create_app(); behavior unchanged.
 
 from __future__ import annotations
 
-import ipaddress
 import time
 from typing import Optional
 
@@ -14,20 +13,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, Response
 
 import localm.inference.http_server as _hs
 from localm import scopes
-
-
-def _is_loopback(host: str) -> bool:
-    """True for a loopback bind host (127.0.0.0/8, ::1, localhost). Mirrors the
-    GUI's own check; kept local so this core route does not import the gui
-    package."""
-    if not host:
-        return False
-    if host == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
+from localm.bindhost import is_loopback_host as _is_loopback
 
 
 def register(app: FastAPI, ctx) -> None:
