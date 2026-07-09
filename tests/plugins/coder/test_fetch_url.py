@@ -159,16 +159,20 @@ class TestHtmlStripping:
 # ---------------------------------------------------------------------------
 
 class TestPlainText:
-    def test_plain_text_not_html_stripped(self):
-        result = _fetch("line one\nline two\nline three", "text/plain")
+    @pytest.mark.parametrize(
+        "content, content_type, expected",
+        [
+            ("line one\nline two\nline three", "text/plain",
+             ("line one", "line two")),
+            ('{"key": "value"}', "application/json", ('"key"',)),
+        ],
+        ids=["text_plain", "application_json"],
+    )
+    def test_non_html_content_type_not_stripped(self, content, content_type, expected):
+        result = _fetch(content, content_type)
         assert result.ok
-        assert "line one" in result.output
-        assert "line two" in result.output
-
-    def test_json_content_type_passthrough(self):
-        result = _fetch('{"key": "value"}', "application/json")
-        assert result.ok
-        assert '"key"' in result.output
+        for substring in expected:
+            assert substring in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -212,11 +216,6 @@ class TestErrors:
              _session(get=_raise(Exception("boom"))):
             result = _call()
         assert not result.ok
-
-    def test_error_result_not_truncated(self):
-        with patch("socket.getaddrinfo", return_value=_PUBLIC_DNS), \
-             _session(get=_raise(Exception("nope"))):
-            result = _call()
         assert not result.truncated
 
 

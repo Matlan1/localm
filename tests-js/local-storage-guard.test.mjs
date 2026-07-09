@@ -36,11 +36,6 @@ test("readStoredJSON returns the fallback for a CORRUPT value and WARNS (does no
   assert.deepEqual(out, [], "falls back to the blank default");
   assert.equal(warns.length, 1, "corruption is surfaced, not silently swallowed");
   assert.match(warns[0], /corrupt/i);
-});
-
-test("a distinct fallback object is honoured (e.g. Set-backed collapsed state)", () => {
-  const { window } = loadApp();
-  window.localStorage.setItem("localm.convCollapsed", "&&&broken");
-  const arr = window.readStoredJSON("localm.convCollapsed", []);
-  assert.deepEqual([...new Set(arr)], [], "wrapping in new Set(...) stays safe");
+  // caller-side wrapping (e.g. Set-backed collapsed state) stays safe on the same fallback
+  assert.deepEqual([...new Set(out)], [], "wrapping the fallback in new Set(...) stays safe");
 });

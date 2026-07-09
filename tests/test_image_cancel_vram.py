@@ -10,6 +10,8 @@ model, loading chat". The reload must run on the cancel path too.
 import asyncio
 from unittest.mock import MagicMock
 
+import pytest
+
 from localm.plugins.builtin.image import plug
 
 
@@ -64,17 +66,18 @@ def _run_generate(monkeypatch, *, gen_result, cancelled):
     return bool(reload_calls), job
 
 
-def test_reload_runs_on_cancel(monkeypatch):
+@pytest.mark.parametrize(
+    "gen_message,cancelled",
+    [
+        ("Generation cancelled.", True),
+        ("ComfyUI rejected the workflow", False),
+    ],
+    ids=["cancel", "failure"],
+)
+def test_reload_runs_on_cancel_or_failure(monkeypatch, gen_message, cancelled):
     reloaded, _ = _run_generate(
-        monkeypatch, gen_result=(False, "Generation cancelled."), cancelled=True)
-    assert reloaded, "chat model must be reloaded after a cancelled generation"
-
-
-def test_reload_runs_on_failure(monkeypatch):
-    reloaded, _ = _run_generate(
-        monkeypatch, gen_result=(False, "ComfyUI rejected the workflow"),
-        cancelled=False)
-    assert reloaded, "chat model must be reloaded after a failed generation"
+        monkeypatch, gen_result=(False, gen_message), cancelled=cancelled)
+    assert reloaded, "chat model must be reloaded after a cancelled or failed generation"
 
 
 def test_reload_runs_on_success(monkeypatch):

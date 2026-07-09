@@ -46,6 +46,20 @@ def _folder(tmp_path, *names):
     return d
 
 
+def _empty_dir(tmp_path):
+    d = tmp_path / "empty"
+    d.mkdir()
+    return d
+
+
+def _junk_dir(tmp_path):
+    d = tmp_path / "junk"
+    d.mkdir()
+    (d / "readme.txt").write_text("not a model")
+    (d / "weights.bin").write_bytes(b"\x00")
+    return d
+
+
 # ---------------------------------------------------------------------------
 #  The new directory branch
 # ---------------------------------------------------------------------------
@@ -104,17 +118,13 @@ class TestFolderOfLooseGGUFs:
         # the non-first split part is never its own entry
         assert not any(p.endswith("model-00002-of-00002.gguf") for p in paths)
 
-    def test_empty_dir_returns_false(self, tmp_path, isolated_home):
-        d = tmp_path / "empty"
-        d.mkdir()
-        assert add_local(str(d)) is False
-        assert load_registry() == {}
-
-    def test_dir_of_non_gguf_returns_false(self, tmp_path, isolated_home):
-        d = tmp_path / "junk"
-        d.mkdir()
-        (d / "readme.txt").write_text("not a model")
-        (d / "weights.bin").write_bytes(b"\x00")
+    @pytest.mark.parametrize(
+        "make_dir",
+        [_empty_dir, _junk_dir],
+        ids=["empty_dir", "dir_of_non_gguf"],
+    )
+    def test_dir_with_no_usable_gguf_returns_false(self, tmp_path, isolated_home, make_dir):
+        d = make_dir(tmp_path)
         assert add_local(str(d)) is False
         assert load_registry() == {}
 

@@ -5,6 +5,8 @@ The "logged" cases are verbatim model outputs from a real session where
 zero tool calls parsed - the finetune wraps valid JSON in broken markers.
 """
 
+import pytest
+
 from localm.plugins.coder.parser import looks_like_tool_attempt, parse_tool_calls
 
 
@@ -32,20 +34,20 @@ class TestMangledVariants:
         assert calls[0].name == "run_shell"
         assert calls[0].args == {"command": "npm init -y"}
 
-    def test_logged_read_file_call(self):
-        text = ('<|tool_call>call:tool_call\n'
-                '{"name": "read_file", "args": {"path": "package.json"}}\n'
-                '<tool_call|>')
+    @pytest.mark.parametrize(
+        "json_body, expected_name, expected_args",
+        [
+            ('{"name": "read_file", "args": {"path": "package.json"}}',
+             "read_file", {"path": "package.json"}),
+            ('{"name": "git_status", "args": {}}',
+             "git_status", {}),
+        ],
+    )
+    def test_logged_calls(self, json_body, expected_name, expected_args):
+        text = f'<|tool_call>call:tool_call\n{json_body}\n<tool_call|>'
         calls = parse_tool_calls(text)
-        assert calls[0].name == "read_file"
-        assert calls[0].args == {"path": "package.json"}
-
-    def test_logged_git_status_call(self):
-        text = ('<|tool_call>call:tool_call\n'
-                '{"name": "git_status", "args": {}}\n<tool_call|>')
-        calls = parse_tool_calls(text)
-        assert calls[0].name == "git_status"
-        assert calls[0].args == {}
+        assert calls[0].name == expected_name
+        assert calls[0].args == expected_args
 
     def test_gemma_native_with_real_name_prefix(self):
         # Older Gemma dialect: name in the prefix, args-only JSON body
@@ -283,8 +285,12 @@ class TestNonStringName:
     the parser's own `parsed[0] in tool_names` check and at execution's
     `call.name in self.disabled_tools` (2026-07-02 coder tool sweep)."""
 
-    def test_numeric_name_rejected(self):
-        text = '<tool_call>\n{"name": 123, "args": {"path": "x.py"}}\n</tool_call>'
+    @pytest.mark.parametrize("name_literal", ["123", "null"])
+    def test_scalar_name_rejected(self, name_literal):
+        text = (
+            f'<tool_call>\n{{"name": {name_literal}, "args": {{"path": "x.py"}}}}\n'
+            '</tool_call>'
+        )
         assert parse_tool_calls(text) == []
 
     def test_dict_name_rejected_without_typeerror(self):
@@ -296,10 +302,6 @@ class TestNonStringName:
         assert parse_tool_calls(bare, tool_names={"read_file"}) == []
         fenced = '```tool_call\n{"name": {"x": 1}, "args": {}}\n```'
         assert parse_tool_calls(fenced, tool_names={"read_file"}) == []
-
-    def test_null_name_rejected(self):
-        text = '<tool_call>\n{"name": null, "args": {}}\n</tool_call>'
-        assert parse_tool_calls(text) == []
 
     def test_string_name_still_parses(self):
         text = '<tool_call>\n{"name": "read_file", "args": {"path": "x.py"}}\n</tool_call>'

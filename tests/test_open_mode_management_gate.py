@@ -55,46 +55,33 @@ class TestOpenModeGate:
         tok = app.state.shell_token
         assert isinstance(tok, str) and len(tok) >= 20
 
-    def test_create_key_without_token_refused(self, open_app):
-        # NEGATIVE: pre-fix this minted a key (200) in open mode.
+    # (method, path, json body) for every management endpoint the gate covers,
+    # so a route that forgot to register under the gate still fails its own row.
+    _MANAGEMENT_ENDPOINTS = [
+        ("post", "/v1/keys", {"name": "x", "scopes": ["models:read"]}),
+        ("patch", "/v1/config", {"n_ctx": 8192}),
+        ("get", "/v1/config", None),
+        ("post", "/v1/models/unload", None),
+    ]
+
+    @pytest.mark.parametrize("method, path, json_body", _MANAGEMENT_ENDPOINTS)
+    def test_management_without_token_refused(self, open_app, method, path, json_body):
+        # NEGATIVE: pre-fix these ran unauthenticated (200) in open mode.
         c, _ = open_app
-        r = c.post("/v1/keys", json={"name": "x", "scopes": ["models:read"]})
+        kwargs = {"json": json_body} if json_body is not None else {}
+        r = getattr(c, method)(path, **kwargs)
         assert r.status_code == 403
 
-    def test_create_key_with_token_allowed(self, open_app):
+    @pytest.mark.parametrize("method, path, json_body", _MANAGEMENT_ENDPOINTS)
+    def test_management_with_token_allowed(self, open_app, method, path, json_body):
         c, app = open_app
-        r = c.post("/v1/keys", json={"name": "x", "scopes": ["models:read"]},
-                   headers=_bearer(app))
+        kwargs = {"json": json_body} if json_body is not None else {}
+        r = getattr(c, method)(path, headers=_bearer(app), **kwargs)
         assert r.status_code == 200
-
-    def test_patch_config_without_token_refused(self, open_app):
-        c, _ = open_app
-        assert c.patch("/v1/config", json={"n_ctx": 8192}).status_code == 403
-
-    def test_patch_config_with_token_allowed(self, open_app):
-        c, app = open_app
-        r = c.patch("/v1/config", json={"n_ctx": 8192}, headers=_bearer(app))
-        assert r.status_code == 200
-
-    def test_get_config_without_token_refused(self, open_app):
-        c, _ = open_app
-        assert c.get("/v1/config").status_code == 403
-
-    def test_get_config_with_token_allowed(self, open_app):
-        c, app = open_app
-        assert c.get("/v1/config", headers=_bearer(app)).status_code == 200
 
     def test_get_session_does_not_need_token(self, open_app):
         c, _ = open_app
         assert c.get("/api/session").status_code == 200
-
-    def test_model_unload_without_token_refused(self, open_app):
-        c, _ = open_app
-        assert c.post("/v1/models/unload").status_code == 403
-
-    def test_model_unload_with_token_allowed(self, open_app):
-        c, app = open_app
-        assert c.post("/v1/models/unload", headers=_bearer(app)).status_code == 200
 
     def test_wrong_token_refused(self, open_app):
         c, _ = open_app

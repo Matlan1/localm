@@ -162,6 +162,8 @@ def test_trusted_block_equals_plain_to_xml():
 def test_untrusted_block_is_tagged_and_fenced():
     r = ToolResult.success("the fetched page body", summary="ok")
     block = build_result_block("fetch_url", r, untrusted=True)
+    # The agent's audit / transcript skips key off startswith("<tool_result"),
+    # so the outer tag must survive for detection alongside the full frame.
     assert block.startswith('<tool_result name="fetch_url" status="ok"')
     assert 'provenance="untrusted-external"' in block
     assert "<untrusted_content>" in block
@@ -170,13 +172,6 @@ def test_untrusted_block_is_tagged_and_fenced():
     assert "the fetched page body" in block
     # The data-not-instructions warning is present.
     assert "NOT instructions" in block or "not instructions" in block.lower()
-
-
-def test_untrusted_block_outer_tag_preserved_for_detection():
-    # The agent's audit / transcript skips key off startswith("<tool_result").
-    r = ToolResult.success("body")
-    block = build_result_block("web_search", r, untrusted=True)
-    assert block.startswith("<tool_result")
 
 
 def test_untrusted_block_neutralises_boundary_spoof():

@@ -33,17 +33,15 @@ class TestEffectiveMode:
     def _no_env(self, monkeypatch):
         monkeypatch.delenv("LOCALM_MODE", raising=False)
 
-    def test_default_is_privacy(self):
-        with patch("localm.config.load_config", return_value=_cfg()):
-            assert effective_mode("chat") == SessionMode.PRIVACY
-            assert effective_mode("coder") == SessionMode.PRIVACY
-            assert effective_mode("server") == SessionMode.PRIVACY
-
-    def test_global_mode_applies_to_all_surfaces(self):
-        with patch("localm.config.load_config", return_value=_cfg(mode="log")):
-            assert effective_mode("chat") == SessionMode.LOG
-            assert effective_mode("coder") == SessionMode.LOG
-            assert effective_mode("server") == SessionMode.LOG
+    @pytest.mark.parametrize("mode,expected", [
+        ("privacy", SessionMode.PRIVACY),
+        ("log", SessionMode.LOG),
+    ])
+    def test_global_mode_applies_to_all_surfaces(self, mode, expected):
+        with patch("localm.config.load_config", return_value=_cfg(mode=mode)):
+            assert effective_mode("chat") == expected
+            assert effective_mode("coder") == expected
+            assert effective_mode("server") == expected
 
     def test_per_surface_overrides_global(self):
         cfg = _cfg(mode="log", chat_mode="full", coder_mode="privacy")

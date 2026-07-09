@@ -66,16 +66,6 @@ def test_resolved_share_block_is_deep_copy_of_source():
     assert plugins["image"]["comfy"]["api_url"] == "http://image"
 
 
-def test_source_not_enabled_falls_back_with_warning():
-    cfg = _cfg({
-        "image": {"comfy": {"api_url": "http://image"}},
-        "music": {"use_config_from": "image", "comfy": {"api_url": "http://own-music"}},
-    })           # active excludes image -> not active (installed-but-disabled)
-    block, warn = mc.resolve_config("music", cfg, active={"music"})
-    assert warn and "image" in warn
-    assert block["comfy"]["api_url"] == "http://own-music"
-
-
 def test_source_installed_but_disabled_falls_back():
     """Two-axis: a source that is installed but DISABLED is not active, so the
     sharer must fall back to its own config (not silently use a dormant source)."""
@@ -84,7 +74,7 @@ def test_source_installed_but_disabled_falls_back():
         "music": {"use_config_from": "image", "comfy": {"api_url": "http://own-music"}},
     })
     block, warn = mc.resolve_config("music", cfg, active={"music"})  # image not active
-    assert warn and "not active" in warn
+    assert warn and "image" in warn and "not active" in warn
     assert block["comfy"]["api_url"] == "http://own-music"
 
 

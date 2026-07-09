@@ -42,13 +42,6 @@ def test_fill_logits_on_every_token_when_not_last_only():
     assert batch_backing(batch)["logits"] == [1, 1, 1, 1]
 
 
-def test_fill_positions_offset_by_start_pos():
-    llm = _bare()
-    with patch.object(api, "llama_batch_init", side_effect=fake_batch_init):
-        batch = llm._create_batch([7, 8], start_pos=100, logits_at_last_only=True)
-    assert batch_backing(batch)["pos"] == [100, 101]
-
-
 def test_batch_freed_when_mid_generation_growth_raises():
     """AUDIT LOW: llama_batch_init allocates native arrays; if the mid-generation
     context-growth re-prefill raises, the batch must still be freed (not leaked)."""

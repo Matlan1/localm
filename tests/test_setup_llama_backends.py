@@ -65,13 +65,9 @@ def test_auto_backend_no_gpu_is_cpu(monkeypatch):
     assert sl._auto_backend() == "cpu"
 
 
-def test_auto_backend_nvidia_is_vulkan(monkeypatch):
-    monkeypatch.setattr(hwdetect, "detect", _fake_detect(["nvidia"], "vulkan"))
-    assert sl._auto_backend() == "vulkan"
-
-
-def test_auto_backend_intel_is_vulkan(monkeypatch):
-    monkeypatch.setattr(hwdetect, "detect", _fake_detect(["intel"], "vulkan"))
+@pytest.mark.parametrize("vendor", ["nvidia", "intel"])
+def test_auto_backend_single_vendor_is_vulkan(monkeypatch, vendor):
+    monkeypatch.setattr(hwdetect, "detect", _fake_detect([vendor], "vulkan"))
     assert sl._auto_backend() == "vulkan"
 
 

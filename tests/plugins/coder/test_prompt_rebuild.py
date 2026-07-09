@@ -11,6 +11,8 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 def _make_agent(tmp_path: Path, **kwargs):
     from localm.plugins.coder.agent import Agent
@@ -48,38 +50,43 @@ def _assert_all_present(agent):
         assert marker in agent._system_prompt, f"{marker} missing after rebuild"
 
 
-def test_initial_rebuild_includes_all_docs(tmp_path):
-    agent = _make_agent(tmp_path)
-    _seed_docs(agent)
-    _assert_all_present(agent)
+def _noop(agent, tmp_path):
+    pass
 
 
-def test_reindex_keeps_plugin_and_skill_docs(tmp_path):
-    agent = _make_agent(tmp_path)
-    _seed_docs(agent)
+def _reindex(agent, tmp_path):
     agent.reindex()
-    _assert_all_present(agent)
 
 
-def test_reload_memory_keeps_plugin_and_skill_docs(tmp_path):
-    agent = _make_agent(tmp_path)
-    _seed_docs(agent)
+def _reload_memory(agent, tmp_path):
     agent.reload_memory()
-    _assert_all_present(agent)
 
 
-def test_set_cwd_keeps_plugin_and_skill_docs(tmp_path):
-    agent = _make_agent(tmp_path)
-    _seed_docs(agent)
+def _set_cwd(agent, tmp_path):
     agent.set_cwd(tmp_path)
-    _assert_all_present(agent)
 
 
-def test_per_write_refresh_keeps_plugin_and_skill_docs(tmp_path):
-    agent = _make_agent(tmp_path)
-    _seed_docs(agent)
+def _per_write_refresh(agent, tmp_path):
     (tmp_path / "x.py").write_text("x = 1", encoding="utf-8")
     agent._refresh_map_for_tool(_make_call("write_file", path="x.py"))
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        pytest.param(_noop, id="initial_rebuild"),
+        pytest.param(_reindex, id="reindex"),
+        pytest.param(_reload_memory, id="reload_memory"),
+        pytest.param(_set_cwd, id="set_cwd"),
+        pytest.param(_per_write_refresh, id="per_write_refresh"),
+    ],
+)
+def test_rebuild_keeps_plugin_and_skill_docs(tmp_path, action):
+    # Each row pins a distinct rebuild call site as its own regression guard -
+    # keep all 5 separate so a bug in any single path still fails its own case.
+    agent = _make_agent(tmp_path)
+    _seed_docs(agent)
+    action(agent, tmp_path)
     _assert_all_present(agent)
 
 

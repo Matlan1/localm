@@ -291,22 +291,22 @@ def _fake_vendors(monkeypatch, vendors):
                         lambda: hwdetect.Detection(vendors=list(vendors)))
 
 
-def test_warn_off_profile_flags_mismatch(monkeypatch, capsys):
-    _fake_vendors(monkeypatch, ["amd"])
-    sl._warn_off_profile("cuda")                 # cuda on an AMD-only box
-    assert "Heads up" in capsys.readouterr().out
-
-
-def test_warn_off_profile_quiet_when_matched(monkeypatch, capsys):
-    _fake_vendors(monkeypatch, ["nvidia"])
-    sl._warn_off_profile("cuda")
-    assert "Heads up" not in capsys.readouterr().out
-
-
-def test_warn_off_profile_quiet_for_universal_backend(monkeypatch, capsys):
-    _fake_vendors(monkeypatch, ["amd"])
-    sl._warn_off_profile("vulkan")               # not a vendor-specific backend
-    assert "Heads up" not in capsys.readouterr().out
+@pytest.mark.parametrize(
+    "vendors, backend, expect_warning",
+    [
+        (["amd"], "cuda", True),      # cuda on an AMD-only box
+        (["nvidia"], "cuda", False),  # vendor matches the backend -> quiet
+        (["amd"], "vulkan", False),   # vulkan is not vendor-specific -> quiet
+    ],
+)
+def test_warn_off_profile(monkeypatch, capsys, vendors, backend, expect_warning):
+    _fake_vendors(monkeypatch, vendors)
+    sl._warn_off_profile(backend)
+    out = capsys.readouterr().out
+    if expect_warning:
+        assert "Heads up" in out
+    else:
+        assert "Heads up" not in out
 
 
 # --------------------------- load-test + fallback ------------------------- #
@@ -326,24 +326,19 @@ def _stub_provision(monkeypatch):
     monkeypatch.setattr(sl.sys.stdin, "isatty", lambda: False)
 
 
-def test_fallback_chosen_loads_returns_chosen(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "results, expected_backend",
+    [
+        ([(True, "")], "cuda"),
+        ([(False, "cuda failed to load"), (True, "")], "vulkan"),
+        ([(False, "cuda no"), (False, "vulkan no"), (True, "")], "cpu"),
+    ],
+)
+def test_fallback_returns_first_backend_that_loads(monkeypatch, tmp_path, results, expected_backend):
     _stub_provision(monkeypatch)
-    monkeypatch.setattr(sl, "_native_loads_ok", lambda: (True, ""))
-    assert sl._provision_with_fallback("cuda", tmp_path, None, True) == "cuda"
-
-
-def test_fallback_to_vulkan_when_chosen_does_not_load(monkeypatch, tmp_path):
-    _stub_provision(monkeypatch)
-    seq = iter([(False, "cuda failed to load"), (True, "")])
+    seq = iter(results)
     monkeypatch.setattr(sl, "_native_loads_ok", lambda: next(seq))
-    assert sl._provision_with_fallback("cuda", tmp_path, None, True) == "vulkan"
-
-
-def test_fallback_to_cpu_when_vulkan_also_fails(monkeypatch, tmp_path):
-    _stub_provision(monkeypatch)
-    seq = iter([(False, "cuda no"), (False, "vulkan no"), (True, "")])
-    monkeypatch.setattr(sl, "_native_loads_ok", lambda: next(seq))
-    assert sl._provision_with_fallback("cuda", tmp_path, None, True) == "cpu"
+    assert sl._provision_with_fallback("cuda", tmp_path, None, True) == expected_backend
 
 
 def test_nothing_loads_raises_reportable_error(monkeypatch, tmp_path):

@@ -333,25 +333,17 @@ class TestSnapshotDiskSpaceAndCompleteness:
 # ---------------------------------------------------------------------------
 
 class TestUserNameSanitized:
-    def test_traversal_name_is_sanitized(self, fake_registry, tmp_path):
+    @pytest.mark.parametrize("bad_name", ["../../evil", "a/b/c"])
+    def test_add_local_name_is_sanitized(self, fake_registry, tmp_path, bad_name):
         store, _ = fake_registry
         f = tmp_path / "m.gguf"
         f.write_bytes(b"bytes")
-        mm.add_local(str(f), "../../evil", on_duplicate="register")
-        # No traversal sequence survives into a registry key.
-        assert "../../evil" not in store
+        mm.add_local(str(f), bad_name, on_duplicate="register")
+        # No traversal or path-separator sequence survives into a registry key.
+        assert bad_name not in store
         assert not any(("/" in k or "\\" in k or ".." in k) for k in store)
         # Something sane got registered.
         assert len(store) == 1
-
-    def test_slash_name_is_sanitized(self, fake_registry, tmp_path):
-        store, _ = fake_registry
-        f = tmp_path / "m.gguf"
-        f.write_bytes(b"bytes")
-        mm.add_local(str(f), "a/b/c", on_duplicate="register")
-        assert "a/b/c" not in store
-        key = next(iter(store))
-        assert "/" not in key and "\\" not in key
 
     def test_gguf_pull_name_is_sanitized(self, fake_registry, tmp_path, monkeypatch):
         # the #83 fix sanitized add's -n but NOT pull's -n (re-audit residual)

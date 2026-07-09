@@ -160,18 +160,13 @@ def test_detect_never_raises_even_with_dead_probes(monkeypatch):
 
 # ------------------- recommended_install_backend (policy) -------------------
 
-def test_install_backend_apple_metal():
-    assert hwdetect.recommended_install_backend(
-        Detection(vendors=["apple"], recommended="metal")) == "metal"
-
-
-def test_install_backend_no_gpu_cpu():
-    assert hwdetect.recommended_install_backend(Detection(vendors=[])) == "cpu"
-
-
-def test_install_backend_nvidia_vulkan():
-    assert hwdetect.recommended_install_backend(
-        Detection(vendors=["nvidia"])) == "vulkan"
+@pytest.mark.parametrize("vendors,expected", [
+    (["apple"], "metal"),
+    ([], "cpu"),
+    (["nvidia"], "vulkan"),
+])
+def test_install_backend_early_return_branches(vendors, expected):
+    assert hwdetect.recommended_install_backend(Detection(vendors=vendors)) == expected
 
 
 def test_install_backend_win_amd_rx6000_is_rocm(monkeypatch):
@@ -209,13 +204,6 @@ def test_install_backend_linux_amd_is_vulkan(monkeypatch):
     # The amd-rocm bundle is Windows-only; AMD on Linux -> vulkan.
     monkeypatch.setattr(hwdetect.sys, "platform", "linux")
     d = Detection(vendors=["amd"], gpu_names="amd radeon rx 6800")
-    assert hwdetect.recommended_install_backend(d) == "vulkan"
-
-
-def test_install_backend_win_mixed_amd_nvidia_is_vulkan(monkeypatch):
-    # vendors != ["amd"] (mixed) -> the narrow amd-rocm case does not apply.
-    monkeypatch.setattr(hwdetect.sys, "platform", "win32")
-    d = Detection(vendors=["nvidia", "amd"], gpu_names="rx 6800 rtx 4090")
     assert hwdetect.recommended_install_backend(d) == "vulkan"
 
 

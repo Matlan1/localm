@@ -49,15 +49,14 @@ class TestResolvePinned:
                             lambda *a, **k: (_ for _ in ()).throw(_socket.gaierror("nope")))
         assert netpolicy._resolve_pinned("does-not-exist.example") is None
 
-    def test_private_resolution_refused_by_default(self, monkeypatch):
-        monkeypatch.setattr("socket.getaddrinfo", _dns("127.0.0.1"))
+    @pytest.mark.parametrize("ip", [
+        pytest.param("127.0.0.1", id="loopback"),
+        pytest.param("169.254.169.254", id="cloud-metadata"),
+    ])
+    def test_private_resolution_refused_by_default(self, ip, monkeypatch):
+        monkeypatch.setattr("socket.getaddrinfo", _dns(ip))
         with pytest.raises(NetworkPolicyError, match="non-public"):
             netpolicy._resolve_pinned("sneaky.example")
-
-    def test_metadata_ip_refused(self, monkeypatch):
-        monkeypatch.setattr("socket.getaddrinfo", _dns("169.254.169.254"))
-        with pytest.raises(NetworkPolicyError, match="non-public"):
-            netpolicy._resolve_pinned("metadata.example")
 
     def test_private_allowed_when_configured(self, monkeypatch):
         monkeypatch.setattr("localm.config.load_config",

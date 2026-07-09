@@ -290,6 +290,14 @@ once per individual unit of a larger task. The full suite takes minutes; CI runs
 it again on the PR anyway, so re-running it after every small change buys no
 extra signal for real cost.
 
+The Python suite runs in parallel via `pytest-xdist`: add `-n auto` to distribute
+tests across worker processes (`pytest -m "not integration" -n auto`). Every test
+already gets its own `LOCALM_HOME` via the autouse `tmp_path` fixture in
+`tests/conftest.py`, and the few tests that bind a real socket use an OS-assigned
+ephemeral port, so this is safe. Not forced on by default (no `addopts`), so a
+plain `pytest -k foo -s` or a debugger session still works without worker
+overhead or interleaved output. CI runs the full suite with `-n auto`.
+
 While iterating within a task:
 
 - Use a targeted/scoped check against just the touched area for fast feedback per

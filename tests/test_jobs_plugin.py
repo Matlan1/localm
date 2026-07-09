@@ -222,51 +222,29 @@ def _at(y, mo, d, h, mi):
     return time.mktime((y, mo, d, h, mi, 0, 0, 0, -1))
 
 
-def test_cron_every_minute_matches_always():
-    from localm.plugins.builtin.jobs.scheduler import cron_match
-    assert cron_match("* * * * *", _at(2026, 6, 17, 13, 37)) is True
-
-
-def test_cron_specific_minute_hour():
-    from localm.plugins.builtin.jobs.scheduler import cron_match
-    expr = "30 9 * * *"
-    assert cron_match(expr, _at(2026, 6, 17, 9, 30)) is True
-    assert cron_match(expr, _at(2026, 6, 17, 9, 31)) is False
-    assert cron_match(expr, _at(2026, 6, 17, 10, 30)) is False
-
-
-def test_cron_step():
-    from localm.plugins.builtin.jobs.scheduler import cron_match
-    expr = "*/15 * * * *"          # 0,15,30,45
-    assert cron_match(expr, _at(2026, 6, 17, 0, 0)) is True
-    assert cron_match(expr, _at(2026, 6, 17, 0, 15)) is True
-    assert cron_match(expr, _at(2026, 6, 17, 0, 30)) is True
-    assert cron_match(expr, _at(2026, 6, 17, 0, 7)) is False
-
-
-def test_cron_range():
-    from localm.plugins.builtin.jobs.scheduler import cron_match
-    expr = "0 9-17 * * *"          # on the hour, 9am-5pm
-    assert cron_match(expr, _at(2026, 6, 17, 9, 0)) is True
-    assert cron_match(expr, _at(2026, 6, 17, 17, 0)) is True
-    assert cron_match(expr, _at(2026, 6, 17, 8, 0)) is False
-    assert cron_match(expr, _at(2026, 6, 17, 18, 0)) is False
-
-
-def test_cron_list():
-    from localm.plugins.builtin.jobs.scheduler import cron_match
-    expr = "0,30 * * * *"
-    assert cron_match(expr, _at(2026, 6, 17, 4, 0)) is True
-    assert cron_match(expr, _at(2026, 6, 17, 4, 30)) is True
-    assert cron_match(expr, _at(2026, 6, 17, 4, 15)) is False
-
-
-def test_cron_day_of_week():
-    from localm.plugins.builtin.jobs.scheduler import cron_match
+@pytest.mark.parametrize("expr,y,mo,d,h,mi,expected", [
+    pytest.param("* * * * *", 2026, 6, 17, 13, 37, True, id="every_minute"),
+    pytest.param("30 9 * * *", 2026, 6, 17, 9, 30, True, id="specific_minute_hour-match"),
+    pytest.param("30 9 * * *", 2026, 6, 17, 9, 31, False, id="specific_minute_hour-wrong_minute"),
+    pytest.param("30 9 * * *", 2026, 6, 17, 10, 30, False, id="specific_minute_hour-wrong_hour"),
+    pytest.param("*/15 * * * *", 2026, 6, 17, 0, 0, True, id="step-on_0"),
+    pytest.param("*/15 * * * *", 2026, 6, 17, 0, 15, True, id="step-on_15"),
+    pytest.param("*/15 * * * *", 2026, 6, 17, 0, 30, True, id="step-on_30"),
+    pytest.param("*/15 * * * *", 2026, 6, 17, 0, 7, False, id="step-off_7"),
+    pytest.param("0 9-17 * * *", 2026, 6, 17, 9, 0, True, id="range-lower_bound"),
+    pytest.param("0 9-17 * * *", 2026, 6, 17, 17, 0, True, id="range-upper_bound"),
+    pytest.param("0 9-17 * * *", 2026, 6, 17, 8, 0, False, id="range-below"),
+    pytest.param("0 9-17 * * *", 2026, 6, 17, 18, 0, False, id="range-above"),
+    pytest.param("0,30 * * * *", 2026, 6, 17, 4, 0, True, id="list-first"),
+    pytest.param("0,30 * * * *", 2026, 6, 17, 4, 30, True, id="list-second"),
+    pytest.param("0,30 * * * *", 2026, 6, 17, 4, 15, False, id="list-not_in_list"),
     # 2026-06-15 is a Monday; dow Monday == 1.
-    expr = "0 0 * * 1"
-    assert cron_match(expr, _at(2026, 6, 15, 0, 0)) is True     # Monday
-    assert cron_match(expr, _at(2026, 6, 16, 0, 0)) is False    # Tuesday
+    pytest.param("0 0 * * 1", 2026, 6, 15, 0, 0, True, id="day_of_week-monday"),
+    pytest.param("0 0 * * 1", 2026, 6, 16, 0, 0, False, id="day_of_week-tuesday"),
+])
+def test_cron_match(expr, y, mo, d, h, mi, expected):
+    from localm.plugins.builtin.jobs.scheduler import cron_match
+    assert cron_match(expr, _at(y, mo, d, h, mi)) is expected
 
 
 def test_cron_invalid_raises():
