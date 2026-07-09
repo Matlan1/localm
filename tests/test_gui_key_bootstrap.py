@@ -191,3 +191,52 @@ class TestLaunchGrantHandoff:
         r = TestClient(_app("0.0.0.0")).get("/", follow_redirects=False)
         assert r.status_code == 200
         assert "localm_session=" not in _set_cookies(r)
+
+
+class TestPullGrant:
+    """SEC-PULL-CONFIRM: `localm gui --pull SPEC` mints a single-use, spec-bound
+    secret (mint_pull_grant) so its OWN deep link can auto-start the download with
+    zero clicks (see init.js), while a forged `?pull=` link elsewhere - which
+    cannot know this secret - falls back to an explicit human confirmation. This
+    class covers the grant primitive itself; the HTTP redeem endpoint is covered
+    by TestPullTokenRedeemEndpoint in test_gui.py, alongside the other pull
+    routes."""
+
+    def test_valid_grant_redeems_once(self):
+        from localm.plugins.gui.web import consume_pull_grant, mint_pull_grant
+        app = _app("127.0.0.1")
+        token = mint_pull_grant(app, "owner/repo:m.gguf")
+        assert consume_pull_grant(app, "owner/repo:m.gguf", token) is True
+
+    def test_grant_is_single_use(self):
+        from localm.plugins.gui.web import consume_pull_grant, mint_pull_grant
+        app = _app("127.0.0.1")
+        token = mint_pull_grant(app, "owner/repo:m.gguf")
+        assert consume_pull_grant(app, "owner/repo:m.gguf", token) is True
+        # Replayed: already popped on first redeem.
+        assert consume_pull_grant(app, "owner/repo:m.gguf", token) is False
+
+    def test_grant_is_bound_to_the_exact_spec(self):
+        # A leaked/observed token must not authorise pulling a DIFFERENT model -
+        # otherwise a forged link could reuse a legitimately-observed token by
+        # pairing it with its own `pull=` spec.
+        from localm.plugins.gui.web import consume_pull_grant, mint_pull_grant
+        app = _app("127.0.0.1")
+        token = mint_pull_grant(app, "owner/repo:m.gguf")
+        assert consume_pull_grant(app, "someone-else/other:x.gguf", token) is False
+        # Still unredeemed for the RIGHT spec (a mismatched attempt must not burn it).
+        assert consume_pull_grant(app, "owner/repo:m.gguf", token) is True
+
+    def test_unknown_or_missing_token_is_rejected(self):
+        from localm.plugins.gui.web import consume_pull_grant
+        app = _app("127.0.0.1")
+        assert consume_pull_grant(app, "owner/repo:m.gguf", "bogus-never-minted") is False
+        assert consume_pull_grant(app, "owner/repo:m.gguf", "") is False
+        assert consume_pull_grant(app, "owner/repo:m.gguf", None) is False
+
+    def test_expired_grant_is_rejected(self):
+        from localm.plugins.gui.web import consume_pull_grant, mint_pull_grant
+        app = _app("127.0.0.1")
+        # A negative TTL puts the expiry in the past the moment it is minted.
+        token = mint_pull_grant(app, "owner/repo:m.gguf", ttl=-1.0)
+        assert consume_pull_grant(app, "owner/repo:m.gguf", token) is False

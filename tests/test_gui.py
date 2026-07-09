@@ -760,6 +760,57 @@ class TestModelEndpoints:
         assert r.status_code == 400
 
 
+class TestPullTokenRedeemEndpoint:
+    """SEC-PULL-CONFIRM: `POST /api/models/pull-token/redeem` is the HTTP surface
+    init.js calls before auto-starting a `?pull=` deep link with zero clicks. Only
+    a genuine mint_pull_grant token, bound to the exact spec, unused and
+    unexpired, may succeed - see TestPullGrant in test_gui_key_bootstrap.py for
+    the grant primitive itself (single-use, spec-bound, expiring)."""
+
+    def test_valid_token_redeems(self, gui_app):
+        from localm.plugins.gui.web import mint_pull_grant
+        app, _ = gui_app
+        token = mint_pull_grant(app, "owner/repo:m.gguf")
+        with TestClient(app) as client:
+            r = client.post("/api/models/pull-token/redeem",
+                            json={"spec": "owner/repo:m.gguf", "token": token})
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+
+    def test_token_is_single_use_over_http(self, gui_app):
+        from localm.plugins.gui.web import mint_pull_grant
+        app, _ = gui_app
+        token = mint_pull_grant(app, "owner/repo:m.gguf")
+        with TestClient(app) as client:
+            first = client.post("/api/models/pull-token/redeem",
+                                json={"spec": "owner/repo:m.gguf", "token": token})
+            second = client.post("/api/models/pull-token/redeem",
+                                 json={"spec": "owner/repo:m.gguf", "token": token})
+        assert first.status_code == 200
+        assert second.status_code == 403
+
+    def test_forged_token_is_rejected(self, gui_app):
+        app, _ = gui_app
+        with TestClient(app) as client:
+            r = client.post(
+                "/api/models/pull-token/redeem",
+                json={"spec": "owner/repo:m.gguf", "token": "forged-never-minted"})
+        assert r.status_code == 403
+
+    def test_token_minted_for_a_different_spec_is_rejected(self, gui_app):
+        """A hidden iframe pairing an observed token with its OWN `pull=` spec
+        must not redeem - the grant is bound to the exact spec it was minted
+        for, not just 'some valid token exists'."""
+        from localm.plugins.gui.web import mint_pull_grant
+        app, _ = gui_app
+        token = mint_pull_grant(app, "owner/repo:m.gguf")
+        with TestClient(app) as client:
+            r = client.post(
+                "/api/models/pull-token/redeem",
+                json={"spec": "attacker/evil:payload.gguf", "token": token})
+        assert r.status_code == 403
+
+
 @pytest.fixture
 def coder_app(tmp_path, monkeypatch):
     """GUI app with the builtin coder plugin installed; isolated home.

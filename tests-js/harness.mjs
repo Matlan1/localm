@@ -160,8 +160,8 @@ const PAGE_SCRIPTS = [
  * run AFTER app.js. Their top-level `$("...").onclick = ...` wiring runs against
  * the real index.html elements.
  */
-export function loadAppWithPages({ fetchImpl } = {}) {
-  const { dom, window } = loadApp({ fetchImpl });
+export function loadAppWithPages({ fetchImpl, url } = {}) {
+  const { dom, window } = loadApp({ fetchImpl, url });
   for (const name of PAGE_SCRIPTS) {
     runScript(window, readClassic(`pages/${name}.js`));
   }
