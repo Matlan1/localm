@@ -184,6 +184,25 @@ class TestDecideMediaSwap:
         assert decide_media_swap({"vram_estimate_bytes": 12 * GB},
                                  read_free=lambda: 4 * GB) is True
 
+    def test_default_read_free_is_split_aware(self, monkeypatch):
+        """AUDIT-GPU-SPLIT-1: with no read_free override (the real call sites
+        in image/music/video plug.py all omit it), the default must weigh a
+        media job against COMBINED split capacity, not just the single main
+        GPU - otherwise a split-configured machine needlessly swaps the chat
+        model out even when the split already covers the media job."""
+        from localm.config import load_config as real_load_config
+        base_cfg = real_load_config()
+        monkeypatch.setattr(
+            "localm.config.load_config",
+            lambda: {**base_cfg, "gpu_split_indices": [0, 1]})
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: [
+            {"index": 0, "name": "A", "total": 8 * GB, "free": 4 * GB},
+            {"index": 1, "name": "B", "total": 8 * GB, "free": 4 * GB},
+        ])
+        # 8 GB combined free comfortably covers a 4 GB estimate (+1 GB
+        # headroom) that the single 4 GB main GPU alone would not.
+        assert decide_media_swap(self._settings(est_gb=4)) is False
+
 
 class TestBackendSwapSettings:
     """The media backends surface swap_policy + vram_estimate_bytes (consumed by
