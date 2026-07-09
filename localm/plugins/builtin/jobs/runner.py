@@ -232,6 +232,31 @@ def _run_memory(job: Job, *, engine=None) -> str:
 #  coder (best-effort)                                                         #
 # --------------------------------------------------------------------------- #
 
+def _shell_still_authorized(job: Job) -> bool:
+    """Re-validate a shell-opt-in job's authorization at RUN time, so a revoked or
+    expired key cannot keep an unattended scheduled job running with shell access
+    forever (LM-DA-014: the runner used to just trust the stored ``allow_shell``
+    flag - its own comment said so).
+
+    ``job.owner`` is the sha256 key hash ``principal_id()`` stamps at creation
+    (store.py) - the same value ``auth.key_hash_live()`` checks for a cookie
+    session. Two cases need no re-check: a job with no owner (``allow_shell``
+    needed no privileged key when ``any_key_configured()`` was False at creation,
+    so there is no key whose liveness matters), and a job owned by the OWNER key
+    itself (the owner key is not a keystore entry and is not revocable/expirable
+    the way a scoped key is - mirrors ``key_hash_live``'s own "owner sessions are
+    not gated on this" contract). Any other owner hash must still resolve to a
+    live (unrevoked, unexpired) keystore key, or the run is downgraded to
+    restricted rather than trusting a stale grant."""
+    if job.owner is None:
+        return True
+    from localm.auth import _hash_key, get_api_key, key_hash_live
+    owner_key = get_api_key()
+    if owner_key and _hash_key(owner_key) == job.owner:
+        return True
+    return key_hash_live(job.owner)
+
+
 def _run_coder(job: Job, *, engine=None) -> str:
     """Run a coder Agent for the prompt in the job's cwd. Best-effort: requires
     the coder plugin and a reachable backend. Honours the current privacy mode
@@ -256,8 +281,11 @@ def _run_coder(job: Job, *, engine=None) -> str:
     # dispatch (agent.py), which closes both the indirect-injection -> run_shell
     # vector (the AutoJack analogue) and the jobs-scope -> shell privilege
     # escalation. The allow_shell opt-in is gated to owner / coder:full at the
-    # creation route; the runner trusts the stored flag.
-    restricted = not getattr(job, "allow_shell", False)
+    # creation route - but a stored True is not trusted FOREVER: the autonomous
+    # scheduler tick has no request/caller to re-check (unlike run-now, which
+    # re-validates the CALLER), so the runner re-validates the OWNING key's live
+    # state on every run instead (LM-DA-014).
+    restricted = not (getattr(job, "allow_shell", False) and _shell_still_authorized(job))
 
     from localm.plugins.coder.agent import Agent
     agent = Agent(
