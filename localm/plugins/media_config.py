@@ -26,6 +26,7 @@ the source is missing/disabled. Applies only to the three media plugins.
 from __future__ import annotations
 
 import copy
+from types import SimpleNamespace
 from typing import Optional
 
 MEDIA_PLUGINS = ("image", "music", "video")
@@ -180,3 +181,39 @@ def combine_warnings(*warnings: Optional[str]) -> Optional[str]:
     without one silently dropping another."""
     parts = [w for w in warnings if w]
     return "; ".join(parts) if parts else None
+
+
+def make_backend_facade(package: str, comfy_ref: SimpleNamespace) -> SimpleNamespace:
+    """Build the ``ensure_available``/``free_vram``/``generate`` dispatch facade
+    shared by every media plugin's backend.py: *comfy_ref* (the plugin's own
+    inline ComfyUI reference implementation) for the default ``"comfy"`` backend,
+    else ``<package>.backends.<name>`` loaded by ``load_backend`` - falling back
+    to *comfy_ref* on an unknown/missing name so a typo never hard-crashes a
+    generate (the settings ``warning`` already carries the config note, via
+    ``backend_unavailable_warning``).
+
+    A plugin's backend.py assigns the returned callables to its own module-level
+    names (including ``resolve`` as ``_impl``, its historical name), so both
+    ``plug.py`` call sites (``_backend.ensure_available``, etc.) and tests that
+    introspect which implementation a settings dict resolves to are unchanged."""
+
+    def resolve(s: dict):
+        name = (s.get("backend") or "comfy").strip().lower()
+        if name in ("", "comfy"):
+            return comfy_ref
+        try:
+            return load_backend(package, name)
+        except ModuleNotFoundError:
+            return comfy_ref
+
+    def ensure_available(s: dict, *args, **kwargs) -> tuple[bool, str]:
+        return resolve(s).ensure_available(s, *args, **kwargs)
+
+    def free_vram(s: dict, *args, **kwargs) -> bool:
+        return resolve(s).free_vram(s, *args, **kwargs)
+
+    def generate(s: dict, *args, **kwargs) -> tuple[bool, str]:
+        return resolve(s).generate(s, *args, **kwargs)
+
+    return SimpleNamespace(resolve=resolve, ensure_available=ensure_available,
+                           free_vram=free_vram, generate=generate)

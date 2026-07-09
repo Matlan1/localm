@@ -212,6 +212,34 @@ def _share_inbox() -> Path:
     return d
 
 
+# No recorded owner ("-") means open mode / untracked - unrestricted, mirroring
+# jobs' job_owner_ok "owner=None is unrestricted" semantics.
+_SHARE_NO_OWNER = "-"
+
+
+def _share_entry_name(owner: "str | None", fid: str, filename: str) -> str:
+    """Build an inbox filename carrying its creator's principal id, so a later
+    request can be checked against job_owner_ok before it is read or cleared."""
+    token = owner if owner else _SHARE_NO_OWNER
+    return f"{fid}__{token}__{filename}"
+
+
+def _parse_share_entry(path: Path) -> "tuple[str, str | None, str]":
+    """(fid, owner_or_None, filename) from an inbox entry's name.
+
+    maxsplit=2 so a filename that itself contains "__" is not corrupted (fid and
+    the owner token are both constructed to never contain "_", so the first two
+    separators are unambiguous). Falls back to the pre-ownership two-part format
+    (owner=None, i.e. unrestricted) for any entry left over from before this
+    field existed, so an old on-disk inbox never breaks the listing."""
+    parts = path.name.split("__", 2)
+    if len(parts) == 3:
+        fid, token, name = parts
+        return fid, (None if token == _SHARE_NO_OWNER else token), name
+    fid, _, name = path.name.partition("__")
+    return fid, None, name
+
+
 def _multipart_boundary(content_type: str) -> "bytes | None":
     """The boundary token from a multipart/form-data Content-Type, or None."""
     if "multipart/form-data" not in (content_type or "").lower():
