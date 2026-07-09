@@ -264,8 +264,9 @@ A plugin's settings live under `config["plugins"][<name>]`, read/written via
 session-derived data to disk (sidecars, caches, generated media) must gate that
 write on the privacy contract - check `effective_mode()` in
 [audit.py](../localm/audit.py) before writing, exactly as the media plugins do.
-Personal model/voice choices belong in a gitignored override (e.g. `tts.json`
-overriding the tracked `tts.example.json`), never committed.
+Personal model/voice choices, such as the tts plugin's, belong under
+`config["plugins"]["tts"]` in the gitignored `config.json`, never committed;
+the tracked `tts.example.json` only supplies the shipped defaults.
 
 ## Third-party plugins
 

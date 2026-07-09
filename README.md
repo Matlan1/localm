@@ -323,6 +323,7 @@ See [docs/llamacpp-binding.md](docs/llamacpp-binding.md) for the binding interna
 | [docs/rag.md](docs/rag.md) | Knowledge: chat with your documents, collections, retrieval design |
 | [docs/network.md](docs/network.md) | Internet access for coder and chat: modes, domain rules, SSRF guard |
 | [docs/tls.md](docs/tls.md) | API keys, TLS, and reverse proxies for LAN serving |
+| [docs/naming.md](docs/naming.md) | Reaching localm by name on your LAN: the localm.local mDNS address |
 | [docs/phone.md](docs/phone.md) | Using localm from your phone: the installable PWA companion |
 | [docs/native-app.md](docs/native-app.md) | The native `LocaLM.exe` launcher: how it works, `make-launcher`, the freeze trade-off |
 
