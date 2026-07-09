@@ -18,8 +18,19 @@ Phase 0 ships the schema + the core fields. The renderer (GUI) lands in Phase 5.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Optional
+
+# Sanity ceiling for a gpu_split_indices entry: no real machine has anywhere
+# near this many GPU devices, so an index above it is a config error (typo or
+# malicious PATCH), never a legitimate one. Bounds the ctypes tensor_split
+# allocation this value eventually drives in discover.apply_gpu_split - without
+# a cap, [0, 500000] would attempt a 500,001-element allocation before the
+# native loader is ever invoked. discover.resolve_gpu_split re-applies the same
+# ceiling at read time (defense in depth: a hand-edited config.json bypasses
+# this write-time check entirely).
+MAX_GPU_SPLIT_INDEX = 127
 
 
 class Widget:
@@ -122,6 +133,19 @@ CORE_FIELDS: list = [
                  "Which GPU device to load models onto, for multi-GPU systems. "
                  "Blank uses device 0.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=0),
+    # HIDDEN: rendered by a "Split across GPUs" checkbox row next to the Main
+    # GPU selector (populated from GET /api/gpus), not the generic settings
+    # form - same reasoning as main_gpu_index above. Still accepted by PATCH
+    # /v1/config and `localm config gpu_split_indices 0,1` like any other field.
+    SettingField("gpu_split_indices", Widget.HIDDEN, "Split across GPUs",
+                 "Device indices to split a model across when it is too large "
+                 "for one card (2+ needed to take effect). Blank uses a single "
+                 "GPU (Main GPU above).",
+                 group="Engine", applies=Applies.NEXT_LOAD),
+    SettingField("gpu_split_ratios", Widget.HIDDEN, "GPU split ratios",
+                 "Optional relative weight per device in Split across GPUs "
+                 "(same order/length). Blank splits evenly.",
+                 group="Engine", applies=Applies.NEXT_LOAD),
     SettingField("idle_unload_seconds", Widget.NUMBER, "Idle model unload (s)",
                  "Free the model's VRAM after this many seconds with no request "
                  "(0 = never; the model stays resident). The next message reloads "
@@ -644,6 +668,41 @@ def _validate_one(key: str, val, field: "SettingField", default):
             if field.min is not None and idx < field.min:
                 raise ValueError(f"{key}: {idx} is below the minimum {field.min}")
             return idx
+        if key == "gpu_split_indices":
+            # A HIDDEN list-of-ints field (the checkbox row renders it, not a
+            # generic list box). Accepts a CLI CSV string ("0,1") or a GUI JSON
+            # list of ints - _to_str_list normalizes either shape to string
+            # tokens first (same convention Widget.LIST fields use), then each
+            # token is coerced/bounded via the shared _to_number helper (also
+            # rejects booleans). Empty/null clears the split (single-GPU).
+            if val is None:
+                return None
+            tokens = _to_str_list(key, val)
+            if not tokens:
+                return None
+            return [_to_number(key, t, want_int=True, lo=0, hi=MAX_GPU_SPLIT_INDEX)
+                    for t in tokens]
+        if key == "gpu_split_ratios":
+            # Same shape as gpu_split_indices, but positive floats (a ratio of
+            # 0 or below is meaningless - llama.cpp would give that device no
+            # share at all, silently dropping it from the split). inf/nan are
+            # rejected explicitly: _to_number's bounds check (lo/hi=None here)
+            # would let both through, and a non-finite value would otherwise
+            # cross straight into the native tensor_split ctypes buffer.
+            if val is None:
+                return None
+            tokens = _to_str_list(key, val)
+            if not tokens:
+                return None
+            out: list = []
+            for t in tokens:
+                r = _to_number(key, t, want_int=False, lo=None, hi=None)
+                if not math.isfinite(r):
+                    raise ValueError(f"{key}: {r} must be a finite number")
+                if r <= 0:
+                    raise ValueError(f"{key}: {r} must be greater than 0")
+                out.append(r)
+            return out
         # plugins_enabled (list) / plugins (dict): managed by the engine, not the
         # settings form, but accepted with the right container type for the
         # GET->PATCH round-trip the GUI does.

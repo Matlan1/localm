@@ -495,25 +495,36 @@ def config_cmd(key, value):
 
 @main.command("gpus")
 def gpus_cmd():
-    """List detected GPUs and the configured main GPU index.
+    """List detected GPUs, the configured main GPU index, and any GPU split.
 
     On a multi-GPU system, localm loads models onto device 0 unless you set
     main_gpu_index. Pick one from this list, then:
 
     \b
       localm config main_gpu_index <index>
+
+    A model too large for one card can instead be split across 2+ GPUs:
+
+    \b
+      localm config gpu_split_indices 0,1
     """
     from ..discover import list_gpus
 
     cfg = load_config()
     configured = cfg.get("main_gpu_index")
+    split = cfg.get("gpu_split_indices") or []
     gpus = list_gpus()
     if not gpus:
         console.print("[dim]No GPUs detected (or VRAM detection is unavailable - "
                       "no torch, no nvidia-smi).[/dim]")
         return
     for g in gpus:
-        marker = "  [green](configured)[/green]" if g["index"] == configured else ""
+        markers = []
+        if g["index"] == configured:
+            markers.append("[green](configured)[/green]")
+        if g["index"] in split:
+            markers.append("[cyan](split)[/cyan]")
+        marker = "  " + " ".join(markers) if markers else ""
         free = g.get("free")
         free_s = f"{free / 1024**3:.1f} GB free / " if isinstance(free, int) else ""
         console.print(
@@ -523,7 +534,12 @@ def gpus_cmd():
         console.print(
             f"[yellow]![/yellow]  configured main_gpu_index={configured} does not "
             "match any GPU detected right now; loads fall back to device 0.")
+    if split and not all(any(g["index"] == idx for g in gpus) for idx in split):
+        console.print(
+            f"[yellow]![/yellow]  configured gpu_split_indices={split} references a "
+            "GPU not detected right now; that device is dropped from the split.")
     console.print("\n[dim]Set the main GPU:  localm config main_gpu_index <index>[/dim]")
+    console.print("[dim]Split across GPUs:  localm config gpu_split_indices 0,1[/dim]")
 
 
 @main.command("unload")

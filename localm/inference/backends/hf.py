@@ -48,6 +48,53 @@ def _require_transformers():
         raise
 
 
+def _cuda_device_map(torch, config: Optional[dict] = None) -> dict:
+    """Build the ``device_map`` (+ optional ``max_memory``) load kwargs for a
+    CUDA load, honouring ``gpu_split_indices`` / ``main_gpu_index`` the same
+    way the GGUF backend's native params do (see
+    ``discover.apply_gpu_split`` / ``discover.apply_main_gpu``) - closing a
+    real gap where this backend used to hardcode ``device_map="auto"``
+    regardless of either setting, so "Main GPU = 1" silently did nothing for
+    an HF (transformers) load:
+
+    - 2+ valid ``gpu_split_indices`` -> ``"auto"`` sharded ONLY across those
+      devices. Any GPU id absent from ``max_memory`` is excluded from
+      accelerate's auto-shard - the standard technique for restricting
+      ``device_map="auto"`` to a device subset.
+    - no split, but a valid ``main_gpu_index`` -> pin the WHOLE model onto
+      that one device (``device_map={"": idx}``) instead of auto-sharding
+      across every visible card.
+    - neither configured -> ``"auto"`` across every visible device, exactly
+      today's default (existing installs see no behavior change).
+    """
+    from localm.config import load_config
+    from localm.discover import resolve_gpu_split, resolve_main_gpu_index
+    cfg = config if config is not None else load_config()
+
+    pairs = resolve_gpu_split(cfg.get("gpu_split_indices"), cfg.get("gpu_split_ratios"))
+    if len(pairs) >= 2:
+        headroom = int(0.5e9)   # leave a little free per device, like the GGUF backend
+        max_memory: dict = {}
+        for idx, _ratio in pairs:
+            try:
+                free, _total = torch.cuda.mem_get_info(idx)
+            except Exception:
+                continue   # one device failing to report never blocks the rest
+            max_memory[idx] = max(0, int(free) - headroom)
+        if len(max_memory) >= 2:
+            return {"device_map": "auto", "max_memory": max_memory}
+        logger.warning(
+            "gpu_split_indices is configured but free VRAM could not be read "
+            "for enough devices (only %s usable); falling back to the "
+            "default device_map", sorted(max_memory))
+
+    if cfg.get("main_gpu_index") is not None:
+        idx = resolve_main_gpu_index(cfg.get("main_gpu_index"))
+        return {"device_map": {"": idx}}
+
+    return {"device_map": "auto"}
+
+
 def _auto_device(torch, override: Optional[str] = None) -> str:
     """Pick the HF inference device: an explicit *override*, else the best available
     GPU, else CPU. CUDA (which also covers AMD ROCm via PyTorch) is preferred, then
@@ -171,10 +218,24 @@ class HFBackend(BaseBackend):
 
         device = _auto_device(torch, self._device)
         dtype = torch.bfloat16 if device in ("cuda", "xpu") else torch.float32
+        device_map_kwargs = (_cuda_device_map(torch) if device == "cuda"
+                              else {"device_map": "cpu"})
 
         console.print(f"[dim]  device   : {device}[/dim]")
         if device == "cuda":
-            console.print(f"[dim]  gpu      : {torch.cuda.get_device_name(0)}[/dim]")
+            dm = device_map_kwargs["device_map"]
+            if isinstance(dm, dict):   # pinned to one explicit device: {"": idx}
+                idx = dm[""]
+                console.print(
+                    f"[dim]  gpu      : {torch.cuda.get_device_name(idx)} "
+                    f"(pinned, device {idx})[/dim]")
+            elif "max_memory" in device_map_kwargs:   # split across a device subset
+                names = ", ".join(
+                    f"{i}:{torch.cuda.get_device_name(i)}"
+                    for i in sorted(device_map_kwargs["max_memory"]))
+                console.print(f"[dim]  gpu      : split across {names}[/dim]")
+            else:
+                console.print(f"[dim]  gpu      : {torch.cuda.get_device_name(0)}[/dim]")
         elif device == "xpu":
             try:
                 console.print(f"[dim]  gpu      : {torch.xpu.get_device_name(0)}[/dim]")
@@ -212,7 +273,7 @@ class HFBackend(BaseBackend):
         # --- Model ---
         console.print("[dim]  loading weights…[/dim]")
         load_kwargs = {
-            "device_map": "auto" if device == "cuda" else "cpu",
+            **device_map_kwargs,
             "torch_dtype": dtype,
             "trust_remote_code": True,
         }

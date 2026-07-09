@@ -118,6 +118,17 @@ DEFAULT_CONFIG: dict = {
     # a logged warning, not a wrong/out-of-range GPU (see
     # discover.resolve_main_gpu_index).
     "main_gpu_index": None,
+    # Split a model too big for one card across 2+ GPUs (GGUF: llama.cpp
+    # layer-split; HF: accelerate device_map restricted to these devices).
+    # None/empty/1 entry = off (today's single-GPU behavior via
+    # main_gpu_index, unchanged). A device no longer detected at load time is
+    # dropped with a logged warning, not trusted blindly (see
+    # discover.resolve_gpu_split).
+    "gpu_split_indices": None,
+    # Optional relative weight per entry in gpu_split_indices (same length,
+    # any positive numbers - llama.cpp treats them as proportions, not values
+    # that must sum to 1). None, or a length mismatch, means an equal split.
+    "gpu_split_ratios": None,
     # Default system prompt for chat. The GUI's per-chat System prompt field
     # OVERRIDES this when set; a blank field inherits this. Empty by default.
     "chat_system_prompt": "",
