@@ -20,7 +20,7 @@ import tempfile
 import threading
 import time
 import uuid
-from typing import Dict, Generator, Iterable, Iterator, List, Optional
+from typing import Callable, Dict, Generator, Iterable, Iterator, List, Optional
 
 from . import _api as api
 from ._structs import llama_token, LlamaChatMessage, LlamaBatch
@@ -454,9 +454,16 @@ class LlamaCpp:
         n_ctx_grow: int = 4096,
         mmproj_path: Optional[str] = None,
         cancel_event: Optional["threading.Event"] = None,
+        vram_check: Optional[Callable[[int], None]] = None,
         **_ignored,
     ) -> None:
         self._n_ctx       = n_ctx
+        # Optional preflight consulted by _prefill_fresh_context() before
+        # (re)creating a BIGGER context (conversation growth, not just the
+        # initial load already guarded by the caller's own preflight): takes
+        # the target n_ctx and raises if it cannot fit. None = no check (the
+        # pre-existing behaviour - only a NULL-pointer check after the fact).
+        self._vram_check  = vram_check
         # Dynamic context window: starts at n_ctx, grows in n_ctx_grow steps
         # up to n_ctx_max when a conversation outgrows it. None/0 = unlimited
         # (the pre-dynamic behaviour: grow exactly as far as needed).
@@ -1063,14 +1070,30 @@ class LlamaCpp:
         self._cached_tokens = list(prompt_tokens)
 
     def _prefill_fresh_context(self, prompt_tokens: List[int], needed: int) -> None:
-        """Recreate the context (empty KV cache) and prefill the full prompt."""
+        """Recreate the context (empty KV cache) and prefill the full prompt.
+
+        Consults ``self._vram_check`` (when set) with the target n_ctx BEFORE
+        freeing the live context, so a refusal leaves the old, still-working
+        context and its cache intact instead of destroying it first and only
+        then discovering the bigger replacement cannot fit. This is the same
+        "will it fit" question the caller's own preflight already answered for
+        the INITIAL load; growth (e.g. the very first prompt, since a request
+        needing more than the base n_ctx forces a grow here) got no such check
+        until this hook - only a NULL-pointer check on the result, after the
+        native call already ran.
+        """
+        target = self._target_ctx(needed)
+        vram_check = getattr(self, "_vram_check", None)
+        if vram_check is not None:
+            vram_check(target)
+
         if self._ctx_ptr:
             api.llama_free(self._ctx_ptr)
             self._ctx_ptr = None
         self._cached_tokens = []
 
         cp = api.llama_context_default_params()
-        cp.n_ctx       = self._target_ctx(needed)
+        cp.n_ctx       = target
         cp.n_batch     = min(cp.n_ctx, 2048)
         cp.n_ubatch    = cp.n_batch   # micro-batch must match so prefill fits in one call
         cp.offload_kqv = True
