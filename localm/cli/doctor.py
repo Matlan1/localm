@@ -236,14 +236,19 @@ def _check_managed_comfy() -> None:
     except Exception as e:  # noqa: BLE001 - a hint must not fail doctor; surface why.
         console.print(f"  {_WARN_SYM}  managed-ComfyUI hint skipped [dim]({e})[/dim]")
         return
+    # soft_wrap: this line names a literal path/command a user may copy-paste; a
+    # narrow terminal must never break it mid-token (only affects THIS line, not
+    # the rest of doctor's output, which still wraps normally).
     if installed:
         console.print(
-            f"  {_OK_SYM}  managed ComfyUI: installed at {managed_comfy_paths().root}"
+            f"  {_OK_SYM}  managed ComfyUI: installed at {managed_comfy_paths().root}",
+            soft_wrap=True,
         )
     else:
         console.print(
             f"  {_HINT_SYM}  localm can manage its own ComfyUI "
-            "(isolated, patched, pinned): run 'localm comfy setup'"
+            "(isolated, patched, pinned): run 'localm comfy setup'",
+            soft_wrap=True,
         )
 
 
