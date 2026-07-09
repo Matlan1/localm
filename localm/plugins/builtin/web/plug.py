@@ -23,6 +23,8 @@ import asyncio
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from localm.plugins.executor import get_plugin_executor
+
 _router = APIRouter()
 
 
@@ -44,7 +46,8 @@ async def web_search_endpoint(req: WebSearchRequest):
     loop = asyncio.get_running_loop()
     try:
         results = await loop.run_in_executor(
-            None, lambda: web_search(req.query, max_results=req.max_results))
+            get_plugin_executor(),
+            lambda: web_search(req.query, max_results=req.max_results))
     except NetworkPolicyError as e:
         raise HTTPException(403, str(e))
     except Exception as e:
@@ -58,7 +61,7 @@ async def web_fetch_endpoint(req: WebFetchRequest):
     loop = asyncio.get_running_loop()
     try:
         final_url, text = await loop.run_in_executor(
-            None, lambda: fetch_text(req.url))
+            get_plugin_executor(), lambda: fetch_text(req.url))
     except NetworkPolicyError as e:
         raise HTTPException(403, str(e))
     except Exception as e:
