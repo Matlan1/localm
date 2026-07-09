@@ -101,6 +101,13 @@ Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on
   skipped the bind-security gates; an `UnboundLocalError` in the chat runner; and
   `coder_confirm_timeout=0` now means wait forever.
 - **Chat:** trimmed the injected web-access prompts so weak models stop fixating on them.
+- **Updater:** the "runtime" update class's post-swap command used a bare `localm`
+  argv that resolved back to the native launcher exe itself on the default install
+  and rolled back the whole update; it now re-invokes through the current
+  interpreter, like every other self-invocation site.
+- **Coder episodic memory:** a concurrent read racing the atomic write (a GUI poll
+  landing mid session-close reflection) could hit a transient Windows
+  `PermissionError`; both sides now retry briefly instead of raising.
 
 ### Security
 - **Authenticated self-update.** Each release build is signed with an offline
