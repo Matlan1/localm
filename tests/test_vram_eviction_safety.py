@@ -20,6 +20,9 @@ These exercise the multi-model switch/eviction path in http_server.switch_engine
           before re-checking, so it does not over-evict on a stale-low reading.
 """
 
+import os
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 from localm.inference import http_server as hs
@@ -152,6 +155,147 @@ def test_measurable_vram_allows_coexistence(monkeypatch):
     loaded = sorted(n for n, e in hs._engines.items() if e.loaded)
     assert loaded == ["model-a", "model-b", "model-c"], (
         f"ample VRAM must keep multi-model coexistence; loaded={loaded}")
+
+
+def _fake_stat_size(monkeypatch, path: Path, size_bytes: int):
+    """Make ``path.stat().st_size`` report *size_bytes* without writing that
+    many real bytes to disk. *path* must already exist (a real, tiny
+    placeholder file) so ``Path.is_file()`` - which itself calls ``.stat()``
+    and checks ``S_ISREG(st_mode)`` - keeps working: only ``st_size`` is
+    swapped out; every other field (including ``st_mode``) comes from the
+    real underlying stat of the real tiny file.
+
+    A prior version of this test truncated a real file to the full target
+    size (15-40 GB) to drive switch_engine's real ``p.stat().st_size`` code
+    path. A code review caught that ``truncate()`` is NOT sparse on this
+    platform (verified directly: allocated blocks matched the apparent size
+    exactly) - each run wrote tens of GB for real, took minutes, and an
+    interrupted run (Ctrl-C, a CI timeout, an OOM-kill) orphaned multi-GB
+    files permanently since the cleanup ``finally`` block never got to run.
+    Faking just the stat result proves the exact same code path
+    (``p.is_file()`` True, ``file_size = p.stat().st_size``) with zero real
+    disk cost and nothing to orphan."""
+    path.touch()
+    real_stat = Path.stat
+
+    def fake_stat(self, *, follow_symlinks=True):
+        result = real_stat(self, follow_symlinks=follow_symlinks)
+        if self == path:
+            seq = (result.st_mode, result.st_ino, result.st_dev, result.st_nlink,
+                   result.st_uid, result.st_gid, size_bytes,
+                   result.st_atime, result.st_mtime, result.st_ctime)
+            return os.stat_result(seq)
+        return result
+
+    monkeypatch.setattr(Path, "stat", fake_stat)
+
+
+class TestSplitAwareCapacityGate:
+    """AUDIT-GPU-SPLIT-1: vram_info() alone is single-GPU (see discover.py), so
+    the pre-load refusal gate (switch_engine) must weigh a load against
+    discover.vram_capacity() - the COMBINED total/free across a configured
+    multi-GPU split - not just the single main GPU. A model too big for one
+    GPU alone but that fits split across 2+ configured devices must load, not
+    503; a model that still does not fit even combined must still be refused
+    (no over-correction to "always assume it fits").
+
+    Uses a real (but tiny) model file with a FAKED stat().st_size (see
+    _fake_stat_size) to actually drive file_size = p.stat().st_size through
+    switch_engine's real code path, rather than the "unregistered path ->
+    fixed 4 GB" fallback other tests in this file rely on - this proves the
+    fix against the same real, size-derived vram_required arithmetic the
+    maintainer's original bug report hit, not just a hardcoded default."""
+
+    _SPLIT_GPUS = [
+        {"index": 0, "name": "A", "total": 16 * 1024 ** 3, "free": 14 * 1024 ** 3},
+        {"index": 1, "name": "B", "total": 16 * 1024 ** 3, "free": 14 * 1024 ** 3},
+    ]
+
+    def _install(self, monkeypatch, tmp_path, *, size_bytes, gpus, gpu_split_indices):
+        model_file = tmp_path / "model-a.gguf"
+        _fake_stat_size(monkeypatch, model_file, size_bytes)
+        fake_registry = {"model-a": {"path": str(model_file), "source": "local"}}
+        monkeypatch.setattr("localm.config.load_registry", lambda: fake_registry)
+        monkeypatch.setattr("localm.model_manager.get_model_info",
+                            lambda name: (str(model_file), "hint"))
+        monkeypatch.setattr("localm.model_manager.get_model_mmproj", lambda name: None)
+        # Overlay just gpu_split_indices onto the REAL (test-isolated) config
+        # rather than replacing load_config() outright - create_app()/switch_engine
+        # read other config keys too, and a stripped-down fake dict would break
+        # those unrelated paths.
+        from localm.config import load_config as real_load_config
+        base_cfg = real_load_config()
+
+        def _cfg():
+            return {**base_cfg, "gpu_split_indices": gpu_split_indices}
+
+        monkeypatch.setattr("localm.config.load_config", _cfg)
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: gpus)
+        monkeypatch.setattr(hs, "_engine_factory", lambda name: FakeEngine(name))
+        hs._engines.clear()
+        hs._engines_lru.clear()
+        hs._inference_sems.clear()
+        hs._last_activity_per_model.clear()
+        hs._active_model_name = None
+        hs._default_model_name = None
+        hs._engine = None
+        hs._inference_sem = None
+
+    def test_fits_combined_split_but_not_single_main_gpu_loads(
+            self, monkeypatch, tmp_path):
+        # 15 GB file -> vram_required ~= 18 GB (*1.2) + 1 GB headroom = 19 GB.
+        # Exceeds either GPU's 14 GB free alone, but fits the 28 GB combined free.
+        self._install(monkeypatch, tmp_path, size_bytes=15 * 1024 ** 3,
+                      gpus=self._SPLIT_GPUS, gpu_split_indices=[0, 1])
+        app = hs.create_app(None)
+        client = TestClient(app)
+        r = _chat(client, "model-a")
+        assert r.status_code == 200, (
+            f"a model needing ~19GB should load via the 28GB COMBINED split "
+            f"free, not be refused against one 14GB GPU alone: {r.text}")
+        assert hs._engines["model-a"].loaded
+
+    def test_same_model_refused_without_a_configured_split(
+            self, monkeypatch, tmp_path):
+        """Guard: the fix must not regress to 'always assume combined capacity' -
+        with NO split configured (single GPU only), the same oversized model is
+        still correctly refused against that one GPU's real free VRAM."""
+        self._install(monkeypatch, tmp_path, size_bytes=15 * 1024 ** 3,
+                      gpus=self._SPLIT_GPUS[:1], gpu_split_indices=None)
+        app = hs.create_app(None)
+        client = TestClient(app)
+        r = _chat(client, "model-a")
+        assert r.status_code == 503
+        assert "Not enough VRAM" in r.text
+
+    def test_exceeds_even_the_combined_split_still_refused(
+            self, monkeypatch, tmp_path):
+        """Guard: combined capacity is a bigger ceiling, not an unlimited one -
+        a model too big even for both configured GPUs together is still 503'd."""
+        # 40 GB file -> needs ~49 GB, exceeds the 28 GB combined free.
+        self._install(monkeypatch, tmp_path, size_bytes=40 * 1024 ** 3,
+                      gpus=self._SPLIT_GPUS, gpu_split_indices=[0, 1])
+        app = hs.create_app(None)
+        client = TestClient(app)
+        r = _chat(client, "model-a")
+        assert r.status_code == 503
+        assert "Not enough VRAM" in r.text
+
+    def test_stale_split_index_not_currently_detected_falls_back_to_single_gpu(
+            self, monkeypatch, tmp_path):
+        """A gpu_split_indices referencing a device that vanished (e.g. it was
+        unplugged) must degrade to single-GPU capacity (resolve_gpu_split's own
+        contract - rule 5, do-not-hide-problems), not silently keep using a
+        combined number for hardware that is no longer there."""
+        self._install(monkeypatch, tmp_path, size_bytes=15 * 1024 ** 3,
+                      gpus=self._SPLIT_GPUS[:1],   # device 1 no longer detected
+                      gpu_split_indices=[0, 1])
+        app = hs.create_app(None)
+        client = TestClient(app)
+        r = _chat(client, "model-a")
+        assert r.status_code == 503, (
+            "a split referencing a since-removed GPU must fall back to "
+            "single-GPU capacity, not keep refusing/granting off a stale combined number")
 
 
 def test_eviction_waits_for_vram_release(monkeypatch):

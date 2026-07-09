@@ -174,7 +174,7 @@ def search_cmd(query, limit, list_files):
     """
     from rich.console import Console
     from ..discover import (DiscoverError, fit_label, hf_gguf_files,
-                           hf_search, vram_info)
+                           hf_search, vram_capacity)
     console = Console()
     text = " ".join(query).strip()
     try:
@@ -183,7 +183,7 @@ def search_cmd(query, limit, list_files):
                 console.print("[red]--files needs a repo id, e.g. "
                               "owner/repo[/red]")
                 sys.exit(1)
-            total = vram_info().get("total")
+            total = vram_capacity().get("total")
             if total:
                 console.print(f"[dim]fit vs {total / 1024**3:.0f} GB total VRAM "
                               "(weights + ~1.5 GB overhead)[/dim]")

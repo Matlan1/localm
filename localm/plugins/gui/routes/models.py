@@ -133,7 +133,7 @@ def register(app: FastAPI, ctx) -> None:
         at the given context + GPU-offload, vs free/total VRAM. Powers the live
         readout under the Settings performance sliders. Always 'approximate'."""
         from localm.config import load_registry
-        from localm.discover import vram_info
+        from localm.discover import vram_capacity
         from localm.sysstats import estimate_vram
         name = model or active_model()
         model_bytes = 0
@@ -146,7 +146,7 @@ def register(app: FastAPI, ctx) -> None:
             except OSError:
                 pass
         est = estimate_vram(model_bytes, n_ctx, n_gpu_layers)
-        info = vram_info()
+        info = vram_capacity()
         free, total = info.get("free"), info.get("total")
         fits = (est["needed"] <= free) if isinstance(free, int) else None
         return {"model": name, "model_bytes": model_bytes, **est,
@@ -276,7 +276,7 @@ def register(app: FastAPI, ctx) -> None:
         # hf_backend_available lets the GUI warn (not block) that a transformers
         # model needs the .[gpu] extra to RUN, though it can still be downloaded.
         from localm.discover import (DiscoverError, fit_label,
-                                     hf_backend_available, hf_search, vram_info)
+                                     hf_backend_available, hf_search, vram_capacity)
         wanted = [f.strip() for f in formats.split(",") if f.strip()]
         loop = asyncio.get_running_loop()
         try:
@@ -285,7 +285,7 @@ def register(app: FastAPI, ctx) -> None:
                 lambda: hf_search(q, limit=limit, formats=wanted))
         except DiscoverError as e:
             raise HTTPException(_discover_status(e), str(e))
-        vram = vram_info()
+        vram = vram_capacity()
         # Attach a VRAM fit badge to results that carry a size estimate (HF results
         # with safetensors param metadata). GGUF results are sized per-file in the
         # /discover/files expander instead. fit_label yields "" when VRAM is unknown;
@@ -300,14 +300,14 @@ def register(app: FastAPI, ctx) -> None:
     @app.get("/api/discover/files", dependencies=[Depends(require_scope(scopes.MODELS_READ))])
     async def discover_files(repo: str):
         from localm.discover import (DiscoverError, fit_label, hf_gguf_files,
-                                     vram_info)
+                                     vram_capacity)
         loop = asyncio.get_running_loop()
         try:
             files = await loop.run_in_executor(
                 get_plugin_executor(), lambda: hf_gguf_files(repo))
         except DiscoverError as e:
             raise HTTPException(_discover_status(e), str(e))
-        vram = vram_info()
+        vram = vram_capacity()
         total = vram.get("total")
         models = []
         mmprojs = []
