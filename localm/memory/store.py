@@ -99,9 +99,42 @@ def namespace_file(principal: str, agent: str, scope_key: str,
     # Path-safety: the resolved file must stay under <home>/memory. agent is
     # allow-listed and the ns is a hex hash, so this is belt-and-suspenders
     # against any future caller that lets a component flow in unchecked.
-    rp = path.resolve()
+    #
+    # CHK-MEM-WINRESOLVE: two DIFFERENT namespaces of the same agent (distinct
+    # scope_key -> distinct ns_hash -> distinct per-namespace lock, so they do
+    # NOT serialise against each other) can race to be the first-ever write
+    # under a shared agent directory (e.g. <home>/memory/chat/) that does not
+    # exist yet: one thread's _save() may create that directory mid-flight
+    # while another thread is inside path.resolve() for a sibling file under
+    # it. On Windows this can make path.resolve() return a \\?\-prefixed
+    # extended-length form (ntpath.realpath's prefix-stripping re-validation,
+    # done via a second internal resolve, can itself be caught by the same
+    # race and leave the prefix in place) while base.resolve() - resolved
+    # moments earlier against a stable, already-existing directory - has no
+    # prefix. Both denote the identical location, so compare prefix-stripped
+    # forms; a real escape attempt is unaffected since the prefix carries no
+    # path-safety information (it only marks how the OS chose to resolve).
+    rp = _strip_extended_prefix(path.resolve())
+    base = _strip_extended_prefix(base)
     if not (rp == base or _within(rp, base)):
         raise ValueError("refusing a memory path outside the memory directory")
+    return path
+
+
+_EXTENDED_PREFIX = "\\\\?\\"
+_EXTENDED_UNC_PREFIX = "\\\\?\\UNC\\"
+
+
+def _strip_extended_prefix(path: Path) -> Path:
+    """Strip Windows' \\?\\ (or \\?\\UNC\\) extended-length-path prefix, if
+    present, so two resolutions of the identical location compare equal
+    regardless of which one the OS chose. See CHK-MEM-WINRESOLVE above; a
+    no-op on POSIX and on any path that never had the prefix."""
+    s = str(path)
+    if s.startswith(_EXTENDED_UNC_PREFIX):
+        return Path("\\\\" + s[len(_EXTENDED_UNC_PREFIX):])
+    if s.startswith(_EXTENDED_PREFIX):
+        return Path(s[len(_EXTENDED_PREFIX):])
     return path
 
 
