@@ -362,3 +362,130 @@ def test_real_changelog_is_append_only_against_head():
     header note on top, removing nothing)."""
     ch = _load_check_hygiene()
     assert ch._changelog_append_only() == []
+
+
+# ---- check 5: raw single-resource accessor guard ----------------------------
+# _raw_accessor_violations enforces that a "single -> combined N resources"
+# capability (vram_info() -> vram_capacity() is the first case) cannot be
+# silently bypassed by a future call site re-adopting the raw single-resource
+# accessor. Written after a fresh-context review of the fix demonstrated that
+# the FIRST version of this check had a real, working bypass (an import
+# alias) - these tests pin both the direct-call and alias-call detection so a
+# future edit that silently weakens the check (e.g. dropping the
+# ast.ImportFrom alias-tracking) fails a test, not just "gets noticed later".
+
+_GUARD_NAME = "vram_info"
+_GUARD_SPEC_KEY = "wrapper"
+
+
+def _guarded_wrapper_text(ch):
+    return ch._RAW_ACCESSOR_GUARDS[_GUARD_NAME][_GUARD_SPEC_KEY]
+
+
+def test_direct_call_outside_allowlist_is_flagged(tmp_path, monkeypatch):
+    """NEGATIVE: a plain `from localm.discover import vram_info` + a direct
+    call, in a file NOT in the guard's allowed set, must be flagged."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    p = tmp_path / "some_module.py"
+    p.write_text(
+        "from localm.discover import vram_info\n"
+        "def f():\n"
+        "    return vram_info().get('total')\n",
+        encoding="utf-8")
+    problems = ch._raw_accessor_violations([p])
+    assert len(problems) == 1
+    assert "some_module.py:3" in problems[0]
+    assert _guarded_wrapper_text(ch) in problems[0]
+
+
+def test_import_alias_bypass_is_flagged(tmp_path, monkeypatch):
+    """NEGATIVE (the confirmed gap): `from localm.discover import vram_info as
+    vi` followed by `vi()` must ALSO be flagged - a fresh-context review
+    demonstrated this alias genuinely evaded the first version of this check
+    (which matched only the literal name `vram_info`, missing that an
+    ast.ImportFrom alias rebinds it locally)."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    p = tmp_path / "some_module.py"
+    p.write_text(
+        "from localm.discover import vram_info as _vi\n"
+        "def f():\n"
+        "    return _vi().get('total')\n",
+        encoding="utf-8")
+    problems = ch._raw_accessor_violations([p])
+    assert len(problems) == 1
+    assert "some_module.py:3" in problems[0]
+    assert "'_vi'" in problems[0]
+
+
+def test_module_attribute_call_is_flagged_regardless_of_module_alias(tmp_path, monkeypatch):
+    """`import localm.discover as disc; disc.vram_info()` must be flagged too -
+    ast.Attribute.attr is still the literal accessor name no matter what the
+    MODULE is aliased to, so this path never needed the alias-tracking fix."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    p = tmp_path / "some_module.py"
+    p.write_text(
+        "import localm.discover as disc\n"
+        "def f():\n"
+        "    return disc.vram_info().get('total')\n",
+        encoding="utf-8")
+    problems = ch._raw_accessor_violations([p])
+    assert len(problems) == 1
+    assert "some_module.py:3" in problems[0]
+
+
+def test_call_inside_an_allowed_file_is_not_flagged(tmp_path, monkeypatch):
+    """A file listed in the guard's allowed set (a documented single-resource
+    exception) must NOT be flagged, direct call or alias alike."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    allowed_rel = next(iter(ch._RAW_ACCESSOR_GUARDS[_GUARD_NAME]["allowed"]))
+    p = tmp_path / allowed_rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(
+        "from localm.discover import vram_info\n"
+        "def f():\n"
+        "    return vram_info().get('free')\n",
+        encoding="utf-8")
+    assert ch._raw_accessor_violations([p]) == []
+
+
+def test_call_inside_tests_directory_is_not_flagged(tmp_path, monkeypatch):
+    """tests/ is exempt everywhere: a test legitimately calls/mocks the raw
+    accessor directly to test IT, not just its consumers."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    p = tmp_path / "tests" / "test_something.py"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(
+        "from localm.discover import vram_info\n"
+        "def test_x():\n"
+        "    assert vram_info() is not None\n",
+        encoding="utf-8")
+    assert ch._raw_accessor_violations([p]) == []
+
+
+def test_docstring_or_comment_mention_is_not_flagged(tmp_path, monkeypatch):
+    """A prose mention of 'vram_info()' in a docstring/comment (not an actual
+    call) must NOT be flagged - this is an AST-based check, not text matching,
+    specifically so it never false-positives on documentation."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    p = tmp_path / "some_module.py"
+    p.write_text(
+        '"""See vram_info() for the single-GPU number this wraps."""\n'
+        "# vram_info() is single-GPU only, per its own docstring.\n"
+        "def f():\n"
+        "    return 1\n",
+        encoding="utf-8")
+    assert ch._raw_accessor_violations([p]) == []
+
+
+def test_real_tree_has_no_raw_accessor_violations():
+    """Regression guard: the real, shipped tree must itself satisfy this check
+    (every consumer either uses vram_capacity() or is in the allowed set)."""
+    ch = _load_check_hygiene()
+    tracked = ch._tracked_files()
+    assert ch._raw_accessor_violations(tracked) == []
