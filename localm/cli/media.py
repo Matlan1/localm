@@ -179,18 +179,21 @@ def image_cmd(prompt, negative, guidance, cfg, seed, input_image, denoise,
         kwargs["input_image"] = Path(input_image)
 
     console.print("[dim]Generating image via ComfyUI (this can take a minute)...[/dim]")
-    _write_sidecar = effective_mode("server") != SessionMode.PRIVACY
+    _is_privacy = effective_mode("server") == SessionMode.PRIVACY
+    _write_sidecar = not _is_privacy
     ok, message = generate_image(
         prompt, out_path,
         api_url=api_url,
         write_sidecar=_write_sidecar,
+        delete_outputs=_is_privacy,
         **kwargs,
     )
     if not ok:
         ok, message = _maybe_apply_func_shim_and_retry(
             message, api_url,
             lambda: generate_image(prompt, out_path, api_url=api_url,
-                                   write_sidecar=_write_sidecar, **kwargs))
+                                   write_sidecar=_write_sidecar,
+                                   delete_outputs=_is_privacy, **kwargs))
     console.print(f"[{'green' if ok else 'red'}]{message}[/{'green' if ok else 'red'}]")
     if not ok:
         sys.exit(1)
@@ -240,7 +243,8 @@ def music_cmd(tags, lyrics, duration, out, seed, steps, cfg):
     lyr = Path(lyrics).read_text(encoding="utf-8") if lyrics else None
     kwargs = {k: v for k, v in
               (("seed", seed), ("steps", steps), ("cfg", cfg)) if v is not None}
-    _write_sidecar = effective_mode("server") != SessionMode.PRIVACY
+    _is_privacy = effective_mode("server") == SessionMode.PRIVACY
+    _write_sidecar = not _is_privacy
 
     def _gen_music():
         return generate_music(
@@ -250,6 +254,7 @@ def music_cmd(tags, lyrics, duration, out, seed, steps, cfg):
             api_url=api_url,
             on_progress=lambda t: console.print(f"  [dim]{t}[/dim]"),
             write_sidecar=_write_sidecar,
+            delete_outputs=_is_privacy,
             **kwargs,
         )
 
@@ -317,7 +322,8 @@ def video_cmd(prompt, negative, duration, fps, width, height, input_image,
               (("negative_prompt", negative), ("width", width),
                ("height", height), ("seed", seed), ("steps", steps),
                ("cfg", cfg)) if v is not None}
-    _write_sidecar = effective_mode("server") != SessionMode.PRIVACY
+    _is_privacy = effective_mode("server") == SessionMode.PRIVACY
+    _write_sidecar = not _is_privacy
 
     def _gen_video():
         return generate_video(
@@ -328,6 +334,7 @@ def video_cmd(prompt, negative, duration, fps, width, height, input_image,
             input_image=Path(input_image) if input_image else None,
             on_progress=lambda t: console.print(f"  [dim]{t}[/dim]"),
             write_sidecar=_write_sidecar,
+            delete_outputs=_is_privacy,
             **kwargs,
         )
 

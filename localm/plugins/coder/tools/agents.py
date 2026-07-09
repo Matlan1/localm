@@ -80,7 +80,19 @@ def tool_spawn_agent(
         name=name,
         max_turns=max_turns,
         verbose=False,
-        auto_approve=True,
+        # A child must be no LESS confirmed than its parent: inherit the parent's
+        # confirmation posture instead of hardcoding auto_approve=True, or a
+        # parent that requires confirmation (auto_approve=False), is running
+        # --dry-run, or has a GUI confirm_handler wired up would still spawn a
+        # child that freely executes write_file/run_shell/git_push/etc. with zero
+        # confirmation. confirm_handler is a synchronous callback, so passing it
+        # through works even though the child runs non-interactively (run_task ->
+        # _loop(interactive=False)): the child calls it in the same call stack the
+        # parent's spawn_agent tool call is already on.
+        auto_approve=getattr(_parent_agent, "auto_approve", True),
+        dry_run=getattr(_parent_agent, "dry_run", False),
+        always_confirm=getattr(_parent_agent, "always_confirm", None),
+        confirm_handler=getattr(_parent_agent, "confirm_handler", None),
         parent=_parent_agent,
         mode=inherited_mode,
         # A child must be no MORE capable than its parent: inherit the restriction
