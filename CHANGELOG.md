@@ -86,13 +86,23 @@ Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on
 - **Models and API:** a local model file registers fully offline with no
   HuggingFace path leak; `/api/models` no longer 500s on a forward reference; a
   hidden native-load failure cause is surfaced.
+- **HF snapshot pulls:** a full-repo HuggingFace pull now preflight-checks free
+  disk space (like the GGUF/URL pull paths already did) instead of running
+  until the OS hits ENOSPC mid-transfer; and "already downloaded" now compares
+  every file the repo lists against what's actually on disk, not just
+  `config.json`'s presence, so a disk-full mid-download no longer gets
+  silently registered as a complete, ready model on retry.
 - **Do not hide problems:** removed production code paths that detected
   pytest/mocks and fabricated behavior; a swallowed VRAM-gate failure is now logged.
 - **Bug reporter:** removed the only path that could ask for a GitHub login; the
   non-interactive path now names the account-less send channel.
 - **Memory:** the owner's chat memory stays in the shared `owner` namespace.
 - **GUI:** an empty ComfyUI scan shows the reason instead of a bare "Added 0"; the
-  GUI no longer sends a chat request when no model is loaded.
+  GUI no longer sends a chat request when no model is loaded; a background job's
+  progress stream (model pull, ComfyUI setup, image/music/video generation) now
+  fans out to every viewer independently, so reloading the page or opening the
+  same job in two tabs no longer splits its events between them (one tab could
+  end up hanging forever with no completion event).
 - **Setup:** warn when a llama.cpp download has no checksum to verify (and verify
   against a published checksum by default); discard stray keyboard input before the
   CUDA prompt; skip console-window hiding in debug mode; skip draft releases with
@@ -101,6 +111,13 @@ Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on
   skipped the bind-security gates; an `UnboundLocalError` in the chat runner; and
   `coder_confirm_timeout=0` now means wait forever.
 - **Chat:** trimmed the injected web-access prompts so weak models stop fixating on them.
+- **Updater:** the "runtime" update class's post-swap command used a bare `localm`
+  argv that resolved back to the native launcher exe itself on the default install
+  and rolled back the whole update; it now re-invokes through the current
+  interpreter, like every other self-invocation site.
+- **Coder episodic memory:** a concurrent read racing the atomic write (a GUI poll
+  landing mid session-close reflection) could hit a transient Windows
+  `PermissionError`; both sides now retry briefly instead of raising.
 - **Coder confirmations:** a coder session tracked only one pending confirmation
   at a time, so two tool calls needing approval in the same turn (e.g. two
   `fetch_url`/`web_search` calls under `net_mode=ask`, which the agent runs
@@ -121,6 +138,13 @@ Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on
   left ComfyUI's own copy (and any img2img source image) on disk indefinitely.
   All six call sites now fold privacy mode into `delete_outputs`, matching the
   GUI/API behaviour.
+- **`?pull=` deep link no longer downloads a model with zero confirmation.**
+  `localm gui --pull SPEC` opens the browser at `?pull=SPEC`, but any page (or a
+  hidden iframe on any site, while localm runs locally) could forge the same
+  link and silently start a real download. The CLI now mints a single-use,
+  spec-bound token passed alongside the link, so ITS OWN deep link still
+  auto-starts with zero clicks; a link without a valid token falls back to an
+  explicit confirmation dialog instead of firing automatically.
 - **Authenticated self-update.** Each release build is signed with an offline
   Ed25519 key and verified against a pinned public key before it is extracted or
   executed, so a compromised release channel cannot push a forged build.
@@ -130,9 +154,20 @@ Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on
 - **Job API privilege escalation fixed:** correct principal-ID hashing for
   admin/owner keys, so owner-created jobs are no longer reachable by
   loopback-anonymous roles.
+- **Media gallery and share-inbox ownership fixed:** the image/music/video
+  generated-media routes (serve/delete/move/rename/history) and the PWA
+  share-inbox routes had no per-key ownership check, so any key holding the
+  plugin's own (non-privileged) scope could enumerate, read, delete, move, or
+  rename another principal's generated media or shared files. Both now stamp
+  and check ownership the same way the jobs API already did.
 - **ComfyUI launch** no longer has a shell-injection vector on Windows.
 - **RAG folder index** skips model weights and secrets rather than indexing them.
 - **MCP** destructive tools are annotated so clients can confirm them.
+- **A scheduled coder job's shell access no longer outlives its creating key.**
+  The autonomous job scheduler now re-validates the owning key is still live
+  (not revoked, not expired) before running an `allow_shell` job, instead of
+  trusting the stored opt-in forever; a dead key downgrades the run to the
+  safe restricted coder rather than keeping shell access.
 - **Coder `spawn_agent` no longer bypasses confirmation.** A child agent spawned
   via `spawn_agent` now inherits the parent session's `auto_approve`, `dry_run`,
   `always_confirm`, and `confirm_handler` instead of always auto-approving, so a
@@ -155,6 +190,10 @@ Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on
   entry is deleted or rewritten. The `[Unreleased]` draft stays freely editable.
 - Contributor-guide and test-cadence clarifications, test isolation via a temp
   `LOCALM_HOME` in `conftest.py`, and a documentation pass across the user manual.
+- **De-duplicated the image/music/video plugins:** the VRAM chat-model handoff
+  and the ComfyUI backend-dispatch facade, each copy-pasted three times near
+  verbatim, are now shared helpers (`localm.vram`, `localm.plugins.media_config`)
+  - no behavior change, structure only.
 
 ## [0.1.0] - 2026-07-04
 

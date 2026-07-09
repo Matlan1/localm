@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for the GUI plugin: coder sessions, agent event hooks, web endpoints."""
 
+import asyncio
 import json
 import queue
 import threading
@@ -760,6 +761,57 @@ class TestModelEndpoints:
         assert r.status_code == 400
 
 
+class TestPullTokenRedeemEndpoint:
+    """SEC-PULL-CONFIRM: `POST /api/models/pull-token/redeem` is the HTTP surface
+    init.js calls before auto-starting a `?pull=` deep link with zero clicks. Only
+    a genuine mint_pull_grant token, bound to the exact spec, unused and
+    unexpired, may succeed - see TestPullGrant in test_gui_key_bootstrap.py for
+    the grant primitive itself (single-use, spec-bound, expiring)."""
+
+    def test_valid_token_redeems(self, gui_app):
+        from localm.plugins.gui.web import mint_pull_grant
+        app, _ = gui_app
+        token = mint_pull_grant(app, "owner/repo:m.gguf")
+        with TestClient(app) as client:
+            r = client.post("/api/models/pull-token/redeem",
+                            json={"spec": "owner/repo:m.gguf", "token": token})
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+
+    def test_token_is_single_use_over_http(self, gui_app):
+        from localm.plugins.gui.web import mint_pull_grant
+        app, _ = gui_app
+        token = mint_pull_grant(app, "owner/repo:m.gguf")
+        with TestClient(app) as client:
+            first = client.post("/api/models/pull-token/redeem",
+                                json={"spec": "owner/repo:m.gguf", "token": token})
+            second = client.post("/api/models/pull-token/redeem",
+                                 json={"spec": "owner/repo:m.gguf", "token": token})
+        assert first.status_code == 200
+        assert second.status_code == 403
+
+    def test_forged_token_is_rejected(self, gui_app):
+        app, _ = gui_app
+        with TestClient(app) as client:
+            r = client.post(
+                "/api/models/pull-token/redeem",
+                json={"spec": "owner/repo:m.gguf", "token": "forged-never-minted"})
+        assert r.status_code == 403
+
+    def test_token_minted_for_a_different_spec_is_rejected(self, gui_app):
+        """A hidden iframe pairing an observed token with its OWN `pull=` spec
+        must not redeem - the grant is bound to the exact spec it was minted
+        for, not just 'some valid token exists'."""
+        from localm.plugins.gui.web import mint_pull_grant
+        app, _ = gui_app
+        token = mint_pull_grant(app, "owner/repo:m.gguf")
+        with TestClient(app) as client:
+            r = client.post(
+                "/api/models/pull-token/redeem",
+                json={"spec": "attacker/evil:payload.gguf", "token": token})
+        assert r.status_code == 403
+
+
 @pytest.fixture
 def coder_app(tmp_path, monkeypatch):
     """GUI app with the builtin coder plugin installed; isolated home.
@@ -1191,26 +1243,30 @@ class TestGuiNoModel:
 
 
 class TestJobs:
-    def test_cli_job_streams_lines_and_ends(self):
+    @pytest.mark.anyio
+    async def test_cli_job_streams_lines_and_ends(self):
         from localm.plugins.gui.jobs import JobManager
         mgr = JobManager()
         # Use python -m localm --help via start_cli's own python: cheap + real
         job = mgr.start_cli("pull", ["--help"])
+        q = job.subscribe()
         events = []
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             try:
-                ev = job.events.get(timeout=0.5)
-            except queue.Empty:
+                ev = await asyncio.wait_for(q.get(), timeout=0.5)
+            except asyncio.TimeoutError:
                 continue
             events.append(ev)
             if ev["type"] == "end":
                 break
+        job.unsubscribe(q)
         assert events[-1]["type"] == "end"
         assert events[-1]["status"] == "done"
         assert any("localm" in e.get("text", "") for e in events if e["type"] == "line")
 
-    def test_pull_flaglike_spec_fails_not_help(self):
+    @pytest.mark.anyio
+    async def test_pull_flaglike_spec_fails_not_help(self):
         """End-to-end: `pull -- -h` treats -h as the spec (unknown) and exits
         non-zero, so the job is 'failed' and no Click help text is dumped."""
         from localm.plugins.gui.jobs import JobManager
@@ -1218,23 +1274,26 @@ class TestJobs:
         # cli_args is the full argv after "-m localm" (the endpoint passes the
         # "pull" subcommand itself), so this runs: localm pull -- -h
         job = mgr.start_cli("pull", ["pull", "--", "-h"])
+        q = job.subscribe()
         events = []
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             try:
-                ev = job.events.get(timeout=0.5)
-            except queue.Empty:
+                ev = await asyncio.wait_for(q.get(), timeout=0.5)
+            except asyncio.TimeoutError:
                 continue
             events.append(ev)
             if ev["type"] == "end":
                 break
+        job.unsubscribe(q)
         assert events[-1]["type"] == "end"
         assert events[-1]["status"] == "failed"
         text = " ".join(e.get("text", "") for e in events if e["type"] == "line")
         assert "Usage:" not in text          # help was NOT dumped
         assert "Unknown spec" in text        # treated as a (bad) model spec
 
-    def test_fn_job_success_and_failure(self):
+    @pytest.mark.anyio
+    async def test_fn_job_success_and_failure(self):
         from localm.plugins.gui.jobs import JobManager
         mgr = JobManager()
 
@@ -1243,16 +1302,18 @@ class TestJobs:
         boom_job = mgr.start_fn("imagine", lambda job: (_ for _ in ()).throw(RuntimeError("x")))
 
         for job, status in ((ok_job, "done"), (fail_job, "failed"), (boom_job, "failed")):
+            q = job.subscribe()
             end = None
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 try:
-                    ev = job.events.get(timeout=0.5)
-                except queue.Empty:
+                    ev = await asyncio.wait_for(q.get(), timeout=0.5)
+                except asyncio.TimeoutError:
                     continue
                 if ev["type"] == "end":
                     end = ev
                     break
+            job.unsubscribe(q)
             assert end is not None
             assert end["status"] == status
 
