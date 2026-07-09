@@ -103,6 +103,20 @@ Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on
 - **Chat:** trimmed the injected web-access prompts so weak models stop fixating on them.
 
 ### Security
+- **Open-mode metadata reads are now origin-bound too.** The default CORS policy
+  trusts every `localhost`/`127.0.0.1` origin to read a matching response, so
+  another local program could steal the loopback GUI shell's open-mode
+  management token from a plain cross-origin `GET /` and replay it against
+  metadata routes (named keys, server config, host stats, the filesystem
+  browser) to read real local data with no credentials of its own. That token
+  is now gated on the same same-origin/allowlist check state-changing routes
+  already enforced; state changes themselves were never affected.
+- **Request-body size cap now covers chunked uploads.** The 160MB body cap
+  only checked the client-supplied `Content-Length` header, so a
+  `Transfer-Encoding: chunked` request (which sends no `Content-Length` at
+  all) bypassed it entirely - reachable pre-auth on the CORS-exempt inference
+  routes, and capable of buffering a multi-gigabyte body into memory from one
+  connection. The cap is now enforced on the actual byte stream.
 - **Authenticated self-update.** Each release build is signed with an offline
   Ed25519 key and verified against a pinned public key before it is extracted or
   executed, so a compromised release channel cannot push a forged build.
@@ -129,6 +143,10 @@ Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on
   entry is deleted or rewritten. The `[Unreleased]` draft stays freely editable.
 - Contributor-guide and test-cadence clarifications, test isolation via a temp
   `LOCALM_HOME` in `conftest.py`, and a documentation pass across the user manual.
+- **Loopback-host check hoisted to one shared module** (`localm/bindhost.py`),
+  replacing five independent copies (one of which had already drifted to a
+  non-identical implementation) - mirrors how `textguard.py` was hoisted for
+  the same reason.
 
 ## [0.1.0] - 2026-07-04
 

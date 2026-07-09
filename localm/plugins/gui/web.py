@@ -25,6 +25,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from localm.bindhost import is_loopback_host as _is_loopback_host  # noqa: F401  (re-export for back-compat)
 from localm.plugins.coder.sessions import SessionManager
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -51,19 +52,6 @@ class _RevalidatingStatic(StaticFiles):
         resp = await super().get_response(path, scope)
         resp.headers.setdefault("Cache-Control", "no-cache")
         return resp
-
-
-def _is_loopback_host(host: str) -> bool:
-    """True for a loopback bind/client host (127.0.0.0/8, ::1, localhost)."""
-    if not host:
-        return False
-    if host == "localhost":
-        return True
-    import ipaddress
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
 
 
 def _index_html_with_shell_token(token: str) -> str:
