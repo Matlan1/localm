@@ -137,6 +137,12 @@ Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on
 - **Job API privilege escalation fixed:** correct principal-ID hashing for
   admin/owner keys, so owner-created jobs are no longer reachable by
   loopback-anonymous roles.
+- **Media gallery and share-inbox ownership fixed:** the image/music/video
+  generated-media routes (serve/delete/move/rename/history) and the PWA
+  share-inbox routes had no per-key ownership check, so any key holding the
+  plugin's own (non-privileged) scope could enumerate, read, delete, move, or
+  rename another principal's generated media or shared files. Both now stamp
+  and check ownership the same way the jobs API already did.
 - **ComfyUI launch** no longer has a shell-injection vector on Windows.
 - **RAG folder index** skips model weights and secrets rather than indexing them.
 - **MCP** destructive tools are annotated so clients can confirm them.
@@ -167,6 +173,10 @@ Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on
   entry is deleted or rewritten. The `[Unreleased]` draft stays freely editable.
 - Contributor-guide and test-cadence clarifications, test isolation via a temp
   `LOCALM_HOME` in `conftest.py`, and a documentation pass across the user manual.
+- **De-duplicated the image/music/video plugins:** the VRAM chat-model handoff
+  and the ComfyUI backend-dispatch facade, each copy-pasted three times near
+  verbatim, are now shared helpers (`localm.vram`, `localm.plugins.media_config`)
+  - no behavior change, structure only.
 
 ## [0.1.0] - 2026-07-04
 
