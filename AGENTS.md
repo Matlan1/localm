@@ -46,11 +46,13 @@ Keep personal and local files out of git with `.gitignore`: `config.json`,
 `registry.json`, `*_local.json` personal workflows, `.venv/`, the native
 binaries under `runtime/localm_llama_runtime/lib/`, `home/`, and `.claude/`.
 Also keep out the installed-plugins directory (`~/.localm/plugins/`, the
-user's own enabled plugins) and any per-plugin local config that overrides a
-tracked template: `tts.json` (overrides `tts.example.json`) and
-`flux_workflow.json` (overrides `flux_workflow.example.json`). Commit the
-`*.example.json` templates, never the personal workflow, voice, or model
-choices they stand in for.
+user's own enabled plugins) and any per-plugin local config file that
+overrides a tracked template, such as `flux_workflow.json` (overrides
+`flux_workflow.example.json`). Commit the `*.example.json` templates, never
+the personal workflow choices they stand in for. A plugin's other personal
+settings, such as the tts plugin's voice/model choice, live inside the
+already-gitignored `config.json` itself, under `config["plugins"][<name>]`,
+not a separate file.
 
 ### 3. No em-dashes
 
@@ -146,7 +148,7 @@ maintainer explicitly tells you, in the current session, to remove something.
 
 Other gitignored local state (do not delete without being asked): `home/`,
 `config.json`, `registry.json`, the installed-plugins dir, and the personal
-`*_workflow*.json` / `tts.json` overrides listed under rule 2.
+`*_workflow*.json` override (e.g. `flux_workflow.json`) listed under rule 2.
 
 ### `issues/` belongs to the maintainer; agent files go in `dev-notes/` (BINDING)
 
