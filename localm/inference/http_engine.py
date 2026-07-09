@@ -168,6 +168,19 @@ class HttpEngine:
                 continue
             choices = chunk.get("choices") or [{}]
             delta = (choices[0] or {}).get("delta") or {}
+            # The server already splits <think> reasoning out of `content` into its
+            # own `reasoning_content` field (H4, /v1 streaming). Re-wrap it in the
+            # same inline <think>...</think> markers the in-process Engine's raw
+            # stream carries, so cli/chat.py's ThinkSplitter/_ThinkPrinter dims it
+            # identically in attach mode instead of silently dropping it.
+            # No escaping needed: the server derives reasoning_content by
+            # scanning for the FIRST "</think>" (ThinkSplitter in textnorm.py),
+            # so a reasoning_content value can never itself contain an intact
+            # "</think>" - reinjecting one here cannot confuse the client-side
+            # splitter that re-parses this wrapped stream.
+            reasoning = delta.get("reasoning_content")
+            if reasoning:
+                yield f"<think>{reasoning}</think>"
             piece = delta.get("content")
             if piece:
                 yield piece

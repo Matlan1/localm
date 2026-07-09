@@ -115,8 +115,10 @@ Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on
   CUDA prompt; skip console-window hiding in debug mode; skip draft releases with
   no uploaded asset.
 - **CLI:** `localm.bat` argument forwarding; a `localm serve` start path that
-  skipped the bind-security gates; an `UnboundLocalError` in the chat runner; and
-  `coder_confirm_timeout=0` now means wait forever.
+  skipped the bind-security gates; an `UnboundLocalError` in the chat runner;
+  `coder_confirm_timeout=0` now means wait forever; and `localm run`'s default
+  attach mode (the common case) no longer silently drops a thinking model's
+  reasoning - it is now dimmed in the terminal like the in-process path already did.
 - **Chat:** trimmed the injected web-access prompts so weak models stop fixating on them.
 - **Updater:** the "runtime" update class's post-swap command used a bare `localm`
   argv that resolved back to the native launcher exe itself on the default install
