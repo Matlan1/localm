@@ -252,7 +252,12 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
                 messages.append(_build_user_message(prompt, list(images)))
                 audit.user(prompt)
                 response = _stream_once(engine, messages, **gen_opts)
-                audit.llm(response)
+                # AUD-HIGH-17-2: the JSONL audit log is an INTERNAL consumer (see
+                # textnorm.strip_think's docstring), so it must get the visible
+                # answer only, not the raw <think> scratchpad - matching what
+                # transcript.exchange already does via its own split_think() call.
+                from ..inference.textnorm import strip_think
+                audit.llm(strip_think(response))
                 if transcript:
                     transcript.exchange(prompt, response)
             else:
@@ -466,9 +471,16 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
                 f"({elapsed:.1f}s)[/dim]"
             )
         if response:
-            messages.append({"role": "assistant", "content": response})
+            # AUD-HIGH-17-2: resend and log only the visible answer, never the raw
+            # <think> scratchpad (textnorm.strip_think's docstring: "the one
+            # helper every INTERNAL consumer of model output must run before
+            # storing"). transcript.exchange is exempt - it splits `response`
+            # itself and keeps the reasoning in a collapsed block.
+            from ..inference.textnorm import strip_think
+            visible = strip_think(response)
+            messages.append({"role": "assistant", "content": visible})
             if audit:
-                audit.llm(response)
+                audit.llm(visible)
             if transcript:
                 transcript.exchange(user_input, response)
 

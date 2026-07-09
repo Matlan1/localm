@@ -43,6 +43,49 @@ def test_chat_stream_yields_tokens(monkeypatch):
     assert captured["headers"]["Authorization"] == "Bearer t"
 
 
+def _sse_reasoning(*deltas):
+    """A fake streaming response yielding raw delta dicts verbatim, so tests can
+    mix `content` and `reasoning_content` fields per chunk like the real server's
+    H4 reasoning/content split does."""
+    lines = ["data: " + json.dumps({"choices": [{"delta": d}]}) for d in deltas]
+    lines.append("data: [DONE]")
+    r = MagicMock()
+    r.status_code = 200
+    r.iter_lines = lambda decode_unicode=False: iter(lines)
+    return r
+
+
+def test_chat_stream_surfaces_reasoning_content(monkeypatch):
+    """AUD-HIGH-17: the server splits <think> reasoning into its own
+    `reasoning_content` SSE field (H4); HttpEngine must re-wrap it in inline
+    <think>...</think> markers (like the in-process Engine's raw stream) so
+    cli/chat.py's ThinkSplitter/_ThinkPrinter dims it instead of silently
+    dropping it in localm run's default attach mode."""
+    deltas = [
+        {"reasoning_content": "because "},
+        {"reasoning_content": "reasons"},
+        {"content": "The "},
+        {"content": "answer."},
+    ]
+    monkeypatch.setattr("requests.post", lambda *a, **k: _sse_reasoning(*deltas))
+    out = list(HttpEngine("http://x/v1").chat_stream(
+        [{"role": "user", "content": "hi"}]))
+    full = "".join(out)
+    assert full == "<think>because </think><think>reasons</think>The answer."
+    from localm.inference.textnorm import ThinkSplitter
+    splitter = ThinkSplitter()
+    content, reasoning = "", ""
+    for piece in out:
+        c, r = splitter.feed(piece)
+        content += c
+        reasoning += r
+    fc, fr = splitter.flush()
+    content += fc
+    reasoning += fr
+    assert content == "The answer."
+    assert reasoning == "because reasons"
+
+
 def test_chat_stream_ignores_non_sse(monkeypatch):
     # NEGATIVE: a non-SSE / non-JSON body yields no tokens and does not crash.
     r = MagicMock()
