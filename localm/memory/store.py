@@ -9,9 +9,11 @@ vec}}``). Keying vectors by record id (not position) keeps them correct across
 edits and deletes.
 
 Design mirrors ``localm/rag/store.py`` (home-scale JSON, atomic tmp+replace, BM25
-always-available, embeddings OPTIONAL). It deliberately stays SMALL: consolidation
-+ decay + the ``N_MAX`` cap keep a namespace to a few hundred distilled records,
-never a transcript, so whole-file rewrites are cheap.
+always-available, embeddings OPTIONAL, and - CHK-MEM-LOCK - a per-namespace lock so
+concurrent writers cannot silently clobber each other, exactly like rag's
+per-collection lock). It deliberately stays SMALL: consolidation + decay + the
+``N_MAX`` cap keep a namespace to a few hundred distilled records, never a
+transcript, so whole-file rewrites are cheap.
 
 Retrieval blends the Generative-Agents signals (Park et al. 2023): relevance
 (lexical BM25, optionally 50/50 with embedding cosine when an embedder is present),
@@ -25,6 +27,8 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
+import threading
 import time
 from pathlib import Path
 from typing import Callable, Optional
@@ -114,6 +118,28 @@ def _maxnorm(scores: list[float]) -> list[float]:
     return [s / top for s in scores] if top > 0 else [0.0 for _ in scores]
 
 
+# Per-namespace-hash locks (CHK-MEM-LOCK). A fresh MemoryStore is constructed per
+# call site - every HTTP request/plugin call builds its own instance (see plug.py's
+# _chat_store) - so a per-INSTANCE lock cannot help: two instances each _load() the
+# same on-disk state, mutate their own in-memory copy, and _save() - last writer
+# wins and the other write is silently lost. This is exactly rag/store.py's
+# CHK-RAG-LOCK, reproduced for memory (see _COLLECTION_LOCKS there). Keyed by
+# namespace_hash, so the map is bounded by the number of active namespaces, not
+# per-call. RLock so prune() calling replace(), or a caller batching several
+# save=False mutations under store.lock(), does not deadlock.
+_NAMESPACE_LOCKS: dict = {}
+_LOCKS_GUARD = threading.Lock()
+
+
+def _namespace_lock(ns_hash: str):
+    with _LOCKS_GUARD:
+        lock = _NAMESPACE_LOCKS.get(ns_hash)
+        if lock is None:
+            lock = threading.RLock()
+            _NAMESPACE_LOCKS[ns_hash] = lock
+        return lock
+
+
 class MemoryStore:
     """JSONL-backed store for one ``(principal, agent, scope_key)`` namespace."""
 
@@ -122,7 +148,10 @@ class MemoryStore:
         self.principal = principal or "owner"
         self.agent = agent
         self.scope_key = scope_key or ""
-        self._file = namespace_file(self.principal, agent, self.scope_key, root=root)
+        # CHK-MEM-LOCK: the key every mutating method locks on (see _namespace_lock).
+        # Computed from the (principal, agent, scope_key) strings alone (no I/O),
+        # so it is safe to compute before acquiring the lock below.
+        self._ns_hash = namespace_hash(self.principal, agent, self.scope_key)
         self._records: list[MemoryRecord] = []
         self._vectors: dict = {}        # id -> vector (present only when embedded)
         self._dim: Optional[int] = None
@@ -130,12 +159,33 @@ class MemoryStore:
         # User/import records evicted by the most recent prune (size cap), so a
         # caller can surface an otherwise-silent user-fact loss. See prune().
         self.last_evicted_user: list[MemoryRecord] = []
-        self._load()
+        # CHK-MEM-LOCK: namespace_file() and _load() must BOTH hold the lock, not
+        # just _load(). Every real call site constructs a fresh instance per call
+        # (see plug.py's _chat_store), so an unlocked read here can overlap
+        # ANOTHER thread's locked _atomic_write -> tmp.replace(path). This is not
+        # only _load()'s read_text(): namespace_file()'s own Path.resolve() calls
+        # can open a handle to an EXISTING target file to resolve it, which can
+        # likewise collide with an in-flight tmp.replace() and raise
+        # PermissionError on Windows - locking only _load() and leaving
+        # namespace_file() unlocked (an earlier version of this fix) still left
+        # that race open.
+        with _namespace_lock(self._ns_hash):
+            self._file = namespace_file(self.principal, agent, self.scope_key, root=root)
+            self._load()
 
     # ----------------------------------------------------------------- IO -- #
     @property
     def path(self) -> Path:
         return self._file
+
+    def lock(self):
+        """This namespace's RLock (CHK-MEM-LOCK). Every mutating method below
+        acquires it internally for its own single call; exposed so a caller that
+        needs to batch several ``save=False`` mutations under ONE reload + save
+        (e.g. plug.py's ``_migrate_legacy``) can hold it across the whole batch,
+        mirroring how rag's ``_add_paths_locked`` reloads once before its loop
+        rather than once per file."""
+        return _namespace_lock(self._ns_hash)
 
     def _vec_file(self) -> Path:
         return self._file.with_suffix(".vec.json")
@@ -198,7 +248,13 @@ class MemoryStore:
 
     @staticmethod
     def _atomic_write(path: Path, content: str) -> None:
-        tmp = path.with_name(path.name + ".tmp")
+        # Unique per-write temp name (pid + thread id), not a fixed "<file>.tmp":
+        # the namespace lock now serialises writers to one namespace, but the
+        # crash-safety property of tmp+replace should hold even for a caller that
+        # writes a sidecar file outside the lock, not just for serialized writers
+        # (CHK-MEM-LOCK). Two writers racing on the OLD fixed name could otherwise
+        # collide mid-write, raising PermissionError on Windows.
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
         tmp.write_text(content, encoding="utf-8")
         tmp.replace(path)
 
@@ -233,56 +289,72 @@ class MemoryStore:
 
     def add(self, record: MemoryRecord, *, embed_fn: Optional[EmbedFn] = None,
             save: bool = True) -> MemoryRecord:
-        record.text = record.text[:MAX_TEXT_LEN]
-        self._records.append(record)
-        vec = self._embed_one(record.text, embed_fn)
-        if vec is not None:
-            self._vectors[record.id] = vec
-        if save:
-            self._save()
-        return record
+        # CHK-MEM-LOCK: re-sync with the latest committed state under the lock
+        # before mutating, so a concurrent add() elsewhere that finished first is
+        # not read-stale-then-overwritten (mirrors rag Collection.add_paths()).
+        # save=False (a caller batching several mutations, e.g. plug.py's
+        # _migrate_legacy) skips the reload - the caller already loaded fresh
+        # once via store.lock() and must not have that in-progress batch wiped.
+        with _namespace_lock(self._ns_hash):
+            if save:
+                self._load()
+            record.text = record.text[:MAX_TEXT_LEN]
+            self._records.append(record)
+            vec = self._embed_one(record.text, embed_fn)
+            if vec is not None:
+                self._vectors[record.id] = vec
+            if save:
+                self._save()
+            return record
 
     def update(self, mem_id: str, *, embed_fn: Optional[EmbedFn] = None,
                save: bool = True, **fields) -> Optional[MemoryRecord]:
-        rec = self.get(mem_id)
-        if rec is None:
-            return None
-        text_changed = False
-        for key, val in fields.items():
-            if key == "text" and isinstance(val, str):
-                val = val.strip()[:MAX_TEXT_LEN]
-                text_changed = val != rec.text
-                rec.text = val
-            elif key == "importance":
-                from .record import _clamp01
-                rec.importance = _clamp01(val)
-            elif key in ("last_used", "created", "uses", "kind", "source", "meta"):
-                setattr(rec, key, val)
-        rec.updated = time.time()
-        if text_changed and embed_fn is not None:
-            vec = self._embed_one(rec.text, embed_fn)
-            if vec is not None:
-                self._vectors[rec.id] = vec
-            else:
-                self._vectors.pop(rec.id, None)
-        if save:
-            self._save()
-        return rec
+        with _namespace_lock(self._ns_hash):
+            if save:
+                self._load()
+            rec = self.get(mem_id)
+            if rec is None:
+                return None
+            text_changed = False
+            for key, val in fields.items():
+                if key == "text" and isinstance(val, str):
+                    val = val.strip()[:MAX_TEXT_LEN]
+                    text_changed = val != rec.text
+                    rec.text = val
+                elif key == "importance":
+                    from .record import _clamp01
+                    rec.importance = _clamp01(val)
+                elif key in ("last_used", "created", "uses", "kind", "source", "meta"):
+                    setattr(rec, key, val)
+            rec.updated = time.time()
+            if text_changed and embed_fn is not None:
+                vec = self._embed_one(rec.text, embed_fn)
+                if vec is not None:
+                    self._vectors[rec.id] = vec
+                else:
+                    self._vectors.pop(rec.id, None)
+            if save:
+                self._save()
+            return rec
 
     def delete(self, mem_id: str, *, save: bool = True) -> bool:
-        before = len(self._records)
-        self._records = [r for r in self._records if r.id != mem_id]
-        self._vectors.pop(mem_id, None)
-        removed = len(self._records) != before
-        if removed and save:
-            self._save()
-        return removed
+        with _namespace_lock(self._ns_hash):
+            if save:
+                self._load()
+            before = len(self._records)
+            self._records = [r for r in self._records if r.id != mem_id]
+            self._vectors.pop(mem_id, None)
+            removed = len(self._records) != before
+            if removed and save:
+                self._save()
+            return removed
 
     def clear(self) -> None:
-        self._records = []
-        self._vectors = {}
-        self._dim = None
-        self._save()
+        with _namespace_lock(self._ns_hash):
+            self._records = []
+            self._vectors = {}
+            self._dim = None
+            self._save()
 
     def invalidate_vectors(self, ids) -> None:
         """Drop the cached vectors of *ids* so the next save/replace re-embeds
@@ -333,39 +405,65 @@ class MemoryStore:
         background pass calls this so coverage climbs to the point where the
         cosine signal kicks in. Bounded per call so a large store backfills
         over several passes instead of one long stall. Best-effort: an embed
-        failure for one record is skipped, not fatal."""
+        failure for one record is skipped, not fatal.
+
+        CHK-MEM-LOCK: locked and re-loaded like the other mutating methods, so a
+        backfill pass started from a stale snapshot cannot silently clobber a
+        concurrent add/update/delete's save."""
         if embed_fn is None:
             return 0
-        done = 0
-        for r in self._records:
-            if done >= limit:
-                break
-            if r.id in self._vectors:
-                continue
-            vec = self._embed_one(r.text, embed_fn)
-            if vec is not None:
-                self._vectors[r.id] = vec
-                done += 1
-        if done:
-            self._save()
-        return done
-
-    def replace(self, records: list[MemoryRecord], *,
-                embed_fn: Optional[EmbedFn] = None) -> None:
-        """Overwrite the whole namespace in ONE atomic save (used by the
-        consolidation batch and prune, so a crash leaves the pre-change store
-        intact - never a half-consolidated state)."""
-        keep_ids = {r.id for r in records}
-        self._vectors = {k: v for k, v in self._vectors.items() if k in keep_ids}
-        self._records = []
-        for r in records:
-            r.text = (r.text or "").strip()[:MAX_TEXT_LEN]
-            self._records.append(r)
-            if embed_fn is not None and r.id not in self._vectors:
+        with _namespace_lock(self._ns_hash):
+            self._load()
+            done = 0
+            for r in self._records:
+                if done >= limit:
+                    break
+                if r.id in self._vectors:
+                    continue
                 vec = self._embed_one(r.text, embed_fn)
                 if vec is not None:
                     self._vectors[r.id] = vec
-        self._save()
+                    done += 1
+            if done:
+                self._save()
+            return done
+
+    def replace(self, records: list[MemoryRecord], *,
+                embed_fn: Optional[EmbedFn] = None,
+                invalidate_ids=None) -> None:
+        """Overwrite the whole namespace in ONE atomic save (used by the
+        consolidation batch and prune, so a crash leaves the pre-change store
+        intact - never a half-consolidated state).
+
+        CHK-MEM-LOCK: locked AND re-loaded like every other mutating method, so a
+        standalone caller (e.g. the PUT /api/memory bulk-edit route) cannot
+        silently clobber a concurrent add/update/delete's already-persisted
+        vector. *records* (the caller's list) always overwrites ``self._records``
+        regardless - that is the point of a full replace - but reloading first
+        means the ``keep_ids`` filter below preserves a FRESH on-disk vector for
+        any surviving id instead of a stale in-memory one.
+
+        *invalidate_ids*: ids whose cached vector must be dropped so the
+        embed-if-missing loop below re-embeds them with new text (consolidation's
+        UPDATE decisions). This must be applied AFTER the reload above, or a
+        reload would silently restore the stale vector straight from disk and
+        undo the caller's invalidation - so it is a parameter here, not a
+        separate ``invalidate_vectors()`` call the caller makes beforehand."""
+        with _namespace_lock(self._ns_hash):
+            self._load()
+            if invalidate_ids:
+                self.invalidate_vectors(invalidate_ids)
+            keep_ids = {r.id for r in records}
+            self._vectors = {k: v for k, v in self._vectors.items() if k in keep_ids}
+            self._records = []
+            for r in records:
+                r.text = (r.text or "").strip()[:MAX_TEXT_LEN]
+                self._records.append(r)
+                if embed_fn is not None and r.id not in self._vectors:
+                    vec = self._embed_one(r.text, embed_fn)
+                    if vec is not None:
+                        self._vectors[r.id] = vec
+            self._save()
 
     # --------------------------------------------------------- retrieval -- #
     def _relevance(self, query: str,
@@ -447,10 +545,32 @@ class MemoryStore:
         hits = [(s, r) for s, i, r in scored if s > FLOOR][:k]
         results = [r for _s, r in hits]
         if reinforce and results:
-            for r in results:
-                r.last_used = now
-                r.uses += 1
-            self._save()
+            # CHK-MEM-LOCK: recall() is called with reinforce=True on every chat
+            # turn (_memory_inlet), making this the highest-frequency write path -
+            # a plain self._save() here would persist THIS instance's whole
+            # self._records, so an unlocked save could silently revert a
+            # concurrent add/update/delete/replace (e.g. resurrect a record
+            # another thread just deleted), not merely lose a last_used/uses
+            # bump. Lock + reload fresh state, then re-apply reinforcement by id
+            # against the RELOADED records (not `results`, whose objects would
+            # otherwise be orphaned by the reload) before saving.
+            with _namespace_lock(self._ns_hash):
+                self._load()
+                by_id = {r.id: r for r in self._records}
+                reinforced = []
+                for r in results:
+                    fresh = by_id.get(r.id)
+                    if fresh is not None:
+                        fresh.last_used = now
+                        fresh.uses += 1
+                        reinforced.append(fresh)
+                    else:
+                        # Concurrently deleted elsewhere: nothing to persist for
+                        # it, but still return it (best-effort) so the caller's
+                        # result count/content is not silently changed mid-call.
+                        reinforced.append(r)
+                self._save()
+                results = reinforced
         return results
 
     # --------------------------------------------------------- forgetting - #
@@ -495,23 +615,31 @@ class MemoryStore:
         (recoverable, not a silent hard delete) and the user-sourced evictions are
         exposed on ``last_evicted_user`` so a caller can surface them. Returns the
         number removed."""
-        now = time.time() if now is None else now
-        kept = [
-            r for r in self._records
-            if r.source in ("user", "import") or self._decayed(r, now) >= PRUNE_FLOOR
-        ]
-        if len(kept) > n_max:
-            kept.sort(key=lambda r: self._decayed(r, now), reverse=True)
-            kept = kept[:n_max]
-        kept_ids = {r.id for r in kept}
-        evicted = [r for r in self._records if r.id not in kept_ids]
-        # Exposed for callers (consolidation surfaces user-fact evictions in its
-        # result); reset every prune so it reflects THIS run only.
-        self.last_evicted_user = [r for r in evicted if r.source in ("user", "import")]
-        if evicted:
-            self._archive_forgotten(evicted)
-            self.replace(kept)
-        return len(evicted)
+        # CHK-MEM-LOCK: locked and re-loaded like every other mutating method (the
+        # RLock lets the nested self.replace() call below re-acquire without
+        # deadlocking), so eviction is computed against the latest committed state,
+        # not a stale in-memory snapshot that could re-evict an already-saved
+        # record or miss one a concurrent writer just added.
+        with _namespace_lock(self._ns_hash):
+            self._load()
+            now = time.time() if now is None else now
+            kept = [
+                r for r in self._records
+                if r.source in ("user", "import") or self._decayed(r, now) >= PRUNE_FLOOR
+            ]
+            if len(kept) > n_max:
+                kept.sort(key=lambda r: self._decayed(r, now), reverse=True)
+                kept = kept[:n_max]
+            kept_ids = {r.id for r in kept}
+            evicted = [r for r in self._records if r.id not in kept_ids]
+            # Exposed for callers (consolidation surfaces user-fact evictions in
+            # its result); reset every prune so it reflects THIS run only.
+            self.last_evicted_user = [
+                r for r in evicted if r.source in ("user", "import")]
+            if evicted:
+                self._archive_forgotten(evicted)
+                self.replace(kept)
+            return len(evicted)
 
 
 def _first_dim(vectors: dict) -> Optional[int]:
