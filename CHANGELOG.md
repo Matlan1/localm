@@ -86,6 +86,12 @@ Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on
 - **Models and API:** a local model file registers fully offline with no
   HuggingFace path leak; `/api/models` no longer 500s on a forward reference; a
   hidden native-load failure cause is surfaced.
+- **HF snapshot pulls:** a full-repo HuggingFace pull now preflight-checks free
+  disk space (like the GGUF/URL pull paths already did) instead of running
+  until the OS hits ENOSPC mid-transfer; and "already downloaded" now compares
+  every file the repo lists against what's actually on disk, not just
+  `config.json`'s presence, so a disk-full mid-download no longer gets
+  silently registered as a complete, ready model on retry.
 - **Do not hide problems:** removed production code paths that detected
   pytest/mocks and fabricated behavior; a swallowed VRAM-gate failure is now logged.
 - **Bug reporter:** removed the only path that could ask for a GitHub login; the

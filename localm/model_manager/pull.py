@@ -516,7 +516,41 @@ def _pull_hf_snapshot(
     model_name = _sanitize_name(name or repo_id.split("/")[-1])
     dest = _mm.MODELS_DIR / model_name
 
-    if dest.exists() and (dest / "config.json").exists():
+    # Fetch the repo's file listing once - used both to verify an existing
+    # download is genuinely complete (every file present with a matching size,
+    # not just config.json) and to size the disk-space preflight / progress
+    # display below. A disk-full mid-download can leave config.json - usually
+    # one of the smallest, earliest files - on disk while weight shards are
+    # still missing; checking only config.json's existence would then register
+    # that broken snapshot as a ready model on the very next retry.
+    repo_siblings = None
+    total_size = 0
+    try:
+        from huggingface_hub import HfApi
+        info = HfApi().model_info(repo_id, files_metadata=True)
+        repo_siblings = info.siblings
+        total_size = sum(getattr(s, "size", None) or 0 for s in repo_siblings)
+    except Exception as e:
+        # Offline / API error: fall back to a config.json-only completeness
+        # check below and an indeterminate (0) progress total - best effort,
+        # matching how _pull_gguf_file/_pull_url degrade when a size HEAD fails.
+        logger.debug("could not fetch file listing for %s (%s); falling back "
+                     "to a config.json-only completeness check", repo_id, e)
+
+    def _snapshot_is_complete() -> bool:
+        if not (dest / "config.json").exists():
+            return False
+        if repo_siblings is None:
+            return True
+        for sib in repo_siblings:
+            fp = dest / sib.rfilename
+            if not fp.is_file():
+                return False
+            if sib.size is not None and fp.stat().st_size != sib.size:
+                return False
+        return True
+
+    if dest.exists() and _snapshot_is_complete():
         console.print(f"[yellow]Already downloaded:[/yellow] {model_name}")
         _mm._register_with_dedup(model_name, dest, f"hf:{repo_id}", model_type=model_type)
         return True
@@ -549,21 +583,15 @@ def _pull_hf_snapshot(
                 alias_model(same_source[0], model_name)
                 return True
 
+    if not _mm._check_disk_space(_mm.MODELS_DIR, total_size):
+        return False
+
     _mm.ensure_dirs()
     console.print(
         f"Downloading full model [bold cyan]{repo_id}[/bold cyan] "
         f"-> [bold]{dest}[/bold]"
     )
     console.print("[dim]This may take a while for large models...[/dim]")
-
-    # Sum the repo's file sizes so the GUI gets a real percentage (best effort)
-    total_size = 0
-    try:
-        from huggingface_hub import HfApi
-        info = HfApi().model_info(repo_id, files_metadata=True)
-        total_size = sum(getattr(s, "size", None) or 0 for s in info.siblings)
-    except Exception:
-        total_size = 0
 
     def _disk_bytes() -> int:
         try:
