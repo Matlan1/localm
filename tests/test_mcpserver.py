@@ -533,6 +533,29 @@ class TestModelDiscoveryTools:
         assert out[0]["fit"] == "fits"
         mock_fit.assert_called_once_with(4_000_000_000, 8_000_000_000)
 
+    def test_list_model_files_fit_reflects_combined_split_capacity(self):
+        """AUDIT-GPU-SPLIT-1: the MCP list_model_files tool must weigh fit
+        against discover.vram_capacity()'s COMBINED split capacity, not just
+        vram_info()'s single main-GPU number - a file too big for one GPU
+        alone but that fits split across a configured 2-GPU split must fit."""
+        server, _ = _server()
+        # need ~= 15e9*1.1 + 1.5e9 = 18e9: exceeds the 16 GB main GPU alone,
+        # but fits under 0.85 * the 24 GB combined split.
+        files = [{"file": "model.Q8_0.gguf", "quant": "Q8_0",
+                 "size_bytes": 15_000_000_000, "n_parts": 1}]
+        from localm.config import load_config as real_load_config
+        base_cfg = real_load_config()
+        with patch("localm.discover.hf_gguf_files", return_value=files), \
+             patch("localm.discover.list_gpus", return_value=[
+                 {"index": 0, "name": "A", "total": 16_000_000_000, "free": 16_000_000_000},
+                 {"index": 1, "name": "B", "total": 8_000_000_000, "free": 8_000_000_000},
+             ]), \
+             patch("localm.config.load_config",
+                   return_value={**base_cfg, "gpu_split_indices": [0, 1]}):
+            r = self._call(server, "list_model_files", {"repo": "owner/repo"})
+        out = json.loads(r["result"]["content"][0]["text"])
+        assert out[0]["fit"] == "fits"
+
     def test_list_model_files_surfaces_discover_error(self):
         server, _ = _server()
         from localm.discover import DiscoverError
