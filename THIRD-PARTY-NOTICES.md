@@ -17,6 +17,7 @@ CDN. Each keeps its own license:
 | highlight.js (`highlight` + `github-dark` theme) | Code highlighting | BSD-3-Clause | (c) 2006 Ivan Sagalaev and contributors |
 | KaTeX (`katex`, `auto-render`, `KaTeX_*` fonts) | Math rendering | MIT | (c) 2013-2024 Khan Academy and contributors |
 | Inter (`vendor/inter`, Latin woff2 + `OFL.txt`) | UI typeface | SIL OFL 1.1 | (c) 2016 The Inter Project Authors |
+| jsQR | QR-code camera scanning (phone pairing) | Apache-2.0 | (c) Cosmo Wolfe and contributors |
 
 The TTS plugin vendors a separate browser bundle. Its components and licenses are
 documented in
