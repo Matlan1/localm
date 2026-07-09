@@ -11,9 +11,10 @@ all interactive prompts fall back to their safe non-interactive defaults.
 
 from __future__ import annotations
 
+import asyncio
+import collections
 import json
 import os
-import queue
 import subprocess
 import sys
 import threading
@@ -24,13 +25,33 @@ from typing import Optional
 
 from localm.model_manager import PROGRESS_SENTINEL
 
+# Bound on both the replay backlog and each subscriber's queue, mirroring the
+# old single-queue's maxsize so a very long-lived job cannot grow unbounded.
+_HISTORY_MAX = 10_000
+
+
+def _safe_put(q: asyncio.Queue, event: dict) -> None:
+    """Push onto a subscriber's queue, evicting the oldest entry on overflow
+    instead of blocking or raising. Runs on the event loop via
+    call_soon_threadsafe, so it must not block."""
+    try:
+        q.put_nowait(event)
+    except asyncio.QueueFull:
+        try:
+            q.get_nowait()
+        except asyncio.QueueEmpty:
+            pass
+        try:
+            q.put_nowait(event)
+        except asyncio.QueueFull:
+            pass
+
 
 @dataclass
 class Job:
     id: str
     kind: str                      # "pull" | "imagine" | ...
     argv: list
-    events: queue.Queue = field(default_factory=lambda: queue.Queue(maxsize=10_000))
     status: str = "running"        # running | done | failed | cancelled
     returncode: Optional[int] = None
     result: Optional[str] = None   # kind-specific payload (e.g. output image path)
@@ -46,23 +67,50 @@ class Job:
     # Set by cancel(); in-thread jobs (start_fn, e.g. media gen) poll this to
     # stop cooperatively since there is no subprocess to terminate.
     cancel_event: threading.Event = field(default_factory=threading.Event)
+    # Every event ever pushed (bounded, oldest evicted first) so a viewer that
+    # subscribes mid-job still sees the full stream from the start. Each SSE
+    # connection then gets its OWN asyncio.Queue in _subscribers, fed live by
+    # push() - a plain queue.Queue is single-consumer, so two concurrent viewers
+    # used to split a job's events between them instead of each seeing all of them.
+    _history: collections.deque = field(
+        default_factory=lambda: collections.deque(maxlen=_HISTORY_MAX))
+    _subscribers: list = field(default_factory=list)
+    _sub_lock: threading.Lock = field(default_factory=threading.Lock)
 
     @property
     def cancel_requested(self) -> bool:
         return self.cancel_event.is_set()
 
+    @property
+    def subscriber_count(self) -> int:
+        with self._sub_lock:
+            return len(self._subscribers)
+
     def push(self, event: dict) -> None:
-        try:
-            self.events.put_nowait(event)
-        except queue.Full:
-            try:
-                self.events.get_nowait()
-            except queue.Empty:
-                pass
-            try:
-                self.events.put_nowait(event)
-            except queue.Full:
-                pass
+        with self._sub_lock:
+            self._history.append(event)
+            subs = list(self._subscribers)
+        for q, loop in subs:
+            loop.call_soon_threadsafe(_safe_put, q, event)
+
+    def subscribe(self) -> asyncio.Queue:
+        """Register an independent event stream for one SSE connection: an
+        asyncio.Queue pre-loaded with every event pushed so far (so a viewer
+        that connects mid-job, or reconnects, still gets the full history) plus
+        every event push() fans out from here on. Call unsubscribe() when the
+        connection closes, or the subscriber leaks for the job's lifetime."""
+        loop = asyncio.get_running_loop()
+        q: asyncio.Queue = asyncio.Queue(maxsize=_HISTORY_MAX)
+        with self._sub_lock:
+            backlog = list(self._history)
+            self._subscribers.append((q, loop))
+        for event in backlog:
+            q.put_nowait(event)
+        return q
+
+    def unsubscribe(self, q: asyncio.Queue) -> None:
+        with self._sub_lock:
+            self._subscribers[:] = [(sq, sl) for sq, sl in self._subscribers if sq is not q]
 
     def cancel(self) -> None:
         """Request cancellation. Sets the cooperative flag (polled by in-thread

@@ -18,6 +18,7 @@ import localm.plugins.gui.web as _web
 from localm import scopes
 from localm.inference.http_server import (_require_auth, caller_scopes,
                                           effective_fs_access, require_scope)
+from localm.plugins.executor import get_plugin_executor
 
 
 def register(app: FastAPI, ctx) -> None:
@@ -31,7 +32,7 @@ def register(app: FastAPI, ctx) -> None:
         the event loop."""
         from localm.sysstats import system_stats
         loop = asyncio.get_running_loop()
-        stats = await loop.run_in_executor(None, system_stats)
+        stats = await loop.run_in_executor(get_plugin_executor(), system_stats)
         return stats
 
     @app.get("/api/companion", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])

@@ -18,8 +18,14 @@ converts an uploaded attachment to text entirely in memory, so privacy-mode
 chats can use documents without leaving traces.
 
 Background indexing and self-embedding use the kernel's shared services
-(``request.app.state.jobs`` / ``.self_url`` / ``.active_model``), set up by the
-GUI; the job stream is served by the kernel's /api/jobs/* endpoints.
+(``request.app.state.jobs`` / ``.self_url`` / ``.active_model``), published by
+``attach_gui``. Under a bare ``localm serve`` (api-mode) these are never set, so
+indexing/upload/embedding-setup - which need a job to run in - degrade to a clean
+503 ("run `localm gui`"), mirroring the coder plugin's ``_sessions`` guard. Query
+only needs self-embedding, not a job, so it degrades further: with no self_url/
+active_model it falls back to lexical-only search (embed_fn=None), the same
+degrade path used when embed=False or the embedder itself is unavailable. The job
+stream is served by the kernel's /api/jobs/* endpoints.
 """
 
 from __future__ import annotations
@@ -34,6 +40,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from localm.plugins.executor import get_plugin_executor
 from localm.textguard import neutralise
 
 _router = APIRouter()
@@ -236,6 +243,37 @@ def _get_collection(name: str):
     return coll
 
 
+def _require_jobs(request: Request, *, needs: str = "Background indexing"):
+    """The background job manager, or a clean 503 when the GUI server isn't
+    running. api-mode (``localm serve`` without the GUI) never calls
+    ``attach_gui``, so ``app.state.jobs`` is absent - mirrors the coder plugin's
+    ``_sessions`` guard rather than crashing with an AttributeError. *needs*
+    names what actually requires the GUI (indexing vs. embedding-model setup)
+    so the message stays accurate at every call site."""
+    jobs = getattr(request.app.state, "jobs", None)
+    if jobs is None:
+        raise HTTPException(503, f"{needs} needs the localm GUI "
+                                 "server (run `localm gui`).")
+    return jobs
+
+
+def _self_services(request: Request):
+    """Best-effort self_embed/self_classify/self_describe helpers built from this
+    server's own /v1/* endpoints, or a matching trio of ``None`` when the GUI
+    server isn't attached (api-mode never publishes ``self_url`` /
+    ``active_model``). ``embed_fn=None`` etc. are already-supported degrade paths
+    in the store layer (lexical-only search, no format tie-break, no image
+    description) - the same fallback used when embed=False or the embedder
+    itself is unavailable, so this never crashes the request."""
+    self_url = getattr(request.app.state, "self_url", None)
+    active_model = getattr(request.app.state, "active_model", None)
+    if not self_url or active_model is None:
+        return None, None, None
+    return (_make_self_embed(self_url, active_model),
+            _make_self_classify(self_url, active_model),
+            _make_self_describe_image(self_url, active_model))
+
+
 @_router.get("/api/rag/collections")
 async def rag_collections():
     from localm.rag import Collection, collection_names
@@ -320,13 +358,8 @@ async def rag_add(name: str, req: RagAddRequest, request: Request):
             "only the owner can widen the list: "
             + ", ".join(sorted(set(addable))[:5]))
     embed = req.embed
-    jobs = request.app.state.jobs
-    self_embed = _make_self_embed(request.app.state.self_url,
-                                  request.app.state.active_model)
-    self_classify = _make_self_classify(request.app.state.self_url,
-                                        request.app.state.active_model)
-    self_describe = _make_self_describe_image(request.app.state.self_url,
-                                              request.app.state.active_model)
+    jobs = _require_jobs(request)
+    self_embed, self_classify, self_describe = _self_services(request)
 
     def _index(job):
         embed_fn = self_embed if embed else None
@@ -396,13 +429,8 @@ async def rag_upload(name: str, req: RagUploadRequest, request: Request):
         uploads.append({"filename": item.filename, "data": data})
 
     embed = req.embed
-    jobs = request.app.state.jobs
-    self_embed = _make_self_embed(request.app.state.self_url,
-                                  request.app.state.active_model)
-    self_classify = _make_self_classify(request.app.state.self_url,
-                                        request.app.state.active_model)
-    self_describe = _make_self_describe_image(request.app.state.self_url,
-                                              request.app.state.active_model)
+    jobs = _require_jobs(request)
+    self_embed, self_classify, self_describe = _self_services(request)
 
     def _index(job):
         embed_fn = self_embed if embed else None
@@ -438,11 +466,11 @@ async def rag_query(name: str, req: RagQueryRequest, request: Request):
     if not req.query.strip():
         raise HTTPException(400, "Empty query")
     k = max(1, min(req.k, 20))
-    self_embed = _make_self_embed(request.app.state.self_url,
-                                  request.app.state.active_model)
+    self_embed, _, _ = _self_services(request)
     loop = asyncio.get_running_loop()
     hits = await loop.run_in_executor(
-        None, lambda: coll.query(req.query, k=k, embed_fn=self_embed))
+        get_plugin_executor(),
+        lambda: coll.query(req.query, k=k, embed_fn=self_embed))
     # Defang control/frame tokens in the untrusted chunk text before it can be
     # spliced into a chat prompt (indirect prompt injection - LM-DA-SEC-03).
     return {"collection": name, "query": req.query, "hits": _neutralise_hits(hits)}
@@ -481,7 +509,7 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
     model = req.model.strip()
     if not model:
         raise HTTPException(400, "No model given")
-    jobs = request.app.state.jobs
+    jobs = _require_jobs(request, needs="Embedding model setup")
 
     def _setup(job):
         from localm.config import update_config
@@ -565,8 +593,18 @@ async def rag_extract(req: RagExtractRequest):
         raise HTTPException(400, "content_b64 is not valid base64")
     if len(data) > 30_000_000:
         raise HTTPException(413, "Attachment too large (max 30 MB)")
+    # Extraction walks an archive's members and can take 8-30s+ on a crafted or
+    # large upload. This is a single-worker server, so running it inline on this
+    # coroutine would freeze the event loop - every route, for every user - for
+    # the duration. rag_upload already offloads the same call via a background
+    # job (jobs.start_fn -> a worker thread); this route returns the text
+    # directly rather than streaming a job, so it offloads to the plugin pool
+    # instead (get_plugin_executor - kept off the inference pool so a burst of
+    # extraction requests can never starve chat completions, see executor.py).
+    loop = asyncio.get_running_loop()
     try:
-        text = extract_bytes(data, req.filename)
+        text = await loop.run_in_executor(
+            get_plugin_executor(), extract_bytes, data, req.filename)
     except ExtractError as e:
         raise HTTPException(422, str(e))
     max_chars = max(500, min(req.max_chars, 200_000))

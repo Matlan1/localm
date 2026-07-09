@@ -93,11 +93,28 @@ class TestFluxImageTool(unittest.TestCase):
         self.assertIs(kwargs.get("write_sidecar"), False)
 
     @patch("localm.image_gen.comfy.generate_image")
+    def test_privacy_mode_deletes_comfy_output_copy(self, mock_gen):
+        """Privacy mode must also delete ComfyUI's own on-disk output copy
+        (it embeds the full prompt/workflow as PNG metadata) - not just
+        suppress the sidecar. See CONSOLIDATED-FINDINGS item 2."""
+        mock_gen.return_value = (True, "Image saved to x")
+        tool_generate_image(self.cwd, "p", self.output_path, _privacy=True)
+        _, kwargs = mock_gen.call_args
+        self.assertIs(kwargs.get("delete_outputs"), True)
+
+    @patch("localm.image_gen.comfy.generate_image")
     def test_default_mode_keeps_sidecar(self, mock_gen):
         mock_gen.return_value = (True, "Image saved to x")
         tool_generate_image(self.cwd, "p", self.output_path)
         _, kwargs = mock_gen.call_args
         self.assertIs(kwargs.get("write_sidecar"), True)
+
+    @patch("localm.image_gen.comfy.generate_image")
+    def test_default_mode_keeps_output_copy(self, mock_gen):
+        mock_gen.return_value = (True, "Image saved to x")
+        tool_generate_image(self.cwd, "p", self.output_path)
+        _, kwargs = mock_gen.call_args
+        self.assertFalse(kwargs.get("delete_outputs"))
 
     @patch("urllib.request.urlopen")
     def test_generate_image_connection_failure(self, mock_urlopen):
@@ -165,6 +182,9 @@ def test_repl_generate_image_privacy_no_sidecar(tmp_path, monkeypatch):
 
     assert calls.get("write_sidecar") is False
     assert calls.get("api_url") == "http://127.0.0.1:9999"
+    # Privacy mode must also delete ComfyUI's own on-disk output copy (it
+    # embeds the full prompt/workflow as PNG metadata), not just the sidecar.
+    assert calls.get("delete_outputs") is True
 
 
 def test_repl_generate_image_logmode_keeps_sidecar(tmp_path, monkeypatch):
@@ -187,6 +207,7 @@ def test_repl_generate_image_logmode_keeps_sidecar(tmp_path, monkeypatch):
         cli._handle_command("/generate-image a cat", [], {}, engine=engine)
 
     assert calls.get("write_sidecar") is True
+    assert not calls.get("delete_outputs")
 
 
 if __name__ == "__main__":

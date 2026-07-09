@@ -168,6 +168,72 @@ def test_changelog_rewriting_a_published_entry_fails():
     assert removed == ["- the GUI"], removed
 
 
+def test_changelog_redating_a_published_version_header_fails():
+    """NEGATIVE (the confirmed gap): the guard skipped every '## ' line when building
+    the protected set, including the version header ITSELF, so silently changing a
+    published release's ship date in place went undetected. The header carries real
+    shipped-record content (version + date), same as any body entry."""
+    ch = _load_check_hygiene()
+    new = _BASE_CHANGELOG.replace(
+        "## [0.1.0] - 2026-07-04", "## [0.1.0] - 2026-07-09")
+    removed = ch._changelog_removed_lines(_BASE_CHANGELOG, new)
+    assert removed == ["## [0.1.0] - 2026-07-04"], removed
+
+
+def test_changelog_renumbering_a_published_version_header_fails():
+    """Same gap, the other direction: silently renumbering a shipped version (e.g.
+    passing off 0.1.0 as 0.1.1) must be caught too."""
+    ch = _load_check_hygiene()
+    new = _BASE_CHANGELOG.replace(
+        "## [0.1.0] - 2026-07-04", "## [0.1.1] - 2026-07-04")
+    removed = ch._changelog_removed_lines(_BASE_CHANGELOG, new)
+    assert removed == ["## [0.1.0] - 2026-07-04"], removed
+
+
+def test_changelog_renaming_a_published_subsection_header_fails():
+    """NEGATIVE (a second confirmed gap, same mechanism): '### Added' etc. inside an
+    already-published section was never in the protected set (the 'stripped.
+    startswith(\"#\")' catch-all excluded it unconditionally), so flipping it to
+    '### Removed' - misrepresenting what a published release shipped, while leaving
+    the bullet text unchanged - went undetected. Reproduces the reviewer's exact
+    repro: pre-fix this returned []."""
+    ch = _load_check_hygiene()
+    new = _BASE_CHANGELOG.replace("### Added\n- inference and CLI\n- the GUI",
+                                  "### Removed\n- inference and CLI\n- the GUI")
+    removed = ch._changelog_removed_lines(_BASE_CHANGELOG, new)
+    assert removed == ["### Added"], removed
+
+
+def test_changelog_deleting_a_published_subsection_header_fails():
+    """Same gap, the other reviewer-confirmed attack: deleting '### Added' entirely
+    (orphaning its bullets directly under the version header) must also be caught."""
+    ch = _load_check_hygiene()
+    new = _BASE_CHANGELOG.replace("### Added\n- inference and CLI\n- the GUI",
+                                  "- inference and CLI\n- the GUI")
+    removed = ch._changelog_removed_lines(_BASE_CHANGELOG, new)
+    assert removed == ["### Added"], removed
+
+
+def test_changelog_unreleased_subsection_headers_stay_freely_editable():
+    """A subsection header under '## [Unreleased]' (not yet published) must NOT
+    become protected - only ones inside an already-published version section."""
+    ch = _load_check_hygiene()
+    new = _BASE_CHANGELOG.replace(
+        "## [Unreleased]\n\n### Added\n- work in progress\n",
+        "## [Unreleased]\n\n### Changed\n- work in progress\n")
+    removed = ch._changelog_removed_lines(_BASE_CHANGELOG, new)
+    assert removed == [], removed
+
+
+def test_changelog_unreleased_header_stays_freely_editable():
+    """The '## [Unreleased]' header must NOT become protected - only VERSIONED
+    headers (a leading digit inside the brackets) are frozen."""
+    ch = _load_check_hygiene()
+    new = _BASE_CHANGELOG.replace("## [Unreleased]", "## [Unreleased draft]")
+    removed = ch._changelog_removed_lines(_BASE_CHANGELOG, new)
+    assert removed == [], removed
+
+
 def test_changelog_removed_lines_release_rename_is_clean():
     """Cutting a release renames the `## [Unreleased]` header, adds a version
     header, and rewrites the compare link + adds a new tag link. Only headers and
@@ -217,6 +283,22 @@ def test_changelog_append_only_guard_flags_a_committed_baseline_deletion(tmp_pat
 
     # delete an existing entry -> FAIL
     cl.write_text(_BASE_CHANGELOG.replace("- the GUI\n", ""), encoding="utf-8")
+    problems = ch._changelog_append_only()
+    assert problems and any("append-only" in p for p in problems), problems
+
+
+def test_changelog_append_only_guard_flags_a_published_header_rewrite(tmp_path, monkeypatch):
+    """The git-wired entrypoint (the actual CI/pre-commit-hook gate) must catch a
+    header-only rewrite of a published section too - reproduces the confirmed gap end
+    to end, not just at the pure _changelog_removed_lines layer."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    _init_changelog_repo(tmp_path, _BASE_CHANGELOG)
+    cl = tmp_path / "CHANGELOG.md"
+
+    cl.write_text(
+        _BASE_CHANGELOG.replace("## [0.1.0] - 2026-07-04", "## [0.1.0] - 2026-07-09"),
+        encoding="utf-8")
     problems = ch._changelog_append_only()
     assert problems and any("append-only" in p for p in problems), problems
 

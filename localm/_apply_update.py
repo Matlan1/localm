@@ -20,6 +20,7 @@ to download, signature verification, and the post-swap step.
 from __future__ import annotations
 
 import shutil
+import sys
 import zipfile
 from pathlib import Path
 from typing import Optional
@@ -308,5 +309,10 @@ def post_swap_command(klass: str, backend: Optional[str] = None) -> Optional[lis
     if klass == "deps":
         return ["uv", "pip", "install", "-p", ".venv", "-e", ".[coder,voice,monitor]"]
     if klass == "runtime":
-        return ["localm", "setup-llama", "--backend", backend or "vulkan"]
+        # A bare "localm" argv[0] resolves back to the launcher exe itself when running
+        # as the default native LocaLM.exe build (Windows same-directory command
+        # resolution), which then mis-invokes and rolls the whole update back. Always
+        # re-invoke through the current interpreter, matching every other
+        # self-invocation site (setup_llama.py, applaunch.py, http_server.py, ...).
+        return [sys.executable, "-m", "localm", "setup-llama", "--backend", backend or "vulkan"]
     return None

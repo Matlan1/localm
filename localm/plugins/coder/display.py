@@ -118,6 +118,13 @@ def print_streaming_token(token: str) -> None:
     console.print(token, end="", highlight=False)
 
 
+def print_reasoning_token(token: str) -> None:
+    """Stream a thinking model's reasoning dimmed, so it reads as an aside next
+    to the visible answer rather than being indistinguishable from it (H4,
+    AUD-HIGH-17-3) - mirrors the chat REPL's ``_ThinkPrinter`` styling."""
+    console.print(token, end="", style="dim", highlight=False)
+
+
 def print_streaming_done() -> None:
     console.print()
 

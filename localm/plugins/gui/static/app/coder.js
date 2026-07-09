@@ -123,6 +123,7 @@ export function registerSession(info, { replay }) {
     busy: info.busy || false,
     liveBody: null,
     liveText: "",
+    liveReasoning: "",   // H4: thinking model's reasoning, streamed via "reasoning" events
     pendingCards: [],
     confirmCards: new Map(),   // confirm_id → {card, title, buttons, tool}
     closed: false,
@@ -145,6 +146,20 @@ export function startAssistantBlock(s) {
   const { body } = addMessageRow(s.feedEl, "assistant", "");
   s.liveBody = body;
   s.liveText = "";
+  s.liveReasoning = "";
+}
+
+// H4: rebuild <think>reasoning</think>content from the two separately-streamed
+// accumulators and hand it to renderMarkdown, which already knows how to split
+// that back into a collapsible .think-block + the main body (same trick the
+// regular chat GUI uses in settings-perf.js's runCompletion). Both the "token"
+// and "reasoning" event handlers call this so a mid-stream re-render of one
+// channel never clobbers the other.
+function renderLiveBlock(s) {
+  const stick = nearBottom(s.feedEl);
+  renderMarkdown(s.liveBody,
+    s.liveReasoning ? `<think>\n${s.liveReasoning}\n</think>\n${s.liveText}` : s.liveText);
+  if (stick) s.feedEl.scrollTop = s.feedEl.scrollHeight;
 }
 
 export function flushAssistantBlock(s) {
@@ -157,6 +172,7 @@ export function flushAssistantBlock(s) {
   }
   s.liveBody = null;
   s.liveText = "";
+  s.liveReasoning = "";
 }
 
 export function renderDiff(text) {
@@ -278,18 +294,24 @@ export function buildConfirmCard(s, ev) {
 }
 
 export function handleCoderEvent(s, ev) {
-  // Keep a light event log (no token spam) so "export" can rebuild the
-  // session as markdown without another server round-trip.
-  if (ev.type !== "token") {
+  // Keep a light event log (no token/reasoning spam) so "export" can rebuild
+  // the session as markdown without another server round-trip.
+  if (ev.type !== "token" && ev.type !== "reasoning") {
     (s.eventLog = s.eventLog || []).push(ev);
   }
   switch (ev.type) {
     case "token": {
       startAssistantBlock(s);
       s.liveText += ev.text;
-      const stick = nearBottom(s.feedEl);
-      renderMarkdown(s.liveBody, s.liveText);
-      if (stick) s.feedEl.scrollTop = s.feedEl.scrollHeight;
+      renderLiveBlock(s);
+      break;
+    }
+    case "reasoning": {
+      // H4: a thinking model's reasoning (AUD-HIGH-17-3), kept in its own
+      // collapsible block via renderLiveBlock - never mixed into the answer.
+      startAssistantBlock(s);
+      s.liveReasoning += ev.text;
+      renderLiveBlock(s);
       break;
     }
     case "turn": {

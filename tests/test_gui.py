@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Tests for the GUI plugin: coder sessions, agent event hooks, web endpoints."""
 
+import asyncio
 import json
 import queue
 import threading
@@ -750,6 +751,57 @@ class TestModelEndpoints:
         assert r.status_code == 400
 
 
+class TestPullTokenRedeemEndpoint:
+    """SEC-PULL-CONFIRM: `POST /api/models/pull-token/redeem` is the HTTP surface
+    init.js calls before auto-starting a `?pull=` deep link with zero clicks. Only
+    a genuine mint_pull_grant token, bound to the exact spec, unused and
+    unexpired, may succeed - see TestPullGrant in test_gui_key_bootstrap.py for
+    the grant primitive itself (single-use, spec-bound, expiring)."""
+
+    def test_valid_token_redeems(self, gui_app):
+        from localm.plugins.gui.web import mint_pull_grant
+        app, _ = gui_app
+        token = mint_pull_grant(app, "owner/repo:m.gguf")
+        with TestClient(app) as client:
+            r = client.post("/api/models/pull-token/redeem",
+                            json={"spec": "owner/repo:m.gguf", "token": token})
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+
+    def test_token_is_single_use_over_http(self, gui_app):
+        from localm.plugins.gui.web import mint_pull_grant
+        app, _ = gui_app
+        token = mint_pull_grant(app, "owner/repo:m.gguf")
+        with TestClient(app) as client:
+            first = client.post("/api/models/pull-token/redeem",
+                                json={"spec": "owner/repo:m.gguf", "token": token})
+            second = client.post("/api/models/pull-token/redeem",
+                                 json={"spec": "owner/repo:m.gguf", "token": token})
+        assert first.status_code == 200
+        assert second.status_code == 403
+
+    def test_forged_token_is_rejected(self, gui_app):
+        app, _ = gui_app
+        with TestClient(app) as client:
+            r = client.post(
+                "/api/models/pull-token/redeem",
+                json={"spec": "owner/repo:m.gguf", "token": "forged-never-minted"})
+        assert r.status_code == 403
+
+    def test_token_minted_for_a_different_spec_is_rejected(self, gui_app):
+        """A hidden iframe pairing an observed token with its OWN `pull=` spec
+        must not redeem - the grant is bound to the exact spec it was minted
+        for, not just 'some valid token exists'."""
+        from localm.plugins.gui.web import mint_pull_grant
+        app, _ = gui_app
+        token = mint_pull_grant(app, "owner/repo:m.gguf")
+        with TestClient(app) as client:
+            r = client.post(
+                "/api/models/pull-token/redeem",
+                json={"spec": "attacker/evil:payload.gguf", "token": token})
+        assert r.status_code == 403
+
+
 @pytest.fixture
 def coder_app(tmp_path, monkeypatch):
     """GUI app with the builtin coder plugin installed; isolated home.
@@ -1181,26 +1233,30 @@ class TestGuiNoModel:
 
 
 class TestJobs:
-    def test_cli_job_streams_lines_and_ends(self):
+    @pytest.mark.anyio
+    async def test_cli_job_streams_lines_and_ends(self):
         from localm.plugins.gui.jobs import JobManager
         mgr = JobManager()
         # Use python -m localm --help via start_cli's own python: cheap + real
         job = mgr.start_cli("pull", ["--help"])
+        q = job.subscribe()
         events = []
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             try:
-                ev = job.events.get(timeout=0.5)
-            except queue.Empty:
+                ev = await asyncio.wait_for(q.get(), timeout=0.5)
+            except asyncio.TimeoutError:
                 continue
             events.append(ev)
             if ev["type"] == "end":
                 break
+        job.unsubscribe(q)
         assert events[-1]["type"] == "end"
         assert events[-1]["status"] == "done"
         assert any("localm" in e.get("text", "") for e in events if e["type"] == "line")
 
-    def test_pull_flaglike_spec_fails_not_help(self):
+    @pytest.mark.anyio
+    async def test_pull_flaglike_spec_fails_not_help(self):
         """End-to-end: `pull -- -h` treats -h as the spec (unknown) and exits
         non-zero, so the job is 'failed' and no Click help text is dumped."""
         from localm.plugins.gui.jobs import JobManager
@@ -1208,23 +1264,26 @@ class TestJobs:
         # cli_args is the full argv after "-m localm" (the endpoint passes the
         # "pull" subcommand itself), so this runs: localm pull -- -h
         job = mgr.start_cli("pull", ["pull", "--", "-h"])
+        q = job.subscribe()
         events = []
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             try:
-                ev = job.events.get(timeout=0.5)
-            except queue.Empty:
+                ev = await asyncio.wait_for(q.get(), timeout=0.5)
+            except asyncio.TimeoutError:
                 continue
             events.append(ev)
             if ev["type"] == "end":
                 break
+        job.unsubscribe(q)
         assert events[-1]["type"] == "end"
         assert events[-1]["status"] == "failed"
         text = " ".join(e.get("text", "") for e in events if e["type"] == "line")
         assert "Usage:" not in text          # help was NOT dumped
         assert "Unknown spec" in text        # treated as a (bad) model spec
 
-    def test_fn_job_success_and_failure(self):
+    @pytest.mark.anyio
+    async def test_fn_job_success_and_failure(self):
         from localm.plugins.gui.jobs import JobManager
         mgr = JobManager()
 
@@ -1233,16 +1292,18 @@ class TestJobs:
         boom_job = mgr.start_fn("imagine", lambda job: (_ for _ in ()).throw(RuntimeError("x")))
 
         for job, status in ((ok_job, "done"), (fail_job, "failed"), (boom_job, "failed")):
+            q = job.subscribe()
             end = None
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 try:
-                    ev = job.events.get(timeout=0.5)
-                except queue.Empty:
+                    ev = await asyncio.wait_for(q.get(), timeout=0.5)
+                except asyncio.TimeoutError:
                     continue
                 if ev["type"] == "end":
                     end = ev
                     break
+            job.unsubscribe(q)
             assert end is not None
             assert end["status"] == status
 
@@ -1426,6 +1487,70 @@ class TestNetworkToolGating:
         assert "confirm_request" not in types
         result = next(e for e in events if e["type"] == "tool_result")
         assert result["ok"] is True
+
+
+class TestConcurrentConfirmations:
+    """Two non-destructive network tools in the SAME turn (both requiring
+    confirmation under net_mode=ask) are dispatched concurrently by
+    Agent._execute_tools' parallel batch (agent/loop.py groups consecutive
+    non-destructive calls and runs them in a ThreadPoolExecutor). A single
+    `CoderSession._pending` slot means the second call's _confirm() clobbers
+    the first's, so the first request's confirm_id can never be matched by
+    answer_confirm() again - it just sits until the timeout auto-rejects it."""
+
+    @staticmethod
+    def _dual_network_call():
+        return (
+            "Fetching and searching.\n"
+            "<tool_call>\n"
+            + json.dumps({"name": "fetch_url",
+                          "args": {"url": "https://example.com/a"}})
+            + "\n</tool_call>\n"
+            "<tool_call>\n"
+            + json.dumps({"name": "web_search", "args": {"query": "b"}})
+            + "\n</tool_call>"
+        )
+
+    def test_two_concurrent_confirmations_are_both_resolvable(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LOCALM_NET_MODE", "ask")
+        # Keep any orphaned confirmation short-lived instead of the 600s
+        # default, so a reproduction of the bug (one confirm never matched)
+        # settles in ~1s instead of leaving a daemon thread blocked for 10
+        # minutes regardless of whether the test passes or fails.
+        monkeypatch.setattr("localm.plugins.coder.sessions._confirm_timeout",
+                            lambda: 1.0)
+        backend = ScriptedBackend([self._dual_network_call(), "Done."])
+        session = CoderSession(tmp_path, backend, auto_approve=False)
+        session.send_message("fetch and search")
+
+        # Collect confirm_request events until both concurrent calls have
+        # registered one - the order between them is not deterministic.
+        requests = []
+        deadline = time.monotonic() + 10.0
+        while len(requests) < 2 and time.monotonic() < deadline:
+            try:
+                ev = session.events.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if ev["type"] == "confirm_request":
+                requests.append(ev)
+        assert len(requests) == 2, f"expected 2 confirm_request events, got {requests}"
+
+        ids = {r["confirm_id"] for r in requests}
+        assert len(ids) == 2, "the two concurrent calls must get distinct confirm ids"
+
+        # Reject both (never fetch/search for real) - the fix under test is
+        # whether each id is independently answerable, not the tool outcome.
+        results = {cid: session.answer_confirm(cid, approved=False) for cid in ids}
+        assert results == {cid: True for cid in ids}, (
+            "a concurrently-issued confirmation was silently dropped instead "
+            f"of being answered (answer_confirm results: {results})"
+        )
+
+        events = _drain(session, until_types={"final"})
+        tool_results = [e for e in events if e["type"] == "tool_result"]
+        assert len(tool_results) == 2
+        assert all(r["ok"] is False for r in tool_results), tool_results
 
 
 # ------------------------------------------------------------------ #

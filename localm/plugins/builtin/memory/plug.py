@@ -161,25 +161,34 @@ def _migrate_legacy(store) -> None:
     Gated on the chat session mode (privacy skips - a migration materialises new
     durable records, which is a write) and on a per-namespace marker file so it
     never re-imports. Best-effort: a failure is logged, never fatal, and never
-    reported as a success it did not perform (RULE 5)."""
+    reported as a success it did not perform (RULE 5).
+
+    CHK-MEM-LOCK: this batches several ``add(..., save=False)`` calls into ONE
+    save, so it must hold the namespace lock across the WHOLE batch (a reload +
+    loop + one final save), the same way rag's ``_add_paths_locked`` reloads once
+    before its per-file loop rather than once per file - the per-call add()/
+    delete() lock is not enough here, it would only serialise each individual
+    append, not the read-then-decide-then-write-once shape of a batch."""
     marker = store.path.with_suffix(".legacy-imported")
     if marker.exists() or not _persist_enabled():
         return
     try:
         from localm.memory import MemoryRecord
         ef = _embed_fn()
-        existing = {r.text.casefold() for r in store.all()}
-        added = False
-        for bullet in _legacy_bullets():
-            if bullet.casefold() in existing:
-                continue
-            store.add(MemoryRecord(text=bullet, kind="semantic",
-                                   source="import", importance=0.7),
-                      embed_fn=ef, save=False)
-            existing.add(bullet.casefold())
-            added = True
-        if added:
-            store._save()                        # one batch write
+        with store.lock():
+            store._load()
+            existing = {r.text.casefold() for r in store.all()}
+            added = False
+            for bullet in _legacy_bullets():
+                if bullet.casefold() in existing:
+                    continue
+                store.add(MemoryRecord(text=bullet, kind="semantic",
+                                       source="import", importance=0.7),
+                          embed_fn=ef, save=False)
+                existing.add(bullet.casefold())
+                added = True
+            if added:
+                store._save()                    # one batch write
     except Exception as e:                        # never break chat on migration
         from localm.debuglog import logger
         logger.debug("chat memory legacy migration failed: %s", e)
@@ -235,7 +244,13 @@ async def memory_get(request: Request = None):
 async def memory_put(req: MemoryUpdate, request: Request = None):
     """Bulk-edit: the modal textarea is the authoritative user memory. DIFF-AWARE:
     a line matching an existing record's text keeps that record as-is; only new
-    lines become new user records; omitted lines are deletes."""
+    lines become new user records; omitted lines are deletes.
+
+    CHK-MEM-LOCK: the existing/records diff below is a snapshot-then-decide-then-
+    write sequence, same shape as consolidation's - a concurrent POST
+    /api/memory/append (e.g. a second browser tab) landing between the snapshot
+    and store.replace() would be silently discarded by replace()'s whole-namespace
+    overwrite if this route didn't hold the lock across the whole thing."""
     if not _persist_enabled():
         raise HTTPException(
             403, "Memory writes are off in privacy mode (no new traces). "
@@ -256,17 +271,19 @@ async def memory_put(req: MemoryUpdate, request: Request = None):
     store = _chat_store(principal)
 
     _migrate_legacy(store)
-    existing = {r.text: r for r in store.all()}
-    seen: set = set()
-    records: list = []
-    for f in facts:
-        if f in seen:
-            continue                          # collapse duplicate lines
-        seen.add(f)
-        keep = existing.get(f)
-        records.append(keep if keep is not None else MemoryRecord(
-            text=f, kind="semantic", source="user", importance=0.8))
-    store.replace(records, embed_fn=_embed_fn())
+    with store.lock():
+        store._load()
+        existing = {r.text: r for r in store.all()}
+        seen: set = set()
+        records: list = []
+        for f in facts:
+            if f in seen:
+                continue                      # collapse duplicate lines
+            seen.add(f)
+            keep = existing.get(f)
+            records.append(keep if keep is not None else MemoryRecord(
+                text=f, kind="semantic", source="user", importance=0.8))
+        store.replace(records, embed_fn=_embed_fn())
     return {"status": "saved", "count": len(records)}
 
 

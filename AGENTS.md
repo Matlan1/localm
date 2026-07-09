@@ -46,11 +46,13 @@ Keep personal and local files out of git with `.gitignore`: `config.json`,
 `registry.json`, `*_local.json` personal workflows, `.venv/`, the native
 binaries under `runtime/localm_llama_runtime/lib/`, `home/`, and `.claude/`.
 Also keep out the installed-plugins directory (`~/.localm/plugins/`, the
-user's own enabled plugins) and any per-plugin local config that overrides a
-tracked template: `tts.json` (overrides `tts.example.json`) and
-`flux_workflow.json` (overrides `flux_workflow.example.json`). Commit the
-`*.example.json` templates, never the personal workflow, voice, or model
-choices they stand in for.
+user's own enabled plugins) and any per-plugin local config file that
+overrides a tracked template, such as `flux_workflow.json` (overrides
+`flux_workflow.example.json`). Commit the `*.example.json` templates, never
+the personal workflow choices they stand in for. A plugin's other personal
+settings, such as the tts plugin's voice/model choice, live inside the
+already-gitignored `config.json` itself, under `config["plugins"][<name>]`,
+not a separate file.
 
 ### 3. No em-dashes
 
@@ -146,7 +148,7 @@ maintainer explicitly tells you, in the current session, to remove something.
 
 Other gitignored local state (do not delete without being asked): `home/`,
 `config.json`, `registry.json`, the installed-plugins dir, and the personal
-`*_workflow*.json` / `tts.json` overrides listed under rule 2.
+`*_workflow*.json` override (e.g. `flux_workflow.json`) listed under rule 2.
 
 ### `issues/` belongs to the maintainer; agent files go in `dev-notes/` (BINDING)
 
@@ -213,7 +215,10 @@ into a version at release time.
 This is enforced, not merely asked. The same `check_hygiene.py` pass diffs the
 working `CHANGELOG.md` against the published-record baseline (the merge-base with
 `origin/master`, else the last commit) and fails if any PUBLISHED entry line was
-removed or rewritten; `[Unreleased]` lines, markdown headers, and the link-reference
+removed or rewritten - INCLUDING a published section's own `## [x.y.z]` version
+header (its number and ship date) and any `### Added`-style subsection header
+within it, not just its bullet entries. Only lines under `## [Unreleased]` (its own
+header, and any intro text before the first version header) and the link-reference
 definitions at the bottom are exempt (cutting a release legitimately renames the
 `[Unreleased]` header to a version and updates the compare link). The release
 tooling honors the same invariant: `scripts/make_release.py` / `build_release.py`

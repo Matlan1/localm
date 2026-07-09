@@ -111,12 +111,21 @@ Contents:read token and require `SHARED_SECRET`.
 ## Releases (for the updater)
 
 The updater offers a build when the latest **GitHub Release** tag is newer than the
-running `VERSION`. To publish one:
+running `VERSION`, and verifies the shipped `.sig` against the public key pinned in
+`localm/updater.py` before applying. The ONE real release procedure is
+[`scripts/make_release.py`](../../scripts/make_release.py) (see
+[`RELEASE.md`](../../RELEASE.md)): it assembles `build.zip` from
+`release-manifest.toml` (never a plain `git archive` of the whole tracked tree),
+signs it with the offline Ed25519 key, and gates `--publish` on a clean/pinned
+commit, a live functional-verification record, and a green CI run before creating
+the GitHub Release. There is no other supported way to cut a release; do not hand-
+roll one.
 
-1. Bump `VERSION` (repo root) and `pyproject.toml` version; commit.
-2. Package a build zip (the repo tree minus `.venv/`, the data dir, and `.git/`) with
-   `tools/bugreport-proxy/make-release.ps1` (or `.sh`).
-3. `gh release create vX.Y.Z dist/localm-vX.Y.Z.zip --notes "..."` (private repo).
+```
+export LOCALM_SIGNING_KEY=/path/to/update_signing_key.pem   # kept OUT of the repo
+python scripts/make_release.py              # build + sign -> dist/
+python scripts/make_release.py --publish    # + gh release create (after the gates pass)
+```
 
 Testers' apps see it on their next check (a quiet startup check + a manual button);
 applying is always their explicit action.

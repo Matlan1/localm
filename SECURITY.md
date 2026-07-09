@@ -12,11 +12,14 @@ disclosure timeline.
 localm is a local-first, single-owner application. API access is gated by a
 **bearer key**:
 
-- When **no key is configured**, reads and the inference API are **fail-open by
-  design** - the server binds to localhost and serves them without auth, for
-  frictionless local use. State-changing management routes still require the
-  loopback shell token (see *State-changing endpoints* below), so another local
-  program cannot silently drive a keyless install.
+- When **no key is configured**, the inference API and ordinary reads (model
+  listing, health) are **fail-open by design** - the server binds to localhost
+  and serves them without auth, for frictionless local use. State-changing
+  management routes, and reads of management/metadata endpoints specifically
+  (named keys, server config, host stats, the filesystem browser), still
+  require the loopback shell token (see *State-changing endpoints* below), so
+  another local program cannot silently drive a keyless install or read those
+  endpoints either.
 - When a key **is** configured (`LOCALM_API_KEY`), every `/v1` and `/api` route
   requires `Authorization: Bearer <key>`, gated by capability scopes: model-read
   routes (`GET /v1/models`, `GET /v1/models/{id}`) need `models:read`, plugin
@@ -56,6 +59,20 @@ through the loopback GUI, or set a key (`localm key generate`). Reads and the
 inference API stay open. A configured `cors_origins` is trusted for cross-origin
 *reads*, but state changes still need a key or the shell token, so a forged `Origin`
 header cannot be used as a management credential.
+
+### Management/metadata reads (open mode)
+
+The same-origin requirement above also applies to `GET` reads of management and
+metadata endpoints (named keys, server config, host stats, uploads/conversations/
+plugins listings, and the filesystem browser used by the file picker) when no key
+is configured: the open-mode shell token those routes accept is bound to the SAME
+same-origin-or-allowlist check as a state change, not just to token possession. This
+closes a specific gap CORS's own permissive `localhost`/`127.0.0.1` origin policy
+would otherwise create: without it, any other program on the machine that can read
+the loopback GUI shell's HTML (CORS trusts every `localhost:PORT` origin to read a
+matching response) could lift the embedded token and replay it cross-origin against
+these routes. `GET /v1/models` and `GET /health` are exempt (unauthenticated by
+design, matching the inference API's own cross-origin posture).
 
 ## Capability scopes grant host access - only issue keys to trusted clients
 

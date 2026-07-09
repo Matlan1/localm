@@ -446,6 +446,25 @@ class TestGenerateImageSafety:
             self._call(server, {"prompt": "x"})
         assert mock_gen.call_args.kwargs.get("write_sidecar") is expected_write_sidecar
 
+    def test_privacy_mode_deletes_comfy_output_copy(self, monkeypatch):
+        """Privacy mode must also delete ComfyUI's own on-disk output copy
+        (it embeds the full prompt/workflow as PNG metadata) - not just
+        suppress the sidecar. See CONSOLIDATED-FINDINGS item 2."""
+        monkeypatch.setenv("LOCALM_MODE", "privacy")
+        server, _ = _server()
+        with patch("localm.image_gen.comfy.generate_image",
+                   return_value=(True, "ok")) as mock_gen:
+            self._call(server, {"prompt": "x"})
+        assert mock_gen.call_args.kwargs.get("delete_outputs") is True
+
+    def test_logmode_keeps_output_copy(self, monkeypatch):
+        monkeypatch.setenv("LOCALM_MODE", "log")
+        server, _ = _server()
+        with patch("localm.image_gen.comfy.generate_image",
+                   return_value=(True, "ok")) as mock_gen:
+            self._call(server, {"prompt": "x"})
+        assert not mock_gen.call_args.kwargs.get("delete_outputs")
+
     def test_generate_image_keeps_stdout_clean(self, capsys):
         """BUG-11: comfy progress output must go to stderr, not the JSON-RPC stdout."""
         server, _ = _server()

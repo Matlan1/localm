@@ -261,3 +261,130 @@ def test_tag_available_peels_annotated_tag_to_commit():
         (["rev-parse", "HEAD"], 0, _HEAD + "\n"),
     ])
     make_release._require_tag_available("v0.1.1", runner=r)   # peeled == HEAD -> ok
+
+
+# --------------------------------------------------------------------------- #
+#  release TOCTOU fix: --publish must build from the GATED commit, not disk   #
+# --------------------------------------------------------------------------- #
+#
+# scripts/make_release.py:313-334 used to run the clean-tree/HEAD/tag/verification-
+# record gates, wait (multiple minutes) on require_ci_green(), and only THEN call
+# build_release.build(out, force=True) - which read every file's bytes from LIVE DISK.
+# A tracked-file edit landing during the CI wait would ship in the signed artifact
+# having never passed CI. The fix: capture HEAD's sha immediately after the clean-
+# tree/HEAD==origin gates (before the CI wait) and pass it through as build_release.
+# build(..., commit=<sha>), which reads via git archive at that pinned commit (see
+# tests/test_release_manifest.py for the read-side proof). This test proves the
+# ORCHESTRATION side: that --publish actually threads that pinned sha through, not
+# just that build_release.build() is *capable* of pinned reads.
+
+def test_publish_pins_the_build_to_the_verified_head_sha(tmp_path, monkeypatch):
+    """Full --publish flow (every gate + git call monkeypatched, no live network/git):
+    build_release.build() must be invoked with commit=<the HEAD sha resolved right
+    after the clean-tree/HEAD==origin gates>, not commit=None (which would mean 'read
+    from whatever is on disk once CI finishes').
+
+    Also asserts the ORDERING, not just the final value: the sha must be captured
+    (git rev-parse HEAD) BEFORE require_ci_green()'s multi-minute wait, not after -
+    that is the actual point of the fix (closing the TOCTOU window CI takes to run).
+    A prior version of this test only checked the final captured value, which cannot
+    tell 'captured before the wait' apart from 'captured after it' since every gate
+    was a stateless no-op; a reintroduced ordering bug (moving the capture below
+    require_ci_green) was confirmed to still pass it. This version uses a shared
+    call_order list so a regression is caught even though the final commit value
+    would look identical either way."""
+    pinned_sha = "f" * 40
+    call_order = []
+
+    monkeypatch.setattr(make_release, "_require_clean_tree",
+                        lambda: call_order.append("clean_tree"))
+    monkeypatch.setattr(make_release, "_require_head_matches_origin",
+                        lambda ref: call_order.append("head_matches_origin"))
+
+    def fake_git(args, runner=None):
+        if list(args) == ["rev-parse", "HEAD"]:
+            call_order.append("git_rev_parse_head")
+        return types.SimpleNamespace(returncode=0, stdout=pinned_sha + "\n", stderr="")
+    monkeypatch.setattr(make_release, "_git", fake_git)
+
+    monkeypatch.setattr(make_release, "_require_tag_available",
+                        lambda tag: call_order.append("tag_available"))
+    monkeypatch.setattr(make_release, "_require_verification_record",
+                        lambda: call_order.append("verification_record"))
+    monkeypatch.setattr(make_release, "require_ci_green",
+                        lambda ref: call_order.append("ci_green"))
+
+    captured = {}
+
+    def fake_build(out, *, force=False, commit=None):
+        call_order.append("build")
+        captured["commit"] = commit
+        captured["force"] = force
+        return ["VERSION", "pyproject.toml"]
+    monkeypatch.setattr(make_release.build_release, "build", fake_build)
+
+    def fake_sign(zip_path, key, sig_path):
+        sig_path.write_text("c2ln", encoding="utf-8")
+        return 0
+    monkeypatch.setattr(make_release.sign_release, "_sign", fake_sign)
+    monkeypatch.setattr(make_release, "_verify_against_pinned", lambda out, sig: None)
+    monkeypatch.setattr(make_release, "smoke_test", lambda out: None)
+    monkeypatch.setattr(make_release.subprocess, "run",
+                        lambda *a, **k: types.SimpleNamespace(returncode=0))
+
+    key = tmp_path / "key.pem"
+    key.write_text("dummy", encoding="utf-8")
+    out = tmp_path / "build.zip"
+
+    rc = make_release.main(["--key", str(key), "--out", str(out), "--publish"])
+
+    assert rc == 0
+    assert captured["commit"] == pinned_sha, (
+        "build_release.build() must receive the pinned HEAD sha, not None "
+        "(None means 'read from live disk' - the TOCTOU gap)")
+    assert captured["force"] is True
+    assert "git_rev_parse_head" in call_order
+
+    # The ordering property: the sha capture must happen strictly before the
+    # multi-minute CI wait, and the build must happen strictly after it (CI must
+    # actually run before the artifact is assembled).
+    idx_capture = call_order.index("git_rev_parse_head")
+    idx_ci_wait = call_order.index("ci_green")
+    idx_build = call_order.index("build")
+    assert idx_capture < idx_ci_wait, (
+        f"the HEAD sha must be captured BEFORE the CI wait, not after "
+        f"(call_order={call_order!r})")
+    assert idx_ci_wait < idx_build, (
+        f"the build must happen AFTER CI passes, not before "
+        f"(call_order={call_order!r})")
+    # And the gate ordering documented in make_release.py's own comments.
+    assert call_order.index("clean_tree") < call_order.index("head_matches_origin")
+    assert call_order.index("head_matches_origin") < idx_capture
+
+
+def test_non_publish_build_is_not_pinned_to_a_commit(tmp_path, monkeypatch):
+    """A plain (no --publish) build is local dev iteration with no CI/verification
+    gates run at all, so there is no verified commit to pin to - it must keep reading
+    the live working tree (commit=None), exactly as before this fix."""
+    captured = {}
+
+    def fake_build(out, *, force=False, commit=None):
+        captured["commit"] = commit
+        return ["VERSION", "pyproject.toml"]
+    monkeypatch.setattr(make_release.build_release, "build", fake_build)
+
+    def fake_sign(zip_path, key, sig_path):
+        sig_path.write_text("c2ln", encoding="utf-8")
+        return 0
+    monkeypatch.setattr(make_release.sign_release, "_sign", fake_sign)
+    monkeypatch.setattr(make_release, "_verify_against_pinned", lambda out, sig: None)
+    monkeypatch.setattr(make_release, "smoke_test", lambda out: None)
+
+    key = tmp_path / "key.pem"
+    key.write_text("dummy", encoding="utf-8")
+    out = tmp_path / "build.zip"
+
+    rc = make_release.main(["--key", str(key), "--out", str(out)])   # no --publish
+
+    assert rc == 0
+    assert captured["commit"] is None

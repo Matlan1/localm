@@ -72,7 +72,7 @@ class TestNullAuditLog:
         # None of these should raise or write anything
         log.set_turn(1)
         log.user("hello")
-        log.llm("response", tokens=100)
+        log.llm("response", tokens=100, reasoning="scratchpad")
         log.tool_call("read_file", {"path": "x.py"})
         log.tool_result("read_file", ok=True, summary="10 lines")
         log.close()
@@ -128,6 +128,29 @@ class TestAuditLog:
         llm_evts = [e for e in events if e["type"] == "llm"]
         assert llm_evts[0]["turn"] == 2
         assert llm_evts[0]["data"]["tokens"] == 500
+
+    def test_llm_event_records_reasoning_separately(self, tmp_path):
+        """AUD-HIGH-17-3: a thinking model's reasoning is stored in its OWN
+        field, never appended to the visible-answer 'content' field."""
+        with patch("localm.plugins.coder.audit._SESSIONS_DIR", tmp_path):
+            log = AuditLog(label="t")
+        log.llm("The answer.", tokens=10, reasoning="because reasons")
+        log.close()
+        events = [json.loads(l) for l in log.path.read_text().splitlines()]
+        llm_evts = [e for e in events if e["type"] == "llm"]
+        assert llm_evts[0]["data"]["content"] == "The answer."
+        assert llm_evts[0]["data"]["reasoning"] == "because reasons"
+
+    def test_llm_event_without_reasoning_arg_is_empty_string(self, tmp_path):
+        """Back-compat: a caller that never passes reasoning= still gets a
+        well-formed (empty) field, not a missing key."""
+        with patch("localm.plugins.coder.audit._SESSIONS_DIR", tmp_path):
+            log = AuditLog(label="t")
+        log.llm("plain answer")
+        log.close()
+        events = [json.loads(l) for l in log.path.read_text().splitlines()]
+        llm_evts = [e for e in events if e["type"] == "llm"]
+        assert llm_evts[0]["data"]["reasoning"] == ""
 
     def test_close_writes_end_event(self, tmp_path):
         with patch("localm.plugins.coder.audit._SESSIONS_DIR", tmp_path):
