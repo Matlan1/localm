@@ -342,7 +342,7 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         except ValueError as e:
             return _text_result(str(e), is_error=True)
 
-        write_sidecar = effective_mode("mcp") != SessionMode.PRIVACY
+        is_privacy = effective_mode("mcp") == SessionMode.PRIVACY
         # comfy.generate_image builds its own rich Console / Progress on stdout;
         # the JSON-RPC frame stream lives on stdout too, so route any stray
         # output to stderr or it corrupts the protocol (BUG-11).
@@ -354,7 +354,8 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
                 seed=args.get("seed"),
                 input_image=input_p,
                 denoise=args.get("denoise"),
-                write_sidecar=write_sidecar,
+                write_sidecar=not is_privacy,
+                delete_outputs=is_privacy,
             )
         return _text_result(message, is_error=not ok)
 
