@@ -148,28 +148,10 @@ _COMFY_REF = SimpleNamespace(
 
 
 # --- backend facade: dispatch to the configured backend (the I1 seam) --------
+# Shared with the image/video plugins - see media_config.make_backend_facade.
 
-def _impl(s: dict):
-    """The backend for s['backend']: the inline ComfyUI reference for 'comfy'
-    (the default), else backends/<name>.py loaded by media_config. An unknown or
-    missing backend name falls back to comfy so a typo never hard-crashes a
-    generate (the settings 'warning' already carries config notes)."""
-    name = (s.get("backend") or "comfy").strip().lower()
-    if name in ("", "comfy"):
-        return _COMFY_REF
-    try:
-        return media_config.load_backend(__package__, name)
-    except ModuleNotFoundError:
-        return _COMFY_REF
-
-
-def ensure_available(s: dict, *args, **kwargs) -> tuple[bool, str]:
-    return _impl(s).ensure_available(s, *args, **kwargs)
-
-
-def free_vram(s: dict, *args, **kwargs) -> bool:
-    return _impl(s).free_vram(s, *args, **kwargs)
-
-
-def generate(s: dict, *args, **kwargs) -> tuple[bool, str]:
-    return _impl(s).generate(s, *args, **kwargs)
+_facade = media_config.make_backend_facade(__package__, _COMFY_REF)
+_impl = _facade.resolve
+ensure_available = _facade.ensure_available
+free_vram = _facade.free_vram
+generate = _facade.generate

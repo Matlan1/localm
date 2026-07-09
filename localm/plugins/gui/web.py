@@ -112,6 +112,54 @@ def _consume_launch_grant(app, token: str) -> bool:
     return exp is not None and _time.time() <= float(exp)
 
 
+def mint_pull_grant(app, spec: str, ttl: float = 120.0) -> str:
+    """Mint a single-use, short-lived grant binding a specific model *spec* to an
+    unguessable token (SEC-PULL-CONFIRM). ``localm gui --pull SPEC`` puts this in
+    the deep link (``?pull=SPEC&pull_token=...``) so ITS OWN browser tab can
+    auto-start the download with zero clicks; a forged ``?pull=`` link (any other
+    page, or a hidden iframe on any site while localm runs locally) cannot know
+    this secret, so the frontend falls back to an explicit human confirmation
+    instead (see init.js) - a download never starts from a URL alone. Stored
+    in-process on ``app.state.pull_grants`` (dies on restart); expired grants are
+    pruned on each mint so the dict cannot grow."""
+    import secrets as _secrets
+    import time as _time
+    grants = getattr(app.state, "pull_grants", None)
+    if grants is None:
+        grants = {}
+        app.state.pull_grants = grants
+    now = _time.time()
+    for k in [k for k, (_, exp) in grants.items() if exp <= now]:
+        grants.pop(k, None)
+    token = _secrets.token_urlsafe(32)
+    grants[token] = (spec, now + float(ttl))
+    return token
+
+
+def consume_pull_grant(app, spec: str, token: str) -> bool:
+    """Redeem a pull grant: SINGLE-USE, not expired, and bound to the EXACT spec
+    it was minted for (so a leaked/observed token cannot be replayed to authorise
+    pulling a different model). Only popped on an actual match or once expired -
+    a mismatched-spec probe must not burn an otherwise-still-valid grant, or a
+    single wrong guess could deny the legitimate redemption that follows it.
+    False for an unknown/used/expired/mismatched token."""
+    import time as _time
+    if not token:
+        return False
+    grants = getattr(app.state, "pull_grants", None) or {}
+    entry = grants.get(token)
+    if entry is None:
+        return False
+    granted_spec, exp = entry
+    if _time.time() > float(exp):
+        grants.pop(token, None)     # expired: clean up regardless of spec
+        return False
+    if granted_spec != spec:
+        return False                # wrong spec: leave the grant intact
+    grants.pop(token, None)          # right spec, still valid: single use
+    return True
+
+
 def _set_session_cookies(response, key: str, *, secure: bool) -> None:
     """Establish the S2 auth cookie on *response* for a loopback owner: mint an
     OPAQUE server-side session for the current owner *key* and set the HttpOnly
@@ -158,6 +206,11 @@ class PullRequest(BaseModel):
     store: str | None = None
 
 
+class PullTokenRedeemRequest(BaseModel):
+    spec: str
+    token: str
+
+
 class RemoveModelRequest(BaseModel):
     model: str
 
@@ -198,6 +251,34 @@ def _share_inbox() -> Path:
     d = home_dir() / "share_inbox"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+# No recorded owner ("-") means open mode / untracked - unrestricted, mirroring
+# jobs' job_owner_ok "owner=None is unrestricted" semantics.
+_SHARE_NO_OWNER = "-"
+
+
+def _share_entry_name(owner: "str | None", fid: str, filename: str) -> str:
+    """Build an inbox filename carrying its creator's principal id, so a later
+    request can be checked against job_owner_ok before it is read or cleared."""
+    token = owner if owner else _SHARE_NO_OWNER
+    return f"{fid}__{token}__{filename}"
+
+
+def _parse_share_entry(path: Path) -> "tuple[str, str | None, str]":
+    """(fid, owner_or_None, filename) from an inbox entry's name.
+
+    maxsplit=2 so a filename that itself contains "__" is not corrupted (fid and
+    the owner token are both constructed to never contain "_", so the first two
+    separators are unambiguous). Falls back to the pre-ownership two-part format
+    (owner=None, i.e. unrestricted) for any entry left over from before this
+    field existed, so an old on-disk inbox never breaks the listing."""
+    parts = path.name.split("__", 2)
+    if len(parts) == 3:
+        fid, token, name = parts
+        return fid, (None if token == _SHARE_NO_OWNER else token), name
+    fid, _, name = path.name.partition("__")
+    return fid, None, name
 
 
 def _multipart_boundary(content_type: str) -> "bytes | None":

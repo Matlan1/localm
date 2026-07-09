@@ -10,8 +10,9 @@ endpoint separately verifies VRAM was reclaimed before the media model loads
 """
 from __future__ import annotations
 
+import os
 import time
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 _VALID_POLICIES = ("auto", "always", "never")
 # A free-VRAM rise of at least this much after unload counts as "the model was
@@ -140,3 +141,99 @@ def wait_for_vram_release(
             return (False, final)
         sleep(poll_s)
         final = read_free()
+
+
+# --------------------------------------------------------------------------- #
+#  Chat<->media VRAM handoff (shared by the image/music/video plugins)         #
+# --------------------------------------------------------------------------- #
+#
+# The three media plugins swap the chat model out before generating and back in
+# after, each via the same self-authenticated HTTP round trip to this server's
+# own /v1/models/unload and /v1/models/load. Only the progress-message wording
+# (which backend is "the image/music/video backend") differs between them, so it
+# lives here once instead of copy-pasted per plugin.
+
+def unload_chat_for_media(job: Any, self_url: str, media_label: str) -> bool:
+    """Unload the chat model BEFORE a media (image/music/video) model loads, so
+    it gets the VRAM.
+
+    Uses the same bearer-token + TLS handling as the reload path: the
+    ``/v1/models/unload`` endpoint needs the models-write scope, so an
+    unauthenticated call is rejected and the chat model stays resident - the
+    media model then loads on top of it and hangs the GPU driver. Logs the
+    outcome (and the VRAM freed) on *job* so a failure is visible instead of
+    silent. Returns True when the server confirmed the chat model is unloaded.
+    *media_label* names the caller ("image"/"music"/"video") for the messages."""
+    job.push({"type": "line", "text": "Freeing VRAM: unloading the chat model..."})
+    try:
+        import requests as _rq
+        headers = {}
+        key = os.environ.get("LOCALM_API_KEY")
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        from localm import tls as _tls
+        resp = _rq.post(f"{self_url}/models/unload", headers=headers, timeout=300,
+                        verify=_tls.requests_verify(self_url))
+        if not resp.ok:
+            job.push({"type": "line", "text":
+                      f"Could not unload the chat model (HTTP {resp.status_code}) - "
+                      f"the {media_label} backend may run low on VRAM."})
+            return False
+        data = {}
+        try:
+            data = resp.json()
+        except Exception:
+            # resp.ok already confirmed the server accepted the unload, so a body
+            # that does not parse is non-fatal: fall through with empty data to
+            # the generic "Chat model unloaded." message below.
+            pass
+        if data.get("status") == "already_unloaded":
+            job.push({"type": "line", "text":
+                      "No chat model was loaded - VRAM already free."})
+            return True
+        before, after = data.get("vram_before_bytes"), data.get("vram_after_bytes")
+        if data.get("vram_freed") and before is not None and after is not None:
+            gb = max(0.0, (after - before) / 1024 ** 3)
+            job.push({"type": "line", "text":
+                      f"Chat model unloaded - freed {gb:.1f} GB of VRAM."})
+        elif data.get("vram_freed") is False:
+            job.push({"type": "line", "text":
+                      "Chat model unloaded, but VRAM has not dropped yet - continuing."})
+        else:
+            job.push({"type": "line", "text": "Chat model unloaded."})
+        return True
+    except Exception as e:
+        job.push({"type": "line", "text":
+                  f"Could not unload the chat model ({e}) - "
+                  f"the {media_label} backend may run low on VRAM."})
+        return False
+
+
+def reload_chat_after_media(job: Any, self_url: str, s: dict, backend: Any,
+                            media_label: str) -> None:
+    """Hand VRAM back: ask *backend* (the plugin's own backend module, exposing
+    ``free_vram(s)``) to drop its models, then reload the chat model so the next
+    reply is instant. Skipped when reload-after-generate is off."""
+    if not s["reload_after"]:
+        job.push({"type": "line", "text":
+                  f"Keeping the {media_label} backend loaded (reload is off) - "
+                  "the chat model reloads on the next message."})
+        return
+    if not backend.free_vram(s):
+        job.push({"type": "line", "text":
+                  f"The {media_label} backend kept its models in VRAM - the chat "
+                  "model will reload on the next message instead."})
+        return
+    job.push({"type": "line", "text": "Reloading the chat model..."})
+    try:
+        import requests as _rq
+        headers = {}
+        key = os.environ.get("LOCALM_API_KEY")
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        from localm import tls as _tls
+        _rq.post(f"{self_url}/models/load", headers=headers, timeout=300,
+                 verify=_tls.requests_verify(self_url))
+        job.push({"type": "line", "text": "Chat model ready."})
+    except Exception as e:
+        job.push({"type": "line", "text": f"Reload deferred to the next message ({e})."})

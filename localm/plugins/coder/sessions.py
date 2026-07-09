@@ -99,7 +99,13 @@ class CoderSession:
         # Tools the user marked "always allow" on an approval card - those
         # skip the confirmation flow for the rest of this session.
         self.allowed_tools: set[str] = set()
-        self._pending: Optional[_PendingConfirm] = None
+        # Keyed by confirm id, not a single slot - a turn can dispatch 2+
+        # non-destructive tool calls concurrently (e.g. two fetch_url/
+        # web_search calls under net_mode=ask, agent/loop.py's
+        # _execute_tools parallel batch), each needing its own confirmation
+        # in flight at once. A single slot would let the second call's
+        # _confirm() clobber the first's, silently orphaning it until timeout.
+        self._pending: dict[str, _PendingConfirm] = {}
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
 
@@ -173,7 +179,7 @@ class CoderSession:
             diff=self._diff_preview(call),
         )
         with self._lock:
-            self._pending = pending
+            self._pending[pending.id] = pending
         self._push({
             "type": "confirm_request",
             "confirm_id": pending.id,
@@ -183,7 +189,7 @@ class CoderSession:
         })
         answered = pending.answered.wait(timeout=_confirm_timeout())
         with self._lock:
-            self._pending = None
+            self._pending.pop(pending.id, None)
         # Always record the outcome in the event stream. Without this, a
         # reloaded page replays the confirm_request and shows live
         # approve/reject buttons for a confirmation that was already answered
@@ -374,7 +380,7 @@ class CoderSession:
             "turns": self.agent.turns,
             "total_tokens": self.agent.total_tokens,
             "created_at": self.created_at,
-            "pending_confirm": self._pending is not None,
+            "pending_confirm": bool(self._pending),
             "allowed_tools": sorted(self.allowed_tools),
             "changed_files": len(self.agent.changed_files()),
         }
@@ -386,8 +392,8 @@ class CoderSession:
         ``always_allow`` (only honoured on approval) whitelists the tool for
         the rest of the session - later calls skip the confirmation flow."""
         with self._lock:
-            pending = self._pending
-        if pending is None or pending.id != confirm_id:
+            pending = self._pending.get(confirm_id)
+        if pending is None:
             return False
         if approved and always_allow:
             self.allowed_tools.add(pending.tool)
@@ -399,8 +405,8 @@ class CoderSession:
         """Request the agent to stop at the next safe point; unblock confirms."""
         self.agent.request_stop()
         with self._lock:
-            pending = self._pending
-        if pending is not None:
+            pendings = list(self._pending.values())
+        for pending in pendings:
             pending.approved = False
             pending.answered.set()
 

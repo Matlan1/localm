@@ -5,6 +5,9 @@ orchestration is integration-level and verified on a real install; these pin the
 correctness + safety of the file ops (deletions applied, never-touch preserved,
 rollback restores the exact pre-apply state)."""
 
+import shutil
+import subprocess
+import sys
 import zipfile
 
 import pytest
@@ -247,8 +250,42 @@ def test_swap_does_not_choke_on_a_held_open_binary(tmp_path):
 def test_post_swap_command_per_class():
     assert au.post_swap_command("reboot") is None
     assert au.post_swap_command("deps")[:3] == ["uv", "pip", "install"]
-    assert au.post_swap_command("runtime", backend="cuda")[-1] == "cuda"
     assert au.post_swap_command("setup") is None
+
+
+def test_post_swap_command_runtime_uses_absolute_interpreter_not_bare_localm():
+    """A bare "localm" argv[0] resolves back to the calling exe itself when running as
+    the default native LocaLM.exe launcher (see the live repro below), which then
+    mis-invokes and rolls back every "runtime"-class update. Must go through
+    sys.executable + "-m localm" instead, same as every other self-invocation site
+    (setup_llama.py, applaunch.py, http_server.py, ...)."""
+    cmd = au.post_swap_command("runtime", backend="cuda")
+    assert cmd[0] == sys.executable
+    assert cmd[1:3] == ["-m", "localm"]
+    assert cmd[3:] == ["setup-llama", "--backend", "cuda"]
+
+
+def test_bare_localm_argv_on_the_launcher_exe_fails_with_exit_2(tmp_path):
+    """Live repro of the underlying failure mode this fix avoids. The native launcher
+    build (LocaLM.exe) is literally a renamed copy of the interpreter (see
+    applaunch.py's `os.path.basename(sys.executable).lower() == "localm.exe"` check),
+    and the original incident confirmed a bare "localm" argv[0] resolves straight back
+    to that same exe on the default install (Windows favors a same-directory match over
+    a PATH-installed console-script shim). Reproduce the resulting failure directly: a
+    copy of the interpreter, invoked with the OLD post_swap_command's trailing args,
+    treats "setup-llama" as a script path it can't open and exits 2 - exactly what
+    rolled back every "runtime"-class update. The fix's absolute sys.executable argv
+    never depends on that name resolution, so it can't hit this failure mode."""
+    launcher = tmp_path / ("localm.exe" if sys.platform == "win32" else "localm")
+    shutil.copy2(sys.executable, launcher)
+    if sys.platform != "win32":
+        launcher.chmod(0o755)
+
+    old_style_cmd = [str(launcher)] + au.post_swap_command("runtime", backend="vulkan")[3:]
+    result = subprocess.run(old_style_cmd, capture_output=True, text=True)
+
+    assert result.returncode == 2
+    assert "setup-llama" in result.stderr
 
 
 # ---------------------- safe extraction (zip slip) ----------------------

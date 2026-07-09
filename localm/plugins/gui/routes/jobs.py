@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import queue
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -31,19 +30,25 @@ def register(app: FastAPI, ctx) -> None:
         # confirm the (unguessable) id exists (KEY-SCOPE-2).
         if job is None or not job_owner_ok(request, job.owner):
             raise HTTPException(404, f"No such job: {job_id}")
-        loop = asyncio.get_running_loop()
 
         async def _stream():
-            while True:
-                try:
-                    event = await loop.run_in_executor(
-                        None, job.events.get, True, _web._KEEPALIVE_S)
-                except queue.Empty:
-                    yield ": keepalive\n\n"
-                    continue
-                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-                if event.get("type") == "end":
-                    return
+            # Each connection gets its own subscriber queue (fed the full history
+            # plus every event pushed from here on) so concurrent viewers of the
+            # same job each see the complete stream, instead of racing to drain
+            # one shared queue between them.
+            q = job.subscribe()
+            try:
+                while True:
+                    try:
+                        event = await asyncio.wait_for(q.get(), timeout=_web._KEEPALIVE_S)
+                    except asyncio.TimeoutError:
+                        yield ": keepalive\n\n"
+                        continue
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                    if event.get("type") == "end":
+                        return
+            finally:
+                job.unsubscribe(q)
 
         return StreamingResponse(
             _stream(),

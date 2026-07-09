@@ -19,9 +19,10 @@ from localm import scopes
 from localm.inference.http_server import (principal_id, require_scope,
                                           unload_all_models, unload_one_model)
 import localm.inference.http_server as _hs
-from localm.plugins.gui.web import (AliasRequest, LoadModelRequest, PullRequest,
+from localm.plugins.gui.web import (AliasRequest, LoadModelRequest,
+                                    PullRequest, PullTokenRedeemRequest,
                                     RemoveModelRequest, SetTypeRequest,
-                                    UnloadModelRequest)
+                                    UnloadModelRequest, consume_pull_grant)
 
 
 def register(app: FastAPI, ctx) -> None:
@@ -161,6 +162,18 @@ def register(app: FastAPI, ctx) -> None:
                 "main_gpu_index": load_config().get("main_gpu_index")}
 
     # ----------------------- model ops + jobs --------------------- #
+
+    @app.post("/api/models/pull-token/redeem",
+              dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
+    async def model_pull_token_redeem(req: PullTokenRedeemRequest, request: Request):
+        """SEC-PULL-CONFIRM: redeem the single-use grant `localm gui --pull`
+        minted for its own deep link (see mint_pull_grant/init.js). Only a
+        genuine, unused, unexpired grant bound to this EXACT spec succeeds - a
+        forged `?pull=` link cannot know the secret, so it 403s here and the
+        frontend falls back to requiring an explicit human confirmation."""
+        if not consume_pull_grant(request.app, req.spec.strip(), req.token):
+            raise HTTPException(403, "Invalid or expired pull token")
+        return {"ok": True}
 
     @app.post("/api/models/pull", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def model_pull(req: PullRequest, request: Request):

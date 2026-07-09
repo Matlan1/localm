@@ -116,6 +116,14 @@ uninstall removes the installed directory and accepts `?delete_data=` to
 also drop the plugin's stored data. Uninstalling a protected plugin (chat)
 returns 409; an unknown plugin returns 404.
 
+### `POST /api/plugins/refresh` / `POST /api/plugins/{name}/refresh`
+
+Refresh plugin state from disk without a server restart. The bare route
+refreshes every installed plugin and returns `{"status": "ok", "refreshed":
+...}`; the `{name}` route refreshes just that plugin and returns
+`{"status": "refreshed"|"up-to-date", "name": name}`. An unknown or
+non-builtin plugin returns 404; any other refresh failure returns 400.
+
 ### `POST /api/plugins/{name}/enable` / `POST /api/plugins/{name}/disable`
 
 Toggle an installed plugin active or inactive in config. Disabling a

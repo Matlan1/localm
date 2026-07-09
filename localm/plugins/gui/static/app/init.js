@@ -356,6 +356,7 @@ reattachSessions();
 {
   const params = new URLSearchParams(location.search);
   const pullSpec = params.get("pull");      // from `localm gui --pull SPEC`
+  const pullToken = params.get("pull_token");  // spec-bound one-time grant, see below
   const viewParam = params.get("view");
   const sharedTo = params.get("shared");    // from the PWA share target (phone)
   if (sharedTo) {
@@ -369,14 +370,45 @@ reattachSessions();
   } else if (pullSpec || viewParam) {
     // Strip the query so a reload doesn't restart the download.
     history.replaceState(null, "", location.pathname);
-    setTimeout(() => {
+    setTimeout(async () => {
       if (window.__localmLocked) return;
       showView(VIEWS.includes(viewParam) ? viewParam : "models");
       if (pullSpec) {
         const specInput = $("pull-spec");
         if (specInput) {
           specInput.value = pullSpec;
-          $("pull-start").click();   // kick off the pull with progress
+          // SEC-PULL-CONFIRM: a `?pull=` query param can be put on ANY link, or
+          // in a hidden iframe on any site the user visits while localm is
+          // running locally - the page has no way to tell that apart from
+          // `localm gui --pull` opening its own tab. Never start a real
+          // download from a URL alone.
+          //
+          // `localm gui --pull` mints a single-use, spec-bound secret
+          // server-side (mint_pull_grant, web.py) and passes it as
+          // `pull_token` so ITS OWN deep link can redeem it here and
+          // auto-start with zero clicks - unattended launches keep working.
+          // A forged link cannot know that secret, so the redeem call below
+          // 403s and we fall back to an explicit human confirmation instead.
+          // window.confirm is a native browser-chrome dialog a page cannot
+          // script past, auto-dismiss, or hide, so that fallback holds even
+          // from an invisible iframe.
+          let authorized = false;
+          if (pullToken) {
+            try {
+              const r = await fetch("/api/models/pull-token/redeem", {
+                method: "POST", headers: authHeaders(),
+                body: JSON.stringify({ spec: pullSpec, token: pullToken }),
+              });
+              authorized = r.ok;
+            } catch (e) { authorized = false; }
+          }
+          if (authorized || confirm(
+            `Download model "${pullSpec}"?\n\n` +
+            "A link or page just asked localm to start this download. Only " +
+            "continue if you started this yourself (e.g. via " +
+            '"localm gui --pull").')) {
+            $("pull-start").click();   // kick off the pull with progress
+          }
         }
       }
     }, 0);
