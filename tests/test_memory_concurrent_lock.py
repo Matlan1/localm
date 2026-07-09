@@ -10,6 +10,16 @@ cannot help. Pre-fix, each instance ``_load()``s the same on-disk state, appends
 its own record, and ``_save()``s - last writer wins and the rest are silently
 dropped; ``_atomic_write`` also reused a fixed ``.tmp`` filename per namespace, so
 concurrent saves could collide on the SAME temp path (PermissionError on Windows).
+
+Also covers CHK-MEM-WINRESOLVE, a separate and narrower Windows-only race found
+while testing the fix above: namespace_file()'s path-safety check compared
+Path.resolve() output directly, which two DIFFERENT namespaces of the same agent
+(distinct ns_hash -> distinct per-namespace lock, so they do not serialise
+against each other) racing on their SHARED, not-yet-existing agent directory
+(e.g. ``<home>/memory/chat/``) could make return mismatched \\?\\-prefixed vs.
+unprefixed forms for the identical location, spuriously raising ValueError - loud,
+not silent, and only on a true cold start (see test_cold_start_concurrent_
+namespaces_no_path_safety_race below).
 """
 
 from __future__ import annotations
@@ -66,6 +76,49 @@ def test_concurrent_add_no_data_loss(tmp_path):
     assert len(final) == N_WRITERS, (
         f"data loss: expected {N_WRITERS} records, got {len(final)}")
     assert set(ids) == stored_ids, "a writer's record id is missing from disk"
+
+
+def test_cold_start_concurrent_namespaces_no_path_safety_race(tmp_path):
+    """CHK-MEM-WINRESOLVE: the per-namespace lock MemoryStore.__init__ takes
+    around namespace_file() (CHK-MEM-LOCK) only serialises writers to the SAME
+    namespace - it cannot serialise DIFFERENT namespaces of the same agent
+    (distinct scope_key -> distinct ns_hash -> distinct lock) against each
+    other. Those namespaces share one parent directory (``<root>/chat/``), so
+    when it does not exist yet, one namespace's first _save() (its mkdir) can
+    race a sibling namespace's concurrent namespace_file() call resolving a
+    file under that same directory. On Windows this can make Path.resolve()
+    return a \\?\\-prefixed extended-length path for one and an unprefixed
+    path for the other, even though both denote the identical location, so the
+    path-safety comparison spuriously raised ValueError. Confirmed via an
+    isolated repro (not just this pytest run): the old comparison hit this on
+    the majority of rounds when racing 40 distinct cold namespaces; a
+    same-single-namespace race (as in test_concurrent_add_no_data_loss above)
+    does NOT reach this code path, because CHK-MEM-LOCK's lock already
+    serialises same-namespace construction - hence a SEPARATE, DISTINCT-
+    namespace test is required to exercise it, unlike the sibling tests above
+    which warm the namespace first specifically to avoid this race."""
+    n = 40
+    start = threading.Barrier(n)
+    errors: list = []
+
+    def worker(i):
+        try:
+            start.wait()                          # release every thread together
+            MemoryStore("owner", "chat", scope_key=f"scope-{i}", root=tmp_path).add(
+                MemoryRecord(text=f"cold start fact {i}", source="user"))
+        except Exception as e:                    # pragma: no cover
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, errors
+    for i in range(n):
+        ns_store = MemoryStore("owner", "chat", scope_key=f"scope-{i}", root=tmp_path)
+        assert len(ns_store) == 1, f"data loss in namespace scope-{i}"
 
 
 def test_concurrent_add_update_delete_no_data_loss(tmp_path):
