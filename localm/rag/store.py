@@ -387,7 +387,17 @@ class Collection:
     def _atomic_write(self, filename: str, content: str) -> None:
         tmp = self.dir / (filename + ".tmp")
         tmp.write_text(content, encoding="utf-8")
-        tmp.replace(self.dir / filename)
+        # Windows MoveFileEx can transiently deny the rename if another process
+        # (AV real-time scan, Search Indexer) briefly has a handle open; retry
+        # rather than fail a good write (mirrors episodes.EpisodeStore.add).
+        for attempt in range(5):
+            try:
+                tmp.replace(self.dir / filename)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.02)
 
     # ------------------------------------------------------------- #
     #  Indexing                                                      #
