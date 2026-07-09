@@ -549,6 +549,32 @@ class TestVramEstimate:
         assert r.status_code == 200
         assert r.json()["fits"] is None        # can't claim fit without a reading
 
+    def test_estimate_reflects_combined_split_capacity(self, gui_app, tmp_path):
+        """AUDIT-GPU-SPLIT-1: with a configured 2-GPU split, /api/vram-estimate
+        must weigh 'fits' against the COMBINED free VRAM, not just the single
+        main GPU - this route calls discover.vram_capacity(), not vram_info(),
+        specifically so a split-configured machine sees the right ceiling."""
+        app, _ = gui_app
+        model_file = tmp_path / "big.gguf"
+        model_file.write_bytes(b"\0" * 1000)   # tiny real file, size irrelevant here
+        reg = {"m": {"path": str(model_file), "source": "local"}}
+        from localm.config import load_config as real_load_config
+        base_cfg = real_load_config()
+        with patch("localm.config.load_registry", return_value=reg), \
+             patch("localm.config.load_config",
+                   return_value={**base_cfg, "gpu_split_indices": [0, 1]}), \
+             patch("localm.discover.list_gpus", return_value=[
+                 {"index": 0, "name": "A", "total": 8 * 1024 ** 3, "free": 4 * 1024 ** 3},
+                 {"index": 1, "name": "B", "total": 8 * 1024 ** 3, "free": 4 * 1024 ** 3},
+             ]):
+            with TestClient(app) as client:
+                r = client.get("/api/vram-estimate",
+                               params={"model": "m", "n_ctx": 4096, "n_gpu_layers": 99})
+        assert r.status_code == 200
+        data = r.json()
+        assert data["total"] == 16 * 1024 ** 3   # 8+8 GiB combined, not one 8 GiB GPU
+        assert data["free"] == 8 * 1024 ** 3      # 4+4 GiB combined, not one 4 GiB GPU
+
 
 class TestGpusEndpoint:
     """GET /api/gpus - powers the Settings > Live tuning "Main GPU" selector."""
@@ -1701,6 +1727,32 @@ class TestDiscoverEndpoints:
                             lambda: {"total": 16_000_000_000})
         with TestClient(app) as client:
             data = client.get("/api/discover/files?repo=org/m").json()
+        assert data["files"][0]["fit"] == "fits"
+
+    def test_files_fit_reflects_combined_split_capacity(self, gui_app, monkeypatch):
+        """AUDIT-GPU-SPLIT-1: /api/discover/files must badge against COMBINED
+        split capacity (discover.vram_capacity()), not just vram_info()'s
+        single main-GPU number - a file too big for one GPU alone but that
+        fits split across a configured 2-GPU split must badge "fits"."""
+        app, _ = gui_app
+        # need ~= 15e9*1.1 + 1.5e9 = 18e9: exceeds the 16 GB main GPU alone
+        # (too-big), but fits under 0.85 * the 24 GB combined split (fits).
+        monkeypatch.setattr(
+            "localm.discover.hf_gguf_files",
+            lambda repo: [{"file": "m-Q8_0.gguf", "quant": "Q8_0",
+                           "size_bytes": 15_000_000_000, "n_parts": 1}])
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: [
+            {"index": 0, "name": "A", "total": 16_000_000_000, "free": 16_000_000_000},
+            {"index": 1, "name": "B", "total": 8_000_000_000, "free": 8_000_000_000},
+        ])
+        from localm.config import load_config as real_load_config
+        base_cfg = real_load_config()
+        monkeypatch.setattr(
+            "localm.config.load_config",
+            lambda: {**base_cfg, "gpu_split_indices": [0, 1]})
+        with TestClient(app) as client:
+            data = client.get("/api/discover/files?repo=org/m").json()
+        assert data["vram"]["total"] == 24_000_000_000
         assert data["files"][0]["fit"] == "fits"
 
     def test_net_off_is_403(self, gui_app, monkeypatch):
