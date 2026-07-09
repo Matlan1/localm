@@ -86,8 +86,13 @@ jobs:
       # in the log plus an uploaded coverage.xml. Config is in pyproject
       # [tool.coverage]. The [gpu]/[gguf] extras are not installed, so tests that
       # need them importorskip and are simply not counted.
+      # -n auto (pytest-xdist) distributes across worker processes; every test
+      # already gets its own LOCALM_HOME via the autouse tmp_path fixture in
+      # tests/conftest.py and the few tests that bind a real socket use an
+      # OS-assigned ephemeral port, so this is safe. See AGENTS.md "Test-run
+      # cadence".
       - name: Tests
-        run: pytest -m "not integration" --cov=localm --cov-report=term-missing --cov-report=xml
+        run: pytest -m "not integration" -n auto --cov=localm --cov-report=term-missing --cov-report=xml
 
       # GUI is vanilla JS (localm/plugins/gui/static); the jsdom harness under
       # tests-js/ loads app.js and exercises it. node:test, no build step.

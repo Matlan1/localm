@@ -263,7 +263,7 @@ def test_auto_send_upload_failure_is_never_reported_as_success(tmp_path, monkeyp
         raise bugreport.LocalmError("upload failed", reason="502 from proxy")
     monkeypatch.setattr(bugreport, "upload_report", _boom)
     bugreport.report_failure(summary="bug", interactive=False, auto_send=True)
-    out = capsys.readouterr().out
+    out = " ".join(capsys.readouterr().out.split())   # collapse rich's line-wrapping
     assert "Sent to the maintainer" not in out
     assert "Could not send it" in out
     assert "email it instead" in out
