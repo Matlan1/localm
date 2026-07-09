@@ -97,11 +97,18 @@ def decide_media_swap(settings: dict, *,
     """Decide whether to unload the chat LLM before a media gen, reading live free
     VRAM. *settings* is a resolved media-plugin settings dict carrying
     ``swap_policy`` and ``vram_estimate_bytes`` (filled by the media backends).
-    Pass *read_free* to inject the free-VRAM reading in tests."""
+    Pass *read_free* to inject the free-VRAM reading in tests.
+
+    The default reading uses ``discover.vram_capacity()`` (combined free
+    across a configured multi-GPU split, else the same single-GPU number
+    ``vram_info()`` reports) - the same "will it fit" ceiling
+    ``http_server.switch_engine``'s eviction gate uses, so a split-configured
+    machine does not needlessly swap the chat model out when the combined
+    capacity already covers the media job."""
     if read_free is None:
         def read_free() -> Optional[int]:
-            from localm.discover import vram_info
-            return vram_info().get("free")
+            from localm.discover import vram_capacity
+            return vram_capacity().get("free")
     return should_swap_for_media(
         read_free(), settings.get("vram_estimate_bytes"),
         policy=settings.get("swap_policy", "auto"))
