@@ -13,6 +13,8 @@ Covers:
 
 import os
 import sys
+from pathlib import Path
+
 import pytest
 from unittest.mock import MagicMock, patch
 
@@ -225,6 +227,60 @@ class TestScrubHistoryFile:
         _scrub_history_file(f, self._pattern())
         # File should exist but be effectively empty (or just a newline)
         assert f.exists()
+
+
+class TestScrubHistoryFileFailureWarnings:
+    """A failure to scrub a history file must always be surfaced, on both the
+    read and the write path - a silent failure here means secret-bearing
+    command lines stay on disk with no indication anything went wrong
+    (AGENTS.md rule 5: privacy/security steps must never fail quietly).
+
+    The write-failure branch already warns (localm/plugins/coder/privacy.py
+    ~204-213); the read-failure branch (~171-174) did not - it returned False
+    with zero output, an asymmetry a prior "codebase honesty pass" (commit
+    5296e13) fixed on the write side and missed on the read side."""
+
+    _PATCH = "localm.plugins.coder.privacy.console"
+
+    def _pattern(self):
+        import re
+        return re.compile(r"localcoder\b", re.IGNORECASE)
+
+    def test_read_failure_prints_warning(self, tmp_path, monkeypatch):
+        f = tmp_path / "history.txt"
+        f.write_text("localcoder --model x\n")
+
+        def _raise_read(self, *a, **k):
+            raise PermissionError("denied")
+
+        monkeypatch.setattr(Path, "read_bytes", _raise_read)
+
+        with patch(self._PATCH) as mock_console:
+            changed = _scrub_history_file(f, self._pattern())
+
+        assert changed is False
+        mock_console.print.assert_called_once()
+        text = mock_console.print.call_args[0][0]
+        assert "warning" in text.lower()
+        assert str(f) in text
+
+    def test_write_failure_prints_warning(self, tmp_path, monkeypatch):
+        f = tmp_path / "history.txt"
+        f.write_text("localcoder --model x\n")
+
+        def _raise_write(self, *a, **k):
+            raise PermissionError("denied")
+
+        monkeypatch.setattr(Path, "write_bytes", _raise_write)
+
+        with patch(self._PATCH) as mock_console:
+            changed = _scrub_history_file(f, self._pattern())
+
+        assert changed is False
+        mock_console.print.assert_called_once()
+        text = mock_console.print.call_args[0][0]
+        assert "warning" in text.lower()
+        assert str(f) in text
 
 
 class TestClearShellHistoryTraces:
