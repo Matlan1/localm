@@ -103,6 +103,17 @@ Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on
 - **Chat:** trimmed the injected web-access prompts so weak models stop fixating on them.
 
 ### Security
+- **Privacy mode now deletes ComfyUI's own on-disk output copy everywhere media
+  is generated, not just from the GUI/API.** ComfyUI keeps its own copy of every
+  generated image/track/clip with the full prompt and workflow embedded as
+  metadata; privacy mode is supposed to remove it after use. That fold-in was
+  only wired up on the GUI/API path - the `localm image`/`music`/`video` CLI
+  commands, the `/generate-image`/`/generate-music`/`/generate-video` REPL
+  commands, the MCP server's `generate_image` tool, and the coder agent's
+  `generate_image` tool all suppressed the prompt sidecar in privacy mode but
+  left ComfyUI's own copy (and any img2img source image) on disk indefinitely.
+  All six call sites now fold privacy mode into `delete_outputs`, matching the
+  GUI/API behaviour.
 - **Authenticated self-update.** Each release build is signed with an offline
   Ed25519 key and verified against a pinned public key before it is extracted or
   executed, so a compromised release channel cannot push a forged build.

@@ -48,6 +48,7 @@ def tool_generate_image(
         input_image=input_p,
         denoise=denoise,
         write_sidecar=not _privacy,
+        delete_outputs=_privacy,
     )
     if ok:
         rel = out_p.relative_to(cwd) if out_p.is_relative_to(cwd) else out_p

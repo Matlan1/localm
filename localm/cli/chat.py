@@ -545,10 +545,12 @@ def _cmd_generate_media(label: str, arg: str, engine, console, home_dir) -> None
     engine.unload()
     from ..audit import SessionMode, effective_mode
     generate = spec["get_generate"]()
+    is_privacy = effective_mode("chat") == SessionMode.PRIVACY
     ok, message = generate(
         arg, out,
         api_url=api,
-        write_sidecar=effective_mode("chat") != SessionMode.PRIVACY,
+        write_sidecar=not is_privacy,
+        delete_outputs=is_privacy,
     )
     console.print(message)
     if ok:

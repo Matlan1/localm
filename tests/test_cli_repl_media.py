@@ -57,6 +57,9 @@ def test_repl_media_privacy_no_sidecar(tmp_path, monkeypatch, command, target,
     # Generator actually ran, sidecar suppressed, resolved api_url passed through.
     assert calls.get("write_sidecar") is False
     assert calls.get("api_url") == "http://127.0.0.1:9999"
+    # Privacy mode must also delete ComfyUI's own on-disk output copy (it
+    # embeds the full prompt/workflow as metadata), not just the sidecar.
+    assert calls.get("delete_outputs") is True
     # Output is routed into the per-medium GUI dir with the right extension.
     assert calls["out"].parent == tmp_path / subdir
     assert calls["out"].suffix == ext
@@ -77,6 +80,7 @@ def test_repl_media_logmode_keeps_sidecar(tmp_path, monkeypatch, command, target
         command, target, mode=SessionMode.LOG,
         api_url="http://127.0.0.1:8188", home_dir=tmp_path)
     assert calls.get("write_sidecar") is True
+    assert not calls.get("delete_outputs")
 
 
 @pytest.mark.parametrize("command,target", [
