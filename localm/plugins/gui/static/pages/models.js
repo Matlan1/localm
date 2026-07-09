@@ -253,6 +253,38 @@ export const FIT_TEXT = { "fits": "fits your VRAM", "tight": "tight fit",
 
 export const FMT_LABEL = { gguf: "GGUF", hf: "HF" };
 
+/** Fetch the current GPU list once per search/files-load (not once per row) -
+ *  used only for the non-blocking split-fit hint below. Empty on any failure
+ *  (server unreachable, no scope) so the hint is simply skipped, never a
+ *  broken search. */
+async function _splitGpus() {
+  try {
+    const r = await fetch("/api/gpus", { headers: authHeaders() });
+    if (!r.ok) return [];
+    const data = await r.json();
+    return Array.isArray(data.gpus) ? data.gpus : [];
+  } catch (e) { return []; }
+}
+
+/** Non-blocking "might not fit on one GPU, but fits split across them" hint,
+ *  or "" when not applicable: unknown size, fewer than 2 GPUs detected, it
+ *  already fits the single largest device, or it would not fit even split
+ *  across every device. Deliberately a ROUGH client-side estimate (compares
+ *  raw free-VRAM sums, no weight/overhead factor) for a suggestion only - the
+ *  server's own fit badges (`m.fit`/`f.fit`) remain the authoritative numbers.
+ *  Never auto-enables anything (the "never silently override a user's
+ *  explicit choice" project rule) - it only points at the Settings control. */
+export function splitFitHint(sizeBytes, gpus) {
+  if (!sizeBytes || !Array.isArray(gpus) || gpus.length < 2) return "";
+  const frees = gpus.map((g) => (typeof g.free === "number" ? g.free : g.total));
+  if (frees.some((f) => typeof f !== "number")) return "";
+  const largest = Math.max(...frees);
+  const total = frees.reduce((a, b) => a + b, 0);
+  if (sizeBytes <= largest || sizeBytes > total) return "";
+  return `may not fit on one GPU, but fits split across your ${gpus.length} GPUs - `
+       + "see Settings > Main GPU";
+}
+
 export function discFormats() {
   // The search-page model-type toggles -> the formats list. Defaults to gguf
   // when the checkboxes are absent (older DOM) so search never silently returns
@@ -301,7 +333,7 @@ function prefillHfPull(repo) {
 // One search-result repo: name + per-format badge(s) + the right pull affordance
 // (GGUF -> a per-quant file list; HF -> a whole-repo add). A repo tagged with
 // both formats gets both.
-function discRepoRow(m) {
+function discRepoRow(m, gpus) {
   const row = el("div", "disc-repo");
   const head = el("div", "head");
   head.appendChild(iconEl("models", "ic ic-model"));
@@ -316,6 +348,8 @@ function discRepoRow(m) {
     if (m.size_bytes) {
       head.appendChild(el("span", "disc-hf-size", fmtSize(m.size_bytes)));
       if (m.fit) head.appendChild(el("span", "fit " + m.fit, FIT_TEXT[m.fit]));
+      const hint = splitFitHint(m.size_bytes, gpus);
+      if (hint) head.appendChild(el("span", "sub split-hint", hint));
     } else {
       head.appendChild(el("span", "disc-hf-size sub", "size unknown"));
     }
@@ -330,7 +364,7 @@ function discRepoRow(m) {
   const filesBox = el("div", "files");
   if (fmts.includes("gguf")) {
     const btn = el("button", "btn-secondary", "files");
-    btn.onclick = () => discoverFiles(m.id, filesBox, btn);
+    btn.onclick = () => discoverFiles(m.id, filesBox, btn, gpus);
     head.appendChild(btn);
   }
   if (fmts.includes("hf")) {
@@ -373,7 +407,8 @@ export async function discoverSearch() {
       box.appendChild(el("div", "sub", "(no matching repos found)"));
       return;
     }
-    for (const m of data.results) box.appendChild(discRepoRow(m));
+    const gpus = await _splitGpus();
+    for (const m of data.results) box.appendChild(discRepoRow(m, gpus));
   } catch (e) {
     box.replaceChildren(el("div", "sub", "Search failed: " + e.message));
   } finally {
@@ -381,13 +416,14 @@ export async function discoverSearch() {
   }
 }
 
-export async function discoverFiles(repo, filesBox, btn) {
+export async function discoverFiles(repo, filesBox, btn, gpus) {
   if (filesBox.childElementCount) {            // toggle collapse
     filesBox.replaceChildren();
     return;
   }
   btn.disabled = true;
   filesBox.replaceChildren(el("div", "sub", "loading file list…"));
+  if (!Array.isArray(gpus)) gpus = await _splitGpus();   // direct call, e.g. from a test
   try {
     const r = await fetch("/api/discover/files?repo=" + encodeURIComponent(repo),
                           { headers: authHeaders() });
@@ -408,6 +444,8 @@ export async function discoverFiles(repo, filesBox, btn) {
         (f.n_parts > 1 ? ` (${f.n_parts} parts)` : "");
       row.appendChild(el("span", "mono", desc));
       if (f.fit) row.appendChild(el("span", "fit " + f.fit, FIT_TEXT[f.fit]));
+      const splitHint = splitFitHint(f.size_bytes, gpus);
+      if (splitHint) row.appendChild(el("span", "sub split-hint", splitHint));
       row.appendChild(el("span", "fname", f.file));
       const pull = el("button", "btn-secondary", "pull");
       pull.onclick = () => {

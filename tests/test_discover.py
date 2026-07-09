@@ -2,6 +2,7 @@
 """Tests for localm.discover - HF search, quant parsing, VRAM fit badges.
 All HuggingFace calls are mocked; no real network."""
 
+import ctypes
 import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -9,9 +10,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from localm.discover import (
-    DiscoverError, _quant_of, apply_main_gpu, fit_label, hf_backend_available,
-    hf_gguf_files, hf_param_bytes, hf_search, list_gpus, resolve_main_gpu_index,
-    vram_info,
+    DiscoverError, _LLAMA_SPLIT_MODE_LAYER, _MAX_GPU_SPLIT_INDEX,
+    _TENSOR_SPLIT_FALLBACK_CAPACITY,
+    _quant_of, apply_gpu_split, apply_main_gpu, fit_label, hf_backend_available,
+    hf_gguf_files, hf_param_bytes, hf_search, list_gpus, resolve_gpu_split,
+    resolve_main_gpu_index, vram_info,
 )
 
 
@@ -486,6 +489,180 @@ class TestApplyMainGpu:
         mp = SimpleNamespace(main_gpu=0)
         apply_main_gpu(mp)
         assert mp.main_gpu == 0
+
+
+class TestResolveGpuSplit:
+    _GPUS = [{"index": 0}, {"index": 1}, {"index": 2}]
+
+    def test_none_configured_returns_empty(self):
+        assert resolve_gpu_split(None) == []
+
+    def test_empty_configured_returns_empty(self):
+        assert resolve_gpu_split([]) == []
+
+    def test_two_valid_indices_no_ratios_equal_split(self):
+        assert resolve_gpu_split([0, 1], gpus=self._GPUS) == [(0, 1.0), (1, 1.0)]
+
+    def test_two_valid_indices_with_matching_ratios_paired_by_index(self):
+        assert resolve_gpu_split([0, 1], [3.0, 1.0], gpus=self._GPUS) == \
+            [(0, 3.0), (1, 1.0)]
+
+    def test_ratio_still_lines_up_with_its_index_after_a_drop(self):
+        # index 5 is unknown and gets dropped; its ratio (9.0, sitting between
+        # the other two in the configured lists) must not bleed onto index 0
+        # or index 1 - each surviving index keeps ITS OWN configured ratio.
+        result = resolve_gpu_split([0, 5, 1], [3.0, 9.0, 1.0], gpus=self._GPUS)
+        assert result == [(0, 3.0), (1, 1.0)]
+
+    def test_unknown_index_dropped_with_warning_remaining_valid_still_work(self, caplog):
+        with caplog.at_level("WARNING", logger="localm"):
+            result = resolve_gpu_split([0, 1, 7], gpus=self._GPUS[:2])
+        assert result == [(0, 1.0), (1, 1.0)]
+        assert any("gpu_split_indices" in r.message for r in caplog.records)
+
+    def test_ratio_length_mismatch_falls_back_to_equal_split_with_warning(self, caplog):
+        with caplog.at_level("WARNING", logger="localm"):
+            result = resolve_gpu_split([0, 1], [1.0, 2.0, 3.0], gpus=self._GPUS[:2])
+        assert result == [(0, 1.0), (1, 1.0)]
+        assert any("gpu_split_ratios" in r.message for r in caplog.records)
+
+    def test_single_valid_survivor_collapses_to_no_split(self, caplog):
+        with caplog.at_level("WARNING", logger="localm"):
+            result = resolve_gpu_split([0, 9], gpus=self._GPUS[:1])
+        assert result == []
+        assert any("gpu_split_indices" in r.message for r in caplog.records)
+
+    def test_duplicate_indices_deduped_first_occurrence_kept(self):
+        # "1" appears twice; the SECOND occurrence is dropped as a duplicate,
+        # and the surviving order follows first-appearance order (1, 0, 2).
+        result = resolve_gpu_split([1, 0, 1, 2], gpus=self._GPUS)
+        assert result == [(1, 1.0), (0, 1.0), (2, 1.0)]
+
+    def test_negative_index_returns_empty_with_warning(self, caplog):
+        with caplog.at_level("WARNING", logger="localm"):
+            result = resolve_gpu_split([-1, 0], gpus=self._GPUS)
+        assert result == []
+        assert any("gpu_split_indices" in r.message and "negative" in r.message
+                   for r in caplog.records)
+
+    def test_non_integer_indices_return_empty_with_warning(self, caplog):
+        with caplog.at_level("WARNING", logger="localm"):
+            result = resolve_gpu_split(["not-a-number", 0], gpus=self._GPUS)
+        assert result == []
+        assert any("gpu_split_indices" in r.message for r in caplog.records)
+
+    def test_index_above_sanity_ceiling_returns_empty_with_warning(self, caplog):
+        # CHK-GPUSPLIT-ALLOC: an absurd index must never reach
+        # apply_gpu_split's ctypes allocation, even when gpus is unmeasurable
+        # (list_gpus() -> [], the exact path this ceiling protects - without
+        # it, a configured index like 500000 would size a 500,001-element
+        # tensor_split array before the native loader is ever invoked).
+        with caplog.at_level("WARNING", logger="localm"):
+            result = resolve_gpu_split([0, 500_000], gpus=[])
+        assert result == []
+        assert any("gpu_split_indices" in r.message and "ceiling" in r.message
+                   for r in caplog.records)
+
+    def test_index_at_ceiling_boundary_is_allowed(self):
+        gpus = [{"index": 0}, {"index": _MAX_GPU_SPLIT_INDEX}]
+        assert resolve_gpu_split([0, _MAX_GPU_SPLIT_INDEX], gpus=gpus) == \
+            [(0, 1.0), (_MAX_GPU_SPLIT_INDEX, 1.0)]
+
+    def test_unmeasurable_passes_through_unvalidated(self, monkeypatch):
+        # gpus not injected and list_gpus() finds nothing (no torch, no
+        # nvidia-smi): the configured indices cannot be cross-checked, so
+        # they pass through rather than discarding an explicit user choice
+        # we have no way to disprove (same documented boundary as
+        # resolve_main_gpu_index).
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: [])
+        assert resolve_gpu_split([3, 7]) == [(3, 1.0), (7, 1.0)]
+
+
+class TestApplyGpuSplit:
+    _GPUS = [{"index": 0}, {"index": 1}, {"index": 2}]
+
+    def test_fewer_than_two_valid_entries_leaves_mp_untouched(self, monkeypatch):
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS)
+        mp = SimpleNamespace(main_gpu=0, tensor_split="SENTINEL_TS",
+                             split_mode="SENTINEL_SM")
+        result = apply_gpu_split(
+            mp, config={"gpu_split_indices": [0], "gpu_split_ratios": None})
+        assert result is None
+        assert mp.tensor_split == "SENTINEL_TS"
+        assert mp.split_mode == "SENTINEL_SM"
+
+    def test_two_valid_entries_sets_split_mode_and_tensor_split(self, monkeypatch):
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS[:2])
+        # Force the documented-fallback capacity so the "0.0 elsewhere" check
+        # below lands on a real, in-bounds slot regardless of what native
+        # runtime (if any) happens to be provisioned on the box running this.
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._api.has_max_devices",
+            lambda: False)
+        mp = SimpleNamespace(main_gpu=0, tensor_split=None, split_mode=0)
+        result = apply_gpu_split(
+            mp, config={"gpu_split_indices": [0, 1],
+                        "gpu_split_ratios": [3.0, 1.0]})
+        assert result is not None
+        assert mp.split_mode == 1
+        assert mp.split_mode == _LLAMA_SPLIT_MODE_LAYER
+        floats = ctypes.cast(mp.tensor_split, ctypes.POINTER(ctypes.c_float))
+        assert floats[0] == pytest.approx(3.0)
+        assert floats[1] == pytest.approx(1.0)
+        assert floats[2] == pytest.approx(0.0)
+
+    def test_main_gpu_corrected_when_not_in_split_set(self, monkeypatch, caplog):
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS)
+        mp = SimpleNamespace(main_gpu=5, tensor_split=None, split_mode=0)
+        with caplog.at_level("WARNING", logger="localm"):
+            apply_gpu_split(
+                mp, config={"gpu_split_indices": [1, 2], "gpu_split_ratios": None})
+        assert mp.main_gpu == 1   # first split index
+        assert any("main_gpu_index" in r.message for r in caplog.records)
+
+    def test_main_gpu_already_in_split_left_unchanged_no_warning(self, monkeypatch, caplog):
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS)
+        mp = SimpleNamespace(main_gpu=1, tensor_split=None, split_mode=0)
+        with caplog.at_level("WARNING", logger="localm"):
+            apply_gpu_split(
+                mp, config={"gpu_split_indices": [1, 2], "gpu_split_ratios": None})
+        assert mp.main_gpu == 1
+        assert not any("main_gpu_index" in r.message for r in caplog.records)
+
+    def test_reads_load_config_when_config_not_passed(self, monkeypatch):
+        monkeypatch.setattr(
+            "localm.config.load_config",
+            lambda: {"gpu_split_indices": None, "gpu_split_ratios": None})
+        mp = SimpleNamespace(main_gpu=0, tensor_split=None, split_mode=0)
+        result = apply_gpu_split(mp)
+        assert result is None
+        assert mp.tensor_split is None
+        assert mp.split_mode == 0
+
+    def test_capacity_falls_back_to_documented_constant(self, monkeypatch):
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS[:2])
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._api.has_max_devices",
+            lambda: False)
+        mp = SimpleNamespace(main_gpu=0, tensor_split=None, split_mode=0)
+        result = apply_gpu_split(
+            mp, config={"gpu_split_indices": [0, 1], "gpu_split_ratios": None})
+        assert len(result) == _TENSOR_SPLIT_FALLBACK_CAPACITY
+
+    def test_capacity_grows_for_a_configured_index_at_or_above_fallback(self, monkeypatch):
+        high_idx = _TENSOR_SPLIT_FALLBACK_CAPACITY   # exactly at the boundary
+        gpus = [{"index": 0}, {"index": high_idx}]
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: gpus)
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._api.has_max_devices",
+            lambda: False)
+        mp = SimpleNamespace(main_gpu=0, tensor_split=None, split_mode=0)
+        result = apply_gpu_split(
+            mp, config={"gpu_split_indices": [0, high_idx],
+                        "gpu_split_ratios": None})
+        assert len(result) == high_idx + 1
+        floats = ctypes.cast(mp.tensor_split, ctypes.POINTER(ctypes.c_float))
+        assert floats[high_idx] == pytest.approx(1.0)
 
 
 class TestVramInfoRespectsConfiguredDevice:

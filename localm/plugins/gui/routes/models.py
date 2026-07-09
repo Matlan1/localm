@@ -155,12 +155,15 @@ def register(app: FastAPI, ctx) -> None:
     @app.get("/api/gpus", dependencies=[Depends(require_scope(scopes.MODELS_READ))])
     async def gui_gpus():
         """Every GPU device visible right now, plus the currently configured
-        main GPU index. Powers the Settings > Live tuning "Main GPU" selector
-        (hidden/disabled when only one device is detected)."""
+        main GPU index and multi-GPU split indices. Powers the Settings >
+        Live tuning "Main GPU" selector and "Split across GPUs" checkboxes
+        (both hidden/disabled when only one device is detected)."""
         from localm.config import load_config
         from localm.discover import list_gpus
+        cfg = load_config()
         return {"gpus": list_gpus(),
-                "main_gpu_index": load_config().get("main_gpu_index")}
+                "main_gpu_index": cfg.get("main_gpu_index"),
+                "gpu_split_indices": cfg.get("gpu_split_indices")}
 
     # ----------------------- model ops + jobs --------------------- #
 

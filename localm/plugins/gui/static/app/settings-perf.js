@@ -84,6 +84,7 @@ export function setupPerfCard() {
     })
     .catch(() => { sync(); refreshPerfEstimate(); });
   setupMainGpuSelector();
+  setupGpuSplitCheckboxes();
 }
 
 /** Populate the "Main GPU" selector from GET /api/gpus: one option per detected
@@ -135,6 +136,63 @@ export function setupMainGpuSelector() {
     } catch (e) { toast("Could not save: " + e.message, true); }
   };
   refreshMainGpuSelector();
+}
+
+/** Populate the "Split across GPUs" checkbox list from GET /api/gpus: one
+ *  checkbox per detected device, pre-checked for whatever gpu_split_indices
+ *  currently holds. Hidden entirely on a single-GPU box, or when the
+ *  endpoint is unreachable/empty - same gate as the Main GPU selector. */
+export async function refreshGpuSplitCheckboxes() {
+  const row = $("perf-gpu-split-row"), list = $("perf-gpu-split-list");
+  if (!row || !list) return;
+  try {
+    const r = await fetch("/api/gpus", { headers: authHeaders() });
+    if (!r.ok) { row.hidden = true; return; }
+    const data = await r.json();
+    const gpus = data.gpus || [];
+    if (gpus.length < 2) { row.hidden = true; return; }
+    const current = new Set(Array.isArray(data.gpu_split_indices) ? data.gpu_split_indices : []);
+    list.replaceChildren();
+    for (const g of gpus) {
+      const label = el("label", "perf-gpu-split-item");
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.value = String(g.index);
+      cb.checked = current.has(g.index);
+      cb.onchange = onGpuSplitChange;
+      label.appendChild(cb);
+      const gb = typeof g.total === "number" ? ` (${_perfGiB(g.total)} GB)` : "";
+      label.appendChild(document.createTextNode(` ${g.index}: ${g.name || "GPU " + g.index}${gb}`));
+      list.appendChild(label);
+    }
+    row.hidden = false;
+  } catch (e) { row.hidden = true; }   // server unreachable - stay hidden, not broken
+}
+
+/** PATCH /v1/config with the currently-checked GPU indices whenever a
+ *  checkbox changes. Fewer than 2 checked CLEARS the split (single-GPU
+ *  behavior, Main GPU selector applies instead) - the saved value always
+ *  matches exactly what is checked, never silently turning the split on. */
+export async function onGpuSplitChange() {
+  const list = $("perf-gpu-split-list");
+  if (!list) return;
+  const checked = [...list.querySelectorAll("input[type=checkbox]:checked")]
+    .map((cb) => Number(cb.value));
+  const value = checked.length >= 2 ? checked : null;
+  try {
+    const r = await fetch("/v1/config", {
+      method: "PATCH", headers: authHeaders(),
+      body: JSON.stringify({ gpu_split_indices: value }),
+    });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+    toast(value ? "Saved - applies on the next model load"
+                : "Split disabled - applies on the next model load");
+  } catch (e) { toast("Could not save: " + e.message, true); }
+}
+
+export function setupGpuSplitCheckboxes() {
+  if (!$("perf-gpu-split-row")) return;
+  refreshGpuSplitCheckboxes();
 }
 
 /* ---- web access (model-initiated, via the params-drawer toggle) ---- */

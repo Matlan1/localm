@@ -74,6 +74,79 @@ class TestValidateUpdate:
         with pytest.raises(ValueError, match="not a boolean"):
             ss.validate_update({"main_gpu_index": True})
 
+    # --- gpu_split_indices / gpu_split_ratios (HIDDEN list-of-number) ----- #
+
+    def test_gpu_split_indices_coerces_csv_string(self):
+        # `localm config gpu_split_indices 0,1` arrives as the CLI CSV string.
+        result = ss.validate_update({"gpu_split_indices": "0,1"})
+        assert result == {"gpu_split_indices": [0, 1]}
+        assert all(isinstance(i, int) for i in result["gpu_split_indices"])
+
+    def test_gpu_split_indices_coerces_json_list(self):
+        # PATCH /v1/config from the GUI sends a native JSON list of ints.
+        result = ss.validate_update({"gpu_split_indices": [0, 1]})
+        assert result == {"gpu_split_indices": [0, 1]}
+        assert all(isinstance(i, int) for i in result["gpu_split_indices"])
+
+    def test_gpu_split_indices_null_clears_it(self):
+        assert ss.validate_update({"gpu_split_indices": None}) == {
+            "gpu_split_indices": None}
+
+    def test_gpu_split_indices_empty_string_clears_it(self):
+        assert ss.validate_update({"gpu_split_indices": ""}) == {
+            "gpu_split_indices": None}
+
+    def test_gpu_split_indices_empty_list_clears_it(self):
+        assert ss.validate_update({"gpu_split_indices": []}) == {
+            "gpu_split_indices": None}
+
+    def test_gpu_split_indices_rejects_negative(self):
+        with pytest.raises(ValueError, match="below the minimum"):
+            ss.validate_update({"gpu_split_indices": [0, -1]})
+
+    def test_gpu_split_indices_rejects_bool(self):
+        with pytest.raises(ValueError):
+            ss.validate_update({"gpu_split_indices": [True, False]})
+
+    def test_gpu_split_indices_rejects_non_numeric(self):
+        with pytest.raises(ValueError, match="expected an integer"):
+            ss.validate_update({"gpu_split_indices": ["abc"]})
+
+    def test_gpu_split_indices_rejects_index_above_sanity_ceiling(self):
+        # CHK-GPUSPLIT-ALLOC: an unbounded index drives an unbounded ctypes
+        # allocation in discover.apply_gpu_split (a raw tensor_split buffer
+        # sized to the highest configured index) - must be rejected at write
+        # time, not just degraded later.
+        with pytest.raises(ValueError, match="above the maximum"):
+            ss.validate_update({"gpu_split_indices": [0, 500_000]})
+
+    def test_gpu_split_indices_allows_ceiling_boundary(self):
+        assert ss.validate_update({"gpu_split_indices": [0, ss.MAX_GPU_SPLIT_INDEX]}) == \
+            {"gpu_split_indices": [0, ss.MAX_GPU_SPLIT_INDEX]}
+
+    def test_gpu_split_ratios_coerces_csv_string(self):
+        result = ss.validate_update({"gpu_split_ratios": "0.6,0.4"})
+        assert result == {"gpu_split_ratios": [0.6, 0.4]}
+        assert all(isinstance(r, float) for r in result["gpu_split_ratios"])
+
+    def test_gpu_split_ratios_null_clears_it(self):
+        assert ss.validate_update({"gpu_split_ratios": None}) == {
+            "gpu_split_ratios": None}
+
+    def test_gpu_split_ratios_rejects_zero_or_negative(self):
+        with pytest.raises(ValueError, match="greater than 0"):
+            ss.validate_update({"gpu_split_ratios": [0.6, 0]})
+        with pytest.raises(ValueError, match="greater than 0"):
+            ss.validate_update({"gpu_split_ratios": [-0.1, 0.5]})
+
+    def test_gpu_split_ratios_rejects_non_finite(self):
+        # A non-finite ratio would cross straight into the native tensor_split
+        # ctypes buffer (discover.apply_gpu_split) with no downstream check.
+        with pytest.raises(ValueError, match="finite"):
+            ss.validate_update({"gpu_split_ratios": [1.0, float("inf")]})
+        with pytest.raises(ValueError, match="finite"):
+            ss.validate_update({"gpu_split_ratios": [1.0, float("nan")]})
+
     def test_toggle_coercion(self):
         assert ss.validate_update({"require_auth": "true"}) == {"require_auth": True}
         assert ss.validate_update({"require_auth": "false"}) == {"require_auth": False}
@@ -233,6 +306,43 @@ class TestConfigCli:
         r = cli_runner.invoke(main, ["config", "main_gpu_index", "--", "-1"])
         assert r.exit_code != 0
         assert self._cfg().get("main_gpu_index") is None   # default untouched
+
+
+# --------------------------------------------------------------------------- #
+#  `localm config gpu_split_indices` / `gpu_split_ratios` CLI                 #
+# --------------------------------------------------------------------------- #
+
+class TestGpuSplitCli:
+    def _cfg(self):
+        from localm.config import load_config
+        return load_config()
+
+    def test_gpu_split_indices_settable(self, cli_runner):
+        from localm.cli import main
+        r = cli_runner.invoke(main, ["config", "gpu_split_indices", "0,1"])
+        assert r.exit_code == 0, r.output
+        assert self._cfg()["gpu_split_indices"] == [0, 1]
+
+    def test_gpu_split_indices_rejects_negative(self, cli_runner):
+        from localm.cli import main
+        # "--" so click's parser treats "-1" as the VALUE argument, not a
+        # (nonexistent) option flag.
+        r = cli_runner.invoke(main, ["config", "gpu_split_indices", "--", "0,-1"])
+        assert r.exit_code != 0
+        assert self._cfg().get("gpu_split_indices") is None   # default untouched
+
+    def test_gpu_split_ratios_settable(self, cli_runner):
+        from localm.cli import main
+        r = cli_runner.invoke(main, ["config", "gpu_split_ratios", "0.6,0.4"])
+        assert r.exit_code == 0, r.output
+        assert self._cfg()["gpu_split_ratios"] == [0.6, 0.4]
+
+    def test_gpu_split_ratios_rejects_zero(self, cli_runner):
+        from localm.cli import main
+        r = cli_runner.invoke(main, ["config", "gpu_split_ratios", "0.6,0"])
+        assert r.exit_code != 0
+        assert "greater than 0" in r.output
+        assert self._cfg().get("gpu_split_ratios") is None   # default untouched
 
 
 # --------------------------------------------------------------------------- #

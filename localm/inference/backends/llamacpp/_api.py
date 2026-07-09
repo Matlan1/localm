@@ -616,3 +616,29 @@ def llama_memory_seq_rm(
 def llama_print_system_info() -> str:
     fn = _bind("llama_print_system_info", ctypes.c_char_p)
     return fn().decode(errors="replace")
+
+
+# ---------------------------------------------------------------------------
+#  Device capacity (multi-GPU tensor-split)
+# ---------------------------------------------------------------------------
+
+def has_max_devices() -> bool:
+    """True when this llama.dll exports llama_max_devices(). Every build with
+    tensor_split support has exported this for years, but it is probed (not
+    assumed) the same way has_memory_api()/has_penalties_sampler() are, so an
+    exotic stripped build degrades to a documented fallback instead of an
+    AttributeError. See discover.apply_gpu_split for how the fallback is used."""
+    try:
+        getattr(load_lib(), "llama_max_devices")
+        return True
+    except AttributeError:
+        return False
+
+
+def llama_max_devices() -> int:
+    """Capacity of the tensor_split array this build's native loader will read
+    from (a const float* with no length parameter of its own - the caller must
+    match this exactly: too short is a real out-of-bounds read). Only call
+    after has_max_devices() is True."""
+    fn = _bind("llama_max_devices", ctypes.c_size_t)
+    return int(fn())

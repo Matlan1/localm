@@ -2,7 +2,10 @@
 // jsdom tests for the Settings "Performance" card (setupPerfCard /
 // refreshPerfEstimate in app.js): the GPU-layers + context sliders seed from
 // /v1/config, the live VRAM readout reflects /api/vram-estimate, and Apply
-// PATCHes the two engine keys.
+// PATCHes the two engine keys. Also covers the "Split across GPUs" checkbox
+// row (refreshGpuSplitCheckboxes / onGpuSplitChange / setupGpuSplitCheckboxes
+// in app/settings-perf.js), which sits right below the Main GPU selector and
+// shares its GET /api/gpus data source and single-GPU-hides-row gate.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -17,11 +20,14 @@ async function waitFor(fn, timeout = 800) {
 }
 
 // Records calls; serves config + estimate + the bootstrap endpoints.
-function makeFetch(calls, { fits = true } = {}) {
+function makeFetch(calls, { fits = true, gpus = [], gpuSplitIndices = null } = {}) {
   return async (url, opts = {}) => {
     const u = String(url);
     const method = (opts.method || "GET").toUpperCase();
     calls.push({ u, method, body: opts.body });
+    if (u.includes("/api/gpus"))
+      return { ok: true, status: 200,
+        json: async () => ({ gpus, main_gpu_index: null, gpu_split_indices: gpuSplitIndices }) };
     if (u.includes("/api/vram-estimate"))
       return { ok: true, status: 200, json: async () => ({
         model: "m", model_bytes: 4 * GIB, weights: 4 * GIB, kv_cache: 0.6 * GIB,
@@ -114,4 +120,77 @@ test("estimate flags a model that may not fit (negative)", async () => {
   assert.ok(await waitFor(() => /may not fit/.test(est.textContent)),
     "a non-fitting model is flagged");
   assert.ok(est.classList.contains("perf-warn"), "warn styling applied");
+});
+
+test("two detected GPUs with a configured split: the checkbox row shows, both boxes pre-checked", async () => {
+  const calls = [];
+  const gpus = [
+    { index: 0, name: "GPU A", total: 24 * GIB, free: 20 * GIB },
+    { index: 1, name: "GPU B", total: 12 * GIB, free: 10 * GIB },
+  ];
+  const { window } = loadApp({ fetchImpl: makeFetch(calls, { gpus, gpuSplitIndices: [0, 1] }) });
+  const row = window.document.getElementById("perf-gpu-split-row");
+  const list = window.document.getElementById("perf-gpu-split-list");
+  assert.ok(await waitFor(() => row.hidden === false), "split row becomes visible for 2+ GPUs");
+  const boxes = [...list.querySelectorAll("input[type=checkbox]")];
+  assert.equal(boxes.length, 2, "one checkbox per detected GPU");
+  assert.ok(boxes.every((cb) => cb.checked), "both checkboxes pre-checked from gpu_split_indices");
+});
+
+test("a single detected GPU keeps the split checkbox row hidden", async () => {
+  const calls = [];
+  const gpus = [{ index: 0, name: "Solo GPU", total: 16 * GIB, free: 12 * GIB }];
+  const { window } = loadApp({ fetchImpl: makeFetch(calls, { gpus, gpuSplitIndices: null }) });
+  const row = window.document.getElementById("perf-gpu-split-row");
+  const list = window.document.getElementById("perf-gpu-split-list");
+  await waitFor(() => calls.some((c) => c.u.includes("/api/gpus")));
+  await settle(30);
+  assert.equal(row.hidden, true, "no useful split on a single-GPU box");
+  assert.equal(list.querySelectorAll("input[type=checkbox]").length, 0,
+    "checkbox list left unpopulated for a single GPU");
+});
+
+test("unchecking down to 1 checked PATCHes gpu_split_indices to null", async () => {
+  const calls = [];
+  const gpus = [
+    { index: 0, name: "GPU A", total: 24 * GIB, free: 20 * GIB },
+    { index: 1, name: "GPU B", total: 12 * GIB, free: 10 * GIB },
+  ];
+  const { window } = loadApp({ fetchImpl: makeFetch(calls, { gpus, gpuSplitIndices: [0, 1] }) });
+  const list = window.document.getElementById("perf-gpu-split-list");
+  assert.ok(await waitFor(() => list.querySelectorAll("input[type=checkbox]").length === 2),
+    "checkbox list populated");
+  const boxes = [...list.querySelectorAll("input[type=checkbox]")];
+  boxes[0].checked = false;
+  boxes[0].dispatchEvent(new window.Event("change", { bubbles: true }));
+  assert.ok(await waitFor(() => calls.some(
+    (c) => c.u.endsWith("/v1/config") && c.method === "PATCH")), "unchecking issues a PATCH");
+  const patch = calls.filter((c) => c.u.endsWith("/v1/config") && c.method === "PATCH").at(-1);
+  const body = JSON.parse(patch.body);
+  assert.equal(body.gpu_split_indices, null,
+    "fewer than 2 checked clears the split rather than silently keeping it on");
+});
+
+test("2 checked boxes PATCH gpu_split_indices with both selected indices", async () => {
+  const calls = [];
+  const gpus = [
+    { index: 0, name: "GPU A", total: 24 * GIB, free: 20 * GIB },
+    { index: 1, name: "GPU B", total: 12 * GIB, free: 10 * GIB },
+  ];
+  const { window } = loadApp({ fetchImpl: makeFetch(calls, { gpus, gpuSplitIndices: null }) });
+  const list = window.document.getElementById("perf-gpu-split-list");
+  assert.ok(await waitFor(() => list.querySelectorAll("input[type=checkbox]").length === 2),
+    "checkbox list populated");
+  const boxes = [...list.querySelectorAll("input[type=checkbox]")];
+  assert.ok(boxes.every((cb) => !cb.checked), "neither box starts checked (no configured split)");
+  boxes[0].checked = true;
+  boxes[0].dispatchEvent(new window.Event("change", { bubbles: true }));
+  boxes[1].checked = true;
+  boxes[1].dispatchEvent(new window.Event("change", { bubbles: true }));
+  assert.ok(await waitFor(() => calls.some(
+    (c) => c.u.endsWith("/v1/config") && c.method === "PATCH")), "checking issues a PATCH");
+  const patch = calls.filter((c) => c.u.endsWith("/v1/config") && c.method === "PATCH").at(-1);
+  const body = JSON.parse(patch.body);
+  assert.deepEqual(body.gpu_split_indices, [0, 1],
+    "PATCH carries both checked GPU indices once 2 are checked");
 });

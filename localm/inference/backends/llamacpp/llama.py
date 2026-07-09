@@ -498,8 +498,13 @@ class LlamaCpp:
         # Multi-GPU: honour the configured main_gpu_index (validated against
         # the devices actually visible right now); leaves the native default
         # (device 0) untouched when unset. See discover.apply_main_gpu.
-        from localm.discover import apply_main_gpu
+        from localm.discover import apply_gpu_split, apply_main_gpu
         apply_main_gpu(mp)
+        # Multi-GPU tensor-split: spreads the model across 2+ configured
+        # devices when gpu_split_indices is set (see discover.apply_gpu_split).
+        # The returned buffer must stay alive through llama_load_model_from_file
+        # below - it is read once at load time, not held as a live pointer.
+        _tensor_split_keepalive = apply_gpu_split(mp)
 
         # Preemptive model switching: wire llama.cpp's native load-progress
         # callback so a load can be ABORTED mid-flight. The callback returns false
