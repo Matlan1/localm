@@ -115,6 +115,11 @@ Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on
 - **ComfyUI launch** no longer has a shell-injection vector on Windows.
 - **RAG folder index** skips model weights and secrets rather than indexing them.
 - **MCP** destructive tools are annotated so clients can confirm them.
+- **A scheduled coder job's shell access no longer outlives its creating key.**
+  The autonomous job scheduler now re-validates the owning key is still live
+  (not revoked, not expired) before running an `allow_shell` job, instead of
+  trusting the stored opt-in forever; a dead key downgrades the run to the
+  safe restricted coder rather than keeping shell access.
 
 ### Internal
 - **Release pipeline.** A release-file manifest and verification gate, a build.zip
