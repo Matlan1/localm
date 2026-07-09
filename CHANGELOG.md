@@ -11,8 +11,21 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
-Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on
-2026-07-04; that tag was never distributed, so its fixes are folded in here.)
+### Fixed
+- **Multi-GPU split fit checks:** a model too large for the single main GPU
+  alone, but that fits combined across a configured multi-GPU split, was
+  wrongly refused ("Not enough VRAM") when loading, and mis-badged "too big"
+  in model search - the pre-load check and the search/CLI/MCP fit badges only
+  ever weighed a load against one GPU's capacity, never the split's combined
+  capacity. They now correctly sum capacity across the configured split.
+- **Phone pairing with a VPN active:** a VPN client's virtual tunnel adapter can
+  become the machine's default route and hand out an ordinary private address,
+  which used to get picked as the "LAN" address for the Companion pairing card
+  and the `<name>.local` mDNS advertisement - pointing a phone at an address
+  only reachable through the VPN. VPN-like adapters are now excluded, so the
+  real LAN address is shown (and advertised) instead.
+
+## [0.1.1] - 2026-07-09
 
 ### Added
 - **Unified model browser (phase 1):** registry model types, a ComfyUI model
@@ -105,12 +118,6 @@ Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on
   attached to instead of the first entry; `/v1/embeddings` no longer force-loads
   the chat model; a stale VRAM estimate and a cross-instance conversation leak are
   fixed.
-- **Multi-GPU split fit checks:** a model too large for the single main GPU
-  alone, but that fits combined across a configured multi-GPU split, was
-  wrongly refused ("Not enough VRAM") when loading, and mis-badged "too big"
-  in model search - the pre-load check and the search/CLI/MCP fit badges only
-  ever weighed a load against one GPU's capacity, never the split's combined
-  capacity. They now correctly sum capacity across the configured split.
 - **Do not hide problems:** removed production code paths that detected
   pytest/mocks and fabricated behavior; a swallowed VRAM-gate failure is now logged.
 - **Inference:** a zero-n_tokens decode failure, batch memory-safety and
@@ -243,12 +250,6 @@ Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on
 - **ComfyUI launch** no longer has a shell-injection vector on Windows.
 - **RAG folder index** skips model weights and secrets rather than indexing them.
 - **MCP** destructive tools are annotated so clients can confirm them.
-- **Phone pairing with a VPN active:** a VPN client's virtual tunnel adapter can
-  become the machine's default route and hand out an ordinary private address,
-  which used to get picked as the "LAN" address for the Companion pairing card
-  and the `<name>.local` mDNS advertisement - pointing a phone at an address
-  only reachable through the VPN. VPN-like adapters are now excluded, so the
-  real LAN address is shown (and advertised) instead.
 
 ## [0.1.0] - 2026-07-04
 
@@ -290,5 +291,6 @@ First tagged release. A self-contained, offline local-LLM platform.
 - The NVIDIA GPU path is validated by design and CI-adjacent testing; the primary
   development hardware is AMD.
 
-[Unreleased]: https://github.com/Matlan1/localm/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Matlan1/localm/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/Matlan1/localm/releases/tag/v0.1.1
 [0.1.0]: https://github.com/Matlan1/localm/releases/tag/v0.1.0
