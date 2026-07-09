@@ -281,6 +281,36 @@ class TestCollection:
         docs = Collection("kb", base=base).documents()
         assert len(docs) == 2, f"data loss: expected both docs, got {docs}"
 
+    def test_atomic_write_retries_transient_permission_error(self, tmp_path, monkeypatch):
+        """CHK-RAG-RETRY: on Windows, Path.replace() (MoveFileEx) can transiently
+        raise PermissionError(13, 'Access is denied') if another process (AV
+        real-time scan, Search Indexer) briefly has the destination or temp file
+        open. _atomic_write must retry a bounded number of times, mirroring the
+        established fix in localm.plugins.coder.episodes.EpisodeStore.add,
+        instead of letting a spurious OS-level rename failure propagate."""
+        import pathlib
+
+        base = tmp_path / "rag"
+        collection = Collection("kb", base=base).create()
+
+        real_replace = pathlib.Path.replace
+        call_count = 0
+
+        def flaky_replace(self, target):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise PermissionError(13, "Access is denied")
+            return real_replace(self, target)
+
+        monkeypatch.setattr(pathlib.Path, "replace", flaky_replace)
+
+        collection._atomic_write("retry_probe.txt", "hello atomic world")
+
+        assert call_count == 2, f"expected exactly one retry, got {call_count} calls"
+        assert (base / "kb" / "retry_probe.txt").read_text(
+            encoding="utf-8") == "hello atomic world"
+
     def test_unchanged_files_skipped_changed_reindexed(self, tmp_path, docs_dir):
         import os
         base = tmp_path / "rag"
