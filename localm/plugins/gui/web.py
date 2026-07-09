@@ -124,6 +124,54 @@ def _consume_launch_grant(app, token: str) -> bool:
     return exp is not None and _time.time() <= float(exp)
 
 
+def mint_pull_grant(app, spec: str, ttl: float = 120.0) -> str:
+    """Mint a single-use, short-lived grant binding a specific model *spec* to an
+    unguessable token (SEC-PULL-CONFIRM). ``localm gui --pull SPEC`` puts this in
+    the deep link (``?pull=SPEC&pull_token=...``) so ITS OWN browser tab can
+    auto-start the download with zero clicks; a forged ``?pull=`` link (any other
+    page, or a hidden iframe on any site while localm runs locally) cannot know
+    this secret, so the frontend falls back to an explicit human confirmation
+    instead (see init.js) - a download never starts from a URL alone. Stored
+    in-process on ``app.state.pull_grants`` (dies on restart); expired grants are
+    pruned on each mint so the dict cannot grow."""
+    import secrets as _secrets
+    import time as _time
+    grants = getattr(app.state, "pull_grants", None)
+    if grants is None:
+        grants = {}
+        app.state.pull_grants = grants
+    now = _time.time()
+    for k in [k for k, (_, exp) in grants.items() if exp <= now]:
+        grants.pop(k, None)
+    token = _secrets.token_urlsafe(32)
+    grants[token] = (spec, now + float(ttl))
+    return token
+
+
+def consume_pull_grant(app, spec: str, token: str) -> bool:
+    """Redeem a pull grant: SINGLE-USE, not expired, and bound to the EXACT spec
+    it was minted for (so a leaked/observed token cannot be replayed to authorise
+    pulling a different model). Only popped on an actual match or once expired -
+    a mismatched-spec probe must not burn an otherwise-still-valid grant, or a
+    single wrong guess could deny the legitimate redemption that follows it.
+    False for an unknown/used/expired/mismatched token."""
+    import time as _time
+    if not token:
+        return False
+    grants = getattr(app.state, "pull_grants", None) or {}
+    entry = grants.get(token)
+    if entry is None:
+        return False
+    granted_spec, exp = entry
+    if _time.time() > float(exp):
+        grants.pop(token, None)     # expired: clean up regardless of spec
+        return False
+    if granted_spec != spec:
+        return False                # wrong spec: leave the grant intact
+    grants.pop(token, None)          # right spec, still valid: single use
+    return True
+
+
 def _set_session_cookies(response, key: str, *, secure: bool) -> None:
     """Establish the S2 auth cookie on *response* for a loopback owner: mint an
     OPAQUE server-side session for the current owner *key* and set the HttpOnly
@@ -168,6 +216,11 @@ class PullRequest(BaseModel):
     # "copy" | "move" | None (default: register a local path in place, unchanged).
     # Ignored for a HuggingFace/URL spec - only the local-path pull branch uses it.
     store: str | None = None
+
+
+class PullTokenRedeemRequest(BaseModel):
+    spec: str
+    token: str
 
 
 class RemoveModelRequest(BaseModel):

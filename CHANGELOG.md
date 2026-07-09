@@ -121,6 +121,13 @@ Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on
   left ComfyUI's own copy (and any img2img source image) on disk indefinitely.
   All six call sites now fold privacy mode into `delete_outputs`, matching the
   GUI/API behaviour.
+- **`?pull=` deep link no longer downloads a model with zero confirmation.**
+  `localm gui --pull SPEC` opens the browser at `?pull=SPEC`, but any page (or a
+  hidden iframe on any site, while localm runs locally) could forge the same
+  link and silently start a real download. The CLI now mints a single-use,
+  spec-bound token passed alongside the link, so ITS OWN deep link still
+  auto-starts with zero clicks; a link without a valid token falls back to an
+  explicit confirmation dialog instead of firing automatically.
 - **Authenticated self-update.** Each release build is signed with an offline
   Ed25519 key and verified against a pinned public key before it is extracted or
   executed, so a compromised release channel cannot push a forged build.
