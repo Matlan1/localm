@@ -1438,6 +1438,70 @@ class TestNetworkToolGating:
         assert result["ok"] is True
 
 
+class TestConcurrentConfirmations:
+    """Two non-destructive network tools in the SAME turn (both requiring
+    confirmation under net_mode=ask) are dispatched concurrently by
+    Agent._execute_tools' parallel batch (agent/loop.py groups consecutive
+    non-destructive calls and runs them in a ThreadPoolExecutor). A single
+    `CoderSession._pending` slot means the second call's _confirm() clobbers
+    the first's, so the first request's confirm_id can never be matched by
+    answer_confirm() again - it just sits until the timeout auto-rejects it."""
+
+    @staticmethod
+    def _dual_network_call():
+        return (
+            "Fetching and searching.\n"
+            "<tool_call>\n"
+            + json.dumps({"name": "fetch_url",
+                          "args": {"url": "https://example.com/a"}})
+            + "\n</tool_call>\n"
+            "<tool_call>\n"
+            + json.dumps({"name": "web_search", "args": {"query": "b"}})
+            + "\n</tool_call>"
+        )
+
+    def test_two_concurrent_confirmations_are_both_resolvable(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LOCALM_NET_MODE", "ask")
+        # Keep any orphaned confirmation short-lived instead of the 600s
+        # default, so a reproduction of the bug (one confirm never matched)
+        # settles in ~1s instead of leaving a daemon thread blocked for 10
+        # minutes regardless of whether the test passes or fails.
+        monkeypatch.setattr("localm.plugins.coder.sessions._confirm_timeout",
+                            lambda: 1.0)
+        backend = ScriptedBackend([self._dual_network_call(), "Done."])
+        session = CoderSession(tmp_path, backend, auto_approve=False)
+        session.send_message("fetch and search")
+
+        # Collect confirm_request events until both concurrent calls have
+        # registered one - the order between them is not deterministic.
+        requests = []
+        deadline = time.monotonic() + 10.0
+        while len(requests) < 2 and time.monotonic() < deadline:
+            try:
+                ev = session.events.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if ev["type"] == "confirm_request":
+                requests.append(ev)
+        assert len(requests) == 2, f"expected 2 confirm_request events, got {requests}"
+
+        ids = {r["confirm_id"] for r in requests}
+        assert len(ids) == 2, "the two concurrent calls must get distinct confirm ids"
+
+        # Reject both (never fetch/search for real) - the fix under test is
+        # whether each id is independently answerable, not the tool outcome.
+        results = {cid: session.answer_confirm(cid, approved=False) for cid in ids}
+        assert results == {cid: True for cid in ids}, (
+            "a concurrently-issued confirmation was silently dropped instead "
+            f"of being answered (answer_confirm results: {results})"
+        )
+
+        events = _drain(session, until_types={"final"})
+        tool_results = [e for e in events if e["type"] == "tool_result"]
+        assert len(tool_results) == 2
+        assert all(r["ok"] is False for r in tool_results), tool_results
+
+
 # ------------------------------------------------------------------ #
 #  Web endpoints (/api/web/*)                                         #
 # ------------------------------------------------------------------ #

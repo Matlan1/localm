@@ -101,6 +101,13 @@ Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on
   skipped the bind-security gates; an `UnboundLocalError` in the chat runner; and
   `coder_confirm_timeout=0` now means wait forever.
 - **Chat:** trimmed the injected web-access prompts so weak models stop fixating on them.
+- **Coder confirmations:** a coder session tracked only one pending confirmation
+  at a time, so two tool calls needing approval in the same turn (e.g. two
+  `fetch_url`/`web_search` calls under `net_mode=ask`, which the agent runs
+  concurrently) would have the second clobber the first - the first could never
+  be answered and just sat until the 10-minute timeout auto-rejected it. Pending
+  confirmations are now tracked per call, so concurrent approvals no longer
+  collide.
 
 ### Security
 - **Privacy mode now deletes ComfyUI's own on-disk output copy everywhere media
