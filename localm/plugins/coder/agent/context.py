@@ -10,8 +10,8 @@ from typing import Optional
 
 import localm.plugins.coder.agent as _agent
 from ..display import (
-    print_assistant_label, print_info, print_streaming_done,
-    print_streaming_token, print_thinking,
+    print_assistant_label, print_info, print_reasoning_token,
+    print_streaming_done, print_streaming_token, print_thinking,
 )
 from .constants import _COMPACT_AUTO_RATIO, _COMPACT_WARN_RATIO, _DEFAULT_CTX_TOKENS
 
@@ -314,10 +314,22 @@ ws     ::= [ \t\n\r]*
             try:
                 if self.on_event is not None:
                     # Event-sink mode (GUI/web session): stream tokens to the sink,
-                    # keep the server terminal quiet.
+                    # keep the server terminal quiet. Reasoning (H4) goes out as
+                    # its own "reasoning" event - NEVER mixed into "token" - so a
+                    # thinking model's scratchpad is distinguishable from the
+                    # visible answer on the client (AUD-HIGH-17-3) instead of
+                    # being silently dropped (this backend never yields it inline;
+                    # see BaseLLMBackend.chat_stream's docstring).
                     full = ""
+                    reasoning_parts: list[str] = []
+
+                    def _on_reasoning(piece: str) -> None:
+                        reasoning_parts.append(piece)
+                        self._emit("reasoning", text=piece)
+
                     for piece, hidden in self._stream_hiding_tool_calls(
-                        self.backend.chat_stream(messages, **self._llm_kwargs())
+                        self.backend.chat_stream(
+                            messages, on_reasoning=_on_reasoning, **self._llm_kwargs())
                     ):
                         full += piece
                         if not hidden:
@@ -325,7 +337,8 @@ ws     ::= [ \t\n\r]*
                         if self._stop_requested:
                             break
                     self._accumulate_usage()
-                    self._audit.llm(full, tokens=self._total_tokens)
+                    self._audit.llm(full, tokens=self._total_tokens,
+                                    reasoning="".join(reasoning_parts))
                     return full
                 if interactive:
                     if first_attempt:
@@ -333,12 +346,19 @@ ws     ::= [ \t\n\r]*
                         print_assistant_label(self.name)
                         first_attempt = False
                     full = ""
+                    reasoning_parts: list[str] = []
+
+                    def _on_reasoning(piece: str) -> None:
+                        reasoning_parts.append(piece)
+                        print_reasoning_token(piece)
+
                     try:
                         # _llm_kwargs (not raw gen_kwargs): the terminal REPL is
                         # the third dispatch branch and previously skipped the
                         # lazy tool-call grammar the other two applied.
                         for piece, hidden in self._stream_hiding_tool_calls(
-                            self.backend.chat_stream(messages, **self._llm_kwargs())
+                            self.backend.chat_stream(
+                                messages, on_reasoning=_on_reasoning, **self._llm_kwargs())
                         ):
                             full += piece
                             if not hidden:
@@ -348,13 +368,18 @@ ws     ::= [ \t\n\r]*
                         print_streaming_done()
                         print_info("(interrupted)")
                     self._accumulate_usage()
-                    self._audit.llm(full, tokens=self._total_tokens)
+                    self._audit.llm(full, tokens=self._total_tokens,
+                                    reasoning="".join(reasoning_parts))
                     return full
                 else:
-                    # Silent call - used by sub-agents and non-interactive mode
+                    # Silent call - used by sub-agents and non-interactive mode.
+                    # No live display, but last_reasoning (when the backend
+                    # supports it) still records a separate audit trail instead
+                    # of leaving no trace at all (AUD-HIGH-17-3).
                     result = self.backend.chat(messages, **self._llm_kwargs())
                     self._accumulate_usage()
-                    self._audit.llm(result, tokens=self._total_tokens)
+                    reasoning = getattr(self.backend, "last_reasoning", "") or ""
+                    self._audit.llm(result, tokens=self._total_tokens, reasoning=reasoning)
                     return result
             except CoderAuthError as e:
                 import sys

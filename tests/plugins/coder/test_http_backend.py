@@ -12,12 +12,15 @@ def _make_backend():
     return HTTPBackend("http://127.0.0.1:8080/v1", "test-model")
 
 
-def _mock_non_streaming_response(content: str, usage: dict):
+def _mock_non_streaming_response(content: str, usage: dict, reasoning: str = None):
     """Build a mock requests.Response for a non-streaming completion."""
+    message = {"content": content}
+    if reasoning is not None:
+        message["reasoning_content"] = reasoning
     resp = MagicMock()
     resp.raise_for_status = MagicMock()
     resp.json.return_value = {
-        "choices": [{"message": {"content": content}}],
+        "choices": [{"message": message}],
         "usage": usage,
     }
     return resp
@@ -73,6 +76,42 @@ class TestHTTPBackendChat(unittest.TestCase):
         self.assertEqual(backend.last_usage["total_tokens"], 3)
 
 
+class TestHTTPBackendChatReasoning(unittest.TestCase):
+    """AUD-HIGH-17-3: chat() must capture the server's H4 `reasoning_content`
+    field into last_reasoning WITHOUT mixing it into the returned text - the
+    coder loop has no downstream splitter, so any inline <think> tag in the
+    returned string would leak into the visible answer, audit log, and
+    conversation history verbatim."""
+
+    @patch("requests.post")
+    def test_chat_captures_reasoning_separately(self, mock_post):
+        mock_post.return_value = _mock_non_streaming_response(
+            "The answer.", {}, reasoning="because reasons")
+        backend = _make_backend()
+        result = backend.chat([{"role": "user", "content": "hi"}])
+        self.assertEqual(result, "The answer.")
+        self.assertEqual(backend.last_reasoning, "because reasons")
+        # NEGATIVE: the raw reasoning text never leaks into the returned answer.
+        self.assertNotIn("because reasons", result)
+        self.assertNotIn("<think>", result)
+
+    @patch("requests.post")
+    def test_chat_no_reasoning_field_leaves_last_reasoning_empty(self, mock_post):
+        mock_post.return_value = _mock_non_streaming_response("Just an answer.", {})
+        backend = _make_backend()
+        backend.chat([{"role": "user", "content": "hi"}])
+        self.assertEqual(backend.last_reasoning, "")
+
+    @patch("requests.post")
+    def test_chat_clears_last_reasoning_before_call(self, mock_post):
+        """last_reasoning from a previous call must not leak into the next one."""
+        backend = _make_backend()
+        backend._last_reasoning = "stale reasoning from a prior turn"
+        mock_post.return_value = _mock_non_streaming_response("hi", {})
+        backend.chat([{"role": "user", "content": "x"}])
+        self.assertEqual(backend.last_reasoning, "")
+
+
 class TestHTTPBackendChatStream(unittest.TestCase):
     def _make_stream_response(self, tokens: list, usage: dict):
         """Build a mock streaming response that yields SSE chunks."""
@@ -125,6 +164,98 @@ class TestHTTPBackendChatStream(unittest.TestCase):
         list(backend.chat_stream([{"role": "user", "content": "hi"}]))
         # {} means the server didn't send usage - that's fine
         self.assertIsInstance(backend.last_usage, dict)
+
+
+class TestHTTPBackendChatStreamReasoning(unittest.TestCase):
+    """AUD-HIGH-17-3: chat_stream() must route the server's H4
+    `reasoning_content` deltas to on_reasoning and last_reasoning, and NEVER
+    yield them as part of the content Iterator[str] - the coder loop's
+    _stream_hiding_tool_calls, terminal display, event-sink, audit log, and
+    conversation history all consume that iterator directly with no splitter,
+    so an inlined reasoning chunk would leak through every one of them."""
+
+    @staticmethod
+    def _stream_response(delta_dicts: list):
+        chunks = [{"choices": [{"delta": d, "finish_reason": None}]} for d in delta_dicts]
+        chunks.append({"choices": [{"delta": {}, "finish_reason": "stop"}]})
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda self: self
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.iter_lines.return_value = _sse_lines(chunks)
+        return mock_resp
+
+    @patch("requests.post")
+    def test_reasoning_never_yielded_as_content(self, mock_post):
+        mock_post.return_value = self._stream_response([
+            {"reasoning_content": "because "},
+            {"reasoning_content": "reasons"},
+            {"content": "The "},
+            {"content": "answer."},
+        ])
+        backend = _make_backend()
+        pieces = list(backend.chat_stream([{"role": "user", "content": "hi"}]))
+        self.assertEqual("".join(pieces), "The answer.")
+        self.assertEqual(backend.last_reasoning, "because reasons")
+        # NEGATIVE: no piece of the yielded content stream carries reasoning or
+        # an inline <think> tag - there is no downstream splitter for it here.
+        for p in pieces:
+            self.assertNotIn("because", p)
+            self.assertNotIn("<think>", p)
+
+    @patch("requests.post")
+    def test_on_reasoning_callback_fires_per_delta(self, mock_post):
+        mock_post.return_value = self._stream_response([
+            {"reasoning_content": "step one. "},
+            {"reasoning_content": "step two."},
+            {"content": "done"},
+        ])
+        backend = _make_backend()
+        seen = []
+        pieces = list(backend.chat_stream(
+            [{"role": "user", "content": "hi"}], on_reasoning=seen.append))
+        self.assertEqual(seen, ["step one. ", "step two."])
+        self.assertEqual("".join(pieces), "done")
+
+    @patch("requests.post")
+    def test_no_reasoning_field_leaves_last_reasoning_empty(self, mock_post):
+        mock_post.return_value = self._stream_response([{"content": "hi"}])
+        backend = _make_backend()
+        list(backend.chat_stream([{"role": "user", "content": "x"}]))
+        self.assertEqual(backend.last_reasoning, "")
+
+    @patch("requests.post")
+    def test_broken_on_reasoning_callback_does_not_kill_the_stream(self, mock_post):
+        """A raising sink (mirrors agent/core.py's _emit contract: 'a broken
+        sink must not kill the agent loop') must not abort the stream."""
+        mock_post.return_value = self._stream_response([
+            {"reasoning_content": "x"},
+            {"content": "The answer."},
+        ])
+        backend = _make_backend()
+
+        def _boom(_piece):
+            raise RuntimeError("sink exploded")
+
+        pieces = list(backend.chat_stream(
+            [{"role": "user", "content": "hi"}], on_reasoning=_boom))
+        self.assertEqual("".join(pieces), "The answer.")
+
+    @patch("requests.post")
+    def test_reasoning_does_not_disturb_tool_call_accumulation(self, mock_post):
+        """Reasoning deltas interleaved with native tool_call deltas must not
+        perturb the existing tool-call XML accumulation."""
+        mock_post.return_value = self._stream_response([
+            {"reasoning_content": "planning the call"},
+            {"tool_calls": [{"index": 0, "function": {"name": "read_file", "arguments": ""}}]},
+            {"tool_calls": [{"index": 0, "function": {"arguments": '{"path": "a.py"}'}}]},
+        ])
+        backend = _make_backend()
+        pieces = list(backend.chat_stream([{"role": "user", "content": "hi"}]))
+        full = "".join(pieces)
+        self.assertIn('"name": "read_file"', full)
+        self.assertIn('"path": "a.py"', full)
+        self.assertNotIn("planning the call", full)
 
 
 if __name__ == "__main__":

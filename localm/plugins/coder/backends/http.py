@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Iterator, Optional
+from typing import Callable, Iterator, Optional
 
 import requests
 
@@ -122,6 +122,11 @@ class HTTPBackend(BaseLLMBackend):
             verify = tls.requests_verify(base_url)
         self._verify = verify
         self._last_usage: dict = {}
+        # Most recent call's reasoning text (H4 `reasoning_content`), the
+        # non-streaming counterpart of chat_stream's on_reasoning callback - see
+        # last_reasoning. Never mixed into chat()/chat_stream()'s returned/yielded
+        # text (AUD-HIGH-17-3).
+        self._last_reasoning: str = ""
         self.native_tools  = native_tools
         # Anthropic speaks the Messages API (/v1/messages, x-api-key,
         # anthropic-version, content-block responses) - NOT the OpenAI
@@ -172,6 +177,17 @@ class HTTPBackend(BaseLLMBackend):
     def last_usage(self) -> dict:
         """Usage dict from the most recent call: {prompt_tokens, completion_tokens, total_tokens}."""
         return dict(self._last_usage)
+
+    @property
+    def last_reasoning(self) -> str:
+        """The most recent call's full reasoning text (H4 ``reasoning_content``),
+        or ``""`` when the model/server did not emit one. ``chat()`` populates this
+        directly; ``chat_stream()`` accumulates it from the same deltas passed to
+        ``on_reasoning`` as they arrive. Mirrors ``last_usage``'s pull-after-call
+        pattern (AUD-HIGH-17-3) - useful for a caller (e.g. a non-interactive/
+        silent agent turn) that has no live callback wired up but still wants the
+        reasoning for its own audit record."""
+        return self._last_reasoning
 
     def set_tools(self, tool_defs: list) -> None:
         """
@@ -329,6 +345,7 @@ class HTTPBackend(BaseLLMBackend):
 
     def chat(self, messages: list[dict], **kwargs) -> str:
         self._last_usage = {}
+        self._last_reasoning = ""
         resp = _post_with_retry(
             self._chat_url(),
             headers=self._headers(),
@@ -344,6 +361,13 @@ class HTTPBackend(BaseLLMBackend):
             self._last_usage = data["usage"]
         message = data["choices"][0]["message"]
         text    = message.get("content") or ""
+        # H4: the server splits a thinking model's reasoning into its own
+        # `reasoning_content` field, kept OUT of `text` (AUD-HIGH-17-3) - unlike
+        # HttpEngine's chat REPL, the coder loop has no downstream splitter, so
+        # inlining it here would leak raw <think> tags into the visible answer,
+        # the audit log, and conversation history. Callers that want it read
+        # last_reasoning after this call returns.
+        self._last_reasoning = message.get("reasoning_content") or ""
         # Native tool calls: convert to our XML format and append
         tool_calls = message.get("tool_calls") or []
         if tool_calls:
@@ -351,12 +375,18 @@ class HTTPBackend(BaseLLMBackend):
             text = (text + "\n" + xml).strip() if text else xml
         return text
 
-    def chat_stream(self, messages: list[dict], **kwargs) -> Iterator[str]:
+    def chat_stream(self, messages: list[dict],
+                    on_reasoning: Optional[Callable[[str], None]] = None,
+                    **kwargs) -> Iterator[str]:
         if self.anthropic:
+            # Anthropic extended-thinking events are a distinct shape this
+            # backend does not translate; not in scope here (AUD-HIGH-17-3).
             yield from self._anthropic_stream(messages, **kwargs)
             return
         import json as _json
         self._last_usage = {}
+        self._last_reasoning = ""
+        _reasoning_parts: list[str] = []
         # Accumulate streaming native tool_calls: index → {name, arguments_buf}
         _tc_buf: dict[int, dict] = {}
 
@@ -385,6 +415,17 @@ class HTTPBackend(BaseLLMBackend):
                 if chunk.get("usage"):
                     self._last_usage = chunk["usage"]
                 delta = chunk.get("choices", [{}])[0].get("delta", {})
+                # H4 reasoning delta: routed to on_reasoning (a SEPARATE channel
+                # from the yielded content), never yielded inline - see chat()'s
+                # comment and BaseLLMBackend.chat_stream's docstring.
+                reasoning = delta.get("reasoning_content") or ""
+                if reasoning:
+                    _reasoning_parts.append(reasoning)
+                    if on_reasoning is not None:
+                        try:
+                            on_reasoning(reasoning)
+                        except Exception:
+                            pass  # a broken sink must not kill the stream
                 # Regular content tokens
                 piece = delta.get("content") or ""
                 if piece:
@@ -399,6 +440,8 @@ class HTTPBackend(BaseLLMBackend):
                         _tc_buf[idx]["name"] += fn["name"]
                     if fn.get("arguments"):
                         _tc_buf[idx]["arguments"] += fn["arguments"]
+
+        self._last_reasoning = "".join(_reasoning_parts)
 
         # Emit accumulated tool calls as XML after the stream ends
         if _tc_buf:
