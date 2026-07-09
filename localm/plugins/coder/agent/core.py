@@ -121,7 +121,9 @@ class Agent(
         # Per-task turn budget for uncertainty escalation. None -> 2/3 of max_turns.
         self.turn_budget    = turn_budget if turn_budget is not None else max(3, (max_turns * 2) // 3)
         # Structured event sink (GUI/web sessions). Called with a dict per event:
-        # token, tool_call, tool_result, turn, info. None -> terminal-only display.
+        # token, reasoning, tool_call, tool_result, turn, info. None -> terminal-only
+        # display. "reasoning" (H4) is a thinking model's reasoning text, kept
+        # separate from "token" (AUD-HIGH-17-3) - see _call_llm.
         self.on_event       = on_event
         # External approval hook: Callable[[ToolCall], bool]. When set it is used
         # for destructive-tool confirmation instead of the terminal prompt, in

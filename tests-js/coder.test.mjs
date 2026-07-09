@@ -80,6 +80,42 @@ test("CODER-2: a resumed session's history events render as message rows", () =>
   assert.match(feedEl.textContent, /here is the plan/);
 });
 
+// AUD-HIGH-17-3: the coder's HTTP backend now surfaces a thinking model's H4
+// reasoning as its own "reasoning" event (never mixed into "token"), routed
+// through the SAME <think>/renderMarkdown machinery the regular chat GUI uses
+// (see tests-js/reasoning.test.mjs) so it renders as a collapsible block.
+test("AUD-HIGH-17-3: reasoning events render a collapsible think-block separate from the answer", () => {
+  const { window } = loadApp({ fetchImpl: okFetch() });
+  const feedEl = window.document.createElement("div");
+  const s = { info: { id: "x" }, feedEl, liveBody: null, liveText: "",
+             liveReasoning: "", pendingCards: [] };
+
+  window.handleCoderEvent(s, { type: "reasoning", text: "because " });
+  window.handleCoderEvent(s, { type: "reasoning", text: "reasons" });
+  window.handleCoderEvent(s, { type: "token", text: "The " });
+  window.handleCoderEvent(s, { type: "token", text: "answer." });
+
+  const det = feedEl.querySelector("details.think-block");
+  assert.ok(det, "reasoning rendered a collapsible think-block");
+  assert.match(det.querySelector("div").textContent, /because reasons/);
+  const main = feedEl.querySelector(".md-main");
+  assert.match(main.textContent, /The answer\./);
+  // NEGATIVE: the visible answer body never contains the reasoning text.
+  assert.doesNotMatch(main.textContent, /because reasons/);
+});
+
+test("AUD-HIGH-17-3: reasoning events are excluded from the light event log (no spam)", () => {
+  const { window } = loadApp({ fetchImpl: okFetch() });
+  const feedEl = window.document.createElement("div");
+  const s = { info: { id: "x" }, feedEl, liveBody: null, liveText: "",
+             liveReasoning: "", pendingCards: [] };
+
+  window.handleCoderEvent(s, { type: "reasoning", text: "thinking..." });
+  window.handleCoderEvent(s, { type: "token", text: "hi" });
+
+  assert.deepEqual(s.eventLog || [], [], "neither token nor reasoning enters eventLog");
+});
+
 test("CODER-EMPTY-MODEL: a tool-only assistant turn leaves no empty Model row", () => {
   const { window } = loadApp({ fetchImpl: okFetch() });
   const feedEl = window.document.createElement("div");

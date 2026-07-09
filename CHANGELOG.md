@@ -119,6 +119,14 @@ Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on
   be answered and just sat until the 10-minute timeout auto-rejected it. Pending
   confirmations are now tracked per call, so concurrent approvals no longer
   collide.
+- **Coder reasoning:** the coder's HTTP backend (the common case - `localm serve`,
+  OpenAI, Anthropic, or any OpenAI-compatible endpoint) never read a thinking
+  model's `reasoning_content`, so its reasoning was silently dropped - no
+  "thinking" display in the terminal or GUI, unlike the CLI attach-mode fix
+  above. It now streams separately (a dimmed terminal aside, its own GUI event
+  and collapsible block, and its own audit-log field) rather than being mixed
+  into the visible answer, which the coder loop resends to the model and stores
+  in history verbatim with no splitter of its own.
 - **Memory:** the owner's chat memory stays in the shared `owner` namespace; a
   missing per-namespace write lock let concurrent writers (two requests, or a
   background consolidation pass racing a live edit) silently drop each other's

@@ -141,7 +141,7 @@ class NullAuditLog:
     def user(self, content: str) -> None:
         pass
 
-    def llm(self, content: str, tokens: int = 0) -> None:
+    def llm(self, content: str, tokens: int = 0, reasoning: str = "") -> None:
         pass
 
     def tool_call(self, name: str, args: dict) -> None:
@@ -201,8 +201,16 @@ class AuditLog:
     def user(self, content: str) -> None:
         self._write("user", {"content": content[:2000]})
 
-    def llm(self, content: str, tokens: int = 0) -> None:
-        self._write("llm", {"content": content[:2000], "tokens": tokens})
+    def llm(self, content: str, tokens: int = 0, reasoning: str = "") -> None:
+        """Record one LLM turn. ``reasoning`` (H4 ``reasoning_content``, when the
+        caller's backend/consumer separates it - AUD-HIGH-17-3) is stored in its
+        OWN field, never appended to ``content``, so the visible-answer field
+        stays exactly what was shown/resent."""
+        self._write("llm", {
+            "content": content[:2000],
+            "reasoning": reasoning[:2000] if reasoning else "",
+            "tokens": tokens,
+        })
 
     def tool_call(self, name: str, args: dict) -> None:
         safe_args = {k: (str(v)[:200] if isinstance(v, str) else v) for k, v in args.items()}

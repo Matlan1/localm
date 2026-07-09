@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Iterator
+from typing import Callable, Iterator, Optional
 
 
 class BaseLLMBackend(ABC):
@@ -23,8 +23,20 @@ class BaseLLMBackend(ABC):
         """Send messages, return the complete response string."""
 
     @abstractmethod
-    def chat_stream(self, messages: list[dict], **kwargs) -> Iterator[str]:
-        """Send messages, yield text pieces as they arrive."""
+    def chat_stream(self, messages: list[dict],
+                    on_reasoning: Optional[Callable[[str], None]] = None,
+                    **kwargs) -> Iterator[str]:
+        """Send messages, yield VISIBLE text pieces as they arrive.
+
+        ``on_reasoning`` is an OPTIONAL side channel: a backend that can split a
+        thinking model's reasoning from its answer (e.g. the OpenAI-compatible
+        ``reasoning_content`` delta field, H4) calls it with each reasoning piece
+        as it streams, instead of mixing that text into the yielded content. A
+        backend without a reasoning channel simply ignores the callback - the
+        agent loop never requires it to fire. Never yield reasoning inline (e.g.
+        wrapped in ``<think>`` tags): callers of this Iterator have no splitter
+        downstream, so an inlined tag would leak into the visible answer, the
+        audit log, and conversation history verbatim."""
 
     @property
     def model_id(self) -> str:
