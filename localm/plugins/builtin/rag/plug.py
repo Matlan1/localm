@@ -40,6 +40,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from localm.plugins.executor import get_plugin_executor
 from localm.textguard import neutralise
 
 _router = APIRouter()
@@ -468,7 +469,8 @@ async def rag_query(name: str, req: RagQueryRequest, request: Request):
     self_embed, _, _ = _self_services(request)
     loop = asyncio.get_running_loop()
     hits = await loop.run_in_executor(
-        None, lambda: coll.query(req.query, k=k, embed_fn=self_embed))
+        get_plugin_executor(),
+        lambda: coll.query(req.query, k=k, embed_fn=self_embed))
     # Defang control/frame tokens in the untrusted chunk text before it can be
     # spliced into a chat prompt (indirect prompt injection - LM-DA-SEC-03).
     return {"collection": name, "query": req.query, "hits": _neutralise_hits(hits)}
@@ -596,11 +598,13 @@ async def rag_extract(req: RagExtractRequest):
     # coroutine would freeze the event loop - every route, for every user - for
     # the duration. rag_upload already offloads the same call via a background
     # job (jobs.start_fn -> a worker thread); this route returns the text
-    # directly rather than streaming a job, so it offloads straight to the
-    # default executor instead.
+    # directly rather than streaming a job, so it offloads to the plugin pool
+    # instead (get_plugin_executor - kept off the inference pool so a burst of
+    # extraction requests can never starve chat completions, see executor.py).
     loop = asyncio.get_running_loop()
     try:
-        text = await loop.run_in_executor(None, extract_bytes, data, req.filename)
+        text = await loop.run_in_executor(
+            get_plugin_executor(), extract_bytes, data, req.filename)
     except ExtractError as e:
         raise HTTPException(422, str(e))
     max_chars = max(500, min(req.max_chars, 200_000))
