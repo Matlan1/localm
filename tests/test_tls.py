@@ -7,6 +7,8 @@ missing / expired / wrong-SAN leaf, and an IP-set change - with the CA reused
 across regenerations so a device trusted once stays trusted.
 """
 
+import socket
+import sys
 from datetime import timedelta
 
 import pytest
@@ -265,3 +267,95 @@ def test_companion_addresses_skips_loopback_only_primary(monkeypatch):
     addrs = tls.companion_addresses()
     assert addrs["lan"] == "192.168.50.10"
     assert addrs["tailscale"] == ""
+
+
+# ------------------------------------------------------------------ #
+#  VPN adapter exclusion (a VPN's virtual tunnel adapter can carry an        #
+#  ordinary RFC1918 address and even win the default route, but is         #
+#  reachable only through the VPN - never the physical LAN)                 #
+# ------------------------------------------------------------------ #
+
+class _FakeOutboundSocket:
+    """Stands in for the UDP socket _primary_lan_ip() opens - returns a fixed
+    address from getsockname() without touching the real network."""
+
+    def __init__(self, ip):
+        self._ip = ip
+
+    def connect(self, addr):
+        pass
+
+    def getsockname(self):
+        return (self._ip, 0)
+
+    def close(self):
+        pass
+
+
+def _mock_outbound_ip(monkeypatch, ip):
+    monkeypatch.setattr(socket, "socket", lambda *a, **kw: _FakeOutboundSocket(ip))
+
+
+def test_vpn_adapter_ips_matches_by_adapter_name(monkeypatch):
+    psutil = pytest.importorskip("psutil")
+
+    class _Addr:
+        def __init__(self, address):
+            self.address = address
+            self.family = socket.AF_INET
+
+    monkeypatch.setattr(psutil, "net_if_addrs", lambda: {
+        "Ethernet": [_Addr("192.168.1.50")],
+        "WireGuard Tunnel": [_Addr("10.66.0.7")],
+    })
+    assert tls._vpn_adapter_ips() == {"10.66.0.7"}
+
+
+def test_vpn_adapter_ips_empty_without_psutil(monkeypatch):
+    # psutil absent (the "[monitor]" extra not installed) degrades to an empty
+    # set, same as _iface_ips - never raises. Setting sys.modules["psutil"] to
+    # None makes the function's own `import psutil` raise ImportError.
+    monkeypatch.setitem(sys.modules, "psutil", None)
+    assert tls._vpn_adapter_ips() == set()
+
+
+def test_primary_lan_ip_excludes_vpn_adapter(monkeypatch):
+    # The OS routing table sent the default-route probe out via a VPN's
+    # virtual tunnel adapter - its address must not be reported as the LAN IP.
+    _mock_outbound_ip(monkeypatch, "10.66.0.7")
+    monkeypatch.setattr(tls, "_vpn_adapter_ips", lambda: {"10.66.0.7"})
+    assert tls._primary_lan_ip() == ""
+
+
+def test_primary_lan_ip_keeps_real_lan_ip(monkeypatch):
+    # Same probe, but the address does not belong to a VPN-like adapter -
+    # unchanged behavior.
+    _mock_outbound_ip(monkeypatch, "192.168.1.50")
+    monkeypatch.setattr(tls, "_vpn_adapter_ips", lambda: set())
+    assert tls._primary_lan_ip() == "192.168.1.50"
+
+
+def test_companion_addresses_excludes_vpn_tunnel_as_primary(monkeypatch):
+    # The default-route trick picked the VPN's tunnel adapter (RFC1918,
+    # otherwise indistinguishable from a real LAN address) - it must not win
+    # the "lan" slot even though it is "primary"; the real LAN IP (also
+    # present via the other probes) must be picked instead. Regression for
+    # the reported "localm doesn't like it when I have a VPN active" bug.
+    monkeypatch.setattr(tls, "_primary_lan_ip", lambda: "10.66.0.7")
+    monkeypatch.setattr(tls, "_host_ips", lambda: ["192.168.1.50"])
+    monkeypatch.setattr(tls, "_iface_ips", lambda: ["192.168.1.50", "10.66.0.7"])
+    monkeypatch.setattr(tls, "_vpn_adapter_ips", lambda: {"10.66.0.7"})
+    addrs = tls.companion_addresses()
+    assert addrs["lan"] == "192.168.1.50"
+
+
+def test_companion_addresses_vpn_only_leaves_lan_empty(monkeypatch):
+    # No real LAN candidate at all (only a VPN tunnel adapter is up) - never
+    # fall back to advertising the VPN's unreachable address; empty is the
+    # honest answer, same as the "nothing detectable" case.
+    monkeypatch.setattr(tls, "_primary_lan_ip", lambda: "10.66.0.7")
+    monkeypatch.setattr(tls, "_host_ips", lambda: ["10.66.0.7"])
+    monkeypatch.setattr(tls, "_iface_ips", lambda: ["10.66.0.7"])
+    monkeypatch.setattr(tls, "_vpn_adapter_ips", lambda: {"10.66.0.7"})
+    addrs = tls.companion_addresses()
+    assert addrs["lan"] == ""

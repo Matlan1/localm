@@ -39,6 +39,17 @@ _RENEW_MARGIN_DAYS = 30
 # Tailscale hands out addresses in the 100.64.0.0/10 CGNAT range.
 _TAILSCALE_NET = ipaddress.ip_network("100.64.0.0/10")
 
+# Adapter-NAME substrings that mark a VPN/tunnel virtual interface rather than
+# a real physical LAN NIC. Most VPN clients (WireGuard, OpenVPN, and virtually
+# every commercial VPN app) hand their tunnel adapter an ordinary RFC1918
+# address - e.g. 10.x.x.x - and install it as the default route, which would
+# otherwise be indistinguishable from a genuine LAN address by IP range alone.
+# Best-effort name match, not exhaustive; lowercased comparison.
+_VPN_ADAPTER_NAME_MARKERS = (
+    "tap", "tun", "vpn", "wireguard", "wintun", "ppp", "utun",
+    "nordlynx", "openvpn", "globalprotect", "anyconnect", "zscaler",
+)
+
 
 # ------------------------------------------------------------------ #
 #  Paths                                                              #
@@ -74,19 +85,57 @@ def _meta_path(home: Path) -> Path:
 #  SAN discovery                                                      #
 # ------------------------------------------------------------------ #
 
+def _vpn_adapter_ips() -> set[str]:
+    """IPv4 addresses bound to an adapter whose NAME looks VPN/tunnel-like
+    (best-effort, via psutil when the ``[monitor]`` extra is installed; empty
+    otherwise, same degrade as ``_iface_ips``). A VPN's virtual adapter often
+    carries an ordinary RFC1918 address indistinguishable from a real LAN
+    address by IP range alone, so callers that need to tell them apart cross-
+    reference against the owning adapter's name instead."""
+    out: set[str] = set()
+    try:
+        import psutil
+    except Exception:
+        return out
+    try:
+        for name, addrs in psutil.net_if_addrs().items():
+            if not any(marker in name.lower() for marker in _VPN_ADAPTER_NAME_MARKERS):
+                continue
+            for a in addrs:
+                if getattr(a, "family", None) == socket.AF_INET:
+                    out.add(a.address)
+    except Exception:
+        # Best-effort, same as _iface_ips: an enumeration failure just means we
+        # cannot tell a VPN adapter apart from a real one this call, not a
+        # reason to fail whatever the caller was doing.
+        pass
+    return out
+
+
 def _primary_lan_ip() -> str:
     """Best-effort primary outbound LAN IPv4, or "" if undetermined. Opens a UDP
     socket toward a TEST-NET address to learn the outbound interface; no packets
-    are actually sent."""
+    are actually sent.
+
+    A VPN client can legitimately become the default route, in which case this
+    trick reports the VPN's virtual tunnel address instead of the machine's
+    real LAN address - reachable only through the VPN, not by another device on
+    the physical LAN. When the discovered address maps to an adapter whose name
+    looks VPN/tunnel-like, it is discarded (treated as undetermined) rather than
+    reported as the LAN IP; callers that need a fallback (``companion_addresses``)
+    still have other probes to try."""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             s.connect(("192.0.2.1", 80))   # TEST-NET-1 (RFC 5737); no traffic
-            return s.getsockname()[0]
+            ip = s.getsockname()[0]
         finally:
             s.close()
     except OSError:
         return ""
+    if ip in _vpn_adapter_ips():
+        return ""
+    return ip
 
 
 def _host_ips() -> list[str]:
@@ -206,10 +255,13 @@ def companion_addresses() -> dict:
     ``lan`` is this machine's primary private (RFC 1918) IPv4 - the interface a
     phone on the same Wi-Fi reaches; ``tailscale`` is a 100.64.0.0/10 (CGNAT)
     address when Tailscale is up, else "". Either may be "" when it cannot be
-    determined. Purely informational - never raises."""
+    determined. A VPN's virtual tunnel adapter is never picked for ``lan`` even
+    if it offers an RFC 1918 address, since it is reachable only through the
+    VPN. Purely informational - never raises."""
     lan = ""
     tailscale = ""
     primary = _norm_ip(_primary_lan_ip()) or ""
+    vpn_ips = _vpn_adapter_ips()
     seen: set[str] = set()
     # Candidate IPv4s this machine owns: the primary outbound interface first
     # (the preferred LAN pick), then hostname + per-interface addresses.
@@ -231,6 +283,8 @@ def companion_addresses() -> dict:
                 tailscale = norm
             continue
         if addr.is_loopback or addr.is_link_local or not addr.is_private:
+            continue
+        if norm in vpn_ips:
             continue
         # The primary outbound interface always wins the LAN slot; otherwise
         # take the first private address seen.
