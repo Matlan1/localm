@@ -24,10 +24,8 @@ import io
 import tarfile
 import zipfile
 
-import pytest
-
 from localm.rag import extract
-from localm.rag.extract import ExtractError, extract_bytes
+from localm.rag.extract import extract_bytes
 
 
 def _zip(members: dict) -> bytes:

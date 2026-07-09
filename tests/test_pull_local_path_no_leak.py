@@ -11,10 +11,6 @@ path (and model filename) to a third party, before falling through to the
 offline add_local. Registering a local file must be fully offline.
 """
 
-from pathlib import Path
-
-import pytest
-
 import localm.model_manager.pull as pull
 
 

@@ -4,7 +4,7 @@ Tests for localm model browser unified type support and ComfyUI model scan capab
 """
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 import pytest
 
 from localm import model_manager as mm

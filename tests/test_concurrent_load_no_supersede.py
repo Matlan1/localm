@@ -14,7 +14,6 @@ import asyncio
 import threading
 
 import pytest
-from fastapi import HTTPException
 
 from localm.inference import http_server as hs
 from localm.inference.backends.base import ModelLoadCancelled
