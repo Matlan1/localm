@@ -57,6 +57,7 @@ def _bare_llama() -> LlamaCpp:
     llm._cached_tokens = []
     llm._ctx_capacity = 4096
     llm._kv_supported = None
+    llm._vram_check = None
     # Native-call serialization primitives normally set up in __init__.
     llm._gen_lock = threading.RLock()
     llm._stop = threading.Event()

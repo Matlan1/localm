@@ -18,6 +18,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   in model search - the pre-load check and the search/CLI/MCP fit badges only
   ever weighed a load against one GPU's capacity, never the split's combined
   capacity. They now correctly sum capacity across the configured split.
+- **GGUF context/KV-cache VRAM checks:** loading a GGUF model with a large
+  context window ignored the KV cache entirely when judging whether it would
+  fit, only weighing model weights - so a model whose weights fit could still
+  ask the driver to reserve a KV cache far bigger than VRAM, which on some
+  drivers either silently spilled into slow system memory or crashed the GPU
+  driver with nothing shown to the user (it looked like the model "loaded"
+  then went silent on the first prompt). The preflight now accounts for the
+  KV cache at the requested context size and refuses clearly, before the
+  native load, when it cannot fit; conversation growth (which can double the
+  context on literally the first prompt, since the default reply budget
+  already exceeds the default starting context) is now checked the same way,
+  so a request that would overflow VRAM fails with a clear message instead of
+  silently returning nothing.
 - **Phone pairing with a VPN active:** a VPN client's virtual tunnel adapter can
   become the machine's default route and hand out an ordinary private address,
   which used to get picked as the "LAN" address for the Companion pairing card
