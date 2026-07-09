@@ -115,3 +115,57 @@ def test_hf_result_gets_fit_from_size(gui_app, monkeypatch):
     by_id = {x["id"]: x for x in r.json()["results"]}
     assert by_id["org/small"]["fit"] == "fits"    # 2 GB on 16 GB VRAM -> fits
     assert "fit" not in by_id["org/unknown"]       # no size -> no fit (GUI: unknown)
+
+
+def _configure_split(monkeypatch, gpu_split_indices):
+    """Overlay gpu_split_indices onto the REAL (test-isolated) config rather
+    than replacing load_config() outright - other GUI routes read other config
+    keys too, and a stripped-down fake dict would break those unrelated paths."""
+    from localm.config import load_config as real_load_config
+    base_cfg = real_load_config()
+
+    def _cfg():
+        return {**base_cfg, "gpu_split_indices": gpu_split_indices}
+
+    monkeypatch.setattr("localm.config.load_config", _cfg)
+
+
+def test_hf_result_fit_reflects_combined_split_capacity(gui_app, monkeypatch):
+    """AUDIT-GPU-SPLIT-1: with a configured 2-GPU split, the fit badge must
+    weigh a result against the COMBINED capacity, not just vram_info()'s
+    single main-GPU number - a model too big for one GPU alone but that fits
+    split across both must badge "fits", not "too-big"."""
+    app, disc = gui_app
+
+    def spy(query, limit=20, formats=("gguf",)):
+        return [{"id": "org/split-fit", "downloads": 1, "likes": 0, "updated": "",
+                 "formats": ["hf"], "size_bytes": 15_000_000_000}]   # ~15 GB weights
+
+    monkeypatch.setattr(disc, "hf_search", spy)
+    monkeypatch.setattr(disc, "hf_backend_available", lambda: True)
+    # need ~= 15e9*1.1 + 1.5e9 = 18e9: exceeds the 16 GB main GPU alone
+    # (too-big), but fits under 0.85 * the 24 GB combined split (fits).
+    monkeypatch.setattr(disc, "list_gpus", lambda: [
+        {"index": 0, "name": "A", "total": 16_000_000_000, "free": 16_000_000_000},
+        {"index": 1, "name": "B", "total": 8_000_000_000, "free": 8_000_000_000},
+    ])
+    _configure_split(monkeypatch, [0, 1])
+    with TestClient(app) as c:
+        r = c.get("/api/discover/search?q=x&formats=hf", headers=_hdr())
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["vram"]["total"] == 24_000_000_000   # combined, not just the 16 GB main GPU
+    assert body["results"][0]["fit"] == "fits"
+
+    # Guard: the SAME result against only the single main GPU (no split
+    # configured) must NOT fit - proves the badge genuinely depends on the split,
+    # not a coincidence of the fit_label threshold math. vram_capacity() falls
+    # back to vram_info() here, so pin that directly to the single-GPU number
+    # (same convention test_hf_result_gets_fit_from_size already uses above).
+    monkeypatch.setattr(disc, "vram_info",
+                        lambda: {"total": 16_000_000_000, "free": 16_000_000_000})
+    _configure_split(monkeypatch, None)
+    with TestClient(app) as c:
+        r2 = c.get("/api/discover/search?q=x&formats=hf", headers=_hdr())
+    assert r2.json()["vram"]["total"] == 16_000_000_000
+    assert r2.json()["results"][0]["fit"] == "too-big"

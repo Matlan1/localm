@@ -14,7 +14,7 @@ from localm.discover import (
     _TENSOR_SPLIT_FALLBACK_CAPACITY,
     _quant_of, apply_gpu_split, apply_main_gpu, fit_label, hf_backend_available,
     hf_gguf_files, hf_param_bytes, hf_search, list_gpus, resolve_gpu_split,
-    resolve_main_gpu_index, vram_info,
+    resolve_main_gpu_index, vram_capacity, vram_info,
 )
 
 
@@ -693,3 +693,91 @@ class TestVramInfoRespectsConfiguredDevice:
         with caplog.at_level("WARNING", logger="localm"):
             info = vram_info()
         assert info == {"total": 24_000_000_000, "free": 20_000_000_000}
+
+
+class TestVramCapacitySplitAware:
+    """vram_capacity() must sum total/free across a CONFIGURED multi-GPU split
+    (2+ valid resolve_gpu_split() devices) instead of vram_info()'s single main-
+    GPU number - the fix for the bug where a model too big for one GPU alone
+    but that fits split across N configured devices was wrongly refused/badged
+    against just one device's capacity."""
+
+    _GPUS = [
+        {"index": 0, "name": "A", "total": 24_000_000_000, "free": 20_000_000_000},
+        {"index": 1, "name": "B", "total": 12_000_000_000, "free": 10_000_000_000},
+        {"index": 2, "name": "C", "total": 8_000_000_000, "free": 6_000_000_000},
+    ]
+
+    def test_no_split_configured_falls_back_to_vram_info(self, monkeypatch):
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS)
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"gpu_split_indices": None})
+        assert vram_capacity() == vram_info() == {
+            "total": 24_000_000_000, "free": 20_000_000_000}
+
+    def test_two_valid_split_devices_sums_total_and_free(self, monkeypatch):
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS)
+        monkeypatch.setattr(
+            "localm.config.load_config",
+            lambda: {"gpu_split_indices": [0, 1]})
+        assert vram_capacity() == {
+            "total": 24_000_000_000 + 12_000_000_000,
+            "free": 20_000_000_000 + 10_000_000_000,
+        }
+
+    def test_three_valid_split_devices_sums_all_three(self, monkeypatch):
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS)
+        monkeypatch.setattr(
+            "localm.config.load_config",
+            lambda: {"gpu_split_indices": [0, 1, 2]})
+        assert vram_capacity() == {
+            "total": 24_000_000_000 + 12_000_000_000 + 8_000_000_000,
+            "free": 20_000_000_000 + 10_000_000_000 + 6_000_000_000,
+        }
+
+    def test_config_param_injection_bypasses_load_config(self, monkeypatch):
+        """Matches apply_gpu_split()/apply_main_gpu()'s existing config= convention."""
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS[:2])
+        assert vram_capacity(config={"gpu_split_indices": [0, 1]}) == {
+            "total": 24_000_000_000 + 12_000_000_000,
+            "free": 20_000_000_000 + 10_000_000_000,
+        }
+
+    def test_fewer_than_two_valid_devices_falls_back_to_vram_info(self, monkeypatch):
+        """Only one of the two configured indices is currently detected -
+        resolve_gpu_split degrades this to "no split" (its own contract) - the
+        combined-capacity path must degrade the same way, not sum a single device."""
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS[:1])
+        monkeypatch.setattr(
+            "localm.config.load_config",
+            lambda: {"gpu_split_indices": [0, 5]})
+        assert vram_capacity() == vram_info() == {
+            "total": 24_000_000_000, "free": 20_000_000_000}
+
+    def test_partially_measurable_free_omits_free_but_keeps_total(self, monkeypatch):
+        """vram_info()'s own contract: "free" is present only when measurable.
+        A split where one device cannot report free must not silently under-
+        count by treating the missing value as 0 - omit "free" entirely, same
+        as a single unmeasurable-free device would."""
+        gpus = [
+            {"index": 0, "name": "A", "total": 24_000_000_000, "free": 20_000_000_000},
+            {"index": 1, "name": "B", "total": 12_000_000_000},  # no "free" key
+        ]
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: gpus)
+        monkeypatch.setattr(
+            "localm.config.load_config",
+            lambda: {"gpu_split_indices": [0, 1]})
+        result = vram_capacity()
+        assert result == {"total": 24_000_000_000 + 12_000_000_000}
+        assert "free" not in result
+
+    def test_unmeasurable_gpus_falls_back_to_vram_info_registry_tier(self, monkeypatch):
+        """No list_gpus() data at all (GGUF-only/non-NVIDIA install): cannot sum
+        per-device capacity, so this must defer to vram_info()'s own registry-
+        fallback tier rather than fabricate a combined number from nothing."""
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: [])
+        monkeypatch.setattr(
+            "localm.config.load_config",
+            lambda: {"gpu_split_indices": [0, 1]})
+        monkeypatch.setattr("localm.discover.vram_info", lambda: {"total": 16_000_000_000})
+        assert vram_capacity() == {"total": 16_000_000_000}

@@ -105,6 +105,12 @@ Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on
   attached to instead of the first entry; `/v1/embeddings` no longer force-loads
   the chat model; a stale VRAM estimate and a cross-instance conversation leak are
   fixed.
+- **Multi-GPU split fit checks:** a model too large for the single main GPU
+  alone, but that fits combined across a configured multi-GPU split, was
+  wrongly refused ("Not enough VRAM") when loading, and mis-badged "too big"
+  in model search - the pre-load check and the search/CLI/MCP fit badges only
+  ever weighed a load against one GPU's capacity, never the split's combined
+  capacity. They now correctly sum capacity across the configured split.
 - **Do not hide problems:** removed production code paths that detected
   pytest/mocks and fabricated behavior; a swallowed VRAM-gate failure is now logged.
 - **Inference:** a zero-n_tokens decode failure, batch memory-safety and

@@ -643,6 +643,54 @@ def vram_info() -> dict:
     return {}
 
 
+def vram_capacity(config: Optional[dict] = None) -> dict:
+    """{"total": bytes, "free"?: bytes} to weigh a model's fit against - the
+    right ceiling for any "will this model fit" decision (a pre-load refusal
+    gate, a fit badge, a VRAM-estimate readout).
+
+    ``vram_info()`` alone is single-GPU by design (see its docstring) and is
+    the wrong ceiling once a multi-GPU ``gpu_split_indices`` is configured: a
+    model too big for the single main GPU but that fits COMBINED across the
+    configured split devices must not be refused or badged "too-big" just
+    because the capacity check only ever looked at one device (the bug this
+    function fixes - a model refused/mis-badged despite a working split).
+
+    Sums ``total``/``free`` across every device in :func:`resolve_gpu_split`'s
+    validated split (via :func:`list_gpus`) when 2+ valid devices are
+    configured; ``free`` is included only when EVERY split device reports a
+    measurable free value (mirrors vram_info()'s own all-or-nothing "free" key
+    - a partially-measurable split must not silently under-count by treating a
+    missing device's free as 0). Falls back to :func:`vram_info` untouched
+    (single main-GPU number) whenever fewer than 2 valid split devices are
+    configured or GPU detection is unmeasurable (registry-fallback tier) -
+    resolve_gpu_split already warns and degrades a stale/invalid split to
+    single-GPU (rule 5, do-not-hide-problems); this reuses that same
+    validation rather than duplicating it.
+    """
+    from localm.config import load_config
+    cfg = config if config is not None else load_config()
+    # Cheap short-circuit for the common (no split configured) case, mirroring
+    # resolve_gpu_split's own early return - skips a real hardware probe
+    # (list_gpus() -> torch/nvidia-smi) on every request for the vast majority
+    # of single-GPU installs that never configured a split.
+    if not cfg.get("gpu_split_indices"):
+        return vram_info()
+
+    gpus = list_gpus()
+    pairs = resolve_gpu_split(
+        cfg.get("gpu_split_indices"), cfg.get("gpu_split_ratios"), gpus=gpus)
+    by_index = {g.get("index"): g for g in gpus}
+    split_gpus = [by_index[idx] for idx, _ in pairs if idx in by_index]
+    if len(split_gpus) < 2:
+        return vram_info()
+
+    out = {"total": sum(g["total"] for g in split_gpus)}
+    frees = [g.get("free") for g in split_gpus]
+    if all(f is not None for f in frees):
+        out["free"] = sum(frees)
+    return out
+
+
 def fit_label(size_bytes: int, total_vram: Optional[int]) -> str:
     """
     Capacity badge for one file: "fits" / "tight" / "too-big", or "" when

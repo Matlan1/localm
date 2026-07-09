@@ -348,7 +348,13 @@ function discRepoRow(m, gpus) {
     if (m.size_bytes) {
       head.appendChild(el("span", "disc-hf-size", fmtSize(m.size_bytes)));
       if (m.fit) head.appendChild(el("span", "fit " + m.fit, FIT_TEXT[m.fit]));
-      const hint = splitFitHint(m.size_bytes, gpus);
+      // "fits"/"tight" are already combined-aware (server sums capacity
+      // across a configured split - see discover.vram_capacity), so a "may
+      // not fit on one GPU, go configure a split" suggestion would be
+      // stale/contradictory right next to a badge that already accounts for
+      // the split.
+      const hint = (m.fit === "fits" || m.fit === "tight")
+        ? "" : splitFitHint(m.size_bytes, gpus);
       if (hint) head.appendChild(el("span", "sub split-hint", hint));
     } else {
       head.appendChild(el("span", "disc-hf-size sub", "size unknown"));
@@ -444,7 +450,10 @@ export async function discoverFiles(repo, filesBox, btn, gpus) {
         (f.n_parts > 1 ? ` (${f.n_parts} parts)` : "");
       row.appendChild(el("span", "mono", desc));
       if (f.fit) row.appendChild(el("span", "fit " + f.fit, FIT_TEXT[f.fit]));
-      const splitHint = splitFitHint(f.size_bytes, gpus);
+      // See the discRepoRow comment above: "fits"/"tight" already account
+      // for a configured split, so skip the redundant split-suggestion hint.
+      const splitHint = (f.fit === "fits" || f.fit === "tight")
+        ? "" : splitFitHint(f.size_bytes, gpus);
       if (splitHint) row.appendChild(el("span", "sub split-hint", splitHint));
       row.appendChild(el("span", "fname", f.file));
       const pull = el("button", "btn-secondary", "pull");
