@@ -106,7 +106,10 @@ Everything since 0.1.0. (0.1.0 and a same-day 0.1.1 micro-tag were both cut on
   pytest/mocks and fabricated behavior; a swallowed VRAM-gate failure is now logged.
 - **Bug reporter:** removed the only path that could ask for a GitHub login; the
   non-interactive path now names the account-less send channel.
-- **Memory:** the owner's chat memory stays in the shared `owner` namespace.
+- **Memory:** the owner's chat memory stays in the shared `owner` namespace; a
+  missing per-namespace write lock let concurrent writers (two requests, or a
+  background consolidation pass racing a live edit) silently drop each other's
+  facts, now fixed with a lock mirroring RAG's existing one.
 - **GUI:** an empty ComfyUI scan shows the reason instead of a bare "Added 0"; the
   GUI no longer sends a chat request when no model is loaded; a background job's
   progress stream (model pull, ComfyUI setup, image/music/video generation) now

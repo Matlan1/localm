@@ -330,7 +330,21 @@ def run_consolidation(store: MemoryStore, session_text: str, complete: Complete,
 
     Gated at entry on ``writes_allowed(surface)``; in privacy mode ``complete`` is
     never called and nothing is written. Applies all decisions in ONE atomic batch.
-    Returns ``{status, added, updated, deleted, noop, [reason]}``."""
+    Returns ``{status, added, updated, deleted, noop, [reason]}``.
+
+    CHK-MEM-LOCK: the ADD/UPDATE/DELETE decision loop below reads a SNAPSHOT
+    (``store.all()``) and then makes potentially many slow LLM calls
+    (``_decide()`` per candidate) before the final ``store.replace()`` overwrites
+    the whole namespace with that snapshot's outcome. A per-call lock inside
+    ``replace()`` alone cannot protect this: it would still silently discard
+    anything a concurrent add/update/delete committed during the decide loop, the
+    exact data loss CHK-MEM-LOCK exists to prevent (the debounced auto-consolidate
+    background pass and the manual POST /api/memory/consolidate route can race
+    each other, and either can race a plain memory_append/memory_delete request).
+    So the WHOLE read-decide-write sequence holds the namespace lock: a
+    concurrent writer blocks until this consolidation finishes and then runs
+    against the fresh post-consolidation state, rather than racing it and losing
+    its write."""
     counts = {"status": "ok", "added": 0, "updated": 0, "deleted": 0, "noop": 0}
     if not writes_allowed(surface):
         return {**counts, "status": "skipped", "reason": "privacy"}
@@ -340,10 +354,22 @@ def run_consolidation(store: MemoryStore, session_text: str, complete: Complete,
         # No new facts, but STILL prune: decay-based forgetting and the size cap
         # used to be reachable only through a fact-producing run, so a store that
         # kept extracting nothing never forgot anything (memory-audit 2026-07-02
-        # F8). Prune is a no-op when nothing is decayed, so this is cheap.
+        # F8). Prune is a no-op when nothing is decayed, so this is cheap (prune()
+        # locks itself, atomically).
         store.prune(now=now)
         return _with_eviction_note(counts, store)
 
+    with store.lock():
+        store._load()
+        return _consolidate_locked(store, candidates, complete, embed_fn=embed_fn,
+                                   now=now, counts=counts)
+
+
+def _consolidate_locked(store: MemoryStore, candidates: list, complete: Complete, *,
+                        embed_fn: Optional[EmbedFn], now: float,
+                        counts: dict) -> dict:
+    """The decide-and-write body of run_consolidation. MUST run under
+    store.lock() after a fresh store._load() (see run_consolidation)."""
     working = store.all()
     processed: set = set()
     updated_ids: set = set()
@@ -405,9 +431,11 @@ def run_consolidation(store: MemoryStore, session_text: str, complete: Complete,
     # keep its old text's vector forever: semantic recall then keeps pointing
     # at the contradicted content, on exactly the records consolidation just
     # corrected (memory-audit 2026-07-02, high; repro showed the stale vector
-    # surviving every later save). Drop the stale vectors so replace re-embeds.
-    store.invalidate_vectors(updated_ids)
-    store.replace(working, embed_fn=embed_fn)
+    # surviving every later save). Drop the stale vectors so replace re-embeds -
+    # passed as invalidate_ids (not a separate invalidate_vectors() call) because
+    # replace() now reloads first (CHK-MEM-LOCK), and a reload after a separate
+    # invalidate call would silently restore the stale vector from disk.
+    store.replace(working, embed_fn=embed_fn, invalidate_ids=updated_ids)
     store.prune(now=now)
     return _with_eviction_note(counts, store)
 
