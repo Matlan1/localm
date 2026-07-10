@@ -673,8 +673,10 @@ async def _idle_unload_once(ttl: int) -> bool:
                       "on the next request", engine.display_name, idle_s, ttl)
             unloaded_any = True
             # Cross-install GPU coordination: reflect the freed model. No-op when
-            # not registered.
-            _gpu_registry_sync()
+            # not registered. Offloaded: _gpu_registry_sync does filesystem I/O
+            # (and, when a non-zero main_gpu_index is set, a GPU probe via
+            # _current_gpu_index) - keep it OFF the event loop.
+            await loop.run_in_executor(None, _gpu_registry_sync)
 
     return unloaded_any
 
@@ -711,7 +713,11 @@ async def _gpu_registry_heartbeat_loop() -> None:
     while True:
         await asyncio.sleep(20)
         try:
-            _gpu_registry_sync()
+            # Offloaded off the event loop: _gpu_registry_sync does filesystem I/O
+            # (registry write) and, when a non-zero main_gpu_index is configured, a
+            # GPU driver probe - either could otherwise stall the single loop and
+            # freeze the whole WebUI on this 20s tick while the box is idle.
+            await asyncio.get_running_loop().run_in_executor(None, _gpu_registry_sync)
         except Exception:
             from localm.debuglog import logger as _dbg
             _dbg.warning("gpu-registry heartbeat failed (continuing)", exc_info=True)
