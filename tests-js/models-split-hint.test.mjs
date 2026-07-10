@@ -22,31 +22,36 @@ function hint() {
   return window.splitFitHint;
 }
 
-test("splitFitHint: already fits the single largest GPU -> no hint", () => {
+test("splitFitHint: already fits the single largest GPU (with overhead) -> no hint", () => {
   const splitFitHint = hint();
   const gpus = [
     { index: 0, name: "GPU A", total: 24 * GIB, free: 20 * GIB },
     { index: 1, name: "GPU B", total: 12 * GIB, free: 10 * GIB },
   ];
-  assert.equal(splitFitHint(10 * GIB, gpus), "", "10 GB fits the 20 GB-free largest GPU alone");
-  // Boundary: exactly the largest free amount already fits that one GPU (<=,
-  // not <) - a model that fits with zero bytes to spare should not be told
-  // it "may not fit on one GPU".
-  assert.equal(splitFitHint(20 * GIB, gpus), "",
-    "a size exactly equal to the largest GPU's free VRAM still fits it alone");
+  // 10 GB needs ~12.5 GB (weights*1.10 + 1.5 GB overhead) - still under the 20 GB
+  // free on the largest GPU, so no split hint.
+  assert.equal(splitFitHint(10 * GIB, gpus), "", "10 GB (need ~12.5 GB) fits the 20 GB-free GPU alone");
+  // The hint uses the loader's need-math, not a raw byte compare: a 20 GB model
+  // needs ~23.5 GB with overhead, which does NOT fit the 20 GB GPU alone but fits
+  // the 30 GB combined - so it DOES hint (a raw size<=free compare would have
+  // wrongly said it fits one GPU).
+  const msg = splitFitHint(20 * GIB, gpus);
+  assert.notEqual(msg, "", "20 GB needs ~23.5 GB with overhead - does not fit one 20 GB GPU");
+  assert.match(msg, /may fit split/, "the split claim is hedged, not a promise");
 });
 
-test("splitFitHint: exceeds the largest GPU but fits the combined free VRAM -> hint text", () => {
+test("splitFitHint: exceeds the largest GPU but fits the combined free VRAM -> hedged hint", () => {
   const splitFitHint = hint();
   const gpus = [
     { index: 0, name: "GPU A", total: 24 * GIB, free: 20 * GIB },
     { index: 1, name: "GPU B", total: 12 * GIB, free: 10 * GIB },
   ];
-  // 25 GB > 20 GB largest, but <= 30 GB combined free.
+  // 25 GB needs ~29 GB (with overhead) > 20 GB largest, but <= 30 GB combined.
   const msg = splitFitHint(25 * GIB, gpus);
   assert.notEqual(msg, "", "a hint is produced when it only fits split");
-  assert.match(msg, /split across your 2 GPUs/, "hint names the GPU count");
-  assert.match(msg, /Settings/i, "hint points at the Settings control, not an auto-toggle");
+  assert.match(msg, /may fit split across your 2 GPUs/, "hedged, and names the GPU count");
+  assert.match(msg, /Split across GPUs/, "points at the split control that enables a split");
+  assert.doesNotMatch(msg, /Main GPU/, "must NOT point at the single-device Main GPU control");
 });
 
 test("splitFitHint: exceeds even the combined total across every GPU -> no hint", () => {
