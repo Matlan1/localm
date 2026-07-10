@@ -20,6 +20,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   no setup on the reporter's part. `LOCALM_HANG_WATCHDOG=0` turns it off (and `=1`
   adds verbose asyncio slow-callback logging); a loopback-only `GET /debug/stacks`
   returns thread and task state on demand.
+- **Clearer bug-report send failures:** when a bug report cannot be filed, the app
+  now tells you WHERE it failed - you appear offline, the server is unreachable, a
+  secure-connection problem, or the server rejected it - instead of a raw error. It
+  always keeps your report and offers to retry, or to download the report file so
+  you can send it by email/Discord yourself (works from a phone or another device
+  where a server-side path is useless). Both the WebUI and `localm bug-report`.
 
 ### Fixed
 - **Server freezing while the system is idle:** reading GPU/VRAM state (opening
