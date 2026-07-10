@@ -1876,6 +1876,16 @@ async def _pin_engine(engine: Engine, gen: AsyncIterator[str]) -> AsyncIterator[
         async for chunk in gen:
             yield chunk
     finally:
+        # Starlette acloses THIS wrapper on a client disconnect (that is how the
+        # pin below gets released). Explicitly aclose the inner stream too so its
+        # own cancel/finally runs NOW - releasing the per-model _inference_lock the
+        # producer thread holds - instead of one async-generator GC tick later.
+        # No-op on a clean finish (the inner generator is already exhausted).
+        try:
+            await gen.aclose()
+        except Exception:
+            from localm.debuglog import logger as _dbg
+            _dbg.exception("closing stream generator on unpin failed")
         _unpin(engine)
 
 
@@ -1927,9 +1937,21 @@ async def _stream_sse(
     token_queue: asyncio.Queue = asyncio.Queue()
     _DONE = object()
 
+    import threading
+
+    # A mid-stream client disconnect makes Starlette throw GeneratorExit into this
+    # async generator. Without a cancel path the producer thread below would keep
+    # driving engine.chat_stream() all the way to end-of-generation, holding
+    # llama.py's per-model _inference_lock the whole time and blocking the next
+    # request to THIS model. cancel_event lets the disconnect unwind stop it.
+    cancel_event = threading.Event()
+
     def _generate():
+        gen = engine.chat_stream(messages, **gen_kwargs)
         try:
-            for token in engine.chat_stream(messages, **gen_kwargs):
+            for token in gen:
+                if cancel_event.is_set():
+                    break
                 loop.call_soon_threadsafe(token_queue.put_nowait, token)
         except Exception as e:
             # Log (full traceback to the debug log) and surface to the client - a
@@ -1943,9 +1965,26 @@ async def _stream_sse(
             loop.call_soon_threadsafe(
                 token_queue.put_nowait, RuntimeError(str(e)))
         finally:
-            loop.call_soon_threadsafe(token_queue.put_nowait, _DONE)
-
-    import threading
+            # Close the generator chain from THIS thread (it is suspended at its
+            # yield right now, so close() is safe here - closing it from the
+            # event-loop thread would race the in-flight next() and raise
+            # "generator already executing"). close() propagates GeneratorExit down
+            # through the backend wrappers into llama.py _generate, whose
+            # `with self._inference_lock` then exits and frees the lock
+            # deterministically - the whole point of the cancel path.
+            try:
+                gen.close()
+            except Exception:
+                from localm.debuglog import logger as _dbg
+                _dbg.exception("closing generation stream failed")
+            # Wake the consumer. If the loop is already gone (server shutdown, or a
+            # disconnect whose request-loop has since closed) the consumer is gone
+            # too, so dropping the sentinel is correct - don't let it surface as an
+            # unhandled daemon-thread exception.
+            try:
+                loop.call_soon_threadsafe(token_queue.put_nowait, _DONE)
+            except RuntimeError:
+                pass
 
     # Serialise inference - only one request runs at a time
     async with sem:
@@ -1956,22 +1995,32 @@ async def _stream_sse(
 
         completion_parts: list[str] = []
         gen_error: Exception | None = None
-        while True:
-            token = await token_queue.get()
-            if token is _DONE:
-                break
-            if isinstance(token, Exception):
-                gen_error = token
-                continue
-            if first_token_at is None:
-                first_token_at = time.perf_counter()
-            # Stream hook transforms the piece before it is recorded and sent,
-            # so usage reflects exactly what the client receives.
-            if pipeline is not None and ctx is not None and pipeline.has("stream"):
-                token = pipeline.run_stream(token, ctx)
-            completion_parts.append(token)
-            for data in _reason_sse(*think.feed(token), model_id, chunk_id, ts):
-                yield data
+        try:
+            while True:
+                token = await token_queue.get()
+                if token is _DONE:
+                    break
+                if isinstance(token, Exception):
+                    gen_error = token
+                    continue
+                if first_token_at is None:
+                    first_token_at = time.perf_counter()
+                # Stream hook transforms the piece before it is recorded and sent,
+                # so usage reflects exactly what the client receives.
+                if pipeline is not None and ctx is not None and pipeline.has("stream"):
+                    token = pipeline.run_stream(token, ctx)
+                completion_parts.append(token)
+                for data in _reason_sse(*think.feed(token), model_id, chunk_id, ts):
+                    yield data
+        finally:
+            # Signal the producer to stop. On a clean finish this is a no-op: the
+            # thread already exited after _DONE, so t.join() below returns at once.
+            # On a disconnect (GeneratorExit raised at the yield above) it makes the
+            # thread break its loop, close the generator chain, and release
+            # _inference_lock instead of running to end-of-generation. GeneratorExit
+            # then keeps propagating, so t.join() below is skipped - the daemon
+            # thread self-terminates within ~one token of the cancel.
+            cancel_event.set()
 
         t.join()
         gen_elapsed = time.perf_counter() - gen_start
@@ -2035,9 +2084,19 @@ async def _stream_sse_completion(
     loop = asyncio.get_running_loop()
     token_queue: asyncio.Queue = asyncio.Queue()
 
+    import threading
+
+    # See _stream_sse: a mid-stream disconnect must stop the producer thread so it
+    # releases llama.py's per-model _inference_lock instead of running to
+    # end-of-generation and blocking the next request to this model.
+    cancel_event = threading.Event()
+
     def _generate():
+        gen = engine.chat_stream(messages, **gen_kwargs)
         try:
-            for token in engine.chat_stream(messages, **gen_kwargs):
+            for token in gen:
+                if cancel_event.is_set():
+                    break
                 loop.call_soon_threadsafe(token_queue.put_nowait, token)
         except Exception as e:
             # Surface an inference failure to the client instead of letting this
@@ -2048,9 +2107,19 @@ async def _stream_sse_completion(
             _dbg.exception("completion generation thread failed")
             loop.call_soon_threadsafe(token_queue.put_nowait, RuntimeError(str(e)))
         finally:
-            loop.call_soon_threadsafe(token_queue.put_nowait, None)
-
-    import threading
+            # Close the generator chain from this (suspended) thread so a cancel
+            # propagates GeneratorExit into llama.py _generate and frees
+            # _inference_lock (see the fuller note in _stream_sse).
+            try:
+                gen.close()
+            except Exception:
+                from localm.debuglog import logger as _dbg
+                _dbg.exception("closing completion generation stream failed")
+            # See _stream_sse: tolerate a gone loop when waking the consumer.
+            try:
+                loop.call_soon_threadsafe(token_queue.put_nowait, None)
+            except RuntimeError:
+                pass
 
     async with sem:
         gen_start = time.perf_counter()
@@ -2060,26 +2129,31 @@ async def _stream_sse_completion(
 
         completion_parts: list[str] = []
         gen_error: Exception | None = None
-        while True:
-            token = await token_queue.get()
-            if token is None:
-                break
-            if isinstance(token, Exception):
-                gen_error = token
-                continue
-            if first_token_at is None:
-                first_token_at = time.perf_counter()
-            # Stream hook transforms each piece before it is recorded and sent,
-            # so usage and the audit trail reflect what the client receives.
-            if pipeline is not None and ctx is not None and pipeline.has("stream"):
-                token = pipeline.run_stream(token, ctx)
-            completion_parts.append(token)
-            chunk = {
-                "id": chunk_id, "object": "text_completion.chunk",
-                "created": ts, "model": model_id,
-                "choices": [{"text": token, "index": 0, "finish_reason": None}],
-            }
-            yield f"data: {json.dumps(chunk)}\n\n"
+        try:
+            while True:
+                token = await token_queue.get()
+                if token is None:
+                    break
+                if isinstance(token, Exception):
+                    gen_error = token
+                    continue
+                if first_token_at is None:
+                    first_token_at = time.perf_counter()
+                # Stream hook transforms each piece before it is recorded and sent,
+                # so usage and the audit trail reflect what the client receives.
+                if pipeline is not None and ctx is not None and pipeline.has("stream"):
+                    token = pipeline.run_stream(token, ctx)
+                completion_parts.append(token)
+                chunk = {
+                    "id": chunk_id, "object": "text_completion.chunk",
+                    "created": ts, "model": model_id,
+                    "choices": [{"text": token, "index": 0, "finish_reason": None}],
+                }
+                yield f"data: {json.dumps(chunk)}\n\n"
+        finally:
+            # No-op on a clean finish (thread already exited after the sentinel);
+            # on a disconnect it stops the producer so _inference_lock is released.
+            cancel_event.set()
 
         t.join()
         gen_elapsed = time.perf_counter() - gen_start
