@@ -242,6 +242,13 @@ DEFAULT_CONFIG: dict = {
     "memory_recall_in_privacy": False,
     "memory_recall_in_privacy_chat": True,      # applies only when the master is on
     "memory_recall_in_privacy_coder": True,     # applies only when the master is on
+    # Keep diagnostics for bug reports even in privacy mode. Off by default:
+    # privacy mode writes NO automatic trace (the hang watchdog trace, the
+    # crash-restart breadcrumbs, and the debug log are all suppressed). On =
+    # keep those diagnostics regardless of mode, so an intermittent freeze/crash
+    # leaves something to attach to a report. Never chat content - code stacks
+    # and operational logs only.
+    "keep_diagnostics": False,
     # On-device embedding model for semantic search (RAG hybrid retrieval + agent
     # memory): a small dedicated GGUF, loaded separately from the chat model.
     # Value = a known key (bge-small-en-v1.5, nomic-embed-text-v1.5), a registered
@@ -538,6 +545,21 @@ def load_config() -> dict:
     if isinstance(stored, dict):
         cfg.update(stored)
     return cfg
+
+
+def keep_diagnostics_enabled() -> bool:
+    """Whether to keep diagnostic traces/logs even in privacy mode. Resolved from
+    the ``LOCALM_KEEP_DIAGNOSTICS`` env (set by the launcher checkbox / the
+    ``--keep-diagnostics`` flag, a per-run override) OR the persistent
+    ``keep_diagnostics`` config key (the WebUI Settings > Privacy toggle). So the
+    launcher and the in-app toggle both take effect. Never raises."""
+    if os.environ.get("LOCALM_KEEP_DIAGNOSTICS", "").strip().lower() in (
+            "1", "true", "on", "yes"):
+        return True
+    try:
+        return bool(load_config().get("keep_diagnostics"))
+    except Exception:
+        return False
 
 
 def _user_delta(cfg: dict) -> dict:

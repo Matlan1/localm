@@ -245,7 +245,13 @@ def run_chat_with_web(engine, prompt: str, *, max_rounds: int = _MAX_ROUNDS) -> 
         call = parse_web_call(reply)
         if call is None:
             return _final_answer(reply)        # the model answered
-        logger.debug("jobs web tool: %s %s", call.get("name"), call.get("args"))
+        # The tool NAME is operational; the ARGS (the model's search query, derived
+        # from the user prompt) are chat content - never log them in privacy mode.
+        from localm.debuglog import debug_content_enabled
+        if debug_content_enabled():
+            logger.debug("jobs web tool: %s %s", call.get("name"), call.get("args"))
+        else:
+            logger.debug("jobs web tool: %s", call.get("name"))
         messages.append({"role": "assistant", "content": reply})
         messages.append({"role": "user", "content": run_web_call(call)})
 

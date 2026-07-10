@@ -41,6 +41,31 @@ def debug_enabled() -> bool:
     return bool(os.environ.get(_ENV_VAR))
 
 
+def debug_content_enabled() -> bool:
+    """Whether the debug log may include raw CHAT CONTENT (a user prompt or a model
+    reply). True only when the debug log is on AND no relevant session mode is
+    privacy - so privacy mode NEVER persists chat content to the debug log, even
+    when ``--debug`` or ``keep_diagnostics`` enabled the log file for OPERATIONAL
+    diagnostics. Fail-safe: no content when the mode cannot be resolved.
+
+    This is the gate for any raw prompt/response logging (e.g. the GGUF backend's
+    "raw model output" line). Operational lines (requests, timings, errors) stay
+    on ``debug_enabled()``; only chat CONTENT is held to this stricter bar."""
+    if not debug_enabled():
+        return False
+    try:
+        from localm.audit import SessionMode, effective_mode
+        # Suppress content if EITHER the server or the chat surface is privacy: the
+        # backend that produces the content is surface-agnostic, so err toward not
+        # writing (over-suppression only costs a debug convenience, never privacy).
+        for surface in ("server", "chat"):
+            if effective_mode(surface) == SessionMode.PRIVACY:
+                return False
+        return True
+    except Exception:
+        return False   # fail-safe: no chat content on disk
+
+
 def honor_env_debug() -> None:
     """Open the debug log file when debug was requested via the LOCALM_DEBUG env
     var (e.g. ``LOCALM_DEBUG=1 localm run ...``), not only via the ``--debug``

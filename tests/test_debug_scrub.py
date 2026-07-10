@@ -162,11 +162,17 @@ class TestDebugLog:
         os.close(fd)
         assert "simulated native crash" in path.read_text(encoding="utf-8")
 
-    def test_debug_mode_scrubs_output_and_logs_raw(self, tmp_path):
-        """_decode_stream always scrubs; debug mode logs the raw text."""
+    def test_debug_mode_scrubs_output_and_logs_raw(self, tmp_path, monkeypatch):
+        """_decode_stream always scrubs; debug mode logs the raw text in log/full
+        mode, but NEVER in privacy mode (chat content is not persisted there)."""
         import logging as _logging
         from localm.inference.backends.llamacpp.llama import LlamaCpp
         from unittest.mock import MagicMock
+
+        def _flush():
+            for h in debuglog.logger.handlers:
+                if isinstance(h, _logging.FileHandler):
+                    h.flush()
 
         llm = LlamaCpp.__new__(LlamaCpp)
         llm._tokenizer = MagicMock()
@@ -179,13 +185,21 @@ class TestDebugLog:
             assert normal == "<think>\n hi"        # normalised in normal mode
 
             path = debuglog.enable_debug()
+            # log mode: the raw, unscrubbed output IS captured in the debug log.
+            monkeypatch.setenv("LOCALM_MODE", "log")
             debug = "".join(llm._decode_stream(iter([1, 2, 3])))
             assert debug == normal                 # scrubbed in debug mode too
-            for h in debuglog.logger.handlers:
-                if isinstance(h, _logging.FileHandler):
-                    h.flush()
-            # raw, unscrubbed output captured in the debug log
+            _flush()
             assert "<|channel|>thought hi" in path.read_text(encoding="utf-8")
+
+            # privacy mode: a decode's raw content must NOT reach the debug log,
+            # even though the log file is open (the keep_diagnostics leak fix).
+            llm._tokenizer.token_to_piece_bytes.side_effect = \
+                lambda t: {1: b"<|channel|>", 2: b"SECRETWORD", 3: b" x"}[t]
+            monkeypatch.setenv("LOCALM_MODE", "privacy")
+            "".join(llm._decode_stream(iter([1, 2, 3])))
+            _flush()
+            assert "SECRETWORD" not in path.read_text(encoding="utf-8")
         finally:
             llm._tokenizer = None
             llm._model_ptr = None

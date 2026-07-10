@@ -17,9 +17,20 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `<home>/logs/hang_*.log` (the file is created only when a real stall happens, so
   a healthy run leaves nothing behind). A captured trace is bundled into a bug
   report automatically, so an intermittent "it just hung" becomes diagnosable with
-  no setup on the reporter's part. `LOCALM_HANG_WATCHDOG=0` turns it off (and `=1`
-  adds verbose asyncio slow-callback logging); a loopback-only `GET /debug/stacks`
-  returns thread and task state on demand.
+  no setup on the reporter's part. It respects privacy: in privacy mode (the
+  default) it writes nothing automatically, unless you turn on "Keep diagnostics
+  for bug reports" (below). `LOCALM_HANG_WATCHDOG=0` turns it off entirely (and `=1`
+  forces it on with verbose logging even in privacy mode); a loopback-only
+  `GET /debug/stacks` returns thread and task state on demand.
+- **"Keep diagnostics for bug reports" privacy setting:** privacy mode saves
+  nothing automatically, which also means a hang or crash leaves nothing to
+  report. This new toggle (off by default) keeps the diagnostic bits a report
+  needs - the hang stack trace, the restart breadcrumb log, and a debug log -
+  even in privacy mode. It is available in Settings > Privacy (in-app) and as a
+  checkbox in the desktop launcher (and `--keep-diagnostics` on the command line).
+  Crucially, it keeps operational diagnostics ONLY: your chat messages and the
+  model's replies are never written to the debug log in privacy mode, even with
+  this on or with `--debug` (previously `--debug` could record raw model output).
 - **Clearer bug-report send failures:** when a bug report cannot be filed, the app
   now tells you WHERE it failed - you appear offline, the server is unreachable, a
   secure-connection problem, or the server rejected it - instead of a raw error. It

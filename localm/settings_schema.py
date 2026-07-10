@@ -258,6 +258,15 @@ CORE_FIELDS: list = [
                  "When the option above is on, recall the coder's past-session "
                  "lessons during privacy-mode coder sessions (read-only).",
                  group="Privacy", owner="memory"),
+    SettingField("keep_diagnostics", Widget.TOGGLE,
+                 "Keep diagnostics for bug reports",
+                 "Privacy mode writes nothing automatically - including the "
+                 "crash/hang diagnostics a bug report needs. Turn this on to keep "
+                 "those (a hang stack trace, the restart breadcrumb log, and a "
+                 "debug log) even in privacy mode, so an intermittent freeze or "
+                 "crash leaves something to attach. Code stacks and operational "
+                 "logs only, never your chat content.",
+                 group="Privacy"),
     # ---- Models ----
     SettingField("embedding_model", Widget.TEXT, "Embedding model",
                  "Small on-device model for semantic search in memory and RAG "
