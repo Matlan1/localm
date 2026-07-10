@@ -256,6 +256,39 @@ def logs_dir() -> Path:
     return HOME_DIR / "logs"
 
 
+# --- Hang watchdog (event-loop stall capture) ------------------------------ #
+# The server runs on a single asyncio event loop; if any callback blocks it (a
+# synchronous driver/subprocess/IO call), the WHOLE server freezes while the box
+# looks idle. The watchdog (wired in http_server.lifespan) runs a plain thread
+# OFF the loop that dumps every thread's stack to a file when the loop stops
+# ticking, so the next intermittent freeze is captured instead of lost. Opt-in
+# via LOCALM_HANG_WATCHDOG so it costs nothing unless a user is chasing a hang.
+_HANG_ENV = "LOCALM_HANG_WATCHDOG"
+_HANG_SECS_ENV = "LOCALM_HANG_WATCHDOG_SECS"
+
+
+def hang_watchdog_enabled() -> bool:
+    return bool(os.environ.get(_HANG_ENV))
+
+
+def hang_watchdog_threshold() -> float:
+    """Seconds the event loop may go without a heartbeat before it is declared
+    stalled and stacks are dumped. Floored at 2s so a normal slow callback does
+    not trip it; default 5s."""
+    try:
+        return max(2.0, float(os.environ.get(_HANG_SECS_ENV, "5")))
+    except ValueError:
+        return 5.0
+
+
+def hang_trace_path() -> Path:
+    """One hang-trace file per run under the logs dir (appended to on each
+    stall). Kept next to the debug log so a bug report picks it up."""
+    d = logs_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"hang_{time.strftime('%Y-%m-%d_%H%M%S')}_{os.getpid()}.log"
+
+
 def enable_debug() -> Path:
     """
     Turn on debug mode for this process and its children.

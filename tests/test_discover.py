@@ -408,6 +408,101 @@ class TestListGpus:
             assert list_gpus() == []
 
 
+class TestListGpusSafety:
+    """The safe-by-construction guarantee: list_gpus() must never block its
+    caller for longer than its deadline even when the GPU driver probe wedges,
+    while ALWAYS returning a fresh reading (no stale free-VRAM). This is the
+    regression guard for the diagnosed idle-hang root cause (a synchronous,
+    untimed torch.cuda probe on the event loop)."""
+
+    def test_deadline_bounds_a_wedged_probe(self, monkeypatch):
+        import threading
+        import time
+
+        release = threading.Event()
+
+        def _wedged():
+            release.wait(10)   # simulate a stuck native driver call
+            return [{"index": 0, "name": "X", "total": 1, "free": 1}]
+
+        monkeypatch.setattr("localm.discover._list_gpus_probe", _wedged)
+        t0 = time.monotonic()
+        # No prior good value -> [] fallback, returned within the deadline.
+        result = list_gpus(deadline=0.3)
+        elapsed = time.monotonic() - t0
+        release.set()
+        assert elapsed < 2.0, f"list_gpus blocked {elapsed:.1f}s past its deadline"
+        assert result == []      # no known value yet -> safe "unknown"
+
+    def test_every_call_reprobes_no_stale_free(self, monkeypatch):
+        """No freshness cache: successive calls must reflect the LIVE reading,
+        never a stale one. switch_engine's eviction loop / wait_for_vram_release
+        polls free-VRAM to confirm a native free landed - a stale value there
+        would defeat the AUDIT-MED-11 over-eviction guard."""
+        seq = [
+            [{"index": 0, "name": "A", "total": 8, "free": 2}],   # tight
+            [{"index": 0, "name": "A", "total": 8, "free": 7}],   # freed up
+        ]
+        calls = {"n": 0}
+
+        def _probe():
+            i = min(calls["n"], len(seq) - 1)
+            calls["n"] += 1
+            return list(seq[i])
+
+        monkeypatch.setattr("localm.discover._list_gpus_probe", _probe)
+        first = list_gpus()
+        second = list_gpus()
+        assert first[0]["free"] == 2
+        assert second[0]["free"] == 7, "second call returned a stale (cached) free"
+        assert calls["n"] == 2, "a call was served from cache instead of re-probing"
+
+    def test_thread_start_failure_degrades_and_resets_guard(self, monkeypatch):
+        """If the probe thread cannot be spawned (OS thread exhaustion), the call
+        must NOT propagate a 500 and must NOT leave the in-flight guard stuck True
+        (which would freeze GPU detection for the process lifetime with no
+        self-heal). It degrades to last-known-good and re-arms for a later retry."""
+        from localm import discover
+
+        good = [{"index": 0, "name": "A", "total": 8, "free": 8}]
+        monkeypatch.setattr("localm.discover._list_gpus_probe", lambda: list(good))
+        assert list_gpus() == good      # record last-known-good
+
+        class _BoomThread:
+            def __init__(self, *a, **k):
+                pass
+
+            def start(self):
+                raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr("localm.discover.threading.Thread", _BoomThread)
+        result = list_gpus()            # must not raise
+        assert result == good           # degraded to last-known-good
+        assert discover._gpu_probe_inflight is False   # re-armed for a later retry
+
+    def test_serves_last_known_good_when_probe_wedges(self, monkeypatch):
+        import threading
+        import time
+
+        good = [{"index": 0, "name": "A", "total": 8, "free": 8}]
+        monkeypatch.setattr("localm.discover._list_gpus_probe", lambda: list(good))
+        assert list_gpus() == good     # a successful probe records last-known-good
+
+        release = threading.Event()
+
+        def _wedged():
+            release.wait(10)
+            return [{"index": 9, "name": "late", "total": 1, "free": 1}]
+
+        monkeypatch.setattr("localm.discover._list_gpus_probe", _wedged)
+        t0 = time.monotonic()
+        fallback = list_gpus(deadline=0.3)   # this probe wedges
+        elapsed = time.monotonic() - t0
+        release.set()
+        assert elapsed < 2.0
+        assert fallback == good, "a wedged probe must serve the last-known-good value, not []"
+
+
 class TestResolveMainGpuIndex:
     def test_none_returns_zero_without_querying_devices(self, monkeypatch):
         calls = []
