@@ -43,6 +43,7 @@ def register(app: FastAPI, ctx) -> None:
     _stream_sse = _hs._stream_sse
     _stream_sse_completion = _hs._stream_sse_completion
     _complete = _hs._complete
+    _generate_full = _hs._generate_full
     _messages_prompt_text = _hs._messages_prompt_text
     _audit_exchange = _hs._audit_exchange
     _pin_engine = _hs._pin_engine
@@ -140,7 +141,8 @@ def register(app: FastAPI, ctx) -> None:
                 )
             return await _complete(engine, messages, req.model, sem,
                                    audit=_audit, transcript=_transcript,
-                                   pipeline=pipeline, ctx=ctx, **gen_kwargs)
+                                   pipeline=pipeline, ctx=ctx,
+                                   request=request, **gen_kwargs)
         finally:
             if not streaming_handoff:
                 _hs._unpin(engine)
@@ -269,16 +271,16 @@ def register(app: FastAPI, ctx) -> None:
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
                 )
 
-            loop = asyncio.get_running_loop()
             # Count tokens on the (possibly inlet-transformed) messages - what
             # inference actually sees, matching the chat path.
             prompt_tokens = engine.count_tokens(_messages_prompt_text(messages))
 
-            def _run():
-                return "".join(engine.chat_stream(messages, **gen_kwargs))
-
             async with sem:
-                text = await loop.run_in_executor(None, _run)
+                # Cancelable on client disconnect (same as /v1/chat/completions'
+                # non-streaming path): an aborted request releases the per-model
+                # _inference_lock instead of generating to end-of-budget and
+                # blocking the next request to this model.
+                text = await _generate_full(engine, messages, request, **gen_kwargs)
 
             # Outlet fully controls the returned content in the non-streaming path;
             # then record the exchange (audit + transcript), exactly like chat.
