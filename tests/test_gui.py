@@ -4,6 +4,7 @@
 import asyncio
 import json
 import queue
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -471,6 +472,67 @@ class TestLogExportEndpoint:
             assert client.post("/api/logs/export", json={"dest": ""}).status_code == 400
             assert client.post("/api/logs/export",
                                json={"dest": "C:/nonexistent-xyz-123"}).status_code == 400
+
+    def test_export_empty_is_honest_and_ok(self, gui_app, tmp_path, monkeypatch):
+        # http-2: genuinely no *.log files -> honest empty message, 200.
+        app, _ = gui_app
+        home = tmp_path / "home"; (home / "logs").mkdir(parents=True)   # no *.log
+        monkeypatch.setattr("localm.debuglog.logs_dir", lambda: home / "logs")
+        monkeypatch.setattr("localm.config.home_dir", lambda: home)
+        dest = tmp_path / "dest"; dest.mkdir()
+        with TestClient(app) as client:
+            r = client.post("/api/logs/export", json={"dest": str(dest)})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["copied"] == 0 and body["found"] == 0
+        assert "no log files were found" in body["message"].lower()
+
+    def test_export_all_copies_fail_reports_failure_not_empty(self, gui_app, tmp_path, monkeypatch):
+        # http-2 core: files EXIST but every copy fails. Must NOT report the
+        # empty-case reason and must NOT return 200 (AGENTS rule 5).
+        app, _ = gui_app
+        home = tmp_path / "home"; (home / "logs").mkdir(parents=True)
+        (home / "logs" / "a.log").write_text("a", encoding="utf-8")
+        (home / "logs" / "b.log").write_text("b", encoding="utf-8")
+        monkeypatch.setattr("localm.debuglog.logs_dir", lambda: home / "logs")
+        monkeypatch.setattr("localm.config.home_dir", lambda: home)
+
+        def boom(src, dst):
+            raise OSError("disk full")
+        monkeypatch.setattr("shutil.copy2", boom)
+        dest = tmp_path / "dest"; dest.mkdir()
+        with TestClient(app) as client:
+            r = client.post("/api/logs/export", json={"dest": str(dest)})
+        assert r.status_code == 500, r.text
+        detail = r.json().get("detail", "").lower()
+        assert "no log files were found" not in detail   # false reason gone
+        assert "disk full" in detail                      # real reason surfaced
+        assert "2" in detail                              # found 2
+
+    def test_export_partial_failure_is_surfaced(self, gui_app, tmp_path, monkeypatch):
+        # http-2: some copy, some fail -> 200 (logs WERE exported) but the failures
+        # are reported, not silently dropped.
+        app, _ = gui_app
+        home = tmp_path / "home"; (home / "logs").mkdir(parents=True)
+        (home / "logs" / "ok.log").write_text("ok", encoding="utf-8")
+        (home / "logs" / "bad.log").write_text("bad", encoding="utf-8")
+        monkeypatch.setattr("localm.debuglog.logs_dir", lambda: home / "logs")
+        monkeypatch.setattr("localm.config.home_dir", lambda: home)
+
+        real_copy = shutil.copy2
+
+        def selective(src, dst):
+            if Path(src).name == "bad.log":
+                raise OSError("locked")
+            return real_copy(src, dst)
+        monkeypatch.setattr("shutil.copy2", selective)
+        dest = tmp_path / "dest"; dest.mkdir()
+        with TestClient(app) as client:
+            r = client.post("/api/logs/export", json={"dest": str(dest)})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["copied"] == 1 and body["found"] == 2
+        assert "warning" in body and "bad.log" in body["warning"]
 
 
 class TestStatsEndpoint:

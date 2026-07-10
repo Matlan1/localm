@@ -13,15 +13,26 @@ from ..model_manager import get_model_info
 from ._core import console, main, _complete_model_name
 
 
-def _attach_fallback_note(no_server: bool, attach_error: Optional[BaseException]) -> Optional[str]:
+def _attach_fallback_note(no_server: bool, attach_error: Optional[BaseException],
+                          autostart_attempted: bool = False) -> Optional[str]:
     """CLI-1: the note to print when `localm run` is about to load the model in
     THIS process instead of attaching to a background server, so the fallback is
-    never silent. None when the user opted out with --no-server (stay quiet)."""
+    never silent. None when the user opted out with --no-server (stay quiet).
+
+    CLI-3: when an auto-start WAS launched but did not come up in time,
+    ``autostart_attempted`` is True so the note acknowledges that timeout instead
+    of telling the user "no server is serving this directory; start one" - which
+    contradicts the `Starting one in the background...` line they just saw."""
     if no_server:
         return None
     if attach_error is not None:
         return (f"Could not attach to a localm server ({attach_error}); loading "
                 "the model in this process.")
+    if autostart_attempted:
+        return ("The background server did not come up in time (~20s; a large "
+                "model can take longer to load); loading the model in this "
+                "process instead. Try again shortly, or start one yourself with "
+                "`localm serve`.")
     return ("No localm server is serving this directory; loading the model in "
             "this process. Start one with `localm serve` so clients share a "
             "single load.")
@@ -149,7 +160,9 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
                 f"[dim]connected to the localm server at {target['base_url']} "
                 f"(no second model load)[/dim]")
 
+    autostart_attempted = False
     if engine is None and not no_server:
+        autostart_attempted = True
         console.print("[dim]No server running. Starting one in the background...[/dim]")
         import subprocess
         import time
@@ -192,7 +205,7 @@ def run(model, prompt, system, max_tokens, temperature, ctx, gpu_layers,
             attach_error = e
 
     if engine is None:
-        _note = _attach_fallback_note(no_server, attach_error)
+        _note = _attach_fallback_note(no_server, attach_error, autostart_attempted)
         if _note:
             console.print(f"[dim]{_note}[/dim]")
         info = get_model_info(model)
