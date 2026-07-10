@@ -333,6 +333,14 @@ def _resolve_backend_asset(backend: str) -> tuple[str, Optional[str]]:
                 if not sha:
                     sha = "18a85d4be9052f8377ca7e7ade4bae6c0a2818b3367989a6eb3297bcb4282b5e"
                 return url, sha
+        # Surface the fallback so the user knows the build may not be current
+        # (the lemonade-sdk release lookup was unreachable, or this release is
+        # missing the expected gfx103X asset); mirrors the visible-fallback
+        # warning in the general (non-ROCm) path below instead of silently
+        # handing back a possibly-stale pinned URL/checksum.
+        console.print("[yellow]Could not find a lemonade-sdk/llamacpp-rocm release asset "
+                      f"for {tag}; using pinned amd-rocm build - rerun later for the "
+                      "latest.[/yellow]")
         return DEFAULT_URL, "18a85d4be9052f8377ca7e7ade4bae6c0a2818b3367989a6eb3297bcb4282b5e"
 
     plat = _platform_key()
@@ -715,7 +723,11 @@ def _release_assets(tag: str, repo: str = _UPSTREAM_REPO) -> list:
         with urllib.request.urlopen(req, timeout=10) as r:
             data = json.loads(r.read().decode("utf-8"))
             return data.get("assets", [])
-    except Exception:
+    except Exception as e:
+        # Best-effort probe: every caller has a pinned fallback for exactly
+        # this case (offline, rate-limited, API down), so this must not raise -
+        # but the cause should stay discoverable (rule 5) instead of vanishing.
+        logger.debug("release asset lookup failed for %s (%s)", api, e)
         return []
 
 
