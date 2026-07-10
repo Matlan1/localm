@@ -112,6 +112,16 @@ def _reset_comfy_readiness_cache():
 
 
 @pytest.fixture(autouse=True)
+def _clear_keep_diagnostics_env():
+    """`localm gui --keep-diagnostics` sets LOCALM_KEEP_DIAGNOSTICS in-process; a
+    test that exercises it would otherwise leak the env into later tests'
+    keep_diagnostics_enabled() resolution. Clear it around every test."""
+    os.environ.pop("LOCALM_KEEP_DIAGNOSTICS", None)
+    yield
+    os.environ.pop("LOCALM_KEEP_DIAGNOSTICS", None)
+
+
+@pytest.fixture(autouse=True)
 def _reset_gpu_probe_cache():
     """discover.list_gpus() caches its GPU probe for a few seconds (so a wedged
     driver call cannot block the event loop repeatedly). That module-level cache

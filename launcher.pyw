@@ -261,6 +261,8 @@ class Launcher(tk.Tk):
         self.mode = tk.StringVar(value=saved.get("mode", "gui"))
         self.model = tk.StringVar(value=saved.get("model", ""))
         self.debug = tk.BooleanVar(value=saved.get("debug", False))
+        self.keep_diagnostics = tk.BooleanVar(
+            value=saved.get("keep_diagnostics", False))
         self.port = tk.StringVar(value=saved.get("port", ""))
         self.ctx = tk.StringVar(value=saved.get("ctx", ""))
         self.gpu_layers = tk.StringVar(value=saved.get("gpu_layers", ""))
@@ -498,6 +500,13 @@ class Launcher(tk.Tk):
         ttk.Combobox(priv_card, textvariable=self.privacy_coder,
                      values=[USE_GLOBAL] + PRIVACY_MODES, state="readonly",
                      width=12).grid(row=3, column=2, sticky="w", padx=(14, 0))
+        # Privacy mode saves nothing - including the diagnostics a bug report
+        # needs. This keeps hang/crash diagnostics + a debug log even in privacy
+        # mode (never chat content). Passed as --keep-diagnostics at launch.
+        ttk.Checkbutton(priv_card, text="Keep diagnostics for bug reports "
+                        "(no chat content)",
+                        variable=self.keep_diagnostics).grid(
+            row=4, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
         # ----- authentication -----
         auth_card = self._card(root)
@@ -767,6 +776,8 @@ class Launcher(tk.Tk):
                 cmd += ["--no-browser"]
             if self.debug.get():
                 cmd += ["--debug"]
+            if self.keep_diagnostics.get():
+                cmd += ["--keep-diagnostics"]
         elif mode == "chat":
             cmd += ["run", model]
             if ctx:
@@ -791,6 +802,8 @@ class Launcher(tk.Tk):
                 cmd += ["-g", gpu]
             if self.debug.get():
                 cmd += ["--debug"]
+            if self.keep_diagnostics.get():
+                cmd += ["--keep-diagnostics"]
         elif mode == "coder":
             cmd += ["coder", "--model", model]
             folder = self.coder_dir.get().strip()
@@ -886,6 +899,7 @@ class Launcher(tk.Tk):
             "mode": self.mode.get(),
             "model": self.model.get(),
             "debug": self.debug.get(),
+            "keep_diagnostics": self.keep_diagnostics.get(),
             "port": self.port.get(),
             "ctx": self.ctx.get(),
             "gpu_layers": self.gpu_layers.get(),
