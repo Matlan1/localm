@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ctypes
 import re
+import threading
 from collections.abc import Sequence
 from typing import Optional
 
@@ -278,9 +279,55 @@ def _quant_of(name: str) -> str:
     return m.group(1).upper() if m else ""
 
 
-def list_gpus() -> list:
+# ---- GPU probe safety: a hardware probe must never block its caller -------- #
+# _list_gpus_probe() calls the GPU driver: torch.cuda.mem_get_info (which, on a
+# torch ROCm build, calls into HIP) has NO timeout, and nvidia-smi is a
+# subprocess. A busy or wedged driver call would block the CALLER for as long as
+# the driver takes. Several callers run on the server's single asyncio event loop
+# (GET /api/gpus, GET /api/vram-estimate, the GPU-registry heartbeat), so a stuck
+# probe there freezes the WHOLE WebUI while the machine sits idle (diagnosed
+# 2026-07). The public list_gpus() below makes the probe safe by construction, so
+# NO caller can be frozen regardless of whether the call site remembered to
+# offload it: the probe runs on a helper thread with a hard DEADLINE; if it
+# overruns, the caller gets the last-known-good reading (or []) and moves on. A
+# wedged NATIVE call cannot be interrupted from Python, so that one helper thread
+# is abandoned; the in-flight guard means at most ONE such thread ever exists,
+# and the overrun is surfaced at debug level (AGENTS.md rule 5), never silently
+# eaten.
+#
+# NOTE - deliberately NO freshness/TTL cache: every call re-probes. A TTL cache
+# would hand a STALE "free" reading to callers that need a live one, most
+# critically switch_engine's eviction loop, whose wait_for_vram_release polls
+# free-VRAM to confirm a native free has landed before re-checking (AUDIT-MED-11);
+# a stale value there would defeat that guard and over-evict. The last-known-good
+# value is kept ONLY as the wedge fallback, never to short-circuit a live probe.
+_GPU_PROBE_DEADLINE = 4.0     # seconds: hard cap a single probe may block a caller
+_gpu_probe_lock = threading.Lock()
+_gpu_last_good: Optional[list] = None    # last SUCCESSFUL probe; served on a wedge
+_gpu_probe_inflight = False
+
+
+def _reset_gpu_probe_cache() -> None:
+    """Test hook: drop the last-known-good GPU reading + in-flight flag so a test
+    that exercised the wedge fallback cannot bleed into the next test."""
+    global _gpu_last_good, _gpu_probe_inflight
+    with _gpu_probe_lock:
+        _gpu_last_good = None
+        _gpu_probe_inflight = False
+
+
+def list_gpus(*, deadline: float = _GPU_PROBE_DEADLINE) -> list:
     """Every GPU device visible right now: ``[{"index", "name", "total",
     "free"}, ...]``, or ``[]`` when nothing is measurable.
+
+    Safe by construction: the real driver probe (:func:`_list_gpus_probe`) runs on
+    a helper thread with a hard ``deadline``-second timeout, so this call NEVER
+    blocks its caller for longer than ``deadline`` even if the GPU driver wedges -
+    critical because several callers run on the server's single event loop. Every
+    call re-probes (see the module note above: no TTL cache, so a live "free"
+    reading is never stale); on an overrun the last-known-good value (or ``[]``) is
+    returned and the stuck probe thread is abandoned. ``deadline`` is overridable
+    for tests.
 
     Tries torch first (CUDA/ROCm - torch's ROCm build aliases torch.cuda.* to
     HIP under the hood, so an AMD card enumerates through the exact same API,
@@ -293,6 +340,61 @@ def list_gpus() -> list:
     adapter" number with no per-device identity, so it cannot support GPU
     *selection* - only vram_info()'s single-number "total VRAM for fit
     badges" use case. That is a scope boundary, not an oversight."""
+    global _gpu_last_good, _gpu_probe_inflight
+    with _gpu_probe_lock:
+        if _gpu_probe_inflight:
+            # A probe is already running (a concurrent caller, or a prior one that
+            # wedged the driver). Never pile on: hand back the last-known-good
+            # reading so this caller stays free. [] is the safe "unknown" answer
+            # when nothing has succeeded yet.
+            return list(_gpu_last_good) if _gpu_last_good is not None else []
+        _gpu_probe_inflight = True
+
+    result: dict = {}
+    done = threading.Event()
+
+    def _run() -> None:
+        global _gpu_last_good, _gpu_probe_inflight
+        value = None
+        try:
+            value = _list_gpus_probe()
+        except Exception as e:   # the probe swallows its own errors; belt-and-braces
+            logger.debug("list_gpus: probe raised unexpectedly: %s", e)
+        with _gpu_probe_lock:
+            if value is not None:
+                _gpu_last_good = value
+            _gpu_probe_inflight = False
+        result["value"] = value
+        done.set()
+
+    try:
+        threading.Thread(target=_run, name="localm-gpu-probe", daemon=True).start()
+    except Exception as e:
+        # Could not spawn the probe thread (e.g. OS thread exhaustion). Reset the
+        # in-flight guard so a LATER call can retry (never leave it stuck True with
+        # no thread to clear it), surface it at debug (rule 5), and degrade to the
+        # last-known-good reading rather than propagating a 500 to the caller.
+        with _gpu_probe_lock:
+            _gpu_probe_inflight = False
+        logger.debug("list_gpus: could not start probe thread: %s", e)
+        return list(_gpu_last_good) if _gpu_last_good is not None else []
+    if done.wait(deadline):
+        # Fresh probe finished in time: return ITS result (never a cached one).
+        v = result.get("value")
+        return list(v) if v is not None else []
+    # Deadline exceeded: the driver call is stuck in native code and cannot be
+    # cancelled. Serve the last-known-good value and let the abandoned thread
+    # finish (or never); _gpu_probe_inflight stays True until it does, so a wedge
+    # spawns no further threads. Surfaced, not silenced (rule 5).
+    logger.debug("list_gpus: GPU probe exceeded %.1fs deadline (driver call stuck); "
+                 "returning last-known GPU info so the caller does not block", deadline)
+    with _gpu_probe_lock:
+        return list(_gpu_last_good) if _gpu_last_good is not None else []
+
+
+def _list_gpus_probe() -> list:
+    """The actual (blocking) GPU driver probe. Call :func:`list_gpus`, not this -
+    this one has no timeout and can wedge on a busy/broken driver."""
     try:
         import torch
         if torch.cuda.is_available():

@@ -18,6 +18,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import sys
 import threading
@@ -25,7 +26,7 @@ import time
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, List, Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (
     JSONResponse,
@@ -75,6 +76,12 @@ _switch_cancel: Optional["threading.Event"] = None
 # never touches the shared machine-wide registry (zero-daemon). Shape:
 # {"instance_id", "port", "host", "scheme", "token"}.
 _gpu_coord: Optional[dict] = None
+
+# Hang watchdog: a monotonic heartbeat bumped ~1/s by _hang_heartbeat_loop (an
+# async task ON the loop) and read by the off-loop watchdog thread + the debug
+# request log. A growing (now - _hb_monotonic) means the single event loop has
+# stopped making progress, i.e. something is blocking it (the diagnosed hang).
+_hb_monotonic = time.monotonic()
 
 def _default_engine_factory(name: str) -> Engine:
     from localm.config import load_registry
@@ -673,8 +680,10 @@ async def _idle_unload_once(ttl: int) -> bool:
                       "on the next request", engine.display_name, idle_s, ttl)
             unloaded_any = True
             # Cross-install GPU coordination: reflect the freed model. No-op when
-            # not registered.
-            _gpu_registry_sync()
+            # not registered. Offloaded: _gpu_registry_sync does filesystem I/O
+            # (and, when a non-zero main_gpu_index is set, a GPU probe via
+            # _current_gpu_index) - keep it OFF the event loop.
+            await loop.run_in_executor(None, _gpu_registry_sync)
 
     return unloaded_any
 
@@ -711,10 +720,74 @@ async def _gpu_registry_heartbeat_loop() -> None:
     while True:
         await asyncio.sleep(20)
         try:
-            _gpu_registry_sync()
+            # Offloaded off the event loop: _gpu_registry_sync does filesystem I/O
+            # (registry write) and, when a non-zero main_gpu_index is configured, a
+            # GPU driver probe - either could otherwise stall the single loop and
+            # freeze the whole WebUI on this 20s tick while the box is idle.
+            await asyncio.get_running_loop().run_in_executor(None, _gpu_registry_sync)
         except Exception:
             from localm.debuglog import logger as _dbg
             _dbg.warning("gpu-registry heartbeat failed (continuing)", exc_info=True)
+
+
+async def _hang_heartbeat_loop() -> None:
+    """Bump _hb_monotonic every ~1s so the off-loop watchdog thread can tell when
+    the single event loop has stopped making progress (a hang). The ONLY
+    steady-state cost is one wakeup per second."""
+    global _hb_monotonic
+    while True:
+        _hb_monotonic = time.monotonic()
+        await asyncio.sleep(1.0)
+
+
+def _start_hang_watchdog(threshold: float, trace_path, *, poll: float = 1.0):
+    """Start a plain (NON-async) daemon thread that watches the heartbeat. When
+    the event loop has not ticked in `threshold`s it is blocked, so dump ALL
+    thread stacks to `trace_path` via faulthandler - the only way to see what a
+    fully-wedged loop is stuck in, because this thread runs OUTSIDE the loop.
+    Polls every `poll`s (tests lower it for speed). Returns (stop_event, thread,
+    file_handle) for teardown. Never blocks: it only waits on an Event, subtracts
+    two numbers, and appends to a file."""
+    import faulthandler
+    import traceback
+
+    stop = threading.Event()
+    fh = open(trace_path, "a", buffering=1, encoding="utf-8", errors="backslashreplace")
+
+    def _run() -> None:
+        last_dump = None
+        while not stop.wait(poll):
+            lag = time.monotonic() - _hb_monotonic
+            if lag < threshold:
+                continue
+            now = time.monotonic()
+            # Throttle: a long freeze yields a handful of snapshots, not one/sec.
+            # `is not None` (not a 0.0 sentinel): time.monotonic() is boot-relative,
+            # so a real 0.0 baseline would wrongly suppress the FIRST dump within the
+            # first ~30s of uptime.
+            if last_dump is not None and now - last_dump < max(30.0, threshold * 3):
+                continue
+            last_dump = now
+            try:
+                fh.write(
+                    f"\n===== LOCALM HANG WATCHDOG: event loop stalled {lag:.1f}s "
+                    f"(pid {os.getpid()}, {time.strftime('%Y-%m-%d %H:%M:%S')}) =====\n")
+                try:
+                    faulthandler.dump_traceback(file=fh, all_threads=True)
+                except Exception:
+                    # Fallback: pure-Python walk of every thread's frames.
+                    for tid, frame in sys._current_frames().items():
+                        fh.write(f"\n--- thread {tid} ---\n")
+                        fh.write("".join(traceback.format_stack(frame)))
+                fh.flush()
+            except Exception:
+                # The watchdog must never crash the process it is diagnosing.
+                pass
+
+    t = threading.Thread(target=_run, name="localm-hang-watchdog", daemon=True)
+    t.start()
+    return stop, t, fh
+
 
 # Optional bearer-token auth - enabled when LOCALM_API_KEY is set.
 _bearer_scheme = HTTPBearer(auto_error=False)
@@ -1425,6 +1498,37 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         # outlives the app.
         idle_task = asyncio.create_task(_idle_unload_loop())
 
+        # Hang-capture watchdog: a 1s async heartbeat + an OFF-loop daemon thread
+        # that dumps all stacks to a file when the loop stops ticking - the only
+        # in-process way to see what a fully-wedged loop is stuck in. Opt-in via
+        # LOCALM_HANG_WATCHDOG (the heartbeat also runs under --debug so the debug
+        # request log can show loop_lag). Skipped under pytest so no thread lingers
+        # across tests. Best-effort: a startup failure must never block serving.
+        hb_task = None
+        hang_stop = hang_thread = hang_fh = None
+        from localm.debuglog import (
+            debug_enabled as _dbg_on,
+            hang_watchdog_enabled as _hw_on,
+            hang_watchdog_threshold as _hw_secs,
+            hang_trace_path as _hw_path,
+        )
+        if (_hw_on() or _dbg_on()) and "pytest" not in sys.modules:
+            try:
+                hb_task = asyncio.create_task(_hang_heartbeat_loop())
+                hang_stop, hang_thread, hang_fh = _start_hang_watchdog(
+                    _hw_secs(), _hw_path())
+                if _hw_on():
+                    import faulthandler
+                    # Belt-and-suspenders periodic dump (unconditional, so noisier
+                    # than the stall-triggered watchdog above); long period.
+                    faulthandler.dump_traceback_later(60, repeat=True, file=hang_fh)
+                    loop = asyncio.get_running_loop()
+                    loop.set_debug(True)
+                    loop.slow_callback_duration = 0.5
+            except Exception as e:
+                from localm.debuglog import logger as _dbg
+                _dbg.debug("hang watchdog startup failed (continuing): %s", e)
+
         # Cross-install GPU/VRAM coordination (see localm.gpu_registry): register
         # this instance in the machine-wide registry, but ONLY for a real,
         # non-isolated, advertise()'d server (instance_id + port/scheme are set by
@@ -1462,6 +1566,26 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                 await idle_task
             except asyncio.CancelledError:
                 pass
+            if hb_task is not None:
+                hb_task.cancel()
+                try:
+                    await hb_task
+                except asyncio.CancelledError:
+                    pass
+            if hang_stop is not None:
+                try:
+                    import faulthandler
+                    faulthandler.cancel_dump_traceback_later()
+                except Exception:
+                    pass
+                hang_stop.set()
+                if hang_thread is not None:
+                    hang_thread.join(timeout=2)
+                if hang_fh is not None:
+                    try:
+                        hang_fh.close()
+                    except Exception:
+                        pass
             if gpu_task is not None:
                 gpu_task.cancel()
                 try:
@@ -1537,13 +1661,47 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         async def _log_requests(request, call_next):
             start = time.perf_counter()
             response = await call_next(request)
+            # loop_lag = how far behind the 1s heartbeat is right now; a large
+            # value means this request was served just after the loop was blocked,
+            # correlating a slow/frozen request with a preceding event-loop stall.
             _dbg.debug(
-                "%s %s -> %d (%.0f ms)",
+                "%s %s -> %d (%.0f ms, loop_lag=%.2fs)",
                 request.method, request.url.path,
                 response.status_code,
                 (time.perf_counter() - start) * 1000,
+                time.monotonic() - _hb_monotonic,
             )
             return response
+
+    # Loopback-only debug endpoint: every thread's stack + the asyncio task list,
+    # for diagnosing a hang/slowdown from the SAME machine on demand. fs-host
+    # gated (Depends(require_fs_host)) because stacks can carry sensitive frame
+    # data, and 404'd off loopback. NOTE: served ON the event loop, so it answers
+    # only while the loop is alive (a partial stall, a task backlog). A FULLY
+    # wedged loop cannot respond here at all - that case is captured by the
+    # off-loop watchdog file (LOCALM_HANG_WATCHDOG); this endpoint complements it.
+    @app.get("/debug/stacks", include_in_schema=False,
+             dependencies=[Depends(require_fs_host)])
+    async def _debug_stacks(request: Request):
+        host = getattr(request.app.state, "bind_host", "127.0.0.1")
+        if not _is_loopback_host(host):
+            return JSONResponse(status_code=404, content={"detail": "Not Found"})
+        import traceback
+        threads = {str(tid): traceback.format_stack(frame)
+                   for tid, frame in sys._current_frames().items()}
+        tasks = []
+        try:
+            for task in asyncio.all_tasks():
+                tasks.append({
+                    "name": task.get_name(),
+                    "done": task.done(),
+                    "stack": [str(f) for f in task.get_stack(limit=20)],
+                })
+        except RuntimeError:
+            pass   # no running loop (should not happen inside an async handler)
+        return {"pid": os.getpid(),
+                "loop_lag_s": round(time.monotonic() - _hb_monotonic, 2),
+                "threads": threads, "tasks": tasks}
 
     # CORS: localhost-only by default. A wildcard here would let ANY website
     # the user visits call this API from browser JS and read the responses

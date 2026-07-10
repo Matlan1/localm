@@ -146,7 +146,11 @@ def register(app: FastAPI, ctx) -> None:
             except OSError:
                 pass
         est = estimate_vram(model_bytes, n_ctx, n_gpu_layers)
-        info = vram_capacity()
+        # vram_capacity() -> list_gpus() probes the GPU driver; keep it OFF the
+        # event loop (it is safe-by-construction but still may take up to its
+        # deadline on a wedged driver) so a stats read never stalls the WebUI.
+        loop = asyncio.get_running_loop()
+        info = await loop.run_in_executor(get_plugin_executor(), vram_capacity)
         free, total = info.get("free"), info.get("total")
         fits = (est["needed"] <= free) if isinstance(free, int) else None
         return {"model": name, "model_bytes": model_bytes, **est,
@@ -161,7 +165,11 @@ def register(app: FastAPI, ctx) -> None:
         from localm.config import load_config
         from localm.discover import list_gpus
         cfg = load_config()
-        return {"gpus": list_gpus(),
+        # list_gpus() probes the GPU driver; offload it so a wedged/slow driver
+        # never blocks the event loop and freezes the whole WebUI.
+        loop = asyncio.get_running_loop()
+        gpus = await loop.run_in_executor(get_plugin_executor(), list_gpus)
+        return {"gpus": gpus,
                 "main_gpu_index": cfg.get("main_gpu_index"),
                 "gpu_split_indices": cfg.get("gpu_split_indices")}
 
@@ -285,7 +293,7 @@ def register(app: FastAPI, ctx) -> None:
                 lambda: hf_search(q, limit=limit, formats=wanted))
         except DiscoverError as e:
             raise HTTPException(_discover_status(e), str(e))
-        vram = vram_capacity()
+        vram = await loop.run_in_executor(get_plugin_executor(), vram_capacity)
         # Attach a VRAM fit badge to results that carry a size estimate (HF results
         # with safetensors param metadata). GGUF results are sized per-file in the
         # /discover/files expander instead. fit_label yields "" when VRAM is unknown;
@@ -307,7 +315,7 @@ def register(app: FastAPI, ctx) -> None:
                 get_plugin_executor(), lambda: hf_gguf_files(repo))
         except DiscoverError as e:
             raise HTTPException(_discover_status(e), str(e))
-        vram = vram_capacity()
+        vram = await loop.run_in_executor(get_plugin_executor(), vram_capacity)
         total = vram.get("total")
         models = []
         mmprojs = []
