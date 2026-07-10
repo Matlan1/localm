@@ -73,14 +73,24 @@ def register(app: FastAPI, ctx) -> None:
             raise HTTPException(500, "Could not save the bug report to disk.")
         result = {"saved": True, "filename": path.name, "path": str(path),
                   "maintainer": bugreport.MAINTAINER_EMAIL}
+        # Return the saved report's markdown so the GUI can offer a browser DOWNLOAD
+        # for manual sending (a tester on a phone/LAN cannot open a server-side path).
+        # It is the user's own report; best-effort (a read failure just hides the
+        # download button, the file is still on disk).
+        try:
+            result["report_markdown"] = path.read_text(encoding="utf-8")
+        except OSError:
+            pass
         # Optional explicit upload: file the saved report as a GitHub issue via the
         # configured proxy. Always user-initiated (never automatic). A failed upload
-        # is surfaced as upload_error, NOT a false success - the file is still saved.
+        # is surfaced with a diagnosed stage + message (NOT a false success) so the
+        # GUI can tell the user WHERE it failed and offer retry/download - the file
+        # is still saved either way (we do not hide problems).
         if body.get("upload"):
             title = (description.splitlines()[0] if description else "")[:120] \
                 or "user-reported issue"
+            report_text = result.get("report_markdown") or path.read_text(encoding="utf-8")
             try:
-                report_text = path.read_text(encoding="utf-8")
                 up = bugreport.upload_report(title, report_text)
                 result["uploaded"] = True
                 if isinstance(up, dict) and up.get("url"):
@@ -91,9 +101,13 @@ def register(app: FastAPI, ctx) -> None:
                 result["uploaded"] = False
                 result["rate_limited"] = True
                 result["retry_after"] = e.retry_after
+                result["upload_stage"] = e.stage or "rate_limited"
+                result["upload_message"] = e.hint or f"rate limited; retry in {e.retry_after}s"
                 result["upload_error"] = f"rate limited; retry in {e.retry_after}s"
             except bugreport.LocalmError as e:
                 result["uploaded"] = False
+                result["upload_stage"] = e.stage or "unknown"
+                result["upload_message"] = e.hint or e.summary
                 result["upload_error"] = (f"{e.summary}: {e.reason}"
                                           .strip().strip(":").strip())
         return result

@@ -600,6 +600,31 @@ if ($("server-shutdown")) {
 // via capabilities.bugreport_upload) ALSO files it as a GitHub issue through the
 // proxy, so a tester needs no GitHub account. A failed upload is reported honestly
 // (the file is still saved), never as success.
+// The most recent saved report's markdown + filename, so "Download report" can
+// hand the tester the file to send manually when an upload fails.
+let _lastBugReport = null;
+
+function _showBugActions({ retry, download }) {
+  const r = $("bug-retry"), d = $("bug-download");
+  if (r) r.hidden = !retry;
+  if (d) d.hidden = !download;
+}
+
+// Download the last saved report as a .md so the tester can email/Discord it -
+// works from a phone or another LAN device where a server-side path is useless.
+function downloadBugReport() {
+  if (!_lastBugReport || !_lastBugReport.markdown) return;
+  const blob = new Blob([_lastBugReport.markdown], { type: "text/markdown" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = _lastBugReport.filename || "bug-report.md";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 export async function submitBugReport(upload, isRetry = false) {
   const desc = ($("bug-desc").value || "").trim();
   if (!desc) { toast("Describe the problem first", true); return; }
@@ -607,6 +632,7 @@ export async function submitBugReport(upload, isRetry = false) {
   const saveBtn = $("bug-send"), upBtn = $("bug-upload");
   if (saveBtn) saveBtn.disabled = true;
   if (upBtn) upBtn.disabled = true;
+  _showBugActions({ retry: false, download: false });   // fresh attempt: reset
   // Browser context so the report carries what actually broke in the page (env
   // snapshot + server state are added server-side). Sanitized + capped on the
   // server; rendered as plain text, never executed.
@@ -635,28 +661,42 @@ export async function submitBugReport(upload, isRetry = false) {
       return;   // the retry (and the finally below) re-enable the buttons
     }
     const where = data.path || data.filename || "report";
-    const uploadFailed = upload && data.upload_error;
+    const sent = upload && data.uploaded;
+    const uploadFailed = upload && data.upload_error && !data.rate_limited;
+    // Stash the saved report so "Download report" can hand it to the tester for
+    // manual sending (a server-side path is useless from a phone / another device).
+    _lastBugReport = data.report_markdown
+      ? { markdown: data.report_markdown, filename: data.filename || "bug-report.md" }
+      : null;
+    // On a failed send, offer Retry (re-file the issue) and Download (send it
+    // yourself); on success, keep them hidden.
+    _showBugActions({ retry: uploadFailed, download: !sent && !!_lastBugReport });
     if (out) {
       out.hidden = false;
-      if (upload && data.uploaded) {
+      if (sent) {
         out.textContent = "Sent." +
           (data.issue_url ? " Tracking issue: " + data.issue_url : "");
       } else if (data.rate_limited) {
         out.textContent = "Saved: " + where +
           "  -  rate limited; wait a bit and click Send again.";
       } else if (uploadFailed) {
-        out.textContent = "Saved: " + where + "  -  could not send (" +
-          data.upload_error + "); email it to " + (data.maintainer || "the maintainer");
+        // Tell the user WHERE it failed (the diagnosed message), and that the
+        // report is kept - they can retry, download it, or email it.
+        out.textContent = "Could not send: " +
+          (data.upload_message || data.upload_error) +
+          "  The report is saved" + (where ? " (" + where + ")" : "") +
+          " - retry, download it, or email " + (data.maintainer || "the maintainer") + ".";
       } else {
         out.textContent = "Saved: " + where +
           (data.maintainer ? "  -  send it to " + data.maintainer : "");
       }
     }
-    // Keep the description if a rate-limited send might still be retried by hand.
-    if (!data.rate_limited) $("bug-desc").value = "";
-    if (upload && data.uploaded) toast("Bug report sent");
+    // Keep the description on ANY failed send so Retry re-uses it; clear it once the
+    // report is genuinely done with (sent, or a plain save with no upload attempt).
+    if (sent || (!upload && data.saved)) $("bug-desc").value = "";
+    if (sent) toast("Bug report sent");
     else if (data.rate_limited) toast("Rate limited; wait a bit and click Send again", true);
-    else if (uploadFailed) toast("Saved, but could not send: " + data.upload_error, true);
+    else if (uploadFailed) toast("Could not send: " + (data.upload_message || data.upload_error), true);
     else toast("Bug report saved");
   } catch (e) {
     toast("Could not file report: " + e.message, true);
@@ -683,6 +723,8 @@ async function countdownRetryBugReport(secs, out) {
 
 if ($("bug-send")) $("bug-send").onclick = () => submitBugReport(false);
 if ($("bug-upload")) $("bug-upload").onclick = () => submitBugReport(true);
+if ($("bug-retry")) $("bug-retry").onclick = () => submitBugReport(true);
+if ($("bug-download")) $("bug-download").onclick = () => downloadBugReport();
 
 // Updates: check-only auto-surface (a throttled startup check in app.js calls
 // __localmUpdateCheck) + an explicit "Update now". localm never self-updates; the

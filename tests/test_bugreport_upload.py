@@ -200,6 +200,56 @@ def test_cli_menu_channels_stable_when_upload_configured(tmp_path, monkeypatch, 
     assert bugreport.MAINTAINER_EMAIL in capsys.readouterr().out
 
 
+def test_cli_menu_upload_failure_shows_hint_and_retries(tmp_path, monkeypatch, capsys):
+    """A failed send tells the user WHERE it failed (the diagnosed hint) and offers
+    to retry creating the issue; answering yes re-attempts and can succeed."""
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
+    monkeypatch.setattr(bugreport, "upload_config",
+                        lambda: ("https://proxy.example", "tok"))
+    calls = {"n": 0}
+
+    def flaky(title, body, *, url=None, token=None, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise bugreport.LocalmError(
+                "could not reach the bug-report server", reason="getaddrinfo failed",
+                stage="offline_or_dns", hint="You may be offline.")
+        return {"url": "https://github.com/x/localm/issues/9"}
+
+    monkeypatch.setattr(bugreport, "upload_report", flaky)
+    answers = iter(["1", "y"])   # pick [1] Send, then retry = yes
+    bugreport.report_failure(summary="bug", interactive=True,
+                             prompt=lambda _t: next(answers, ""))
+    out = capsys.readouterr().out
+    assert "You may be offline." in out          # the diagnosed hint is shown
+    assert calls["n"] == 2                        # retried after the failure
+    assert "Sent to the maintainer." in out       # the retry succeeded
+
+
+def test_cli_menu_upload_failure_decline_retry_keeps_file(tmp_path, monkeypatch, capsys):
+    """Declining the retry does not re-attempt; the saved report + email fallback
+    are pointed at (a failed send is never a false success)."""
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
+    monkeypatch.setattr(bugreport, "upload_config",
+                        lambda: ("https://proxy.example", "tok"))
+    calls = {"n": 0}
+
+    def always_fail(title, body, *, url=None, token=None, **kw):
+        calls["n"] += 1
+        raise bugreport.LocalmError("could not reach the bug-report server",
+                                    reason="refused", stage="unreachable",
+                                    hint="The server may be down.")
+
+    monkeypatch.setattr(bugreport, "upload_report", always_fail)
+    answers = iter(["1", "n"])   # pick [1] Send, then decline retry
+    bugreport.report_failure(summary="bug", interactive=True,
+                             prompt=lambda _t: next(answers, ""))
+    out = capsys.readouterr().out
+    assert "The server may be down." in out
+    assert calls["n"] == 1                        # NOT retried
+    assert bugreport.MAINTAINER_EMAIL in out       # email fallback pointed at
+
+
 # ------------------------------- endpoint --------------------------------- #
 
 def _engine():

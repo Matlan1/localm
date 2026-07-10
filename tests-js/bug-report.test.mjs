@@ -94,6 +94,55 @@ test("R47: Send to maintainer POSTs upload:true and shows the tracking issue URL
   assert.match(out.textContent, /issues\/42/);
 });
 
+test("R47: a failed upload shows WHERE it failed, reveals Retry + Download, keeps the text", async () => {
+  const posts = [];
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch(posts, {
+    saved: true, uploaded: false,
+    upload_stage: "offline_or_dns", upload_message: "You may be offline.",
+    upload_error: "could not reach the bug-report server: dns",
+    report_markdown: "# localm bug report\nbody", filename: "bug-f.md",
+    path: "/home/bug-reports/bug-f.md", maintainer: "owner@example.com",
+  }) });
+  const doc = window.document;
+  doc.getElementById("bug-desc").value = "it will not send";
+  doc.getElementById("bug-upload").click();
+  await flush();
+  const out = doc.getElementById("bug-result");
+  assert.match(out.textContent, /Could not send: You may be offline\./,
+    "shows the diagnosed 'where it failed' message");
+  assert.equal(doc.getElementById("bug-retry").hidden, false, "Retry revealed");
+  assert.equal(doc.getElementById("bug-download").hidden, false, "Download revealed");
+  assert.equal(doc.getElementById("bug-desc").value, "it will not send",
+    "the description is kept so Retry can re-use it");
+});
+
+test("R47: Retry re-sends the report and Download hands back the saved markdown", async () => {
+  const posts = [];
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch(posts, {
+    saved: true, uploaded: false, upload_message: "The server may be down.",
+    upload_error: "unreachable", report_markdown: "# report\nbody",
+    filename: "bug-g.md", path: "/p/bug-g.md", maintainer: "owner@example.com",
+  }) });
+  const doc = window.document;
+  const blobs = [];
+  window.URL.createObjectURL = (b) => { blobs.push(b); return "blob:x"; };
+  window.URL.revokeObjectURL = () => {};
+  // jsdom does not implement download-anchor navigation (a real browser downloads
+  // the file); no-op the click so the real-browser behaviour is not mistaken for
+  // an error, while still verifying the blob was built.
+  window.HTMLAnchorElement.prototype.click = function () {};
+  doc.getElementById("bug-desc").value = "please send";
+  doc.getElementById("bug-upload").click();
+  await flush();
+  assert.equal(posts.length, 1);
+  doc.getElementById("bug-retry").click();          // retry re-attempts the send
+  await flush();
+  assert.equal(posts.length, 2, "Retry re-POSTed the report");
+  assert.equal(posts[1].upload, true, "retry keeps the upload flag");
+  doc.getElementById("bug-download").click();        // download the saved report
+  assert.equal(blobs.length, 1, "download built a blob from the saved report");
+});
+
 test("R47: a 2xx upload with no issue_url still reports 'Sent' (matches the toast)", async () => {
   const posts = [];
   const { window } = loadAppWithPages({ fetchImpl: makeFetch(posts, {
