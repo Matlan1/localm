@@ -111,6 +111,19 @@ def _reset_comfy_readiness_cache():
     comfy_client._confirmed_alive.clear()
 
 
+@pytest.fixture(autouse=True)
+def _reset_gpu_probe_cache():
+    """discover.list_gpus() caches its GPU probe for a few seconds (so a wedged
+    driver call cannot block the event loop repeatedly). That module-level cache
+    would otherwise bleed one test's mocked devices into the next within its TTL,
+    so a test that fakes two GPUs would leak them into a later "no GPU" test.
+    Clear it before and after every test so each starts from a cold probe."""
+    from localm import discover
+    discover._reset_gpu_probe_cache()
+    yield
+    discover._reset_gpu_probe_cache()
+
+
 @pytest.fixture
 def cli_runner(tmp_path, monkeypatch):
     """End-to-end CLI harness: a click CliRunner with a throwaway LOCALM_HOME.
