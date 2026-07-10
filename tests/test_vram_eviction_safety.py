@@ -20,9 +20,12 @@ These exercise the multi-model switch/eviction path in http_server.switch_engine
           before re-checking, so it does not over-evict on a stale-low reading.
 """
 
+import asyncio
 import os
+import threading
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from localm.inference import http_server as hs
@@ -499,6 +502,107 @@ class TestPerDeviceSplitFitGate:
         assert r.status_code == 200, (
             f"a non-GGUF path must skip the per-device gate entirely: {r.text}")
         assert hs._engines["model-a"].loaded
+
+
+@pytest.mark.anyio
+async def test_switch_engine_vram_probe_does_not_block_event_loop(monkeypatch):
+    """Regression guard for the diagnosed idle-hang root cause PR #541 fixed
+    elsewhere: switch_engine's pre-load eviction loop calls
+    discover.vram_capacity()/gpu_split_shortfall(), which route through the
+    deadline-bounded discover.list_gpus() probe - but a bounded (up to ~4s)
+    block is still a block if it runs directly on the single event loop,
+    freezing every OTHER concurrent coroutine for that long. This loop can
+    re-probe multiple times per eviction, so it is exposed to exactly the
+    same hang class the other call sites were fixed for.
+
+    Proven with an independent heartbeat coroutine ticking on a fixed
+    interval, NOT by racing against switch_engine's own request-completion
+    timing (which depends on how many other awaits happen to run first and is
+    not a reliable signal - confirmed by hand: an httpx/ASGI-based version of
+    this test kept passing even with the fix reverted, because enough
+    incidental await points elsewhere let it interleave anyway). If the event
+    loop is genuinely blocked, the heartbeat CANNOT tick during that window -
+    a deterministic, unambiguous signal regardless of switch_engine's
+    internal scheduling."""
+    fake_registry = {"model-a": {"path": "models/model-a.gguf", "source": "local"}}
+    monkeypatch.setattr("localm.config.load_registry", lambda: fake_registry)
+    monkeypatch.setattr("localm.model_manager.get_model_info",
+                        lambda name: ("models/model-a.gguf", "hint"))
+    monkeypatch.setattr("localm.model_manager.get_model_mmproj", lambda name: None)
+    # A configured split means BOTH vram_capacity() and gpu_split_shortfall()
+    # (a GGUF path) will each independently call list_gpus() - exercising both
+    # of this loop's executor-wrapped probe call sites, not just one.
+    from localm.config import load_config as real_load_config
+    base_cfg = real_load_config()
+    monkeypatch.setattr(
+        "localm.config.load_config",
+        lambda: {**base_cfg, "gpu_split_indices": [0, 1]})
+    monkeypatch.setattr(hs, "_engine_factory", lambda name: FakeEngine(name))
+    hs._engines.clear()
+    hs._engines_lru.clear()
+    hs._inference_sems.clear()
+    hs._last_activity_per_model.clear()
+    hs._active_model_name = None
+    hs._default_model_name = None
+    hs._engine = None
+    hs._inference_sem = None
+
+    probe_entered = threading.Event()
+    release = threading.Event()
+
+    def _blocking_probe():
+        # Simulate a slow/wedged GPU driver call. If vram_capacity() (or
+        # gpu_split_shortfall()) ran this on the event loop instead of a
+        # worker thread, the whole server would freeze here until release.
+        probe_entered.set()
+        release.wait(3)
+        return [{"index": 0, "name": "X", "total": 16 * 1024 ** 3, "free": 16 * 1024 ** 3},
+                {"index": 1, "name": "Y", "total": 16 * 1024 ** 3, "free": 16 * 1024 ** 3}]
+
+    monkeypatch.setattr("localm.discover._list_gpus_probe", _blocking_probe)
+
+    ticks = {"n": 0}
+
+    async def _heartbeat():
+        while True:
+            ticks["n"] += 1
+            await asyncio.sleep(0.01)
+
+    hb_task = asyncio.ensure_future(_heartbeat())
+    try:
+        switch_task = asyncio.ensure_future(
+            hs.switch_engine("model-a", hs._engine_factory, preempt=False))
+
+        probe_started = False
+        for _ in range(200):
+            if probe_entered.is_set():
+                probe_started = True
+                break
+            await asyncio.sleep(0.01)
+        assert probe_started, "probe never started (executor not reached)"
+
+        ticks_before = ticks["n"]
+        await asyncio.sleep(0.5)   # the probe is still blocked (releases at 3s)
+        ticks_after = ticks["n"]
+        assert not switch_task.done(), (
+            "switch_engine already completed while its own probe should "
+            "still be blocked for ~3s in a worker thread - this means the "
+            "probe call actually ran SYNCHRONOUSLY on the event loop (which "
+            "also starved this test's own heartbeat/polling coroutines until "
+            "the whole chain finished) rather than being offloaded via "
+            "run_in_executor")
+        assert ticks_after - ticks_before > 20, (
+            f"the heartbeat barely advanced ({ticks_before} -> {ticks_after} "
+            f"in 0.5s, expected ~50) while the VRAM probe was blocked in its "
+            f"worker thread - the event loop was NOT actually free, meaning "
+            f"the probe call was NOT offloaded")
+    finally:
+        release.set()
+        result = await switch_task
+        hb_task.cancel()
+
+    assert result.get("status") == "loaded"
+    assert hs._engines["model-a"].loaded
 
 
 def test_eviction_waits_for_vram_release(monkeypatch):

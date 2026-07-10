@@ -301,7 +301,15 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
             check_split_fit = _is_gguf(m_path)
 
             while True:
-                v_info = vram_capacity()
+                # Off the event loop: vram_capacity()/gpu_split_shortfall() route
+                # through discover.list_gpus(), which is deadline-bounded (PR #541)
+                # but still a REAL hardware probe that can take up to that deadline
+                # - calling it directly on the loop would stall every other
+                # concurrent request on this single-threaded server for that long,
+                # the exact class of hang #541 fixed for the GUI routes and the
+                # GPU-registry heartbeat. This loop can iterate (and re-probe)
+                # multiple times per eviction, so it is just as exposed.
+                v_info = await loop.run_in_executor(None, vram_capacity)
                 free_vram = v_info.get("free")
                 measurable = free_vram is not None
                 # + headroom for consistency with the aggregate check just
@@ -310,8 +318,10 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                 # to a thinner margin than the aggregate ceiling it composes
                 # with (see gpu_split_shortfall's own docstring: it does not
                 # bake in headroom itself, that is the caller's decision).
-                shortfall = (gpu_split_shortfall(vram_required + headroom)
-                            if check_split_fit else [])
+                shortfall = (
+                    await loop.run_in_executor(
+                        None, gpu_split_shortfall, vram_required + headroom)
+                    if check_split_fit else [])
                 if measurable and free_vram >= vram_required + headroom and not shortfall:
                     break
 
