@@ -38,6 +38,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   where a server-side path is useless). Both the WebUI and `localm bug-report`.
 
 ### Fixed
+- **`localm doctor` no longer cries "CPU mode only" when your GPU is in use:**
+  doctor decided GPU capability from `nvidia-smi` / `rocm-smi` / torch alone, none
+  of which see localm's default GPU paths - Vulkan (Intel/NVIDIA/AMD via the
+  display driver), Metal on Apple Silicon, or the bundled AMD-on-Windows ROCm
+  build - so it wrongly reported "CPU mode only" on the majority of non-CUDA-toolkit
+  GPU setups while inference was actually running on the GPU. It now reports the
+  GPU from what localm will actually load: the real device the provisioned
+  llama.cpp runtime registers (e.g. "GPU: ROCm0 - used for inference"), falling
+  back to the provisioned backend name; the smi/torch lines remain as extra detail.
 - **Server freezing while the system is idle:** reading GPU/VRAM state (opening
   Settings > Performance, the Models page, or the periodic cross-instance GPU
   heartbeat) ran a synchronous GPU driver query directly on the server's single
