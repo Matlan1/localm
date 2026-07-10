@@ -15,6 +15,21 @@ import time
 from typing import Any, Callable, Optional
 
 _VALID_POLICIES = ("auto", "always", "never")
+
+# Single source of truth for the fixed VRAM headroom a GGUF load reserves beyond
+# model weights: KV cache + compute buffers. The GGUF backend (its _check_vram /
+# _auto_ctx_max / _auto_gpu_layers preflights), the GUI VRAM estimate
+# (sysstats.estimate_vram) and the discover fit badge (discover.fit_label) all
+# reason about "does it fit" and MUST use the same number, or a badge and the
+# loader can disagree on the same model. They keep their own module/class-level
+# name (so existing monkeypatch targets like GgufBackend._VRAM_OVERHEAD_BYTES
+# stay patchable) but derive its value from here.
+VRAM_OVERHEAD_BYTES = int(1.5e9)
+# Weights rarely load at exactly their on-disk size; a small safety factor the
+# fit badge applies (discover.fit_label). Kept here alongside the overhead so the
+# two "fit math" knobs live in one place.
+VRAM_WEIGHT_FACTOR = 1.10
+
 # A free-VRAM rise of at least this much after unload counts as "the model was
 # actually freed" (guards against a tiny transient fluctuation reading as freed).
 _MIN_RELEASE_RISE = int(256e6)  # 256 MB

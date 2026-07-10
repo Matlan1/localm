@@ -35,10 +35,12 @@ _TIMEOUT = 20
 # response may omit.
 _FORMAT_FILTER = {"gguf": "gguf", "hf": "transformers"}
 
-# Mirrors GgufBackend._VRAM_OVERHEAD_BYTES (KV cache + compute buffers)
-_OVERHEAD_BYTES = int(1.5e9)
-# Weights rarely load at exactly file size - small safety factor
-_WEIGHT_FACTOR = 1.10
+# Single-sourced from localm.vram, the same overhead (KV cache + compute buffers)
+# and weight safety factor GgufBackend._check_vram / sysstats.estimate_vram use,
+# so the fit badge and the loader agree on "does it fit". Kept as module-level
+# names so the value has one home while fit_label still reads a local constant.
+from localm.vram import VRAM_OVERHEAD_BYTES as _OVERHEAD_BYTES
+from localm.vram import VRAM_WEIGHT_FACTOR as _WEIGHT_FACTOR
 
 # Quantization label inside a GGUF filename, e.g. Q4_K_M, Q8_0, IQ4_XS,
 # Q6_K, F16, BF16. Matched case-insensitively on word-ish boundaries.
@@ -853,10 +855,23 @@ def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None) -> li
 
 def fit_label(size_bytes: int, total_vram: Optional[int]) -> str:
     """
-    Capacity badge for one file: "fits" / "tight" / "too-big", or "" when
-    VRAM is unknown. "tight" means it should load with little headroom
-    (small context, nothing else on the GPU); "too-big" still runs with
-    partial offload to system RAM, just slower.
+    Capacity badge for one file, against a single-GPU (or combined-split) VRAM
+    ceiling: "fits" / "tight" / "too-big", or "" when VRAM is unknown. "tight"
+    means it should load with little headroom (small context, nothing else on the
+    GPU); "too-big" still runs, with some layers offloaded to system RAM (slower).
+    That partial offload is delivered automatically: with n_gpu_layers_auto on
+    (the default) the loader sizes how many layers fit from free VRAM at load
+    (GgufBackend._auto_gpu_layers), so a "too-big" model loads instead of being
+    refused, rather than only if the user manually lowers -g.
+
+    The need estimate here (weights * safety factor + fixed overhead) is
+    context-agnostic and deliberately a touch more conservative on weights than
+    the loader's exact weights + real-KV + overhead math (GgufBackend._check_vram),
+    so at a normal/default context a "fits" badge is not optimistic. It carries no
+    explicit KV term, so it is a weights-fit signal, not a guarantee for an
+    unusually large -c/n_ctx (whose KV can exceed the weight slack); the loader's
+    own preflight remains the authority. A "tight"/"too-big" model may still load
+    via partial offload.
     """
     if not total_vram or not size_bytes:
         return ""

@@ -637,6 +637,30 @@ class TestVramEstimate:
         assert data["total"] == 16 * 1024 ** 3   # 8+8 GiB combined, not one 8 GiB GPU
         assert data["free"] == 8 * 1024 ** 3      # 4+4 GiB combined, not one 4 GiB GPU
 
+    def test_estimate_uses_cached_layer_count_for_partial_offload(self, gui_app, tmp_path):
+        """A model's true layer count, cached by a prior load (localm.model_meta),
+        lets /api/vram-estimate scale a partial offload (n_gpu_layers < 99) by the
+        REAL layer count instead of the /99 sentinel - the dead-but-correct
+        sysstats branch, now wired. Weights for a 16-of-32-layer offload must be
+        materially below the /99 full offload for the same model."""
+        app, _ = gui_app
+        model_file = tmp_path / "m.gguf"
+        model_file.write_bytes(b"\0" * 800_000)   # small real file; ratio is size-agnostic
+        reg = {"m": {"path": str(model_file), "source": "local"}}
+        with patch("localm.config.load_registry", return_value=reg), \
+             patch("localm.model_meta.cached_n_layers", return_value=32), \
+             patch("localm.discover.vram_info",
+                   return_value={"free": 20 * 1024 ** 3, "total": 24 * 1024 ** 3}):
+            with TestClient(app) as client:
+                full = client.get("/api/vram-estimate",
+                                  params={"model": "m", "n_gpu_layers": 99}).json()
+                half = client.get("/api/vram-estimate",
+                                  params={"model": "m", "n_gpu_layers": 16}).json()
+        # 16/32 layers on the GPU -> half the weight of the /99 full offload. Without
+        # the cached count this would hit the /99 fallback (16/99) and be ~0.16x.
+        assert half["weights"] < full["weights"]
+        assert half["weights"] == pytest.approx(full["weights"] / 2, rel=0.02)
+
 
 class TestGpusEndpoint:
     """GET /api/gpus - powers the Settings > Live tuning "Main GPU" selector."""

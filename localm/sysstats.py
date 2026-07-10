@@ -91,11 +91,11 @@ def system_stats() -> dict:
 
 
 # VRAM footprint estimate -------------------------------------------------- #
-# Deliberately mirrors the GGUF backend's own heuristic (gguf.GgufBackend:
-# _VRAM_OVERHEAD_BYTES and the bytes-per-token rule in _auto_ctx_max) so the
-# number the GUI shows matches how the loader actually reasons about fit. It is
-# approximate by nature - callers should label it as an estimate.
-_VRAM_OVERHEAD_BYTES = int(1.5e9)
+# Single-sourced from localm.vram (the same constant GgufBackend._check_vram and
+# discover.fit_label use) plus the bytes-per-token rule mirrored from
+# _auto_ctx_max, so the number the GUI shows matches how the loader actually
+# reasons about fit. Approximate by nature - callers should label it an estimate.
+from localm.vram import VRAM_OVERHEAD_BYTES as _VRAM_OVERHEAD_BYTES
 
 
 def estimate_vram(model_bytes: int, n_ctx: int,
