@@ -137,6 +137,23 @@ def test_resolve_offline_falls_back_to_pinned_tag(monkeypatch):
     assert url.startswith(f"https://github.com/{sl._UPSTREAM_REPO}/releases/download/")
 
 
+def test_release_assets_logs_the_swallowed_cause(monkeypatch, caplog):
+    """_release_assets() must not silently swallow the failure (AGENTS.md rule
+    5): the exception must be discoverable at debug level, not just an empty
+    list with no trace of why."""
+    import logging
+
+    def _boom(*a, **k):
+        raise OSError("simulated DNS failure")
+    monkeypatch.setattr("urllib.request.urlopen", _boom)
+
+    with caplog.at_level(logging.DEBUG, logger="localm"):
+        assets = sl._release_assets("b9870")
+
+    assert assets == []
+    assert "simulated dns failure" in caplog.text.lower()
+
+
 def test_download_stall_raises_and_restores_timeout(monkeypatch, tmp_path):
     """A stalled transfer must become a loud ArtifactError, not an infinite
     hang, and the global socket default timeout must be restored afterward."""
@@ -203,6 +220,58 @@ def test_resolve_backend_asset_fallback_uses_pinned_sha256(monkeypatch):
     url, sha = sl._resolve_backend_asset("vulkan")
     assert "llama-b9870-bin-win-vulkan-x64.zip" in url
     assert sha == "8687a8405447853ccbd6b15bd7ccda23bb79cf85dd83243401e514bd9e45ed8a"
+
+
+def test_resolve_amd_rocm_asset_warns_when_release_lookup_fails(monkeypatch, capsys):
+    """A failed lemonade-sdk release lookup must be surfaced the same way the
+    general (non-ROCm) fallback already is, not silently skipped (AGENTS.md
+    rule 5)."""
+    monkeypatch.setattr(sl.sys, "platform", "win32")
+    monkeypatch.setattr(sl, "_release_assets", lambda tag, repo=None: [])
+
+    url, sha = sl._resolve_backend_asset("amd-rocm")
+
+    assert url == sl.DEFAULT_URL
+    out = capsys.readouterr().out.lower()
+    assert "rocm" in out and "could not find" in out, (
+        f"a failed lemonade-sdk release lookup must be surfaced; got: {out!r}")
+
+
+def test_resolve_amd_rocm_asset_warns_when_gfx103x_asset_missing(monkeypatch, capsys):
+    """The release lookup can succeed yet still not contain the expected
+    gfx103X asset (e.g. only other GPU variants are listed) - that must warn
+    too, not just the empty-list case."""
+    dummy_assets = [{
+        "name": "llama-b1288-windows-rocm-gfx110X-x64.zip",
+        "browser_download_url": "https://dummy.github/releases/download/b1288/llama-rocm-gfx110X.zip",
+        "digest": "sha256:othergpuvariant",
+    }]
+    monkeypatch.setattr(sl.sys, "platform", "win32")
+    monkeypatch.setattr(sl, "_release_assets", lambda tag, repo=None: dummy_assets)
+
+    url, sha = sl._resolve_backend_asset("amd-rocm")
+
+    assert url == sl.DEFAULT_URL
+    out = capsys.readouterr().out.lower()
+    assert "rocm" in out and "could not find" in out, (
+        f"a release with no gfx103X asset must be surfaced; got: {out!r}")
+
+
+def test_resolve_amd_rocm_asset_no_warning_when_release_found(monkeypatch, capsys):
+    dummy_assets = [{
+        "name": "llama-b1288-windows-rocm-gfx103X-x64.zip",
+        "browser_download_url": "https://dummy.github/releases/download/b1288/llama-rocm.zip",
+        "digest": "sha256:dummyrocmsha",
+    }]
+    monkeypatch.setattr(sl.sys, "platform", "win32")
+    monkeypatch.setattr(sl, "_release_assets", lambda tag, repo=None: dummy_assets)
+
+    url, sha = sl._resolve_backend_asset("amd-rocm")
+
+    assert url == "https://dummy.github/releases/download/b1288/llama-rocm.zip"
+    assert sha == "dummyrocmsha"
+    out = capsys.readouterr().out.lower()
+    assert "could not find" not in out
 
 
 def test_provision_backend_verifies_default_sha256(monkeypatch):
