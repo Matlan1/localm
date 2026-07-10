@@ -253,36 +253,71 @@ export const FIT_TEXT = { "fits": "fits your VRAM", "tight": "tight fit",
 
 export const FMT_LABEL = { gguf: "GGUF", hf: "HF" };
 
-/** Fetch the current GPU list once per search/files-load (not once per row) -
- *  used only for the non-blocking split-fit hint below. Empty on any failure
- *  (server unreachable, no scope) so the hint is simply skipped, never a
- *  broken search. */
-async function _splitGpus() {
+/** Fetch the GPU list AND the configured split once per search/files-load (not
+ *  once per row) - used for the split-fit hint and the VRAM-basis caption below.
+ *  Empty on any failure (server unreachable, no scope) so both simply degrade,
+ *  never a broken search. */
+async function _gpuInfo() {
   try {
     const r = await fetch("/api/gpus", { headers: authHeaders() });
-    if (!r.ok) return [];
+    if (!r.ok) return { gpus: [], gpu_split_indices: [] };
     const data = await r.json();
-    return Array.isArray(data.gpus) ? data.gpus : [];
-  } catch (e) { return []; }
+    return {
+      gpus: Array.isArray(data.gpus) ? data.gpus : [],
+      gpu_split_indices: Array.isArray(data.gpu_split_indices) ? data.gpu_split_indices : [],
+    };
+  } catch (e) { return { gpus: [], gpu_split_indices: [] }; }
 }
 
-/** Non-blocking "might not fit on one GPU, but fits split across them" hint,
+/** The GPU array alone (for the split hint / row rendering). */
+async function _splitGpus() { return (await _gpuInfo()).gpus; }
+
+/** Caption naming what the fit-badge VRAM number actually is, so it never
+ *  mislabels a single main-GPU ceiling as the machine "total" (a 2x16 GB box
+ *  with no split has a 16 GB main-GPU ceiling, not 32) and always agrees with
+ *  the split hint. Mirrors discover.vram_capacity: the number is COMBINED only
+ *  when 2+ configured split indices map to detected devices; otherwise it is the
+ *  single main GPU's. `gpuInfo` is {gpus, gpu_split_indices} from _gpuInfo(). */
+export function vramBasisCaption(totalBytes, gpuInfo) {
+  const gib = (totalBytes / GIB).toFixed(0);
+  const gpus = Array.isArray(gpuInfo?.gpus) ? gpuInfo.gpus : [];
+  const rawSplit = Array.isArray(gpuInfo?.gpu_split_indices) ? gpuInfo.gpu_split_indices : [];
+  // Dedup and keep only indices that map to a detected device - the same
+  // resolve_gpu_split validation vram_capacity() applies before it combines.
+  const split = [...new Set(rawSplit.filter((i) => gpus.some((g) => g.index === i)))];
+  const tail = " (weights + ~1.5 GB overhead).";
+  let basis;
+  if (split.length >= 2) {
+    basis = `your ${gib} GB VRAM combined across ${split.length} GPUs`;
+  } else if (gpus.length > 1) {
+    basis = `your main GPU's ${gib} GB (set a split in Settings to use all ${gpus.length})`;
+  } else {
+    basis = `your ${gib} GB VRAM`;
+  }
+  return `Badges compare each file against ${basis}${tail}`;
+}
+
+/** Non-blocking "might not fit on one GPU, but may fit split across them" hint,
  *  or "" when not applicable: unknown size, fewer than 2 GPUs detected, it
  *  already fits the single largest device, or it would not fit even split
- *  across every device. Deliberately a ROUGH client-side estimate (compares
- *  raw free-VRAM sums, no weight/overhead factor) for a suggestion only - the
- *  server's own fit badges (`m.fit`/`f.fit`) remain the authoritative numbers.
- *  Never auto-enables anything (the "never silently override a user's
- *  explicit choice" project rule) - it only points at the Settings control. */
+ *  across every device. A ROUGH client-side suggestion only - the server's own
+ *  fit badges (`m.fit`/`f.fit`) remain the authoritative numbers, and the real
+ *  split load still applies a per-device VRAM check (gpu_split_shortfall) that
+ *  can refuse it, which is why this is hedged ("may fit") not a promise. It uses
+ *  the same need-math as the fit badge (weights * 1.10 + ~1.5 GB overhead) rather
+ *  than a raw byte sum so it does not over-promise. Never auto-enables anything
+ *  (the "never silently override a user's explicit choice" rule) - it only points
+ *  at the "Split across GPUs" control that actually enables a split. */
 export function splitFitHint(sizeBytes, gpus) {
   if (!sizeBytes || !Array.isArray(gpus) || gpus.length < 2) return "";
   const frees = gpus.map((g) => (typeof g.free === "number" ? g.free : g.total));
   if (frees.some((f) => typeof f !== "number")) return "";
+  const need = sizeBytes * 1.10 + 1.5e9;   // same basis as the fit badge (fit_label)
   const largest = Math.max(...frees);
   const total = frees.reduce((a, b) => a + b, 0);
-  if (sizeBytes <= largest || sizeBytes > total) return "";
-  return `may not fit on one GPU, but fits split across your ${gpus.length} GPUs - `
-       + "see Settings > Main GPU";
+  if (need <= largest || need > total) return "";
+  return `may not fit on one GPU, but may fit split across your ${gpus.length} GPUs - `
+       + "see Settings > Split across GPUs";
 }
 
 export function discFormats() {
@@ -401,8 +436,10 @@ export async function discoverSearch() {
                           { headers: authHeaders() });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
+    // One GPU probe drives both the basis caption and the per-row split hint.
+    const gpuInfo = await _gpuInfo();
     $("disc-vram").textContent = data.vram.total
-      ? `Badges compare each file against your ${(data.vram.total / GIB).toFixed(0)} GB total VRAM (weights + ~1.5 GB overhead).`
+      ? vramBasisCaption(data.vram.total, gpuInfo)
       : "No GPU VRAM detected - sizes shown without fit badges.";
     // Show the HF-runtime hint only when HF is actually being searched and the
     // runtime is missing (backend flag comes from the server probe).
@@ -413,8 +450,7 @@ export async function discoverSearch() {
       box.appendChild(el("div", "sub", "(no matching repos found)"));
       return;
     }
-    const gpus = await _splitGpus();
-    for (const m of data.results) box.appendChild(discRepoRow(m, gpus));
+    for (const m of data.results) box.appendChild(discRepoRow(m, gpuInfo.gpus));
   } catch (e) {
     box.replaceChildren(el("div", "sub", "Search failed: " + e.message));
   } finally {
