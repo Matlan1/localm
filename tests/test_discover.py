@@ -411,9 +411,9 @@ class TestListGpus:
 class TestListGpusSafety:
     """The safe-by-construction guarantee: list_gpus() must never block its
     caller for longer than its deadline even when the GPU driver probe wedges,
-    and must reuse a fresh measurement (TTL cache). This is the regression guard
-    for the diagnosed idle-hang root cause (a synchronous, untimed torch.cuda
-    probe on the event loop)."""
+    while ALWAYS returning a fresh reading (no stale free-VRAM). This is the
+    regression guard for the diagnosed idle-hang root cause (a synchronous,
+    untimed torch.cuda probe on the event loop)."""
 
     def test_deadline_bounds_a_wedged_probe(self, monkeypatch):
         import threading
@@ -427,34 +427,43 @@ class TestListGpusSafety:
 
         monkeypatch.setattr("localm.discover._list_gpus_probe", _wedged)
         t0 = time.monotonic()
-        # Cold cache (autouse reset) + no prior value -> [] fallback, fast.
-        result = list_gpus(ttl=0, deadline=0.3)
+        # No prior good value -> [] fallback, returned within the deadline.
+        result = list_gpus(deadline=0.3)
         elapsed = time.monotonic() - t0
         release.set()
         assert elapsed < 2.0, f"list_gpus blocked {elapsed:.1f}s past its deadline"
         assert result == []      # no known value yet -> safe "unknown"
 
-    def test_ttl_cache_reuses_one_measurement(self, monkeypatch):
-        calls = []
-        devices = [{"index": 0, "name": "A", "total": 8, "free": 8}]
+    def test_every_call_reprobes_no_stale_free(self, monkeypatch):
+        """No freshness cache: successive calls must reflect the LIVE reading,
+        never a stale one. switch_engine's eviction loop / wait_for_vram_release
+        polls free-VRAM to confirm a native free landed - a stale value there
+        would defeat the AUDIT-MED-11 over-eviction guard."""
+        seq = [
+            [{"index": 0, "name": "A", "total": 8, "free": 2}],   # tight
+            [{"index": 0, "name": "A", "total": 8, "free": 7}],   # freed up
+        ]
+        calls = {"n": 0}
 
-        def _counting():
-            calls.append(1)
-            return list(devices)
+        def _probe():
+            i = min(calls["n"], len(seq) - 1)
+            calls["n"] += 1
+            return list(seq[i])
 
-        monkeypatch.setattr("localm.discover._list_gpus_probe", _counting)
-        first = list_gpus(ttl=60)
-        second = list_gpus(ttl=60)      # within TTL -> cached, no re-probe
-        assert first == devices and second == devices
-        assert len(calls) == 1, f"probe ran {len(calls)}x; TTL cache did not hold"
+        monkeypatch.setattr("localm.discover._list_gpus_probe", _probe)
+        first = list_gpus()
+        second = list_gpus()
+        assert first[0]["free"] == 2
+        assert second[0]["free"] == 7, "second call returned a stale (cached) free"
+        assert calls["n"] == 2, "a call was served from cache instead of re-probing"
 
-    def test_serves_stale_value_when_probe_wedges(self, monkeypatch):
+    def test_serves_last_known_good_when_probe_wedges(self, monkeypatch):
         import threading
         import time
 
         good = [{"index": 0, "name": "A", "total": 8, "free": 8}]
         monkeypatch.setattr("localm.discover._list_gpus_probe", lambda: list(good))
-        assert list_gpus(ttl=0) == good     # prime the cache with a real value
+        assert list_gpus() == good     # a successful probe records last-known-good
 
         release = threading.Event()
 
@@ -464,11 +473,11 @@ class TestListGpusSafety:
 
         monkeypatch.setattr("localm.discover._list_gpus_probe", _wedged)
         t0 = time.monotonic()
-        stale = list_gpus(ttl=0, deadline=0.3)   # forced re-probe wedges
+        fallback = list_gpus(deadline=0.3)   # this probe wedges
         elapsed = time.monotonic() - t0
         release.set()
         assert elapsed < 2.0
-        assert stale == good, "a wedged re-probe must serve the last-known value, not []"
+        assert fallback == good, "a wedged probe must serve the last-known-good value, not []"
 
 
 class TestResolveMainGpuIndex:
