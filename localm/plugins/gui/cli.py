@@ -121,12 +121,18 @@ def _print_qr(url: str) -> None:
                    "fetch a first model with a progress bar, no model required.")
 @click.option("--debug", is_flag=True,
               help="Write a debug log (~/.localm/logs/), capture native llama.cpp "
-                   "stderr, log requests, and record raw model output in the log.")
+                   "stderr, and log requests. Raw model output is recorded too, "
+                   "EXCEPT in privacy mode (chat content is never written there).")
 @click.option("--mode", default=None,
               type=click.Choice(["privacy", "log", "full"], case_sensitive=False),
               help="Session persistence [default: config 'mode', else privacy]. "
                    "privacy = nothing saved; log = JSONL audit of chat traffic; "
                    "full = log + markdown transcript.")
+@click.option("--keep-diagnostics", "keep_diagnostics", is_flag=True,
+              help="Keep diagnostics (a hang stack trace, restart breadcrumbs, and "
+                   "a debug log) even in privacy mode, so a bug report has "
+                   "something to attach. Chat content is never recorded in privacy "
+                   "mode. Same as the Settings > Privacy toggle, for this run.")
 @click.option("--insecure", is_flag=True,
               help="Allow binding past loopback WITHOUT LOCALM_API_KEY set. This "
                    "exposes the unauthenticated coder agent (shell + file edits) "
@@ -162,8 +168,8 @@ def _print_qr(url: str) -> None:
 @click.option("--device", default=None,
               help="Explicit device (e.g., cuda:0, metal).")
 def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, debug,
-         mode, insecure, no_tls, tls_cert, tls_key, show_qr, project, force_new,
-         isolated, api_mode, mmproj, device):
+         mode, keep_diagnostics, insecure, no_tls, tls_cert, tls_key, show_qr,
+         project, force_new, isolated, api_mode, mmproj, device):
     """Open the localm web GUI - chat and the coder agent in your browser.
 
     \b
@@ -196,16 +202,24 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     # Light branding: a single wordmark line (the M in accent blue), no noise.
     console.print("[bold]LocaL[/bold][bold #4f9cf9]M[/bold #4f9cf9]  [dim]local AI, offline[/dim]")
 
+    # --keep-diagnostics is a per-run override of the config toggle (the launcher
+    # checkbox passes it); export it so the server's gates resolve it via
+    # keep_diagnostics_enabled(). Set BEFORE the debug-log decision below.
+    if keep_diagnostics:
+        import os as _osd
+        _osd.environ["LOCALM_KEEP_DIAGNOSTICS"] = "1"
+
     if debug:
         from localm.debuglog import enable_debug
         console.print(f"[yellow]debug log:[/yellow] {enable_debug()}")
     else:
         # keep_diagnostics: a user who opted into keeping diagnostics for bug
         # reports (even in privacy mode) gets a debug log written too, so a report
-        # has request/operation context - without needing to pass --debug.
+        # has request/operation context - without needing to pass --debug. Chat
+        # content is still never written in privacy mode (see debug_content_enabled).
         try:
-            from localm.config import load_config
-            if load_config().get("keep_diagnostics"):
+            from localm.config import keep_diagnostics_enabled
+            if keep_diagnostics_enabled():
                 from localm.debuglog import enable_debug
                 console.print(f"[yellow]debug log (keep_diagnostics):[/yellow] "
                               f"{enable_debug()}")

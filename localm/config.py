@@ -547,6 +547,21 @@ def load_config() -> dict:
     return cfg
 
 
+def keep_diagnostics_enabled() -> bool:
+    """Whether to keep diagnostic traces/logs even in privacy mode. Resolved from
+    the ``LOCALM_KEEP_DIAGNOSTICS`` env (set by the launcher checkbox / the
+    ``--keep-diagnostics`` flag, a per-run override) OR the persistent
+    ``keep_diagnostics`` config key (the WebUI Settings > Privacy toggle). So the
+    launcher and the in-app toggle both take effect. Never raises."""
+    if os.environ.get("LOCALM_KEEP_DIAGNOSTICS", "").strip().lower() in (
+            "1", "true", "on", "yes"):
+        return True
+    try:
+        return bool(load_config().get("keep_diagnostics"))
+    except Exception:
+        return False
+
+
 def _user_delta(cfg: dict) -> dict:
     """Reduce *cfg* to the keys that need persisting: values that differ from
     the CURRENT DEFAULT_CONFIG, plus keys DEFAULT_CONFIG does not know (a

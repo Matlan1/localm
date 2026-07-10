@@ -856,8 +856,8 @@ def _diagnostics_allowed() -> bool:
     "nothing written automatically" promise holds, while the toggle lets a tester
     keep the diagnostics a bug report needs."""
     try:
-        from localm.config import load_config
-        if load_config().get("keep_diagnostics"):
+        from localm.config import keep_diagnostics_enabled
+        if keep_diagnostics_enabled():
             return True
     except Exception:
         pass
