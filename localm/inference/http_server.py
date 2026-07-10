@@ -745,48 +745,62 @@ def _start_hang_watchdog(threshold: float, trace_path, *, poll: float = 1.0):
     the event loop has not ticked in `threshold`s it is blocked, so dump ALL
     thread stacks to `trace_path` via faulthandler - the only way to see what a
     fully-wedged loop is stuck in, because this thread runs OUTSIDE the loop.
-    Polls every `poll`s (tests lower it for speed). Returns (stop_event, thread,
-    file_handle) for teardown. Never blocks: it only waits on an Event, subtracts
-    two numbers, and appends to a file."""
+    Polls every `poll`s (tests lower it for speed). Returns (stop_event, thread)
+    for teardown; the thread OWNS its file and closes it on exit.
+
+    The trace file is opened LAZILY, only when the first stall is detected, so a
+    healthy run (the overwhelming common case, since this is on by default) never
+    creates a file at all. Never blocks: it only waits on an Event, subtracts two
+    numbers, and appends to a file."""
     import faulthandler
     import traceback
 
     stop = threading.Event()
-    fh = open(trace_path, "a", buffering=1, encoding="utf-8", errors="backslashreplace")
 
     def _run() -> None:
+        fh = None
         last_dump = None
-        while not stop.wait(poll):
-            lag = time.monotonic() - _hb_monotonic
-            if lag < threshold:
-                continue
-            now = time.monotonic()
-            # Throttle: a long freeze yields a handful of snapshots, not one/sec.
-            # `is not None` (not a 0.0 sentinel): time.monotonic() is boot-relative,
-            # so a real 0.0 baseline would wrongly suppress the FIRST dump within the
-            # first ~30s of uptime.
-            if last_dump is not None and now - last_dump < max(30.0, threshold * 3):
-                continue
-            last_dump = now
-            try:
-                fh.write(
-                    f"\n===== LOCALM HANG WATCHDOG: event loop stalled {lag:.1f}s "
-                    f"(pid {os.getpid()}, {time.strftime('%Y-%m-%d %H:%M:%S')}) =====\n")
+        try:
+            while not stop.wait(poll):
+                lag = time.monotonic() - _hb_monotonic
+                if lag < threshold:
+                    continue
+                now = time.monotonic()
+                # Throttle: a long freeze yields a handful of snapshots, not one/sec.
+                # `is not None` (not a 0.0 sentinel): time.monotonic() is boot-relative,
+                # so a real 0.0 baseline would wrongly suppress the FIRST dump within
+                # the first ~30s of uptime.
+                if last_dump is not None and now - last_dump < max(30.0, threshold * 3):
+                    continue
+                last_dump = now
                 try:
-                    faulthandler.dump_traceback(file=fh, all_threads=True)
+                    if fh is None:   # lazy: create the file only on a real stall
+                        fh = open(trace_path, "a", buffering=1,
+                                  encoding="utf-8", errors="backslashreplace")
+                    fh.write(
+                        f"\n===== LOCALM HANG WATCHDOG: event loop stalled {lag:.1f}s "
+                        f"(pid {os.getpid()}, {time.strftime('%Y-%m-%d %H:%M:%S')}) =====\n")
+                    try:
+                        faulthandler.dump_traceback(file=fh, all_threads=True)
+                    except Exception:
+                        # Fallback: pure-Python walk of every thread's frames.
+                        for tid, frame in sys._current_frames().items():
+                            fh.write(f"\n--- thread {tid} ---\n")
+                            fh.write("".join(traceback.format_stack(frame)))
+                    fh.flush()
                 except Exception:
-                    # Fallback: pure-Python walk of every thread's frames.
-                    for tid, frame in sys._current_frames().items():
-                        fh.write(f"\n--- thread {tid} ---\n")
-                        fh.write("".join(traceback.format_stack(frame)))
-                fh.flush()
-            except Exception:
-                # The watchdog must never crash the process it is diagnosing.
-                pass
+                    # The watchdog must never crash the process it is diagnosing.
+                    pass
+        finally:
+            if fh is not None:
+                try:
+                    fh.close()
+                except Exception:
+                    pass
 
     t = threading.Thread(target=_run, name="localm-hang-watchdog", daemon=True)
     t.start()
-    return stop, t, fh
+    return stop, t
 
 
 # Optional bearer-token auth - enabled when LOCALM_API_KEY is set.
@@ -1500,28 +1514,29 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
 
         # Hang-capture watchdog: a 1s async heartbeat + an OFF-loop daemon thread
         # that dumps all stacks to a file when the loop stops ticking - the only
-        # in-process way to see what a fully-wedged loop is stuck in. Opt-in via
-        # LOCALM_HANG_WATCHDOG (the heartbeat also runs under --debug so the debug
-        # request log can show loop_lag). Skipped under pytest so no thread lingers
-        # across tests. Best-effort: a startup failure must never block serving.
+        # in-process way to see what a fully-wedged loop is stuck in. ON BY DEFAULT
+        # (the trace file is created lazily, only on a real stall) so a tester's
+        # intermittent freeze is captured with zero setup on their part;
+        # LOCALM_HANG_WATCHDOG=0 opts out, =1 adds the verbose extras below. Skipped
+        # under pytest so no thread lingers across tests. Best-effort: a startup
+        # failure must never block serving.
         hb_task = None
-        hang_stop = hang_thread = hang_fh = None
+        hang_stop = hang_thread = None
         from localm.debuglog import (
-            debug_enabled as _dbg_on,
-            hang_watchdog_enabled as _hw_on,
+            hang_watchdog_active as _hw_active,
+            hang_watchdog_verbose as _hw_verbose,
             hang_watchdog_threshold as _hw_secs,
             hang_trace_path as _hw_path,
         )
-        if (_hw_on() or _dbg_on()) and "pytest" not in sys.modules:
+        if _hw_active() and "pytest" not in sys.modules:
             try:
                 hb_task = asyncio.create_task(_hang_heartbeat_loop())
-                hang_stop, hang_thread, hang_fh = _start_hang_watchdog(
-                    _hw_secs(), _hw_path())
-                if _hw_on():
-                    import faulthandler
-                    # Belt-and-suspenders periodic dump (unconditional, so noisier
-                    # than the stall-triggered watchdog above); long period.
-                    faulthandler.dump_traceback_later(60, repeat=True, file=hang_fh)
+                hang_stop, hang_thread = _start_hang_watchdog(_hw_secs(), _hw_path())
+                if _hw_verbose():
+                    # Explicit opt-in extras: asyncio debug logs any single callback
+                    # that hogs the loop past the threshold (names the culprit at a
+                    # lower cost than a full stall). Adds per-callback overhead, so
+                    # it is NOT part of the default-on path.
                     loop = asyncio.get_running_loop()
                     loop.set_debug(True)
                     loop.slow_callback_duration = 0.5
@@ -1573,19 +1588,11 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                 except asyncio.CancelledError:
                     pass
             if hang_stop is not None:
-                try:
-                    import faulthandler
-                    faulthandler.cancel_dump_traceback_later()
-                except Exception:
-                    pass
+                # Signal the watchdog thread to stop; it closes its own trace file
+                # (if it ever opened one) in its finally.
                 hang_stop.set()
                 if hang_thread is not None:
                     hang_thread.join(timeout=2)
-                if hang_fh is not None:
-                    try:
-                        hang_fh.close()
-                    except Exception:
-                        pass
             if gpu_task is not None:
                 gpu_task.cancel()
                 try:
