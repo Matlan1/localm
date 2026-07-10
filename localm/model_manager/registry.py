@@ -45,6 +45,21 @@ def is_auto_chat_eligible(entry: dict) -> bool:
     return isinstance(entry, dict) and entry.get("model_type", "llm") != "unknown"
 
 
+def is_llm(entry: dict) -> bool:
+    """True when a registry *entry* is a text-generation (chat) LLM.
+
+    'llm' (or a legacy entry with no ``model_type`` key, treated as 'llm') is an
+    LLM; every other type - 'unknown' (unclassified) and the non-text component
+    types 'mmproj' / 'diffusion-unet' / 'text-encoder' / 'vae' / 'lora' - is NOT.
+    This is the same rule the GUI Models page uses (``isLlm`` in models.js); use it
+    wherever a UI must offer ONLY chat-launchable models, e.g. the desktop
+    launcher's model selector. Distinct from :func:`is_auto_chat_eligible`, which
+    only screens out 'unknown' (for auto-picking a default) and would still admit a
+    LoRA / VAE / other component model.
+    """
+    return isinstance(entry, dict) and entry.get("model_type", "llm") == "llm"
+
+
 def _detect_local_model_type(path: Path, *, is_gguf: bool, is_hf: bool,
                              is_blob: bool = False) -> str:
     """Deterministically classify a LOCAL model's type from HARD metadata only.

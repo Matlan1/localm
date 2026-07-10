@@ -200,7 +200,20 @@ def load_models() -> list:
             sync_models_dir()
         except Exception:
             pass
-        return sorted(load_registry())
+        reg = load_registry()
+        # Only LLM (chat) models belong in the launcher's selector: this dropdown
+        # launches a chat model, so an embedding / LoRA / VAE / diffusion component
+        # or an unclassified 'unknown' entry must not appear here. Mirror the GUI's
+        # own isLlm rule (model_type 'llm', or a legacy entry with no model_type).
+        try:
+            from localm.model_manager import is_llm
+            names = [n for n, e in reg.items() if is_llm(e)]
+        except Exception:
+            # Older localm without is_llm (e.g. a mixed tree mid self-update): inline
+            # the same rule so the selector still filters, not shows everything.
+            names = [n for n, e in reg.items()
+                     if isinstance(e, dict) and e.get("model_type", "llm") == "llm"]
+        return sorted(names)
     except Exception:
         return []
 
