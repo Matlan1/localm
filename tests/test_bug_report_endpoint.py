@@ -94,6 +94,53 @@ def test_blank_description_rejected(monkeypatch):
     assert r.status_code == 400
 
 
+def test_response_carries_report_markdown_for_download(monkeypatch):
+    """The response includes the saved report's markdown so the GUI can offer a
+    browser download for manual sending (a phone/LAN tester cannot open a
+    server-side path)."""
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    app = create_app(_engine())
+    with TestClient(app) as c:
+        r = c.post(
+            "/api/bug-report",
+            json={"description": "downloadable please"},
+            headers={"Authorization": f"Bearer {app.state.shell_token}"},
+        )
+    assert r.status_code == 200
+    data = r.json()
+    assert "downloadable please" in data["report_markdown"]
+
+
+def test_upload_failure_returns_stage_and_message(monkeypatch):
+    """A failed upload is surfaced with the diagnosed stage + friendly message (not
+    a false success), and the report file + downloadable markdown are still there."""
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    from localm import bugreport
+
+    def _boom(*a, **k):
+        raise bugreport.LocalmError(
+            "could not reach the bug-report server", reason="getaddrinfo failed",
+            stage="offline_or_dns", hint="You may be offline.")
+
+    monkeypatch.setattr(bugreport, "upload_report", _boom)
+    app = create_app(_engine())
+    with TestClient(app) as c:
+        r = c.post(
+            "/api/bug-report",
+            json={"description": "send this", "upload": True},
+            headers={"Authorization": f"Bearer {app.state.shell_token}"},
+        )
+    assert r.status_code == 200
+    data = r.json()
+    assert data["saved"] is True and data["uploaded"] is False
+    assert data["upload_stage"] == "offline_or_dns"
+    assert data["upload_message"] == "You may be offline."
+    assert "send this" in data["report_markdown"]     # still downloadable for retry
+    assert Path(data["path"]).is_file()               # file kept for manual send
+
+
 def test_browser_client_context_lands_in_report(monkeypatch):
     """The GUI attaches a ``client`` block (user agent, page, viewport, recent JS
     console errors). It is rendered into the report; unknown fields are dropped by
