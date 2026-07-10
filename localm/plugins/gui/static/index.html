@@ -681,6 +681,10 @@
                      .bugreport_upload); files the report as a GitHub issue via the
                      proxy so no GitHub account is needed. -->
                 <button class="btn-primary" id="bug-upload" hidden>Send to maintainer</button>
+                <!-- Revealed only after a failed send: retry creating the issue, or
+                     download the saved report to send it manually (email/Discord). -->
+                <button class="btn-secondary" id="bug-retry" hidden>Retry send</button>
+                <button class="btn-secondary" id="bug-download" hidden>Download report</button>
               </div>
               <div id="bug-result" class="sub" hidden></div>
             </section>
