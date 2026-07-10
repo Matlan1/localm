@@ -12,9 +12,9 @@ import pytest
 from localm.discover import (
     DiscoverError, _LLAMA_SPLIT_MODE_LAYER, _MAX_GPU_SPLIT_INDEX,
     _TENSOR_SPLIT_FALLBACK_CAPACITY,
-    _quant_of, apply_gpu_split, apply_main_gpu, fit_label, hf_backend_available,
-    hf_gguf_files, hf_param_bytes, hf_search, list_gpus, resolve_gpu_split,
-    resolve_main_gpu_index, vram_capacity, vram_info,
+    _quant_of, apply_gpu_split, apply_main_gpu, fit_label, gpu_split_shortfall,
+    hf_backend_available, hf_gguf_files, hf_param_bytes, hf_search, list_gpus,
+    resolve_gpu_split, resolve_main_gpu_index, vram_capacity, vram_info,
 )
 
 
@@ -876,3 +876,111 @@ class TestVramCapacitySplitAware:
             lambda: {"gpu_split_indices": [0, 1]})
         monkeypatch.setattr("localm.discover.vram_info", lambda: {"total": 16_000_000_000})
         assert vram_capacity() == {"total": 16_000_000_000}
+
+
+class TestGpuSplitShortfall:
+    """gpu_split_shortfall(): vram_capacity()'s AGGREGATE check alone is not
+    enough for a GGUF-backend load - apply_gpu_split() divides a model by a
+    STATIC per-config ratio with no live per-device capacity awareness, so an
+    asymmetric split (e.g. another already-loaded model sits on one device
+    more than another) can pass the aggregate check while one device's actual
+    share is short. This is the per-device gate that catches that case."""
+
+    _GPUS = [
+        {"index": 0, "name": "A", "total": 16_000_000_000, "free": 2_000_000_000},
+        {"index": 1, "name": "B", "total": 16_000_000_000, "free": 14_000_000_000},
+    ]
+
+    def test_no_split_configured_returns_empty(self, monkeypatch):
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS)
+        monkeypatch.setattr(
+            "localm.config.load_config", lambda: {"gpu_split_indices": None})
+        assert gpu_split_shortfall(10_000_000_000) == []
+
+    def test_equal_split_both_devices_sufficient_returns_empty(self, monkeypatch):
+        # 4 GB required, equal 50/50 split -> 2 GB needed per device; both
+        # GPUs (2 GB and 14 GB free) have enough.
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS)
+        monkeypatch.setattr(
+            "localm.config.load_config",
+            lambda: {"gpu_split_indices": [0, 1]})
+        assert gpu_split_shortfall(4_000_000_000) == []
+
+    def test_equal_split_one_device_short_is_flagged(self, monkeypatch):
+        # 8 GB required, equal 50/50 split -> 4 GB needed per device. GPU 0
+        # only has 2 GB free (short by 2 GB); GPU 1's 14 GB free easily covers
+        # its 4 GB share. Only GPU 0 should be flagged.
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS)
+        monkeypatch.setattr(
+            "localm.config.load_config",
+            lambda: {"gpu_split_indices": [0, 1]})
+        result = gpu_split_shortfall(8_000_000_000)
+        assert result == [{"index": 0, "needed": 4_000_000_000, "free": 2_000_000_000}]
+
+    def test_asymmetric_ratio_computes_proportional_need(self, monkeypatch):
+        # 10 GB required, ratio 1:4 (GPU0:GPU1) -> GPU0 needs 1/5 = 2 GB
+        # (exactly its 2 GB free - not short), GPU1 needs 4/5 = 8 GB (well
+        # within its 14 GB free) - nothing flagged.
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS)
+        monkeypatch.setattr(
+            "localm.config.load_config",
+            lambda: {"gpu_split_indices": [0, 1], "gpu_split_ratios": [1.0, 4.0]})
+        assert gpu_split_shortfall(10_000_000_000) == []
+
+    def test_asymmetric_ratio_flags_the_heavier_device_when_short(self, monkeypatch):
+        # Same 1:4 ratio, but now GPU1 (the heavier share) is the tight one.
+        gpus = [
+            {"index": 0, "name": "A", "total": 16_000_000_000, "free": 14_000_000_000},
+            {"index": 1, "name": "B", "total": 16_000_000_000, "free": 2_000_000_000},
+        ]
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: gpus)
+        monkeypatch.setattr(
+            "localm.config.load_config",
+            lambda: {"gpu_split_indices": [0, 1], "gpu_split_ratios": [1.0, 4.0]})
+        # 10 GB required -> GPU0 needs 2 GB (has 14 GB, fine), GPU1 needs 8 GB
+        # (has only 2 GB free - short by 6 GB).
+        result = gpu_split_shortfall(10_000_000_000)
+        assert result == [{"index": 1, "needed": 8_000_000_000, "free": 2_000_000_000}]
+
+    def test_both_devices_short_flags_both(self, monkeypatch):
+        gpus = [
+            {"index": 0, "name": "A", "total": 16_000_000_000, "free": 1_000_000_000},
+            {"index": 1, "name": "B", "total": 16_000_000_000, "free": 1_000_000_000},
+        ]
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: gpus)
+        monkeypatch.setattr(
+            "localm.config.load_config",
+            lambda: {"gpu_split_indices": [0, 1]})
+        result = gpu_split_shortfall(8_000_000_000)
+        assert {d["index"] for d in result} == {0, 1}
+
+    def test_fewer_than_two_valid_devices_returns_empty(self, monkeypatch):
+        """Only one of the two configured indices is currently detected -
+        resolve_gpu_split degrades this to "no split" (its own contract), so
+        there is no per-device split share to check at all."""
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS[:1])
+        monkeypatch.setattr(
+            "localm.config.load_config",
+            lambda: {"gpu_split_indices": [0, 5]})
+        assert gpu_split_shortfall(100_000_000_000) == []
+
+    def test_unmeasurable_device_free_is_skipped_not_flagged(self, monkeypatch):
+        """A device with no 'free' key at all (unmeasurable for that specific
+        device) cannot be checked - it must be skipped, not treated as a
+        false 0-free shortfall."""
+        gpus = [
+            {"index": 0, "name": "A", "total": 16_000_000_000},   # no "free" key
+            {"index": 1, "name": "B", "total": 16_000_000_000, "free": 14_000_000_000},
+        ]
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: gpus)
+        monkeypatch.setattr(
+            "localm.config.load_config",
+            lambda: {"gpu_split_indices": [0, 1]})
+        assert gpu_split_shortfall(20_000_000_000) == []
+
+    def test_config_param_injection_bypasses_load_config(self, monkeypatch):
+        """Matches vram_capacity()/apply_gpu_split()'s existing config= convention."""
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS)
+        result = gpu_split_shortfall(
+            8_000_000_000, config={"gpu_split_indices": [0, 1]})
+        assert result == [{"index": 0, "needed": 4_000_000_000, "free": 2_000_000_000}]

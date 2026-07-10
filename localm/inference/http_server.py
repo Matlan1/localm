@@ -259,7 +259,7 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
 
         # Perform VRAM check and eviction
         from pathlib import Path
-        from localm.discover import vram_capacity
+        from localm.discover import gpu_split_shortfall, vram_capacity
         from localm.model_manager import get_model_info
         from localm.config import load_registry
         
@@ -284,22 +284,54 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
 
         # Only perform eviction check if there are registered models
         if registry:
+            from localm.inference.engine import _is_gguf
             from localm.vram import wait_for_vram_release
             vram_required = int(file_size * 1.2)
             headroom = 1024 ** 3  # 1GB VRAM headroom
+            # discover.gpu_split_shortfall's docstring has the full rationale:
+            # vram_capacity() alone proves the AGGREGATE combined split free is
+            # enough, but the GGUF/llama.cpp backend divides a model by a
+            # STATIC per-config ratio with no live per-device capacity check of
+            # its own (unlike the HF backend's device_map="auto", which already
+            # self-corrects from live per-device free VRAM) - so an asymmetric
+            # split (e.g. another already-loaded model sits on one device more
+            # than another) can pass the aggregate check while one device's
+            # actual share is short, reaching the native loader with too
+            # little room on that device. Only applies to a GGUF-backend load.
+            check_split_fit = _is_gguf(m_path)
 
             while True:
-                v_info = vram_capacity()
+                # Off the event loop: vram_capacity()/gpu_split_shortfall() route
+                # through discover.list_gpus(), which is deadline-bounded (PR #541)
+                # but still a REAL hardware probe that can take up to that deadline
+                # - calling it directly on the loop would stall every other
+                # concurrent request on this single-threaded server for that long,
+                # the exact class of hang #541 fixed for the GUI routes and the
+                # GPU-registry heartbeat. This loop can iterate (and re-probe)
+                # multiple times per eviction, so it is just as exposed.
+                v_info = await loop.run_in_executor(None, vram_capacity)
                 free_vram = v_info.get("free")
                 measurable = free_vram is not None
-                if measurable and free_vram >= vram_required + headroom:
+                # + headroom for consistency with the aggregate check just
+                # below, which also demands vram_required + headroom, not
+                # bare vram_required - a per-device share should not be held
+                # to a thinner margin than the aggregate ceiling it composes
+                # with (see gpu_split_shortfall's own docstring: it does not
+                # bake in headroom itself, that is the caller's decision).
+                shortfall = (
+                    await loop.run_in_executor(
+                        None, gpu_split_shortfall, vram_required + headroom)
+                    if check_split_fit else [])
+                if measurable and free_vram >= vram_required + headroom and not shortfall:
                     break
 
                 # Make room. Measurable VRAM: evict idle models until the new one
-                # fits. NOT measurable (default GGUF-only / non-NVIDIA, no "free"
-                # from discover.vram_info): cannot prove it fits alongside others,
-                # so fall back to single-resident (evict every idle model first)
-                # rather than stacking until the driver OOMs (AUDIT-CRIT-2).
+                # fits (also satisfying any configured split device's own share
+                # - see check_split_fit above). NOT measurable (default GGUF-only
+                # / non-NVIDIA, no "free" from discover.vram_info): cannot prove
+                # it fits alongside others, so fall back to single-resident
+                # (evict every idle model first) rather than stacking until the
+                # driver OOMs (AUDIT-CRIT-2).
                 evict_name = None
                 for candidate in _engines_lru:
                     if candidate == name:
@@ -327,6 +359,17 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                     if _engines:
                         raise HTTPException(503, f"VRAM exhausted (cannot load '{name}'). "
                                             "All other loaded models are busy.")
+                    if shortfall:
+                        # Aggregate may well be enough (or unmeasurable) - it is
+                        # specifically the configured split's per-device share
+                        # that is short, so name the device(s), not a generic
+                        # aggregate message.
+                        detail = "; ".join(
+                            f"GPU {d['index']} needs ~{d['needed'] // 1024 ** 2} MB, "
+                            f"{d['free'] // 1024 ** 2} MB free" for d in shortfall)
+                        raise HTTPException(
+                            503, f"Not enough VRAM on the configured split "
+                            f"device(s) to load '{name}' ({detail}).")
                     raise HTTPException(503, f"Not enough VRAM to load '{name}' "
                                         f"(need ~{vram_required // 1024 ** 2} MB, "
                                         f"{(free_vram or 0) // 1024 ** 2} MB free).")

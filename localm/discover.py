@@ -793,6 +793,64 @@ def vram_capacity(config: Optional[dict] = None) -> dict:
     return out
 
 
+def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None) -> list:
+    """``[{"index", "needed", "free"}, ...]`` for every configured split device
+    whose live free VRAM cannot cover its proportional share of
+    *vram_required* - empty when no split is configured/resolvable, every
+    device has enough, or per-device free is unmeasurable (nothing to check).
+
+    ``vram_capacity()`` is an AGGREGATE check: it proves total combined free
+    VRAM across the split is enough, but ``apply_gpu_split()`` (the GGUF/
+    llama.cpp backend's tensor_split writer) divides a model by a STATIC
+    per-config ratio with NO live per-device capacity awareness of its own -
+    unlike the HF/transformers backend, whose ``device_map="auto"`` is built
+    from live per-device ``torch.cuda.mem_get_info()`` free VRAM instead (see
+    ``backends/hf.py``'s ``_cuda_device_map``), so it already self-corrects.
+    Without this check, a model too big for one device's actual share could
+    still pass the aggregate check (e.g. another already-loaded model sits
+    asymmetrically on one split device more than another) and reach
+    llama.cpp's native loader with too little room on that device - not
+    always a catchable Python exception, since the native loader can hard-
+    abort the process rather than return NULL. Callers should treat any
+    non-empty result as a hard refusal for a GGUF-backend load (see
+    ``http_server.switch_engine``), not merely a warning.
+
+    Only meaningful for the GGUF/llama.cpp load path - callers should gate on
+    that themselves (e.g. via ``inference.engine._is_gguf``); this function
+    has no way to know which backend a given load will use.
+
+    Deliberately takes no headroom margin of its own (a device with EXACTLY
+    enough free for its proportional share passes) - if a caller wants the
+    same safety margin the aggregate ``vram_capacity()`` check demands, add
+    it to *vram_required* before calling (e.g. ``vram_required + headroom``),
+    so a per-device share is not held to a thinner margin than the aggregate
+    ceiling it composes with.
+    """
+    from localm.config import load_config
+    cfg = config if config is not None else load_config()
+    if not cfg.get("gpu_split_indices"):
+        return []
+    gpus = list_gpus()
+    pairs = resolve_gpu_split(
+        cfg.get("gpu_split_indices"), cfg.get("gpu_split_ratios"), gpus=gpus)
+    if len(pairs) < 2:
+        return []
+    by_index = {g.get("index"): g for g in gpus}
+    total_ratio = sum(ratio for _, ratio in pairs)
+    if total_ratio <= 0:
+        return []
+    shortfall = []
+    for idx, ratio in pairs:
+        g = by_index.get(idx)
+        if g is None or g.get("free") is None:
+            continue   # unmeasurable for this device - cannot check, do not block
+        needed = int(vram_required * (ratio / total_ratio))
+        free = g["free"]
+        if free < needed:
+            shortfall.append({"index": idx, "needed": needed, "free": free})
+    return shortfall
+
+
 def fit_label(size_bytes: int, total_vram: Optional[int]) -> str:
     """
     Capacity badge for one file: "fits" / "tight" / "too-big", or "" when

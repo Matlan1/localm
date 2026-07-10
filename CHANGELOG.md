@@ -45,6 +45,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   hardware-monitor VRAM readout only ever weighed a load against one GPU's
   capacity, never the split's combined capacity. They now correctly sum
   capacity across the configured split.
+- **Multi-GPU split vs. multiple loaded models:** a GGUF model load (chat
+  model or the embedding model) could pass the pre-load VRAM check (enough
+  COMBINED free VRAM across a configured split) and still fail or crash on
+  a single GPU, if another already-loaded model left that specific device
+  with less free room than its configured share of the new model needed -
+  the aggregate check alone cannot catch an uneven split. Loading now also
+  checks each configured GPU's own share before handing off to the native
+  loader, evicting further (chat models) or refusing clearly instead of
+  risking a native crash. That VRAM check also now runs off the server's
+  event loop (like the idle-freeze fix above), so a slow GPU driver during
+  a model load can no longer stall other requests.
 - **GGUF context/KV-cache VRAM checks:** loading a GGUF model with a large
   context window ignored the KV cache entirely when judging whether it would
   fit, only weighing model weights - so a model whose weights fit could still
