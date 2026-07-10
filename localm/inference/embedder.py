@@ -158,8 +158,34 @@ class GGUFEmbedder:
         # and llamacpp/llama.py). The returned buffer must stay alive through
         # llama_load_model_from_file below - it is read once at load time, not
         # held as a live pointer.
-        from localm.discover import apply_gpu_split, apply_main_gpu
+        from localm.discover import apply_gpu_split, apply_main_gpu, gpu_split_shortfall
         apply_main_gpu(mp)
+        # Same per-device capacity gate as http_server.switch_engine's
+        # pre-load check (see gpu_split_shortfall's docstring for the full
+        # rationale: a configured split's STATIC ratio has no live per-device
+        # capacity awareness of its own, so an already-tight device can still
+        # get handed a share it cannot fit, reaching the native loader with
+        # too little room - this embedder is a second, independent GGUF/
+        # llama.cpp load path with no gate of its own until now). Embedding
+        # models are small (24-90 MB per this module's docstring), so this
+        # rarely fires in practice, but the check is cheap and the model file
+        # is already being opened next regardless. A RuntimeError here is
+        # already handled gracefully by get_embedder()'s caller - falls back
+        # to lexical-only retrieval with a logged warning, same as any other
+        # embedder load failure.
+        try:
+            file_size = Path(model_path).stat().st_size
+        except OSError:
+            file_size = 0
+        if file_size:
+            shortfall = gpu_split_shortfall(int(file_size * 1.2))
+            if shortfall:
+                detail = "; ".join(
+                    f"GPU {d['index']} needs ~{d['needed'] // 1024 ** 2} MB, "
+                    f"{d['free'] // 1024 ** 2} MB free" for d in shortfall)
+                raise RuntimeError(
+                    f"Not enough VRAM on the configured split device(s) to "
+                    f"load the embedding model ({detail}).")
         _tensor_split_keepalive = apply_gpu_split(mp)
         self._model = api.llama_load_model_from_file(model_path, mp)
         if not self._model:

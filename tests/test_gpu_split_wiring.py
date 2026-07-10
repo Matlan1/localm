@@ -24,6 +24,8 @@ import ctypes
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from localm.inference.backends.llamacpp.llama import LlamaCpp
 
 # llama.cpp's LLAMA_SPLIT_MODE_LAYER - see discover.py's
@@ -249,3 +251,48 @@ class TestGgufEmbedderGpuSplitWiring:
             "gpu_split_indices" in r.message and "main_gpu_index" in r.message
             for r in caplog.records
         )
+
+    def test_split_configured_but_one_device_short_refuses(self, monkeypatch, tmp_path):
+        """AUDIT-GPU-SPLIT-2: the embedder is a SECOND, independent GGUF/
+        llama.cpp load path with no capacity gate of its own until this fix -
+        it must also refuse (not attempt a native load that could hard-abort)
+        when a configured split device's own proportional share is short,
+        even though embedding models are typically small (this module's own
+        docstring: 24-90 MB) - a tight-enough split device can still be
+        short of even a few MB."""
+        model_file = tmp_path / "embed.gguf"
+        model_file.write_bytes(b"\0" * (2 * 1024 * 1024))   # 2 MB, realistic size
+        monkeypatch.setattr(
+            "localm.config.load_config",
+            lambda: {"gpu_split_indices": [0, 1]})
+        monkeypatch.setattr(
+            "localm.discover.list_gpus",
+            lambda: [{"index": 0, "name": "A", "total": 1024, "free": 512},
+                     {"index": 1, "name": "B", "total": 16 * 1024 ** 3,
+                      "free": 16 * 1024 ** 3}])
+        mock_api = _mock_embed_api()
+        with patch("localm.inference.backends.llamacpp._api", mock_api):
+            from localm.inference.embedder import GGUFEmbedder
+            with pytest.raises(RuntimeError, match="configured split"):
+                GGUFEmbedder(str(model_file))
+        # Refused BEFORE the native loader was ever reached.
+        mock_api.llama_load_model_from_file.assert_not_called()
+
+    def test_split_configured_with_enough_room_loads_normally(self, monkeypatch, tmp_path):
+        """Guard: the new gate must not over-correct into refusing every
+        split-configured embedder load - a real (non-zero-size) file that
+        genuinely fits each device's free VRAM must still succeed."""
+        model_file = tmp_path / "embed.gguf"
+        model_file.write_bytes(b"\0" * (2 * 1024 * 1024))
+        monkeypatch.setattr(
+            "localm.config.load_config",
+            lambda: {"gpu_split_indices": [0, 1]})
+        monkeypatch.setattr(
+            "localm.discover.list_gpus",
+            lambda: [{"index": 0, "name": "A", "total": 16 * 1024 ** 3, "free": 16 * 1024 ** 3},
+                     {"index": 1, "name": "B", "total": 16 * 1024 ** 3, "free": 16 * 1024 ** 3}])
+        mock_api = _mock_embed_api()
+        with patch("localm.inference.backends.llamacpp._api", mock_api):
+            from localm.inference.embedder import GGUFEmbedder
+            GGUFEmbedder(str(model_file))
+        mock_api.llama_load_model_from_file.assert_called_once()
