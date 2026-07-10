@@ -211,6 +211,158 @@ def test_close_cascades_through_scrub_stream_releases_lock():
 
 
 # --------------------------------------------------------------------------- #
+# NON-streaming disconnect (the _complete / _generate_full twin of the above).
+#
+# A non-streaming handler is a plain coroutine, so Starlette does NOT aclose it on
+# a client disconnect the way it acloses a StreamingResponse's generator. The fix
+# instead polls request.is_disconnected() and, on disconnect, signals the executor
+# worker to stop and gen.close() the chain - releasing _inference_lock now rather
+# than at end-of-generation. These tests drive the REAL _generate_full / _complete
+# coroutines; the only faked pieces are token production (the lock-holding engine,
+# same discipline as _generate) and the disconnect signal (a controllable request).
+# --------------------------------------------------------------------------- #
+
+
+class _FakeRequest:
+    """Stands in for a Starlette Request purely for is_disconnected() polling.
+    Flip .disconnected from the test to simulate the client aborting."""
+
+    def __init__(self, disconnected: bool = False):
+        self.disconnected = disconnected
+
+    async def is_disconnected(self) -> bool:
+        return self.disconnected
+
+
+def test_generate_full_disconnect_releases_inference_lock():
+    from localm.inference.http_server import _generate_full
+
+    async def scenario():
+        eng = _LockingEngine()                # never-ending generation
+        req = _FakeRequest()
+
+        task = asyncio.ensure_future(_generate_full(eng, _MSG, req, max_tokens=0))
+        # Worker starts and grabs the lock (mirrors _generate's _inference_lock).
+        assert await _wait(lambda: eng.inference_lock.locked(), True, 2.0), \
+            "worker should hold the inference lock while generating"
+        assert not task.done()
+
+        req.disconnected = True               # client aborts mid-generation
+
+        # The poller must observe the disconnect, stop the worker, close the
+        # generator chain, and release the lock - not run to end-of-generation.
+        text = await asyncio.wait_for(task, timeout=3.0)
+        assert isinstance(text, str)          # partial text, not an error
+        assert await _wait(lambda: eng.inference_lock.locked(), False, 3.0), \
+            "inference lock still held after non-stream disconnect: worker orphaned"
+
+        # A brand-new generation over the SAME engine must acquire the lock
+        # promptly instead of blocking behind the orphan.
+        req2 = _FakeRequest()
+        t2 = asyncio.ensure_future(_generate_full(eng, _MSG, req2, max_tokens=0))
+        assert await _wait(lambda: eng.inference_lock.locked(), True, 3.0), \
+            "follow-up generation blocked - lock was not released"
+        req2.disconnected = True
+        await asyncio.wait_for(t2, timeout=3.0)
+
+    asyncio.run(scenario())
+
+
+def test_generate_full_completes_and_releases_lock():
+    """Happy path: a finite generation returns the full joined text and leaves the
+    lock free (the cancel_event + watcher must not corrupt a clean completion)."""
+
+    from localm.inference.http_server import _generate_full
+
+    async def scenario():
+        eng = _LockingEngine(ntokens=3, per_token_delay=0.0)
+        req = _FakeRequest()                  # stays connected the whole time
+        text = await asyncio.wait_for(
+            _generate_full(eng, _MSG, req, max_tokens=64), timeout=5.0)
+        assert text == "t0 t1 t2 "
+        assert not eng.inference_lock.locked()
+
+    asyncio.run(scenario())
+
+
+def test_generate_full_none_request_runs_to_completion():
+    """request=None (a caller with no disconnect signal) is inert: the generation
+    runs to completion and the lock is released, never a spurious cancel."""
+
+    from localm.inference.http_server import _generate_full
+
+    async def scenario():
+        eng = _LockingEngine(ntokens=2, per_token_delay=0.0)
+        text = await asyncio.wait_for(
+            _generate_full(eng, _MSG, None, max_tokens=64), timeout=5.0)
+        assert text == "t0 t1 "
+        assert not eng.inference_lock.locked()
+
+    asyncio.run(scenario())
+
+
+def test_complete_disconnect_releases_inference_lock():
+    """End-to-end through the real chat non-streaming handler _complete: a mid-
+    generation disconnect must release _inference_lock (and the semaphore) so the
+    next request to the same model is not blocked."""
+
+    from localm.inference.http_server import _complete
+
+    async def scenario():
+        eng = _LockingEngine()                # never-ending
+        sem = asyncio.Semaphore(1)
+        req = _FakeRequest()
+
+        task = asyncio.ensure_future(
+            _complete(eng, _MSG, "lock-model", sem, request=req, max_tokens=0))
+        assert await _wait(lambda: eng.inference_lock.locked(), True, 2.0)
+        assert not task.done()
+
+        req.disconnected = True               # abort
+        # _complete still returns (with partial content); the point is the lock is
+        # freed, not the discarded response.
+        await asyncio.wait_for(task, timeout=3.0)
+        assert await _wait(lambda: eng.inference_lock.locked(), False, 3.0), \
+            "inference lock still held after _complete disconnect"
+
+        # Semaphore was released too: a fresh _complete acquires it and runs.
+        req2 = _FakeRequest()
+        t2 = asyncio.ensure_future(
+            _complete(eng, _MSG, "lock-model", sem, request=req2, max_tokens=0))
+        assert await _wait(lambda: eng.inference_lock.locked(), True, 3.0), \
+            "follow-up _complete blocked - lock/semaphore not released"
+        req2.disconnected = True
+        await asyncio.wait_for(t2, timeout=3.0)
+
+    asyncio.run(scenario())
+
+
+def test_complete_happy_path_returns_response_and_releases_lock():
+    """A non-streaming request that runs to completion still returns a valid
+    ChatResponse JSON and leaves the lock free."""
+
+    import json as _json
+
+    from localm.inference.http_server import _complete
+
+    async def scenario():
+        eng = _LockingEngine(ntokens=3, per_token_delay=0.0)
+        sem = asyncio.Semaphore(1)
+        req = _FakeRequest()
+
+        resp = await asyncio.wait_for(
+            _complete(eng, _MSG, "lock-model", sem, request=req, max_tokens=64),
+            timeout=5.0)
+        body = _json.loads(bytes(resp.body))
+        content = body["choices"][0]["message"]["content"]
+        assert "t0" in content and "t2" in content
+        assert body["choices"][0]["finish_reason"] == "stop"
+        assert not eng.inference_lock.locked()
+
+    asyncio.run(scenario())
+
+
+# --------------------------------------------------------------------------- #
 # REAL native inference: the unit tests above stub token production with a
 # lock-holding generator. This one proves the ACTUAL llama.py _generate releases
 # the ACTUAL _inference_lock when the real backend generator chain
@@ -282,3 +434,106 @@ def test_real_gguf_midstream_close_releases_inference_lock(gguf_backend):
     )).strip()
     assert any(c.isalpha() for c in out), f"follow-up generation broke: {out!r}"
     assert be.loaded
+
+
+# --------------------------------------------------------------------------- #
+# REAL uvicorn server: the unit tests above prove the cancel MECHANISM with a
+# fake request whose is_disconnected() we flip by hand. This one closes the gap
+# they cannot: that a REAL client abort of a REAL non-streaming request over a
+# REAL uvicorn server makes request.is_disconnected() fire, so the lock is freed.
+# No model or network needed - a lock-holding fake engine stands in for the
+# native backend, exactly as in the unit tests, so this runs in the default gate.
+# --------------------------------------------------------------------------- #
+
+
+class _ServerLockingEngine(_LockingEngine):
+    """_LockingEngine wired to satisfy the real chat handler + get_engine: it must
+    look loaded (so get_engine returns it directly) and text-only."""
+
+    def __init__(self):
+        super().__init__()               # ntokens=None -> never ends on its own
+        self.loaded = True
+        self.supports_images = False
+        self.can_be_multimodal = False
+
+
+def _wait_sync(cond, want=True, timeout: float = 6.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if bool(cond()) == want:
+            return True
+        time.sleep(0.02)
+    return bool(cond()) == want
+
+
+def _raw_chat_request(port: int) -> bytes:
+    body = (
+        b'{"model":"lock-model","messages":[{"role":"user","content":"hi"}],'
+        b'"stream":false}'
+    )
+    return (
+        b"POST /v1/chat/completions HTTP/1.1\r\n"
+        b"Host: 127.0.0.1\r\n"
+        b"Content-Type: application/json\r\n"
+        b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+        b"Connection: close\r\n"
+        b"\r\n" + body
+    )
+
+
+def test_real_uvicorn_nonstream_disconnect_releases_inference_lock():
+    """Production path: a client that opens a non-streaming /v1/chat/completions
+    request and then drops the socket mid-generation must make the server release
+    _inference_lock (via request.is_disconnected() polling), so the model is not
+    wedged for the next caller. Proves the disconnect DETECTION, not just the
+    cancel mechanism."""
+    import socket as _socket
+
+    import uvicorn
+
+    from localm.inference.http_server import create_app
+
+    eng = _ServerLockingEngine()
+    app = create_app(eng, api_landing=True)
+
+    # Pre-bind an ephemeral port so we know it before the server starts.
+    lsock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    lsock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+    lsock.bind(("127.0.0.1", 0))
+    port = lsock.getsockname()[1]
+
+    config = uvicorn.Config(app, log_level="warning", lifespan="on")
+    server = uvicorn.Server(config)
+
+    def _serve():
+        # Fresh event loop in this thread; uvicorn drives the ASGI app here.
+        asyncio.run(server.serve(sockets=[lsock]))
+
+    th = threading.Thread(target=_serve, daemon=True)
+    th.start()
+    try:
+        assert _wait_sync(lambda: server.started, True, 10.0), "uvicorn did not start"
+
+        # 1) Open a non-streaming request and abort it mid-generation.
+        client = _socket.create_connection(("127.0.0.1", port), timeout=5.0)
+        client.sendall(_raw_chat_request(port))
+        assert _wait_sync(lambda: eng.inference_lock.locked(), True, 6.0), \
+            "server never started generating (lock not held)"
+        client.close()                          # <-- the disconnect under test
+
+        # The disconnect poller must fire and free the lock - not run forever
+        # (the fake engine never ends on its own, so a broken fix hangs here).
+        assert _wait_sync(lambda: eng.inference_lock.locked(), False, 8.0), \
+            "inference lock still held after real client disconnect: is_disconnected() never fired"
+
+        # 2) The model is usable again: a second request acquires the lock promptly
+        #    instead of blocking behind the orphaned first one.
+        client2 = _socket.create_connection(("127.0.0.1", port), timeout=5.0)
+        client2.sendall(_raw_chat_request(port))
+        assert _wait_sync(lambda: eng.inference_lock.locked(), True, 6.0), \
+            "follow-up request blocked - lock was not truly released"
+        client2.close()
+        assert _wait_sync(lambda: eng.inference_lock.locked(), False, 8.0)
+    finally:
+        server.should_exit = True
+        th.join(timeout=10.0)
