@@ -15,6 +15,13 @@ name = "RATE_LIMIT"
 namespace_id = "400"
 simple = { limit = 20, period = 60 }
 
+# Workers Logs: captures per-request metadata (status, colo, errors) for up to 7
+# days, queryable from the dashboard or the Observability API. Off by default -
+# without this, a failed/blocked client request leaves literally no trace to
+# debug from, even though the Worker ran fine otherwise.
+[observability]
+enabled = true
+
 # Public, non-secret config. Point this at the repo issues + releases live in.
 [vars]
 TARGET_REPO = "Matlan1/localm"
