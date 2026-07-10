@@ -266,7 +266,8 @@ def test_auto_send_upload_failure_is_never_reported_as_success(tmp_path, monkeyp
     out = " ".join(capsys.readouterr().out.split())   # collapse rich's line-wrapping
     assert "Sent to the maintainer" not in out
     assert "Could not send it" in out
-    assert "email it instead" in out
+    # The email fallback is offered (now naming the maintainer address).
+    assert "email it to" in out and bugreport.MAINTAINER_EMAIL in out
 
 
 # --------------------------- process-wide net ----------------------------- #

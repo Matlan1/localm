@@ -991,12 +991,15 @@ def report_failure(*, summary: str, reason: str = "",
             try:
                 res = upload_report(summary, body, url=up_url, token=up_token)
             except LocalmError as e2:
-                console.print(f"[yellow]Still could not send it ({e2.reason}). The report "
-                              f"is at {where} - email it instead.[/yellow]")
+                console.print(f"[yellow]Still could not send it.[/yellow] "
+                              f"{e2.hint or e2.reason}")
+                console.print(f"[dim]The report is at {where} - email it to "
+                              f"{MAINTAINER_EMAIL} instead.[/dim]")
                 return path
         except LocalmError as e:
-            console.print(f"[yellow]Could not send it ({e.summary}: {e.reason}). The report "
-                          f"is at {where} - email it instead.[/yellow]")
+            console.print(f"[yellow]Could not send it.[/yellow] {e.hint or e.reason}")
+            console.print(f"[dim]The report is at {where} - email it to "
+                          f"{MAINTAINER_EMAIL} instead.[/dim]")
             return path
         link = res.get("url") if isinstance(res, dict) else None
         console.print("[green]Sent to the maintainer.[/green]"
@@ -1052,29 +1055,41 @@ def report_failure(*, summary: str, reason: str = "",
 
     try:
         if action == "upload":
-            def _send():
-                res = upload_report(summary, body, url=up_url, token=up_token)
-                link = res.get("url") if isinstance(res, dict) else None
-                console.print("[green]Sent to the maintainer.[/green]"
-                              + (f" Tracking issue: {link}" if link else ""))
-            try:
-                _send()
-            except RateLimitedError as e:
-                # Rate limited: wait the server-advised delay and retry ONCE, rather
-                # than making the tester re-run the whole command.
-                import time as _time
-                console.print("[yellow]The bug-report server is rate limiting. "
-                              f"Retrying in {e.retry_after}s...[/yellow]")
-                _time.sleep(e.retry_after)
+            attempt = 0
+            while True:
+                attempt += 1
                 try:
-                    _send()
-                except LocalmError as e2:
-                    console.print(f"[yellow]Still could not send it ({e2.reason}). "
-                                  f"The report is at {where} - email it instead.[/yellow]")
-            except LocalmError as e:
-                # A failed send must not look like success - say so and keep the file.
-                console.print(f"[yellow]Could not send it ({e.summary}: {e.reason}). "
-                              f"The report is at {where} - email it instead.[/yellow]")
+                    res = upload_report(summary, body, url=up_url, token=up_token)
+                    link = res.get("url") if isinstance(res, dict) else None
+                    console.print("[green]Sent to the maintainer.[/green]"
+                                  + (f" Tracking issue: {link}" if link else ""))
+                    break
+                except RateLimitedError as e:
+                    # Rate limited: wait the server-advised delay and retry ONCE
+                    # automatically rather than making the tester re-run the command.
+                    import time as _time
+                    msg = e.hint or "The bug-report server is rate limiting."
+                    console.print(f"[yellow]{msg} Retrying in {e.retry_after}s...[/yellow]")
+                    _time.sleep(e.retry_after)
+                    if attempt >= 2:
+                        console.print(f"[yellow]Still rate limited.[/yellow] The report "
+                                      f"is at {where} - email it to {MAINTAINER_EMAIL}.")
+                        break
+                    continue
+                except LocalmError as e:
+                    # A failed send must never look like success - say WHERE it failed
+                    # (rule 5), keep the file, and offer to retry creating the issue.
+                    console.print(f"[yellow]Could not send it.[/yellow] {e.hint or e.reason}")
+                    console.print(f"[dim]The report is saved at {where}.[/dim]")
+                    if attempt >= 3:
+                        console.print(f"[dim]Email it to {MAINTAINER_EMAIL} when you can.[/dim]")
+                        break
+                    again = (ask("  Retry sending now? [y/N]") or "").strip().lower()
+                    if again in ("y", "yes"):
+                        continue
+                    console.print(f"[dim]Not retried - email {where} to "
+                                  f"{MAINTAINER_EMAIL} when you can.[/dim]")
+                    break
         elif action == "email":
             open_browser(mailto_url(summary, body))
             console.print(f"[green]Opened your mail app to {MAINTAINER_EMAIL}.[/green]")
