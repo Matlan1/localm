@@ -199,6 +199,18 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     if debug:
         from localm.debuglog import enable_debug
         console.print(f"[yellow]debug log:[/yellow] {enable_debug()}")
+    else:
+        # keep_diagnostics: a user who opted into keeping diagnostics for bug
+        # reports (even in privacy mode) gets a debug log written too, so a report
+        # has request/operation context - without needing to pass --debug.
+        try:
+            from localm.config import load_config
+            if load_config().get("keep_diagnostics"):
+                from localm.debuglog import enable_debug
+                console.print(f"[yellow]debug log (keep_diagnostics):[/yellow] "
+                              f"{enable_debug()}")
+        except Exception:
+            pass
 
     import os as _os
     from localm.audit import MODE_ENV_VAR, SessionMode, effective_mode

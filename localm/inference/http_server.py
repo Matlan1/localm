@@ -846,6 +846,28 @@ def _start_hang_watchdog(threshold: float, trace_path, *, poll: float = 1.0):
     return stop, t
 
 
+def _diagnostics_allowed() -> bool:
+    """Whether localm may write an AUTOMATIC diagnostic trace right now. True in
+    the log/full session modes; in privacy mode ONLY when the user opted into
+    keeping diagnostics (config ``keep_diagnostics``). Fail-safe to privacy (no
+    trace) when the mode/config cannot be resolved, matching audit.py's default.
+
+    Gates the hang watchdog and the crash-restart breadcrumbs so privacy mode's
+    "nothing written automatically" promise holds, while the toggle lets a tester
+    keep the diagnostics a bug report needs."""
+    try:
+        from localm.config import load_config
+        if load_config().get("keep_diagnostics"):
+            return True
+    except Exception:
+        pass
+    try:
+        from localm.audit import SessionMode, effective_mode
+        return effective_mode("server") != SessionMode.PRIVACY
+    except Exception:
+        return False   # fail toward privacy: write no automatic trace
+
+
 # Optional bearer-token auth - enabled when LOCALM_API_KEY is set.
 _bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -1477,16 +1499,11 @@ def _do_restart() -> None:
         from localm.debuglog import dump_ring_buffer, flush_log_handlers, recent_activity
         # Privacy mode opts out of ALL automatic disk traces, so skip the
         # crash-recovery breadcrumb dumps (ring buffer + pre_restart.log): they are
-        # session-derived INFO breadcrumbs written without the user asking. If the
-        # mode cannot be resolved, fail toward privacy (skip) - matching audit.py's
-        # fail-safe-to-privacy default - rather than write a trace the user may have
-        # opted out of.
-        try:
-            from localm.audit import SessionMode, effective_mode
-            _privacy = effective_mode("server") == SessionMode.PRIVACY
-        except Exception:
-            _privacy = True
-        if not _privacy:
+        # session-derived INFO breadcrumbs written without the user asking. The
+        # keep_diagnostics toggle overrides that (a tester who wants a report has
+        # opted in); _diagnostics_allowed() folds both in and fails toward privacy
+        # (skip) when the mode/config cannot be resolved.
+        if _diagnostics_allowed():
             dump_ring_buffer()
             # Also write a clear text log for the bug reporter to ingest directly,
             # in case the JSON buffer fails to load back into memory.
@@ -1613,12 +1630,14 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
 
         # Hang-capture watchdog: a 1s async heartbeat + an OFF-loop daemon thread
         # that dumps all stacks to a file when the loop stops ticking - the only
-        # in-process way to see what a fully-wedged loop is stuck in. ON BY DEFAULT
-        # (the trace file is created lazily, only on a real stall) so a tester's
-        # intermittent freeze is captured with zero setup on their part;
-        # LOCALM_HANG_WATCHDOG=0 opts out, =1 adds the verbose extras below. Skipped
-        # under pytest so no thread lingers across tests. Best-effort: a startup
-        # failure must never block serving.
+        # in-process way to see what a fully-wedged loop is stuck in. On by default
+        # in the log/full session modes (the trace file is lazy, created only on a
+        # real stall), so an intermittent freeze is captured with zero setup. In
+        # PRIVACY mode it stays OFF (no automatic trace) UNLESS the user opted into
+        # keeping diagnostics (_diagnostics_allowed) or explicitly forced it on
+        # (LOCALM_HANG_WATCHDOG=1). LOCALM_HANG_WATCHDOG=0 opts out entirely. Skipped
+        # under pytest so no thread lingers. Best-effort: a startup failure must
+        # never block serving.
         hb_task = None
         hang_stop = hang_thread = None
         from localm.debuglog import (
@@ -1627,7 +1646,8 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
             hang_watchdog_threshold as _hw_secs,
             hang_trace_path as _hw_path,
         )
-        if _hw_active() and "pytest" not in sys.modules:
+        if (_hw_active() and (_hw_verbose() or _diagnostics_allowed())
+                and "pytest" not in sys.modules):
             try:
                 hb_task = asyncio.create_task(_hang_heartbeat_loop())
                 hang_stop, hang_thread = _start_hang_watchdog(_hw_secs(), _hw_path())

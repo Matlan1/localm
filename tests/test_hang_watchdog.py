@@ -44,6 +44,39 @@ def test_hang_watchdog_env_semantics(monkeypatch):
     assert debuglog.hang_watchdog_threshold() == 2.0    # floored
 
 
+def test_diagnostics_allowed_respects_privacy_and_toggle(monkeypatch):
+    """Privacy mode writes no automatic trace unless keep_diagnostics is on; the
+    log/full modes always allow it. This gates both the hang watchdog and the
+    crash-restart breadcrumbs."""
+    from localm.inference import http_server as hs
+    monkeypatch.delenv("LOCALM_MODE", raising=False)   # config decides the mode
+
+    def _cfg(mode, keep):
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"mode": mode, "keep_diagnostics": keep})
+
+    _cfg("privacy", False)
+    assert hs._diagnostics_allowed() is False    # privacy + off -> no trace
+    _cfg("privacy", True)
+    assert hs._diagnostics_allowed() is True     # privacy + toggle -> allowed
+    _cfg("log", False)
+    assert hs._diagnostics_allowed() is True      # log mode -> allowed
+    _cfg("full", False)
+    assert hs._diagnostics_allowed() is True      # full mode -> allowed
+
+
+def test_diagnostics_allowed_fails_safe_to_privacy(monkeypatch):
+    """If the mode/config cannot be resolved, default to NO trace (privacy)."""
+    from localm.inference import http_server as hs
+
+    def _boom():
+        raise RuntimeError("config unreadable")
+
+    monkeypatch.delenv("LOCALM_MODE", raising=False)
+    monkeypatch.setattr("localm.config.load_config", _boom)
+    assert hs._diagnostics_allowed() is False
+
+
 def test_watchdog_dumps_stacks_on_stall(tmp_path, monkeypatch):
     from localm.inference import http_server as hs
     trace = tmp_path / "hang.log"
