@@ -8,6 +8,7 @@ the loop stops ticking, so a freeze that would otherwise be lost is captured.
 /debug/stacks is the on-demand complement (usable while the loop is still alive).
 """
 
+import asyncio
 import time
 
 import pytest
@@ -55,6 +56,33 @@ def test_watchdog_quiet_while_loop_ticks(tmp_path, monkeypatch):
         thread.join(timeout=2)
         fh.close()
     assert trace.read_text(encoding="utf-8", errors="replace") == ""
+
+
+@pytest.mark.anyio
+async def test_watchdog_catches_a_real_event_loop_block(tmp_path, monkeypatch):
+    """End-to-end: the REAL 1s heartbeat coroutine + the off-loop watchdog must
+    catch a genuine event-loop block (a synchronous call that stalls the loop -
+    exactly the diagnosed hang), not just a manually-staled heartbeat."""
+    from localm.inference import http_server as hs
+    trace = tmp_path / "hang.log"
+    hb = asyncio.create_task(hs._hang_heartbeat_loop())
+    stop, thread, fh = hs._start_hang_watchdog(
+        threshold=1.0, trace_path=trace, poll=0.1)
+    try:
+        await asyncio.sleep(0.3)     # heartbeat ticks; lag stays low
+        time.sleep(1.6)              # BLOCK the real event loop past the threshold
+        await asyncio.sleep(0.3)     # resume; heartbeat catches up
+    finally:
+        hb.cancel()
+        try:
+            await hb
+        except asyncio.CancelledError:
+            pass
+        stop.set()
+        thread.join(timeout=2)
+        fh.close()
+    text = trace.read_text(encoding="utf-8", errors="replace")
+    assert "LOCALM HANG WATCHDOG" in text, text
 
 
 @pytest.fixture
