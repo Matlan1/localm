@@ -91,8 +91,12 @@ def setup_embeddings(model):
             f"key {tuple(KNOWN_EMBEDDING_MODELS)}, a registered model, or a GGUF "
             "path, and network must be enabled (net_mode is not 'off').")
         sys.exit(1)
-    console.print(f"[green]Embedding model ready:[/green] {path}\n"
-                  "Memory and RAG will now use semantic search.")
+    console.print(
+        f"[green]Embedding model ready:[/green] {path}\n"
+        "Memory now retrieves semantically. Existing RAG collections stay lexical "
+        "(BM25) until re-indexed with embeddings: re-add them in the GUI, or run "
+        "`localm rag add <name> <path> --embed` and query with `--embed` against a "
+        "running server.")
 
 
 @main.command("make-launcher")
