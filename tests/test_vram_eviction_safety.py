@@ -298,6 +298,209 @@ class TestSplitAwareCapacityGate:
             "single-GPU capacity, not keep refusing/granting off a stale combined number")
 
 
+class TestPerDeviceSplitFitGate:
+    """AUDIT-GPU-SPLIT-2: vram_capacity()'s AGGREGATE check alone is not
+    enough for a GGUF-backend load - apply_gpu_split() divides a model by a
+    STATIC per-config ratio with no live per-device capacity awareness of its
+    own (unlike the HF backend's device_map="auto", which self-corrects from
+    live per-device free VRAM instead). An asymmetric split - e.g. another
+    already-loaded model sits on one configured device more than another -
+    can pass the aggregate check while one device's actual proportional
+    share is short, reaching the native loader with too little room on that
+    device. discover.gpu_split_shortfall() is the per-device gate that
+    catches this before the native load, refusing cleanly instead of risking
+    a native crash (llama.cpp can hard-abort rather than raise)."""
+
+    def _install(self, monkeypatch, tmp_path, *, filename, gpus, gpu_split_indices,
+                 gpu_split_ratios=None):
+        model_file = tmp_path / filename
+        # Unregistered-on-disk path (matches _install_fakes' convention at the
+        # top of this file): file_size falls back to the code's own documented
+        # 4 GB default, so vram_required is always int(4 GiB * 1.2) ~= 5.15
+        # GiB, + the fixed 1 GiB headroom ~= 6.15 GiB aggregate threshold -
+        # comfortably covered by the GPUs below, so only the PER-DEVICE gate
+        # is what can block these tests.
+        fake_registry = {"model-a": {"path": str(model_file), "source": "local"}}
+        monkeypatch.setattr("localm.config.load_registry", lambda: fake_registry)
+        monkeypatch.setattr("localm.model_manager.get_model_info",
+                            lambda name: (str(model_file), "hint"))
+        monkeypatch.setattr("localm.model_manager.get_model_mmproj", lambda name: None)
+        from localm.config import load_config as real_load_config
+        base_cfg = real_load_config()
+
+        def _cfg():
+            return {**base_cfg, "gpu_split_indices": gpu_split_indices,
+                    "gpu_split_ratios": gpu_split_ratios}
+
+        monkeypatch.setattr("localm.config.load_config", _cfg)
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: gpus)
+        monkeypatch.setattr(hs, "_engine_factory", lambda name: FakeEngine(name))
+        hs._engines.clear()
+        hs._engines_lru.clear()
+        hs._inference_sems.clear()
+        hs._last_activity_per_model.clear()
+        hs._active_model_name = None
+        hs._default_model_name = None
+        hs._engine = None
+        hs._inference_sem = None
+
+    def test_aggregate_fits_but_one_device_short_is_refused(self, monkeypatch, tmp_path):
+        # GPU0: 2 GiB free (short of its ~2.58 GiB equal-split share of the
+        # ~5.15 GiB required). GPU1: 30 GiB free (comfortably covers its
+        # share). Combined 32 GiB free >> the ~6.15 GiB aggregate threshold -
+        # the OLD aggregate-only gate would have let this through.
+        gpus = [
+            {"index": 0, "name": "A", "total": 16 * 1024 ** 3, "free": 2 * 1024 ** 3},
+            {"index": 1, "name": "B", "total": 32 * 1024 ** 3, "free": 30 * 1024 ** 3},
+        ]
+        self._install(monkeypatch, tmp_path, filename="model-a.gguf",
+                      gpus=gpus, gpu_split_indices=[0, 1])
+        app = hs.create_app(None)
+        client = TestClient(app)
+        r = _chat(client, "model-a")
+        assert r.status_code == 503, (
+            f"aggregate free (32GiB) covers the ~6.15GiB threshold, but GPU 0's "
+            f"own equal-split share does not fit its 2GiB free - must still "
+            f"refuse rather than reach the native loader: {r.text}")
+        assert "configured split" in r.text
+        assert "GPU 0" in r.text
+
+    def test_per_device_fit_satisfied_with_asymmetric_ratio_loads(self, monkeypatch, tmp_path):
+        """Guard: the new gate must not over-correct into refusing every
+        asymmetric setup - a deliberately lopsided gpu_split_ratios that DOES
+        fit each device's real free VRAM must still load normally."""
+        # ~5.15 GiB required, ratio 1:4 (GPU0:GPU1) -> GPU0 needs ~1.03 GiB
+        # (has 2 GiB, fine), GPU1 needs ~3.84 GiB (has 30 GiB, fine).
+        gpus = [
+            {"index": 0, "name": "A", "total": 16 * 1024 ** 3, "free": 2 * 1024 ** 3},
+            {"index": 1, "name": "B", "total": 32 * 1024 ** 3, "free": 30 * 1024 ** 3},
+        ]
+        self._install(monkeypatch, tmp_path, filename="model-a.gguf", gpus=gpus,
+                      gpu_split_indices=[0, 1], gpu_split_ratios=[1.0, 4.0])
+        app = hs.create_app(None)
+        client = TestClient(app)
+        r = _chat(client, "model-a")
+        assert r.status_code == 200, (
+            f"a ratio that genuinely fits each device's free VRAM must load: {r.text}")
+        assert hs._engines["model-a"].loaded
+
+    def test_shortfall_triggers_additional_eviction_beyond_aggregate(
+            self, monkeypatch, tmp_path):
+        """The two gates COMPOSE: the eviction loop's exit condition is
+        aggregate-fits AND per-device-fits, not aggregate alone. A second,
+        real model ("model-b") loads first and occupies GPU 0 (simulating its
+        real footprint by shrinking GPU 0's reported free once its .load()
+        actually runs); model-a's load then hits a per-device shortfall on
+        GPU 0 even though AGGREGATE free is already sufficient, and must
+        evict the idle model-b to relieve it - proving the per-device gate
+        genuinely drives additional eviction, not just a one-shot refusal."""
+        model_a_file = tmp_path / "model-a.gguf"
+        fake_registry = {
+            "model-a": {"path": str(model_a_file), "source": "local"},
+            "model-b": {"path": "models/model-b.gguf", "source": "local"},
+        }
+        monkeypatch.setattr("localm.config.load_registry", lambda: fake_registry)
+        monkeypatch.setattr(
+            "localm.model_manager.get_model_info",
+            lambda name: (str(model_a_file), "hint") if name == "model-a"
+            else ("models/model-b.gguf", "hint"))
+        monkeypatch.setattr("localm.model_manager.get_model_mmproj", lambda name: None)
+        from localm.config import load_config as real_load_config
+        base_cfg = real_load_config()
+        monkeypatch.setattr(
+            "localm.config.load_config",
+            lambda: {**base_cfg, "gpu_split_indices": [0, 1]})
+
+        # Three-phase GPU state, driven by model-b's REAL load()/unload()
+        # events (not a call-count guess): plenty of room on both devices
+        # while nothing is loaded -> GPU 0 shrinks once model-b actually
+        # loads (simulating its real footprint) -> GPU 0 partially recovers
+        # once model-b is evicted for model-a.
+        state = {"phase": "empty"}
+
+        def _list_gpus():
+            if state["phase"] == "evicted":
+                return [
+                    {"index": 0, "name": "A", "total": 16 * 1024 ** 3, "free": 6 * 1024 ** 3},
+                    {"index": 1, "name": "B", "total": 32 * 1024 ** 3, "free": 30 * 1024 ** 3},
+                ]
+            if state["phase"] == "b_loaded":
+                return [
+                    {"index": 0, "name": "A", "total": 16 * 1024 ** 3, "free": 2 * 1024 ** 3},
+                    {"index": 1, "name": "B", "total": 32 * 1024 ** 3, "free": 30 * 1024 ** 3},
+                ]
+            return [   # "empty": nothing loaded yet, plenty of room everywhere
+                {"index": 0, "name": "A", "total": 16 * 1024 ** 3, "free": 16 * 1024 ** 3},
+                {"index": 1, "name": "B", "total": 32 * 1024 ** 3, "free": 30 * 1024 ** 3},
+            ]
+
+        fake_b = FakeEngine("model-b")
+        real_b_load, real_b_unload = fake_b.load, fake_b.unload
+
+        def _b_load_and_shrink_gpu0():
+            real_b_load()
+            state["phase"] = "b_loaded"
+
+        def _b_unload_and_relieve_gpu0():
+            real_b_unload()
+            state["phase"] = "evicted"
+
+        fake_b.load = _b_load_and_shrink_gpu0
+        fake_b.unload = _b_unload_and_relieve_gpu0
+
+        monkeypatch.setattr("localm.discover.list_gpus", _list_gpus)
+        monkeypatch.setattr(
+            hs, "_engine_factory",
+            lambda name: fake_b if name == "model-b" else FakeEngine(name))
+        hs._engines.clear()
+        hs._engines_lru.clear()
+        hs._inference_sems.clear()
+        hs._last_activity_per_model.clear()
+        hs._active_model_name = None
+        hs._default_model_name = None
+        hs._engine = None
+        hs._inference_sem = None
+
+        app = hs.create_app(None)
+        client = TestClient(app)
+
+        # model-b loads first, while both devices have plenty of room -
+        # its own load flips the GPU state to "b_loaded" (shrinking GPU 0).
+        assert _chat(client, "model-b").status_code == 200
+        assert hs._engines["model-b"].loaded
+
+        # model-a's load now hits GPU 0's per-device shortfall (aggregate
+        # free is 2+30=32GiB, well over the ~6.15GiB threshold) - it must
+        # evict the idle model-b to relieve GPU 0, not refuse outright.
+        r = _chat(client, "model-a")
+        assert r.status_code == 200, (
+            f"model-b must be evicted to relieve GPU 0's per-device shortfall "
+            f"even though aggregate free (32GiB) was already enough: {r.text}")
+        assert hs._engines["model-a"].loaded
+        assert "model-b" not in hs._engines, "model-b should have been evicted"
+
+    def test_non_gguf_path_skips_the_per_device_gate(self, monkeypatch, tmp_path):
+        """The per-device gate only applies to the GGUF/llama.cpp backend
+        (identified by file extension) - the HF backend's device_map="auto"
+        already self-corrects from live per-device free VRAM, so applying
+        this same simplistic proportional-by-ratio estimate to an HF load
+        would risk FALSE refusals (accelerate's real bin-packing can be
+        smarter than a uniform ratio assumption). Same asymmetric GPUs as the
+        refused GGUF case above, but a non-.gguf path - must load, not 503."""
+        gpus = [
+            {"index": 0, "name": "A", "total": 16 * 1024 ** 3, "free": 2 * 1024 ** 3},
+            {"index": 1, "name": "B", "total": 32 * 1024 ** 3, "free": 30 * 1024 ** 3},
+        ]
+        self._install(monkeypatch, tmp_path, filename="model-a",  # no .gguf suffix
+                      gpus=gpus, gpu_split_indices=[0, 1])
+        app = hs.create_app(None)
+        client = TestClient(app)
+        r = _chat(client, "model-a")
+        assert r.status_code == 200, (
+            f"a non-GGUF path must skip the per-device gate entirely: {r.text}")
+        assert hs._engines["model-a"].loaded
+
+
 def test_eviction_waits_for_vram_release(monkeypatch):
     """MED-11: an eviction under measurable VRAM pressure waits for the freed
     VRAM to land (wait_for_vram_release) before re-checking / loading."""
