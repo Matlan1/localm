@@ -125,6 +125,12 @@ CORE_FIELDS: list = [
                  "Model layers to run on the GPU. 99 puts the whole model on the "
                  "GPU; lower it if you run out of VRAM.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=0, max=999),
+    SettingField("n_gpu_layers_auto", Widget.TOGGLE, "Auto-size GPU layers from VRAM",
+                 "When GPU layers is left at 99 (all), pick how many layers "
+                 "actually fit from free VRAM at load: a model too big for the "
+                 "GPU runs some layers on CPU (slower) and still loads, instead "
+                 "of being refused. An explicit GPU-layers value is left as-is.",
+                 group="Engine", applies=Applies.NEXT_LOAD),
     # HIDDEN: rendered by a dedicated Main GPU selector in the Live Tuning card
     # (populated from GET /api/gpus), not the generic settings form - a plain
     # number box would not show device names/VRAM. Still accepted by PATCH

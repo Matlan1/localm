@@ -134,18 +134,24 @@ def register(app: FastAPI, ctx) -> None:
         readout under the Settings performance sliders. Always 'approximate'."""
         from localm.config import load_registry
         from localm.discover import vram_capacity
+        from localm.model_meta import cached_n_layers
         from localm.sysstats import estimate_vram
         name = model or active_model()
         model_bytes = 0
+        n_layers = None
         entry = load_registry().get(name)
         if entry:
             try:
                 p = Path(entry.get("path", ""))
                 if p.is_file():
                     model_bytes = p.stat().st_size
+                    # A prior load caches the model's true layer count, so a
+                    # partial-offload estimate (n_gpu_layers < 99) scales by real
+                    # layers instead of the /99 sentinel fallback.
+                    n_layers = cached_n_layers(str(p))
             except OSError:
                 pass
-        est = estimate_vram(model_bytes, n_ctx, n_gpu_layers)
+        est = estimate_vram(model_bytes, n_ctx, n_gpu_layers, n_layers=n_layers)
         # vram_capacity() -> list_gpus() probes the GPU driver; keep it OFF the
         # event loop (it is safe-by-construction but still may take up to its
         # deadline on a wedged driver) so a stats read never stalls the WebUI.

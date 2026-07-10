@@ -113,6 +113,12 @@ DEFAULT_CONFIG: dict = {
     # starts at n_ctx and grows on demand. False = use fixed n_ctx_max.
     "ctx_auto": True,
     "n_gpu_layers": 99,    # 99 = offload everything to GPU
+    # When n_gpu_layers is left at its "everything" default, auto-size how many
+    # layers actually go on the GPU from free VRAM at load: a model too big for
+    # full GPU offload runs some layers on CPU (slower) and LOADS, instead of
+    # being refused. An explicit n_gpu_layers (any value other than 99, e.g.
+    # `-g 24`) is always honoured verbatim. Off => request full offload as-is.
+    "n_gpu_layers_auto": True,
     # GPU device to load onto / read VRAM from on a multi-GPU box. None = no
     # explicit selection (device 0). A stale index falls back to device 0 with
     # a logged warning, not a wrong/out-of-range GPU (see
