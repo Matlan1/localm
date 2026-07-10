@@ -185,7 +185,20 @@ def search_cmd(query, limit, list_files):
                 sys.exit(1)
             total = vram_capacity().get("total")
             if total:
-                console.print(f"[dim]fit vs {total / 1024**3:.0f} GB total VRAM "
+                # Name what the number is: vram_capacity() sums across a configured
+                # 2+ GPU split, otherwise it is the single main GPU's ceiling - so
+                # do not call a one-GPU number the machine "total" (a 2x16 GB box
+                # with no split has a 16 GB main-GPU ceiling, not 32). Gate on the
+                # DETECTED split device count (split_device_count), the same signal
+                # vram_capacity() used, not the raw config length - a stale index or
+                # a GGUF-only box leaves a 2-entry split resolving to one device.
+                from ..discover import split_device_count
+                n_split = split_device_count()
+                basis = (f"{total / 1024**3:.0f} GB combined across your "
+                         f"{n_split}-GPU split"
+                         if n_split >= 2
+                         else f"your main GPU's {total / 1024**3:.0f} GB")
+                console.print(f"[dim]fit vs {basis} "
                               "(weights + ~1.5 GB overhead)[/dim]")
             for f in hf_gguf_files(text):
                 fit = fit_label(f["size_bytes"], total)

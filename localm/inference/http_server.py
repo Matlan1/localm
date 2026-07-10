@@ -370,9 +370,27 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                         raise HTTPException(
                             503, f"Not enough VRAM on the configured split "
                             f"device(s) to load '{name}' ({detail}).")
+                    # Name what the free figure actually is, so a multi-GPU box does
+                    # not read it as broken detection. free_vram is COMBINED when a
+                    # split resolves across 2+ devices (the case an HF load reaches
+                    # here, since split-fit is only pre-checked for GGUF), else it is
+                    # the single GPU the model loads onto. Gate the wording on the
+                    # same signal vram_capacity() used, and only suggest a split when
+                    # one is not already active (do not tell a split user to make one).
+                    from localm.discover import split_device_count
+                    free_mb = (free_vram or 0) // 1024 ** 2
+                    need_mb = vram_required // 1024 ** 2
+                    if split_device_count() >= 2:
+                        raise HTTPException(503, f"Not enough VRAM to load '{name}' "
+                                            f"(need ~{need_mb} MB, {free_mb} MB free "
+                                            f"combined across your GPU split). Free "
+                                            f"VRAM (unload another model / close a GPU "
+                                            f"app) or use a smaller quant.")
                     raise HTTPException(503, f"Not enough VRAM to load '{name}' "
-                                        f"(need ~{vram_required // 1024 ** 2} MB, "
-                                        f"{(free_vram or 0) // 1024 ** 2} MB free).")
+                                        f"(need ~{need_mb} MB, {free_mb} MB free on "
+                                        f"the GPU it loads onto). With more than one "
+                                        f"GPU, a split can combine them: "
+                                        f"localm config gpu_split_indices 0,1")
 
                 evict_engine = _engines[evict_name]
                 free_before = free_vram

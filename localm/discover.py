@@ -795,6 +795,31 @@ def vram_capacity(config: Optional[dict] = None) -> dict:
     return out
 
 
+def split_device_count(config: Optional[dict] = None) -> int:
+    """How many DETECTED devices the configured gpu_split resolves to.
+
+    This is the exact signal ``vram_capacity()`` uses to decide whether its total
+    is COMBINED across a split (>= 2) or the single main GPU (< 2): the same
+    ``resolve_gpu_split`` + detected-device filter. Callers that LABEL a VRAM
+    number ("combined across N GPUs" vs "your main GPU's") must gate on this, not
+    on the raw ``gpu_split_indices`` length - a stale/typo'd index or a GGUF-only
+    box (no ``list_gpus``) leaves a 2-entry split resolving to one device, where
+    the number is single-GPU and calling it "combined" would mislabel it.
+
+    Returns 0 when no split is configured (the common single-GPU path, with no
+    hardware probe); otherwise the count of valid split devices (0/1 = effectively
+    single, 2+ = combined)."""
+    from localm.config import load_config
+    cfg = config if config is not None else load_config()
+    split = cfg.get("gpu_split_indices")
+    if not split:
+        return 0
+    gpus = list_gpus()
+    pairs = resolve_gpu_split(split, cfg.get("gpu_split_ratios"), gpus=gpus)
+    by_index = {g.get("index") for g in gpus}
+    return len([idx for idx, _ in pairs if idx in by_index])
+
+
 def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None) -> list:
     """``[{"index", "needed", "free"}, ...]`` for every configured split device
     whose live free VRAM cannot cover its proportional share of

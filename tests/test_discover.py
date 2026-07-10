@@ -14,7 +14,8 @@ from localm.discover import (
     _TENSOR_SPLIT_FALLBACK_CAPACITY,
     _quant_of, apply_gpu_split, apply_main_gpu, fit_label, gpu_split_shortfall,
     hf_backend_available, hf_gguf_files, hf_param_bytes, hf_search, list_gpus,
-    resolve_gpu_split, resolve_main_gpu_index, vram_capacity, vram_info,
+    resolve_gpu_split, resolve_main_gpu_index, split_device_count, vram_capacity,
+    vram_info,
 )
 
 
@@ -876,6 +877,41 @@ class TestVramCapacitySplitAware:
             lambda: {"gpu_split_indices": [0, 1]})
         monkeypatch.setattr("localm.discover.vram_info", lambda: {"total": 16_000_000_000})
         assert vram_capacity() == {"total": 16_000_000_000}
+
+
+class TestSplitDeviceCount:
+    """split_device_count(): the DETECTED split size vram_capacity() uses to decide
+    combined-vs-single, so a caption/message can name the VRAM basis honestly. Must
+    agree with vram_capacity()'s own combined/fall-back decision on the same inputs."""
+
+    _GPUS = [
+        {"index": 0, "name": "A", "total": 24_000_000_000, "free": 20_000_000_000},
+        {"index": 1, "name": "B", "total": 12_000_000_000, "free": 10_000_000_000},
+    ]
+
+    def test_no_split_is_zero_without_probing(self, monkeypatch):
+        # The common single-GPU path must not even call list_gpus().
+        called = {"n": 0}
+        monkeypatch.setattr("localm.discover.list_gpus",
+                            lambda: called.__setitem__("n", called["n"] + 1) or self._GPUS)
+        assert split_device_count({"gpu_split_indices": None}) == 0
+        assert called["n"] == 0, "no split configured -> no hardware probe"
+
+    def test_two_valid_devices_counts_two(self, monkeypatch):
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS)
+        assert split_device_count({"gpu_split_indices": [0, 1]}) == 2
+
+    def test_stale_index_resolves_below_two(self, monkeypatch):
+        # Only device 0 detected: matches vram_capacity()'s fall-back to single.
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS[:1])
+        n = split_device_count({"gpu_split_indices": [0, 5]})
+        assert n < 2
+        # And it agrees with vram_capacity(): that also degrades to the single GPU.
+        assert vram_capacity(config={"gpu_split_indices": [0, 5]}) == vram_info()
+
+    def test_gguf_only_box_no_gpus_is_below_two(self, monkeypatch):
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: [])
+        assert split_device_count({"gpu_split_indices": [0, 1]}) < 2
 
 
 class TestGpuSplitShortfall:

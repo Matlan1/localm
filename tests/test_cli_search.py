@@ -21,6 +21,10 @@ def test_search_files_shows_fit_badge(cli_runner):
     assert result.exit_code == 0, result.output
     assert "fits" in result.output
     assert "Q4_K_M" in result.output
+    # No split configured -> the caption names the single main GPU's ceiling, not
+    # a machine "total" (gui-1/cli-1 wording fix).
+    assert "main GPU" in result.output
+    assert "total VRAM" not in result.output
 
 
 def test_search_files_fit_reflects_combined_split_capacity(cli_runner):
@@ -46,6 +50,34 @@ def test_search_files_fit_reflects_combined_split_capacity(cli_runner):
                return_value={**base_cfg, "gpu_split_indices": [0, 1]}):
         result = CliRunner().invoke(main, ["search", "owner/repo", "--files"])
     assert result.exit_code == 0, result.output
-    assert "24 GB total VRAM" in result.output   # combined, not the 16 GB main GPU
+    # Names the basis (combined across the configured split), never mislabels the
+    # single main GPU's 16 GB as the machine "total" (gui-1/cli-1 wording fix).
+    assert "24 GB combined across your 2-GPU split" in result.output
+    assert "total VRAM" not in result.output
     assert "fits" in result.output
     assert "too big" not in result.output
+
+
+def test_search_files_stale_split_does_not_claim_combined(cli_runner):
+    """cli-1 accuracy: a 2-entry split that resolves to only ONE detected device
+    (a stale/typo'd index, or a GGUF-only box) makes vram_capacity() fall back to
+    the single main GPU - so the caption must say 'main GPU', NOT 'combined across
+    your 2-GPU split' (which would mislabel a one-GPU number, the very bug the
+    reword fixes). Gated on split_device_count, not the raw config length."""
+    gib = 1024 ** 3
+    files = [{"file": "model.Q4_K_M.gguf", "quant": "Q4_K_M",
+             "size_bytes": 2 * gib, "n_parts": 1}]
+    from localm.config import load_config as real_load_config
+    base_cfg = real_load_config()
+    with patch("localm.discover.hf_gguf_files", return_value=files), \
+         patch("localm.discover.list_gpus", return_value=[
+             {"index": 0, "name": "A", "total": 16 * gib, "free": 16 * gib},
+         ]), \
+         patch("localm.discover.vram_info",
+               return_value={"total": 16 * gib, "free": 16 * gib}), \
+         patch("localm.config.load_config",
+               return_value={**base_cfg, "gpu_split_indices": [0, 1]}):
+        result = CliRunner().invoke(main, ["search", "owner/repo", "--files"])
+    assert result.exit_code == 0, result.output
+    assert "main GPU" in result.output
+    assert "combined" not in result.output   # a single-device fallback is NOT combined
