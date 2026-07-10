@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+from typing import Optional
+
 from ._core import console, main
 
 # ------------------------------------------------------------------ #
@@ -161,6 +163,146 @@ def _check_vram_torch() -> bool:
     return torch_gpu_found
 
 
+# The llama.cpp backends that run inference on the GPU. localm's DEFAULT setup
+# provisions one of these on any GPU box (vulkan for NVIDIA/Intel/mixed, the
+# self-contained amd-rocm build for AMD on Windows, metal on Apple Silicon), or
+# the user pins cuda/sycl/hip. NONE of them needs nvidia-smi/rocm-smi on PATH,
+# and torch.cuda is False for all but CUDA/ROCm-torch - which is exactly why the
+# smi/torch probes above cannot be the GPU verdict (audit doctor-1). "custom" is
+# a user-supplied build of unknown class, so it is NOT assumed GPU by name; its
+# capability comes from the real device probe instead.
+_GPU_BACKENDS = frozenset({"vulkan", "cuda", "sycl", "hip", "metal", "amd-rocm"})
+
+# Run in a FRESH interpreter (like the ABI self-check): the loader mutates the
+# DLL/lib search path and pulls in the native GPU runtime, so a broken or
+# mismatched build can never crash doctor, and the probe matches the real run
+# environment. It prints one JSON line reporting whether the runtime computes and
+# the exact ggml devices it registered.
+_GPU_PROBE_CODE = """
+import json
+from localm.inference.backends.llamacpp import _loader
+r = {"loaded": False, "devices": [], "error": ""}
+try:
+    r["loaded"] = bool(_loader.compute_backends_available())
+    r["devices"] = [[n, t] for (n, t) in _loader.compute_devices()]
+except Exception as e:
+    r["error"] = repr(e)
+print("GPU_PROBE:" + json.dumps(r))
+"""
+
+
+def _provisioned_backend_name(find_binary_dir) -> Optional[str]:
+    """The llama.cpp backend localm has provisioned (read from the runtime dir's
+    .localm-backend marker), or None when unprovisioned or unmarked (an old
+    install predating the marker, or a hand-placed build)."""
+    binary_dir = find_binary_dir()
+    if not binary_dir:
+        return None
+    try:
+        from localm.setup_llama import _provisioned_backend
+        return _provisioned_backend(binary_dir)
+    except Exception:
+        return None
+
+
+def _probe_gpu_devices() -> Optional[dict]:
+    """Load the provisioned runtime in a subprocess and enumerate the ggml
+    compute devices it registers - the ground truth for whether localm runs
+    inference on the GPU. Returns the parsed
+    ``{"loaded": bool, "devices": [[name, type], ...], "error": str}`` or None
+    when the probe could not run at all (subprocess-isolated, so a broken GPU
+    build never crashes doctor)."""
+    import json as _json
+    import subprocess
+    import sys as _sys
+    try:
+        r = subprocess.run([_sys.executable, "-c", _GPU_PROBE_CODE],
+                           capture_output=True, text=True, timeout=120)
+        line = next((ln for ln in (r.stdout or "").splitlines()
+                     if ln.startswith("GPU_PROBE:")), "")
+        return _json.loads(line[len("GPU_PROBE:"):]) if line else None
+    except Exception:
+        return None
+
+
+def _check_gpu_verdict(find_binary_dir, lib_healthy: bool, smi_or_torch_gpu: bool) -> None:
+    """Report GPU capability from what localm will ACTUALLY use for inference,
+    not from nvidia-smi / rocm-smi / torch alone (those miss the Vulkan, Metal
+    and bundled-ROCm paths, so their silence is NOT proof of CPU-only - the
+    audit doctor-1 false negative).
+
+    Order of truth:
+      1) a real load probe of the provisioned runtime - the ggml compute DEVICES
+         it registers (a GPU build registers a GPU/ACCEL device beside the CPU);
+      2) failing that, the provisioned backend marker (vulkan/cuda/.../metal =>
+         GPU, cpu => CPU-only) - still far better than smi/torch;
+      3) failing that, the smi/torch signal already printed above, hedged: a GPU
+         they see is positive proof, their silence is not.
+
+    "CPU mode only" is emitted only for a genuine cpu build, a runtime that loads
+    with no GPU device, or a truly indeterminate no-signal case - never from the
+    mere absence of the vendor CLIs the default GPU path never needs."""
+    backend = _provisioned_backend_name(find_binary_dir)
+    probe = _probe_gpu_devices() if lib_healthy else None
+    loaded = bool(probe.get("loaded")) if probe else False
+    devices = (probe.get("devices") or []) if probe else []
+
+    # Each verdict is a SHORT primary line (the pass/fail phrase never wraps, so
+    # a narrow terminal cannot split "CPU mode only" across a line break and mask
+    # it), with any elaboration on a separate dim hint line - the doctor idiom.
+    tag = f" ({backend})" if backend and backend != "custom" else ""
+
+    # (1) Ground truth: the runtime loaded and reported its real compute devices.
+    if loaded and devices:
+        # Count only true GPU devices (ggml type GPU). ACCEL devices (BLAS / RPC)
+        # are CPU-side or remote accelerators, NOT a GPU, so they must not be
+        # labelled "GPU"; all of localm's GPU backends (Vulkan/Metal/CUDA/HIP/
+        # SYCL/bundled-ROCm) register as GPU type, so this loses no real GPU.
+        gpu = [name for (name, dtype) in devices
+               if int(dtype) == _loader_gpu_type()]
+        if gpu:
+            console.print(f"  {_OK_SYM}  GPU: {', '.join(gpu)}{tag} - used for inference")
+        else:
+            console.print(f"  {_WARN_SYM}  GPU: none in the loaded runtime{tag} - CPU mode only")
+        return
+
+    # (2) No device registry (older build) or the probe could not enumerate:
+    #     trust the provisioned backend NAME. Only when the runtime is not
+    #     known-broken - it loaded, OR the probe did not run for a BENIGN reason
+    #     (a healthy lib we simply chose not to load-test here). A lib doctor just
+    #     flagged as truncated/corrupt (lib_healthy False) must NOT be reported as
+    #     a working GPU from its marker alone (AGENTS.md rule 5: never report
+    #     success for a known-broken state).
+    marker_trustworthy = loaded or (probe is None and lib_healthy)
+    if marker_trustworthy and backend in _GPU_BACKENDS:
+        console.print(f"  {_OK_SYM}  GPU: '{backend}' backend provisioned - used for inference")
+        return
+    if marker_trustworthy and backend == "cpu":
+        console.print(f"  {_WARN_SYM}  GPU: 'cpu' backend provisioned - CPU mode only")
+        console.print("       [dim]run 'localm setup-llama --backend vulkan' to enable GPU[/dim]")
+        return
+
+    # (3) No trustworthy runtime signal. A GPU seen by smi/torch is positive
+    #     proof (already printed by those checks); their silence is NOT proof of
+    #     CPU-only, so hedge rather than state a false fact (audit doctor-1).
+    if smi_or_torch_gpu:
+        return
+    console.print(f"  {_WARN_SYM}  No GPU detected (nvidia-smi / rocm-smi / torch) - CPU mode only")
+    console.print("       [dim]those miss Vulkan/Metal/bundled-ROCm GPUs; run "
+                  "'localm setup-llama' to provision one[/dim]")
+
+
+def _loader_gpu_type() -> int:
+    """The ggml GPU device-type value, read from the loader so doctor and the
+    runtime never disagree on the enum. Falls back to 1 (the ggml
+    GGML_BACKEND_DEVICE_TYPE_GPU constant) if the loader cannot be imported."""
+    try:
+        from localm.inference.backends.llamacpp import _loader
+        return int(_loader.GGML_DEV_TYPE_GPU)
+    except Exception:
+        return 1
+
+
 def _check_packages() -> None:
     import importlib
     import importlib.metadata as _ilm
@@ -260,7 +402,8 @@ def doctor():
     Verifies:
       - Python version (3.10+ required)
       - llama.dll / llama.so available on PATH or in expected locations
-      - CUDA / ROCm GPU driver
+      - GPU inference capability, from the backend localm actually provisioned
+        (Vulkan / Metal / bundled-ROCm / CUDA), not just nvidia-smi/rocm-smi/torch
       - Available VRAM
       - Required Python packages (huggingface-hub, torch, uvicorn, fastapi)
       - Enabled plugins have their pip extras installed
@@ -276,10 +419,12 @@ def doctor():
     # native ABI self-check only when a healthy lib is present.
     if lib_healthy:
         _check_native_abi()
+    # smi/torch are SUPPLEMENTARY detail lines, not the verdict: they miss
+    # localm's default Vulkan/Metal/bundled-ROCm GPU paths entirely. The verdict
+    # is derived from what localm will actually load (audit doctor-1).
     gpu_found = _check_gpu_driver()
     torch_gpu_found = _check_vram_torch()
-    if not gpu_found and not torch_gpu_found:
-        console.print(f"  {_WARN_SYM}  No GPU driver found (nvidia-smi / rocm-smi) - CPU mode only")
+    _check_gpu_verdict(find_binary_dir, lib_healthy, gpu_found or torch_gpu_found)
     _check_packages()
     _check_plugin_deps()
     _check_managed_comfy()
