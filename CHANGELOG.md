@@ -28,9 +28,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   needs - the hang stack trace, the restart breadcrumb log, and a debug log -
   even in privacy mode. It is available in Settings > Privacy (in-app) and as a
   checkbox in the desktop launcher (and `--keep-diagnostics` on the command line).
-  Crucially, it keeps operational diagnostics ONLY: your chat messages and the
-  model's replies are never written to the debug log in privacy mode, even with
-  this on or with `--debug` (previously `--debug` could record raw model output).
+  It keeps operational diagnostics only - see Security below for the chat-content
+  guarantee this is held to.
 - **Clearer bug-report send failures:** when a bug report cannot be filed, the app
   now tells you WHERE it failed - you appear offline, the server is unreachable, a
   secure-connection problem, or the server rejected it - instead of a raw error. It
@@ -92,6 +91,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   and the `<name>.local` mDNS advertisement - pointing a phone at an address
   only reachable through the VPN. VPN-like adapters are now excluded, so the
   real LAN address is shown (and advertised) instead.
+- **Setup:** a silent fallback during AMD ROCm asset lookup (when the upstream
+  release-asset check fails) now prints a warning instead of happening
+  invisibly.
+
+### Security
+- **Privacy mode never logs chat content, even with diagnostics on.** Two
+  code paths (the GGUF backend's raw model output, and the coder's web-tool
+  call logging) could write your actual chat content - prompts and replies -
+  to the debug log while in privacy mode, if `--debug` or the new "keep
+  diagnostics" setting above was active. Both now stay off in privacy mode
+  regardless of diagnostic settings; operational details (timings, request
+  shapes) are unaffected.
 
 ## [0.1.1] - 2026-07-09
 
