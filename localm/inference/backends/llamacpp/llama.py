@@ -1221,13 +1221,14 @@ class LlamaCpp:
 
     def _decode_stream(self, gen: Iterator[int]) -> Iterator[str]:
         """Token-ID stream → text stream: stop-string filter, then marker
-        scrub.  Chat output is always scrubbed; in debug mode the raw
-        pre-scrub text is additionally written to the debug log."""
-        from localm.debuglog import debug_enabled, logger
+        scrub.  Chat output is always scrubbed; in debug mode the raw pre-scrub
+        text is additionally written to the debug log - EXCEPT in privacy mode,
+        where chat content is never persisted (debug_content_enabled)."""
+        from localm.debuglog import debug_content_enabled, logger
         # Decode token BYTES through one UTF-8-safe stream so a character split
         # across a token boundary is reassembled, not turned into U+FFFD (R46).
         raw = _utf8_pieces(self._tokenizer.token_to_piece_bytes(t) for t in gen)
-        if debug_enabled():
+        if debug_content_enabled():
             captured: list = []
 
             def _tee(pieces):
