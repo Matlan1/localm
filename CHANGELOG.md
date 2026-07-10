@@ -12,11 +12,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
-- **Server hang diagnostics:** an opt-in event-loop stall watchdog
-  (`LOCALM_HANG_WATCHDOG=1`) that dumps every thread's stack to
-  `<home>/logs/hang_*.log` if the server ever freezes, plus a loopback-only
-  `GET /debug/stacks` endpoint that returns thread and task state on demand. These
-  turn an intermittent "the server hung" into something diagnosable instead of lost.
+- **Automatic server-hang diagnostics:** an event-loop stall watchdog runs by
+  default and, if the server ever freezes, dumps every thread's stack to
+  `<home>/logs/hang_*.log` (the file is created only when a real stall happens, so
+  a healthy run leaves nothing behind). A captured trace is bundled into a bug
+  report automatically, so an intermittent "it just hung" becomes diagnosable with
+  no setup on the reporter's part. `LOCALM_HANG_WATCHDOG=0` turns it off (and `=1`
+  adds verbose asyncio slow-callback logging); a loopback-only `GET /debug/stacks`
+  returns thread and task state on demand.
 
 ### Fixed
 - **Server freezing while the system is idle:** reading GPU/VRAM state (opening
