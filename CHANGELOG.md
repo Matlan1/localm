@@ -11,7 +11,20 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Added
+- **Server hang diagnostics:** an opt-in event-loop stall watchdog
+  (`LOCALM_HANG_WATCHDOG=1`) that dumps every thread's stack to
+  `<home>/logs/hang_*.log` if the server ever freezes, plus a loopback-only
+  `GET /debug/stacks` endpoint that returns thread and task state on demand. These
+  turn an intermittent "the server hung" into something diagnosable instead of lost.
+
 ### Fixed
+- **Server freezing while the system is idle:** reading GPU/VRAM state (opening
+  Settings > Performance, the Models page, or the periodic cross-instance GPU
+  heartbeat) ran a synchronous GPU driver query directly on the server's single
+  event loop; if the driver was momentarily busy or wedged, the whole web UI froze
+  even though the machine was idle. GPU probes are now time-bounded and run off the
+  event loop, so a slow or stuck driver can no longer stall the server.
 - **Multi-GPU split fit checks:** a model too large for the single main GPU
   alone, but that fits combined across a configured multi-GPU split, was
   wrongly refused ("Not enough VRAM") when loading, and mis-badged "too big"
