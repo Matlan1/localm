@@ -870,6 +870,62 @@ class _BodyStreamCapMiddleware:
             )(scope, receive, send)
 
 
+# Scope key under which _DisconnectSignalMiddleware publishes a non-blocking
+# "has the client gone?" poll. See the middleware and _generate_full for why an
+# endpoint cannot just call request.is_disconnected().
+_DISCONNECT_POLL_KEY = "localm.disconnect_poll"
+
+
+class _DisconnectSignalMiddleware:
+    """Publish a working client-disconnect poll for endpoints that need one.
+
+    The four @app.middleware("http") handlers below are BaseHTTPMiddleware, which
+    runs the endpoint in a child task fed by a SYNTHETIC receive that never yields
+    http.disconnect - so request.is_disconnected() is permanently False for any
+    endpoint behind them (confirmed against a real uvicorn client abort). A
+    StreamingResponse still learns of a disconnect (Starlette acloses its body
+    generator), but a plain non-streaming coroutine does not.
+
+    This is a PURE-ASGI middleware (a BaseHTTPMiddleware here would defeat its own
+    purpose) added OUTSIDE that stack, so it keeps the raw ASGI receive - which
+    does carry http.disconnect - and stashes a Starlette-style non-blocking peek at
+    scope[_DISCONNECT_POLL_KEY]. It never wraps receive/send, so it is transparent
+    to every other route; only the non-streaming inference path polls it (see
+    _generate_full). WHY here and not fixed globally: converting the auth/origin
+    BaseHTTPMiddleware handlers to pure-ASGI is a far larger, riskier change; this
+    gives the one path that needs it a correct signal without touching them."""
+
+    def __init__(self, app):
+        self._app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+
+        gone = {"v": False}
+
+        async def poll_disconnected() -> bool:
+            # Mirrors Starlette.Request.is_disconnected: peek the raw stream with an
+            # immediately-cancelled receive so it never blocks, and latch True once
+            # http.disconnect has arrived. Reading the raw receive here is safe: the
+            # body is fully read (through the wrapped chain) before the endpoint -
+            # and thus this poll - runs, so only http.disconnect remains to consume.
+            import anyio
+            if gone["v"]:
+                return True
+            message: dict = {}
+            with anyio.CancelScope() as cs:
+                cs.cancel()
+                message = await receive()
+            if message.get("type") == "http.disconnect":
+                gone["v"] = True
+            return gone["v"]
+
+        scope[_DISCONNECT_POLL_KEY] = poll_disconnected
+        await self._app(scope, receive, send)
+
+
 # SEAMLESS: the session cookie PERSISTS so the user stays signed in across a browser
 # or PWA restart (a drop-on-close cookie made the key gate and its "Install
 # certificate" step reappear every restart). Browsers clamp lifetime to ~400 days,
@@ -1722,9 +1778,15 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                 return JSONResponse(status_code=404, content={"detail": "Not Found"})
         return await call_next(request)
 
-    # Added LAST (== outermost, sees the raw ASGI receive() before every other
-    # middleware/BaseHTTPMiddleware handler above, none of which touch the body).
+    # Outside every BaseHTTPMiddleware handler above (none of which touch the
+    # body), so it sees the raw ASGI receive() for its body-size accounting. The
+    # _DisconnectSignalMiddleware added right after passes receive() through
+    # untouched, so this still gets the raw stream.
     app.add_middleware(_BodyStreamCapMiddleware)
+    # Added LAST (== outermost) so its disconnect poll is bound to the raw receive,
+    # OUTSIDE the BaseHTTPMiddleware handlers that otherwise mask http.disconnect
+    # from the non-streaming inference path (see the class + _generate_full).
+    app.add_middleware(_DisconnectSignalMiddleware)
 
     # Route groups (extracted to localm/inference/routes/*.py).
     # The engine + inference semaphore are module globals read live by the route
@@ -2196,6 +2258,104 @@ async def _stream_sse_completion(
     yield "data: [DONE]\n\n"
 
 
+async def _generate_full(engine, messages: list, request=None, **gen_kwargs) -> str:
+    """Consume a whole (non-streaming) generation in an executor while watching for
+    a client disconnect, and return the accumulated text.
+
+    A non-streaming handler is a plain coroutine, and Starlette does NOT cancel it
+    when the client disconnects (unlike a StreamingResponse, whose async generator
+    it acloses - the hook the _stream_sse fix relies on). So without a cancel path,
+    an aborted request with a large/unlimited max_tokens leaves the executor thread
+    driving engine.chat_stream() to end-of-generation while holding llama.py's
+    per-model _inference_lock, blocking the NEXT request to this model (and this
+    coroutine keeps the per-model semaphore too). This is the non-streaming twin of
+    the _stream_sse cancel path (PR #540).
+
+    We poll a disconnect signal on the loop (resolved just below - NOT plain
+    request.is_disconnected(), which the app's BaseHTTPMiddleware stack defeats)
+    and, on disconnect, set a threading.Event the worker checks each token; the
+    worker then gen.close()s the chain, cascading GeneratorExit through the backend
+    wrappers into llama.py _generate, whose `with self._inference_lock` exits and
+    frees the lock now rather than at end-of-generation. Returns the partial text
+    produced before the abort (the caller's response is discarded anyway once the
+    client is gone).
+    """
+    loop = asyncio.get_running_loop()
+    cancel_event = threading.Event()
+
+    # Resolve a working disconnect poll. In the real server the endpoint sits
+    # behind BaseHTTPMiddleware, which makes request.is_disconnected() permanently
+    # False (its synthetic receive never yields http.disconnect), so
+    # _DisconnectSignalMiddleware publishes one bound to the raw receive under
+    # scope[_DISCONNECT_POLL_KEY]. Fall back to request.is_disconnected for a bare
+    # request (no middleware - unit tests, or a caller that never disconnects).
+    poll = None
+    if request is not None:
+        scope = getattr(request, "scope", None)
+        if isinstance(scope, dict):
+            poll = scope.get(_DISCONNECT_POLL_KEY)
+        if poll is None:
+            poll = getattr(request, "is_disconnected", None)
+
+    def _run() -> str:
+        gen = engine.chat_stream(messages, **gen_kwargs)
+        parts: list[str] = []
+        try:
+            for token in gen:
+                if cancel_event.is_set():
+                    break
+                parts.append(token)
+        finally:
+            # Close from THIS (suspended) worker thread so GeneratorExit propagates
+            # through the backend wrappers into llama.py _generate, whose
+            # `with self._inference_lock` then exits - freeing the lock
+            # deterministically (see _stream_sse for the fuller rationale). Closing
+            # it from the event-loop thread would race the in-flight next().
+            try:
+                gen.close()
+            except Exception:
+                from localm.debuglog import logger as _dbg
+                _dbg.exception("closing non-stream generation stream failed")
+        return "".join(parts)
+
+    fut = loop.run_in_executor(None, _run)
+
+    async def _watch_disconnect() -> None:
+        # The poll is a non-blocking peek (it cancels the receive immediately), so
+        # polling it every 0.1s is cheap. poll is None for a caller with no request
+        # / no disconnect signal, in which case this loop is an inert wait for the
+        # generation to finish.
+        try:
+            while not fut.done():
+                if poll is not None and await poll():
+                    cancel_event.set()
+                    return
+                await asyncio.sleep(0.1)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # A watcher failure must NEVER cancel a live generation; fall back to
+            # the pre-fix behaviour (run to completion) and surface why (rule 5),
+            # rather than risk truncating a good reply on a transient poll error.
+            from localm.debuglog import logger as _dbg
+            _dbg.exception("non-stream disconnect watcher failed")
+
+    watcher = asyncio.ensure_future(_watch_disconnect())
+    try:
+        return await fut
+    finally:
+        # Also stop the worker if the handler coroutine itself is cancelled (server
+        # shutdown, a timeout middleware): a no-op on the normal path, where the
+        # worker already returned and fut is done, so it cannot truncate a good
+        # reply. Then retire the watcher.
+        cancel_event.set()
+        watcher.cancel()
+        try:
+            await watcher
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
 async def _complete(
     engine: Engine,
     messages: list,
@@ -2205,10 +2365,9 @@ async def _complete(
     transcript=None,
     pipeline=None,
     ctx=None,
+    request=None,
     **gen_kwargs,
 ):
-    loop = asyncio.get_running_loop()
-
     # Call the engine's real methods directly. The previous hasattr-guarded
     # fallbacks (100 prompt tokens, 4096 capacity, an "ok" completion, 10
     # completion tokens) let a method-less mock pass through, so a broken engine
@@ -2227,13 +2386,14 @@ async def _complete(
             if changed:
                 messages = list(new_messages)
                 prompt_tokens = engine.count_messages_tokens(messages)
-    def _run():
-        return "".join(engine.chat_stream(messages, **gen_kwargs))
 
     # Serialise inference - only one request runs at a time
     async with sem:
         gen_start = time.perf_counter()
-        text = await loop.run_in_executor(None, _run)
+        # Cancelable on client disconnect so an aborted request releases the
+        # per-model _inference_lock (and this semaphore) instead of generating to
+        # end-of-budget behind the next request's back.
+        text = await _generate_full(engine, messages, request, **gen_kwargs)
         gen_elapsed = time.perf_counter() - gen_start
 
     # Outlet fully controls the returned content in the non-streaming path.

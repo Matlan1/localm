@@ -12,13 +12,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Fixed
-- **A cancelled streaming reply no longer blocks the next request:** if a client
-  disconnected in the middle of a streaming response (closed the tab, pressed
-  stop, or dropped the connection), the model kept generating the abandoned reply
-  all the way to the end while still holding that model's single-inference lock,
-  so the very next request to the same model stalled until the discarded
-  generation ran itself out. A disconnect now stops the abandoned generation
-  promptly and releases the model, so the next request starts right away.
+- **A cancelled reply no longer blocks the next request:** if a client
+  disconnected in the middle of a response (closed the tab, pressed stop, or
+  dropped the connection), the model kept generating the abandoned reply all the
+  way to the end while still holding that model's single-inference lock, so the
+  very next request to the same model stalled until the discarded generation ran
+  itself out. A disconnect now stops the abandoned generation promptly and
+  releases the model, so the next request starts right away - for both streaming
+  and plain (non-streaming) requests.
 - **Multi-GPU split fit checks:** a model too large for the single main GPU
   alone, but that fits combined across a configured multi-GPU split, was
   wrongly refused ("Not enough VRAM") when loading, and mis-badged "too big"
