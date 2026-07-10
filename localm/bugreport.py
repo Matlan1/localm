@@ -78,11 +78,18 @@ class LocalmError(Exception):
     *reason*, and diagnostic *context* for the report."""
 
     def __init__(self, summary: str, reason: str = "",
-                 context: Optional[dict] = None):
+                 context: Optional[dict] = None, *,
+                 stage: Optional[str] = None, hint: Optional[str] = None):
         super().__init__(summary)
         self.summary = summary
         self.reason = reason
         self.context = context or {}
+        # For an UPLOAD failure: WHERE it failed (offline_or_dns / unreachable /
+        # tls / timeout / server_rejected / no_endpoint / rate_limited / unknown)
+        # and a friendly, actionable *hint* to show the user. Both None for a
+        # non-upload LocalmError.
+        self.stage = stage
+        self.hint = hint
 
 
 class RateLimitedError(LocalmError):
@@ -98,7 +105,11 @@ class RateLimitedError(LocalmError):
             ra = 30
         super().__init__("the bug-report server is rate limiting reports",
                          reason=reason or f"try again in about {ra} seconds",
-                         context={"retry_after": ra})
+                         context={"retry_after": ra},
+                         stage="rate_limited",
+                         hint=(f"The bug-report server is busy right now and asked to "
+                               f"wait about {ra}s before trying again. Your report is "
+                               f"saved either way."))
         self.retry_after = ra
 
 
@@ -794,6 +805,49 @@ def _retry_after_from(headers, body_text) -> int:
     return 30
 
 
+def _classify_url_error(exc) -> tuple:
+    """(stage, hint) diagnosing WHERE a failed upload broke, from the ACTUAL error
+    only - we never contact a third-party host to test connectivity (offline-first
+    + privacy). ``stage`` is offline_or_dns / tls / timeout / unreachable / unknown;
+    ``hint`` is a friendly, actionable line (the caller adds the "report is saved /
+    email it" part)."""
+    import socket
+    import ssl
+
+    # A urllib URLError wraps the real cause in .reason (usually an OSError); unwrap
+    # so isinstance checks see gaierror/SSLError/timeout, not the URLError shell.
+    reason = getattr(exc, "reason", None)
+    inner = reason if isinstance(reason, BaseException) else exc
+
+    if isinstance(inner, socket.gaierror):
+        return ("offline_or_dns",
+                "Could not look up the bug-report server's address. You may be "
+                "offline, or a DNS/network setting is blocking the connection.")
+    if isinstance(inner, ssl.SSLError):
+        return ("tls",
+                "A secure (TLS) connection to the bug-report server could not be "
+                "established.")
+    if isinstance(inner, (TimeoutError, socket.timeout)):
+        return ("timeout",
+                "The bug-report server did not respond in time. It may be slow or "
+                "temporarily unreachable.")
+    if isinstance(inner, ConnectionError):
+        return ("unreachable",
+                "Reached the network but could not connect to the bug-report "
+                "server. It may be down, or a firewall/proxy is blocking it.")
+    if isinstance(inner, OSError):
+        txt = str(getattr(inner, "strerror", "") or inner).lower()
+        if "unreachable" in txt or "not known" in txt or "no address" in txt:
+            return ("offline_or_dns",
+                    "The network appears to be unavailable (could not reach the "
+                    "bug-report server). Check your internet connection.")
+        return ("unreachable",
+                "Could not connect to the bug-report server. It may be down, or a "
+                "firewall/proxy is blocking it.")
+    return ("unknown",
+            "The report could not be sent for an unexpected reason.")
+
+
 def upload_report(title: str, body: str, *, url: Optional[str] = None,
                   token: Optional[str] = None, timeout: float = 15.0,
                   opener=None) -> dict:
@@ -818,7 +872,10 @@ def upload_report(title: str, body: str, *, url: Optional[str] = None,
             token = cfg_token
     if not url:
         raise LocalmError("no upload endpoint is configured",
-                          reason="set bugreport_upload_url to enable the Send channel")
+                          reason="set bugreport_upload_url to enable the Send channel",
+                          stage="no_endpoint",
+                          hint="No bug-report server is configured in this build, so "
+                               "the report cannot be filed automatically.")
     payload = _json.dumps(
         {"title": (title or "localm bug report")[:200], "body": body or ""}
     ).encode("utf-8")
@@ -848,18 +905,29 @@ def upload_report(title: str, body: str, *, url: Optional[str] = None,
                     raise RateLimitedError(
                         _retry_after_from(getattr(e, "headers", None), detail),
                         reason=detail)
-                raise LocalmError("the bug-report server rejected the upload",
-                                  reason=f"HTTP {e.code}: {detail}".strip())
+                raise LocalmError(
+                    "the bug-report server rejected the upload",
+                    reason=f"HTTP {e.code}: {detail}".strip(),
+                    stage="server_rejected",
+                    hint=(f"The bug-report server received the report but rejected it "
+                          f"(HTTP {e.code}). This is likely a temporary server-side "
+                          f"issue, not your connection."))
             except (urllib.error.URLError, OSError) as e:
+                stage, hint = _classify_url_error(e)
                 raise LocalmError("could not reach the bug-report server",
-                                  reason=str(getattr(e, "reason", e)))
+                                  reason=str(getattr(e, "reason", e)),
+                                  stage=stage, hint=hint)
 
     status, raw = opener(url, payload, headers, timeout)
     if int(status) == 429:
         raise RateLimitedError(_retry_after_from(None, raw), reason=str(raw)[:300])
     if not (200 <= int(status) < 300):
-        raise LocalmError("the bug-report server rejected the upload",
-                          reason=f"HTTP {status}: {raw[:300]}".strip())
+        raise LocalmError(
+            "the bug-report server rejected the upload",
+            reason=f"HTTP {status}: {raw[:300]}".strip(),
+            stage="server_rejected",
+            hint=(f"The bug-report server rejected the report (HTTP {status}). This is "
+                  f"likely a temporary server-side issue, not your connection."))
     try:
         return _json.loads(raw) if raw.strip() else {}
     except ValueError:
