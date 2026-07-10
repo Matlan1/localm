@@ -558,20 +558,28 @@ class LlamaCpp:
             raise RuntimeError(
                 f"Failed to load model: {model_path}{hint}{suffix}")
 
+        # Model's true transformer layer count, read once here - the only place it
+        # is knowable (there is no pre-load GGUF header parser in the tree). The
+        # GGUF backend caches it (localm.model_meta) so later loads and the GUI
+        # VRAM estimate can size a partial GPU offload precisely; the clamp note
+        # below reuses it.
+        self.n_layers: Optional[int] = None
+        try:
+            actual = api.llama_model_n_layer(self._model_ptr)
+            if actual and actual > 0:
+                self.n_layers = int(actual)
+        except Exception:
+            pass  # introspection is best-effort; never block a successful load
+
         # REC-GPULAYERS-CLAMP: llama.cpp already offloads min(n_gpu_layers, actual),
         # so an over-large value is harmless - but silently clamping a SPECIFIC
         # number is confusing, so surface a message. 99 = "offload all", so skip it.
-        if 0 < n_gpu_layers < 99:
-            try:
-                actual = api.llama_model_n_layer(self._model_ptr)
-                if actual and n_gpu_layers > actual:
-                    from localm.debuglog import logger
-                    logger.info(
-                        "n_gpu_layers=%d exceeds the model's %d layers; "
-                        "offloading all %d (the extra has no effect)",
-                        n_gpu_layers, actual, actual)
-            except Exception:
-                pass  # introspection is best-effort; never block a successful load
+        if 0 < n_gpu_layers < 99 and self.n_layers and n_gpu_layers > self.n_layers:
+            from localm.debuglog import logger
+            logger.info(
+                "n_gpu_layers=%d exceeds the model's %d layers; "
+                "offloading all %d (the extra has no effect)",
+                n_gpu_layers, self.n_layers, self.n_layers)
 
         # --- create context ---
         cp = api.llama_context_default_params()

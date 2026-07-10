@@ -286,7 +286,8 @@ def _scrub_secrets(text: str) -> str:
 # credential-scrubbed before they are rendered. The API key lives in auth.key,
 # never config.json - we stay conservative regardless.
 _SAFE_CONFIG_KEYS = (
-    "binary_dir", "n_ctx", "n_ctx_max", "ctx_auto", "n_gpu_layers", "max_tokens",
+    "binary_dir", "n_ctx", "n_ctx_max", "ctx_auto", "n_gpu_layers",
+    "n_gpu_layers_auto", "max_tokens",
     "model_swap_policy", "idle_unload_seconds", "reload_llm_after_imagine",
     "port", "require_auth", "cors_origins", "mode", "chat_mode", "coder_mode",
     "net_mode", "comfy_launch_cmd", "comfy_workdir", "comfy_api_url",

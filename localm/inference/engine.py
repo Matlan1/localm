@@ -93,6 +93,7 @@ def create_backend(
             n_ctx_max=cfg.get("n_ctx_max", 16384),
             n_ctx_grow=cfg.get("n_ctx_grow", 4096),
             ctx_auto=bool(cfg.get("ctx_auto", False)),
+            n_gpu_layers_auto=bool(cfg.get("n_gpu_layers_auto", True)),
         )
 
     raise ValueError(

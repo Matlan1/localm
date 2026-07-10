@@ -13,6 +13,7 @@ from typing import Iterator, List, Optional
 
 from rich.console import Console
 
+from localm.vram import VRAM_OVERHEAD_BYTES
 from .base import BaseBackend, ModelLoadCancelled
 
 console = Console()
@@ -37,6 +38,7 @@ class GgufBackend(BaseBackend):
         n_ctx_max: Optional[int] = None,
         n_ctx_grow: int = 4096,
         ctx_auto: bool = False,
+        n_gpu_layers_auto: bool = False,
     ) -> None:
         self.model_path = str(Path(model_path).resolve())
         self.mmproj_path = mmproj_path   # multimodal projection GGUF
@@ -45,7 +47,12 @@ class GgufBackend(BaseBackend):
         self.n_ctx_max = n_ctx_max       # ceiling for dynamic growth (0/None = unlimited)
         self.n_ctx_grow = n_ctx_grow
         self.ctx_auto = ctx_auto         # derive n_ctx_max from free VRAM at load
+        # Auto-size how many layers go on the GPU from free VRAM at load, but only
+        # when n_gpu_layers is left at its "everything" default (see
+        # _effective_gpu_layers - an explicit -g is never overridden).
+        self.n_gpu_layers_auto = n_gpu_layers_auto
         self.effective_ctx_max: Optional[int] = None   # resolved ceiling of the last load
+        self.effective_gpu_layers: Optional[int] = None  # resolved gpu layers of the last load
         self._llm = None
         self._loaded = False
         self._load_cancel = None         # threading.Event to abort a load mid-flight
@@ -73,8 +80,11 @@ class GgufBackend(BaseBackend):
     #  Load / unload                                                       #
     # ------------------------------------------------------------------ #
 
-    # Rough VRAM headroom for KV cache + compute buffers beyond model weights
-    _VRAM_OVERHEAD_BYTES = int(1.5e9)
+    # Rough VRAM headroom for KV cache + compute buffers beyond model weights.
+    # Single-sourced from localm.vram so the loader, the GUI estimate, and the fit
+    # badge all reason about "does it fit" with the same number; kept as a class
+    # attribute (not read from the module directly) so tests can monkeypatch it.
+    _VRAM_OVERHEAD_BYTES = VRAM_OVERHEAD_BYTES
 
     @staticmethod
     def _free_total_vram_bytes() -> "tuple[Optional[int], Optional[int]]":
@@ -207,14 +217,30 @@ class GgufBackend(BaseBackend):
         launch failure") with nothing surfaced to the user - see
         dev-notes/ for the real-hardware repro (CHK-KVCACHE-OVERFLOW).
         """
-        if self.n_gpu_layers == 0:
+        # Use the resolved offload count when load() already picked it (auto), else
+        # the configured value (also covers a direct _check_vram() call in tests).
+        gpu_layers = (self.effective_gpu_layers
+                      if self.effective_gpu_layers is not None
+                      else self.n_gpu_layers)
+        if gpu_layers == 0:
             return  # CPU-only run, VRAM is irrelevant
         free = self._free_vram_bytes()
         if free is None:
             return  # can't measure (no torch / no GPU) - nothing useful to say
         model_bytes = self._model_bytes()
         kv_cache = self.n_ctx * self._bytes_per_token(model_bytes)
-        need = model_bytes + kv_cache + self._VRAM_OVERHEAD_BYTES
+        # Charge only the offloaded fraction of the weights: a partial load
+        # (0 < g < 99, whether auto-sized or a user's explicit -g) puts only some
+        # layers on the GPU, so it needs far less VRAM than the whole model. A
+        # full/"all" load (>= 99) charges the entire weight, as before. This is
+        # what lets an auto-sized partial load pass the check instead of being
+        # refused "cannot fit regardless".
+        if gpu_layers >= self._DEFAULT_GPU_LAYERS:
+            weights = model_bytes
+        else:
+            layers = self._cached_layer_count() or self._ASSUMED_LAYERS
+            weights = int(model_bytes * min(1.0, gpu_layers / layers))
+        need = weights + kv_cache + self._VRAM_OVERHEAD_BYTES
         ctx_hint = f"weights + a {self.n_ctx:,}-token KV cache + buffers"
         total = self._total_vram_bytes()
         if total is not None and need > total:
@@ -226,7 +252,9 @@ class GgufBackend(BaseBackend):
                 f"  Options:\n"
                 f"    - Lower the context:  -c 32768  (or smaller)\n"
                 f"    - Offload fewer layers:  -g 24  (or -g 0 for CPU-only)\n"
-                f"    - Let localm size it automatically:  "
+                f"    - Let localm auto-size GPU offload:  "
+                f"localm config n_gpu_layers_auto true\n"
+                f"    - Let localm auto-size the context:  "
                 f"localm config ctx_auto true"
             )
         if free >= need:
@@ -263,12 +291,28 @@ class GgufBackend(BaseBackend):
         grow to 8192 tokens - doubling the KV cache with, until this hook, no
         VRAM check at all (see dev-notes/, CHK-KVCACHE-OVERFLOW).
         """
-        if self.n_gpu_layers == 0:
+        # Gate on the RESOLVED offload count (auto may have chosen it), not the raw
+        # configured n_gpu_layers - otherwise an auto-sized CPU-only load
+        # (effective_gpu_layers == 0, e.g. a too-big model on a tiny card) still
+        # carries n_gpu_layers==99 and would false-raise here on the first grow
+        # even though nothing is on the GPU (twin of _check_vram's resolution).
+        gpu_layers = (self.effective_gpu_layers
+                      if self.effective_gpu_layers is not None
+                      else self.n_gpu_layers)
+        if gpu_layers == 0:
             return  # CPU-only run, VRAM is irrelevant
         free = self._free_vram_bytes()
         if free is None:
             return  # can't measure (no torch / no GPU) - nothing useful to say
         kv_cache = n_ctx * self._bytes_per_token(self._model_bytes())
+        # For a partial offload only the offloaded layers keep their KV in VRAM
+        # (offload_kqv); the CPU layers' KV lives in system RAM. Charge just that
+        # GPU fraction - mirroring _check_vram's weight fraction - so a partial
+        # auto load (now the default path for a too-big model) is not false-refused
+        # its first grow by being charged the whole KV cache.
+        if gpu_layers < self._DEFAULT_GPU_LAYERS:
+            layers = self._cached_layer_count() or self._ASSUMED_LAYERS
+            kv_cache = int(kv_cache * min(1.0, gpu_layers / layers))
         need = kv_cache + self._VRAM_OVERHEAD_BYTES
         if need <= free:
             return
@@ -336,6 +380,90 @@ class GgufBackend(BaseBackend):
             return auto
         return self.n_ctx_max
 
+    # The "offload everything" sentinel: n_gpu_layers left at this value is the
+    # signal that the user did NOT pin a specific layer count, so auto may size it.
+    _DEFAULT_GPU_LAYERS = 99
+    # Layer count assumed for a model we have never loaded (true count not cached
+    # yet). Deliberately conservative: llama.cpp offloads min(n, real_count), so
+    # overshooting is harmless (the extra is clamped - REC-GPULAYERS-CLAMP in
+    # llama.py) and undershooting only underuses VRAM; the true count is cached
+    # after the first load (model_meta) and used from then on.
+    _ASSUMED_LAYERS = 32
+
+    def _cached_layer_count(self) -> Optional[int]:
+        """The model's true transformer layer count if a prior load cached it,
+        else None (never loaded yet - the caller falls back to _ASSUMED_LAYERS)."""
+        from localm.model_meta import cached_n_layers
+        return cached_n_layers(self.model_path)
+
+    def _auto_gpu_layers(self) -> Optional[int]:
+        """Pick how many layers to offload to the GPU from free VRAM, or None when
+        VRAM is not measurable (no torch.cuda: Vulkan/Metal/CPU builds - the caller
+        then falls back honestly to the configured value instead of guessing a
+        precise offload it could not compute).
+
+        Returns 99 ("all") when the whole model plus its KV cache and overhead fit
+        in free VRAM; otherwise the largest layer count whose weight share fits the
+        GPU budget left after reserving the KV cache + overhead (conservative: the
+        KV cache is charged wholly to the GPU). 0 means even that budget is gone -
+        run entirely on CPU, still a working (slow) load, the extreme end of the
+        promised RAM offload."""
+        free = self._free_vram_bytes()
+        if free is None:
+            return None                       # unmeasurable - honest fallback (A0)
+        model = self._model_bytes()
+        if model <= 0:
+            return self._DEFAULT_GPU_LAYERS    # can't size - attempt full offload
+        kv = self.n_ctx * self._bytes_per_token(model)
+        overhead = self._VRAM_OVERHEAD_BYTES
+        if free >= model + kv + overhead:
+            return self._DEFAULT_GPU_LAYERS    # full offload fits
+        weight_budget = free - kv - overhead
+        if weight_budget <= 0:
+            return 0                           # no room even for one layer's share
+        fraction = min(max(weight_budget / model, 0.0), 1.0)
+        layers = self._cached_layer_count() or self._ASSUMED_LAYERS
+        n = int(fraction * layers)
+        return max(0, min(self._DEFAULT_GPU_LAYERS, n))
+
+    def _effective_gpu_layers(self) -> int:
+        """The n_gpu_layers this load will actually use.
+
+        Auto only acts when it is ON and the user left n_gpu_layers at the
+        "everything" default (99): an explicit value (e.g. -g 24) is honoured
+        verbatim so a deliberate choice is never silently overridden (hard-won
+        rule: never override a user's explicit selection). When auto sizes a
+        partial offload it prints a mandatory one-line notice, since the model
+        will run slower with layers on CPU. When VRAM is unmeasurable it says so
+        and attempts the configured value rather than faking a precise number."""
+        if not self.n_gpu_layers_auto:
+            return self.n_gpu_layers
+        if self.n_gpu_layers != self._DEFAULT_GPU_LAYERS:
+            return self.n_gpu_layers          # explicit choice - respect it as-is
+        auto = self._auto_gpu_layers()
+        if auto is None:
+            # Unmeasurable VRAM (no torch.cuda: Vulkan/Metal/CPU builds) is the
+            # NORMAL case on those backends, where offload via the display driver
+            # is the right default and the model usually fits fine. Keep it a
+            # discoverable debug line, not a per-load console notice that would
+            # fire on every load and read oddly on a CPU-only build - if a full
+            # offload then does not fit, the native load fails loudly with a VRAM
+            # hint (load()'s except handler), so the failure is never hidden.
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("gpu layers auto: VRAM not measurable; using configured "
+                       "n_gpu_layers=%s", self.n_gpu_layers)
+            return self.n_gpu_layers
+        if auto >= self._DEFAULT_GPU_LAYERS:
+            return auto                        # full offload fits - no scary notice
+        count = self._cached_layer_count()
+        of = f"{count}" if count else f"~{self._ASSUMED_LAYERS} (estimated)"
+        console.print(
+            f"[yellow]  gpu layers auto:[/yellow] offloading {auto}/{of} layers to "
+            f"the GPU, the rest on CPU (model too big for full GPU offload - "
+            f"slower). Set n_gpu_layers to override, or n_gpu_layers_auto false."
+        )
+        return auto
+
     def load(self) -> None:
         # Split GGUF pre-flight: all sibling parts must be present, otherwise
         # llama.cpp fails with a cryptic native error mid-load.
@@ -347,6 +475,10 @@ class GgufBackend(BaseBackend):
                 f"Split GGUF is incomplete - missing part(s): {names}. "
                 f"Re-run 'localm pull' to download all parts."
             )
+        # Resolve the effective GPU-layer count ONCE (it may probe free VRAM and
+        # print a notice), then let _check_vram and _load_native both read it - so
+        # the preflight and the actual load agree on how many layers go on the GPU.
+        self.effective_gpu_layers = self._effective_gpu_layers()
         self._check_vram()
         try:
             self._load_native()
@@ -391,16 +523,22 @@ class GgufBackend(BaseBackend):
         ) as progress:
             ctx_max = self._effective_ctx_max()
             self.effective_ctx_max = ctx_max
+            # load() resolves this before _check_vram; fall back for a direct
+            # _load_native() call (e.g. in tests) so the value is never None here.
+            gpu_layers = self.effective_gpu_layers
+            if gpu_layers is None:
+                gpu_layers = self._effective_gpu_layers()
+                self.effective_gpu_layers = gpu_layers
             cap_label = f"→{ctx_max}" if ctx_max else "→∞"
             progress.add_task(
                 f"Loading model  (ctx={self.n_ctx}{cap_label}, "
-                f"gpu_layers={self.n_gpu_layers})",
+                f"gpu_layers={gpu_layers})",
                 total=None,
             )
             self._llm = LlamaCpp(
                 model_path=self.model_path,
                 n_ctx=self.n_ctx,
-                n_gpu_layers=self.n_gpu_layers,
+                n_gpu_layers=gpu_layers,
                 n_ctx_max=ctx_max,
                 n_ctx_grow=self.n_ctx_grow,
                 mmproj_path=self.mmproj_path,   # C1: in-process vision via mtmd
@@ -410,6 +548,16 @@ class GgufBackend(BaseBackend):
             )
 
         self._loaded = True
+
+        # Remember the model's true transformer layer count (read once during the
+        # native load - the only place it is knowable) so the next load and the
+        # GUI VRAM estimate can size a partial GPU offload precisely instead of
+        # from _ASSUMED_LAYERS. Static model metadata, not chat/session content -
+        # written regardless of privacy mode (see localm.model_meta).
+        n_layers = getattr(self._llm, "n_layers", None)
+        if isinstance(n_layers, int) and n_layers > 0:
+            from localm.model_meta import store_n_layers
+            store_n_layers(self.model_path, n_layers)
 
         # VRAM usage after load - device-level driver numbers, because
         # torch's allocator counters (memory_allocated/reserved) can only
