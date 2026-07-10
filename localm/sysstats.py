@@ -5,7 +5,9 @@ Pure and NEVER raises: a probe that fails just omits its field, so the status
 bar degrades gracefully (e.g. VRAM still shows on a box without psutil). Cheap
 enough to call on a short GUI poll:
   * CPU % and RAM via psutil (the optional ``[monitor]`` extra)
-  * VRAM via localm.discover.vram_info (torch -> nvidia-smi -> Windows registry)
+  * VRAM via localm.discover.vram_capacity (combined across a configured
+    multi-GPU split, else the single main GPU - torch -> nvidia-smi ->
+    Windows registry)
   * GPU utilisation % best-effort via nvidia-smi (NVIDIA only; omitted elsewhere)
 """
 
@@ -39,10 +41,11 @@ def _cpu_ram() -> dict:
 
 
 def _vram() -> dict:
-    """{"vram": {"used"?, "total", "percent"?}} for the largest GPU, or {}."""
+    """{"vram": {"used"?, "total", "percent"?}} - combined across a configured
+    multi-GPU split, else the single main GPU, or {} when unmeasurable."""
     try:
-        from localm.discover import vram_info
-        info = vram_info()
+        from localm.discover import vram_capacity
+        info = vram_capacity()
     except Exception:
         return {}
     total = info.get("total")

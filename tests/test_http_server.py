@@ -113,6 +113,46 @@ class TestUnloadEndpoint(unittest.TestCase):
         self.assertEqual(body["vram_before_bytes"], 10 * GB)
         self.assertEqual(body["vram_after_bytes"], 20 * GB)
 
+    def test_unload_release_detected_via_combined_split_capacity(self):
+        """AUDIT-GPU-SPLIT-1: the C4 release-guard's before/after free-VRAM
+        delta must be measured against discover.vram_capacity() (combined
+        split capacity), not just the single main GPU - a model that frees
+        VRAM mostly on a NON-main split device must still be detected as
+        released. If only the main GPU's free were measured here, this
+        scenario would show no rise at all and incorrectly report
+        vram_freed=False despite VRAM genuinely being freed."""
+        from localm.config import load_config as real_load_config
+        base_cfg = real_load_config()
+        states = iter([
+            # before: GPU0 (main) 10GB free, GPU1 5GB free -> combined 15GB
+            [{"index": 0, "name": "A", "total": 16 * GB, "free": 10 * GB},
+             {"index": 1, "name": "B", "total": 16 * GB, "free": 5 * GB}],
+            # after: the model was mostly on GPU1 - GPU0 unchanged, GPU1 freed
+            # 10GB -> combined 25GB. Repeats for subsequent polls.
+            [{"index": 0, "name": "A", "total": 16 * GB, "free": 10 * GB},
+             {"index": 1, "name": "B", "total": 16 * GB, "free": 15 * GB}],
+        ])
+        last = []
+
+        def _list_gpus():
+            nonlocal last
+            last = next(states, last)
+            return last
+
+        with patch("localm.discover.list_gpus", side_effect=_list_gpus), \
+             patch("localm.config.load_config",
+                   return_value={**base_cfg, "gpu_split_indices": [0, 1]}):
+            r = self.client.post("/v1/models/unload")
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual(body["status"], "unloaded")
+        self.assertTrue(
+            body["vram_freed"],
+            "combined split free must show a rise even though the single "
+            "main GPU (10GB -> 10GB) alone never would")
+        self.assertEqual(body["vram_before_bytes"], 15 * GB)
+        self.assertEqual(body["vram_after_bytes"], 25 * GB)
+
 
 class TestLoadEndpoint(unittest.TestCase):
     def setUp(self):

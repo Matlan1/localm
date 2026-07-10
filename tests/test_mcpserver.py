@@ -205,6 +205,44 @@ class TestEngineCache:
             second = cache.get("b")   # must not hang/raise
         assert second is not None
 
+    def test_switch_release_detected_via_combined_split_capacity(self):
+        """AUDIT-GPU-SPLIT-1: the switch's before/after free-VRAM delta must be
+        measured against discover.vram_capacity() (combined split capacity),
+        not just the single main GPU - a model that frees VRAM mostly on a
+        NON-main split device must still be detected as released within the
+        real (not mocked) wait_for_vram_release poll."""
+        from localm.config import load_config as real_load_config
+        base_cfg = real_load_config()
+        GB = 1024 ** 3
+        states = iter([
+            # before: GPU0 (main) 10GB free, GPU1 5GB free -> combined 15GB
+            [{"index": 0, "name": "A", "total": 16 * GB, "free": 10 * GB},
+             {"index": 1, "name": "B", "total": 16 * GB, "free": 5 * GB}],
+            # after: freed mostly on GPU1 - GPU0 unchanged, GPU1 +10GB free
+            [{"index": 0, "name": "A", "total": 16 * GB, "free": 10 * GB},
+             {"index": 1, "name": "B", "total": 16 * GB, "free": 15 * GB}],
+        ])
+        last = []
+
+        def _list_gpus():
+            nonlocal last
+            last = next(states, last)
+            return last
+
+        logged = []
+        cache = EngineCache("m", engine_factory=_stub_engine_factory)
+        cache.get("a")
+        with patch("localm.discover.list_gpus", side_effect=_list_gpus), \
+             patch("localm.config.load_config",
+                   return_value={**base_cfg, "gpu_split_indices": [0, 1]}), \
+             patch("localm.plugins.mcpserver.server._log", logged.append):
+            second = cache.get("b")
+        assert second is not None
+        assert not any("did not rise" in m for m in logged), (
+            "combined split free must show a rise (detected quickly, no "
+            f"timeout warning) even though the single main GPU (10GB -> "
+            f"10GB) alone never would: {logged}")
+
     def test_no_default_falls_back_to_first_registered(self):
         cache = EngineCache(None, engine_factory=_stub_engine_factory)
         with patch("localm.config.load_registry",

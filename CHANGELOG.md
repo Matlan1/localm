@@ -15,9 +15,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Multi-GPU split fit checks:** a model too large for the single main GPU
   alone, but that fits combined across a configured multi-GPU split, was
   wrongly refused ("Not enough VRAM") when loading, and mis-badged "too big"
-  in model search - the pre-load check and the search/CLI/MCP fit badges only
-  ever weighed a load against one GPU's capacity, never the split's combined
-  capacity. They now correctly sum capacity across the configured split.
+  in model search - the pre-load check, the search/CLI/MCP fit badges, the
+  Settings performance-slider estimate, the scheduled-job/media-generation
+  VRAM swap decisions, model-unload VRAM-release detection, and the GUI's
+  hardware-monitor VRAM readout only ever weighed a load against one GPU's
+  capacity, never the split's combined capacity. They now correctly sum
+  capacity across the configured split.
 - **GGUF context/KV-cache VRAM checks:** loading a GGUF model with a large
   context window ignored the KV cache entirely when judging whether it would
   fit, only weighing model weights - so a model whose weights fit could still
