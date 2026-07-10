@@ -11,7 +11,23 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Added
+- **Automatic server-hang diagnostics:** an event-loop stall watchdog runs by
+  default and, if the server ever freezes, dumps every thread's stack to
+  `<home>/logs/hang_*.log` (the file is created only when a real stall happens, so
+  a healthy run leaves nothing behind). A captured trace is bundled into a bug
+  report automatically, so an intermittent "it just hung" becomes diagnosable with
+  no setup on the reporter's part. `LOCALM_HANG_WATCHDOG=0` turns it off (and `=1`
+  adds verbose asyncio slow-callback logging); a loopback-only `GET /debug/stacks`
+  returns thread and task state on demand.
+
 ### Fixed
+- **Server freezing while the system is idle:** reading GPU/VRAM state (opening
+  Settings > Performance, the Models page, or the periodic cross-instance GPU
+  heartbeat) ran a synchronous GPU driver query directly on the server's single
+  event loop; if the driver was momentarily busy or wedged, the whole web UI froze
+  even though the machine was idle. GPU probes are now time-bounded and run off the
+  event loop, so a slow or stuck driver can no longer stall the server.
 - **A cancelled reply no longer blocks the next request:** if a client
   disconnected in the middle of a response (closed the tab, pressed stop, or
   dropped the connection), the model kept generating the abandoned reply all the

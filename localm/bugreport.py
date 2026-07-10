@@ -436,6 +436,37 @@ def _recent_log_tail(home=None, pid=None, max_lines: int = 120,
         return ""
 
 
+def _recent_hang_traces(home=None, max_chars: int = 8000) -> str:
+    """The most recent event-loop hang trace (``<logs>/hang_*.log``), if the
+    always-on stall watchdog captured one - every thread's stack at the moment the
+    server froze, which is exactly what diagnoses an intermittent "it hung" report.
+    Kept HEAD-first (the first snapshot names where the loop first stuck). Home
+    paths are scrubbed. Empty when no freeze was captured. Never raises."""
+    try:
+        from pathlib import Path as _P
+        if home is None:
+            from localm.debuglog import logs_dir
+            d = logs_dir()
+        else:
+            d = _P(home) / "logs"
+        if not d.is_dir():
+            return ""
+        traces = sorted(d.glob("hang_*.log"),
+                        key=lambda p: p.stat().st_mtime, reverse=True)
+        if not traces:
+            return ""
+        text = traces[0].read_text(encoding="utf-8", errors="replace").strip()
+        if not text:
+            return ""
+        scrubbed = _scrub_secrets(text)
+        if len(scrubbed) > max_chars:
+            scrubbed = scrubbed[:max_chars] + \
+                "\n... (trace truncated - full stacks in the hang_*.log file)"
+        return scrubbed
+    except Exception:
+        return ""
+
+
 def _kv_lines(d: dict) -> list:
     """Render a flat dict as ``- key: value`` markdown lines (stable order)."""
     lines = []
@@ -536,6 +567,12 @@ def build_report(summary: str, reason: str = "",
     tail = ctx.get("recent_log_tail")
     if tail:
         parts += ["", "## Recent log (tail)", "```", _scrub_home(str(tail))[:4000], "```"]
+    hang = ctx.get("hang_traces")
+    if hang:
+        parts += ["", "## Server hang trace (event-loop stall)",
+                  "The hang watchdog captured every thread's stack when the server "
+                  "froze (the top of the main thread is the blocking call):",
+                  "```", _scrub_home(str(hang))[:8000], "```"]
 
     # Always-on in-memory breadcrumbs (INFO+; no chat content) so even a non-debug
     # report shows what the app was doing right before the problem.
@@ -668,6 +705,12 @@ def save_user_report(description: str, *, summary: str = "",
         tail = _recent_log_tail(pid=os.getpid())
         if tail:
             context["recent_log_tail"] = tail
+    # Always attach a captured hang trace when one exists (independent of
+    # include_log): it only exists if the server actually froze, and it is the
+    # single most useful thing for diagnosing a "the app hung" report.
+    hang = _recent_hang_traces()
+    if hang:
+        context["hang_traces"] = hang
     if isinstance(client, dict) and client:
         context["client"] = client
     text = build_report(summary, context=context)
@@ -1199,6 +1242,11 @@ def check_and_report_prior_crash(home=None, interactive: bool = False):
         tail = _recent_log_tail(home, pid=info.get("pid"))
         if tail:
             ctx["recent_log_tail"] = tail
+        # If the watchdog captured a freeze before the run was force-killed, attach
+        # its stacks too: a hang the user force-quit is exactly this recovery path.
+        hang = _recent_hang_traces(home)
+        if hang:
+            ctx["hang_traces"] = hang
         return report_failure(
             summary="localm server crashed (recovered on the next start)",
             reason=("the previous server run ended without a clean shutdown - a "
