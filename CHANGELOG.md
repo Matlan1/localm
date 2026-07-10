@@ -24,10 +24,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `GET /debug/stacks` returns thread and task state on demand.
 - **"Keep diagnostics for bug reports" privacy setting:** privacy mode saves
   nothing automatically, which also means a hang or crash leaves nothing to
-  report. This new Settings > Privacy toggle (off by default) keeps the diagnostic
-  bits a report needs - the hang stack trace, the restart breadcrumb log, and a
-  debug log - even in privacy mode. Code stacks and operational logs only, never
-  your chat content.
+  report. This new toggle (off by default) keeps the diagnostic bits a report
+  needs - the hang stack trace, the restart breadcrumb log, and a debug log -
+  even in privacy mode. It is available in Settings > Privacy (in-app) and as a
+  checkbox in the desktop launcher (and `--keep-diagnostics` on the command line).
+  Crucially, it keeps operational diagnostics ONLY: your chat messages and the
+  model's replies are never written to the debug log in privacy mode, even with
+  this on or with `--debug` (previously `--debug` could record raw model output).
 - **Clearer bug-report send failures:** when a bug report cannot be filed, the app
   now tells you WHERE it failed - you appear offline, the server is unreachable, a
   secure-connection problem, or the server rejected it - instead of a raw error. It

@@ -143,7 +143,7 @@ def _build_fake(launcher_mod, **overrides):
         mode="gui", model=launcher_mod.NO_MODEL_LABEL, ctx="", gpu_layers="",
         port="", privacy_global="privacy", privacy_chat=launcher_mod.USE_GLOBAL,
         privacy_coder=launcher_mod.USE_GLOBAL, no_browser=False, host_lan=False,
-        debug=False, coder_dir="", coder_yes=False,
+        debug=False, keep_diagnostics=False, coder_dir="", coder_yes=False,
     )
     base.update(overrides)
 
@@ -180,6 +180,18 @@ def test_serve_expose_still_binds_network(launcher_mod):
     fake = _build_fake(launcher_mod, mode="serve", model="m", host_lan=True)
     cmd = launcher_mod.Launcher._build_command(fake)
     assert "gui" in cmd and "--api-mode" in cmd and "-H" in cmd and "0.0.0.0" in cmd
+
+
+def test_keep_diagnostics_checkbox_passes_flag(launcher_mod):
+    """The Privacy-card "Keep diagnostics" checkbox passes --keep-diagnostics for
+    gui and serve, and nothing when it is off."""
+    for mode in ("gui", "serve"):
+        on = launcher_mod.Launcher._build_command(
+            _build_fake(launcher_mod, mode=mode, model="m", keep_diagnostics=True))
+        assert "--keep-diagnostics" in on, mode
+        off = launcher_mod.Launcher._build_command(
+            _build_fake(launcher_mod, mode=mode, model="m", keep_diagnostics=False))
+        assert "--keep-diagnostics" not in off, mode
 
 
 def test_invalid_numeric_fields(launcher_mod):
