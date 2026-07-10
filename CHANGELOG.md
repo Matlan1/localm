@@ -94,6 +94,22 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Setup:** a silent fallback during AMD ROCm asset lookup (when the upstream
   release-asset check fails) now prints a warning instead of happening
   invisibly.
+- **Log export reports real failures instead of "no logs found":** exporting logs
+  to a folder that could not be written (full disk, read-only, or a permissions
+  problem) used to report success with "No log files were found to export", hiding
+  the write failure. It now fails with the actual reason when nothing could be
+  copied, and a partial export lists the files it could not copy.
+- **`localm setup-embeddings` no longer overstates what changed:** the completion
+  message claimed memory and RAG would now use semantic search, but existing RAG
+  collections stay lexical until re-indexed with embeddings. It now says memory
+  retrieves semantically right away and names the re-index step
+  (`localm rag add <name> <path> --embed`, queried with `--embed`) that RAG
+  collections need.
+- **`localm run` stops contradicting its own auto-start:** after it tried to start
+  a background server that did not come up in time, it used to say "no server is
+  serving this directory; start one with `localm serve`". It now acknowledges the
+  timed-out start and loads the model in this process instead of advising exactly
+  what it just attempted.
 
 ### Security
 - **Privacy mode never logs chat content, even with diagnostics on.** Two

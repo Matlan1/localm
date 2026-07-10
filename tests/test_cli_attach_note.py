@@ -27,6 +27,47 @@ def test_attach_error_is_surfaced():
     assert "whoami timed out" in note
 
 
+def test_autostart_timeout_is_acknowledged():
+    # CLI-3: after a background auto-start that timed out, the note must ACKNOWLEDGE
+    # that (not tell the user "no server here; start one", which contradicts the
+    # `Starting one in the background...` line they just saw).
+    note = _attach_fallback_note(no_server=False, attach_error=None,
+                                 autostart_attempted=True)
+    assert note is not None
+    low = note.lower()
+    assert "background" in low            # acknowledges the auto-start
+    assert "in time" in low               # names the timeout
+    assert "this process" in low          # still explains the in-process fallback
+    assert "no localm server is serving this directory" not in low   # no contradiction
+
+
+def test_run_autostart_timeout_note(monkeypatch):
+    # Real path: drive the actual `run` command so run() enters the auto-start
+    # block and the poll times out. Only the external subprocess + server discovery
+    # are stubbed (fully-unmocked would spawn a real server we must not kill by
+    # port); the real run() control flow + note selection execute.
+    from unittest.mock import MagicMock
+
+    from click.testing import CliRunner
+
+    from localm.audit import SessionMode
+    from localm.cli.chat import run
+
+    monkeypatch.setattr("localm.instances.attach_target", lambda *a, **k: None)
+    monkeypatch.setattr("localm.instances.resolve_root_dir", lambda *a, **k: ".")
+    monkeypatch.setattr("subprocess.Popen", lambda *a, **k: MagicMock())
+    monkeypatch.setattr("time.sleep", lambda *a, **k: None)
+    monkeypatch.setattr("localm.audit.effective_mode", lambda *a, **k: SessionMode.LOG)
+
+    runner = CliRunner()
+    result = runner.invoke(run, ["definitely-not-a-real-model-xyz", "-p", "hi"])
+    # Collapse rich's line-wrapping so phrase assertions are wrap-proof.
+    flat = " ".join(result.output.split()).lower()
+    assert "starting one in the background" in flat          # auto-start was attempted
+    assert "background server did not come up in time" in flat   # timeout acknowledged
+    assert "no localm server is serving this directory" not in flat   # no contradiction
+
+
 def test_chat_cli_sys_unbound_error(monkeypatch):
     from click.testing import CliRunner
     from localm.cli.chat import run

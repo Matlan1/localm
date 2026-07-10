@@ -53,7 +53,9 @@ def register(app: FastAPI, ctx) -> None:
             pass
         out = dest_dir / f"localm-logs-{_time.strftime('%Y%m%d-%H%M%S')}"
         seen: set = set()
-        copied = 0
+        found = 0            # *.log candidates seen (files that DO exist)
+        copied = 0           # successfully copied
+        errors: list = []    # per-file copy failures, with the real reason
         try:
             out.mkdir(parents=True, exist_ok=True)
             used: set = set()
@@ -64,6 +66,7 @@ def register(app: FastAPI, ctx) -> None:
                     if p.resolve() in seen:
                         continue
                     seen.add(p.resolve())
+                    found += 1
                     # Two logs can share a basename across home/ and home/logs/;
                     # disambiguate so the second does not clobber the first.
                     target = p.name
@@ -75,15 +78,32 @@ def register(app: FastAPI, ctx) -> None:
                     try:
                         shutil.copy2(p, out / target)
                         copied += 1
-                    except OSError:
-                        pass
+                    except OSError as ce:
+                        # AGENTS rule 5: do NOT swallow a real copy failure into a
+                        # false "no files" success. Record the reason so the
+                        # response can report it truthfully below.
+                        errors.append(f"{p.name}: {ce}")
         except OSError as e:
             raise HTTPException(500, f"Could not write to that folder: {e}")
-        if copied == 0:
-            # Be honest: nothing was exported (no logs, or all copies failed).
-            return {"copied": 0, "dest": str(out),
+        if found == 0:
+            # Genuinely empty: there were no *.log files anywhere to export.
+            return {"copied": 0, "found": 0, "dest": str(out),
                     "message": "No log files were found to export."}
-        return {"copied": copied, "dest": str(out)}
+        if copied == 0:
+            # Files existed but every copy failed: surface the real failure with a
+            # non-200. Never report the empty-case reason here (that would hide a
+            # write failure behind a false success - AGENTS rule 5).
+            raise HTTPException(
+                500, f"Found {found} log file(s) but none could be exported: "
+                + "; ".join(errors))
+        result = {"copied": copied, "found": found, "dest": str(out)}
+        if errors:
+            # Partial success: some logs copied, some failed. Report the failures
+            # rather than silently dropping them.
+            result["warning"] = (
+                f"{len(errors)} of {found} log file(s) could not be copied: "
+                + "; ".join(errors))
+        return result
 
     @app.post("/api/comfyui/create-launcher", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def create_comfy_launcher(workdir: str):

@@ -850,8 +850,11 @@ if ($("logs-export")) {
         out.textContent = data.copied
           ? `Exported ${data.copied} log file(s) to: ${data.dest}`
           : (data.message || "No logs found to export.");
+        // A partial export reports which files failed - surface it, do not hide it.
+        if (data.warning) out.textContent += `  (${data.warning})`;
       }
-      toast(data.copied ? `Exported ${data.copied} log file(s)` : "No logs to export", !data.copied);
+      toast(data.copied ? `Exported ${data.copied} log file(s)` : "No logs to export",
+        !data.copied || !!data.warning);
     } catch (e) {
       toast("Could not export logs: " + e.message, true);
     } finally {
