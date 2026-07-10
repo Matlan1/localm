@@ -271,12 +271,15 @@ def _changelog_append_only() -> list[str]:
 # ---- check 5: raw single-resource accessor guard ----------------------------
 # Each entry maps a raw single-resource function name to the wrapper that must
 # be used instead, and the file(s) allowed to still call the raw function
-# directly - the function's own home module (definition + the wrapper's own
-# fallback calls), plus any call site that is NOT a "does this fit" capacity
-# decision (a before/after delta measurement on one device, a status-bar
-# widget deliberately reporting one device) with a documented reason. `tests/`
-# is exempt everywhere: tests legitimately call/mock the raw function directly
-# to test IT, not just its consumers.
+# directly - only the function's own home module (definition + the wrapper's
+# own fallback call) by default. `tests/` is exempt everywhere: tests
+# legitimately call/mock the raw function directly to test IT, not just its
+# consumers. Every OTHER consumer must go through the wrapper - no single-
+# device exception is granted by default; add one here only with a
+# documented reason that survives "every relevant function should be
+# multi/split-aware" as the bar (a maintainer explicitly said so once every
+# remaining single-GPU call site turned out to have no real reason to stay
+# that way - see dev-notes/gpu-split-capacity-fix/).
 #
 # Add a new entry here whenever a similar "single -> combined N resources"
 # capability ships (see dev-notes/gpu-split-capacity-fix/ for the multi-GPU
@@ -288,16 +291,6 @@ _RAW_ACCESSOR_GUARDS = {
             # home module: the definition, plus vram_capacity()'s own
             # documented fallback to the single-GPU number.
             "localm/discover.py",
-            # before/after free-VRAM DELTA measurements on one reading
-            # (detecting that an unload actually landed) - not a capacity/fit
-            # decision, so combined-vs-single does not apply.
-            "localm/inference/http_server.py",
-            "localm/plugins/mcpserver/server.py",
-            # hardware-monitor status-bar widget: deliberately reports the
-            # single main GPU's live utilisation for display, not an
-            # aggregate "does it fit" number (a combined used/total would
-            # hide which physical card is actually full).
-            "localm/sysstats.py",
         },
     },
 }

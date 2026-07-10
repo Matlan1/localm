@@ -123,8 +123,8 @@ class EngineCache:
             return self._engine
         if self._engine is not None:
             _log(f"switching model {self._loaded_name} -> {name}")
-            from localm.discover import vram_info
-            before_free = vram_info().get("free")
+            from localm.discover import vram_capacity
+            before_free = vram_capacity().get("free")
             try:
                 self._engine.unload()
             except Exception as e:
@@ -139,7 +139,7 @@ class EngineCache:
             # no-op and behaves as before.
             from localm.vram import wait_for_vram_release
             released, _final = wait_for_vram_release(
-                lambda: vram_info().get("free"), before_bytes=before_free)
+                lambda: vram_capacity().get("free"), before_bytes=before_free)
             if released is False:
                 _log(f"warning: VRAM free did not rise after unloading "
                      f"{self._loaded_name} within the timeout - loading {name} anyway")

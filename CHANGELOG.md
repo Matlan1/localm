@@ -25,12 +25,35 @@ permanent public record of what shipped and are never rewritten; the in-progress
   event loop; if the driver was momentarily busy or wedged, the whole web UI froze
   even though the machine was idle. GPU probes are now time-bounded and run off the
   event loop, so a slow or stuck driver can no longer stall the server.
+- **A cancelled streaming reply no longer blocks the next request:** if a client
+  disconnected in the middle of a streaming response (closed the tab, pressed
+  stop, or dropped the connection), the model kept generating the abandoned reply
+  all the way to the end while still holding that model's single-inference lock,
+  so the very next request to the same model stalled until the discarded
+  generation ran itself out. A disconnect now stops the abandoned generation
+  promptly and releases the model, so the next request starts right away.
 - **Multi-GPU split fit checks:** a model too large for the single main GPU
   alone, but that fits combined across a configured multi-GPU split, was
   wrongly refused ("Not enough VRAM") when loading, and mis-badged "too big"
-  in model search - the pre-load check and the search/CLI/MCP fit badges only
-  ever weighed a load against one GPU's capacity, never the split's combined
-  capacity. They now correctly sum capacity across the configured split.
+  in model search - the pre-load check, the search/CLI/MCP fit badges, the
+  Settings performance-slider estimate, the scheduled-job/media-generation
+  VRAM swap decisions, model-unload VRAM-release detection, and the GUI's
+  hardware-monitor VRAM readout only ever weighed a load against one GPU's
+  capacity, never the split's combined capacity. They now correctly sum
+  capacity across the configured split.
+- **GGUF context/KV-cache VRAM checks:** loading a GGUF model with a large
+  context window ignored the KV cache entirely when judging whether it would
+  fit, only weighing model weights - so a model whose weights fit could still
+  ask the driver to reserve a KV cache far bigger than VRAM, which on some
+  drivers either silently spilled into slow system memory or crashed the GPU
+  driver with nothing shown to the user (it looked like the model "loaded"
+  then went silent on the first prompt). The preflight now accounts for the
+  KV cache at the requested context size and refuses clearly, before the
+  native load, when it cannot fit; conversation growth (which can double the
+  context on literally the first prompt, since the default reply budget
+  already exceeds the default starting context) is now checked the same way,
+  so a request that would overflow VRAM fails with a clear message instead of
+  silently returning nothing.
 - **Phone pairing with a VPN active:** a VPN client's virtual tunnel adapter can
   become the machine's default route and hand out an ordinary private address,
   which used to get picked as the "LAN" address for the Companion pairing card

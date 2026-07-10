@@ -77,21 +77,36 @@ class GgufBackend(BaseBackend):
     _VRAM_OVERHEAD_BYTES = int(1.5e9)
 
     @staticmethod
-    def _free_vram_bytes() -> Optional[int]:
-        """Free VRAM in bytes on the configured main GPU device (device 0 when
-        unset - see main_gpu_index / discover.resolve_main_gpu_index), or None
-        when not measurable."""
+    def _free_total_vram_bytes() -> "tuple[Optional[int], Optional[int]]":
+        """(free, total) bytes on the configured main GPU device (device 0 when
+        unset - see main_gpu_index / discover.resolve_main_gpu_index), or
+        (None, None) when not measurable. Shared by _free_vram_bytes() and
+        _total_vram_bytes() so both read the same device in one call."""
         try:
             import torch
             if torch.cuda.is_available():
                 from localm.config import load_config
                 from localm.discover import resolve_main_gpu_index
                 idx = resolve_main_gpu_index(load_config().get("main_gpu_index"))
-                free, _total = torch.cuda.mem_get_info(idx)
-                return int(free)
+                free, total = torch.cuda.mem_get_info(idx)
+                return int(free), int(total)
         except Exception:
             pass
-        return None
+        return None, None
+
+    @staticmethod
+    def _free_vram_bytes() -> Optional[int]:
+        """Free VRAM in bytes on the configured main GPU device, or None when
+        not measurable."""
+        return GgufBackend._free_total_vram_bytes()[0]
+
+    @staticmethod
+    def _total_vram_bytes() -> Optional[int]:
+        """Total VRAM in bytes on the configured main GPU device, or None when
+        not measurable. The hard physical ceiling: unlike free VRAM, nothing
+        can be freed to raise it, so a load that needs more than this can
+        never fit on this device - see _check_vram()."""
+        return GgufBackend._free_total_vram_bytes()[1]
 
     @staticmethod
     def _vram_levels() -> list:
@@ -163,31 +178,109 @@ class GgufBackend(BaseBackend):
             pass  # advisory only - fall through to the generic hint
         return "another GPU app is holding memory (ComfyUI, a browser, another model)."
 
+    @staticmethod
+    def _bytes_per_token(model_bytes: int) -> int:
+        """KV bytes per token, estimated from the model's size class (larger
+        models have more layers and wider KV heads; sliding-window models need
+        less, so this stays deliberately conservative). Shared by
+        _check_vram()'s preflight KV-cache estimate and _auto_ctx_max()'s
+        VRAM-derived ceiling so both reason about a load's KV cost the same
+        way."""
+        return min(max(model_bytes // 100_000, 16_000), 512_000)
+
     def _check_vram(self) -> None:
         """
-        Warn - loudly and with options - when the model is unlikely to fit
-        in the currently free VRAM. Never blocks: partial offload and system
-        RAM spill can still work, and the estimate is approximate.
+        Warn - loudly and with options - when the model is unlikely to fit in
+        currently free VRAM, and refuse outright when even a clean, otherwise-
+        empty card could not hold weights plus the requested context's KV
+        cache (a "can never fit" case, distinct from "something else is using
+        the GPU" - freeing VRAM elsewhere would not help).
+
+        ``need`` includes the KV cache for ``self.n_ctx`` - the base context
+        size _load_native() actually passes to context creation, regardless of
+        ctx_auto (which only governs the growth ceiling, not this initial
+        size). A weights-only estimate stayed silent for a large -c/n_ctx
+        request, so a load could pass this check with room to spare yet still
+        ask the driver to reserve a KV cache many times bigger than VRAM. On
+        ROCm that reservation has been observed to either silently spill into
+        slow system memory or crash the GPU driver outright ("unspecified
+        launch failure") with nothing surfaced to the user - see
+        dev-notes/ for the real-hardware repro (CHK-KVCACHE-OVERFLOW).
         """
         if self.n_gpu_layers == 0:
             return  # CPU-only run, VRAM is irrelevant
         free = self._free_vram_bytes()
         if free is None:
             return  # can't measure (no torch / no GPU) - nothing useful to say
-        need = self._model_bytes() + self._VRAM_OVERHEAD_BYTES
+        model_bytes = self._model_bytes()
+        kv_cache = self.n_ctx * self._bytes_per_token(model_bytes)
+        need = model_bytes + kv_cache + self._VRAM_OVERHEAD_BYTES
+        ctx_hint = f"weights + a {self.n_ctx:,}-token KV cache + buffers"
+        total = self._total_vram_bytes()
+        if total is not None and need > total:
+            raise RuntimeError(
+                f"Context too large for available VRAM: this load needs "
+                f"roughly {need / 1024**3:.1f} GB ({ctx_hint}) but this GPU "
+                f"only has {total / 1024**3:.1f} GB total - freeing other "
+                f"VRAM will not help, it cannot fit regardless.\n"
+                f"  Options:\n"
+                f"    - Lower the context:  -c 32768  (or smaller)\n"
+                f"    - Offload fewer layers:  -g 24  (or -g 0 for CPU-only)\n"
+                f"    - Let localm size it automatically:  "
+                f"localm config ctx_auto true"
+            )
         if free >= need:
             return
         console.print(
             f"[yellow]⚠ Low VRAM:[/yellow] this model needs roughly "
-            f"[bold]{need / 1024**3:.1f} GB[/bold] (weights + buffers) but only "
+            f"[bold]{need / 1024**3:.1f} GB[/bold] ({ctx_hint}) but only "
             f"[bold]{free / 1024**3:.1f} GB[/bold] is free.\n"
             f"  [dim]Likely cause: {self._vram_holder_hint()}[/dim]\n"
             f"  Options:\n"
             f"    • Free VRAM first (close the other app, or POST "
             f"/v1/models/unload on its server)\n"
+            f"    • Lower the context:  [bold]-c 32768[/bold]  (or smaller)\n"
             f"    • Offload fewer layers:  [bold]-g 24[/bold]  "
             f"(or [bold]-g 0[/bold] for CPU-only)\n"
             f"  Continuing anyway - load may be slow or fail."
+        )
+
+    def _check_context_fit(self, n_ctx: int) -> None:
+        """Preflight for GROWING the live context to *n_ctx* tokens after the
+        model is already loaded - wired as LlamaCpp's ``vram_check`` hook,
+        consulted by ``_prefill_fresh_context()`` before it (re)creates a
+        bigger context. Model weights are already resident by this point (this
+        runs after ``_check_vram()``'s one-time load gate), so unlike that
+        gate this must NOT add weights to ``need`` again - only the NEW KV
+        cache plus buffers has to fit in currently free VRAM; re-adding
+        weights would double-count them and false-refuse an ordinary grow.
+
+        This closes the same class of gap _check_vram() closed for the
+        initial load, at the call site that actually needs it in practice:
+        _prefill_fresh_context() runs on literally the first prompt for
+        anyone on default settings, because the default max_tokens (4096)
+        already exceeds the default base n_ctx (4096), forcing an immediate
+        grow to 8192 tokens - doubling the KV cache with, until this hook, no
+        VRAM check at all (see dev-notes/, CHK-KVCACHE-OVERFLOW).
+        """
+        if self.n_gpu_layers == 0:
+            return  # CPU-only run, VRAM is irrelevant
+        free = self._free_vram_bytes()
+        if free is None:
+            return  # can't measure (no torch / no GPU) - nothing useful to say
+        kv_cache = n_ctx * self._bytes_per_token(self._model_bytes())
+        need = kv_cache + self._VRAM_OVERHEAD_BYTES
+        if need <= free:
+            return
+        raise RuntimeError(
+            f"Context too large for available VRAM: growing this "
+            f"conversation to {n_ctx:,} tokens needs roughly "
+            f"{need / 1024**3:.1f} GB of additional KV cache + buffers, but "
+            f"only {free / 1024**3:.1f} GB is free.\n"
+            f"  Options:\n"
+            f"    - Start a new chat (clears the context)\n"
+            f"    - Ask for shorter replies (lower max_tokens)\n"
+            f"    - Lower the context ceiling:  localm config n_ctx_max 8192"
         )
 
     # Bounds for VRAM-derived context ceilings
@@ -218,10 +311,7 @@ class GgufBackend(BaseBackend):
         budget = free - model - self._VRAM_OVERHEAD_BYTES
         if budget <= 0:
             return max(self.n_ctx, self._AUTO_CTX_MIN)
-        # Heuristic: ~1 byte of KV per token per 100KB of model weights,
-        # clamped so tiny and huge models stay in a plausible band.
-        bytes_per_token = min(max(model // 100_000, 16_000), 512_000)
-        auto = budget // bytes_per_token
+        auto = budget // self._bytes_per_token(model)
         auto = (auto // 1024) * 1024
         hi = auto if not capped else min(self._AUTO_CTX_MAX, auto)
         return int(max(self._AUTO_CTX_MIN, hi))
@@ -315,6 +405,7 @@ class GgufBackend(BaseBackend):
                 n_ctx_grow=self.n_ctx_grow,
                 mmproj_path=self.mmproj_path,   # C1: in-process vision via mtmd
                 cancel_event=self._load_cancel,  # abort mid-load if superseded
+                vram_check=self._check_context_fit,  # guard context GROWTH too
                 verbose=False,
             )
 
