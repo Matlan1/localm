@@ -113,11 +113,14 @@ class TestFreshContextVramCheck:
     initial load, just at a different, unguarded call site. An optional
     vram_check callback (wired by GgufBackend._check_context_fit) closes it."""
 
-    def test_vram_check_called_with_target_ctx_before_growing(self):
+    def test_vram_check_called_with_target_and_current_ctx_before_growing(self):
         llm = _llm()
         llm._ctx_ptr = 222
+        llm._ctx_capacity = 4096
         calls = []
-        llm._vram_check = lambda n_ctx: calls.append(n_ctx)
+        # The hook receives (target, current_ctx) and returns where the KV cache
+        # goes (True=VRAM, False=RAM, None=default), charging only the NET growth.
+        llm._vram_check = lambda n_ctx, current=0: calls.append((n_ctx, current))
         mock_api = MagicMock()
         cp = MagicMock()
         mock_api.llama_context_default_params.return_value = cp
@@ -126,27 +129,77 @@ class TestFreshContextVramCheck:
         mock_api.llama_batch_init.side_effect = fake_batch_init
         with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
             llm._prefill_fresh_context(list(range(100)), needed=5000)
-        assert calls == [8192]   # the rounded-up target, matching cp.n_ctx
+        assert calls == [(8192, 4096)]   # rounded-up target + the live ctx size
 
-    def test_vram_check_veto_preserves_old_context(self):
-        # A refusal must leave the OLD, still-working context alone rather
-        # than freeing it first and only THEN discovering the replacement
-        # cannot fit - that would leave the conversation with no context at
-        # all instead of a smaller one that still works.
+    def test_vram_check_false_puts_kv_cache_in_system_ram(self):
+        # When the hook returns False (KV cache does not fit VRAM), _prefill keeps
+        # the FULL window (target unchanged) but creates the context with
+        # offload_kqv False so the KV cache lives in system RAM - a degrade, not a
+        # shrink, not an abort.
+        llm = _llm()
+        llm._ctx_ptr = 222
+        llm._ctx_capacity = 4096
+        llm._vram_check = lambda n_ctx, current=0: False
+        mock_api = MagicMock()
+        cp = MagicMock()
+        mock_api.llama_context_default_params.return_value = cp
+        mock_api.llama_init_from_model.return_value = 444
+        mock_api.llama_decode.return_value = 0
+        mock_api.llama_batch_init.side_effect = fake_batch_init
+        with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
+            llm._prefill_fresh_context(list(range(100)), needed=5000)
+        assert cp.n_ctx == 8192          # FULL window kept (not shrunk)
+        assert cp.offload_kqv is False   # KV cache placed in system RAM
+
+    def test_vram_check_true_keeps_kv_cache_in_vram(self):
+        llm = _llm()
+        llm._ctx_ptr = 222
+        llm._ctx_capacity = 4096
+        llm._vram_check = lambda n_ctx, current=0: True
+        mock_api = MagicMock()
+        cp = MagicMock()
+        mock_api.llama_context_default_params.return_value = cp
+        mock_api.llama_init_from_model.return_value = 444
+        mock_api.llama_decode.return_value = 0
+        mock_api.llama_batch_init.side_effect = fake_batch_init
+        with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
+            llm._prefill_fresh_context(list(range(100)), needed=5000)
+        assert cp.n_ctx == 8192
+        assert cp.offload_kqv is True    # KV cache stays in VRAM (fast)
+
+    def test_vram_check_exception_preserves_old_context(self):
+        # Defensive ordering: the hook is consulted BEFORE the live context is
+        # freed, so even an unexpected exception in it leaves the OLD, still-
+        # working context intact rather than destroying it first.
         llm = _llm()
         llm._ctx_ptr = 222
 
-        def _refuse(n_ctx):
-            raise RuntimeError(f"Context too large for available VRAM: {n_ctx}")
+        def _boom(n_ctx, current=0):
+            raise RuntimeError("hook blew up")
 
-        llm._vram_check = _refuse
+        llm._vram_check = _boom
         mock_api = MagicMock()
         with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
-            with pytest.raises(RuntimeError, match="too large"):
+            with pytest.raises(RuntimeError, match="blew up"):
                 llm._prefill_fresh_context(list(range(100)), needed=5000)
         assert llm._ctx_ptr == 222          # old context untouched
-        mock_api.llama_free.assert_not_called()
-        mock_api.llama_init_from_model.assert_not_called()
+
+    def test_context_creation_failure_surfaces_clean_last_resort_error(self):
+        # Last resort: if the native context cannot be created even with the KV
+        # cache in system RAM (llama_init_from_model returns NULL), surface a clear
+        # "not enough memory" message, not a bare failure or a crash.
+        llm = _llm()
+        llm._ctx_ptr = 222
+        llm._ctx_capacity = 4096
+        llm._vram_check = lambda n_ctx, current=0: False   # KV to RAM (VRAM was tight)
+        mock_api = MagicMock()
+        cp = MagicMock()
+        mock_api.llama_context_default_params.return_value = cp
+        mock_api.llama_init_from_model.return_value = 0    # NULL: allocation failed
+        with patch("localm.inference.backends.llamacpp.llama.api", mock_api):
+            with pytest.raises(RuntimeError, match="Not enough memory"):
+                llm._prefill_fresh_context(list(range(100)), needed=5000)
+        assert cp.offload_kqv is False     # it did try the system-RAM path first
 
     def test_no_vram_check_configured_is_a_noop(self):
         # Backward compat: a LlamaCpp built without a vram_check (the default,

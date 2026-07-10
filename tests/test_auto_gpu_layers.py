@@ -189,40 +189,39 @@ class TestCheckVramPartial:
 # --------------------------------------------------------------------------- #
 
 class TestCheckContextFitAutoAware:
-    def test_auto_resolved_cpu_load_does_not_false_raise_on_grow(self, tmp_path):
+    def test_auto_resolved_cpu_load_does_not_act_on_grow(self, tmp_path):
         # The MAJOR regression: an auto-sized CPU-only load (effective 0) still
         # carries n_gpu_layers==99, so a grow check gated on n_gpu_layers would
-        # raise "context too large" even though NOTHING is on the GPU. It must
-        # gate on effective_gpu_layers and early-return.
+        # act even though NOTHING is on the GPU. It must gate on
+        # effective_gpu_layers and early-return None (leave the target as-is).
         b = _model(tmp_path, 12 * GB, n_gpu_layers=99, auto=True)
         b.effective_gpu_layers = 0                     # what load() resolves to
         with patch.object(GgufBackend, "_free_vram_bytes", return_value=100 * 1024 ** 2):
-            b._check_context_fit(8192)                 # must NOT raise (CPU-only)
+            assert b._check_context_fit(8192, current_ctx=4096) is None   # CPU-only
 
     def test_partial_offload_charges_only_kv_fraction_on_grow(self, tmp_path):
         # A partial offload keeps only its layers' KV in VRAM. Charging the WHOLE
-        # KV would false-refuse a grow that actually fits the GPU fraction.
+        # KV delta would wrongly send to RAM a grow that fits the GPU fraction.
         b = _model(tmp_path, 20 * GB, n_gpu_layers=99, auto=True)
         b.effective_gpu_layers = 16                    # 16/32 assumed -> half KV
-        # free chosen so full KV+overhead would exceed it but half KV+overhead fits.
-        kv_full = 8192 * GgufBackend._bytes_per_token(20 * GB)
-        ov = GgufBackend._VRAM_OVERHEAD_BYTES
-        free = int(kv_full * 0.5 + ov + 50 * 1024 ** 2)   # room for half, not full
-        assert kv_full + ov > free                      # full would raise...
+        bpt = GgufBackend._bytes_per_token(20 * GB)
+        delta_full = (8192 - 4096) * bpt               # if it charged the FULL fraction
+        free = int(delta_full * 0.5 + 10 * 1024 ** 2)  # room for the half-delta, not the full
+        assert delta_full > free                        # full-fraction delta would not fit...
         with patch.object(GgufBackend, "_free_vram_bytes", return_value=free):
-            b._check_context_fit(8192)                  # ...half must not raise
+            # ...but half the delta fits VRAM, so keep the KV cache there (True).
+            assert b._check_context_fit(8192, current_ctx=4096) is True
 
-    def test_full_offload_still_charges_whole_kv_on_grow(self, tmp_path):
-        # Control: a full/pinned load (effective 99) still charges the whole KV,
-        # so a genuine oversize grow is still refused (no regression to the guard).
+    def test_full_offload_uses_ram_for_an_oversize_grow_instead_of_raising(self, tmp_path):
+        # A full/pinned load (effective 99) charges the whole KV delta; an oversize
+        # grow that will not fit VRAM keeps the full window with its KV cache in
+        # system RAM (return False) - a degrade, NOT a raise, NOT a shrink.
         b = _model(tmp_path, 20 * GB, n_gpu_layers=99, auto=False)
         b.effective_gpu_layers = 99
-        kv_full = 8192 * GgufBackend._bytes_per_token(20 * GB)
-        ov = GgufBackend._VRAM_OVERHEAD_BYTES
-        free = int(kv_full * 0.5 + ov)                  # not enough for the full KV
+        bpt = GgufBackend._bytes_per_token(20 * GB)
+        free = int((8192 - 4096) * bpt * 0.5)          # not enough for the full delta
         with patch.object(GgufBackend, "_free_vram_bytes", return_value=free):
-            with pytest.raises(RuntimeError, match="too large"):
-                b._check_context_fit(8192)
+            assert b._check_context_fit(8192, current_ctx=4096) is False
 
 
 # --------------------------------------------------------------------------- #

@@ -1091,9 +1091,17 @@ class LlamaCpp:
         native call already ran.
         """
         target = self._target_ctx(needed)
+        offload_kqv = True
         vram_check = getattr(self, "_vram_check", None)
         if vram_check is not None:
-            vram_check(target)
+            # Ask WHERE this context's KV cache must live (it charges only the NET KV
+            # growth - the old context's KV is reclaimed when we free it below). If it
+            # does not fit VRAM, keep the FULL window but put the KV cache in system
+            # RAM (slower) rather than shrinking the window or refusing - a degrade,
+            # not an abort, so a model that can run always runs.
+            decision = vram_check(target, self._ctx_capacity)
+            if decision is False:
+                offload_kqv = False
 
         if self._ctx_ptr:
             api.llama_free(self._ctx_ptr)
@@ -1104,11 +1112,17 @@ class LlamaCpp:
         cp.n_ctx       = target
         cp.n_batch     = min(cp.n_ctx, 2048)
         cp.n_ubatch    = cp.n_batch   # micro-batch must match so prefill fits in one call
-        cp.offload_kqv = True
+        cp.offload_kqv = offload_kqv  # False -> KV cache in system RAM (VRAM was tight)
 
         self._ctx_ptr = api.llama_init_from_model(self._model_ptr, cp)
         if not self._ctx_ptr:
-            raise RuntimeError("Failed to (re)create llama context")
+            # Last resort: it did not fit even with the KV cache in system RAM
+            # (offload_kqv set False above when VRAM was tight). Surface it clearly.
+            raise RuntimeError(
+                f"Not enough memory to create a {target:,}-token context, even with "
+                f"the KV cache in system RAM. Start a new chat, lower n_ctx_max, or "
+                f"free some memory."
+            )
         self._ctx_capacity = cp.n_ctx
         # Update the tokenizer's ctx reference
         self._tokenizer._ctx = self._ctx_ptr
