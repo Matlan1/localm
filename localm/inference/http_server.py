@@ -466,11 +466,11 @@ async def unload_all_models() -> dict:
     original inline implementation."""
     global _active_model_name, _engine, _inference_sem
     loop = asyncio.get_running_loop()
-    from localm.discover import vram_info
+    from localm.discover import vram_capacity
     from localm.vram import wait_for_vram_release
 
     def _free():
-        return vram_info().get("free")
+        return vram_capacity().get("free")
 
     before = _free()
     unloaded_models = []
@@ -524,7 +524,7 @@ async def unload_one_model(name: str) -> dict:
     outright should check the registry themselves before calling this."""
     global _active_model_name, _engine, _inference_sem
     loop = asyncio.get_running_loop()
-    from localm.discover import vram_info
+    from localm.discover import vram_capacity
     from localm.vram import wait_for_vram_release
 
     engine = _engines.get(name)
@@ -532,7 +532,7 @@ async def unload_one_model(name: str) -> dict:
         return {"status": "already_unloaded", "model": name}
 
     def _free():
-        return vram_info().get("free")
+        return vram_capacity().get("free")
 
     before = _free()
     sem = _inference_sems.setdefault(name, asyncio.Semaphore(1))
