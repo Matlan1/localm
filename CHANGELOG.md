@@ -40,6 +40,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   where a server-side path is useless). Both the WebUI and `localm bug-report`.
 
 ### Fixed
+- **Launcher model selector lists only chat models:** the desktop launcher's model
+  dropdown listed every registered model, including non-LLM ones (embedding /
+  text-encoder / VAE / LoRA / diffusion components, or an unclassified `unknown`
+  entry) that cannot be launched as a chat model. It now shows only LLM models,
+  matching the rule the Models page already uses.
 - **`localm doctor` no longer cries "CPU mode only" when your GPU is in use:**
   doctor decided GPU capability from `nvidia-smi` / `rocm-smi` / torch alone, none
   of which see localm's default GPU paths - Vulkan (Intel/NVIDIA/AMD via the
