@@ -17,20 +17,46 @@ from fastapi.testclient import TestClient
 from localm.inference.http_server import create_app
 
 
+def test_hang_watchdog_env_semantics(monkeypatch):
+    """On by default (so a tester needs no setup); 0/false/off opts out; 1/true/on
+    also turns on the verbose extras."""
+    from localm import debuglog
+
+    monkeypatch.delenv("LOCALM_HANG_WATCHDOG", raising=False)
+    assert debuglog.hang_watchdog_active() is True      # default ON
+    assert debuglog.hang_watchdog_verbose() is False
+
+    for off in ("0", "false", "off", "no", "OFF"):
+        monkeypatch.setenv("LOCALM_HANG_WATCHDOG", off)
+        assert debuglog.hang_watchdog_active() is False, off
+        assert debuglog.hang_watchdog_verbose() is False, off
+
+    for on in ("1", "true", "on", "YES"):
+        monkeypatch.setenv("LOCALM_HANG_WATCHDOG", on)
+        assert debuglog.hang_watchdog_active() is True, on
+        assert debuglog.hang_watchdog_verbose() is True, on
+
+    monkeypatch.delenv("LOCALM_HANG_WATCHDOG_SECS", raising=False)
+    assert debuglog.hang_watchdog_threshold() == 10.0   # conservative default
+    monkeypatch.setenv("LOCALM_HANG_WATCHDOG_SECS", "3")
+    assert debuglog.hang_watchdog_threshold() == 3.0
+    monkeypatch.setenv("LOCALM_HANG_WATCHDOG_SECS", "0.5")
+    assert debuglog.hang_watchdog_threshold() == 2.0    # floored
+
+
 def test_watchdog_dumps_stacks_on_stall(tmp_path, monkeypatch):
     from localm.inference import http_server as hs
     trace = tmp_path / "hang.log"
     # Freeze the heartbeat far in the past so the loop looks permanently stalled;
     # the watchdog thread reads this module global every second.
     monkeypatch.setattr(hs, "_hb_monotonic", 0.0)
-    stop, thread, fh = hs._start_hang_watchdog(
+    stop, thread = hs._start_hang_watchdog(
         threshold=0.2, trace_path=trace, poll=0.05)
     try:
         time.sleep(0.4)     # several 0.05s polls: the watchdog observes + dumps
     finally:
         stop.set()
-        thread.join(timeout=2)
-        fh.close()
+        thread.join(timeout=2)      # the thread flushes + closes its file on exit
     text = trace.read_text(encoding="utf-8", errors="replace")
     assert "LOCALM HANG WATCHDOG" in text, text
     assert "stalled" in text
@@ -40,11 +66,13 @@ def test_watchdog_dumps_stacks_on_stall(tmp_path, monkeypatch):
 
 
 def test_watchdog_quiet_while_loop_ticks(tmp_path, monkeypatch):
-    """No stall -> no dump. A fresh heartbeat must not trip the watchdog."""
+    """No stall -> no dump, and (lazy file) NO trace file created at all. A healthy
+    run - the common case, since the watchdog is on by default - must leave nothing
+    behind."""
     from localm.inference import http_server as hs
     trace = tmp_path / "hang.log"
     monkeypatch.setattr(hs, "_hb_monotonic", time.monotonic())
-    stop, thread, fh = hs._start_hang_watchdog(
+    stop, thread = hs._start_hang_watchdog(
         threshold=0.3, trace_path=trace, poll=0.05)
     try:
         # Keep the heartbeat fresh across many watchdog polls (lag stays < 0.3s).
@@ -54,8 +82,7 @@ def test_watchdog_quiet_while_loop_ticks(tmp_path, monkeypatch):
     finally:
         stop.set()
         thread.join(timeout=2)
-        fh.close()
-    assert trace.read_text(encoding="utf-8", errors="replace") == ""
+    assert not trace.exists(), "a healthy run must not create a hang trace file"
 
 
 @pytest.mark.anyio
@@ -66,7 +93,7 @@ async def test_watchdog_catches_a_real_event_loop_block(tmp_path, monkeypatch):
     from localm.inference import http_server as hs
     trace = tmp_path / "hang.log"
     hb = asyncio.create_task(hs._hang_heartbeat_loop())
-    stop, thread, fh = hs._start_hang_watchdog(
+    stop, thread = hs._start_hang_watchdog(
         threshold=1.0, trace_path=trace, poll=0.1)
     try:
         await asyncio.sleep(0.3)     # heartbeat ticks; lag stays low
@@ -80,7 +107,6 @@ async def test_watchdog_catches_a_real_event_loop_block(tmp_path, monkeypatch):
             pass
         stop.set()
         thread.join(timeout=2)
-        fh.close()
     text = trace.read_text(encoding="utf-8", errors="replace")
     assert "LOCALM HANG WATCHDOG" in text, text
 

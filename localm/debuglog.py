@@ -261,24 +261,41 @@ def logs_dir() -> Path:
 # synchronous driver/subprocess/IO call), the WHOLE server freezes while the box
 # looks idle. The watchdog (wired in http_server.lifespan) runs a plain thread
 # OFF the loop that dumps every thread's stack to a file when the loop stops
-# ticking, so the next intermittent freeze is captured instead of lost. Opt-in
-# via LOCALM_HANG_WATCHDOG so it costs nothing unless a user is chasing a hang.
+# ticking, so an intermittent freeze is captured instead of lost.
+#
+# It is ON BY DEFAULT: a non-technical tester never has to set anything, and its
+# steady-state cost is ~one wakeup/second on a background thread (the trace file
+# is opened LAZILY, only if a real stall happens, so a healthy run leaves nothing
+# behind). LOCALM_HANG_WATCHDOG=0/false/off turns it off; =1/true/on ALSO enables
+# the verbose extras (asyncio debug + slow-callback logging).
 _HANG_ENV = "LOCALM_HANG_WATCHDOG"
 _HANG_SECS_ENV = "LOCALM_HANG_WATCHDOG_SECS"
+_HANG_OFF = frozenset({"0", "false", "off", "no"})
+_HANG_ON = frozenset({"1", "true", "on", "yes"})
 
 
-def hang_watchdog_enabled() -> bool:
-    return bool(os.environ.get(_HANG_ENV))
+def hang_watchdog_active() -> bool:
+    """Whether the event-loop stall watchdog runs. ON unless explicitly disabled
+    (LOCALM_HANG_WATCHDOG=0/false/off), so a tester's freeze is captured with no
+    setup on their part."""
+    return os.environ.get(_HANG_ENV, "").strip().lower() not in _HANG_OFF
+
+
+def hang_watchdog_verbose() -> bool:
+    """Whether the extra, noisier diagnostics (asyncio debug mode + slow-callback
+    logging) are on. Explicit opt-in only (LOCALM_HANG_WATCHDOG=1/true/on)."""
+    return os.environ.get(_HANG_ENV, "").strip().lower() in _HANG_ON
 
 
 def hang_watchdog_threshold() -> float:
     """Seconds the event loop may go without a heartbeat before it is declared
     stalled and stacks are dumped. Floored at 2s so a normal slow callback does
-    not trip it; default 5s."""
+    not trip it; default 10s (conservative, since it runs by default - a real
+    hang is indefinite, so a higher bar only skips brief transient stalls)."""
     try:
-        return max(2.0, float(os.environ.get(_HANG_SECS_ENV, "5")))
+        return max(2.0, float(os.environ.get(_HANG_SECS_ENV, "10")))
     except ValueError:
-        return 5.0
+        return 10.0
 
 
 def hang_trace_path() -> Path:
