@@ -457,6 +457,29 @@ class TestListGpusSafety:
         assert second[0]["free"] == 7, "second call returned a stale (cached) free"
         assert calls["n"] == 2, "a call was served from cache instead of re-probing"
 
+    def test_thread_start_failure_degrades_and_resets_guard(self, monkeypatch):
+        """If the probe thread cannot be spawned (OS thread exhaustion), the call
+        must NOT propagate a 500 and must NOT leave the in-flight guard stuck True
+        (which would freeze GPU detection for the process lifetime with no
+        self-heal). It degrades to last-known-good and re-arms for a later retry."""
+        from localm import discover
+
+        good = [{"index": 0, "name": "A", "total": 8, "free": 8}]
+        monkeypatch.setattr("localm.discover._list_gpus_probe", lambda: list(good))
+        assert list_gpus() == good      # record last-known-good
+
+        class _BoomThread:
+            def __init__(self, *a, **k):
+                pass
+
+            def start(self):
+                raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr("localm.discover.threading.Thread", _BoomThread)
+        result = list_gpus()            # must not raise
+        assert result == good           # degraded to last-known-good
+        assert discover._gpu_probe_inflight is False   # re-armed for a later retry
+
     def test_serves_last_known_good_when_probe_wedges(self, monkeypatch):
         import threading
         import time

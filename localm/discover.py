@@ -367,7 +367,17 @@ def list_gpus(*, deadline: float = _GPU_PROBE_DEADLINE) -> list:
         result["value"] = value
         done.set()
 
-    threading.Thread(target=_run, name="localm-gpu-probe", daemon=True).start()
+    try:
+        threading.Thread(target=_run, name="localm-gpu-probe", daemon=True).start()
+    except Exception as e:
+        # Could not spawn the probe thread (e.g. OS thread exhaustion). Reset the
+        # in-flight guard so a LATER call can retry (never leave it stuck True with
+        # no thread to clear it), surface it at debug (rule 5), and degrade to the
+        # last-known-good reading rather than propagating a 500 to the caller.
+        with _gpu_probe_lock:
+            _gpu_probe_inflight = False
+        logger.debug("list_gpus: could not start probe thread: %s", e)
+        return list(_gpu_last_good) if _gpu_last_good is not None else []
     if done.wait(deadline):
         # Fresh probe finished in time: return ITS result (never a cached one).
         v = result.get("value")

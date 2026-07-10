@@ -755,14 +755,17 @@ def _start_hang_watchdog(threshold: float, trace_path, *, poll: float = 1.0):
     fh = open(trace_path, "a", buffering=1, encoding="utf-8", errors="backslashreplace")
 
     def _run() -> None:
-        last_dump = 0.0
+        last_dump = None
         while not stop.wait(poll):
             lag = time.monotonic() - _hb_monotonic
             if lag < threshold:
                 continue
             now = time.monotonic()
             # Throttle: a long freeze yields a handful of snapshots, not one/sec.
-            if now - last_dump < max(30.0, threshold * 3):
+            # `is not None` (not a 0.0 sentinel): time.monotonic() is boot-relative,
+            # so a real 0.0 baseline would wrongly suppress the FIRST dump within the
+            # first ~30s of uptime.
+            if last_dump is not None and now - last_dump < max(30.0, threshold * 3):
                 continue
             last_dump = now
             try:
