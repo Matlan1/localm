@@ -436,3 +436,80 @@ def compute_backends_available() -> bool:
     lost. This is the AGENTS.md rule-5 gate for runtime provisioning."""
     load_lib()
     return bool(_compute_backends_ok)
+
+
+# ggml_backend_dev_type values (ggml-backend.h): the class of device the runtime
+# will run ops on. A GPU build registers a GPU (or ACCEL) device ALONGSIDE the
+# CPU one; a cpu build registers only CPU. So "any device whose type is not CPU"
+# is the honest test for whether localm actually runs inference on the GPU -
+# independent of nvidia-smi/rocm-smi/torch, which never see the Vulkan, Metal or
+# bundled-ROCm paths (the doctor "CPU mode only" false-negative, audit doctor-1).
+GGML_DEV_TYPE_CPU = 0
+GGML_DEV_TYPE_GPU = 1
+GGML_DEV_TYPE_ACCEL = 2
+
+
+def compute_devices() -> "List[tuple]":
+    """The ggml compute DEVICES the provisioned runtime registers, as a list of
+    ``(name, type)`` where *type* follows ggml_backend_dev_type (0=CPU, 1=GPU,
+    2=ACCEL). Loads the library first (idempotent, which also registers the
+    backends), so this reports the devices a real model load would actually use.
+
+    Returns ``[]`` when the ggml device-registry symbols are unavailable (an
+    older build without ``ggml_backend_dev_*``); the caller then has no
+    device-level signal and must fall back to the provisioned-backend name."""
+    load_lib()
+    binary_dir = runtime_binary_dir()
+    # The registry-query symbols live in ggml.dll on a split build, or in the
+    # main library on a monolithic one - gather every handle that might export
+    # them (same candidate set as _register_ggml_backends).
+    handles: List[ctypes.CDLL] = []
+    if _loaded_lib is not None:
+        handles.append(_loaded_lib)
+    if binary_dir is not None:
+        try:
+            for p in sorted(binary_dir.glob(_ggml_glob())):
+                try:
+                    handles.append(ctypes.CDLL(str(p)))
+                except OSError:
+                    pass
+        except OSError:
+            pass
+
+    def _sym(sym_name: str):
+        for h in handles:
+            fn = getattr(h, sym_name, None)
+            if fn is not None:
+                return fn
+        return None
+
+    cnt = _sym("ggml_backend_dev_count")
+    get = _sym("ggml_backend_dev_get")
+    name_fn = _sym("ggml_backend_dev_name")
+    type_fn = _sym("ggml_backend_dev_type")
+    if not (cnt and get and name_fn and type_fn):
+        return []
+    cnt.restype = ctypes.c_size_t
+    get.restype = ctypes.c_void_p
+    get.argtypes = [ctypes.c_size_t]
+    name_fn.restype = ctypes.c_char_p
+    name_fn.argtypes = [ctypes.c_void_p]
+    type_fn.restype = ctypes.c_int
+    type_fn.argtypes = [ctypes.c_void_p]
+
+    devices: "List[tuple]" = []
+    try:
+        n = int(cnt())
+    except Exception:
+        return []
+    for i in range(n):
+        try:
+            dev = get(i)
+            raw = name_fn(dev)
+            dname = raw.decode("utf-8", "replace") if raw else f"device{i}"
+            devices.append((dname, int(type_fn(dev))))
+        except Exception:
+            # One unreadable device must not lose the others (fail honest per
+            # device, not silent for the whole probe).
+            continue
+    return devices
