@@ -11,6 +11,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-07-10
+
 ### Added
 - **Automatic server-hang diagnostics:** an event-loop stall watchdog runs by
   default and, if the server ever freezes, dumps every thread's stack to
@@ -395,6 +397,7 @@ First tagged release. A self-contained, offline local-LLM platform.
 - The NVIDIA GPU path is validated by design and CI-adjacent testing; the primary
   development hardware is AMD.
 
-[Unreleased]: https://github.com/Matlan1/localm/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/Matlan1/localm/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/Matlan1/localm/releases/tag/v0.1.2
 [0.1.1]: https://github.com/Matlan1/localm/releases/tag/v0.1.1
 [0.1.0]: https://github.com/Matlan1/localm/releases/tag/v0.1.0
