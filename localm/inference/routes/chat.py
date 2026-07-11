@@ -207,7 +207,13 @@ def register(app: FastAPI, ctx) -> None:
                 return base64.b64encode(buf).decode("ascii")
             return vec
 
-        total_tokens = sum(engine.count_tokens(t) for t in texts)
+        # Off the event loop: count_tokens is a native tokenizer call PER input, and
+        # `input` is only bounded by the 160 MB body cap (millions of short strings),
+        # so summing it on the single-threaded loop would freeze every other request
+        # for the whole batch - an event-loop-block DoS. Offload it (the embed above
+        # already runs in an executor).
+        total_tokens = await loop.run_in_executor(
+            None, lambda: sum(engine.count_tokens(t) for t in texts))
         return {
             "object": "list",
             "data": [
