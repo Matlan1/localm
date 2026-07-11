@@ -27,6 +27,18 @@ from localm.plugins.gui.web import (AliasRequest, LoadModelRequest,
                                     UnloadModelRequest, consume_pull_grant)
 
 
+def _require_registered(model: str, registry: dict | None = None) -> dict:
+    """Raise 404 unless *model* is in the registry (GUI-2: the same guard was
+    repeated verbatim across five route handlers). Returns the registry, so a
+    caller that needs it afterward (model_alias) doesn't load it twice."""
+    from localm.config import load_registry
+    if registry is None:
+        registry = load_registry()
+    if model not in registry:
+        raise HTTPException(404, f"Model not registered: {model}")
+    return registry
+
+
 def register(app: FastAPI, ctx) -> None:
     active_model = ctx.active_model
     switch_model = ctx.switch_model
@@ -108,9 +120,7 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/api/models/load", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def gui_load_model(req: LoadModelRequest):
-        from localm.config import load_registry
-        if req.model not in load_registry():
-            raise HTTPException(404, f"Model not registered: {req.model}")
+        _require_registered(req.model)
         # Route every switch through the coordinator (switch_engine) so a new
         # selection PREEMPTS an in-flight load instead of queuing behind it. The
         # coordinator returns the authoritative status: loaded, already_active, or
@@ -132,9 +142,7 @@ def register(app: FastAPI, ctx) -> None:
         button. With `model` set, unloads only that one, leaving any other
         loaded models untouched - the GUI's per-row Unload button."""
         if req.model:
-            from localm.config import load_registry
-            if req.model not in load_registry():
-                raise HTTPException(404, f"Model not registered: {req.model}")
+            _require_registered(req.model)
             return await unload_one_model(req.model)
         return await unload_all_models()
 
@@ -241,9 +249,7 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/api/models/remove", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def model_remove(req: RemoveModelRequest, request: Request):
-        from localm.config import load_registry
-        if req.model not in load_registry():
-            raise HTTPException(404, f"Model not registered: {req.model}")
+        _require_registered(req.model)
         if req.model == active_model():
             raise HTTPException(409, "Cannot remove the active model - switch first")
         job = jobs.start_cli("remove", ["rm", req.model, "--yes"],
@@ -252,10 +258,7 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/api/models/alias", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def model_alias(req: AliasRequest):
-        from localm.config import load_registry
-        registry = load_registry()
-        if req.model not in registry:
-            raise HTTPException(404, f"Model not registered: {req.model}")
+        registry = _require_registered(req.model)
         if req.alias in registry:
             raise HTTPException(409, f"Name already taken: {req.alias}")
         from localm.model_manager import alias_model
@@ -272,10 +275,8 @@ def register(app: FastAPI, ctx) -> None:
         """Change a registered model's type (the one-click set-type control). A
         type='unknown' model is not auto-loaded as chat but stays runnable by name;
         this corrects a mis-detected or bulk-imported model's type."""
-        from localm.config import load_registry
         from localm.model_manager import MODEL_TYPES, set_model_type
-        if req.model not in load_registry():
-            raise HTTPException(404, f"Model not registered: {req.model}")
+        _require_registered(req.model)
         if req.model_type not in MODEL_TYPES:
             raise HTTPException(
                 400, f"Invalid type: {req.model_type}. "
@@ -300,28 +301,39 @@ def register(app: FastAPI, ctx) -> None:
             return 502          # HF unreachable
         return 422              # bad repo / no GGUF files / bad format token
 
+    async def _run_discover(fn):
+        """Run *fn* off the event loop; map DiscoverError to its HTTP status
+        (GUI-3: discover_search/discover_files shared this try/except)."""
+        from localm.discover import DiscoverError
+        loop = asyncio.get_running_loop()
+        try:
+            return await loop.run_in_executor(get_plugin_executor(), fn)
+        except DiscoverError as e:
+            raise HTTPException(_discover_status(e), str(e))
+
+    async def _vram_total():
+        """Off-thread vram_capacity() plus its extracted 'total' bytes, both
+        of which discover_search/discover_files feed into fit_label()."""
+        from localm.discover import vram_capacity
+        loop = asyncio.get_running_loop()
+        vram = await loop.run_in_executor(get_plugin_executor(), vram_capacity)
+        return vram, vram.get("total")
+
     @app.get("/api/discover/search", dependencies=[Depends(require_scope(scopes.MODELS_READ))])
     async def discover_search(q: str = "", limit: int = 20, formats: str = "gguf"):
         # `formats` is a CSV of {gguf, hf} from the search-page toggles. Empty
         # tokens are dropped; hf_search raises DiscoverError if none stay valid.
         # hf_backend_available lets the GUI warn (not block) that a transformers
         # model needs the .[gpu] extra to RUN, though it can still be downloaded.
-        from localm.discover import (DiscoverError, fit_label,
-                                     hf_backend_available, hf_search, vram_capacity)
+        from localm.discover import fit_label, hf_backend_available, hf_search
         wanted = [f.strip() for f in formats.split(",") if f.strip()]
-        loop = asyncio.get_running_loop()
-        try:
-            results = await loop.run_in_executor(
-                get_plugin_executor(),
-                lambda: hf_search(q, limit=limit, formats=wanted))
-        except DiscoverError as e:
-            raise HTTPException(_discover_status(e), str(e))
-        vram = await loop.run_in_executor(get_plugin_executor(), vram_capacity)
+        results = await _run_discover(
+            lambda: hf_search(q, limit=limit, formats=wanted))
         # Attach a VRAM fit badge to results that carry a size estimate (HF results
         # with safetensors param metadata). GGUF results are sized per-file in the
         # /discover/files expander instead. fit_label yields "" when VRAM is unknown;
         # a result with no size estimate keeps no fit (the GUI shows "size unknown").
-        total = vram.get("total")
+        vram, total = await _vram_total()
         for r in results:
             if r.get("size_bytes"):
                 r["fit"] = fit_label(r["size_bytes"], total)
@@ -330,16 +342,9 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.get("/api/discover/files", dependencies=[Depends(require_scope(scopes.MODELS_READ))])
     async def discover_files(repo: str):
-        from localm.discover import (DiscoverError, fit_label, hf_gguf_files,
-                                     vram_capacity)
-        loop = asyncio.get_running_loop()
-        try:
-            files = await loop.run_in_executor(
-                get_plugin_executor(), lambda: hf_gguf_files(repo))
-        except DiscoverError as e:
-            raise HTTPException(_discover_status(e), str(e))
-        vram = await loop.run_in_executor(get_plugin_executor(), vram_capacity)
-        total = vram.get("total")
+        from localm.discover import fit_label, hf_gguf_files
+        files = await _run_discover(lambda: hf_gguf_files(repo))
+        vram, total = await _vram_total()
         models = []
         mmprojs = []
         for f in files:
