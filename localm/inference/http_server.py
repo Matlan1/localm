@@ -60,6 +60,17 @@ _inference_sems: dict[str, asyncio.Semaphore] = {}
 _engine: Engine | None = None
 _inference_sem: asyncio.Semaphore | None = None
 
+# The server's running event loop, captured once at lifespan startup so an OFF-loop
+# worker thread (notably the jobs runner, which runs on a run_in_executor thread) can
+# submit a coroutine back ONTO it via asyncio.run_coroutine_threadsafe. Used to route
+# a shared-engine unload through the guarded unload_one_model ON the loop, where
+# get_engine and the synchronous request _pin also run - the event loop is the
+# serialization point that makes eviction safe (a bare off-loop engine.unload() races
+# get_engine's fast path and ignores the in-flight pin). None until a real server
+# lifespan runs (a bare create_app() test app / headless import never sets it), so an
+# off-loop caller detects "no loop" and degrades safely instead of racing the registry.
+_server_loop: "asyncio.AbstractEventLoop | None" = None
+
 # Preemptive model switching (see switch_engine). _switch_desired = most-recent
 # switch request; _switch_loading = model whose load is in flight; _switch_cancel
 # aborts it. Touched only on the event-loop thread inside switch_engine, except the
@@ -1647,7 +1658,11 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        global _inference_sem, _inference_sems, _active_model_name
+        global _inference_sem, _inference_sems, _active_model_name, _server_loop
+        # Publish the running loop so off-loop worker threads (the jobs runner) can
+        # route a shared-engine unload back onto it via run_coroutine_threadsafe -
+        # see unload_one_model and the _server_loop comment above.
+        _server_loop = asyncio.get_running_loop()
         if _active_model_name:
             _inference_sem = asyncio.Semaphore(1)
             _inference_sems[_active_model_name] = _inference_sem
@@ -1785,6 +1800,10 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                     from localm.debuglog import logger as _dbg
                     _dbg.debug("gpu-registry cleanup on shutdown failed: %s", e)
                 _gpu_coord = None
+            # The loop is stopping - stop advertising it so a late off-loop caller
+            # falls back to the safe "no loop" path instead of a dead loop reference
+            # (_server_loop is already declared global at the top of lifespan).
+            _server_loop = None
             _audit.close()
 
     app = FastAPI(
