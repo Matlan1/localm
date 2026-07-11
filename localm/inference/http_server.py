@@ -245,8 +245,8 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
     async with sem:
         if preempt and _switch_desired != name:
             return {"status": "superseded", "model": name, "by": _switch_desired}
-            
-        if name in _engines and _engines[name].loaded:
+
+        if name in _engines and _engines[name].loaded and getattr(_engines[name], "unloading", False) is not True:
             if name in _engines_lru:
                 _engines_lru.remove(name)
             _engines_lru.append(name)
@@ -337,7 +337,16 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                     if candidate == name:
                         continue  # never evict the model we are loading
                     candidate_engine = _engines.get(candidate)
-                    if candidate_engine is not None and getattr(candidate_engine, "active_requests", 0) == 0:
+                    # Skip an engine another unload path is already mid-freeing
+                    # (unloading is True): those paths keep it in _engines_lru until
+                    # AFTER the native free completes, so without this guard the
+                    # eviction could select it and call _backend.unload() a SECOND
+                    # time concurrently (a double free of one native context - the
+                    # per-model semaphore does not serialise it, since eviction takes
+                    # no victim sem). active_requests==0 alone does not catch this.
+                    if (candidate_engine is not None
+                            and getattr(candidate_engine, "active_requests", 0) == 0
+                            and getattr(candidate_engine, "unloading", False) is not True):
                         evict_name = candidate
                         break
 
@@ -394,23 +403,53 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
 
                 evict_engine = _engines[evict_name]
                 free_before = free_vram
+                # Defensive re-check right before we commit (approach (a) of the
+                # pin-during-unload fix, WITHOUT its victim-semaphore - that would
+                # reintroduce the two-switch lock-ordering deadlock below). The LRU
+                # scan above already required active_requests==0 and there is no
+                # await between it and here, so this cannot currently fire; it is a
+                # guard so a future await in the scan cannot silently reopen the
+                # window. If it became pinned, abandon this candidate and re-scan.
+                if getattr(evict_engine, "active_requests", 0) != 0:
+                    continue
+
+                # Detach the victim from the live registry BEFORE the native free,
+                # not after (the pin-arrives-during-the-unload-await fix, BUG-9b).
                 # Safe to unload without the victim's own semaphore: active_requests
                 # == 0 means no request is pinned on it (a request pins its engine
                 # for its whole lifetime - AUDIT-CRIT-1), so no decode races the
-                # native free. Taking the victim sem while holding the target sem
-                # would also risk a two-switch lock-ordering deadlock.
-                await loop.run_in_executor(None, evict_engine.unload)
-                # Guarded removal: the unload above is an await, so a concurrent
-                # evictor (two API loads of different models can pick the SAME idle
-                # victim - get_engine loads preempt=False, so they coexist) or an
-                # idle/explicit unload may have already removed evict_name during the
-                # yield. A bare `del`/`list.remove` would then raise KeyError/
-                # ValueError out through the chat route as a 500. pop/guard is safe
-                # and matches unload_all_models / _idle_unload_once.
+                # free; taking the victim sem while holding the target sem would risk
+                # a two-switch lock-ordering deadlock. But active_requests alone does
+                # NOT stop a QUEUED request pinning the victim DURING the unload await
+                # (it pins lock-free, after the check passed): while await unload()
+                # yields the loop, get_engine's fast path would still see the victim
+                # loaded+registered and pin a doomed engine, which then gets freed out
+                # from under it and silently auto-reloaded (VRAM over-subscription /
+                # a tight-box 500). Removing it from _engines first closes that window
+                # - a queued request now misses the fast path and gets a fresh,
+                # VRAM-checked reload via switch_engine - and means a concurrent
+                # switch_engine(evict_name) rebuilds a fresh engine instead of reusing
+                # (and racing load() against) this backend object mid-free. The flag
+                # is belt-and-suspenders for any stale reference already resolved.
+                # Removal stays pop/guarded (BUG-9a): even pre-await, a concurrent
+                # idle/explicit unload could have popped the victim already.
+                evict_engine.unloading = True
                 _engines.pop(evict_name, None)
                 if evict_name in _engines_lru:
                     _engines_lru.remove(evict_name)
                 _inference_sems.pop(evict_name, None)
+                # If the victim was the active/compat engine, drop those pointers too,
+                # so a concurrent get_engine back-compat re-import cannot resurrect the
+                # just-detached victim mid-free and nothing keeps serving a being-freed
+                # engine as active. switch_engine sets them to the newly-loaded model
+                # at the end (or leaves them cleared if the load fails - correct, the
+                # old active model is gone). The other unload paths already do this.
+                if _active_model_name == evict_name:
+                    _active_model_name = None
+                if _engine is evict_engine:
+                    _engine = None
+                    _inference_sem = None
+                await loop.run_in_executor(None, evict_engine.unload)
 
                 # Wait for the native VRAM free to land before re-checking, so the
                 # next iteration does not see a stale-low reading and over-evict
@@ -504,7 +543,21 @@ async def get_engine(model_name: str, *, load: bool = True) -> Engine:
                 msg += f" Registered models in your library: {', '.join(registered)}. Use 'localm pull' to add a new model."
             raise HTTPException(404, msg)
 
-    if name in _engines and _engines[name].loaded:
+    # A name that resolved to nothing (an empty/"localm" request with no active AND
+    # no default model - e.g. `gui --no-model` with a populated registry, or the
+    # transient window during an active-model eviction/unload where _active_model_name
+    # was just cleared) must be an honest 503, not fall through to switch_engine(None)
+    # -> get_model_info(None) -> Path(None) TypeError -> HTTP 500.
+    if not name:
+        raise HTTPException(503, "No model is loaded and none was specified. "
+                            "Load a model first or name one explicitly.")
+
+    # `not unloading`: never hand back (and let the caller pin) an engine that an
+    # eviction/unload path is mid-freeing - that is the pin-arrives-during-the-
+    # unload-await race. An engine flagged unloading falls through to switch_engine
+    # below, which reloads it cleanly under its per-model semaphore (the unloader
+    # holds that semaphore for the native free, so the reload serializes AFTER it).
+    if name in _engines and _engines[name].loaded and getattr(_engines[name], "unloading", False) is not True:
         if name in _engines_lru:
             _engines_lru.remove(name)
         _engines_lru.append(name)
@@ -566,11 +619,20 @@ async def unload_all_models() -> dict:
             skipped_in_use.append(name)
             continue
         sem = _inference_sems.setdefault(name, asyncio.Semaphore(1))
-        async with sem:
-            await loop.run_in_executor(None, engine.unload)
-            unloaded_models.append(name)
-            if name in _engines_lru:
-                _engines_lru.remove(name)
+        # Flag BEFORE acquiring the semaphore so no request that arrives after the
+        # pin check above can take get_engine's fast path and pin this engine while
+        # we free it (the pin-arrives-during-the-unload-await window, BUG-9b); such
+        # a request now blocks on the same semaphore and reloads cleanly afterwards.
+        # Cleared in finally so the kept-in-_engines engine reloads lazily.
+        engine.unloading = True
+        try:
+            async with sem:
+                await loop.run_in_executor(None, engine.unload)
+                unloaded_models.append(name)
+                if name in _engines_lru:
+                    _engines_lru.remove(name)
+        finally:
+            engine.unloading = False
 
     # Update compatibility pointers - but NOT if the active engine was a pinned one
     # we deliberately left loaded (clearing it would strand the in-flight request's
@@ -640,10 +702,19 @@ async def unload_one_model(name: str) -> dict:
 
     before = _free()
     sem = _inference_sems.setdefault(name, asyncio.Semaphore(1))
-    async with sem:
-        await loop.run_in_executor(None, engine.unload)
-        if name in _engines_lru:
-            _engines_lru.remove(name)
+    # Flag BEFORE acquiring the semaphore so no request that arrives after the pin
+    # check above can fast-path-pin this engine while we free it (the pin-arrives-
+    # during-the-unload-await window, BUG-9b); such a request blocks on the same
+    # semaphore and reloads cleanly afterwards. Cleared in finally so the
+    # kept-in-_engines engine reloads lazily.
+    engine.unloading = True
+    try:
+        async with sem:
+            await loop.run_in_executor(None, engine.unload)
+            if name in _engines_lru:
+                _engines_lru.remove(name)
+    finally:
+        engine.unloading = False
 
     was_active = _active_model_name == name
     if was_active:
@@ -754,7 +825,16 @@ async def _idle_unload_once(ttl: int) -> bool:
                 continue
                 
             idle_s = int(time.monotonic() - last_act)
-            await loop.run_in_executor(None, engine.unload)
+            # Flag for the duration of the native free so no request that slips in
+            # after the active_requests recheck above can take get_engine's fast
+            # path and pin this engine while it is being freed (the pin-arrives-
+            # during-the-unload-await window, BUG-9b). Cleared in finally so the
+            # kept-in-_engines engine reloads lazily on the next request.
+            engine.unloading = True
+            try:
+                await loop.run_in_executor(None, engine.unload)
+            finally:
+                engine.unloading = False
 
             # Keep the (now-unloaded) Engine in _engines so the next request
             # reloads it lazily with its ORIGINAL constructor settings (n_ctx /
