@@ -21,8 +21,11 @@ MED-21  A per-member extraction error was appended into the indexed text as
 import bz2
 import gzip
 import io
+import lzma
 import tarfile
 import zipfile
+
+import pytest
 
 from localm.rag import extract
 from localm.rag.extract import extract_bytes
@@ -99,7 +102,7 @@ def test_single_bzip2_file_extracts_inner_text(monkeypatch):
 
 def test_nested_single_stream_compression_is_bounded():
     """A file that is a single compressed stream wrapped many times over
-    (gzip(gzip(gzip(...)))) must be refused with a clean ExtractError once the
+    (gzip(gzip(gzip(...)))) must be REFUSED with a clean ExtractError once the
     nesting passes the depth bound, NOT recurse unboundedly.
 
     The single-stream fallback in _extract_tar_or_stream re-enters extract_bytes
@@ -109,24 +112,23 @@ def test_nested_single_stream_compression_is_bounded():
     upload / extract routes (a decompression-amplification DoS). The depth bound
     (MAX_EXTRACT_DEPTH) is small, so testing just past it stays fast (nesting
     deep enough to hit the recursion limit is O(n^2) to even build, because each
-    level re-probes the whole nest as a possible tarball)."""
+    level re-probes the whole nest as a possible tarball).
+
+    This asserts the REFUSAL (pytest.raises), which is what makes it a real
+    regression guard: without the depth bound, this shallow nesting extracts
+    silently (no error) at every level, so the test would FAIL; a stray
+    RecursionError would not match ExtractError and would fail the test too."""
     from localm.rag.extract import ExtractError, MAX_EXTRACT_DEPTH
-    depth = MAX_EXTRACT_DEPTH + 30        # comfortably past the bound, still fast
+    depth = MAX_EXTRACT_DEPTH + 5         # past the bound; small nest keeps it fast
     for name, comp in (("bomb.gz", gzip.compress),
                        ("bomb.bz2", bz2.compress),
-                       ("bomb.xz", __import__("lzma").compress)):
+                       ("bomb.xz", lzma.compress)):
         data = b"the innermost text file content\n" * 4
         for _ in range(depth):
             data = comp(data)
         assert len(data) < 200_000, f"{name}: nesting stayed bomb-shaped"
-        try:
+        with pytest.raises(ExtractError):
             extract_bytes(data, name)
-        except ExtractError:
-            pass                          # refused cleanly at the bound - correct
-        except RecursionError:
-            raise AssertionError(
-                f"{name}: nested single-stream compression recursed unboundedly "
-                "(RecursionError) instead of a clean ExtractError")
 
 
 def test_single_level_compression_still_extracts_after_depth_bound():
