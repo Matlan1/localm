@@ -18,12 +18,14 @@ Design constraints that shaped this package:
   needs a third-party parser (pypdf, the ``[rag]`` extra).
 """
 
+from .bm25 import BM25
 from .chunk import chunk_text
 from .extract import (EXTRACTABLE_SUFFIXES, ExtractError, classify_format,
                       extract_bytes, extract_text, sniff_text_format)
 from .store import Collection, collection_names, delete_collection, rag_dir
 
 __all__ = [
+    "BM25",
     "Collection",
     "ExtractError",
     "EXTRACTABLE_SUFFIXES",

@@ -40,7 +40,6 @@ _DEFAULT_NAME = "localm"
 # A single DNS label: ASCII letters, digits, hyphen; <=63 chars; no leading or
 # trailing hyphen. Anything else in a configured name is folded to a hyphen.
 _LABEL_STRIP_RE = re.compile(r"[^a-z0-9-]")
-_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 # ``tailscale status --json`` can hang if the daemon is wedged; bound it so a
 # broken Tailscale never stalls server startup.

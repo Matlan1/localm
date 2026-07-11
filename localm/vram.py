@@ -10,7 +10,6 @@ endpoint separately verifies VRAM was reclaimed before the media model loads
 """
 from __future__ import annotations
 
-import os
 import time
 from typing import Any, Callable, Optional
 
@@ -188,14 +187,8 @@ def unload_chat_for_media(job: Any, self_url: str, media_label: str) -> bool:
     *media_label* names the caller ("image"/"music"/"video") for the messages."""
     job.push({"type": "line", "text": "Freeing VRAM: unloading the chat model..."})
     try:
-        import requests as _rq
-        headers = {}
-        key = os.environ.get("LOCALM_API_KEY")
-        if key:
-            headers["Authorization"] = f"Bearer {key}"
-        from localm import tls as _tls
-        resp = _rq.post(f"{self_url}/models/unload", headers=headers, timeout=300,
-                        verify=_tls.requests_verify(self_url))
+        from localm.selfclient import self_request
+        resp = self_request("POST", "/models/unload", timeout=300, base_url=self_url)
         if not resp.ok:
             job.push({"type": "line", "text":
                       f"Could not unload the chat model (HTTP {resp.status_code}) - "
@@ -248,14 +241,8 @@ def reload_chat_after_media(job: Any, self_url: str, s: dict, backend: Any,
         return
     job.push({"type": "line", "text": "Reloading the chat model..."})
     try:
-        import requests as _rq
-        headers = {}
-        key = os.environ.get("LOCALM_API_KEY")
-        if key:
-            headers["Authorization"] = f"Bearer {key}"
-        from localm import tls as _tls
-        _rq.post(f"{self_url}/models/load", headers=headers, timeout=300,
-                 verify=_tls.requests_verify(self_url))
+        from localm.selfclient import self_request
+        self_request("POST", "/models/load", timeout=300, base_url=self_url)
         job.push({"type": "line", "text": "Chat model ready."})
     except Exception as e:
         job.push({"type": "line", "text": f"Reload deferred to the next message ({e})."})

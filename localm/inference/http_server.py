@@ -1397,12 +1397,12 @@ def principal_id(request: Request) -> Optional[str]:
     token, source = _request_token(request)
     if not token or not token.strip():
         return None
-    if source == "cookie":
-        from localm import sessions
-        rec = sessions.lookup(token)
-        if rec:
-            return rec.get("key_hash")
-        return None
+    # Route through _principal_from_token for BOTH sources (AUTH-NETWORK-4):
+    # a cookie session for a non-ADMIN key must be re-validated against the
+    # live keystore the same way a bearer token is on every request, or a
+    # revoked/expired key's still-resident session can keep resolving a key
+    # hash here even though the same cookie is already rejected everywhere
+    # else auth is enforced.
     prin = _principal_from_token(token, source)
     if prin is not None:
         held, key_hash, _ = prin
@@ -2932,29 +2932,30 @@ def _protocol_messages_to_dicts(messages: List[Message]) -> list:
     return result
 
 
-def serve(engine: Engine, host: str = "127.0.0.1", port: int = 8642,
-          ssl_certfile: Optional[str] = None,
-          ssl_keyfile: Optional[str] = None,
-          project: Optional[str] = None,
-          isolated: bool = False) -> None:
-    """Start the server - blocks until Ctrl+C.
+def run_advertised(app, host: str, port: int, *, mode: str,
+                    ssl_certfile: Optional[str] = None,
+                    ssl_keyfile: Optional[str] = None,
+                    project: Optional[str] = None,
+                    isolated: bool = False,
+                    log_level: Optional[str] = None) -> None:
+    """Advertise *app* in the instance registry and serve it - blocks until
+    Ctrl+C.
 
-    When ``ssl_certfile`` / ``ssl_keyfile`` are given (built-in TLS, NET-1), the
-    server speaks HTTPS on this port; a plain-HTTP request to it then fails the
-    TLS handshake (effectively refused) rather than crossing the network in
-    cleartext.
+    This is the shared "advertise, then run_server" tail used by both
+    ``serve()`` below (the api-only production path, which also owns the
+    ``create_app`` call) and ``localm gui``'s CLI (``plugins/gui/cli.py``),
+    which needs the ``app`` object available earlier than this to wire its
+    own GUI-only routes/state, so it cannot delegate the ``create_app`` call
+    itself here - only this tail was actually duplicated between the two.
 
-    Advertises itself in the instance registry (H6 phase 3/4) as an ``api``
-    surface so a future launch can discover and attach to it; ``isolated`` keeps
-    it invisible to discovery.
+    ``mode`` is the instance-registry surface (``"api"`` or ``"full"``).
+    ``log_level`` defaults to ``debuglog.uvicorn_log_level()`` when omitted.
     """
     from localm import instances, portmux
     from localm.config import home_dir
-
-    app = create_app(engine, api_landing=True)
-    # Record the bind host so routes that depend on it (open-mode seeding,
-    # CA download) can reason about loopback vs network binds.
-    app.state.bind_host = host
+    if log_level is None:
+        from localm.debuglog import uvicorn_log_level
+        log_level = uvicorn_log_level()
     scheme = "https" if ssl_certfile else "http"
 
     # SRV-CTRLC: no custom Win32 Ctrl+C handler here. A previous one resolved the
@@ -2965,13 +2966,47 @@ def serve(engine: Engine, host: str = "127.0.0.1", port: int = 8642,
     # (KeyboardInterrupt caught in portmux.run_server), kept responsive on Windows
     # by portmux's SRV-6 loop-wakeup. Verified live (Ctrl+Break).
 
-    with instances.advertise(app, home_dir(), host=host, port=port, mode="api",
+    with instances.advertise(app, home_dir(), host=host, port=port, mode=mode,
                              scheme=scheme, project=project, isolated=isolated):
         # On a TLS bind, also catch a plain-http request on the same port with an
         # https redirect (issue 8); plain binds are a direct uvicorn.run. SRV-5:
         # in debug mode uvicorn logs at "info" so the console shows requests.
-        from localm.debuglog import uvicorn_log_level
-        portmux.run_server(app, host=host, port=port,
-                           log_level=uvicorn_log_level(),
+        portmux.run_server(app, host=host, port=port, log_level=log_level,
                            ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
+
+
+def serve(engine: Engine, host: str = "127.0.0.1", port: int = 8642,
+          ssl_certfile: Optional[str] = None,
+          ssl_keyfile: Optional[str] = None,
+          project: Optional[str] = None,
+          isolated: bool = False, *,
+          mode: str = "api",
+          port_retry: bool = False) -> None:
+    """Start the server - blocks until Ctrl+C. The real production startup
+    path: both ``localm serve`` and ``localm gui`` end up here, the latter via
+    ``run_advertised`` above (it builds ``app`` itself, to attach GUI-only
+    routes/state before advertising, then reuses the shared tail).
+
+    When ``ssl_certfile`` / ``ssl_keyfile`` are given (built-in TLS, NET-1), the
+    server speaks HTTPS on this port; a plain-HTTP request to it then fails the
+    TLS handshake (effectively refused) rather than crossing the network in
+    cleartext.
+
+    ``mode`` is the instance-registry surface (``"api"`` or ``"full"``).
+    ``port_retry`` walks to the next free port (``config.pick_port``) when
+    *port* is already in use, instead of failing to bind.
+
+    Advertises itself in the instance registry (H6 phase 3/4) so a future
+    launch can discover and attach to it; ``isolated`` keeps it invisible to
+    discovery.
+    """
+    if port_retry:
+        from localm.config import pick_port
+        port, _ = pick_port(port, host="127.0.0.1" if host == "0.0.0.0" else host)
+    app = create_app(engine, api_landing=True)
+    # Record the bind host so routes that depend on it (open-mode seeding,
+    # CA download) can reason about loopback vs network binds.
+    app.state.bind_host = host
+    run_advertised(app, host, port, mode=mode, ssl_certfile=ssl_certfile,
+                   ssl_keyfile=ssl_keyfile, project=project, isolated=isolated)
 
