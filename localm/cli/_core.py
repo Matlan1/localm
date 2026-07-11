@@ -135,26 +135,49 @@ class _GracefulGroup(click.Group):
         except (SystemExit, KeyboardInterrupt, click.exceptions.Abort,
                 click.exceptions.Exit, click.ClickException):
             raise
-        except Exception as e:  # an actual, unexpected failure
-            # Reporting must never itself crash the handler (that would turn a
-            # caught bug into the hard crash we are trying to avoid), so guard it.
-            try:
-                from localm import bugreport
-                interactive = bool(getattr(sys.stdin, "isatty", lambda: False)())
-                if isinstance(e, bugreport.LocalmError):
-                    bugreport.report_failure(
-                        summary=e.summary, reason=e.reason,
-                        error=e.__cause__ or e, context=e.context,
-                        interactive=interactive)
-                else:
-                    bugreport.report_failure(
-                        summary="localm hit an unexpected error",
-                        reason=str(e), error=e,
-                        context={"command": getattr(ctx, "invoked_subcommand", None)},
-                        interactive=interactive)
-            except Exception:
-                console.print(f"[red]localm failed:[/red] {e}")
+        except OSError as e:
+            # A downstream consumer closing the pipe early (`localm ... | head`,
+            # `| findstr`) surfaces as BrokenPipeError, or on Windows as an OSError
+            # EPIPE/EINVAL from the stdout flush. That is NOT a bug: do not report it
+            # (reporting would write to the same dead stdout and re-crash), and exit
+            # as if killed by SIGPIPE. A real OSError falls through to reporting.
+            import errno
+            if isinstance(e, BrokenPipeError) or e.errno in (errno.EPIPE, errno.EINVAL):
+                try:
+                    sys.stdout.close()
+                except Exception:
+                    pass
+                raise SystemExit(0)
+            self._report_failure(ctx, e)
             raise SystemExit(1)
+        except Exception as e:  # an actual, unexpected failure
+            self._report_failure(ctx, e)
+            raise SystemExit(1)
+
+    @staticmethod
+    def _report_failure(ctx, e):
+        # Reporting must never itself crash the handler (that would turn a caught bug
+        # into the hard crash we are trying to avoid), so guard it - and if reporting
+        # fails, write the fallback to STDERR, since STDOUT may be the very pipe that
+        # just broke.
+        try:
+            from localm import bugreport
+            interactive = bool(getattr(sys.stdin, "isatty", lambda: False)())
+            if isinstance(e, bugreport.LocalmError):
+                bugreport.report_failure(
+                    summary=e.summary, reason=e.reason,
+                    error=e.__cause__ or e, context=e.context,
+                    interactive=interactive)
+            else:
+                bugreport.report_failure(
+                    summary="localm hit an unexpected error",
+                    reason=str(e), error=e,
+                    context={"command": getattr(ctx, "invoked_subcommand", None)},
+                    interactive=interactive)
+        except Exception:
+            # Broken-pipe is already handled above (before this point), so stdout is
+            # live here for a real failure - the original fallback is safe.
+            console.print(f"[red]localm failed:[/red] {e}")
 
 
 

@@ -218,15 +218,27 @@ def pull_model(
     if model_type == "auto":
         if "/" in spec and not (spec.startswith("http://") or spec.startswith("https://")):
             repo_id = spec.split(":")[0] if ":" in spec else spec
-            detected_type = _hf_pipeline_tag_to_type(repo_id)
-            logger.info("Auto-detected model type for %s: %s", repo_id, detected_type)
-            if detected_type == "unknown":
-                # Surface the honest result (AGENTS.md rule 5): it won't be
-                # auto-loaded for chat, but it stays runnable by name.
-                console.print(
-                    "[yellow]Could not determine this model's type[/yellow] - "
-                    "registering it as 'unknown'. Run it by name, or set its type "
-                    "later: [bold]localm set-type <name> <type>[/bold]")
+            # A named .gguf file is a hard LLM signal (the container format itself),
+            # exactly like a local `add` of a .gguf - so type it 'llm' and do NOT
+            # fall back to the repo's HF pipeline_tag, which a GGUF-quant repo often
+            # lacks, mislabeling the model 'unknown'. An 'unknown' type then hides
+            # the model from the desktop launcher and blocks auto-chat selection, so
+            # a plain `localm pull owner/repo:model.gguf` would vanish from the UI.
+            # Catch both file forms the dispatch below accepts (owner/repo:file.gguf
+            # AND owner/repo/file.gguf) via the last path segment; only probe the
+            # pipeline tag for a bare repo (no specific .gguf file).
+            if spec.rsplit("/", 1)[-1].lower().endswith(".gguf"):
+                detected_type = "llm"
+            else:
+                detected_type = _hf_pipeline_tag_to_type(repo_id)
+                logger.info("Auto-detected model type for %s: %s", repo_id, detected_type)
+                if detected_type == "unknown":
+                    # Surface the honest result (AGENTS.md rule 5): it won't be
+                    # auto-loaded for chat, but it stays runnable by name.
+                    console.print(
+                        "[yellow]Could not determine this model's type[/yellow] - "
+                        "registering it as 'unknown'. Run it by name, or set its type "
+                        "later: [bold]localm set-type <name> <type>[/bold]")
         else:
             detected_type = "llm"
     else:

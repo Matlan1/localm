@@ -78,3 +78,24 @@ def test_remote_auto_detect_still_runs(monkeypatch):
 
     pull.pull_model("someowner/some-vae-model", model_type="auto")
     assert hf_calls == ["someowner/some-vae-model"], "remote spec must still probe HF"
+
+
+def test_remote_gguf_file_spec_types_llm_without_probing(monkeypatch):
+    """A remote spec that names a .gguf file (owner/repo:file.gguf OR
+    owner/repo/file.gguf) is a HARD LLM signal via the filename - it must type
+    'llm' WITHOUT probing the repo's HF pipeline_tag, which a GGUF-quant repo often
+    lacks (mislabeling it 'unknown', which then HIDES the pulled model from the
+    launcher and blocks auto-chat). Regression for the pull-vs-add type mismatch."""
+    hf_calls = []
+    monkeypatch.setattr(pull, "_hf_pipeline_tag_to_type",
+                        lambda repo_id: hf_calls.append(repo_id) or "unknown")
+    monkeypatch.setattr("localm.netpolicy.network_mode", lambda: "allow")
+    monkeypatch.setattr(pull._mm, "resolve_spec", lambda s: s)
+    got = {}
+    monkeypatch.setattr(pull._mm, "_pull_gguf_file",
+                        lambda spec, name, **kw: got.update(mt=kw.get("model_type")) or True)
+    for spec in ("owner/SmolLM2-GGUF:SmolLM2-Q8_0.gguf", "owner/repo/model.gguf"):
+        got.clear()
+        assert pull.pull_model(spec, model_type="auto") is True
+        assert got.get("mt") == "llm", (spec, got)
+    assert hf_calls == [], f"a named .gguf must not probe HF (probed: {hf_calls})"
