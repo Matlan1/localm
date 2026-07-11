@@ -361,6 +361,47 @@ class TestCollection:
         assert c.stats()["corrupt"] is True
         assert c.stats()["n_chunks"] == 0
 
+    def test_corrupt_meta_preserves_queryable_chunks(self, tmp_path, docs_dir):
+        # A corrupt meta.json must NOT discard the independent chunks.jsonl:
+        # meta holds only {name, created, docs}, none of which retrieval needs,
+        # so intact chunks stay fully queryable and recoverable data is not
+        # silently lost (AGENTS rule 5 - missing vs corrupt must not collapse).
+        base = tmp_path / "rag"
+        c = Collection("kb", base=base).create()
+        c.add_paths([docs_dir])
+        before = c.stats()
+        assert before["n_chunks"] > 0 and c.query("sourdough")
+
+        # Corrupt ONLY meta.json; chunks.jsonl is untouched on disk.
+        (base / "kb" / "meta.json").write_text("{ not json at all", encoding="utf-8")
+
+        c2 = Collection("kb", base=base)
+        assert c2.corrupt is True                       # surfaced, not hidden
+        assert c2.stats()["n_chunks"] == before["n_chunks"]   # chunks preserved
+        assert c2.query("sourdough"), "intact chunks must stay queryable"
+        # docs map reconstructed from chunk sources so `rag repair` can rebuild
+        assert len(c2.documents()) == before["n_docs"]
+
+    def test_repair_recovers_corrupt_meta_without_duplication(self, tmp_path, docs_dir):
+        # `rag repair` (add_paths(documents(), force=True)) on a corrupt-meta
+        # collection must rebuild the index from the recovered sources, heal
+        # meta.json, and NOT duplicate the surviving chunks.
+        base = tmp_path / "rag"
+        c = Collection("kb", base=base).create()
+        c.add_paths([docs_dir])
+        orig_chunks = c.stats()["n_chunks"]
+
+        (base / "kb" / "meta.json").write_text("{bad", encoding="utf-8")
+        recovered = Collection("kb", base=base)
+        recovered.add_paths(recovered.documents(), force=True)   # what repair does
+
+        healed = Collection("kb", base=base)
+        assert healed.corrupt is False                   # meta.json is valid again
+        assert healed.stats()["n_chunks"] == orig_chunks  # no duplication
+        assert isinstance(
+            json.loads((base / "kb" / "meta.json").read_text(encoding="utf-8")), dict)
+        assert healed.query("rocm")
+
     def test_vectors_json_records_dim(self, tmp_path, docs_dir):
         # BUG-5 / FAC: the documented vectors.json "dim" field is now written
         base = tmp_path / "rag"
