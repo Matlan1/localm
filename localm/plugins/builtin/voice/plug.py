@@ -17,7 +17,9 @@ import base64
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from localm.inference.errors import route_errors
 from localm.plugins.executor import get_plugin_executor
+from localm.voice import VoiceError
 
 _router = APIRouter()
 
@@ -37,8 +39,16 @@ async def voice_status():
 
 
 @_router.post("/api/voice/transcribe")
+@route_errors({
+    # Branch on the structured failure class, not the human message:
+    # rewording a message must never flip the status code. 501 = the
+    # capability is not installed; everything else is a 422 on this input.
+    VoiceError: lambda e: (
+        501 if getattr(e, "code", "") == "needs-faster-whisper" else 422, str(e)),
+    Exception: lambda e: (502, f"Transcription failed: {e}"),
+})
 async def voice_transcribe(req: TranscribeRequest):
-    from localm.voice import VoiceError, transcribe_bytes
+    from localm.voice import transcribe_bytes
     try:
         data = base64.b64decode(req.audio_b64, validate=True)
     except Exception:
@@ -48,16 +58,9 @@ async def voice_transcribe(req: TranscribeRequest):
     if len(data) > 25_000_000:
         raise HTTPException(413, "Recording too large (max 25 MB)")
     loop = asyncio.get_running_loop()
-    try:
-        text = await loop.run_in_executor(
-            get_plugin_executor(),
-            lambda: transcribe_bytes(data, language=req.language))
-    except VoiceError as e:
-        # Branch on the structured failure class, not the human message:
-        # rewording a message must never flip the status code. 501 = the
-        # capability is not installed; everything else is a 422 on this input.
-        status = 501 if getattr(e, "code", "") == "needs-faster-whisper" else 422
-        raise HTTPException(status, str(e))
+    text = await loop.run_in_executor(
+        get_plugin_executor(),
+        lambda: transcribe_bytes(data, language=req.language))
     return {"text": text}
 
 

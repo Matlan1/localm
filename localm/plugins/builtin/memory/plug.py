@@ -56,6 +56,30 @@ def _chat_store(principal: str | None = None):
     return _mem.open_store(principal, "chat", "", root=_memory_root())
 
 
+def _request_principal(request: Request | None) -> str | None:
+    """MEMORY-1: the principal-resolution half of the request/store snippet
+    every /api/memory* route repeated."""
+    from localm.inference.http_server import memory_principal
+    return memory_principal(request) if request is not None else None
+
+
+def _request_store(request: Request | None):
+    """MEMORY-1: the principal-resolution + store-open snippet every mutating
+    /api/memory* route repeated verbatim."""
+    return _chat_store(_request_principal(request))
+
+
+def _require_writable() -> None:
+    """MEMORY-2: the '_persist_enabled() guard -> 403' shape every mutating
+    /api/memory* route repeated, with wording that had drifted between call
+    sites - this deliberately picks memory_put's more helpful wording for all
+    five (an intentional behavior change, not an oversight)."""
+    if not _persist_enabled():
+        raise HTTPException(
+            403, "Memory writes are off in privacy mode (no new traces). "
+            "Set mode/chat_mode to 'log' or 'full' to enable them.")
+
+
 class MemoryUpdate(BaseModel):
     text: str
 
@@ -230,9 +254,7 @@ def _rendered_text(store) -> str:
 
 @_router.get("/api/memory")
 async def memory_get(request: Request = None):
-    from localm.inference.http_server import memory_principal
-    principal = memory_principal(request) if request is not None else None
-    store = _chat_store(principal)
+    store = _request_store(request)
     if _persist_enabled():
         _migrate_legacy(store)
     return {"text": _rendered_text(store), "writable": _persist_enabled(),
@@ -251,10 +273,7 @@ async def memory_put(req: MemoryUpdate, request: Request = None):
     /api/memory/append (e.g. a second browser tab) landing between the snapshot
     and store.replace() would be silently discarded by replace()'s whole-namespace
     overwrite if this route didn't hold the lock across the whole thing."""
-    if not _persist_enabled():
-        raise HTTPException(
-            403, "Memory writes are off in privacy mode (no new traces). "
-            "Set mode/chat_mode to 'log' or 'full' to enable them.")
+    _require_writable()
     from localm.memory import MAX_TEXT_LEN, N_MAX, MemoryRecord
     if len(req.text) > _MEMORY_MAX:
         raise HTTPException(413, "Memory too large (max 64k chars)")
@@ -266,9 +285,7 @@ async def memory_put(req: MemoryUpdate, request: Request = None):
         raise HTTPException(
             413, f"Too many memory records ({len(facts)}); the store keeps at "
             f"most {N_MAX}. Trim the list before saving.")
-    from localm.inference.http_server import memory_principal
-    principal = memory_principal(request) if request is not None else None
-    store = _chat_store(principal)
+    store = _request_store(request)
 
     _migrate_legacy(store)
     with store.lock():
@@ -289,15 +306,11 @@ async def memory_put(req: MemoryUpdate, request: Request = None):
 
 @_router.post("/api/memory/append")
 async def memory_append(req: MemoryAppend, request: Request = None):
-    if not _persist_enabled():
-        raise HTTPException(
-            403, "Memory writes are off in privacy mode (no new traces)")
+    _require_writable()
     fact = _strip_bullet(req.text)
     if not fact:
         raise HTTPException(400, "Nothing to remember")
-    from localm.inference.http_server import memory_principal
-    principal = memory_principal(request) if request is not None else None
-    store = _chat_store(principal)
+    store = _request_store(request)
 
     _migrate_legacy(store)
     from localm.memory import N_MAX, MemoryRecord
@@ -314,11 +327,8 @@ async def memory_append(req: MemoryAppend, request: Request = None):
 
 @_router.patch("/api/memory/{mem_id}")
 async def memory_patch(mem_id: str, req: MemoryPatch, request: Request = None):
-    if not _persist_enabled():
-        raise HTTPException(403, "Memory writes are off in privacy mode")
-    from localm.inference.http_server import memory_principal
-    principal = memory_principal(request) if request is not None else None
-    store = _chat_store(principal)
+    _require_writable()
+    store = _request_store(request)
 
     fields = {}
     if req.text is not None:
@@ -334,11 +344,8 @@ async def memory_patch(mem_id: str, req: MemoryPatch, request: Request = None):
 
 @_router.delete("/api/memory/{mem_id}")
 async def memory_delete(mem_id: str, request: Request = None):
-    if not _persist_enabled():
-        raise HTTPException(403, "Memory writes are off in privacy mode")
-    from localm.inference.http_server import memory_principal
-    principal = memory_principal(request) if request is not None else None
-    store = _chat_store(principal)
+    _require_writable()
+    store = _request_store(request)
 
     return {"status": "deleted" if store.delete(mem_id) else "absent", "id": mem_id}
 
@@ -347,8 +354,7 @@ async def memory_delete(mem_id: str, request: Request = None):
 async def memory_consolidate(request: Request = None):
     """Manually distil durable facts from recent sessions into the store (the
     opt-in consolidation trigger). Gated on privacy; needs a loaded model."""
-    if not _persist_enabled():
-        raise HTTPException(403, "Memory writes are off in privacy mode")
+    _require_writable()
     if _ENGINE is None or not getattr(_ENGINE, "loaded", False):
         raise HTTPException(503, "Load a model first to consolidate memory")
 
@@ -360,8 +366,7 @@ async def memory_consolidate(request: Request = None):
         return strip_think("".join(_ENGINE.chat_stream(
             [{"role": "user", "content": prompt}]))).strip()
 
-    from localm.inference.http_server import memory_principal
-    principal = memory_principal(request) if request is not None else None
+    principal = _request_principal(request)
     return synthesize_memory(complete, principal=principal)
 
 

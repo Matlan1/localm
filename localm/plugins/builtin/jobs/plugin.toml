@@ -4,7 +4,7 @@ version = "1.0.0"
 description = "Scheduled recurring tasks: run a chat or coder prompt on an interval or cron schedule."
 scope = "jobs"
 register = "plug"
-cli = "cli:main"
+cli = "localm.plugins.builtin.jobs.cli:main"
 data_subdir = "jobs"
 # The memory-synthesis job calls chat's synthesize_memory (see runner.py), so
 # declare the dependency honestly; chat is protected + preinstalled, so this

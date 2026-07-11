@@ -1340,30 +1340,6 @@ class TestPlatformEndpoints:
             assert "effective_mode" not in stored
             assert "effective_ctx_max" not in stored
 
-    def test_plugins_list_empty(self, v1_client, tmp_path):
-        with patch("localm.plugins.loader.plugins_dir", return_value=tmp_path):
-            data = v1_client.get("/v1/plugins").json()
-        assert data["plugins"] == []
-        assert data["errors"] == []
-
-    def test_plugin_install_and_remove(self, v1_client, tmp_path):
-        src = tmp_path / "src" / "myplug"
-        src.mkdir(parents=True)
-        (src / "plugin.toml").write_text(
-            '[plugin]\nname = "myplug"\nentry = "mod:main"\n', encoding="utf-8")
-        (src / "mod.py").write_text("main = None\n", encoding="utf-8")
-        plugdir = tmp_path / "installed"
-        with patch("localm.plugins.loader.plugins_dir", return_value=plugdir):
-            r = v1_client.post("/v1/plugins/install", json={"source": str(src)})
-            assert r.status_code == 200
-            assert r.json()["name"] == "myplug"
-            assert (plugdir / "myplug" / "plugin.toml").is_file()
-            assert v1_client.delete("/v1/plugins/myplug").status_code == 200
-            assert v1_client.delete("/v1/plugins/myplug").status_code == 404
-
-    def test_plugin_install_invalid_source(self, v1_client):
-        r = v1_client.post("/v1/plugins/install", json={"source": "Z:/nope"})
-        assert r.status_code == 400
 
 
 class TestGuiNoModel:

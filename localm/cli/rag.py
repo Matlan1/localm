@@ -69,12 +69,9 @@ def rag_add(collection, paths, force, embed, url):
     """
     from rich.console import Console
     from ..rag import Collection
+    from .errors import _report_add_paths_result, run_or_die
     console = Console()
-    try:
-        coll = Collection(collection)
-    except ValueError as e:
-        console.print(f"[red]{e}[/red]")
-        sys.exit(1)
+    coll = run_or_die(Collection, collection)
     coll.create()
     embed_fn = _cli_rag_embed_fn(url) if embed else None
     result = coll.add_paths(list(paths), force=force, embed_fn=embed_fn,
@@ -82,10 +79,7 @@ def rag_add(collection, paths, force, embed, url):
     console.print(f"[green]{result['added']} added, {result['updated']} updated, "
                   f"{result['skipped']} unchanged[/green] - "
                   f"{result['chunks']} chunks in '{collection}'")
-    for f in result["failed"]:
-        console.print(f"  [yellow]failed:[/yellow] {f['path']}: {f['error']}")
-    if result["failed"]:
-        sys.exit(1)
+    _report_add_paths_result(result)
 
 
 
@@ -100,12 +94,9 @@ def rag_repair(collection):
     """
     from rich.console import Console
     from ..rag import Collection
+    from .errors import _report_add_paths_result, run_or_die
     console = Console()
-    try:
-        coll = Collection(collection)
-    except ValueError as e:
-        console.print(f"[red]{e}[/red]")
-        sys.exit(1)
+    coll = run_or_die(Collection, collection)
     paths = coll.documents()
     if not paths:
         if coll.corrupt:
@@ -124,10 +115,7 @@ def rag_repair(collection):
     console.print(f"[green]repaired: {result['updated']} re-indexed, "
                   f"{result['added']} added[/green] - "
                   f"{result['chunks']} chunks in '{collection}'")
-    for f in result["failed"]:
-        console.print(f"  [yellow]failed:[/yellow] {f['path']}: {f['error']}")
-    if result["failed"]:
-        sys.exit(1)
+    _report_add_paths_result(result)
 
 
 

@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""M2 Phase 3 security regressions for the legacy plugin loader and the auth
-keystore.
+"""M2 Phase 3 security regressions for the plugin engine and the auth keystore.
 
-SEC-6: loader.remove_plugin (and DELETE /v1/plugins/{name} that calls it) must
-       honour the engine's protected-plugin guard, so a protected plugin (e.g.
-       chat) cannot be deleted via the legacy path.
+SEC-6: PluginManager.uninstall() must honour the protected-plugin guard, so a
+       protected plugin (e.g. chat) cannot be deleted. This used to also cover
+       the legacy loader.remove_plugin()/DELETE /v1/plugins/{name} path, which
+       was dead for every shipped plugin and has been removed (see
+       PATHFINDER-2026-07-11) - PluginManager.uninstall() is now the ONE
+       plugin-removal path, so it is the one this guards.
 SEC-10: the auth keystore had no lock; two concurrent create_key calls could
         read-modify-write the shared record list and lose one write.
 """
@@ -12,80 +14,76 @@ SEC-10: the auth keystore had no lock; two concurrent create_key calls could
 import threading
 
 import pytest
+from fastapi import FastAPI
 
 
 # --------------------------------------------------------------------------- #
-#  SEC-6: remove_plugin refuses a protected plugin                            #
+#  SEC-6: uninstall() refuses a protected plugin                              #
 # --------------------------------------------------------------------------- #
 
-def _write_plugin(root, name, *, protected=None, register=False):
-    """Create an installed-plugin dir with a manifest. *protected* None omits the
-    key entirely; True/False writes it explicitly. *register* makes it an
-    engine-contract plugin instead of a legacy one."""
+def _write_plugin(root, name, *, protected=None):
+    """Create an installed engine-contract plugin dir. *protected* None omits
+    the key entirely; True/False writes it explicitly."""
     d = root / name
     d.mkdir(parents=True)
-    lines = ["[plugin]", f'name = "{name}"']
-    if register:
-        lines.append('register = "plug"')
-    else:
-        lines.append('entry = "x:main"')
+    lines = ["[plugin]", f'name = "{name}"', 'register = "plug"']
     if protected is not None:
         lines.append(f"protected = {'true' if protected else 'false'}")
     (d / "plugin.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (d / "plug.py").write_text(
+        "def register(host):\n    pass\n\n\ndef unregister():\n    pass\n",
+        encoding="utf-8")
     return d
 
 
-@pytest.fixture
-def loader(tmp_path, monkeypatch):
-    """localm.plugins.loader with plugins_dir() redirected to a throwaway dir."""
-    root = tmp_path / "plugins"
-    root.mkdir()
-    import localm.plugins.loader as ldr
-    monkeypatch.setattr(ldr, "plugins_dir", lambda: root)
-    ldr._root = root  # convenience handle for tests
-    return ldr
+def _manager(tmp_path):
+    from localm.plugins.engine import PluginManager
+    installed = tmp_path / "installed"
+    installed.mkdir(parents=True, exist_ok=True)
+    return PluginManager(FastAPI(), external_root=installed, builtin_root=None)
 
 
-def test_remove_refuses_catalog_protected_chat(loader):
-    """The catalog marks chat as protected; remove_plugin must refuse it and
-    leave its directory on disk (the bug deleted it)."""
-    root = loader._root
-    # chat ships as an engine-contract plugin (register=, protected=true).
-    _write_plugin(root, "chat", protected=True, register=True)
-    with pytest.raises(loader.PluginError, match="protected"):
-        loader.remove_plugin("chat")
-    assert (root / "chat").is_dir()   # not deleted
+def test_uninstall_refuses_catalog_protected_chat(tmp_path):
+    """The catalog marks chat as protected; uninstall() must refuse it and
+    leave its directory on disk (the bug this guards against deleted it)."""
+    mgr = _manager(tmp_path)
+    _write_plugin(mgr._installed_root, "chat")
+    with pytest.raises(ValueError, match="protected"):
+        mgr.uninstall("chat")
+    assert (mgr._installed_root / "chat").is_dir()   # not deleted
 
 
-def test_remove_refuses_manifest_protected_plugin(loader):
+def test_uninstall_refuses_manifest_protected_plugin(tmp_path):
     """A plugin not in the catalog but whose installed manifest sets
     protected = true must also be refused (manifest is the engine's source)."""
-    root = loader._root
-    _write_plugin(root, "guarded", protected=True)
-    with pytest.raises(loader.PluginError, match="protected"):
-        loader.remove_plugin("guarded")
-    assert (root / "guarded").is_dir()
+    mgr = _manager(tmp_path)
+    _write_plugin(mgr._installed_root, "guarded", protected=True)
+    with pytest.raises(ValueError, match="protected"):
+        mgr.uninstall("guarded")
+    assert (mgr._installed_root / "guarded").is_dir()
 
 
-def test_remove_allows_unprotected_plugin(loader):
+def test_uninstall_allows_unprotected_plugin(tmp_path):
     """Control: an ordinary plugin (no protected flag) is still removable."""
-    root = loader._root
-    _write_plugin(root, "demo", protected=False)
-    assert loader.remove_plugin("demo") is True
-    assert not (root / "demo").exists()
+    mgr = _manager(tmp_path)
+    _write_plugin(mgr._installed_root, "demo", protected=False)
+    assert mgr.uninstall("demo") is True
+    assert not (mgr._installed_root / "demo").exists()
 
 
-def test_remove_allows_plugin_without_protected_key(loader):
+def test_uninstall_allows_plugin_without_protected_key(tmp_path):
     """A manifest that omits the protected key entirely defaults to removable."""
-    root = loader._root
-    _write_plugin(root, "plain", protected=None)
-    assert loader.remove_plugin("plain") is True
-    assert not (root / "plain").exists()
+    mgr = _manager(tmp_path)
+    _write_plugin(mgr._installed_root, "plain", protected=None)
+    assert mgr.uninstall("plain") is True
+    assert not (mgr._installed_root / "plain").exists()
 
 
-def test_remove_missing_still_returns_false(loader):
-    """An absent plugin returns False (not a protected error)."""
-    assert loader.remove_plugin("ghost") is False
+def test_uninstall_missing_raises_keyerror(tmp_path):
+    """An absent plugin raises KeyError (not a protected error)."""
+    mgr = _manager(tmp_path)
+    with pytest.raises(KeyError):
+        mgr.uninstall("ghost")
 
 
 # --------------------------------------------------------------------------- #

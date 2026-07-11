@@ -78,9 +78,7 @@ def _check_native_abi() -> None:
     """Native ABI self-check (struct layout vs the actual DLL). Runs in a
     SUBPROCESS (like setup-llama's load test) so a broken/incompatible DLL can
     never crash doctor itself, and so the GPU runtime is loaded out-of-process."""
-    import json as _json
-    import subprocess
-    import sys as _sys
+    from .errors import _run_probe_subprocess
     abi_code = (
         "import json;"
         "from localm.inference.backends.llamacpp._abi import abi_report;"
@@ -88,14 +86,7 @@ def _check_native_abi() -> None:
         "print('ABI_RESULT:'+json.dumps("
         "{'status':v.status,'detail':v.detail,'failures':v.failures[:3]}))"
     )
-    try:
-        r = subprocess.run([_sys.executable, "-c", abi_code],
-                           capture_output=True, text=True, timeout=120)
-        line = next((ln for ln in (r.stdout or "").splitlines()
-                     if ln.startswith("ABI_RESULT:")), "")
-        abi = _json.loads(line[len("ABI_RESULT:"):]) if line else {}
-    except Exception:
-        abi = {}
+    abi = _run_probe_subprocess(abi_code, "ABI_RESULT:") or {}
     status = abi.get("status", "unchecked")
     if status == "ok":
         console.print(f"  {_OK_SYM}  native ABI: struct layout matches this build")
@@ -212,17 +203,8 @@ def _probe_gpu_devices() -> Optional[dict]:
     ``{"loaded": bool, "devices": [[name, type], ...], "error": str}`` or None
     when the probe could not run at all (subprocess-isolated, so a broken GPU
     build never crashes doctor)."""
-    import json as _json
-    import subprocess
-    import sys as _sys
-    try:
-        r = subprocess.run([_sys.executable, "-c", _GPU_PROBE_CODE],
-                           capture_output=True, text=True, timeout=120)
-        line = next((ln for ln in (r.stdout or "").splitlines()
-                     if ln.startswith("GPU_PROBE:")), "")
-        return _json.loads(line[len("GPU_PROBE:"):]) if line else None
-    except Exception:
-        return None
+    from .errors import _run_probe_subprocess
+    return _run_probe_subprocess(_GPU_PROBE_CODE, "GPU_PROBE:")
 
 
 def _check_gpu_verdict(find_binary_dir, lib_healthy: bool, smi_or_torch_gpu: bool) -> None:
