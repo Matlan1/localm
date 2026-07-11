@@ -174,6 +174,20 @@ class TestMcpEmbedToolCapability:
 # --------------------------------------------------------------------------- #
 
 class TestRequireAuthLockoutGuard:
+    @pytest.fixture(autouse=True)
+    def _isolated_config_file(self, tmp_path, monkeypatch):
+        # save_config/load_config/update_config all read the FROZEN CONFIG_FILE/
+        # HOME_DIR module attributes, not the lazy home_dir() the autouse
+        # per-test LOCALM_HOME env fixture affects - repoint them explicitly so
+        # this test's real config write/read never touches another test's file
+        # (mirrors test_config_atomic_concurrency.py's `home` fixture).
+        import localm.config as cfg
+        home = tmp_path / ".localm"
+        monkeypatch.setattr(cfg, "HOME_DIR", home)
+        monkeypatch.setattr(cfg, "MODELS_DIR", home / "models")
+        monkeypatch.setattr(cfg, "CONFIG_FILE", home / "config.json")
+        monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
+
     def _client(self):
         # H5: PATCH /v1/config is a management route; in open mode it needs the
         # loopback shell token. Seed it by default (tests that set their own key
@@ -183,26 +197,30 @@ class TestRequireAuthLockoutGuard:
             app, raise_server_exceptions=True,
             headers={"Authorization": f"Bearer {app.state.shell_token}"})
 
+    # NOTE: patch_config() now persists via config.update_config() (APP-LIFECYCLE-1,
+    # the atomic read-modify-write helper), not a load_config()/save_config()
+    # pair - so these tests verify against the REAL persisted config (the
+    # autouse per-test LOCALM_HOME isolates the file) instead of mocking
+    # save_config, which update_config no longer calls at all.
+
     def test_enable_require_auth_without_key_rejected_400(self):
         os.environ.pop("LOCALM_API_KEY", None)
-        cfg = {"require_auth": False}
-        with patch("localm.config.load_config", return_value=dict(cfg)), \
-             patch("localm.config.save_config") as save, \
-             patch("localm.auth.any_key_configured", return_value=False):
+        from localm.config import load_config, save_config
+        save_config({"require_auth": False})
+        with patch("localm.auth.any_key_configured", return_value=False):
             with self._client() as c:
                 r = c.patch("/v1/config", json={"require_auth": True})
         assert r.status_code == 400
         detail = r.json()["detail"]
         assert "key" in detail.lower()
         # Crucially, the lockout config was never persisted.
-        save.assert_not_called()
+        assert load_config()["require_auth"] is False
 
     def test_enable_require_auth_with_key_succeeds_200(self):
         os.environ.pop("LOCALM_API_KEY", None)
-        cfg = {"require_auth": False}
-        with patch("localm.config.load_config", return_value=dict(cfg)), \
-             patch("localm.config.save_config") as save, \
-             patch.dict(os.environ, {"LOCALM_API_KEY": SECRET}):
+        from localm.config import load_config, save_config
+        save_config({"require_auth": False})
+        with patch.dict(os.environ, {"LOCALM_API_KEY": SECRET}):
             # An owner key is now configured (env), so the guard allows it and
             # the owner key authorises the CONFIG_WRITE scope.
             with self._client() as c:
@@ -210,30 +228,28 @@ class TestRequireAuthLockoutGuard:
                             headers={"Authorization": f"Bearer {SECRET}"})
         assert r.status_code == 200
         assert r.json().get("require_auth") is True
-        save.assert_called_once()
+        assert load_config()["require_auth"] is True
 
     def test_setting_require_auth_false_without_key_not_blocked(self):
         # The guard only blocks ENABLING the lockout. Writing require_auth=False
         # (or any unrelated key) while keyless must never be blocked by the
         # guard - otherwise even backing out becomes impossible.
         os.environ.pop("LOCALM_API_KEY", None)
-        cfg = {"require_auth": False}
-        with patch("localm.config.load_config", return_value=dict(cfg)), \
-             patch("localm.config.save_config") as save, \
-             patch("localm.auth.any_key_configured", return_value=False):
+        from localm.config import load_config, save_config
+        save_config({"require_auth": False})
+        with patch("localm.auth.any_key_configured", return_value=False):
             with self._client() as c:
                 r = c.patch("/v1/config", json={"require_auth": False})
         assert r.status_code == 200
-        save.assert_called_once()
+        assert load_config()["require_auth"] is False
 
     def test_unrelated_patch_without_key_not_blocked(self):
         # A PATCH that does not touch require_auth is unaffected by the guard.
         os.environ.pop("LOCALM_API_KEY", None)
-        cfg = {"require_auth": False, "max_tokens": 1024}
-        with patch("localm.config.load_config", return_value=dict(cfg)), \
-             patch("localm.config.save_config") as save, \
-             patch("localm.auth.any_key_configured", return_value=False):
+        from localm.config import load_config, save_config
+        save_config({"require_auth": False, "max_tokens": 1024})
+        with patch("localm.auth.any_key_configured", return_value=False):
             with self._client() as c:
                 r = c.patch("/v1/config", json={"max_tokens": 2048})
         assert r.status_code == 200
-        save.assert_called_once()
+        assert load_config()["max_tokens"] == 2048

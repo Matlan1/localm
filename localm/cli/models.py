@@ -4,7 +4,7 @@ from pathlib import Path
 
 import click
 
-from ..config import HOME_DIR, find_binary_dir, load_config, save_config
+from ..config import HOME_DIR, find_binary_dir, load_config, update_config
 from ..model_manager import (
     get_model_info, list_models, MODEL_TYPES, pull_model, relocate_model,
     remove_model, set_model_type, show_shortcuts, sync_models_dir,
@@ -508,9 +508,10 @@ def config_cmd(key, value):
         validated = validate_update({key: value})
     except ValueError as e:
         raise click.ClickException(str(e))
-    cfg = load_config()
-    cfg.update(validated)
-    save_config(cfg)
+    # APP-LIFECYCLE-1: update_config() is the atomic read-modify-write helper
+    # (a bare load_config()/save_config() pair has an unlocked window where a
+    # concurrent config write can be silently lost).
+    update_config(lambda cfg: cfg.update(validated))
     console.print(f"[green]✓[/green] {key} = {validated[key]}")
 
 
