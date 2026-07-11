@@ -203,6 +203,26 @@ def confine_index_path(p, policy: Optional[dict] = None) -> Path:
     if policy is None:
         return rp
 
+    # --- API floor: refuse model-weight / binary / credential FILES (policy set) ---
+    # The recursive folder walk (_expand) already skips these by suffix + secret
+    # name, but an EXPLICITLY-named top-level file used to bypass that filter, so a
+    # `rag`-scoped HTTP caller could POST paths=["<home>/deploy.pem"] and read the
+    # key back via /query (C2). Apply the SAME filter to explicit picks whenever a
+    # policy is present (every API caller, owner and non-owner alike - a loopback
+    # page or remote client is untrusted). This runs BEFORE the mode branches so a
+    # secret is never offered through the whitelist "add and continue" consent flow.
+    # Guarded on is_file() so a directory merely NAMED like a secret (a real
+    # ./credentials or ./.env folder) is still walkable, not over-blocked. The CLI
+    # (policy=None, returned above) stays unconfined: the local operator can already
+    # read their own files, so an explicit single-file pick is still honoured there.
+    if rp.is_file() and (rp.suffix.lower() in BLACKLISTED_SUFFIXES
+                         or is_secret_index_name(rp.name)):
+        raise ConfinementError(
+            f"Refusing to index {rp.name}: files of this type (binary, model "
+            f"weights, or key/credential material) are not indexed through the "
+            f"API. Use the local CLI (`localm rag add`) if you really intend to.",
+            path=rp, reason="blacklisted_file")
+
     if policy.get("mode") == "blacklist":
         # Allow anything not explicitly denied (the hard floor above still holds).
         # Path(d) coerces in case a caller hand-built the policy with str entries
@@ -408,10 +428,12 @@ class Collection:
                 policy: Optional[dict] = None) -> list[Path]:
         """Resolve files + recursive folder contents to indexable files.
 
-        When *policy* is given, files resolving outside the confinement (system
-        paths, credential dirs, denied roots, or symlinks escaping an allowed
-        folder) are silently dropped - add_paths already validated the top-level
-        inputs, so this only catches sneaky nested escapes."""
+        When *policy* is given, files that fail confinement (system paths,
+        credential dirs, denied roots, symlinks escaping an allowed folder, or a
+        model-weight / binary / credential FILE) are dropped by the confine loop
+        below - add_paths already validated the top-level inputs, so this catches
+        nested escapes and the per-file secret filter. With no policy (the CLI)
+        explicit picks are unfiltered: the local operator is unconfined."""
         out: list[Path] = []
         for p in paths:
             p = Path(p).expanduser()

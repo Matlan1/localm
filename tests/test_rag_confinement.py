@@ -398,3 +398,239 @@ class TestRagAddRoute:
             r2 = client.post("/api/rag/collections/kb/add",
                              json={"paths": [str(denied / "s.txt")], "embed": False})
             assert r2.status_code == 400, r2.text
+
+
+# --------------------------------------------------------------------------- #
+#  Explicitly-named secret / binary files under a policy (C2 completion)      #
+#                                                                             #
+#  The folder WALK already skips model weights + secret material              #
+#  (BLACKLISTED_SUFFIXES / SECRET_INDEX_NAMES), but an EXPLICITLY-named        #
+#  top-level file used to be indexed with no such filter - so an API caller   #
+#  with `rag` scope could POST paths=["<home>/deploy.pem"] and read the key   #
+#  back via /query. The filter now applies to explicit picks too WHENEVER a   #
+#  policy is present (the API path). The CLI (policy=None) stays unconfined.  #
+# --------------------------------------------------------------------------- #
+
+# Stand-in for key/cert material: plain text (so, without this filter, it would
+# sniff as .txt and be indexed verbatim - the exact leak we are closing). Kept
+# free of a real PEM header so the hygiene scanner does not flag it as a secret;
+# the block keys off the file's SUFFIX / NAME, not its bytes. The unique token
+# lets a test assert the content is never retrievable back out.
+_PEM = ("PRIVATE-KEY-PLACEHOLDER-DO-NOT-INDEX\n"
+        "body SUPERSECRETKEYMATERIAL0123456789 not-a-real-key\n")
+
+
+class TestExplicitSecretFileUnderPolicy:
+    def test_explicit_pem_blocked_by_policy(self, home_env):
+        home, _ = home_env
+        pem = home / "docs" / "deploy.pem"
+        pem.write_text(_PEM, encoding="utf-8")
+        with pytest.raises(ConfinementError) as ei:
+            confine_index_path(pem, _wl())
+        assert ei.value.reason == "blacklisted_file"
+
+    def test_explicit_key_suffix_blocked(self, home_env):
+        home, _ = home_env
+        key = home / "docs" / "tls.key"
+        key.write_text("key placeholder", encoding="utf-8")
+        with pytest.raises(ConfinementError) as ei:
+            confine_index_path(key, _wl())
+        assert ei.value.reason == "blacklisted_file"
+
+    def test_explicit_extensionless_secret_name_blocked(self, home_env):
+        home, _ = home_env
+        key = home / "docs" / "id_rsa"          # secret NAME, no suffix
+        key.write_text("ssh key placeholder", encoding="utf-8")
+        with pytest.raises(ConfinementError) as ei:
+            confine_index_path(key, _wl())
+        assert ei.value.reason == "blacklisted_file"
+
+    def test_explicit_dotenv_blocked(self, home_env):
+        home, _ = home_env
+        env = home / "docs" / ".env"
+        env.write_text("AWS_SECRET_ACCESS_KEY=xyz", encoding="utf-8")
+        with pytest.raises(ConfinementError) as ei:
+            confine_index_path(env, _wl())
+        assert ei.value.reason == "blacklisted_file"
+
+    def test_secret_blocked_in_blacklist_mode_too(self, home_env):
+        # It is a hard, mode-independent refusal: a .pem is refused even where the
+        # location itself is allowed (blacklist mode, not on any denied root).
+        home, _ = home_env
+        pem = home / "docs" / "server.pem"
+        pem.write_text(_PEM, encoding="utf-8")
+        with pytest.raises(ConfinementError) as ei:
+            confine_index_path(pem, _bl())
+        assert ei.value.reason == "blacklisted_file"
+
+    def test_secret_takes_precedence_over_outside_allowed(self, home_env, tmp_path):
+        # A secret file OUTSIDE the whitelist must be refused as a secret, NEVER
+        # offered back through the "add this folder and continue" consent flow.
+        outside = tmp_path / "external"
+        outside.mkdir()
+        pem = outside / "id_ed25519"
+        pem.write_text("ssh key", encoding="utf-8")
+        with pytest.raises(ConfinementError) as ei:
+            confine_index_path(pem, _wl())
+        assert ei.value.reason == "blacklisted_file"   # not "outside_allowed"
+
+    @pytest.mark.parametrize("fname", [
+        "deploy.ppk", "signing.p8", "key.pk8", "bundle.pkcs12",
+        "chain.p7b", "chain.p7c", "client.ovpn",   # by suffix
+        ".envrc",                                   # by secret name
+    ])
+    def test_additional_credential_formats_blocked(self, home_env, fname):
+        # Denylist-completeness: common private-key / credential formats that used
+        # to slip both the walk and an explicit API pick are now refused.
+        home, _ = home_env
+        f = home / "docs" / fname
+        f.write_text("secret-ish placeholder body", encoding="utf-8")
+        with pytest.raises(ConfinementError) as ei:
+            confine_index_path(f, _wl())
+        assert ei.value.reason == "blacklisted_file"
+
+    def test_cli_policy_none_still_honours_explicit_secret(self, home_env):
+        # The CLI local operator (policy=None) can already read their own files;
+        # they stay unconfined for an explicit single-file pick (contract preserved).
+        home, _ = home_env
+        pem = home / "docs" / "deploy.pem"
+        pem.write_text(_PEM, encoding="utf-8")
+        assert confine_index_path(pem, None) == pem.resolve()
+
+    def test_directory_named_credentials_not_over_blocked(self, home_env):
+        # is_secret_index_name("credentials") is True, but the secret filter is
+        # for FILES only: a real folder named "credentials" must still be walkable
+        # (its non-secret contents index; its secret contents are skipped by the
+        # walk). Guarding on is_file() prevents an over-block regression.
+        home, _ = home_env
+        d = home / "docs" / "credentials"       # a directory, not a file
+        d.mkdir()
+        assert confine_index_path(d, _wl()) == d.resolve()
+
+
+class TestExpandAndAddPathsSecretFilter:
+    def test_expand_drops_explicit_secret_under_policy(self, home_env):
+        # Repro of the reported bug: _expand([pem], policy) used to RETURN the pem.
+        home, _ = home_env
+        pem = home / "docs" / "deploy.pem"
+        pem.write_text(_PEM, encoding="utf-8")
+        assert Collection._expand([pem], _wl()) == []
+
+    def test_expand_keeps_explicit_secret_without_policy(self, home_env):
+        # CLI path (policy=None): explicit pick still honoured.
+        home, _ = home_env
+        pem = home / "docs" / "deploy.pem"
+        pem.write_text(_PEM, encoding="utf-8")
+        assert Collection._expand([pem]) == [pem.resolve()]
+
+    def test_add_paths_explicit_secret_raises_under_policy(self, home_env, tmp_path):
+        # Repro of the reported bug: add_paths([pem], policy) used to return added=1.
+        home, _ = home_env
+        pem = home / "docs" / "deploy.pem"
+        pem.write_text(_PEM, encoding="utf-8")
+        c = Collection("kb", base=tmp_path / "rag").create()
+        with pytest.raises(ConfinementError):
+            c.add_paths([pem], policy=_wl())
+        # And nothing leaked into the index.
+        assert c.docs() == []
+
+    def test_add_paths_folder_indexes_good_skips_secret(self, home_env, tmp_path):
+        # A folder holding a good doc AND a secret: the doc indexes, the secret does
+        # not (walk filter), even though the folder itself is an allowed location.
+        home, _ = home_env
+        (home / "docs" / "good.txt").write_text(
+            "ordinary indexable document", encoding="utf-8")
+        (home / "docs" / "deploy.pem").write_text(_PEM, encoding="utf-8")
+        c = Collection("kb2", base=tmp_path / "rag").create()
+        res = c.add_paths([home / "docs"], policy=_wl())
+        assert res["added"] == 1
+        sources = " ".join(d["path"] for d in c.docs())
+        assert "good.txt" in sources
+        assert "deploy.pem" not in sources
+
+    def test_cli_add_paths_can_index_explicit_secret(self, home_env, tmp_path):
+        # The CLI (policy=None) still indexes an explicitly-picked secret file - the
+        # local operator is unconfined. This is the behaviour we must NOT regress.
+        home, _ = home_env
+        pem = home / "docs" / "deploy.pem"
+        pem.write_text(_PEM, encoding="utf-8")
+        c = Collection("kb3", base=tmp_path / "rag").create()
+        res = c.add_paths([pem])                 # no policy -> CLI contract
+        assert res["added"] == 1
+
+
+class TestRagAddRouteSecretFile:
+    def test_owner_explicit_secret_file_hard_blocked(self, rag_route_app):
+        app, home = rag_route_app
+        docs = home / "kdocs"
+        docs.mkdir()
+        pem = docs / "deploy.pem"               # inside the whitelist location...
+        pem.write_text(_PEM, encoding="utf-8")  # ...but a credential file
+        with TestClient(app) as client:
+            client.post("/api/rag/collections", json={"name": "kb"})
+            r = client.post("/api/rag/collections/kb/add",
+                            json={"paths": [str(pem)], "embed": False})
+            assert r.status_code == 400, r.text   # hard block, never offered (409)
+            assert "deploy.pem" in r.text
+
+    def test_secret_content_not_retrievable_after_block(self, rag_route_app):
+        # End-to-end C2: a loopback/API caller cannot read a credential back out.
+        app, home = rag_route_app
+        docs = home / "kdocs"
+        docs.mkdir()
+        (docs / "notes.md").write_text("rocm gfx1030 dll", encoding="utf-8")
+        (docs / "secret.pem").write_text(_PEM, encoding="utf-8")
+        with TestClient(app) as client:
+            client.post("/api/rag/collections", json={"name": "kb"})
+            # The good doc indexes fine.
+            assert client.post("/api/rag/collections/kb/add",
+                               json={"paths": [str(docs / "notes.md")],
+                                     "embed": False}).status_code == 200
+            # The credential is refused up front.
+            assert client.post("/api/rag/collections/kb/add",
+                               json={"paths": [str(docs / "secret.pem")],
+                                     "embed": False}).status_code == 400
+            # ...and its contents are not retrievable.
+            q = client.post("/api/rag/collections/kb/query",
+                            json={"query": "SUPERSECRETKEYMATERIAL", "k": 5})
+            assert q.status_code == 200, q.text
+            blob = " ".join(h.get("text", "") for h in q.json()["hits"])
+            assert "SUPERSECRETKEYMATERIAL" not in blob
+
+    def test_scoped_key_also_blocked_from_secret_file(
+            self, tmp_path, monkeypatch, tmp_path_factory):
+        # A non-owner scoped rag key is blocked from indexing a secret file too
+        # (400) - the C2 threat actor. It is refused as a secret, not offered the
+        # owner-only 409/403 whitelist-widening path.
+        from localm.plugins.engine import PluginManager
+        from localm.plugins.gui.web import attach_gui
+        home = tmp_path
+        localm = home / ".localm"
+        localm.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("LOCALM_HOME", str(localm))
+        monkeypatch.setenv("LOCALM_API_KEY", "owner-key-xyz")
+        monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+        import localm.config as cfg
+        monkeypatch.setattr(cfg, "HOME_DIR", localm)
+        monkeypatch.setattr(cfg, "MODELS_DIR", localm / "models")
+        monkeypatch.setattr(cfg, "CONFIG_FILE", localm / "config.json")
+        monkeypatch.setattr(cfg, "REGISTRY_FILE", localm / "registry.json")
+        from localm import auth
+        scoped = auth.create_key("dev", ["rag"])["key"]
+
+        app = FastAPI()
+        PluginManager(app, external_root=tmp_path / "noplugins").install("rag")
+
+        async def switch_model(name):
+            pass
+        attach_gui(app, self_url="http://127.0.0.1:9/v1",
+                   switch_model=switch_model, active_model=lambda: "model-a")
+
+        pem = home / "deploy.pem"               # under home -> whitelist location
+        pem.write_text(_PEM, encoding="utf-8")
+        with TestClient(app) as client:
+            sc = {"Authorization": f"Bearer {scoped}"}
+            client.post("/api/rag/collections", json={"name": "kb"}, headers=sc)
+            r = client.post("/api/rag/collections/kb/add",
+                            json={"paths": [str(pem)], "embed": False}, headers=sc)
+            assert r.status_code == 400, r.text

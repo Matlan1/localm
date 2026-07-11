@@ -74,18 +74,25 @@ BLACKLISTED_SUFFIXES = {
     ".gguf", ".safetensors", ".pt", ".pth", ".onnx", ".ckpt", ".h5",
     ".pb", ".tflite", ".npz", ".npy", ".pkl",
     # Secret / key material: plain-text key/cert files must not land in a
-    # searchable, model-visible index during a folder walk (AUDIT-MED-18).
+    # searchable, model-visible index during a folder walk (AUDIT-MED-18) or via
+    # an explicitly-named API pick (confine_index_path with a policy). Covers PEM
+    # keys/certs, PKCS bundles, keystores, and formats that routinely embed a
+    # private key inline (OpenVPN configs, direnv is handled by name below).
     ".pem", ".key", ".crt", ".cer", ".der", ".p12", ".pfx",
     ".keystore", ".jks", ".asc", ".gpg", ".kdbx",
+    ".ppk", ".p8", ".pk8", ".pkcs12", ".p7b", ".p7c", ".ovpn",
 }
 
 # Extensionless / dotfile secrets a recursive folder walk must skip - the suffix
-# blacklist cannot catch these (AUDIT-MED-18). A user who explicitly picks one of
-# these single files is still honoured; this only filters the recursive walk.
+# blacklist cannot catch these (AUDIT-MED-18). This filters the recursive walk;
+# the API path (confine_index_path with a policy) applies it to explicit single-
+# file picks too, so a `rag`-scoped caller cannot name a key file directly. The
+# local CLI (policy=None) is unconfined and still honours an explicit pick.
 SECRET_INDEX_NAMES = {
     "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
     ".netrc", ".pgpass", ".htpasswd", ".git-credentials",
     ".npmrc", ".pypirc", ".dockercfg", "credentials",
+    ".envrc",   # direnv: a shell script that routinely exports secrets, like .env
 }
 
 
