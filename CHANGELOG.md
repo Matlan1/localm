@@ -29,11 +29,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   path a couple of levels deep (e.g. `D:\localm\data`) used to crash if the parent
   folders did not exist yet. localm now creates the whole path, like `mkdir -p`.
 - **No more crash or lost settings when two processes touch config at once
-  (Windows):** on Windows, saving `config.json` / `registry.json` could fail with
-  an "access denied" error if another localm process, antivirus, a backup tool, or
-  Windows Search happened to be reading the file at that instant, and a read at
-  that moment could momentarily fall back to defaults. Saves and reads now ride out
-  that brief lock, so concurrent access no longer crashes a save or drops settings.
+  (Windows):** on Windows, saving `config.json` / `registry.json` could fail if
+  another localm process, antivirus, a backup tool, or Windows Search happened to be
+  reading the file at that instant, OR if two localm processes tried to save the same
+  file at the same time (a CLI `pull`/`config` while the GUI is running); a read at
+  that moment could momentarily fall back to defaults. Saves now use a unique temp
+  file per write and both saves and reads ride out the brief lock, so concurrent
+  access no longer crashes a save or drops settings.
 - **A `config.json` that is not a JSON object is no longer ignored silently:** if
   the file somehow becomes valid JSON but not an object (a list, a bare string, a
   number), localm now says it is ignoring it and using defaults, instead of quietly

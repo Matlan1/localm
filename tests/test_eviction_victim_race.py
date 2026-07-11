@@ -1,53 +1,147 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Regression: the model-eviction / unload TOCTOU window (a pin arriving DURING
-the native unload await).
+"""VRAM eviction must not crash when the victim is removed during its unload.
 
-A request pins its engine lock-free (``active_requests += 1``) the instant it
-owns it, AFTER get_engine's ``active_requests == 0`` check has already passed -
-AUDIT-CRIT-1 keeps that pin synchronous (no await between get_engine and the
-pin) so an eviction cannot interleave BEFORE it. But the eviction loop in
-``switch_engine`` and the unload helpers (``unload_all_models`` /
-``unload_one_model`` / ``_idle_unload_once``) check ``active_requests == 0`` and
-THEN ``await run_in_executor(engine.unload)``. During that await a QUEUED request
-for the victim could take get_engine's fast path and pin the still-loaded engine,
-which then gets freed out from under it and silently auto-reloaded - VRAM
-over-subscription on a roomy box, a 500 / driver fault on a tight one.
+switch_engine picks an idle victim, then `await`s its unload (an executor call -
+an event-loop yield). During that yield a CONCURRENT remover (another API load
+that picked the SAME idle victim - get_engine loads with preempt=False so they
+coexist - or an idle/explicit unload) may have already dropped the victim from
+`_engines`/`_engines_lru`. The removal step then used a bare
+`del _engines[evict_name]` / `_engines_lru.remove(evict_name)`, which raises
+KeyError/ValueError and surfaces as an HTTP 500 with a traceback (plus a leaked
+`_inference_sems` entry). This pins the guarded removal.
 
-The fix makes the pin and the native free mutually exclusive WITHOUT taking the
-victim's own semaphore (which would reintroduce the two-switch lock-ordering
-deadlock AUDIT-CRIT-1 warns about):
+The concurrent removal is simulated deterministically by the victim's own
+unload() dropping itself from the registry (exactly what a racing remover does
+during the same await window) and freeing enough VRAM for the incoming load.
 
-  * the eviction path DETACHES the victim from the live registry (_engines /
-    _engines_lru / _inference_sems) BEFORE the native free; and
-  * the unload helpers, which keep the engine registered for lazy reload, FLAG
-    it ``unloading`` for the duration of the free.
-
-get_engine / switch_engine's fast paths then refuse an engine that is detached
-or flagged, so a queued request misses the fast path and instead reloads cleanly
-(under the same per-model semaphore the unloader holds, so it serialises after
-the free) rather than pinning a doomed engine.
-
-Each test drives the eviction / unload to a controllable STOP inside the native
-``unload()`` (the exact TOCTOU window) and asserts the victim is not
-fast-path-pinnable there. Negative-tested: on the pre-fix code the victim is
-still ``loaded`` and registered during its own free, so ``_fast_path_pinnable``
-returns True and each assertion fires.
+The GatedEngine tests further down pin the deeper BUG-9b follow-up: the
+pin-arrives-during-the-native-unload-await window itself, on every evict/unload
+path. A request pins its engine lock-free (active_requests += 1) AFTER
+get_engine's active_requests==0 check has passed (AUDIT-CRIT-1 keeps the pin
+synchronous), so a QUEUED request could pin the victim DURING the unload await and
+get it freed out from under it, then silently auto-reloaded (VRAM
+over-subscription / a tight-box 500). The fix detaches the eviction victim from
+the live registry BEFORE the free and flags the kept-registered unload paths
+`unloading`, so get_engine/switch_engine's fast paths refuse an engine that is
+being freed - WITHOUT taking the victim's own semaphore (which would reintroduce
+the two-switch lock-ordering deadlock AUDIT-CRIT-1 warns about).
 """
 
 import asyncio
 import threading
 import time
 
+import pytest
 from fastapi import HTTPException
 
 from localm.inference import http_server as hs
 
 
+class _IncomingEngine:
+    def __init__(self, name):
+        self.display_name = name
+        self._loaded = False
+        self.active_requests = 0
+
+    @property
+    def loaded(self):
+        return self._loaded
+
+    def set_load_cancel(self, ev):
+        pass
+
+    def load(self):
+        self._loaded = True
+
+    def unload(self):
+        self._loaded = False
+
+
+class _RacyVictim:
+    """An idle victim whose unload() ALSO removes it from the registry (like a
+    concurrent remover during the same await window) and frees VRAM."""
+
+    def __init__(self, name, vram_state):
+        self.display_name = name
+        self._loaded = True
+        self.active_requests = 0
+        self._vram = vram_state
+
+    @property
+    def loaded(self):
+        return self._loaded
+
+    def unload(self):
+        self._loaded = False
+        # Simulate a concurrent removal landing during this (executor) unload...
+        hs._engines.pop(self.display_name, None)
+        if self.display_name in hs._engines_lru:
+            hs._engines_lru.remove(self.display_name)
+        # ...and the freed VRAM so the incoming load now fits and the loop breaks.
+        self._vram["free"] = 8 * 1024 ** 3
+
+
+@pytest.fixture
+def evicting(monkeypatch):
+    vram = {"free": 3 * 1024 ** 3}   # below the ~5.8 GB the incoming load needs
+    monkeypatch.setattr("localm.discover.vram_capacity",
+                        lambda config=None: {"free": vram["free"], "total": 16 * 1024 ** 3})
+    monkeypatch.setattr("localm.discover.gpu_split_shortfall", lambda need: [])
+    monkeypatch.setattr("localm.discover.split_device_count", lambda: 1)
+    monkeypatch.setattr("localm.vram.wait_for_vram_release",
+                        lambda free_fn, before_bytes=None: (0, before_bytes))
+    monkeypatch.setattr(hs, "_gpu_registry_sync", lambda: None)
+    reg = {"victim": {"path": "models/victim.gguf", "source": "local"},
+           "incoming": {"path": "models/incoming.gguf", "source": "local"}}
+    monkeypatch.setattr("localm.config.load_registry", lambda: reg)
+    monkeypatch.setattr("localm.model_manager.get_model_info",
+                        lambda n: (f"models/{n}.gguf", "hint"))
+    for d in (hs._engines, hs._engines_lru, hs._inference_sems,
+              hs._last_activity_per_model):
+        d.clear()
+    hs._active_model_name = None
+    hs._default_model_name = None
+    hs._engine = None
+    hs._inference_sem = None
+    hs._switch_desired = None
+    hs._switch_loading = None
+    hs._switch_cancel = None
+    return vram
+
+
+def test_eviction_survives_victim_removed_during_unload(evicting):
+    vram = evicting
+    victim = _RacyVictim("victim", vram)
+    hs._engines["victim"] = victim
+    hs._engines_lru.append("victim")
+    hs._inference_sems["victim"] = asyncio.Semaphore(1)
+    hs._active_model_name = "victim"
+
+    incoming = _IncomingEngine("incoming")
+    from unittest.mock import patch
+    with patch.object(hs, "_engine_factory", lambda n: incoming):
+        # Without the guarded removal this raises KeyError (-> HTTP 500); with it
+        # the load completes.
+        engine = asyncio.run(hs.get_engine("incoming"))
+
+    assert engine is incoming and incoming.loaded, "incoming model should have loaded"
+    assert "victim" not in hs._engines, "victim was evicted"
+    assert "victim" not in hs._inference_sems, "victim's semaphore must not leak"
+
+
+# --------------------------------------------------------------------------- #
+#  BUG-9b: the pin-arrives-during-the-native-unload-await window itself.       #
+#  Each test drives an evict/unload to a controllable STOP inside the native  #
+#  unload() (the exact TOCTOU window) and asserts the victim is not            #
+#  fast-path-pinnable there. Negative-tested: on the pre-fix code the victim   #
+#  is still loaded+registered during its own free, so the assertion fires.     #
+# --------------------------------------------------------------------------- #
+
+
 class GatedEngine:
     """Fake engine whose ``unload()`` blocks until ``release`` is set and signals
     ``entered`` the instant it starts - so a test can inspect / act on server
-    state DURING the native free (the TOCTOU window). Mirrors the FakeEngine
-    surface the other eviction tests use."""
+    state DURING the native free (the TOCTOU window)."""
 
     def __init__(self, display_name, *, gate=False):
         self.display_name = display_name
