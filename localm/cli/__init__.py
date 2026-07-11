@@ -71,15 +71,3 @@ _parse_plugin_selection = _plugins._parse_plugin_selection
 # Resolved from the package by plugins.py so a monkeypatch on
 # localm.cli._engine_manager reaches the call site.
 _engine_manager = _plugins._engine_manager
-
-
-# Register external plugin commands at import time so they show in --help.
-# A broken plugin must never take down the CLI (warnings only). MUST run last,
-# after every built-in submodule above has registered on ``main``.
-try:
-    from ..plugins.loader import register_external_plugins as _register_ext
-
-    for _warning in _register_ext(main):
-        console.print(f"[yellow]plugin warning:[/yellow] {_warning}")
-except Exception as _e:  # pragma: no cover - absolute last resort
-    console.print(f"[yellow]plugin discovery failed:[/yellow] {_e}")

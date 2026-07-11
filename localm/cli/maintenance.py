@@ -7,53 +7,60 @@ from ._core import console, main
 
 
 # ------------------------------------------------------------------ #
-#  Plugin: coder (optional extra)                                      #
+#  Plugin CLI wiring (first-party plugins that ship a Click group)      #
 # ------------------------------------------------------------------ #
 
-# Register ``localm coder`` when the coder plugin is installed.
-# The plugin is gated behind ``pip install "localm[coder]"`` so the import
-# is wrapped in a try/except - the base localm install keeps working fine
-# if the extra was never requested.
-# MCP server plugin - expose localm to MCP clients (Claude Desktop, etc.)
-try:
-    from ..plugins.mcpserver.cli import main as _mcp_main
-    main.add_command(_mcp_main, name="mcp")
-except ImportError:
-    pass
+def _wire_plugin_cli_entries() -> None:
+    """Wire each first-party plugin's CLI Click group from its manifest's
+    ``cli`` entry point (PluginManager.cli_entries()) instead of one hardcoded
+    try/except-ImportError block per plugin - so shipping a new first-party
+    plugin with a CLI surface needs a manifest line, not a new block here.
+    A plugin's optional pip extras gate it via ImportError, exactly like the
+    hardcoded blocks this replaces (CF-3/PLUGIN-ENGINE unification) - it is
+    NOT gated on `plugin install`/enabled state, since e.g. `localm coder`
+    must stay reachable regardless of that toggle.
+
+    The Click command/group's OWN declared name (e.g. jobs/cli.py's
+    ``@click.group(name="job")``) is used as-is, not the plugin's catalog
+    name - jobs' catalog name is "jobs" but its CLI verb is "job", a
+    pre-existing quirk this loop preserves rather than silently renames."""
+    import importlib
+
+    from ..plugins.engine import PluginManager
+    mgr = PluginManager(None)
+    wired = set()
+    for name, entry in mgr.cli_entries():
+        mod_name, _, attr = entry.partition(":")
+        attr = attr or "main"
+        try:
+            mod = importlib.import_module(mod_name)
+            main.add_command(getattr(mod, attr))
+            wired.add(name)
+        except ImportError:
+            pass
+    if "coder" not in wired:
+        @main.command("coder", context_settings={"ignore_unknown_options": True})
+        def _coder_stub(**_):
+            """Offline AI coding agent (run: pip install "localm[coder]" to enable)."""
+            console.print(
+                '[yellow]The coder plugin could not be loaded.[/yellow]\n'
+                'Install its dependencies with:  [bold]pip install "localm[coder]"[/bold]\n'
+                '  or (editable):  [bold]pip install -e ".[coder]"[/bold]\n'
+                'then activate it with:  [bold]localm plugin install coder[/bold]'
+            )
 
 
+_wire_plugin_cli_entries()
 
-# GUI plugin - browser interface for chat and the coder agent
+
+# GUI is core kernel surface (the WebUI), not a PluginManager-tracked plugin
+# (no plugin.toml - it is not an installable feature), so it is wired directly
+# rather than through cli_entries().
 try:
     from ..plugins.gui.cli import main as _gui_main
     main.add_command(_gui_main, name="gui")
 except ImportError:
     pass
-
-
-
-# Jobs plugin - scheduled recurring tasks (localm job add/list/run/...)
-try:
-    from ..plugins.builtin.jobs.cli import main as _jobs_main
-    main.add_command(_jobs_main, name="job")
-except ImportError:
-    pass
-
-
-
-try:
-    from ..plugins.coder.cli import main as _coder_main
-    main.add_command(_coder_main, name="coder")
-except ImportError:
-    @main.command("coder", context_settings={"ignore_unknown_options": True})
-    def _coder_stub(**_):
-        """Offline AI coding agent (run: pip install "localm[coder]" to enable)."""
-        console.print(
-            '[yellow]The coder plugin could not be loaded.[/yellow]\n'
-            'Install its dependencies with:  [bold]pip install "localm[coder]"[/bold]\n'
-            '  or (editable):  [bold]pip install -e ".[coder]"[/bold]\n'
-            'then activate it with:  [bold]localm plugin install coder[/bold]'
-        )
 
 
 

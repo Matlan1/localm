@@ -1,17 +1,31 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """
-External plugin discovery and loading.
+Legacy plugin manifest discovery, plus small constants shared with the plugin
+engine (``localm/plugins/engine.py``).
 
-Plugins live in ``~/.localm/plugins/<name>/`` and are described by a
-``plugin.toml`` manifest:
+The engine's ``register = "plug"`` contract (``PluginManager``) is the ONE
+install/enable/disable/list mechanism for a plugin's server surface - it used
+to share this module with a second, independent ``entry = "<module>:<attr>"``
+CLI-manifest mechanism, but that half (install/remove, the ``/v1/plugins`` HTTP
+API, and the ``plugin list``/``plugin remove`` CLI verbs) was dead for every
+shipped plugin and has been removed (see PATHFINDER-2026-07-11).
+
+What remains here is still live: a third-party plugin's ``[tools] exports =
+[...]`` manifest section (this module's own ``discover_plugins``/
+``import_plugin_module``) is how ``localm/plugins/coder/plugin_tools.py``
+discovers and loads externally-exported coder-agent tools - a distinct
+capability from the engine's server-surface registration, unrelated to the
+CF-1/CF-2 install/enable/disable duplication that motivated the cut above.
+``plugins_dir()`` and ``_RESERVED_NAMES`` are also read directly by
+``engine.py``/``media_config.py``.
 
     [plugin]
-    name = "myplugin"                 # CLI name: ``localm myplugin``
+    name = "myplugin"
     version = "0.1.0"
     description = "What it does"
-    entry = "myplugin_cli:main"       # "<module>:<attr>" - attr is a Click command
+    entry = "myplugin_cli:main"       # "<module>:<attr>" - only needed for tool exports now
 
-    [tools]                           # optional - tool exports for the agent
+    [tools]                           # tool exports for the coder agent
     exports = ["tool_hello"]
 
 The entry module is imported from the plugin directory itself, so a plugin
@@ -22,7 +36,6 @@ Everything works offline - installation is a local directory copy.
 from __future__ import annotations
 
 import importlib.util
-import shutil
 import sys
 import tomllib
 from dataclasses import dataclass, field
@@ -133,10 +146,12 @@ def parse_manifest(plugin_dir: Path, *,
 
 def discover_plugins(root: Optional[Path] = None) -> List[PluginManifest]:
     """
-    Scan the plugins directory and return manifests for every valid plugin.
+    Scan the plugins directory and return manifests for every valid legacy
+    (``entry =``) plugin - this is how ``plugin_tools.register_plugin_tools()``
+    finds third-party coder-agent tool exports.
 
     Invalid plugins are skipped silently here - use :func:`discover_errors`
-    when you want the reasons (e.g. for ``localm plugin list``).
+    when you want the reasons.
     """
     manifests, _, _ = _scan(root)
     return manifests
@@ -150,8 +165,7 @@ def discover_errors(root: Optional[Path] = None) -> List[str]:
 
 def discover_warnings(root: Optional[Path] = None) -> List[str]:
     """Non-fatal manifest warnings (unknown/misspelled keys, LM-DA-007) for
-    plugins that still parse and load; surfaced by ``localm plugin list`` and
-    ``/v1/plugins`` so a typo does not degrade silently."""
+    plugins that still parse and load - so a typo does not degrade silently."""
     _, _, warns = _scan(root)
     return warns
 
@@ -226,122 +240,3 @@ def import_plugin_module(manifest: PluginManifest):
         raise PluginError(f"Plugin {manifest.name!r} failed to import: {e}") from e
 
     return module
-
-
-def load_entry(manifest: PluginManifest):
-    """
-    Import the plugin's entry module from its directory and return the
-    entry attribute (expected to be a Click command or group).
-    """
-    module = import_plugin_module(manifest)
-    attr = getattr(module, manifest.entry_attr, None)
-    if attr is None:
-        raise PluginError(
-            f"Plugin {manifest.name!r}: entry attribute "
-            f"{manifest.entry_attr!r} not found in {manifest.entry_module}"
-        )
-    return attr
-
-
-def register_external_plugins(group) -> List[str]:
-    """
-    Discover external plugins and add each one's Click command to *group*.
-
-    Returns a list of warning strings for plugins that failed to load.
-    Never raises - a broken plugin must not take down the localm CLI.
-    """
-    warnings: List[str] = []
-    existing = set(group.commands) if hasattr(group, "commands") else set()
-    for manifest in discover_plugins():
-        if manifest.name in existing:
-            warnings.append(
-                f"Plugin {manifest.name!r} skipped: command name already registered"
-            )
-            continue
-        try:
-            cmd = load_entry(manifest)
-            group.add_command(cmd, name=manifest.name)
-            existing.add(manifest.name)
-        except PluginError as e:
-            warnings.append(str(e))
-        except Exception as e:  # defensive - plugin bugs stay contained
-            warnings.append(f"Plugin {manifest.name!r} failed to register: {e}")
-    return warnings
-
-
-# ------------------------------------------------------------------ #
-#  Install / remove                                                    #
-# ------------------------------------------------------------------ #
-
-def install_plugin(source: Path, *, force: bool = False) -> PluginManifest:
-    """
-    Install a plugin by copying *source* (a directory containing plugin.toml)
-    into the plugins directory. Returns the installed manifest.
-    """
-    source = source.resolve()
-    if not source.is_dir():
-        raise PluginError(f"Not a directory: {source}")
-    manifest = parse_manifest(source)  # validate before copying
-
-    dest = plugins_dir() / manifest.name
-    if dest.exists():
-        if not force:
-            raise PluginError(
-                f"Plugin {manifest.name!r} is already installed "
-                f"(use --force to overwrite)"
-            )
-        shutil.rmtree(dest)
-
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(
-        source, dest,
-        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".git"),
-    )
-    return parse_manifest(dest)
-
-
-def _is_protected(name: str, plugin_dir: Optional[Path] = None) -> bool:
-    """True when *name* is a protected plugin that must never be removed.
-
-    Mirrors the engine's determination (engine.PluginManager._is_protected): a
-    plugin is protected if it is listed as protected in the catalog OR its own
-    installed manifest sets ``[plugin] protected = true``. The legacy loader has
-    no live engine state, so it consults both sources directly. Checking the
-    on-disk manifest matters because a malicious/legacy removal path must not be
-    able to delete a protected plugin (e.g. chat) just because the catalog list
-    happens not to know its name."""
-    try:
-        from localm.plugins import catalog as _cat
-        if name in _cat.protected():
-            return True
-    except Exception:
-        pass
-    if plugin_dir is None:
-        plugin_dir = plugins_dir() / name
-    try:
-        data = tomllib.loads((plugin_dir / "plugin.toml").read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError):
-        return False
-    plugin = data.get("plugin")
-    if not isinstance(plugin, dict):
-        return False
-    return bool(plugin.get("protected", False))
-
-
-def remove_plugin(name: str) -> bool:
-    """Remove an installed plugin by name. Returns True if it existed.
-
-    Refuses to remove a protected plugin (e.g. the built-in ``chat`` plugin):
-    the legacy removal path must honour the same protected-plugin guard the
-    engine enforces, so a protected plugin's directory cannot be deleted via
-    this path (or the DELETE /v1/plugins/{name} endpoint that calls it)."""
-    target = plugins_dir() / name
-    if not target.is_dir():
-        return False
-    # Refuse to delete anything outside the plugins root
-    if target.resolve().parent != plugins_dir().resolve():
-        raise PluginError(f"Refusing to remove path outside plugins dir: {target}")
-    if _is_protected(name, target):
-        raise PluginError(f"Plugin {name!r} is protected and cannot be removed")
-    shutil.rmtree(target)
-    return True

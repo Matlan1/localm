@@ -634,7 +634,7 @@ def test_jobs_manifest_parses():
     spec = parse_spec(d, builtin=True)
     assert spec.name == "jobs"
     assert spec.scope == "jobs"
-    assert spec.cli_entry == "cli:main"
+    assert spec.cli_entry == "localm.plugins.builtin.jobs.cli:main"
     assert spec.surface.tab_id == "jobs"
     assert spec.compatible()
 

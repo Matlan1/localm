@@ -5,6 +5,7 @@ from pathlib import Path
 import click
 
 from ._core import console, main
+from .errors import run_or_die
 
 
 # ------------------------------------------------------------------ #
@@ -13,51 +14,7 @@ from ._core import console, main
 
 @main.group()
 def plugin() -> None:
-    """Manage external plugins (installed in ~/.localm/plugins/)."""
-
-
-
-
-@plugin.command("list")
-def plugin_list():
-    """List installed external plugins."""
-    from ..plugins.loader import (discover_errors, discover_plugins,
-                                  discover_warnings, plugins_dir)
-
-    manifests = discover_plugins()
-    errors = discover_errors()
-    warnings = discover_warnings()
-    if not manifests and not errors:
-        console.print(f"[dim]No external plugins installed ({plugins_dir()})[/dim]")
-        return
-    for m in manifests:
-        desc = f" - {m.description}" if m.description else ""
-        console.print(f"  [bold]{m.name}[/bold] v{m.version}{desc}")
-        if m.tool_exports:
-            console.print(f"    [dim]tools: {', '.join(m.tool_exports)}[/dim]")
-    for err in errors:
-        console.print(f"  [yellow]invalid:[/yellow] {err}")
-    for warn in warnings:
-        console.print(f"  [yellow]warning:[/yellow] {warn}")
-
-
-
-
-@plugin.command("remove")
-@click.argument("name")
-def plugin_remove(name):
-    """Remove an installed plugin by name."""
-    from ..plugins.loader import PluginError, remove_plugin
-
-    try:
-        existed = remove_plugin(name)
-    except PluginError as e:
-        console.print(f"[red]{e}[/red]")
-        sys.exit(1)
-    if existed:
-        console.print(f"[green]Removed[/green] plugin [bold]{name}[/bold]")
-    else:
-        console.print(f"[yellow]Plugin {name!r} is not installed[/yellow]")
+    """Manage plugins (status/install/uninstall/enable/disable)."""
 
 
 
@@ -169,14 +126,8 @@ def plugin_install_engine(target, force, with_deps):
                           f"({', '.join(spec.requires_extras)}); install per its "
                           f"own instructions.[/dim]")
         return
-    try:
-        mgr.set_installed_state(target, True)
-    except KeyError:
-        console.print(f"[red]No such plugin: {target}[/red]")
-        sys.exit(1)
-    except ValueError as e:
-        console.print(f"[red]{e}[/red]")
-        sys.exit(1)
+    run_or_die(mgr.set_installed_state, target, True,
+              missing_msg=f"No such plugin: {target}")
     console.print(f"[green]Installed[/green] plugin [bold]{target}[/bold]")
     _warn_missing_requires(mgr, target)
     if _resolve_with_deps(with_deps):
@@ -407,14 +358,8 @@ def plugin_uninstall_engine(name, delete_data):
     """Uninstall (deselect) an engine plugin. Keeps its data unless --delete-data."""
     from localm import cli as _cli
     mgr = _cli._engine_manager()
-    try:
-        was = mgr.uninstall(name, delete_data=delete_data)
-    except KeyError:
-        console.print(f"[red]No such plugin: {name}[/red]")
-        sys.exit(1)
-    except ValueError as e:
-        console.print(f"[red]{e}[/red]")
-        sys.exit(1)
+    was = run_or_die(mgr.uninstall, name, delete_data=delete_data,
+                     missing_msg=f"No such plugin: {name}")
     if was:
         console.print(f"[yellow]Uninstalled[/yellow] plugin [bold]{name}[/bold]")
     else:
@@ -432,14 +377,8 @@ def plugin_enable(name, with_deps):
     """Enable an installed engine plugin (must be installed first)."""
     from localm import cli as _cli
     mgr = _cli._engine_manager()
-    try:
-        mgr.set_enabled_state(name, True)
-    except KeyError:
-        console.print(f"[red]No such plugin: {name}[/red]")
-        sys.exit(1)
-    except ValueError as e:
-        console.print(f"[red]{e}[/red]")
-        sys.exit(1)
+    run_or_die(mgr.set_enabled_state, name, True,
+              missing_msg=f"No such plugin: {name}")
     console.print(f"[green]Enabled[/green] plugin [bold]{name}[/bold]")
     _warn_missing_requires(mgr, name)
     if _resolve_with_deps(with_deps):
@@ -457,14 +396,8 @@ def plugin_disable(name):
     """Disable an installed engine plugin (keeps it installed)."""
     from localm import cli as _cli
     mgr = _cli._engine_manager()
-    try:
-        mgr.set_enabled_state(name, False)
-    except KeyError:
-        console.print(f"[red]No such plugin: {name}[/red]")
-        sys.exit(1)
-    except ValueError as e:
-        console.print(f"[red]{e}[/red]")
-        sys.exit(1)
+    run_or_die(mgr.set_enabled_state, name, False,
+              missing_msg=f"No such plugin: {name}")
     console.print(f"[yellow]Disabled[/yellow] plugin [bold]{name}[/bold]")
 
 

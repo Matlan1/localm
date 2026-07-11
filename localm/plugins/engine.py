@@ -674,6 +674,24 @@ class PluginManager:
                 pass
         return out
 
+    def cli_entries(self) -> list[tuple[str, str]]:
+        """(name, "module.path:attr") for every first-party plugin that
+        declares a CLI entry point in its manifest's ``cli`` key, in catalog
+        order. Read from the bundled store (NOT the installed set): a
+        first-party CLI command like ``localm coder`` must stay reachable
+        regardless of plugin install/enable state - only its pip extras
+        (ImportError) gate it, matching cli/maintenance.py's existing
+        try/except contract. Lets shipping a new first-party plugin with a
+        CLI surface skip adding a new hardcoded wiring block."""
+        from localm.plugins import catalog as _cat
+        order = {e.name: i for i, e in enumerate(_cat.CATALOG)}
+        out = []
+        for name, spec in sorted(self.store_catalog().items(),
+                                 key=lambda kv: order.get(kv[0], len(order))):
+            if spec.cli_entry:
+                out.append((name, spec.cli_entry))
+        return out
+
     # ---- installed/enabled state -------------------------------------------
     # "Installed" is PHYSICAL: a plugin is installed iff its directory is present
     # in the installed folder (discoverable). It is NOT a config flag. "Enabled"
@@ -1020,29 +1038,11 @@ class PluginManager:
         spec = self._specs.get(name)
         return bool(spec and spec.protected) or name in _cat.protected()
 
-    # ---- public lifecycle (install/uninstall = store<->installed) -----------
-    def install(self, name: str) -> None:
-        """Install a plugin: copy it from the bundled store (or its GitHub repo)
-        into the installed folder, then load + enable it on the live app. Rolls
-        back the copy if it does not load. KeyError if no such plugin exists."""
-        self._provision_from_store(name)             # may raise KeyError
-        self.discover()
-        if name not in self._specs:
-            detail = self._discover_errors.get(name, "bad manifest")
-            self._remove_installed_dir(name)
-            raise ValueError(f"plugin {name!r} could not be installed: {detail}")
-        try:
-            if name not in self._loaded:
-                self._load(self._specs[name])
-        except Exception:
-            self._remove_installed_dir(name)         # roll back the copy
-            raise
-        self._invoke_hook(name, "on_install")        # optional lifecycle hook
-        self._set_enabled(name, True)
-
-    def install_external(self, source: Path, *, force: bool = False):
-        """Install a THIRD-PARTY plugin from an arbitrary source directory: copy it
-        into the installed folder, then load + enable. Rolls back on failure."""
+    # ---- shared install-sequence helpers (PLUGIN-ENGINE-1/2/3) -------------
+    def _copy_third_party_source(self, source: Path, *, force: bool):
+        """Validate + copy a third-party plugin source dir into the installed
+        folder. ``install_external()``/``set_installed_from_dir()`` did this
+        almost verbatim (PLUGIN-ENGINE-1). Returns (parsed spec, dest dir)."""
         import shutil
         src = Path(source)
         spec0 = parse_spec(src)                       # validate + name (raises)
@@ -1063,11 +1063,56 @@ class PluginManager:
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(src, dest)
         _write_marker(dest, "external", _dir_content_hash(src))
+        return spec0, dest
+
+    def _provision_and_verify(self, name: str, *, rollback_on_fail: bool = True,
+                              fail_verb: str = "could not be installed") -> None:
+        """Re-discover after a copy landed in the installed folder and confirm
+        the manifest actually parses, rolling back the copy on failure
+        (PLUGIN-ENGINE-2: ``install()``/``install_external()``/
+        ``set_installed_from_dir()``/``set_installed_state()`` all repeated
+        this 'provision, then verify-or-rollback' sequence)."""
+        self.discover()
+        if name not in self._specs:
+            detail = self._discover_errors.get(name, "bad manifest")
+            if rollback_on_fail:
+                self._remove_installed_dir(name)
+            raise ValueError(f"plugin {name!r} {fail_verb}: {detail}")
+
+    def _resolve_missing_plugin_error(self, name: str, *, hint_ok: bool = True) -> Exception:
+        """The 'not installed -> is it at least known (ValueError with an
+        install hint) or truly unknown (KeyError)' resolution ``enable()``/
+        ``set_enabled_state()`` both repeated (PLUGIN-ENGINE-3). *hint_ok*
+        suppresses the install hint for disable (``set_enabled_state(on=False)``),
+        where 'install it first' makes no sense."""
+        from localm.plugins import catalog as _cat
+        if hint_ok and (_cat.get(name) or self._store_dir(name)):
+            return ValueError(f"plugin {name!r} is not installed; install it first")
+        return KeyError(f"no such plugin: {name}")
+
+    # ---- public lifecycle (install/uninstall = store<->installed) -----------
+    def install(self, name: str) -> None:
+        """Install a plugin: copy it from the bundled store (or its GitHub repo)
+        into the installed folder, then load + enable it on the live app. Rolls
+        back the copy if it does not load. KeyError if no such plugin exists."""
+        self._provision_from_store(name)             # may raise KeyError
+        self._provision_and_verify(name)
         try:
-            self.discover()
-            if name not in self._specs:
-                detail = self._discover_errors.get(name, "bad manifest")
-                raise ValueError(f"plugin {name!r} is not loadable: {detail}")
+            if name not in self._loaded:
+                self._load(self._specs[name])
+        except Exception:
+            self._remove_installed_dir(name)         # roll back the copy
+            raise
+        self._invoke_hook(name, "on_install")        # optional lifecycle hook
+        self._set_enabled(name, True)
+
+    def install_external(self, source: Path, *, force: bool = False):
+        """Install a THIRD-PARTY plugin from an arbitrary source directory: copy it
+        into the installed folder, then load + enable. Rolls back on failure."""
+        spec0, dest = self._copy_third_party_source(source, force=force)
+        name = spec0.name
+        self._provision_and_verify(name, fail_verb="is not loadable")
+        try:
             if name not in self._loaded:
                 self._load(self._specs[name])
         except Exception:
@@ -1085,31 +1130,9 @@ class PluginManager:
         manifest, copy it into the installed folder, and enable it. Rolls back a
         copy that does not parse. A running GUI server loads it on its next
         start. Returns the parsed PluginSpec."""
-        import shutil
-        src = Path(source)
-        spec0 = parse_spec(src)                       # validate manifest + name (raises)
+        spec0, dest = self._copy_third_party_source(source, force=force)
         name = spec0.name
-        # A third-party plugin must not shadow a built-in command name
-        # (run/serve/config/coder/...). Builtins install via install() from the
-        # trusted store; only arbitrary-source third-party installs are gated.
-        # Reuse the legacy loader's set so the two loaders cannot drift.
-        from localm.plugins.loader import _RESERVED_NAMES
-        if name in _RESERVED_NAMES:
-            raise ValueError(
-                f"plugin name {name!r} clashes with a built-in command")
-        dest = self._installed_dir(name)
-        if dest.exists():
-            if not force:
-                raise ValueError(f"plugin {name!r} is already installed")
-            self._remove_installed_dir(name)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(src, dest)
-        _write_marker(dest, "external", _dir_content_hash(src))
-        self.discover()
-        if name not in self._specs:
-            detail = self._discover_errors.get(name, "bad manifest")
-            self._remove_installed_dir(name)
-            raise ValueError(f"plugin {name!r} could not be installed: {detail}")
+        self._provision_and_verify(name)
         if enable:
             self._set_enabled(name, True)
         return spec0
@@ -1117,10 +1140,7 @@ class PluginManager:
     def enable(self, name: str) -> None:
         self.discover()
         if name not in self._specs:
-            from localm.plugins import catalog as _cat
-            if _cat.get(name) or self._store_dir(name):
-                raise ValueError(f"plugin {name!r} is not installed; install it first")
-            raise KeyError(f"no such plugin: {name}")
+            raise self._resolve_missing_plugin_error(name)
         self._require_deps_installed(name)            # REC-PLUGIN-REQUIRES
         self._maybe_refresh_builtin(name)             # pick up an upgraded builtin
         self.discover()                               # re-read the refreshed spec
@@ -1282,11 +1302,7 @@ class PluginManager:
         uninstalling disables. Honours protection on uninstall."""
         if on:
             self._provision_from_store(name)         # copy store -> installed (raises if unknown)
-            self.discover()
-            if name not in self._specs:              # copied but unparseable -> roll back
-                detail = self._discover_errors.get(name, "bad manifest")
-                self._remove_installed_dir(name)
-                raise ValueError(f"plugin {name!r} could not be installed: {detail}")
+            self._provision_and_verify(name)
             if enable:
                 self._set_enabled(name, True)
         else:
@@ -1303,10 +1319,7 @@ class PluginManager:
         to be installed (on disk); honours protection on disable."""
         self.discover()
         if name not in self._installed_set():
-            from localm.plugins import catalog as _cat
-            if on and (_cat.get(name) or self._store_dir(name)):
-                raise ValueError(f"plugin {name!r} is not installed; install it first")
-            raise KeyError(f"no such plugin: {name}")
+            raise self._resolve_missing_plugin_error(name, hint_ok=on)
         if not on and self._is_protected(name):
             raise ValueError(f"plugin {name!r} is protected and cannot be disabled")
         if on:
