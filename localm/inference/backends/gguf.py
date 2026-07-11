@@ -630,6 +630,14 @@ class GgufBackend(BaseBackend):
     def loaded(self) -> bool:
         return self._loaded
 
+    def validate_grammar(self, grammar: Optional[str]) -> None:
+        """Raise :class:`InvalidGrammarError` for a malformed GBNF string, up front,
+        so a bad grammar is a clean 400 rather than a native fault that would latch
+        _grammar_unsupported and silently strip grammar from later requests. No-op
+        when not loaded (no vocab to parse against) or when *grammar* is empty."""
+        if grammar and self._loaded and self._llm is not None:
+            self._llm.check_grammar(grammar)
+
     # ------------------------------------------------------------------ #
     #  Tokenisation                                                        #
     # ------------------------------------------------------------------ #

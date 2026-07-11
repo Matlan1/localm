@@ -54,6 +54,98 @@ def _null_fake_pointers():
     _FAKES.clear()
 
 
+def test_build_sampler_rejects_invalid_grammar_never_adds_null():
+    """An invalid GBNF string makes llama_sampler_init_grammar return NULL. The
+    builder must raise InvalidGrammarError (and free the half-built chain) rather
+    than add NULL to the chain - adding NULL NULL-derefs at sample time, which the
+    GGUF backend catches by LATCHING _grammar_unsupported, silently stripping
+    grammar from every later request (the poisoning bug)."""
+    from localm.inference.backends.base import InvalidGrammarError
+    from localm.inference.backends.llamacpp import llama as L
+
+    mock_api = MagicMock()
+    mock_api.llama_sampler_chain_init.return_value = 500
+    mock_api.llama_sampler_init_grammar.return_value = None  # NULL == parse failure
+
+    with patch.object(L, "api", mock_api):
+        with pytest.raises(InvalidGrammarError):
+            L._build_sampler(vocab=1, grammar='root ::= "x" (((', temperature=0.0)
+
+    # The NULL sampler was NEVER added to the chain, and the chain was freed.
+    mock_api.llama_sampler_chain_add.assert_not_called()
+    mock_api.llama_sampler_free.assert_called_once_with(500)
+
+
+def test_build_sampler_rejects_invalid_lazy_grammar():
+    """Same guard for the lazy path: a NULL from init_grammar_lazy_patterns must
+    raise, not be added to the chain."""
+    from localm.inference.backends.base import InvalidGrammarError
+    from localm.inference.backends.llamacpp import llama as L
+
+    mock_api = MagicMock()
+    mock_api.llama_sampler_chain_init.return_value = 500
+    mock_api.has_lazy_grammar.return_value = True
+    mock_api.llama_sampler_init_grammar_lazy_patterns.return_value = None
+
+    with patch.object(L, "api", mock_api):
+        with pytest.raises(InvalidGrammarError):
+            L._build_sampler(vocab=1, grammar="bad", grammar_lazy=True,
+                             grammar_triggers=["<tool_call>"], temperature=0.0)
+
+    mock_api.llama_sampler_free.assert_called_once_with(500)
+
+
+def test_build_sampler_accepts_valid_grammar():
+    """A valid grammar (non-NULL init) is added to the chain, no raise, no free."""
+    from localm.inference.backends.llamacpp import llama as L
+
+    mock_api = MagicMock()
+    mock_api.llama_sampler_chain_init.return_value = 500
+    mock_api.llama_sampler_init_grammar.return_value = 777  # non-NULL == parsed
+    mock_api.has_penalties_sampler.return_value = False
+
+    with patch.object(L, "api", mock_api):
+        L._build_sampler(vocab=1, grammar='root ::= "x"', temperature=0.0)
+
+    added = [c.args for c in mock_api.llama_sampler_chain_add.call_args_list]
+    assert (500, 777) in added, "the valid grammar sampler must be added to the chain"
+
+
+def test_route_rejects_invalid_grammar_with_400_not_silent_200():
+    """A malformed grammar is a clean 400 up front (both stream and non-stream),
+    never a silent unconstrained 200 and never a 500. The engine is never asked to
+    generate, so a bad grammar cannot poison later requests."""
+    import os
+
+    from fastapi.testclient import TestClient
+
+    from localm.inference.backends.base import InvalidGrammarError
+    from localm.inference.http_server import create_app
+
+    os.environ.pop("LOCALM_API_KEY", None)
+    engine = MagicMock()
+    engine.display_name = "test-model"
+    type(engine).loaded = property(lambda self: True)
+    engine.active_requests = 0
+    engine.validate_grammar.side_effect = InvalidGrammarError(
+        "invalid GBNF grammar (native parser rejected it)")
+    # If generation were reached this would stream - it must NOT be reached.
+    engine.chat_stream.side_effect = AssertionError("generation must not start on a bad grammar")
+
+    client = TestClient(create_app(engine), raise_server_exceptions=True)
+    for stream in (False, True):
+        r = client.post("/v1/chat/completions", json={
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "grammar": "root ::= (((",
+            "stream": stream,
+            "max_tokens": 4,
+        })
+        assert r.status_code == 400, (stream, r.status_code, r.text)
+        assert "grammar" in r.text.lower(), r.text
+    engine.chat_stream.assert_not_called()
+
+
 def test_generate_never_calls_accept_after_sample():
     llm = _bare_llama()
     mock_api = MagicMock()
@@ -117,5 +209,59 @@ def test_grammar_constrains_real_generation():
         # The soft-degrade flag must NOT have been tripped: the constraint was
         # actually enforced, not silently dropped.
         assert not getattr(backend, "_grammar_unsupported", False)
+    finally:
+        backend.unload()
+
+
+@pytest.mark.integration
+@pytest.mark.real_gguf
+def test_invalid_grammar_does_not_poison_later_valid_grammars():
+    """A single MALFORMED grammar must not disable grammar for later VALID requests.
+
+    Regression pin for the poisoning bug (live-confirmed): an invalid grammar used
+    to NULL-deref the native sampler; the OSError handler latched
+    _grammar_unsupported and thereafter stripped grammar from EVERY request. The
+    fix rejects a bad grammar up front (InvalidGrammarError) so the latch never
+    trips and valid grammars keep constraining."""
+    try:
+        from localm.inference.backends.llamacpp._loader import load_lib
+        load_lib()
+    except Exception as e:
+        pytest.skip(f"native llama runtime not provisioned: {e}")
+    from huggingface_hub import hf_hub_download
+    try:
+        path = hf_hub_download(repo_id=_REPO, filename=_FILE)
+    except Exception as e:
+        pytest.skip(f"could not fetch {_REPO}/{_FILE}: {e}")
+
+    from localm.inference.backends.base import InvalidGrammarError
+    from localm.inference.backends.gguf import GgufBackend
+
+    VALID = 'root ::= "yes" | "no"'
+
+    def constrained() -> str:
+        return "".join(backend.chat_stream(
+            [{"role": "user", "content": "Answer with one word, yes or no: "
+                                         "is water wet?"}],
+            max_tokens=8, temperature=0.0, grammar=VALID))
+
+    backend = GgufBackend(path, n_ctx=1024)
+    backend.load()
+    try:
+        # A valid grammar constrains.
+        assert constrained() in ("yes", "no")
+        # Up-front validation rejects a malformed grammar as a typed error...
+        with pytest.raises(InvalidGrammarError):
+            backend.validate_grammar('root ::= "yes" (((')
+        # ...and even driving generation with a bad grammar raises cleanly rather
+        # than latching the silent-degrade flag.
+        with pytest.raises(InvalidGrammarError):
+            list(backend.chat_stream(
+                [{"role": "user", "content": "hi"}],
+                max_tokens=8, temperature=0.0, grammar='root ::= "yes" ((('))
+        assert not getattr(backend, "_grammar_unsupported", False), \
+            "a bad grammar must NOT latch the global soft-degrade flag"
+        # The valid grammar STILL constrains (not poisoned).
+        assert constrained() in ("yes", "no")
     finally:
         backend.unload()
