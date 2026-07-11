@@ -100,6 +100,49 @@ def test_scoped_key_patch_forbidden_owner_allowed(app_env):
     assert owned.status_code == 200, owned.text
 
 
+def test_net_allow_private_is_owner_only(app_env):
+    """net_allow_private DISABLES the SSRF guard server-wide (it permits requests
+    to loopback / private / link-local / cloud-metadata targets), so - exactly like
+    the rag_* folder settings - it widens a trust boundary and must be owner-only.
+    A non-owner config:write key must be refused at the API, or it could flip the
+    guard off and then reach internal services via any model-initiated fetch.
+    Regression for pentest finding LM-PT-001 (net_allow_private was config:write,
+    not admin_only, unlike every other trust-widening key)."""
+    c, scoped, _ = app_env
+    # PATCH is refused for the non-owner config:write key (the guard-disable is
+    # owner-only), with the same 'owner' rationale the rag_* keys use.
+    denied = c.patch("/v1/config", headers=_scoped(scoped),
+                     json={"net_allow_private": True})
+    assert denied.status_code == 403, denied.text
+    assert "owner" in denied.text.lower()
+    # The control is also hidden from the scoped key's schema (no control shipped).
+    scoped_schema = {f["key"] for f in
+                     c.get("/v1/config/schema", headers=_scoped(scoped)).json()["fields"]}
+    assert "net_allow_private" not in scoped_schema, \
+        "guard-disable toggle must not be offered to a non-owner key"
+    # ... but the OWNER can still flip it, and the value is visible to the owner.
+    ok = c.patch("/v1/config", headers=_owner(), json={"net_allow_private": True})
+    assert ok.status_code == 200, ok.text
+    assert c.get("/v1/config", headers=_owner()).json().get("net_allow_private") is True
+    # A plain (non-owner-only) network field stays fully usable by the scoped key,
+    # so the gate is specific to the guard-disable, not a blanket block on net_*.
+    assert c.patch("/v1/config", headers=_scoped(scoped),
+                   json={"net_allow": ["x.com"]}).status_code == 200
+
+
+def test_net_allow_private_value_hidden_from_scoped_key(app_env):
+    """The owner-only value is stripped from GET /v1/config for a non-owner key
+    (parity with the rag_* keys), so a scoped key cannot even read the current
+    SSRF-guard state."""
+    c, scoped, _ = app_env
+    assert c.patch("/v1/config", headers=_owner(),
+                   json={"net_allow_private": True}).status_code == 200
+    owner_cfg = c.get("/v1/config", headers=_owner()).json()
+    scoped_cfg = c.get("/v1/config", headers=_scoped(scoped)).json()
+    assert "net_allow_private" in owner_cfg
+    assert "net_allow_private" not in scoped_cfg
+
+
 def test_owner_widening_reaches_the_indexer_policy(app_env):
     """The whole point: the owner's API write flows into the RAG indexer's policy,
     so a folder the owner adds becomes indexable. (A folder genuinely outside the

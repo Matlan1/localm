@@ -11,6 +11,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Security
+- **Disabling the private-network (SSRF) guard now requires an owner key.** The
+  "Allow private/loopback targets" setting (`net_allow_private`) turns off the
+  guard that blocks model-initiated requests to localhost, your LAN, and
+  cloud-metadata addresses. It was changeable by any key with `config:write`;
+  now, like the other trust-widening settings (the RAG indexing folders, a media
+  backend's launch command), it is owner-only, so a scoped device key can no
+  longer weaken this protection. No change for an owner running the app normally.
+
 ## [0.1.2] - 2026-07-10
 
 ### Added
