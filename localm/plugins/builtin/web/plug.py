@@ -23,6 +23,8 @@ import asyncio
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from localm.inference.errors import route_errors
+from localm.netpolicy import NetworkPolicyError
 from localm.plugins.executor import get_plugin_executor
 
 _router = APIRouter()
@@ -39,33 +41,31 @@ class WebFetchRequest(BaseModel):
 
 
 @_router.post("/api/web/search")
+@route_errors({
+    NetworkPolicyError: 403,
+    Exception: lambda e: (502, f"Search failed: {e}"),
+})
 async def web_search_endpoint(req: WebSearchRequest):
-    from localm.netpolicy import NetworkPolicyError, web_search
+    from localm.netpolicy import web_search
     if not req.query.strip():
         raise HTTPException(400, "Empty query")
     loop = asyncio.get_running_loop()
-    try:
-        results = await loop.run_in_executor(
-            get_plugin_executor(),
-            lambda: web_search(req.query, max_results=req.max_results))
-    except NetworkPolicyError as e:
-        raise HTTPException(403, str(e))
-    except Exception as e:
-        raise HTTPException(502, f"Search failed: {e}")
+    results = await loop.run_in_executor(
+        get_plugin_executor(),
+        lambda: web_search(req.query, max_results=req.max_results))
     return {"query": req.query, "results": results}
 
 
 @_router.post("/api/web/fetch")
+@route_errors({
+    NetworkPolicyError: 403,
+    Exception: lambda e: (502, f"Fetch failed: {e}"),
+})
 async def web_fetch_endpoint(req: WebFetchRequest):
-    from localm.netpolicy import NetworkPolicyError, fetch_text
+    from localm.netpolicy import fetch_text
     loop = asyncio.get_running_loop()
-    try:
-        final_url, text = await loop.run_in_executor(
-            get_plugin_executor(), lambda: fetch_text(req.url))
-    except NetworkPolicyError as e:
-        raise HTTPException(403, str(e))
-    except Exception as e:
-        raise HTTPException(502, f"Fetch failed: {e}")
+    final_url, text = await loop.run_in_executor(
+        get_plugin_executor(), lambda: fetch_text(req.url))
     max_chars = max(500, min(req.max_chars, 60_000))
     return {"url": final_url,
             "text": text[:max_chars],

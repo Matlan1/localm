@@ -14,6 +14,7 @@ from fastapi import Depends, FastAPI, HTTPException
 
 import localm.inference.http_server as _hs
 from localm import scopes
+from localm.inference.errors import format_localm_error
 
 
 def register(app: FastAPI, ctx) -> None:
@@ -108,8 +109,7 @@ def register(app: FastAPI, ctx) -> None:
                 result["uploaded"] = False
                 result["upload_stage"] = e.stage or "unknown"
                 result["upload_message"] = e.hint or e.summary
-                result["upload_error"] = (f"{e.summary}: {e.reason}"
-                                          .strip().strip(":").strip())
+                result["upload_error"] = format_localm_error(e)
         return result
 
     @app.get("/api/issues", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
@@ -125,8 +125,7 @@ def register(app: FastAPI, ctx) -> None:
             issues = await asyncio.to_thread(issue_tracker.list_issues, state)
             return {"available": True, "issues": issues}
         except LocalmError as e:
-            return {"available": True, "issues": [],
-                    "error": f"{e.summary}: {e.reason}".strip().strip(":").strip()}
+            return {"available": True, "issues": [], "error": format_localm_error(e)}
 
     @app.get("/api/update/check", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def update_check_ep():
@@ -142,8 +141,7 @@ def register(app: FastAPI, ctx) -> None:
             info["available"] = True
             return info
         except LocalmError as e:
-            return {"available": True,
-                    "error": f"{e.summary}: {e.reason}".strip().strip(":").strip()}
+            return {"available": True, "error": format_localm_error(e)}
 
     @app.get("/api/changelog", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def changelog_ep():
@@ -176,7 +174,7 @@ def register(app: FastAPI, ctx) -> None:
         try:
             info = await asyncio.to_thread(updater.check)
         except LocalmError as e:
-            raise HTTPException(502, f"{e.summary}: {e.reason}".strip().strip(":").strip())
+            raise HTTPException(502, format_localm_error(e))
         if not info.get("newer"):
             return {"applied": False, "reason": "already up to date",
                     "current": info.get("current")}
@@ -188,8 +186,7 @@ def register(app: FastAPI, ctx) -> None:
                 updater.apply, asset["id"], signature=info.get("signature"))
         except LocalmError as e:
             # apply() already rolled back; report the failure, do not fake success.
-            return {"applied": False,
-                    "error": f"{e.summary}: {e.reason}".strip().strip(":").strip()}
+            return {"applied": False, "error": format_localm_error(e)}
         res["available"] = True
         # Restart in place so the swapped (editable) code loads - except a setup-class
         # update, which needs setup.bat re-run by the user.

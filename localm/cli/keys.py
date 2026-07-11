@@ -5,6 +5,7 @@ import sys
 import click
 
 from ._core import console, main
+from .errors import _note_env_override
 
 
 # ------------------------------------------------------------------ #
@@ -76,10 +77,7 @@ def key_generate():
     console.print("[green]New API key (shown once - copy it now):[/green]")
     console.print(f"  [bold]{key}[/bold]")
     console.print("[dim]Clients send it as: Authorization: Bearer <key>[/dim]")
-    env_key = os.environ.get(auth.ENV_VAR)
-    if env_key and env_key.strip():
-        console.print(f"[yellow]Note:[/yellow] {auth.ENV_VAR} is set and "
-                      "overrides this stored key until it is unset.")
+    _note_env_override("is set and overrides this stored key until it is unset.")
 
 
 
@@ -121,10 +119,7 @@ def key_clear(yes):
     console.print("[green]✓[/green] API key cleared - open mode.")
     if revoked:
         console.print("[dim]Browser sessions were signed out.[/dim]")
-    env_key = os.environ.get(auth.ENV_VAR)
-    if env_key and env_key.strip():
-        console.print(f"[yellow]Note:[/yellow] {auth.ENV_VAR} is still set, so a "
-                      "key remains active from the environment.")
+    _note_env_override("is still set, so a key remains active from the environment.")
 
 
 
@@ -160,10 +155,7 @@ def key_recover():
     if revoked:
         console.print("[dim]Browser sessions were reset; sign in again with the "
                       "new key.[/dim]")
-    env_key = os.environ.get(auth.ENV_VAR)
-    if env_key and env_key.strip():
-        console.print(f"[yellow]Note:[/yellow] {auth.ENV_VAR} is set and overrides "
-                      "this stored key until it is unset.")
+    _note_env_override("is set and overrides this stored key until it is unset.")
 
 
 @key_group.command("list")

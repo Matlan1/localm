@@ -2229,8 +2229,6 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     _routes_system.register(app, ctx)
     from localm.inference.routes import session as _routes_session
     _routes_session.register(app, ctx)
-    from localm.inference.routes import plugins as _routes_plugins
-    _routes_plugins.register(app, ctx)
     from localm.inference.routes import config as _routes_config
     _routes_config.register(app, ctx)
     from localm.inference.routes import keys as _routes_keys

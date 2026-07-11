@@ -35,6 +35,7 @@ destructiveHint, so an MCP client can confirm before a destructive call.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import subprocess
 import sys
@@ -151,6 +152,29 @@ class EngineCache:
 
 def _text_result(text: str, is_error: bool = False) -> dict:
     return {"content": [{"type": "text", "text": text}], "isError": is_error}
+
+
+@contextlib.contextmanager
+def _quiet_stdout():
+    """MCP-1: redirect stdout to stderr for the duration of the block, so a
+    downstream call's stray prints never corrupt the JSON-RPC frame stream on
+    stdout. Eight tool handlers below repeated this identical guard."""
+    with contextlib.redirect_stdout(sys.stderr):
+        yield
+
+
+def _run_mgr_action(mgr, fn, *, plugin: str):
+    """MCP-2: call fn(mgr) inside the stdout-quieting guard, mapping
+    KeyError/ValueError the same way install/enable/disable/uninstall_plugin
+    all did. Returns the mapped error _text_result, or None on success."""
+    with _quiet_stdout():
+        try:
+            fn(mgr)
+        except KeyError:
+            return _text_result(f"No such plugin: {plugin}", is_error=True)
+        except ValueError as e:
+            return _text_result(str(e), is_error=True)
+    return None
 
 
 def _backend_can_embed(engines: "EngineCache") -> bool:
@@ -278,7 +302,6 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
                 is_error=True)
         spec = f"{repo}:{args['file']}" if args.get("file") else repo
 
-        import contextlib
         from localm.model_manager.pull import pull_model as _pull
 
         # pull_model()'s progress bars/messages print via a rich Console (module-
@@ -286,7 +309,7 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         # pull.py at load time - patching model_manager's own re-exported name
         # would miss it). redirect_stdout catches it regardless of which Console
         # instance is in play, same defense generate_image uses above.
-        with contextlib.redirect_stdout(sys.stderr):
+        with _quiet_stdout():
             try:
                 ok = _pull(spec, name=name)
             except Exception as e:
@@ -323,7 +346,6 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         prompt = args.get("prompt", "")
         if not prompt:
             return _text_result("'prompt' is required", is_error=True)
-        import contextlib
         from localm.audit import SessionMode, effective_mode
         from localm.config import home_dir
         from localm.image_gen.comfy import generate_image as gen_img
@@ -354,7 +376,7 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         # comfy.generate_image builds its own rich Console / Progress on stdout;
         # the JSON-RPC frame stream lives on stdout too, so route any stray
         # output to stderr or it corrupts the protocol (BUG-11).
-        with contextlib.redirect_stdout(sys.stderr):
+        with _quiet_stdout():
             ok, message = gen_img(
                 prompt, out,
                 guidance=args.get("guidance"),
@@ -442,11 +464,10 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         from localm.config import update_config
         from localm.inference.embedder import (KNOWN_EMBEDDING_MODELS,
                                           resolve_embedding_model_path)
-        import contextlib
         if model:
             update_config(lambda c: c.update({"embedding_model": model}))
-        
-        with contextlib.redirect_stdout(sys.stderr):
+
+        with _quiet_stdout():
             try:
                 path = resolve_embedding_model_path(allow_download=True)
             except Exception as e:
@@ -469,8 +490,7 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         reg = load_registry()
         if model not in reg:
             return _text_result(f"Model not found: {model}", is_error=True)
-        import contextlib
-        with contextlib.redirect_stdout(sys.stderr):
+        with _quiet_stdout():
             try:
                 _rm(model)
             except Exception as e:
@@ -510,15 +530,11 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
             return _text_result("'plugin' is required", is_error=True)
         from localm.plugins.engine import PluginManager
         mgr = PluginManager(None)
-        import contextlib
-        with contextlib.redirect_stdout(sys.stderr):
-            try:
-                mgr.set_installed_state(plugin, True)
-            except KeyError:
-                return _text_result(f"No such plugin: {plugin}", is_error=True)
-            except ValueError as e:
-                return _text_result(str(e), is_error=True)
-            
+        err = _run_mgr_action(
+            mgr, lambda m: m.set_installed_state(plugin, True), plugin=plugin)
+        if err is not None:
+            return err
+        with _quiet_stdout():
             with_deps = args.get("with_deps", True)
             if with_deps and mgr.plugin_missing_deps(plugin):
                 mgr.install_plugin_deps(plugin)
@@ -530,14 +546,10 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
             return _text_result("'plugin' is required", is_error=True)
         from localm.plugins.engine import PluginManager
         mgr = PluginManager(None)
-        import contextlib
-        with contextlib.redirect_stdout(sys.stderr):
-            try:
-                mgr.set_enabled_state(plugin, True)
-            except KeyError:
-                return _text_result(f"No such plugin: {plugin}", is_error=True)
-            except ValueError as e:
-                return _text_result(str(e), is_error=True)
+        err = _run_mgr_action(
+            mgr, lambda m: m.set_enabled_state(plugin, True), plugin=plugin)
+        if err is not None:
+            return err
         return _text_result(f"Plugin '{plugin}' successfully enabled.")
 
     def disable_plugin(args: dict) -> dict:
@@ -546,14 +558,10 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
             return _text_result("'plugin' is required", is_error=True)
         from localm.plugins.engine import PluginManager
         mgr = PluginManager(None)
-        import contextlib
-        with contextlib.redirect_stdout(sys.stderr):
-            try:
-                mgr.set_enabled_state(plugin, False)
-            except KeyError:
-                return _text_result(f"No such plugin: {plugin}", is_error=True)
-            except ValueError as e:
-                return _text_result(str(e), is_error=True)
+        err = _run_mgr_action(
+            mgr, lambda m: m.set_enabled_state(plugin, False), plugin=plugin)
+        if err is not None:
+            return err
         return _text_result(f"Plugin '{plugin}' successfully disabled.")
 
     def uninstall_plugin(args: dict) -> dict:
@@ -563,14 +571,10 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
         delete_data = args.get("delete_data", False)
         from localm.plugins.engine import PluginManager
         mgr = PluginManager(None)
-        import contextlib
-        with contextlib.redirect_stdout(sys.stderr):
-            try:
-                mgr.uninstall(plugin, delete_data=delete_data)
-            except KeyError:
-                return _text_result(f"No such plugin: {plugin}", is_error=True)
-            except ValueError as e:
-                return _text_result(str(e), is_error=True)
+        err = _run_mgr_action(
+            mgr, lambda m: m.uninstall(plugin, delete_data=delete_data), plugin=plugin)
+        if err is not None:
+            return err
         return _text_result(f"Plugin '{plugin}' successfully uninstalled.")
 
     _model_param = {"type": "string",

@@ -67,7 +67,7 @@ def _complete_model(ctx, param, incomplete):
         return []
 
 
-@click.command(context_settings={"help_option_names": ["-h", "--help"]})
+@click.command("coder", context_settings={"help_option_names": ["-h", "--help"]})
 @click.argument("task", default="", required=False, metavar="[TASK]")
 @click.option("-m", "--model",      default=None,  envvar="LOCALCODER_MODEL",
               shell_complete=_complete_model,

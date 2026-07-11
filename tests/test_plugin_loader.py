@@ -1,5 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for localm.plugins.loader - external plugin discovery and management."""
+"""Tests for localm.plugins.loader - the legacy plugin manifest ("entry =")
+discovery/import machinery. install/remove and the CLI-command-wiring half of
+this module were dead for every shipped plugin and have been removed (see
+PATHFINDER-2026-07-11); what remains (parse_manifest/discover_plugins/
+import_plugin_module) is still live: it is how
+localm.plugins.coder.plugin_tools.register_plugin_tools() discovers and loads
+third-party coder-agent tool exports."""
 
 import sys
 import textwrap
@@ -12,11 +18,8 @@ from localm.plugins.loader import (
     discover_errors,
     discover_plugins,
     discover_warnings,
-    install_plugin,
-    load_entry,
+    import_plugin_module,
     parse_manifest,
-    register_external_plugins,
-    remove_plugin,
 )
 
 
@@ -198,142 +201,28 @@ class TestDiscover:
 
 
 # ---------------------------------------------------------------------------
-#  load_entry
+#  import_plugin_module (still live: backs plugin_tools.register_plugin_tools)
 # ---------------------------------------------------------------------------
 
-class TestLoadEntry:
-    def test_loads_click_command(self, tmp_path):
+class TestImportPluginModule:
+    def test_imports_module(self, tmp_path):
         d = _make_plugin(tmp_path)
         m = parse_manifest(d)
-        cmd = load_entry(m)
-        import click
-        assert isinstance(cmd, click.Command)
+        mod = import_plugin_module(m)
+        assert hasattr(mod, "main")
 
     def test_missing_entry_module(self, tmp_path):
         d = _make_plugin(tmp_path, entry_file="other.py")
         m = parse_manifest(d)
         with pytest.raises(PluginError, match="not found"):
-            load_entry(m)
-
-    def test_missing_entry_attr(self, tmp_path):
-        d = _make_plugin(tmp_path, entry_src="x = 1\n")
-        m = parse_manifest(d)
-        with pytest.raises(PluginError, match="entry attribute"):
-            load_entry(m)
+            import_plugin_module(m)
 
     def test_import_error_wrapped(self, tmp_path):
         d = _make_plugin(tmp_path, entry_src="raise RuntimeError('boom')\n")
         m = parse_manifest(d)
         with pytest.raises(PluginError, match="failed to import"):
-            load_entry(m)
+            import_plugin_module(m)
         # broken module must not linger in sys.modules
         assert not any(k.startswith("_localm_plugin_demo") and getattr(
             sys.modules.get(k), "__file__", "").startswith(str(tmp_path))
             for k in list(sys.modules))
-
-
-# ---------------------------------------------------------------------------
-#  register_external_plugins
-# ---------------------------------------------------------------------------
-
-class TestRegister:
-    def test_registers_command_on_group(self, tmp_path, monkeypatch):
-        import click
-        monkeypatch.setattr(
-            "localm.plugins.loader.plugins_dir", lambda: tmp_path)
-        _make_plugin(tmp_path)
-
-        @click.group()
-        def grp():
-            pass
-
-        warnings = register_external_plugins(grp)
-        assert warnings == []
-        assert "demo" in grp.commands
-
-    def test_name_clash_warns_and_skips(self, tmp_path, monkeypatch):
-        import click
-        monkeypatch.setattr(
-            "localm.plugins.loader.plugins_dir", lambda: tmp_path)
-        _make_plugin(tmp_path)
-
-        @click.group()
-        def grp():
-            pass
-
-        @grp.command("demo")
-        def existing():
-            pass
-
-        warnings = register_external_plugins(grp)
-        assert len(warnings) == 1
-        assert "already registered" in warnings[0]
-
-    def test_broken_plugin_warns_but_does_not_raise(self, tmp_path, monkeypatch):
-        import click
-        monkeypatch.setattr(
-            "localm.plugins.loader.plugins_dir", lambda: tmp_path)
-        _make_plugin(tmp_path, entry_src="raise ImportError('nope')\n")
-
-        @click.group()
-        def grp():
-            pass
-
-        warnings = register_external_plugins(grp)
-        assert len(warnings) == 1
-        assert "demo" not in grp.commands
-
-
-# ---------------------------------------------------------------------------
-#  install / remove
-# ---------------------------------------------------------------------------
-
-class TestInstallRemove:
-    @pytest.fixture(autouse=True)
-    def _patch_root(self, tmp_path, monkeypatch):
-        self.root = tmp_path / "installed"
-        monkeypatch.setattr(
-            "localm.plugins.loader.plugins_dir", lambda: self.root)
-
-    def test_install_copies_directory(self, tmp_path):
-        src = _make_plugin(tmp_path / "src")
-        m = install_plugin(src)
-        assert m.path == self.root / "demo"
-        assert (self.root / "demo" / "plugin.toml").is_file()
-        assert (self.root / "demo" / "demo_cli.py").is_file()
-
-    def test_install_rejects_duplicate_without_force(self, tmp_path):
-        src = _make_plugin(tmp_path / "src")
-        install_plugin(src)
-        with pytest.raises(PluginError, match="already installed"):
-            install_plugin(src)
-
-    def test_install_force_overwrites(self, tmp_path):
-        src = _make_plugin(tmp_path / "src")
-        install_plugin(src)
-        m = install_plugin(src, force=True)
-        assert m.name == "demo"
-
-    def test_install_excludes_pycache(self, tmp_path):
-        src = _make_plugin(tmp_path / "src")
-        (src / "__pycache__").mkdir()
-        (src / "__pycache__" / "x.pyc").write_bytes(b"")
-        install_plugin(src)
-        assert not (self.root / "demo" / "__pycache__").exists()
-
-    def test_install_validates_before_copy(self, tmp_path):
-        bad = tmp_path / "src" / "bad"
-        bad.mkdir(parents=True)
-        (bad / "plugin.toml").write_text("[plugin]\n", encoding="utf-8")
-        with pytest.raises(PluginError):
-            install_plugin(bad)
-        assert not self.root.exists()
-
-    def test_remove_existing(self, tmp_path):
-        src = _make_plugin(tmp_path / "src")
-        install_plugin(src)
-        assert remove_plugin("demo") is True
-        assert not (self.root / "demo").exists()
-
-    def test_remove_missing_returns_false(self):
-        assert remove_plugin("ghost") is False

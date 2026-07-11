@@ -4,6 +4,7 @@ version = "1.0.0"
 description = "Offline AI coding agent: agentic loop, tool use, project map (CLI + GUI)."
 scope = "coder"
 register = "plug"
+cli = "localm.plugins.coder.cli:main"
 
 [surface]
 tab_id = "coder"
