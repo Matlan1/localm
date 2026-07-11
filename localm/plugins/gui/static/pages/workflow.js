@@ -6,7 +6,7 @@
 "use strict";
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
-import { $, authHeaders, el, toast } from "../app/helpers.js";
+import { $, authHeaders, confirmDanger, el, toast } from "../app/helpers.js";
 import { loginWithKey } from "../app/models-sidebar.js";
 import { MEDIA_PLUGIN_ORDER } from "./settings.js";
 
@@ -79,13 +79,15 @@ export async function selectWorkflow(media, name) {
   else toast((await r.json().catch(() => ({}))).detail || "Failed", true);
 }
 
-export async function deleteWorkflow(media, name) {
-  if (!confirm(`Delete workflow "${name}"?`)) return;
-  const r = await fetch(`/api/${media}/workflows/${encodeURIComponent(name)}`, {
-    method: "DELETE", headers: authHeaders(),
-  });
-  if (r.ok) { toast("Deleted"); refreshWorkflowPanel(media); }
-  else toast((await r.json().catch(() => ({}))).detail || "Failed", true);
+export function deleteWorkflow(media, name) {
+  confirmDanger(`Delete workflow "${name}"?`, "This can't be undone.",
+    "Delete", async () => {
+      const r = await fetch(`/api/${media}/workflows/${encodeURIComponent(name)}`, {
+        method: "DELETE", headers: authHeaders(),
+      });
+      if (r.ok) { toast("Deleted"); refreshWorkflowPanel(media); }
+      else toast((await r.json().catch(() => ({}))).detail || "Failed", true);
+    });
 }
 
 export async function uploadWorkflow(media, fileInput) {

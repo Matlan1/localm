@@ -8,7 +8,7 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { chat, renderAttachChips } from "../app/chat.js";
 import { pickDirectory } from "../app/picker.js";
-import { $, authHeaders, cancelJob, el, fetchImageURL, openModal, streamJob, toast } from "../app/helpers.js";
+import { $, authHeaders, cancelJob, confirmDanger, el, fetchImageURL, openModal, streamJob, toast } from "../app/helpers.js";
 import { emptyState } from "../app/icons.js";
 import { showView } from "../app/tabs.js";
 
@@ -117,14 +117,16 @@ export function renderImageGrid() {
     const del = el("button", "danger");
     del.appendChild(iconEl("trash"));
     del.title = "Delete from disk";
-    del.onclick = async (e) => {
+    del.onclick = (e) => {
       e.stopPropagation();
-      if (!confirm(`Delete ${item.name}? This removes the file from disk.`)) return;
-      try {
-        await imgApiDelete(item.name);
-        toast("Deleted " + item.name);
-        refreshImageHistory();
-      } catch (err) { toast("Delete failed: " + err.message, true); }
+      confirmDanger(`Delete "${item.name}"?`, "This removes the file from disk.",
+        "Delete", async () => {
+          try {
+            await imgApiDelete(item.name);
+            toast("Deleted " + item.name);
+            refreshImageHistory();
+          } catch (err) { toast("Delete failed: " + err.message, true); }
+        });
     };
     acts.append(dl, del);
     thumb.appendChild(acts);
@@ -170,16 +172,18 @@ export function renderImgBulkBar() {
   };
 
   const del = el("button", "danger", "delete");
-  del.onclick = async () => {
-    if (!confirm(`Delete ${n} image(s) from disk?`)) return;
-    let deleted = 0, failed = 0;
-    for (const name of [...imgState.selected]) {
-      try { await imgApiDelete(name); deleted++; }
-      catch (e) { failed++; toast(`${name}: ${e.message}`, true); }
-    }
-    toast(`Deleted ${deleted} image(s)` + (failed ? `, ${failed} failed` : ""));
-    imgState.selected.clear();
-    refreshImageHistory();
+  del.onclick = () => {
+    confirmDanger(`Delete ${n} image(s)?`, "This removes the files from disk.",
+      "Delete", async () => {
+        let deleted = 0, failed = 0;
+        for (const name of [...imgState.selected]) {
+          try { await imgApiDelete(name); deleted++; }
+          catch (e) { failed++; toast(`${name}: ${e.message}`, true); }
+        }
+        toast(`Deleted ${deleted} image(s)` + (failed ? `, ${failed} failed` : ""));
+        imgState.selected.clear();
+        refreshImageHistory();
+      });
   };
 
   const clear = el("button", "btn-secondary", "clear selection");
@@ -320,16 +324,18 @@ export function showImageDetail(item) {
     actions.appendChild(move);
 
     const del = el("button", "danger", "delete");
-    del.onclick = async () => {
-      if (!confirm(`Delete ${item.name}? This removes the file from disk.`)) return;
-      try {
-        await imgApiDelete(item.name);
-        toast("Deleted " + item.name);
-        closeModal();
-        refreshImageHistory();
-      } catch (e) {
-        toast("Delete failed: " + e.message, true);
-      }
+    del.onclick = () => {
+      confirmDanger(`Delete "${item.name}"?`, "This removes the file from disk.",
+        "Delete", async () => {
+          try {
+            await imgApiDelete(item.name);
+            toast("Deleted " + item.name);
+            closeModal();
+            refreshImageHistory();
+          } catch (e) {
+            toast("Delete failed: " + e.message, true);
+          }
+        });
     };
     actions.appendChild(del);
 

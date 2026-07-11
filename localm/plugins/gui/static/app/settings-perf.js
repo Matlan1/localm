@@ -8,7 +8,7 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { iconEl } from "./icons.js";
 import { COMPACT_KEEP, addMessageRow, chat, chatParams, compactConversation, currentConv, maybeCompactConversation, msgImages, msgText, newConversation, renderAttachChips, renderChat, renderConvList, saveConversations, stripUserImages } from "./chat.js";
-import { $, GIB, authHeaders, autoGrow, el, formatToolCalls, nearBottom, openModal, readSSE, renderMarkdown, stripThink, toast } from "./helpers.js";
+import { $, GIB, authHeaders, autoGrow, confirmDanger, el, formatToolCalls, nearBottom, openModal, readSSE, renderMarkdown, stripThink, toast } from "./helpers.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
 import { execChatCommand, handleSlashSubmit } from "./slash.js";
 import { CORE_VIEWS, VIEWS, _applyActiveClasses, closeNav, showView } from "./tabs.js";
@@ -1116,20 +1116,22 @@ $("persona-save").onclick = async () => {
   }
 };
 
-$("persona-delete").onclick = async () => {
+$("persona-delete").onclick = () => {
   const name = $("p-persona").value;
   if (!name) { toast("Select a persona first", true); return; }
-  if (!confirm(`Delete persona '${name}'? The drawer values stay as they are.`)) return;
-  try {
-    const r = await fetch("/api/prompts/" + encodeURIComponent(name), {
-      method: "DELETE", headers: authHeaders() });
-    if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
-    await refreshPersonas();
-    $("p-persona").value = "";
-    toast(`Persona '${name}' deleted`);
-  } catch (e) {
-    toast("Delete failed: " + e.message, true);
-  }
+  confirmDanger(`Delete persona '${name}'?`, "The drawer values stay as they are.",
+    "Delete", async () => {
+      try {
+        const r = await fetch("/api/prompts/" + encodeURIComponent(name), {
+          method: "DELETE", headers: authHeaders() });
+        if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+        await refreshPersonas();
+        $("p-persona").value = "";
+        toast(`Persona '${name}' deleted`);
+      } catch (e) {
+        toast("Delete failed: " + e.message, true);
+      }
+    });
 };
 
 /* sending */

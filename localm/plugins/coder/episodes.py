@@ -229,7 +229,7 @@ class EpisodeStore:
         eps = self.all()
         if not eps or not (task or "").strip():
             return []
-        from localm.rag.bm25 import BM25
+        from localm.rag import BM25
         texts = [e.search_text() for e in eps]
         # Lexical signal on CONTENT words only (see _content_tokens): a query and an
         # episode sharing only a stopword must NOT clear the relevance floor. The

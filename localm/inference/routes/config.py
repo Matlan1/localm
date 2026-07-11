@@ -73,7 +73,7 @@ def register(app: FastAPI, ctx) -> None:
         The read-only extras the GET handler injects (effective_mode etc.) are
         dropped first, so a client that round-trips the whole config object is
         not rejected for echoing back values it never edited."""
-        from localm.config import load_config, save_config
+        from localm.config import update_config
         from localm.settings_schema import validate_update, admin_only_keys
         readonly = {"effective_mode", "effective_coder_mode", "effective_ctx_max",
                     "instance_id"}
@@ -112,10 +112,12 @@ def register(app: FastAPI, ctx) -> None:
                     "Cannot enable require_auth while no API key is configured: "
                     "this would lock you out. Set an owner key (the launcher or "
                     "LOCALM_API_KEY) or create a named key first, then enable it.")
-        cfg = load_config()
-        cfg.update(validated)
-        save_config(cfg)
-        return cfg
+        # APP-LIFECYCLE-1: update_config() is the atomic read-modify-write
+        # helper - a bare load_config()/save_config() pair (as this call site
+        # used to be) has an unlocked window where a concurrent config write
+        # (e.g. set_media_config() below, which already uses update_config())
+        # can be silently lost.
+        return update_config(lambda cfg: cfg.update(validated))
 
     # ---------------------------------------------------------------- #
     #  Per-plugin media config (image / music / video)                   #

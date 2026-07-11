@@ -16,11 +16,6 @@ console = Console()
 
 
 
-_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
-
-
-
-
 def _exposed_bind_warning(host: str) -> Optional[str]:
     """
     Warning text when binding beyond loopback unsafely. Two unsafe cases, both of
@@ -33,7 +28,8 @@ def _exposed_bind_warning(host: str) -> Optional[str]:
     Returns None when the configuration is safe (loopback, or a strong key).
     """
     from localm.auth import MIN_KEY_LEN, any_key_configured, get_api_key
-    if host in _LOOPBACK_HOSTS:
+    from localm.bindhost import is_loopback_host
+    if is_loopback_host(host):
         return None
     if not any_key_configured():
         return (
@@ -74,7 +70,8 @@ def _resolve_tls(host, *, no_tls, tls_cert, tls_key):
             raise click.UsageError(
                 "--tls-cert and --tls-key must be provided together.")
         return str(tls_cert), str(tls_key)
-    if no_tls or host in _LOOPBACK_HOSTS:
+    from localm.bindhost import is_loopback_host
+    if no_tls or is_loopback_host(host):
         return None, None
     from localm import netname, tls
     from localm.config import home_dir

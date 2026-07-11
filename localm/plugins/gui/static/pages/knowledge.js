@@ -7,7 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { chat } from "../app/chat.js";
-import { $, authHeaders, el, openModal, streamJob, toast } from "../app/helpers.js";
+import { $, authHeaders, confirmDanger, el, openModal, streamJob, toast } from "../app/helpers.js";
 import { emptyState } from "../app/icons.js";
 import { pickPath } from "../app/picker.js";
 import { caps, refreshKbSelect } from "../app/settings-perf.js";
@@ -100,14 +100,16 @@ export async function refreshKnowledgePage() {
     actions.appendChild(info);
 
     const del = el("button", "danger", "delete");
-    del.onclick = async () => {
-      if (!confirm(`Delete collection '${c.name}'? Only the index is removed - ` +
-                   "your original files are untouched.")) return;
-      const r = await fetch(
-        "/api/rag/collections/" + encodeURIComponent(c.name), {
-          method: "DELETE", headers: authHeaders() });
-      if (r.ok) { toast("Deleted " + c.name); refreshKnowledgePage(); }
-      else toast("Delete failed", true);
+    del.onclick = () => {
+      confirmDanger(`Delete collection '${c.name}'?`,
+        "Only the index is removed - your original files are untouched.",
+        "Delete", async () => {
+          const r = await fetch(
+            "/api/rag/collections/" + encodeURIComponent(c.name), {
+              method: "DELETE", headers: authHeaders() });
+          if (r.ok) { toast("Deleted " + c.name); refreshKnowledgePage(); }
+          else toast("Delete failed", true);
+        });
     };
     actions.appendChild(del);
     tr.appendChild(actions);
@@ -562,18 +564,20 @@ export function kbSearchModal(name) {
   });
 }
 
-$("gui-clear-convs").onclick = async () => {
+$("gui-clear-convs").onclick = () => {
   const where = chat.persist
     ? "from this browser AND the server store" : "from this browser";
-  if (!confirm(`Delete all saved conversations ${where}?`)) return;
-  if (chat.persist) {
-    // Server store is the source of truth - clear it too or they come back.
-    await Promise.allSettled(chat.conversations.map((c) =>
-      fetch("/api/conversations/" + encodeURIComponent(c.id), {
-        method: "DELETE", headers: authHeaders(),
-      })));
-  }
-  localStorage.removeItem("localm.conversations");
-  location.reload();
+  confirmDanger(`Delete all saved conversations ${where}?`,
+    "This can't be undone.", "Delete", async () => {
+      if (chat.persist) {
+        // Server store is the source of truth - clear it too or they come back.
+        await Promise.allSettled(chat.conversations.map((c) =>
+          fetch("/api/conversations/" + encodeURIComponent(c.id), {
+            method: "DELETE", headers: authHeaders(),
+          })));
+      }
+      localStorage.removeItem("localm.conversations");
+      location.reload();
+    });
 };
 

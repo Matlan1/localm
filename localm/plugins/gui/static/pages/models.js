@@ -192,18 +192,21 @@ export async function refreshModelsPage() {
       }
       if (!m.active) {
         const rm = el("button", "danger", "remove");
-        rm.onclick = async () => {
-          if (!confirm(`Remove '${m.name}'? The file is deleted only when this is its last name and it lives in the data directory.`)) return;
-          const r = await fetch("/api/models/remove", {
-            method: "POST", headers: authHeaders(),
-            body: JSON.stringify({ model: m.name }),
-          });
-          const data = await r.json().catch(() => ({}));
-          if (!r.ok) { toast(data.detail || "Remove failed", true); return; }
-          const end = await streamJob(data.job_id, null);
-          toast(end.status === "done" ? `Removed '${m.name}'` : "Remove failed",
-                end.status !== "done");
-          refreshModelsPage();
+        rm.onclick = () => {
+          confirmDanger(`Remove '${m.name}'?`,
+            "The file is deleted only when this is its last name and it lives " +
+            "in the data directory.", "Remove", async () => {
+              const r = await fetch("/api/models/remove", {
+                method: "POST", headers: authHeaders(),
+                body: JSON.stringify({ model: m.name }),
+              });
+              const data = await r.json().catch(() => ({}));
+              if (!r.ok) { toast(data.detail || "Remove failed", true); return; }
+              const end = await streamJob(data.job_id, null);
+              toast(end.status === "done" ? `Removed '${m.name}'` : "Remove failed",
+                    end.status !== "done");
+              refreshModelsPage();
+            });
         };
         actions.appendChild(rm);
       }

@@ -26,12 +26,12 @@ import math
 import os
 import re
 import stat as _stat
-import threading
 import time
 from pathlib import Path
 from typing import Callable, Optional
 
 from localm.debuglog import logger as _log
+from localm.storekit import NamespaceLockRegistry, atomic_write as _storekit_atomic_write
 from .bm25 import BM25
 from .chunk import chunk_text
 from .extract import (BLACKLISTED_SUFFIXES, ExtractError, classify_format,
@@ -379,17 +379,14 @@ def delete_collection(name: str, base: Optional[Path] = None) -> bool:
 # the lock must be keyed by the collection name so writes to one collection serialise
 # process-wide. Keyed by name, so the map is bounded by the number of collections
 # (small, stable), not per-event. RLock so a locked method may call another safely.
-_COLLECTION_LOCKS: dict = {}
-_LOCKS_GUARD = threading.Lock()
+# Shared registry implementation (storekit.NamespaceLockRegistry) - see CF-9/CF-10:
+# memory/store.py independently re-implements the identical lazy-RLock-per-key
+# pattern, keyed by namespace hash instead of collection name.
+_COLLECTION_LOCKS = NamespaceLockRegistry()
 
 
 def _collection_lock(name: str):
-    with _LOCKS_GUARD:
-        lock = _COLLECTION_LOCKS.get(name)
-        if lock is None:
-            lock = threading.RLock()
-            _COLLECTION_LOCKS[name] = lock
-        return lock
+    return _COLLECTION_LOCKS.get(name)
 
 
 class Collection:
@@ -554,19 +551,10 @@ class Collection:
         self._bm25 = None
 
     def _atomic_write(self, filename: str, content: str) -> None:
-        tmp = self.dir / (filename + ".tmp")
-        tmp.write_text(content, encoding="utf-8")
-        # Windows MoveFileEx can transiently deny the rename if another process
-        # (AV real-time scan, Search Indexer) briefly has a handle open; retry
-        # rather than fail a good write (mirrors episodes.EpisodeStore.add).
-        for attempt in range(5):
-            try:
-                tmp.replace(self.dir / filename)
-                break
-            except PermissionError:
-                if attempt == 4:
-                    raise
-                time.sleep(0.02)
+        # storekit.atomic_write: unique temp name + Windows PermissionError
+        # retry (an AV real-time scan / Search Indexer can transiently hold a
+        # handle to the target, which would otherwise fail a good write).
+        _storekit_atomic_write(self.dir / filename, content)
 
     # ------------------------------------------------------------- #
     #  Indexing                                                      #

@@ -7,7 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { chat } from "../app/chat.js";
-import { $, MIB, authHeaders, el, fetchImageURL, streamJob, toast } from "../app/helpers.js";
+import { $, MIB, authHeaders, confirmDanger, el, fetchImageURL, streamJob, toast } from "../app/helpers.js";
 import { emptyState } from "../app/icons.js";
 import { hideStop, showStop } from "./images.js";
 import { pickDirectory } from "../app/picker.js";
@@ -145,12 +145,14 @@ export async function refreshVideoHistory() {
     head.appendChild(move);
 
     const del = el("button", "btn-secondary btn-danger", "delete");
-    del.onclick = async () => {
-      if (!confirm(`Delete ${item.name}?`)) return;
-      const r = await fetch("/api/video/file/" + encodeURIComponent(item.name),
-                            { method: "DELETE", headers: authHeaders() });
-      if (r.ok) { toast("Deleted"); refreshVideoHistory(); }
-      else toast("Delete failed", true);
+    del.onclick = () => {
+      confirmDanger(`Delete "${item.name}"?`, "This removes the file from disk.",
+        "Delete", async () => {
+          const r = await fetch("/api/video/file/" + encodeURIComponent(item.name),
+                                { method: "DELETE", headers: authHeaders() });
+          if (r.ok) { toast("Deleted"); refreshVideoHistory(); }
+          else toast("Delete failed", true);
+        });
     };
     head.appendChild(del);
 
@@ -235,12 +237,14 @@ export async function refreshMusicHistory() {
     head.appendChild(move);
 
     const del = el("button", "btn-secondary btn-danger", "delete");
-    del.onclick = async () => {
-      if (!confirm(`Delete ${item.name}?`)) return;
-      const r = await fetch("/api/music/file/" + encodeURIComponent(item.name),
-                            { method: "DELETE", headers: authHeaders() });
-      if (r.ok) { toast("Deleted"); refreshMusicHistory(); }
-      else toast("Delete failed", true);
+    del.onclick = () => {
+      confirmDanger(`Delete "${item.name}"?`, "This removes the file from disk.",
+        "Delete", async () => {
+          const r = await fetch("/api/music/file/" + encodeURIComponent(item.name),
+                                { method: "DELETE", headers: authHeaders() });
+          if (r.ok) { toast("Deleted"); refreshMusicHistory(); }
+          else toast("Delete failed", true);
+        });
     };
     head.appendChild(del);
 
