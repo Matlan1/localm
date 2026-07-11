@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import os
 from pathlib import Path
 
 from typing import Optional
@@ -111,16 +110,10 @@ def _make_self_embed(self_url: str, active_model):
     backend has no embedding support (GGUF ctypes binding); callers degrade to
     lexical-only."""
     def _self_embed(texts: list) -> list:
-        import requests as _rq
-        headers = {}
-        key = os.environ.get("LOCALM_API_KEY")
-        if key:
-            headers["Authorization"] = f"Bearer {key}"
-        from localm import tls as _tls
-        r = _rq.post(f"{self_url}/embeddings",
-                     json={"input": texts, "model": active_model() or "localm"},
-                     headers=headers, timeout=600,
-                     verify=_tls.requests_verify(self_url))
+        from localm.selfclient import self_request
+        r = self_request("POST", "/embeddings",
+                         json={"input": texts, "model": active_model() or "localm"},
+                         timeout=600, base_url=self_url)
         if not r.ok:
             # Surface the endpoint's actionable detail (e.g. "No embedding model
             # available. Run 'localm setup-embeddings'") instead of the bare HTTP
@@ -151,12 +144,7 @@ def _make_self_classify(self_url: str, active_model):
         model = active_model()
         if not model:
             return None
-        import requests as _rq
-        headers = {}
-        key = os.environ.get("LOCALM_API_KEY")
-        if key:
-            headers["Authorization"] = f"Bearer {key}"
-        from localm import tls as _tls
+        from localm.selfclient import self_request
         prompt = (
             "You are a file format classifier. Respond ONLY with a single lowercase word "
             "identifying the format of the code/configuration/text snippet below "
@@ -165,15 +153,14 @@ def _make_self_classify(self_url: str, active_model):
             f"Snippet:\n{text_snippet[:1000]}"
         )
         try:
-            r = _rq.post(f"{self_url}/chat/completions",
-                         json={
-                             "model": model,
-                             "messages": [{"role": "user", "content": prompt}],
-                             "temperature": 0.0,
-                             "max_tokens": 10,
-                         },
-                         headers=headers, timeout=10,
-                         verify=_tls.requests_verify(self_url))
+            r = self_request("POST", "/chat/completions",
+                             json={
+                                 "model": model,
+                                 "messages": [{"role": "user", "content": prompt}],
+                                 "temperature": 0.0,
+                                 "max_tokens": 10,
+                             },
+                             timeout=10, base_url=self_url)
             if r.ok:
                 choice = r.json()["choices"][0]["message"]["content"].strip().lower()
                 choice = choice.replace("`", "").replace(".", "")
@@ -187,32 +174,25 @@ def _make_self_classify(self_url: str, active_model):
 def _make_self_describe_image(self_url: str, active_model):
     """Describe image via this server's own /chat/completions (vision support)."""
     def _self_describe_image(image_bytes: bytes, mime_type: str) -> Optional[str]:
-        import requests as _rq
-        import base64
-        headers = {}
-        key = os.environ.get("LOCALM_API_KEY")
-        if key:
-            headers["Authorization"] = f"Bearer {key}"
-        from localm import tls as _tls
+        from localm.selfclient import self_request
         b64 = base64.b64encode(image_bytes).decode("utf-8")
         data_url = f"data:{mime_type};base64,{b64}"
         prompt = "Describe this image in detail. Extract any visible text, handwriting, diagram structure, or code verbatim."
         try:
-            r = _rq.post(f"{self_url}/chat/completions",
-                         json={
-                             "model": active_model() or "localm",
-                             "messages": [{
-                                 "role": "user",
-                                 "content": [
-                                     {"type": "text", "text": prompt},
-                                     {"type": "image_url", "image_url": {"url": data_url}}
-                                 ]
-                             }],
-                             "temperature": 0.2,
-                             "max_tokens": 1000,
-                         },
-                         headers=headers, timeout=60,
-                         verify=_tls.requests_verify(self_url))
+            r = self_request("POST", "/chat/completions",
+                             json={
+                                 "model": active_model() or "localm",
+                                 "messages": [{
+                                     "role": "user",
+                                     "content": [
+                                         {"type": "text", "text": prompt},
+                                         {"type": "image_url", "image_url": {"url": data_url}}
+                                     ]
+                                 }],
+                                 "temperature": 0.2,
+                                 "max_tokens": 1000,
+                             },
+                             timeout=60, base_url=self_url)
             if r.ok:
                 return r.json()["choices"][0]["message"]["content"].strip()
             else:

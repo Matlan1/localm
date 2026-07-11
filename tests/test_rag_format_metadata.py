@@ -53,10 +53,13 @@ def test_embedding_only_index_does_not_call_chat_path(tmp_path, monkeypatch):
     """With no chat model loaded, indexing an ambiguous odd-extension file must
     NOT fire the (10s-timeout) chat endpoint - no stall - and labels "text"."""
     posted = []
-    def fake_post(*args, **kwargs):
+    def fake_request(*args, **kwargs):
         posted.append((args, kwargs))
         raise RuntimeError("chat endpoint must not be called with no model loaded")
-    monkeypatch.setattr(requests, "post", fake_post)
+    # self_request (localm.selfclient) issues requests.request(method, ...), not
+    # requests.post directly - patch the mechanism actually used, or this guard
+    # would stop verifying anything (a real call would just fail unpatched).
+    monkeypatch.setattr(requests, "request", fake_request)
 
     # active_model() == "" is exactly what the server reports when no engine is
     # resident (see http_server.active_model).
@@ -95,7 +98,7 @@ def test_known_extension_labels_from_suffix(tmp_path):
 def test_make_self_classify_no_model_short_circuits(monkeypatch):
     """No chat model loaded -> classify returns None WITHOUT any HTTP call."""
     called = []
-    monkeypatch.setattr(requests, "post", lambda *a, **k: called.append(1))
+    monkeypatch.setattr(requests, "request", lambda *a, **k: called.append(1))
     classify = plug._make_self_classify("https://127.0.0.1:65535/v1", lambda: "")
     assert classify("some ambiguous text") is None
     assert called == []
@@ -108,13 +111,15 @@ def test_make_self_classify_with_model_calls_endpoint(monkeypatch):
         def json(self):
             return {"choices": [{"message": {"content": "YAML."}}]}
     called = []
-    def fake_post(*a, **k):
-        called.append(1)
+    def fake_request(method, url, **k):
+        called.append((method, url))
         return FakeResp()
-    monkeypatch.setattr(requests, "post", fake_post)
+    # _make_self_classify now goes through localm.selfclient.self_request, which
+    # issues requests.request(method, ...) (not requests.post directly).
+    monkeypatch.setattr(requests, "request", fake_request)
     classify = plug._make_self_classify("https://127.0.0.1:65535/v1", lambda: "mymodel")
     assert classify("key: value") == "yaml"
-    assert called == [1]
+    assert called == [("POST", "https://127.0.0.1:65535/v1/chat/completions")]
 
 
 # --------------------------------------------------------------------------- #
