@@ -150,6 +150,14 @@ GB = 1024 ** 3
 
 
 class TestInitialOffloadKqv:
+    @pytest.fixture(autouse=True)
+    def _force_vulkan(self, monkeypatch):
+        # The preemptive offload is gated on the Vulkan backend (the only one that
+        # crashes); these tests exercise the offload MATH, so force the gate on.
+        # test_non_vulkan_backend_keeps_kv_in_vram overrides it to check the gate.
+        from localm.inference.backends.llamacpp import _loader
+        monkeypatch.setattr(_loader, "gpu_backend_is_vulkan", lambda: True)
+
     def test_keeps_vram_when_kv_size_unknown(self):
         # No accurate KV size (stripped build): keep the VRAM default rather than
         # needlessly slowing a model that may well fit.
@@ -200,6 +208,36 @@ class TestInitialOffloadKqv:
         assert fake_logger.warning.called
         msg = fake_logger.warning.call_args[0][0]
         assert "system RAM" in msg
+
+    def test_non_vulkan_backend_keeps_kv_in_vram(self, monkeypatch):
+        # ROCm/CUDA/Metal never had the Vulkan compute-buffer crash; even a model
+        # that fills VRAM must KEEP its KV cache in VRAM (return True) so it runs
+        # full-speed as before - the fix must not regress those backends.
+        from localm.inference.backends.llamacpp import _loader
+        monkeypatch.setattr(_loader, "gpu_backend_is_vulkan", lambda: False)
+        llm = _bare_offload(327_680, lambda: int(0.2 * GB))   # would offload on Vulkan
+        assert llm._initial_offload_kqv(4096) is True
+
+
+class TestGpuBackendIsVulkan:
+    def test_false_when_lib_not_loaded(self, monkeypatch):
+        from localm.inference.backends.llamacpp import _loader
+        monkeypatch.setattr(_loader, "_loaded_lib", None)
+        assert _loader.gpu_backend_is_vulkan() is False
+
+    def test_true_for_vulkan_device(self, monkeypatch):
+        from localm.inference.backends.llamacpp import _loader
+        monkeypatch.setattr(_loader, "_loaded_lib", object())
+        monkeypatch.setattr(_loader, "compute_devices",
+                            lambda: [("CPU", 0), ("Vulkan0", 1)])
+        assert _loader.gpu_backend_is_vulkan() is True
+
+    def test_false_for_rocm_device(self, monkeypatch):
+        from localm.inference.backends.llamacpp import _loader
+        monkeypatch.setattr(_loader, "_loaded_lib", object())
+        monkeypatch.setattr(_loader, "compute_devices",
+                            lambda: [("ROCm0", 1), ("CPU", 0)])
+        assert _loader.gpu_backend_is_vulkan() is False
 
 
 # --------------------------------------------------------------------------- #

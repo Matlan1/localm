@@ -698,9 +698,18 @@ class LlamaCpp:
         accurate per-token KV size is known; otherwise it keeps the VRAM default,
         so a model that fits fine is never needlessly slowed. Free VRAM is read
         HERE, right before context creation, so it reflects what the already-loaded
-        weights left behind."""
+        weights left behind.
+
+        Gated on the VULKAN backend: the near-VRAM-limit compute-buffer crash this
+        prevents is Vulkan-specific. ROCm / CUDA / Metal fit a tight model into VRAM
+        (or spill / error cleanly), so preemptively forcing their KV cache to RAM
+        would only slow a model that ran full-speed in VRAM - a regression on those
+        backends, which never had the crash (see loader.gpu_backend_is_vulkan)."""
         if not self.kv_bytes_per_token:
             return True   # no accurate KV size (stripped build) - keep the default
+        from . import _loader
+        if not _loader.gpu_backend_is_vulkan():
+            return True   # non-Vulkan: no preemptive offload (would regress speed)
         free_fn = getattr(self, "_free_vram_fn", None)
         if free_fn is None:
             return True   # no free-VRAM reader wired - keep the default
