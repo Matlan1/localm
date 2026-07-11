@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Shared tool primitives: the ``ToolResult`` value type and the cwd-confinement
-and output-truncation helpers every tool builds on."""
+"""Shared tool primitives: the ``ToolResult`` value type, the cwd-confinement
+and output-truncation helpers every tool builds on, and the canonical
+subprocess-execution primitive (``run_subprocess``, CODER-2)."""
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional, Union
 
 @dataclass
 class ToolResult:
@@ -93,3 +97,75 @@ def _confine(cwd: Path, path: str) -> Path:
             "All file operations must stay within the project root."
         )
     return resolved
+
+
+@dataclass
+class SubprocessResult:
+    """Outcome of one :func:`run_subprocess` call.
+
+    A completed process sets *returncode*/*stdout*/*stderr* (``ok`` is
+    ``returncode == 0``). A timeout sets *timed_out* and carries whatever the
+    process produced before the kill in *stdout*/*stderr* - possibly bytes even
+    in text mode (a CPython ``TimeoutExpired`` quirk) - pass the result straight
+    to :func:`_partial_on_timeout` to format it. A launch failure sets
+    *not_found* (missing executable) or *error* (any other exception); *ok* is
+    always False for either.
+    """
+    ok: bool
+    returncode: Optional[int] = None
+    stdout: object = ""
+    stderr: object = ""
+    timed_out: bool = False
+    not_found: bool = False
+    error: Optional[str] = None
+
+
+def run_subprocess(
+    argv_or_cmd: Union[list, str],
+    cwd: Path,
+    *,
+    timeout: float,
+    shell_wrap: bool = False,
+    env: Optional[dict] = None,
+) -> SubprocessResult:
+    """
+    Run a subprocess, capturing stdout+stderr as text with a timeout.
+
+    *argv_or_cmd* is an argument list, run directly, unless *shell_wrap* is
+    true - then it must be a command STRING, routed through the platform
+    shell (``cmd /C`` on Windows, ``/bin/sh -c`` elsewhere) so shell operators
+    (pipes, redirects, ``&&``) work.
+
+    On a timeout, the process's captured stdout/stderr up to the kill is
+    preserved on the result, not dropped - format it for display with
+    :func:`_partial_on_timeout`. This is the canonical subprocess-execution
+    primitive for the coder's tools/shell.py, tools/git.py, and cli/goal.py
+    (CODER-2) - previously four independent copies of this run+capture+timeout
+    sequence, with only shell.py's own callers getting partial-output-on-timeout
+    and git.py/goal.py silently dropping it.
+    """
+    if shell_wrap:
+        if sys.platform == "win32":
+            argv = ["cmd", "/C", argv_or_cmd]
+        else:
+            argv = ["/bin/sh", "-c", argv_or_cmd]
+    else:
+        argv = argv_or_cmd
+
+    try:
+        proc = subprocess.run(
+            argv, cwd=str(cwd), capture_output=True, text=True,
+            timeout=timeout, encoding="utf-8", errors="replace", env=env,
+        )
+    except subprocess.TimeoutExpired as e:
+        return SubprocessResult(
+            ok=False, timed_out=True, stdout=e.stdout, stderr=e.stderr)
+    except FileNotFoundError as e:
+        return SubprocessResult(ok=False, not_found=True, error=str(e))
+    except Exception as e:
+        return SubprocessResult(ok=False, error=str(e))
+
+    return SubprocessResult(
+        ok=(proc.returncode == 0), returncode=proc.returncode,
+        stdout=proc.stdout or "", stderr=proc.stderr or "",
+    )

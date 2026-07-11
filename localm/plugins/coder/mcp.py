@@ -31,7 +31,8 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from .provenance import neutralise
-from .tools import TOOL_REGISTRY, ToolDef, ToolResult
+from .tool_registration import register_foreign_tool
+from .tools import ToolResult
 
 PROTOCOL_VERSION = "2025-03-26"
 
@@ -307,20 +308,17 @@ def register_mcp_tools(cwd: Path) -> tuple[List[str], List[str]]:
             # ordinary names); the ACTUAL call keeps the original tool_name via
             # the closure, so legitimate servers are unaffected.
             reg_name = f"mcp_{name}_{neutralise(tool_name)}"
-            if reg_name in TOOL_REGISTRY:
-                warnings.append(f"MCP tool name clash, skipped: {reg_name}")
-                continue
-            TOOL_REGISTRY[reg_name] = ToolDef(
-                name=reg_name,
+            register_foreign_tool(
+                reg_name,
                 fn=_make_tool_fn(server, tool_name),
-                description=neutralise(
-                    f"[MCP:{name}] {tool.get('description', '')}".strip()
-                ),
+                description=f"[MCP:{name}] {tool.get('description', '')}",
                 params=_schema_to_params(tool.get("inputSchema", {})),
                 # External code - confirm unless the config marks it trusted
                 destructive=not server.trusted,
+                source_label="MCP",
+                registered=registered,
+                warnings=warnings,
             )
-            registered.append(reg_name)
 
         import atexit
         atexit.register(server.stop)

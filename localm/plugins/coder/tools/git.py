@@ -4,29 +4,22 @@ and the commit/push/create-branch write commands."""
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 from typing import Optional
 
-from .base import ToolResult, _partial_on_timeout, _truncate
+from .base import ToolResult, _partial_on_timeout, _truncate, run_subprocess
 
 def _git(cwd: Path, *args: str, timeout: int = 10) -> tuple[str, bool]:
     """Run a git command and return (output, ok)."""
-    try:
-        proc = subprocess.run(
-            ["git", *args],
-            cwd=str(cwd),
-            capture_output=True, text=True,
-            timeout=timeout, encoding="utf-8", errors="replace",
-        )
-        out = (proc.stdout + proc.stderr).strip() or "(no output)"
-        return out, proc.returncode == 0
-    except FileNotFoundError:
+    result = run_subprocess(["git", *args], cwd, timeout=timeout)
+    if result.not_found:
         return "git not found in PATH", False
-    except subprocess.TimeoutExpired as e:
-        return f"git {args[0]} timed out{_partial_on_timeout(e)}", False
-    except Exception as e:
-        return str(e), False
+    if result.timed_out:
+        return f"git {args[0]} timed out{_partial_on_timeout(result)}", False
+    if result.error is not None:
+        return result.error, False
+    out = (result.stdout + result.stderr).strip() or "(no output)"
+    return out, result.ok
 
 
 def tool_git_status(cwd: Path) -> ToolResult:

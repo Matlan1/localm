@@ -206,6 +206,24 @@ class HTTPBackend(BaseLLMBackend):
         """
         self._tool_defs = tool_defs
 
+    def _flush_tool_calls_as_xml(self, tc_buf: dict) -> Optional[str]:
+        """
+        The trailing '\\n' + XML block for accumulated streaming tool-call
+        chunks (index -> {"name", "arguments"}), or None if none were
+        accumulated.
+
+        Shared by chat_stream's and _anthropic_stream's identical tail blocks
+        (CODER-3) - previously duplicated verbatim in both.
+        """
+        if not tc_buf:
+            return None
+        ordered = [tc_buf[i] for i in sorted(tc_buf)]
+        xml = self._tool_calls_to_xml([
+            {"function": {"name": t["name"], "arguments": t["arguments"]}}
+            for t in ordered
+        ])
+        return "\n" + xml
+
     @staticmethod
     def _tool_calls_to_xml(tool_calls: list) -> str:
         """Convert an OpenAI tool_calls list to our internal XML format."""
@@ -444,13 +462,9 @@ class HTTPBackend(BaseLLMBackend):
         self._last_reasoning = "".join(_reasoning_parts)
 
         # Emit accumulated tool calls as XML after the stream ends
-        if _tc_buf:
-            ordered = [_tc_buf[i] for i in sorted(_tc_buf)]
-            xml = self._tool_calls_to_xml([
-                {"function": {"name": t["name"], "arguments": t["arguments"]}}
-                for t in ordered
-            ])
-            yield "\n" + xml
+        flushed = self._flush_tool_calls_as_xml(_tc_buf)
+        if flushed is not None:
+            yield flushed
 
     def _anthropic_stream(self, messages: list[dict], **kwargs) -> Iterator[str]:
         """
@@ -520,13 +534,9 @@ class HTTPBackend(BaseLLMBackend):
                 elif etype == "message_stop":
                     break
 
-        if _tc_buf:
-            ordered = [_tc_buf[i] for i in sorted(_tc_buf)]
-            xml = self._tool_calls_to_xml([
-                {"function": {"name": t["name"], "arguments": t["arguments"]}}
-                for t in ordered
-            ])
-            yield "\n" + xml
+        flushed = self._flush_tool_calls_as_xml(_tc_buf)
+        if flushed is not None:
+            yield flushed
 
 
 # ------------------------------------------------------------------ #
