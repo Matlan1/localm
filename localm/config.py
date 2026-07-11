@@ -4,6 +4,7 @@ import json
 import os
 import socket
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -532,26 +533,49 @@ def _atomic_write_json(path: Path, data) -> None:
     Keeps a one-step .bak of the previous good file so a corrupt read can
     recover. os.replace is atomic on Windows and POSIX when src/dst share a
     filesystem, which they do (same directory); _replace_atomic additionally
-    rides out the transient Windows sharing violation a concurrent reader causes."""
-    tmp = path.with_name(path.name + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-        f.flush()
-        os.fsync(f.fileno())
-    if path.exists():
+    rides out the transient Windows sharing violation a concurrent reader causes.
+
+    The temp file gets a UNIQUE per-write name (mkstemp), NOT a fixed ``<name>.tmp``.
+    Two localm processes writing the same file concurrently (a CLI ``pull``/``config``
+    alongside the running GUI, or two CLI invocations) would otherwise both open the
+    SAME ``<name>.tmp`` and collide - one save then crashes when the other's replace
+    has already consumed the shared temp (Windows WinError 2/32), or on POSIX their
+    writes interleave into a torn temp. ``_io_lock`` only serialises writers WITHIN
+    one process; _replace_atomic's retry rides out a locked DESTINATION but not two
+    writers sharing one temp SOURCE. A unique temp per writer removes the collision
+    at the source, so cross-process contention degrades to the documented
+    last-writer-wins on the final file, with no crash or torn write."""
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent),
+                                    prefix=path.name + ".", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        if path.exists():
+            try:
+                _replace_atomic(path, path.with_name(path.name + ".bak"))
+            except OSError as e:
+                # The .bak snapshot is best-effort: a failed one must NOT fail the
+                # primary write (which still proceeds below). _replace_atomic already
+                # rode out the transient sharing violation, so reaching here means a
+                # PERSISTENT problem (a lock that outlasted the retries, disk full, a
+                # real permission error) - note it so it is discoverable rather than
+                # totally silent (do-not-hide-problems), without escalating a
+                # best-effort path into a hard fail.
+                print(f"[localm] note: could not refresh {path.name}.bak ({e}); "
+                      "the main write still succeeded.", file=sys.stderr)
+        _replace_atomic(tmp, path)
+    except BaseException:
+        # _replace_atomic consumes tmp on success; on any failure BEFORE that, remove
+        # our unique temp so a failed write never leaves an orphan behind (the old
+        # fixed-name temp was reused by the next write; a unique one would pile up).
         try:
-            _replace_atomic(path, path.with_name(path.name + ".bak"))
-        except OSError as e:
-            # The .bak snapshot is best-effort: a failed one must NOT fail the
-            # primary write (which still proceeds below). But _replace_atomic
-            # already rode out the transient sharing violation, so reaching here
-            # means a PERSISTENT problem (a lock that outlasted the retries, disk
-            # full, a real permission error) - note it at a low level so it is
-            # discoverable rather than totally silent (do-not-hide-problems),
-            # without escalating a legitimate best-effort path into a hard fail.
-            print(f"[localm] note: could not refresh {path.name}.bak ({e}); "
-                  "the main write still succeeded.", file=sys.stderr)
-    _replace_atomic(tmp, path)
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def _read_json(path: Path, default):
