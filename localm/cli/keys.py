@@ -102,7 +102,7 @@ def key_set(key):
 @click.option("-y", "--yes", is_flag=True, help="Skip the confirmation prompt.")
 def key_clear(yes):
     """Remove the owner key, returning the server to open mode."""
-    from localm import auth
+    from localm import auth, sessions
     if auth.get_api_key() is None:
         console.print("[dim]No API key set (already open mode).[/dim]")
         return
@@ -112,7 +112,15 @@ def key_clear(yes):
         console.print("[dim]Cancelled.[/dim]")
         return
     auth.clear_api_key()
+    # A browser owner session carries its own ADMIN scope snapshot and survives a
+    # key roll (S1), so a leftover owner cookie would keep full access after the
+    # key is gone - defeating the clear (dangerous when require_auth is on). Sign
+    # every browser session out here, mirroring /api/auth/key/clear. Device bearer
+    # KEYS live in the keystore and are untouched.
+    revoked = sessions.revoke_all()
     console.print("[green]✓[/green] API key cleared - open mode.")
+    if revoked:
+        console.print("[dim]Browser sessions were signed out.[/dim]")
     env_key = os.environ.get(auth.ENV_VAR)
     if env_key and env_key.strip():
         console.print(f"[yellow]Note:[/yellow] {auth.ENV_VAR} is still set, so a "
@@ -127,12 +135,21 @@ def key_recover():
 
     Mints a FRESH owner key and prints it once - use this when you have lost the
     owner key but still need to manage the server. Existing scoped DEVICE keys are
-    untouched, so devices keep working; only the owner credential is rotated. The
-    local CLI is the trusted recovery path, so this does not require the old key
-    (SEC-3). To instead drop all auth and return to open mode, use 'key clear'."""
-    from localm import auth
+    untouched, so devices keep working; only the owner credential is rotated. Live
+    browser (cookie) sessions are signed out too, so a captured owner cookie cannot
+    outlive the recovery. The local CLI is the trusted recovery path, so this does
+    not require the old key (SEC-3). To instead drop all auth and return to open
+    mode, use 'key clear'."""
+    from localm import auth, sessions
     had = auth.get_api_key() is not None
     key = auth.regenerate_key()
+    # regenerate_key deliberately leaves browser sessions alone (S1: a GUI key roll
+    # must not log the browser out), but recovery is the compromise path. An owner
+    # cookie carries its own ADMIN snapshot and is exempt from the keystore recheck,
+    # so it would survive the rotation unless dropped here. Revoke every session
+    # (NOT inside regenerate_key, to keep the GUI's survive-a-roll behavior intact),
+    # mirroring /api/auth/key/clear. Device bearer KEYS in the keystore are untouched.
+    revoked = sessions.revoke_all()
     console.print("[green]Owner access recovered. New owner key (shown once - "
                   "copy it now):[/green]")
     console.print(f"  [bold]{key}[/bold]")
@@ -140,6 +157,9 @@ def key_recover():
     if had:
         console.print("[dim]The previous owner key no longer works; scoped device "
                       "keys are unchanged.[/dim]")
+    if revoked:
+        console.print("[dim]Browser sessions were reset; sign in again with the "
+                      "new key.[/dim]")
     env_key = os.environ.get(auth.ENV_VAR)
     if env_key and env_key.strip():
         console.print(f"[yellow]Note:[/yellow] {auth.ENV_VAR} is set and overrides "
