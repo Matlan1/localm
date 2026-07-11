@@ -57,6 +57,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   after a recovery meant to lock an attacker out. Your scoped device keys are
   untouched, so devices keep working; just sign in again in the browser with the
   new key.
+- **Knowledge-base indexing refuses credential files named directly through the
+  API:** the folder scan already skipped key and secret material (`.pem`, `.key`,
+  `id_rsa`, `.env`, and the like) and model-weight binaries, but a file named
+  explicitly in an API "add to collection" request slipped past that filter, so a
+  scoped or remote client could point the indexer straight at a private key and
+  read it back through search. Such files are now refused (HTTP 400) whenever
+  indexing goes through the API, for every caller. Indexing your own key material
+  on your own machine still works from the `localm rag add` command line.
 
 ## [0.1.2] - 2026-07-10
 

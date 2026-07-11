@@ -30,10 +30,15 @@ def test_folder_walk_skips_weights_and_secrets(tmp_path):
     # secrets by suffix (content is irrelevant - the skip is by name/suffix)
     (tmp_path / "server.pem").write_text("cert placeholder")
     (tmp_path / "tls.key").write_text("key placeholder")
+    # more key/credential formats that used to slip the suffix denylist
+    (tmp_path / "putty.ppk").write_text("PuTTY-User-Key-File placeholder")
+    (tmp_path / "signing.p8").write_text("pkcs8 placeholder")
+    (tmp_path / "client.ovpn").write_text("<key>embedded key placeholder</key>")
     # secrets by name (extensionless / dotfiles)
     (tmp_path / ".env").write_text("AWS_SECRET_ACCESS_KEY=xyz")
     (tmp_path / "id_rsa").write_text("ssh key placeholder")
     (tmp_path / ".netrc").write_text("machine x login y password z")
+    (tmp_path / ".envrc").write_text("export AWS_SECRET_ACCESS_KEY=xyz")
 
     got = {p.name for p in Collection._expand([tmp_path])}
 
