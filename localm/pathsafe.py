@@ -21,8 +21,13 @@ def confined_name(base: Path, name: str) -> Path:
     Blocklisting separators is not enough on Windows: a drive-relative name like
     ``C:evil`` joins to ``C:evil`` (outside *base*), and an absolute name
     replaces the join entirely. We verify the *resolved* path's parent is *base*
-    and the basename is unchanged, which also rejects ``..``, nested subpaths,
-    and ``con``/device names."""
+    and the basename is unchanged, which also rejects ``..`` and nested subpaths.
+
+    Windows reserved device names (``con``, ``nul``, ``com1`` ...) are NOT
+    specially rejected: they pass as ordinary basenames and resolve directly
+    inside *base*, so confinement still holds for them. Blocking device names is
+    deliberately not done here - it is not required for confinement and would
+    reject otherwise-legitimate names."""
     if name != Path(name).name or name in ("", ".", ".."):
         raise HTTPException(400, "Invalid file name")
     try:
