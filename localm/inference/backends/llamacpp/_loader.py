@@ -525,6 +525,26 @@ def compute_devices() -> "List[tuple]":
     return devices
 
 
+def gpu_backend_is_vulkan() -> bool:
+    """True when the active GPU compute device is a Vulkan device.
+
+    The load-time KV-cache-to-RAM offload (LlamaCpp._initial_offload_kqv) is gated
+    on this. The near-VRAM-limit compute-buffer crash it prevents (native
+    0xe06d7363 on the first decode) is SPECIFIC to the Vulkan backend; ROCm / CUDA
+    / Metal handle a tight fit gracefully - they fit it, spill to system memory, or
+    error cleanly - so preemptively forcing THEIR KV cache to system RAM would only
+    slow a model that used to run full-speed with its KV cache in VRAM (a
+    regression). Does not force-load the native lib (returns False when it is not
+    loaded yet); safe/quiet on any failure."""
+    if _loaded_lib is None:
+        return False
+    try:
+        return any(t != GGML_DEV_TYPE_CPU and str(n).lower().startswith("vulkan")
+                   for n, t in compute_devices())
+    except Exception:
+        return False
+
+
 # Cache of (gpu_device_handle, bound ggml_backend_dev_memory) once resolved, or
 # False when unavailable (no GPU / no symbol / multi-GPU). The native lib is loaded
 # once for the process lifetime, so the device handle is stable.
