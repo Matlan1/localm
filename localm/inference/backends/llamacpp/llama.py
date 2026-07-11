@@ -29,6 +29,9 @@ from ._structs import llama_token, LlamaChatMessage, LlamaBatch
 _stderr_lock = threading.Lock()
 _devnull_fd: Optional[int] = None
 
+# Surfaced (as InvalidGrammarError) when the native GBNF parser rejects a grammar.
+_INVALID_GRAMMAR_MSG = "invalid GBNF grammar (the native parser could not parse it)"
+
 
 @contextlib.contextmanager
 def _quiet_stderr():
@@ -389,20 +392,31 @@ def _build_sampler(
         must never silently become a strict constraint (a strict grammar
         stalls thinking models, live-verified 2026-07-02).
     """
+    from localm.inference.backends.base import InvalidGrammarError
+
     chain_params = api.llama_sampler_chain_default_params()
     chain_params.no_perf = True
     chain = api.llama_sampler_chain_init(chain_params)
 
-    # Grammar sampler masks logits before any scoring stage touches them
+    # Grammar sampler masks logits before any scoring stage touches them.
+    # llama_sampler_init_grammar[_lazy_patterns] returns NULL (ctypes -> None) when
+    # the native GBNF parser rejects the grammar. Adding that NULL to the chain
+    # NULL-derefs at sample time (a native access violation): the GGUF backend
+    # CATCHES that fault and latches _grammar_unsupported, silently stripping
+    # grammar from EVERY later request (valid ones too) until reload - one bad
+    # grammar poisoned the whole feature for all clients. So check the return and
+    # raise a typed error the request path can turn into a clean 400, instead of
+    # letting a malformed grammar reach the crash-and-latch path.
     if grammar and grammar_lazy:
         if grammar_triggers and api.has_lazy_grammar():
-            api.llama_sampler_chain_add(
-                chain,
-                api.llama_sampler_init_grammar_lazy_patterns(
-                    vocab, grammar.encode(), b"root",
-                    [t.encode() for t in grammar_triggers],
-                ),
+            gsampler = api.llama_sampler_init_grammar_lazy_patterns(
+                vocab, grammar.encode(), b"root",
+                [t.encode() for t in grammar_triggers],
             )
+            if gsampler is None:
+                api.llama_sampler_free(chain)
+                raise InvalidGrammarError(_INVALID_GRAMMAR_MSG)
+            api.llama_sampler_chain_add(chain, gsampler)
         else:
             from localm.debuglog import logger as _dbg
             _dbg.debug(
@@ -410,10 +424,11 @@ def _build_sampler(
                 "no trigger patterns were given" if not grammar_triggers
                 else "this llama build lacks llama_sampler_init_grammar_lazy_patterns")
     elif grammar:
-        api.llama_sampler_chain_add(
-            chain,
-            api.llama_sampler_init_grammar(vocab, grammar.encode(), b"root"),
-        )
+        gsampler = api.llama_sampler_init_grammar(vocab, grammar.encode(), b"root")
+        if gsampler is None:
+            api.llama_sampler_free(chain)
+            raise InvalidGrammarError(_INVALID_GRAMMAR_MSG)
+        api.llama_sampler_chain_add(chain, gsampler)
 
     # Repetition penalty applies to greedy and stochastic sampling alike
     if repeat_penalty and repeat_penalty != 1.0 and api.has_penalties_sampler():
@@ -709,6 +724,27 @@ class LlamaCpp:
         # (R46). Per-token decode would mangle exactly those boundaries.
         raw = b"".join(self._tokenizer.token_to_piece_bytes(t) for t in tokens)
         return raw.decode("utf-8", errors="replace")
+
+    def check_grammar(self, grammar: str) -> None:
+        """Raise :class:`InvalidGrammarError` if *grammar* is not a parseable GBNF
+        string, WITHOUT running any generation. A cheap native parse:
+        ``llama_sampler_init_grammar`` returns NULL for a malformed grammar. Lets
+        the request path reject a bad grammar with a clean 400 up front instead of
+        letting it reach the sample-time NULL-deref (which the GGUF backend catches
+        by latching the silent _grammar_unsupported degrade). No-op for an empty
+        grammar or when the model is not loaded (no vocab to parse against)."""
+        from localm.inference.backends.base import InvalidGrammarError
+
+        if not grammar or not self._model_ptr:
+            return
+        # The native parser prints "failed to parse grammar" to stderr on rejection;
+        # keep that off the terminal (it still lands in the debug log via _quiet_stderr).
+        with _quiet_stderr():
+            sampler = api.llama_sampler_init_grammar(
+                self._tokenizer._vocab, grammar.encode(), b"root")
+        if sampler is None:
+            raise InvalidGrammarError(_INVALID_GRAMMAR_MSG)
+        api.llama_sampler_free(sampler)
 
     def _create_batch(self, tokens: List[int], start_pos: int, logits_at_last_only: bool = True) -> LlamaBatch:
         n = len(tokens)
