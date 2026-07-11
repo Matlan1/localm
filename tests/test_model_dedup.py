@@ -92,6 +92,42 @@ class TestAliasModel:
         store["b"] = {"path": "q", "source": "local"}
         assert mm.alias_model("a", "b") is False
 
+    # ---- alias sanitizes its new name (GAP-CLI-1: it was the one registry-key
+    #      path that skipped _sanitize_name, so `alias real ../../evil` etc. wrote
+    #      a raw/unsafe key). --------------------------------------------------
+    @pytest.mark.parametrize("raw, expected", [
+        ("../../evil", "evil"),        # traversal collapses to a bare component
+        ("a/b/c", "a-b-c"),            # path separators -> hyphen
+        ("", "model"),                 # empty -> the sanitizer's fallback, never ""
+        (r"\\host\share\x", "host-share-x"),   # UNC path -> safe key
+    ])
+    def test_alias_sanitizes_new_name(self, fake_registry, tmp_path, raw, expected):
+        store, _ = fake_registry
+        f = _file(tmp_path, "m.gguf")
+        store["orig"] = {"path": str(f), "source": "local", "sha256": "abc"}
+        assert mm.alias_model("orig", raw) is True
+        # The raw, unsafe string is NEVER a registry key ...
+        assert raw not in store
+        # ... a sanitized, path-safe key is created instead, pointing at the
+        # same entry as the original.
+        assert expected in store
+        assert store[expected] == store["orig"]
+        # No key may contain a path separator, '..', or be empty.
+        for k in store:
+            assert k != ""
+            assert "/" not in k and "\\" not in k
+            assert ".." not in k
+
+    def test_alias_collision_checked_on_sanitized_name(self, fake_registry, tmp_path):
+        # Two raw names that sanitize to the SAME key collide on the sanitized
+        # value, not the raw string.
+        store, _ = fake_registry
+        f = _file(tmp_path, "m.gguf")
+        store["orig"] = {"path": str(f), "source": "local"}
+        assert mm.alias_model("orig", "a/b") is True      # -> "a-b"
+        assert "a-b" in store
+        assert mm.alias_model("orig", "a\\b") is False     # also -> "a-b": taken
+
 
 # ---------------------------------------------------------------------------
 #  _register stores sha256
@@ -425,3 +461,101 @@ class TestRegistryRmwAtomicity:
         mm.remove_model("m")
         assert "m" not in store
         assert "concurrent" in store, "lost update: remove clobbered a concurrent write"
+
+
+# ---------------------------------------------------------------------------
+#  Malformed registry entries must never crash a read/list/remove/dedup/sync
+#  (a single JSON-valid-but-wrong-shape entry once wedged the whole model CLI:
+#  list/rm/add all raised an uncaught traceback and offered a bug report, with
+#  no in-tool way to remove the bad entry). load_registry already promises a
+#  damaged FILE never takes the app down; this extends it to a damaged ENTRY.
+# ---------------------------------------------------------------------------
+
+# The shapes a hand-edited / half-written / cross-version registry.json can take.
+BAD_ENTRIES = {
+    "string_entry": "oops",                       # not a dict at all
+    "null_entry": None,                            # null value
+    "no_path": {"source": "local"},               # dict missing 'path'
+    "null_path": {"path": None, "source": "local"},   # path is null
+    "int_path": {"path": 123},                     # path is not a string
+    "empty_path": {"path": "", "source": "local"},    # path is empty
+}
+
+
+class TestMalformedRegistryResilience:
+    def _seed(self, store, tmp_path, bad_key, bad_val):
+        good = _file(tmp_path, "good.gguf")
+        store["good"] = {"path": str(good), "source": "local", "model_type": "llm"}
+        store[bad_key] = bad_val
+        return good
+
+    @pytest.mark.parametrize("bad_key,bad_val", list(BAD_ENTRIES.items()))
+    def test_list_models_survives_one_bad_entry(self, fake_registry, tmp_path,
+                                                bad_key, bad_val):
+        store, _ = fake_registry
+        self._seed(store, tmp_path, bad_key, bad_val)
+        # Must not raise; the good model is still listed and the bad entry is
+        # shown as a corrupt row (never a traceback that hides the whole list).
+        mm.list_models()
+
+    @pytest.mark.parametrize("bad_key,bad_val", list(BAD_ENTRIES.items()))
+    def test_remove_drops_a_corrupt_entry(self, fake_registry, tmp_path,
+                                          bad_key, bad_val):
+        store, _ = fake_registry
+        self._seed(store, tmp_path, bad_key, bad_val)
+        # Removing the malformed entry is the CLI recovery path: it just drops
+        # the name, no crash, and leaves the good model intact.
+        mm.remove_model(bad_key)
+        assert bad_key not in store
+        assert "good" in store
+
+    @pytest.mark.parametrize("bad_key,bad_val", list(BAD_ENTRIES.items()))
+    def test_remove_good_model_with_a_bad_sibling(self, fake_registry, tmp_path,
+                                                  bad_key, bad_val):
+        store, _ = fake_registry
+        self._seed(store, tmp_path, bad_key, bad_val)
+        # A bad SIBLING entry must not block removing a healthy model (the dedup
+        # helper find_aliases_by_path iterates every entry).
+        mm.remove_model("good")
+        assert "good" not in store
+
+    @pytest.mark.parametrize("bad_key,bad_val", list(BAD_ENTRIES.items()))
+    def test_dedup_helpers_skip_bad_entry(self, fake_registry, tmp_path,
+                                          bad_key, bad_val):
+        store, _ = fake_registry
+        good = self._seed(store, tmp_path, bad_key, bad_val)
+        # None of the identity/dedup scans (run by add/pull) may crash.
+        assert mm.find_aliases_by_path(good) == ["good"]
+        assert mm.find_by_sha256("deadbeef") == []
+        assert mm.find_by_size(good.stat().st_size) == ["good"]
+
+    @pytest.mark.parametrize("bad_key,bad_val", list(BAD_ENTRIES.items()))
+    def test_get_model_info_on_bad_named_entry(self, fake_registry, tmp_path,
+                                               bad_key, bad_val):
+        store, _ = fake_registry
+        self._seed(store, tmp_path, bad_key, bad_val)
+        # Resolving the malformed name falls through to path resolution and
+        # returns None instead of crashing run/benchmark/serve.
+        assert mm.get_model_info(bad_key) is None
+
+    @pytest.mark.parametrize("bad_key,bad_val", list(BAD_ENTRIES.items()))
+    def test_sync_models_dir_survives_bad_entry(self, fake_registry, tmp_path,
+                                                bad_key, bad_val):
+        store, _ = fake_registry
+        self._seed(store, tmp_path, bad_key, bad_val)
+        # The launch-time reconcile scan must tolerate a malformed entry: it
+        # leaves it in place (shown corrupt by list) rather than crashing.
+        result = mm.sync_models_dir()
+        assert isinstance(result, mm.ModelSyncResult)
+        assert bad_key in store   # not silently dropped by sync
+
+    @pytest.mark.parametrize("bad_key,bad_val", list(BAD_ENTRIES.items()))
+    def test_vision_and_external_helpers_survive(self, fake_registry, tmp_path,
+                                                 bad_key, bad_val):
+        store, _ = fake_registry
+        self._seed(store, tmp_path, bad_key, bad_val)
+        # The vision-routing scan and the external-path check must not crash on a
+        # malformed entry (a str entry's .get would raise AttributeError).
+        assert isinstance(mm.vision_capable_models(), list)
+        assert mm.model_is_external(bad_key) is False
+        assert isinstance(mm.model_is_external("good"), bool)

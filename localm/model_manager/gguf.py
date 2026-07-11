@@ -122,6 +122,12 @@ def _safe_models_filename(filename: str) -> Optional[str]:
     """
     if not filename:
         return None
+    # An embedded NUL is not a legal filename on any OS and makes Path.resolve() /
+    # os.stat raise ValueError, which would ESCAPE the OSError-only guard below and
+    # crash the caller (an uncaught traceback) instead of being rejected. Fail
+    # closed: unsafe input must return None, exactly like a '/'/'..'/drive spec.
+    if "\x00" in filename:
+        return None
     # Reject anything that is not a single path component (no separators, no
     # drive/absolute prefixes, no '.'/'..').
     name = Path(filename).name
@@ -129,11 +135,13 @@ def _safe_models_filename(filename: str) -> Optional[str]:
         return None
     if "/" in filename or "\\" in filename or os.sep in filename:
         return None
-    dest = (_mm.MODELS_DIR / name).resolve()
     try:
+        dest = (_mm.MODELS_DIR / name).resolve()
         if dest.parent != _mm.MODELS_DIR.resolve():
             return None
-    except OSError:
+    except (OSError, ValueError):
+        # ValueError also covers a null/odd path that slipped past the check above
+        # (belt and suspenders); either way, an unresolvable name is not safe.
         return None
     return name
 

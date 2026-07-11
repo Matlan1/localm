@@ -299,24 +299,32 @@ def rm(model, yes):
     localm config confirm_remove false
     """
     from ..config import MODELS_DIR, load_registry
-    from ..model_manager import find_aliases_by_path
+    from ..model_manager import _entry_path, find_aliases_by_path
 
     cfg = load_config()
     if not yes and cfg.get("confirm_remove", True):
         reg = load_registry()
         if model in reg:
-            path = Path(reg[model]["path"])
-            others = [a for a in find_aliases_by_path(path, reg) if a != model]
-            if others:
-                detail = (f"unregisters the name only - file kept, "
-                          f"still registered as: {', '.join(others)}")
-            elif str(path).startswith(str(MODELS_DIR)) and path.exists():
-                size = path.stat().st_size / 1024**3 if path.is_file() else None
-                size_s = f" ({size:.1f} GB)" if size else ""
-                detail = f"PERMANENTLY deletes {path}{size_s}"
+            epath = _entry_path(reg[model])
+            if epath is None:
+                # A malformed / corrupt entry: no valid file to describe, and
+                # reg[model]["path"] would itself raise. Confirm a plain drop -
+                # remove_model then clears the corrupt name (CLI recovery path).
+                click.confirm(
+                    f"Remove corrupt registry entry '{model}'?", abort=True)
             else:
-                detail = "unregisters the name only (file is outside ~/.localm/models)"
-            click.confirm(f"Remove '{model}'? This {detail}. Continue?", abort=True)
+                path = Path(epath)
+                others = [a for a in find_aliases_by_path(path, reg) if a != model]
+                if others:
+                    detail = (f"unregisters the name only - file kept, "
+                              f"still registered as: {', '.join(others)}")
+                elif str(path).startswith(str(MODELS_DIR)) and path.exists():
+                    size = path.stat().st_size / 1024**3 if path.is_file() else None
+                    size_s = f" ({size:.1f} GB)" if size else ""
+                    detail = f"PERMANENTLY deletes {path}{size_s}"
+                else:
+                    detail = "unregisters the name only (file is outside ~/.localm/models)"
+                click.confirm(f"Remove '{model}'? This {detail}. Continue?", abort=True)
         else:
             click.confirm(f"Remove '{model}'?", abort=True)
     remove_model(model)
