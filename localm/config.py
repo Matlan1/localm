@@ -5,12 +5,23 @@ import os
 import socket
 import sys
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Callable, Optional
 
 
 _warned_unconfigured_home = False
+
+# (registry file, sorted dropped names) already warned about this process, so a
+# malformed-entry warning is surfaced once per distinct corruption instead of on
+# every load_registry call (see _sanitize_registry).
+_warned_bad_registry_entries: set = set()
+
+# config files already warned about (present but not a JSON object), so a
+# non-dict config.json is surfaced once per process, not on every load_config
+# call (see _merge_stored_config).
+_warned_bad_config: set = set()
 
 
 def _warn_unconfigured_home(path: Path) -> None:
@@ -432,8 +443,13 @@ def pick_port(requested: Optional[int] = None, host: str = "127.0.0.1"):
 
 
 def ensure_dirs() -> None:
-    HOME_DIR.mkdir(exist_ok=True)
-    MODELS_DIR.mkdir(exist_ok=True)
+    # parents=True: LOCALM_HOME is an explicit "keep my data here" choice, so a
+    # nested path a level or two below an existing dir (a fresh D:\localm\data)
+    # must be created like `mkdir -p`, not crash with WinError 3 the way a bare
+    # mkdir does when a parent is missing (AUD-ENSUREDIRS). exist_ok stays so a
+    # re-run is a no-op.
+    HOME_DIR.mkdir(parents=True, exist_ok=True)
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # Registry and config are mutated from several places at once - the GUI server
@@ -447,13 +463,52 @@ def ensure_dirs() -> None:
 # crash-proof (fall back to the .bak snapshot, then to the default).
 _io_lock = threading.RLock()
 
+# A concurrent open handle makes a Windows os.replace / open raise a TRANSIENT
+# PermissionError (WinError 5); a bounded retry rides it out. The lock is usually
+# microseconds, but a loaded box (antivirus scanning the file, an indexer, a slow
+# second process) can hold it tens of ms, so the backoff escalates and the total
+# budget is ~1 s before a PERSISTENT failure is re-raised / falls back
+# (do-not-hide-problems). See _replace_atomic / _read_json (AUD-WINREPLACE).
+_REPLACE_RETRIES = 16
+_REPLACE_BACKOFF = 0.01      # seconds; escalates up to the cap
+_REPLACE_BACKOFF_CAP = 0.1   # seconds
+
+
+def _transient_backoff(attempt: int) -> None:
+    """Sleep before the next retry, escalating linearly to a cap so a lock that
+    lingers on a busy machine is ridden out without a hot spin."""
+    time.sleep(min(_REPLACE_BACKOFF * (attempt + 1), _REPLACE_BACKOFF_CAP))
+
+
+def _replace_atomic(src: Path, dst: Path) -> None:
+    """``os.replace(src, dst)`` with a bounded retry on a transient Windows
+    sharing violation.
+
+    os.replace IS atomic, but on Windows it raises PermissionError (WinError 5)
+    when another handle has *dst* open at that instant: a second localm process
+    reading the file, an antivirus / indexer / backup scanner, Windows Search.
+    That window is short, so retrying briefly rides it out instead of crashing
+    the save. A genuine, persistent permission problem still surfaces (re-raised
+    after the last attempt) - we retry the transient race, we never hide a real
+    failure. On POSIX os.replace does not hit this, so the loop succeeds first
+    try."""
+    for attempt in range(_REPLACE_RETRIES):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == _REPLACE_RETRIES - 1:
+                raise
+            _transient_backoff(attempt)
+
 
 def _atomic_write_json(path: Path, data) -> None:
     """Write *data* as JSON to *path* atomically (temp file + os.replace).
 
     Keeps a one-step .bak of the previous good file so a corrupt read can
     recover. os.replace is atomic on Windows and POSIX when src/dst share a
-    filesystem, which they do (same directory)."""
+    filesystem, which they do (same directory); _replace_atomic additionally
+    rides out the transient Windows sharing violation a concurrent reader causes."""
     tmp = path.with_name(path.name + ".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
@@ -461,10 +516,18 @@ def _atomic_write_json(path: Path, data) -> None:
         os.fsync(f.fileno())
     if path.exists():
         try:
-            path.replace(path.with_name(path.name + ".bak"))
-        except OSError:
-            pass  # a missing .bak is not worth failing the write over
-    os.replace(tmp, path)
+            _replace_atomic(path, path.with_name(path.name + ".bak"))
+        except OSError as e:
+            # The .bak snapshot is best-effort: a failed one must NOT fail the
+            # primary write (which still proceeds below). But _replace_atomic
+            # already rode out the transient sharing violation, so reaching here
+            # means a PERSISTENT problem (a lock that outlasted the retries, disk
+            # full, a real permission error) - note it at a low level so it is
+            # discoverable rather than totally silent (do-not-hide-problems),
+            # without escalating a legitimate best-effort path into a hard fail.
+            print(f"[localm] note: could not refresh {path.name}.bak ({e}); "
+                  "the main write still succeeded.", file=sys.stderr)
+    _replace_atomic(tmp, path)
 
 
 def _read_json(path: Path, default):
@@ -473,20 +536,33 @@ def _read_json(path: Path, default):
     for candidate in (path, path.with_name(path.name + ".bak")):
         if not candidate.is_file():
             continue
-        try:
-            with open(candidate, encoding="utf-8") as f:
-                return json.load(f)
-        except (ValueError, OSError, RecursionError) as e:
-            # Broadened from (JSONDecodeError, OSError): a non-UTF-8 file raises
-            # UnicodeDecodeError, a huge integer raises ValueError, and a deeply
-            # nested document raises RecursionError - all of which previously
-            # ESCAPED and crashed the app instead of honouring the documented
-            # "fall back to .bak then default, never take the app down"
-            # guarantee (AUD-CFGFALLBACK). JSONDecodeError/UnicodeDecodeError are
-            # ValueError subclasses, so this tuple covers them too.
-            print(f"[localm] {candidate.name} is unreadable ({e}); "
-                  "falling back.", file=sys.stderr)
-            continue
+        for attempt in range(_REPLACE_RETRIES):
+            try:
+                with open(candidate, encoding="utf-8") as f:
+                    return json.load(f)
+            except PermissionError as e:
+                # TRANSIENT on Windows: a concurrent atomic replace (another
+                # process, or antivirus/indexer) has the file locked for a
+                # microsecond. Retry the SAME file before giving up, so a passing
+                # scanner does not make us spuriously fall back to .bak/defaults
+                # and momentarily discard live settings. A persistent EACCES
+                # surfaces after the retries via the same warning + fall-through.
+                if attempt < _REPLACE_RETRIES - 1:
+                    _transient_backoff(attempt)
+                    continue
+                print(f"[localm] {candidate.name} is unreadable ({e}); "
+                      "falling back.", file=sys.stderr)
+            except (ValueError, OSError, RecursionError) as e:
+                # NOT transient (corrupt/non-UTF-8 JSON -> ValueError incl.
+                # JSONDecodeError/UnicodeDecodeError, a huge integer -> ValueError,
+                # deep nesting -> RecursionError, or a hard OS error): fall back
+                # immediately without wasting the retry budget. Previously these
+                # ESCAPED and crashed the app instead of honouring the documented
+                # "fall back to .bak then default, never take the app down"
+                # guarantee (AUD-CFGFALLBACK).
+                print(f"[localm] {candidate.name} is unreadable ({e}); "
+                      "falling back.", file=sys.stderr)
+            break
     return default() if callable(default) else default
 
 
@@ -539,6 +615,27 @@ def instance_id() -> str:
         return val
 
 
+def _merge_stored_config(cfg: dict, stored) -> None:
+    """Overlay the persisted config delta *stored* onto *cfg* (the defaults).
+
+    A present-but-non-dict config.json - valid JSON that is a list / string /
+    number / null, or any non-object - is ignored so it cannot corrupt the merge,
+    but that discard is SURFACED once per process (do-not-hide-problems): the
+    user's saved settings are being dropped, which must never be silent. A MISSING
+    file arrives here as the ``{}`` default (a dict) and is a normal no-op, not a
+    warning; a genuinely unparseable file already warned in _read_json and also
+    arrives as ``{}``. stderr, not the logger (see _detect_home / AUD-DETECTHOME)."""
+    if isinstance(stored, dict):
+        cfg.update(stored)
+        return
+    key = str(CONFIG_FILE)
+    if key not in _warned_bad_config:
+        _warned_bad_config.add(key)
+        print(f"[localm] config.json is not a JSON object (got "
+              f"{type(stored).__name__}); ignoring it and using defaults. The file "
+              "is left untouched so you can recover it by hand.", file=sys.stderr)
+
+
 def load_config() -> dict:
     ensure_dirs()
     # DEEP copy: a shallow .copy() shares the nested mutable defaults (e.g. the
@@ -548,8 +645,7 @@ def load_config() -> dict:
     cfg = copy.deepcopy(DEFAULT_CONFIG)
     with _io_lock:
         stored = _read_json(CONFIG_FILE, {})
-    if isinstance(stored, dict):
-        cfg.update(stored)
+    _merge_stored_config(cfg, stored)
     return cfg
 
 
@@ -621,8 +717,7 @@ def update_config(mutator: Callable[[dict], None]) -> dict:
     with _io_lock:
         cfg = copy.deepcopy(DEFAULT_CONFIG)   # deep: see load_config (nested dicts)
         stored = _read_json(CONFIG_FILE, {})
-        if isinstance(stored, dict):
-            cfg.update(stored)
+        _merge_stored_config(cfg, stored)
         mutator(cfg)
         # The mutator and the return value see the full merged dict; only the
         # user-set delta hits the disk (see _user_delta / save_config).
@@ -630,11 +725,51 @@ def update_config(mutator: Callable[[dict], None]) -> dict:
         return cfg
 
 
+def _sanitize_registry(reg: dict) -> dict:
+    """Return only the WELL-FORMED entries of *reg*: a dict value carrying a
+    non-empty string ``path`` - the invariant every registry writer guarantees
+    (``_register`` / ``alias_model`` always write ``{"path": str(...), ...}``)
+    and every reader assumes.
+
+    A malformed entry (value not a dict, or a missing / non-string / empty
+    ``path``) would otherwise crash the first consumer that does ``entry["path"]``
+    or ``entry.get(...)`` - ``localm list`` / ``run`` / ``sync_models_dir`` all
+    do, with no per-entry guard - so a single hand-edited or externally-corrupted
+    entry took the whole command down (AUD-REGSANITIZE). Dropping just the bad
+    entries keeps the good models usable instead of losing every model to one bad
+    row, and it never rewrites the file here, so the bad entry stays
+    hand-recoverable on disk (a later atomic save snapshots it to .bak first).
+
+    Dropped keys are surfaced on stderr (do-not-hide-problems), not silently
+    discarded. stderr, not the logger: importing debuglog here would be circular
+    (see _detect_home / AUD-DETECTHOME)."""
+    clean, dropped = {}, []
+    for name, entry in reg.items():
+        if isinstance(entry, dict) and isinstance(entry.get("path"), str) and entry["path"]:
+            clean[name] = entry
+        else:
+            dropped.append(str(name))
+    if dropped:
+        # Warn once per distinct corruption per process: load_registry is called
+        # several times per command (sync_models_dir alone re-reads 3x), so an
+        # un-deduped warning would spam the same line and train the user to ignore
+        # it. Keying on (file, dropped-names) still re-surfaces a CHANGED set.
+        sig = (str(REGISTRY_FILE), tuple(sorted(dropped)))
+        if sig not in _warned_bad_registry_entries:
+            _warned_bad_registry_entries.add(sig)
+            shown = ", ".join(sorted(dropped)[:10]) + (", ..." if len(dropped) > 10 else "")
+            print(f"[localm] registry.json: ignoring {len(dropped)} malformed "
+                  f"entr{'y' if len(dropped) == 1 else 'ies'} ({shown}); the file "
+                  "is left untouched so you can recover them by hand.",
+                  file=sys.stderr)
+    return clean
+
+
 def load_registry() -> dict:
     ensure_dirs()
     with _io_lock:
         reg = _read_json(REGISTRY_FILE, {})
-    return reg if isinstance(reg, dict) else {}
+    return _sanitize_registry(reg) if isinstance(reg, dict) else {}
 
 
 def save_registry(reg: dict) -> None:
@@ -654,8 +789,7 @@ def update_registry(mutator: Callable[[dict], None]) -> dict:
     but each write stays atomic and non-corrupting.)"""
     with _io_lock:
         reg = _read_json(REGISTRY_FILE, {})
-        if not isinstance(reg, dict):
-            reg = {}
+        reg = _sanitize_registry(reg) if isinstance(reg, dict) else {}
         mutator(reg)
         _atomic_write_json(REGISTRY_FILE, reg)
         return reg

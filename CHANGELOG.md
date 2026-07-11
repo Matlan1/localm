@@ -11,6 +11,28 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Fixed
+- **A damaged `registry.json` no longer takes down `localm list` / `run`:** if a
+  single model entry in the registry got hand-edited or partially corrupted (a
+  non-object entry, or one missing its file path), commands that scan the registry
+  used to crash with an "unexpected error". Now the bad entry is skipped with a
+  notice (the file is left untouched so you can recover it by hand) and your other
+  models keep working - one bad row no longer hides your whole model list.
+- **A nested `LOCALM_HOME` is created for you:** pointing `LOCALM_HOME` at a fresh
+  path a couple of levels deep (e.g. `D:\localm\data`) used to crash if the parent
+  folders did not exist yet. localm now creates the whole path, like `mkdir -p`.
+- **No more crash or lost settings when two processes touch config at once
+  (Windows):** on Windows, saving `config.json` / `registry.json` could fail with
+  an "access denied" error if another localm process, antivirus, a backup tool, or
+  Windows Search happened to be reading the file at that instant, and a read at
+  that moment could momentarily fall back to defaults. Saves and reads now ride out
+  that brief lock, so concurrent access no longer crashes a save or drops settings.
+- **A `config.json` that is not a JSON object is no longer ignored silently:** if
+  the file somehow becomes valid JSON but not an object (a list, a bare string, a
+  number), localm now says it is ignoring it and using defaults, instead of quietly
+  dropping your settings with no explanation. The file is left untouched so you can
+  recover it.
+
 ## [0.1.2] - 2026-07-10
 
 ### Added
