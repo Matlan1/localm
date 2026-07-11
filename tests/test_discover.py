@@ -10,8 +10,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from localm.discover import (
-    DiscoverError, _LLAMA_SPLIT_MODE_LAYER, _MAX_GPU_SPLIT_INDEX,
-    _TENSOR_SPLIT_FALLBACK_CAPACITY,
+    DiscoverError, GPU_PROBE_OK, GPU_PROBE_TIMEOUT,
+    _GPU_PROBE_CLI_DEADLINE, _GPU_PROBE_DEADLINE, _LLAMA_SPLIT_MODE_LAYER,
+    _MAX_GPU_SPLIT_INDEX, _TENSOR_SPLIT_FALLBACK_CAPACITY,
     _quant_of, apply_gpu_split, apply_main_gpu, fit_label, gpu_split_shortfall,
     hf_backend_available, hf_gguf_files, hf_param_bytes, hf_search, list_gpus,
     resolve_gpu_split, resolve_main_gpu_index, split_device_count, vram_capacity,
@@ -502,6 +503,70 @@ class TestListGpusSafety:
         release.set()
         assert elapsed < 2.0
         assert fallback == good, "a wedged probe must serve the last-known-good value, not []"
+
+
+class TestListGpusTimeoutStatus:
+    """A timed-out cold probe must be DISTINGUISHABLE from a genuine empty result
+    so a blocking caller can retry / report accurately, instead of misattributing
+    a slow driver init to 'no GPU / no torch' (AGENTS.md rule 5). Diagnosed cause:
+    the FIRST cold torch.cuda/HIP call initializes the ROCm/CUDA driver (~6.5s
+    measured) and overruns the 4s server deadline, so list_gpus() returns [] just
+    like a no-torch box - with no way, before this, to tell the two apart."""
+
+    def test_short_deadline_times_out_to_empty_with_timeout_status(self, monkeypatch):
+        import threading
+        import time
+
+        release = threading.Event()
+
+        def _slow():
+            release.wait(10)     # a cold driver init that overruns the short deadline
+            return [{"index": 0, "name": "GPU0", "total": 8, "free": 8}]
+
+        monkeypatch.setattr("localm.discover._list_gpus_probe", _slow)
+        t0 = time.monotonic()
+        gpus, status = list_gpus(deadline=0.2, return_status=True)
+        elapsed = time.monotonic() - t0
+        release.set()            # let the abandoned probe thread finish now
+        assert elapsed < 2.0, f"list_gpus blocked {elapsed:.1f}s past its deadline"
+        assert gpus == []
+        assert status == GPU_PROBE_TIMEOUT
+
+    def test_generous_deadline_lets_a_slow_cold_probe_complete(self, monkeypatch):
+        import time
+
+        def _slow():
+            time.sleep(0.4)      # a cold init that beats a generous (CLI) deadline
+            return [{"index": 0, "name": "GPU0", "total": 8, "free": 8}]
+
+        monkeypatch.setattr("localm.discover._list_gpus_probe", _slow)
+        gpus, status = list_gpus(deadline=3.0, return_status=True)
+        assert status == GPU_PROBE_OK
+        assert gpus == [{"index": 0, "name": "GPU0", "total": 8, "free": 8}]
+
+    def test_completed_empty_probe_is_ok_not_timeout(self, monkeypatch):
+        """A probe that COMPLETES and finds nothing is authoritative 'no GPU'
+        (status OK) - the real no-torch/no-nvidia-smi box - and must NOT be
+        conflated with a timeout."""
+        monkeypatch.setattr("localm.discover._list_gpus_probe", lambda: [])
+        gpus, status = list_gpus(deadline=3.0, return_status=True)
+        assert gpus == []
+        assert status == GPU_PROBE_OK
+
+    def test_return_status_false_keeps_plain_list_contract(self, monkeypatch):
+        """The default call returns a bare list (every existing caller and the
+        ~28 test files that patch list_gpus rely on it), never a tuple."""
+        good = [{"index": 0, "name": "A", "total": 8, "free": 8}]
+        monkeypatch.setattr("localm.discover._list_gpus_probe", lambda: list(good))
+        assert list_gpus() == good
+        assert list_gpus(deadline=3.0) == good
+
+    def test_cli_deadline_is_more_generous_than_the_server_deadline(self):
+        """The blocking-caller deadline must give a cold driver init real room,
+        and must be strictly larger than the 4s server-loop cap it exists to
+        relax - otherwise `localm gpus` inherits the same premature timeout."""
+        assert _GPU_PROBE_CLI_DEADLINE > _GPU_PROBE_DEADLINE
+        assert _GPU_PROBE_CLI_DEADLINE >= 10.0
 
 
 class TestResolveMainGpuIndex:
