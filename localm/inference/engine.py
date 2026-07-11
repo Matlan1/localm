@@ -158,6 +158,13 @@ class Engine:
             device=device,
         )
         self.active_requests = 0
+        # Set True by an unload/eviction path for the duration of the native
+        # free, so get_engine()/switch_engine()'s fast paths refuse to hand this
+        # engine back (and thus refuse to let a request pin it) while it is being
+        # torn down. Closes the pin-arrives-during-the-unload-await window that
+        # active_requests alone cannot (a request pins lock-free, AFTER the
+        # active_requests==0 check has already passed). See http_server.py.
+        self.unloading = False
 
     @property
     def loaded(self) -> bool:
