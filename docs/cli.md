@@ -17,7 +17,7 @@ localm info                      # paths + current config
 localm setup-llama [opts]        # provision native llama.cpp binaries
 ```
 
-`--debug` on `gui`, `serve`, and `run` writes a log to `~/.localm/logs/` with request timing and the native llama.cpp stderr stream (including crash abort reasons), and shows raw model output without marker scrubbing.
+`--debug` on `gui`, `serve`, and `run` writes a log to `<data dir>/logs/` with request timing and the native llama.cpp stderr stream (including crash abort reasons), and shows raw model output without marker scrubbing.
 
 ### Running models
 
@@ -122,14 +122,14 @@ localm add D:\ollama\manifests\registry.ollama.ai\library\<model>\<tag>
 localm alias mymodel short                   # second name for the same file
 ```
 
-By default `add` (and `pull` with a local path) registers the file where it already is - nothing is copied or moved. Pass `--store copy` or `--store move` to bring it into `~/.localm/models` first and register it from there instead, so it's managed exactly like a pulled model:
+By default `add` (and `pull` with a local path) registers the file where it already is - nothing is copied or moved. Pass `--store copy` or `--store move` to bring it into `<data dir>/models` first and register it from there instead, so it's managed exactly like a pulled model:
 
 ```bash
-localm add D:\models\mymodel.gguf --store copy   # duplicate into ~/.localm/models, keep the original
-localm add D:\models\mymodel.gguf --store move   # relocate into ~/.localm/models
+localm add D:\models\mymodel.gguf --store copy   # duplicate into <data dir>/models, keep the original
+localm add D:\models\mymodel.gguf --store move   # relocate into <data dir>/models
 ```
 
-`--store` moves/copies a split GGUF's every part and a sibling mmproj vision-projector file together with the model, so multi-part loading and vision capability survive the move. It refuses (no changes made) if a different file already occupies that name in `~/.localm/models`, if there isn't enough free disk space, or if a copy's SHA256 doesn't match the original afterward.
+`--store` moves/copies a split GGUF's every part and a sibling mmproj vision-projector file together with the model, so multi-part loading and vision capability survive the move. It refuses (no changes made) if a different file already occupies that name in `<data dir>/models`, if there isn't enough free disk space, or if a copy's SHA256 doesn't match the original afterward.
 
 ### Model type
 
@@ -244,7 +244,7 @@ localm config comfy_launch_cmd "D:\path\to\comfyui.bat"
 localm config autoprune_missing_models true
 ```
 
-Config lives at `~/.localm/config.json` and only known keys are settable (both the CLI and the GUI validate against the schema). Only the settings you actually changed are stored in the file. Set `require_auth true` (or `LOCALM_REQUIRE_AUTH=1`) to fail closed and refuse requests until a key exists; localm warns when binding to a non-loopback address without a key; `cors_origins` widens CORS (locked to localhost by default). See the [API keys](#api-keys) section and [SECURITY.md](../SECURITY.md) for the auth and scope model, and [docs/tls.md](../docs/tls.md) for LAN serving.
+Config lives at `<data dir>/config.json` and only known keys are settable (both the CLI and the GUI validate against the schema). Only the settings you actually changed are stored in the file. Set `require_auth true` (or `LOCALM_REQUIRE_AUTH=1`) to fail closed and refuse requests until a key exists; localm warns when binding to a non-loopback address without a key; `cors_origins` widens CORS (locked to localhost by default). See the [API keys](#api-keys) section and [SECURITY.md](../SECURITY.md) for the auth and scope model, and [docs/tls.md](../docs/tls.md) for LAN serving.
 
 ### Dynamic context window
 
@@ -334,7 +334,7 @@ localm plugin install-deps NAME # install a plugin's pip extras on this host
 localm plugin install-deps --all# fill in missing extras for every enabled plugin
 ```
 
-The store names are `coder`, `image`, `music`, `video`, `rag`, `web`, `voice`, `tts`, `jobs`, and `mcp` (plus the protected `chat`). Plugins with heavy Python dependencies carry them in a pip extra, installed on the host by default (the `auto_install_plugin_deps` setting; `--no-deps` to skip, `--with-deps` to force, or `localm plugin install-deps` later). A running GUI server picks up new HTTP routes and tabs at runtime; stdio plugins like mcp take effect on the next `localm mcp`. See [docs/plugins.md](../docs/plugins.md).
+The store names are `coder`, `image`, `music`, `video`, `rag`, `web`, `memory`, `voice`, `tts`, `jobs`, and `mcp` (plus the protected `chat`). Plugins with heavy Python dependencies carry them in a pip extra, installed on the host by default (the `auto_install_plugin_deps` setting; `--no-deps` to skip, `--with-deps` to force, or `localm plugin install-deps` later). A running GUI server picks up new HTTP routes and tabs at runtime; stdio plugins like mcp take effect on the next `localm mcp`. See [docs/plugins.md](../docs/plugins.md).
 
 Third-party plugins are folders containing a `plugin.toml` manifest and Python files. Install from a local path with `localm plugin install <path>` (the same command takes a store name or a directory); installation is a local directory copy, fully offline. See [docs/plugins.md](../docs/plugins.md) for the full authoring contract.
 
