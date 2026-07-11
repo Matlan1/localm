@@ -142,6 +142,31 @@ def llama_model_n_layer(model: ctypes.c_void_p) -> int:
     return _bind("llama_model_n_layer", ctypes.c_int32, LlamaModel)(model)
 
 
+def has_kv_head_api() -> bool:
+    """True when this llama.dll exports llama_model_n_head + llama_model_n_head_kv,
+    so the KV-cache size per token can be computed EXACTLY from the model's
+    attention shape (heads x head_dim x layers) instead of estimated from file
+    size. Every current build exports them (probed on the shipped cpu / vulkan /
+    amd-rocm runtimes); the guard lets an exotic stripped build fall back to the
+    size-class heuristic instead of raising AttributeError - same pattern as
+    has_memory_api()/has_penalties_sampler()."""
+    lib = load_lib()
+    return all(hasattr(lib, fn)
+               for fn in ("llama_model_n_head", "llama_model_n_head_kv"))
+
+
+def llama_model_n_head(model: ctypes.c_void_p) -> int:
+    """Number of attention (query) heads. Only call after has_kv_head_api()."""
+    return _bind("llama_model_n_head", ctypes.c_int32, LlamaModel)(model)
+
+
+def llama_model_n_head_kv(model: ctypes.c_void_p) -> int:
+    """Number of key/value heads - fewer than n_head under grouped-query
+    attention, which is exactly what makes the KV cache smaller than a naive
+    n_head estimate. Only call after has_kv_head_api()."""
+    return _bind("llama_model_n_head_kv", ctypes.c_int32, LlamaModel)(model)
+
+
 # ---------------------------------------------------------------------------
 #  Vocabulary / tokenisation
 # ---------------------------------------------------------------------------
