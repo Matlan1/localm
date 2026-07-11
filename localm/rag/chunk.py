@@ -33,9 +33,15 @@ def chunk_text(text: str, *, chunk_chars: int = CHUNK_CHARS,
     paragraphs: list[tuple[int, str]] = []
     line_no = 1
     for raw in text.split("\n\n"):
+        # An ODD number of blank lines between paragraphs leaves a leading '\n' on
+        # this split element; those leading newlines belong to THIS paragraph's
+        # start (they precede its text), so advance past them before recording pos.
+        # Without this, pos is one line too low and the citation points at a blank
+        # line (B7).
+        lead = len(raw) - len(raw.lstrip("\n"))
         stripped = raw.strip("\n")
         if stripped.strip():
-            paragraphs.append((line_no, stripped))
+            paragraphs.append((line_no + lead, stripped))
         line_no += raw.count("\n") + 2   # the paragraph's lines + blank line
 
     # Oversized paragraphs are pre-split so the packer below stays simple
