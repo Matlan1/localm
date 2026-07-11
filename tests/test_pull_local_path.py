@@ -72,3 +72,65 @@ class TestPullByLocalPath:
         pull_model("owner/repo")
         assert called["hf"] is True
         assert called["add_local"] is False
+
+
+class TestPullLocalSha256:
+    """A user-supplied --sha256 on a LOCAL pull is a safety assertion: it must be
+    verified against the real bytes, never silently ignored while reporting
+    success (AGENTS.md rule 5: a safety step that fails must not report success)."""
+
+    def _sha(self, p):
+        import hashlib
+        return hashlib.sha256(p.read_bytes()).hexdigest()
+
+    def test_matching_hash_verifies_and_registers(self, tmp_path, isolated_home):
+        p = _gguf(tmp_path, "okmodel.gguf")
+        assert pull_model(str(p), expected_sha256=self._sha(p)) is True
+        assert "okmodel" in load_registry()
+
+    def test_wrong_hash_refuses_and_does_not_register(self, tmp_path, isolated_home):
+        p = _gguf(tmp_path, "badmodel.gguf")
+        assert pull_model(str(p), expected_sha256="de" * 32) is False
+        # The safety assertion failed -> the model must NOT be registered.
+        assert "badmodel" not in load_registry()
+
+    def test_uppercase_hash_matches(self, tmp_path, isolated_home):
+        p = _gguf(tmp_path, "casemodel.gguf")
+        assert pull_model(str(p), expected_sha256=self._sha(p).upper()) is True
+
+    def test_directory_with_sha256_refused(self, tmp_path, isolated_home):
+        # An HF model dir has no single digest; --sha256 on it is refused, not
+        # silently ignored.
+        d = tmp_path / "hfmodel"
+        d.mkdir()
+        (d / "config.json").write_text('{"architectures":["LlamaForCausalLM"]}')
+        (d / "tokenizer.json").write_text("{}")
+        assert pull_model(str(d), expected_sha256="de" * 32) is False
+
+
+class TestSafeFilenameFailsClosed:
+    """The download-destination guard must fail CLOSED (return None) on unsafe
+    input, never raise - a NUL byte used to escape the OSError-only guard as an
+    uncaught ValueError."""
+
+    def test_nul_byte_returns_none(self, isolated_home):
+        assert mm._safe_models_filename("evil\x00.gguf") is None
+
+    def test_nul_in_pull_spec_no_traceback(self, tmp_path, isolated_home, monkeypatch):
+        # A NUL in the gguf spec must be rejected cleanly (False), never crash.
+        monkeypatch.setattr("localm.netpolicy.network_mode", lambda: "ask")
+        assert pull_model("owner/repo:evil\x00.gguf") is False
+
+    @pytest.mark.parametrize("good", ["model.gguf", "a-b_c.1.gguf"])
+    def test_normal_names_still_pass(self, good, isolated_home):
+        assert mm._safe_models_filename(good) == good
+
+
+class TestGetModelInfoPathologicalName:
+    """get_model_info must return None for a pathological/nonexistent name, never
+    crash run/benchmark/serve. On Windows a dots-only name ('....') stats as an
+    existing dir but iterdir() on the raw string raises FileNotFoundError."""
+
+    @pytest.mark.parametrize("name", ["....", "...", "..", "a..b", "doesnotexist"])
+    def test_pathological_names_resolve_to_none(self, name, isolated_home):
+        assert mm.get_model_info(name) is None

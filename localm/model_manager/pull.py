@@ -195,6 +195,27 @@ def pull_model(
     except OSError:
         is_local_path = False
     if is_local_path:
+        # FAC-5 / AGENTS.md rule 5: a user-supplied --sha256 is a SAFETY assertion.
+        # For a local file we can and MUST actually verify it, never register the
+        # file and report success while silently ignoring the hash (a false-success
+        # that tells the user integrity held when it was never checked). A full HF
+        # repo refuses --sha256 outright; a single local file we verify against the
+        # real bytes and refuse on mismatch, mirroring the URL/GGUF download paths.
+        if expected_sha256:
+            if local.is_dir():
+                console.print(
+                    "[red]--sha256 is not supported for a local directory[/red] "
+                    f"({local}): a folder has many files and no single digest to "
+                    "verify. Drop --sha256, or point at a single .gguf file.")
+                return False
+            want = expected_sha256.strip().lower()
+            actual = _mm._sha256_file(local).lower()
+            if actual != want:
+                console.print(
+                    f"[red]SHA256 mismatch![/red] {local} is {actual[:16]}…, not "
+                    f"--sha256 {want[:16]}…. Refusing to register.")
+                return False
+            console.print(f"[green]✓[/green] SHA256 verified: {actual[:16]}…")
         # A local file gets no remote type probe: honour an explicit --type, else let
         # add_local deterministically detect it (GGUF -> llm, HF dir -> config.json,
         # otherwise the 'unknown' sentinel rather than a silent 'llm').
