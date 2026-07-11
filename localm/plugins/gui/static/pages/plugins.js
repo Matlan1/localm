@@ -6,7 +6,7 @@
 "use strict";
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
-import { $, authHeaders, el, readSSE, toast } from "../app/helpers.js";
+import { $, authHeaders, confirmDanger, el, readSSE, toast } from "../app/helpers.js";
 import { emptyState } from "../app/icons.js";
 import { refreshPluginCommands } from "../app/settings-perf.js";
 
@@ -250,34 +250,41 @@ export async function _maybeAutoInstallDeps(name) {
   } catch (e) { /* best-effort */ }
 }
 
-export async function pluginCatalogAction(action, name) {
-  if (action === "uninstall" &&
-      !confirm(`Uninstall '${name}'? Its plugin files are removed (your data is kept).`)) return;
-  try {
-    const r = await fetch(`/api/plugins/${encodeURIComponent(name)}/${action}`,
-                          { method: "POST", headers: authHeaders() });
-    const d = await r.json().catch(() => ({}));
-    if (!r.ok) {
-      const msg = d.detail || (r.status === 404 ? "no such plugin"
-                 : r.status === 409 ? "not allowed in the current state"
-                 : "failed");
-      toast(`${action} ${name}: ${msg}`, true);
+export function pluginCatalogAction(action, name) {
+  const run = async () => {
+    try {
+      const r = await fetch(`/api/plugins/${encodeURIComponent(name)}/${action}`,
+                            { method: "POST", headers: authHeaders() });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        const msg = d.detail || (r.status === 404 ? "no such plugin"
+                   : r.status === 409 ? "not allowed in the current state"
+                   : "failed");
+        toast(`${action} ${name}: ${msg}`, true);
+        return;
+      }
+      toast(`${name}: ${d.status || action}`);
+    } catch (e) {
+      toast(`${action} failed: ${e.message}`, true);
       return;
     }
-    toast(`${name}: ${d.status || action}`);
-  } catch (e) {
-    toast(`${action} failed: ${e.message}`, true);
-    return;
+    // Re-derive from one place: the catalog table and the slash-hint cache.
+    renderCatalogPlugins();
+    refreshPluginCommands();
+    // R50: tell other open tabs (which may be parked on this plugin's page) so
+    // they re-sync and leave a now-disabled view instead of erroring on its
+    // dead routes.
+    if (window.bumpPluginsRev) window.bumpPluginsRev();
+    // Auto-install the plugin's pip extras when the setting is on (host-only;
+    // a remote GUI silently leaves the manual "Install dependencies" button).
+    if (action === "install" || action === "enable") _maybeAutoInstallDeps(name);
+  };
+  if (action === "uninstall") {
+    confirmDanger(`Uninstall '${name}'?`,
+      "Its plugin files are removed (your data is kept).", "Uninstall", run);
+  } else {
+    run();
   }
-  // Re-derive from one place: the catalog table and the slash-hint cache.
-  renderCatalogPlugins();
-  refreshPluginCommands();
-  // R50: tell other open tabs (which may be parked on this plugin's page) so they
-  // re-sync and leave a now-disabled view instead of erroring on its dead routes.
-  if (window.bumpPluginsRev) window.bumpPluginsRev();
-  // Auto-install the plugin's pip extras when the setting is on (host-only; a
-  // remote GUI silently leaves the manual "Install dependencies" button).
-  if (action === "install" || action === "enable") _maybeAutoInstallDeps(name);
 }
 
 export async function refreshPluginsPage() {
@@ -312,13 +319,16 @@ export async function refreshPluginsPage() {
         const actions = el("td");
         actions.style.textAlign = "right";
         const rm = el("button", "danger", "remove");
-        rm.onclick = async () => {
-          if (!confirm(`Remove plugin '${p.name}'? Its folder in the data directory's plugins/ is deleted.`)) return;
-          const rr = await fetch(`/v1/plugins/${encodeURIComponent(p.name)}`, {
-            method: "DELETE", headers: authHeaders() });
-          const dd = await rr.json();
-          if (rr.ok) { toast(`Removed '${p.name}'`); refreshPluginsPage(); }
-          else toast(dd.detail || "Remove failed", true);
+        rm.onclick = () => {
+          confirmDanger(`Remove plugin '${p.name}'?`,
+            "Its folder in the data directory's plugins/ is deleted.",
+            "Remove", async () => {
+              const rr = await fetch(`/v1/plugins/${encodeURIComponent(p.name)}`, {
+                method: "DELETE", headers: authHeaders() });
+              const dd = await rr.json();
+              if (rr.ok) { toast(`Removed '${p.name}'`); refreshPluginsPage(); }
+              else toast(dd.detail || "Remove failed", true);
+            });
         };
         actions.appendChild(rm);
         tr.appendChild(actions);

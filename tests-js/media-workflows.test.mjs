@@ -47,7 +47,6 @@ async function drain() {
 test("workflow panel renders default + uploaded, and select round-trips", async () => {
   const calls = [];
   const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(calls) });
-  win.confirm = () => true;
   runScript(win, 'refreshWorkflowPanel("image");');
   await drain();
   const box = win.document.querySelector("#img-workflows");
@@ -70,6 +69,12 @@ test("workflow panel renders default + uploaded, and select round-trips", async 
   const delBtn = box2.querySelector(".workflow-del");
   assert.ok(delBtn, "an inactive workflow can be deleted");
   delBtn.click();
+  await drain();
+  // Deletion now confirms via the in-page confirmDanger modal (GUI-5), not
+  // window.confirm - click its danger button.
+  const ok = win.document.querySelector("#modal-body .btn-danger");
+  assert.ok(ok, "delete-workflow confirm modal shown");
+  ok.click();
   await drain();
   assert.ok(calls.find((c) => c[0] === "delete" && c[1] === "a.json"), "DELETE sent");
 });

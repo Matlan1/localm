@@ -544,8 +544,9 @@ export function saveCurrentAsPreset(presets) {
 }
 
 export function deleteKeyPreset(name, presets) {
-  if (!confirm(`Delete preset "${name}"?`)) return;
-  saveKeyPresets(presets.filter((p) => p.name !== name));
+  confirmDanger(`Delete preset "${name}"?`, "This can't be undone.", "Delete", () => {
+    saveKeyPresets(presets.filter((p) => p.name !== name));
+  });
 }
 
 // Server-rendered pairing QR for a freshly-minted SCOPED key: scan it in localm
@@ -651,12 +652,14 @@ export async function refreshKeysPanel() {
     row.appendChild(el("span", "sub key-expiry-tag", keyExpiryLabel(k.expires)));
     row.appendChild(el("span", "sub key-lastused-tag", keyLastUsedLabel(k.last_used)));
     const rm = el("button", "btn-secondary", "Revoke");
-    rm.onclick = async () => {
-      if (!confirm(`Revoke key "${k.name || k.id}"?`)) return;
-      const d = await fetch(`/v1/keys/${encodeURIComponent(k.id)}`,
-                            { method: "DELETE", headers: authHeaders() });
-      if (d.ok) { toast("Key revoked"); refreshKeysPanel(); }
-      else { toast("Revoke failed"); }
+    rm.onclick = () => {
+      confirmDanger(`Revoke key "${k.name || k.id}"?`,
+        "Anything using this key immediately loses access.", "Revoke", async () => {
+          const d = await fetch(`/v1/keys/${encodeURIComponent(k.id)}`,
+                                { method: "DELETE", headers: authHeaders() });
+          if (d.ok) { toast("Key revoked"); refreshKeysPanel(); }
+          else { toast("Revoke failed"); }
+        });
     };
     row.appendChild(rm);
     list.appendChild(row);

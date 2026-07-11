@@ -152,10 +152,15 @@ test("keys panel: owner can save and delete a preset (PATCH /v1/config)", async 
   await tick();
   await window.refreshKeysPanel();
   await tick();
-  window.confirm = () => true;
   const del = window.document.querySelector(".key-preset-del");
   assert.ok(del, "owner sees a delete affordance");
   del.onclick({ stopPropagation() {} });
+  await tick();
+  // Deletion now confirms via the in-page confirmDanger modal (GUI-5), not
+  // window.confirm - click its danger button.
+  const ok = window.document.querySelector("#modal-body .btn-danger");
+  assert.ok(ok, "delete-preset confirm modal shown");
+  ok.click();
   await tick();
   assert.equal(patched.key_presets.length, 0);      // "Old" removed
   patched = null;
