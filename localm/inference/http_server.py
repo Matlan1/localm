@@ -400,10 +400,17 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                 # native free. Taking the victim sem while holding the target sem
                 # would also risk a two-switch lock-ordering deadlock.
                 await loop.run_in_executor(None, evict_engine.unload)
-                del _engines[evict_name]
-                _engines_lru.remove(evict_name)
-                if evict_name in _inference_sems:
-                    del _inference_sems[evict_name]
+                # Guarded removal: the unload above is an await, so a concurrent
+                # evictor (two API loads of different models can pick the SAME idle
+                # victim - get_engine loads preempt=False, so they coexist) or an
+                # idle/explicit unload may have already removed evict_name during the
+                # yield. A bare `del`/`list.remove` would then raise KeyError/
+                # ValueError out through the chat route as a 500. pop/guard is safe
+                # and matches unload_all_models / _idle_unload_once.
+                _engines.pop(evict_name, None)
+                if evict_name in _engines_lru:
+                    _engines_lru.remove(evict_name)
+                _inference_sems.pop(evict_name, None)
 
                 # Wait for the native VRAM free to land before re-checking, so the
                 # next iteration does not see a stale-low reading and over-evict
@@ -542,10 +549,21 @@ async def unload_all_models() -> dict:
 
     before = _free()
     unloaded_models = []
+    skipped_in_use = []
 
     for name in list(_engines.keys()):
         engine = _engines[name]
         if not engine.loaded:
+            continue
+        # Honor the in-flight-request pin (AUDIT-CRIT-1), like the VRAM-eviction and
+        # idle-unload paths: a pinned engine has a request generating (or about to)
+        # against it. Unloading it would free VRAM the request immediately reloads
+        # (so the reported "freed" total is a lie) and race a use-after-unload; skip
+        # it and report it as still in use. Gate on isinstance(int) exactly like
+        # _pin/_unpin: a non-int active_requests (a bare test double) is "not pinned".
+        active = getattr(engine, "active_requests", 0)
+        if isinstance(active, int) and active > 0:
+            skipped_in_use.append(name)
             continue
         sem = _inference_sems.setdefault(name, asyncio.Semaphore(1))
         async with sem:
@@ -554,10 +572,13 @@ async def unload_all_models() -> dict:
             if name in _engines_lru:
                 _engines_lru.remove(name)
 
-    # Update compatibility pointers
-    _active_model_name = None
-    _engine = None
-    _inference_sem = None
+    # Update compatibility pointers - but NOT if the active engine was a pinned one
+    # we deliberately left loaded (clearing it would strand the in-flight request's
+    # active model).
+    if _active_model_name not in skipped_in_use:
+        _active_model_name = None
+        _engine = None
+        _inference_sem = None
 
     if before is not None and unloaded_models:
         released, after = await loop.run_in_executor(
@@ -565,11 +586,19 @@ async def unload_all_models() -> dict:
     else:
         released, after = 0, before
 
+    if unloaded_models:
+        status = "unloaded"
+    elif skipped_in_use:
+        status = "in_use"          # nothing freed: every loaded model is pinned
+    else:
+        status = "already_unloaded"
     result = {
-        "status": "unloaded" if unloaded_models else "already_unloaded",
+        "status": status,
         "model": unloaded_models[0] if unloaded_models else "none",
         "unloaded_models": unloaded_models
     }
+    if skipped_in_use:
+        result["skipped_in_use"] = skipped_in_use
     if before is not None:
         result.update(vram_freed=released,
                       vram_before_bytes=before, vram_after_bytes=after)
@@ -598,6 +627,13 @@ async def unload_one_model(name: str) -> dict:
     engine = _engines.get(name)
     if engine is None or not engine.loaded:
         return {"status": "already_unloaded", "model": name}
+    # Honor the in-flight-request pin (AUDIT-CRIT-1): an engine a request is
+    # generating on must not be unloaded out from under it (it would reload it
+    # anyway, making the "freed" report a lie). Report it as in use, not unloaded.
+    # isinstance(int) guard matches _pin/_unpin (a bare test double is not pinned).
+    active = getattr(engine, "active_requests", 0)
+    if isinstance(active, int) and active > 0:
+        return {"status": "in_use", "model": name, "vram_freed": 0}
 
     def _free():
         return vram_capacity().get("free")
