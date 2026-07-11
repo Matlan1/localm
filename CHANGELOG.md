@@ -34,6 +34,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   now, like the other trust-widening settings (the RAG indexing folders, a media
   backend's launch command), it is owner-only, so a scoped device key can no
   longer weaken this protection. No change for an owner running the app normally.
+- **`localm key recover` and `localm key clear` now sign out browser sessions.**
+  Rotating the owner key with `key recover` (the compromise-recovery path) or
+  removing it with `key clear` now also invalidates every active browser (cookie)
+  session, matching what the in-app "clear key" button already did. A browser
+  session is deliberately decoupled from the key so a routine key roll does not
+  log you out - but that meant a captured session cookie could keep owner access
+  after a recovery meant to lock an attacker out. Your scoped device keys are
+  untouched, so devices keep working; just sign in again in the browser with the
+  new key.
 
 ## [0.1.2] - 2026-07-10
 
