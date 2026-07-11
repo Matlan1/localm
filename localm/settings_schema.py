@@ -684,20 +684,15 @@ def _validate_one(key: str, val, field: "SettingField", default):
         if key == "key_presets":
             return _validate_key_presets(val)
         if key == "main_gpu_index":
-            # A HIDDEN NUMBER-shaped field (the dedicated GPU selector renders
-            # it, not the generic number box - see its schema comment). val may
-            # arrive as a JSON int (GUI) or a CLI string (`localm config
-            # main_gpu_index 1`); coerce explicitly so config.json always
-            # stores a real int, not a stringly-typed one.
-            if isinstance(val, bool):
-                raise ValueError(f"{key}: expected an integer, not a boolean")
-            try:
-                idx = int(val)
-            except (TypeError, ValueError):
-                raise ValueError(f"{key}: expected an integer, got {val!r}")
-            if field.min is not None and idx < field.min:
-                raise ValueError(f"{key}: {idx} is below the minimum {field.min}")
-            return idx
+            # A HIDDEN NUMBER-shaped field (the dedicated GPU selector renders it,
+            # not the generic number box - see its schema comment). val may arrive
+            # as a JSON int (GUI) or a CLI string (`localm config main_gpu_index
+            # 1`); route it through the shared _to_number helper so config.json
+            # stores a real int and this field inherits the SAME coercion guards
+            # as every other number (bool/NaN/inf/overflow rejection). A parallel
+            # hand-rolled int(val) here previously drifted from _to_number and
+            # leaked an uncaught OverflowError on inf (int(float("inf"))).
+            return _to_number(key, val, want_int=True, lo=field.min, hi=field.max)
         if key == "gpu_split_indices":
             # A HIDDEN list-of-ints field (the checkbox row renders it, not a
             # generic list box). Accepts a CLI CSV string ("0,1") or a GUI JSON

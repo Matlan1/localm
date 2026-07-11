@@ -132,6 +132,9 @@ def test_net_allow_private_is_admin_only():
     ("repeat_penalty", float("inf")),  # float, no upper bound: inf slips through
     ("max_tokens", float("inf")),      # int field: int(inf) is an OverflowError
     ("top_k", float("inf")),           # int field, no upper bound: OverflowError
+    ("main_gpu_index", float("inf")),  # separate hand-rolled int() path (not the
+                                       # generic NUMBER branch): int(inf) used to
+                                       # leak an uncaught OverflowError -> API 500
 ])
 def test_validate_update_rejects_non_finite_numbers(key, bad):
     with pytest.raises(ValueError):
@@ -144,6 +147,7 @@ def test_validate_update_keeps_finite_numbers():
     assert ss.validate_update({"max_tokens": 2048}) == {"max_tokens": 2048}
     assert ss.validate_update({"top_p": 0.0}) == {"top_p": 0.0}
     assert ss.validate_update({"temperature": 2}) == {"temperature": 2}
+    assert ss.validate_update({"main_gpu_index": 1}) == {"main_gpu_index": 1}
 
 
 def test_to_number_rejects_non_finite_directly():
