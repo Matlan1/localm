@@ -14,6 +14,10 @@ they exercise the real _atomic_write_json / _read_json code paths on every
 platform; the real Windows race was also reproduced by hand (see the PR)."""
 
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -138,3 +142,84 @@ def test_replace_atomic_rides_out_a_real_file_lock(home):
     t.join()
     fh.close()  # idempotent; ensures the handle is closed on POSIX too
     assert json.loads(p.read_text()) == {"new": 2}
+
+
+# --------------------------------------------------------------------------- #
+#  Unique per-write temp: the fix for two PROCESSES writing the same file at
+#  once. _replace_atomic (above) rides out a locked DESTINATION (a concurrent
+#  reader), but a FIXED temp name meant two concurrent WRITERS still collided on
+#  that one temp source - one save crashed when the other's replace had already
+#  consumed it (WinError 2/32). A unique temp per write removes the collision.
+# --------------------------------------------------------------------------- #
+
+def test_atomic_write_uses_unique_temp_per_write(tmp_path, monkeypatch):
+    target = tmp_path / "reg.json"
+    names = []
+    real_mkstemp = cfg.tempfile.mkstemp
+
+    def spy_mkstemp(*a, **k):
+        fd, name = real_mkstemp(*a, **k)
+        names.append(name)
+        return fd, name
+
+    monkeypatch.setattr(cfg.tempfile, "mkstemp", spy_mkstemp)
+    cfg._atomic_write_json(target, {"a": 1})
+    cfg._atomic_write_json(target, {"a": 2})
+
+    assert len(names) == 2
+    assert names[0] != names[1]                            # unique per write
+    assert all(Path(n).name != "reg.json.tmp" for n in names)   # never the old fixed name
+    assert json.loads(target.read_text()) == {"a": 2}      # last write wins, intact
+    assert not list(tmp_path.glob("reg.json*.tmp"))        # no orphan temp left behind
+
+
+def test_atomic_write_leaves_no_orphan_temp(tmp_path):
+    target = tmp_path / "c.json"
+    cfg._atomic_write_json(target, {"x": 1})
+    cfg._atomic_write_json(target, {"x": 2})
+    assert json.loads(target.read_text()) == {"x": 2}
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+# Each worker process hammers the SAME file. With the old FIXED temp name this
+# reliably crashed on Windows (the shared temp is consumed by another process's
+# replace -> WinError 2/32); with the unique temp every process completes. This
+# exercises the REAL cross-process path (not a mock) - the in-process _io_lock
+# cannot be what makes it safe. Sized to reliably trip the old bug while light.
+_CONC_NPROC = 5
+_CONC_NWRITES = 25
+_CONC_WORKER = (
+    "import sys\n"
+    "from pathlib import Path\n"
+    "import localm.config as c\n"
+    "p = Path(sys.argv[1]); idx = int(sys.argv[2]); m = int(sys.argv[3])\n"
+    "for n in range(m):\n"
+    "    c._atomic_write_json(p, {'w': idx, 'n': n})\n"
+)
+
+
+def test_concurrent_processes_no_crash_no_corruption(tmp_path):
+    target = tmp_path / "shared.json"
+    target.write_text("{}", encoding="utf-8")
+    env = dict(os.environ)
+    env["LOCALM_HOME"] = str(tmp_path / "home")
+    # Make the child import the SAME localm this test runs (the worktree), not
+    # whatever the venv editable-installed - the worktree-venv gotcha.
+    env["PYTHONPATH"] = os.pathsep.join(p for p in sys.path if p)
+
+    procs = [
+        subprocess.Popen(
+            [sys.executable, "-c", _CONC_WORKER, str(target), str(i), str(_CONC_NWRITES)],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        for i in range(_CONC_NPROC)
+    ]
+    for i, pr in enumerate(procs):
+        out, err = pr.communicate(timeout=90)
+        assert pr.returncode == 0, (
+            f"writer {i} crashed (rc={pr.returncode}): "
+            f"{err.decode('utf-8', 'replace')[-500:]}")
+
+    # The final file is valid JSON (never a torn write) and no temp leaked.
+    data = json.loads(target.read_text(encoding="utf-8"))
+    assert data.get("w") in range(_CONC_NPROC)
+    assert not list(tmp_path.glob("shared.json*.tmp"))
