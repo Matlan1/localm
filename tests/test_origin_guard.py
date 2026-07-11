@@ -215,3 +215,71 @@ class TestShellTokenMetadataGetOriginGate:
         # still refused without the token even under wildcard CORS
         refused = client.get("/v1/keys", headers={"Origin": "http://localhost:9999"})
         assert refused.status_code == 403
+
+
+class TestSensitiveGetCrossOriginRefused:
+    """LM-PT-002 (CWE-200): /whoami (root_dir -> the OS username on a loopback
+    bind) and /debug/stacks (thread stacks) are UNAUTHENTICATED GETs. The default
+    CORS policy hands an ACAO to any http(s)://localhost:PORT origin, so without an
+    explicit refusal a drive-by local page could read them cross-origin. They are
+    NOT under /api or /v1, so the metadata-GET gate never covered them; and unlike
+    those reads they have no route-level auth to fall back on, so the refusal must
+    hold in EVERY mode (open and protected)."""
+
+    def test_cross_origin_whoami_refused(self, client):
+        # Make the leak concrete: a real root_dir would otherwise be disclosed.
+        client.app.state.root_dir = "/home/someuser/project"
+        r = client.get("/whoami", headers={"Origin": "http://evil.localhost:1234"})
+        assert r.status_code == 403
+        assert "cross-origin" in r.json()["detail"].lower()
+
+    def test_cross_origin_debug_stacks_refused(self, client):
+        r = client.get("/debug/stacks",
+                       headers={"Origin": "http://evil.localhost:1234"})
+        assert r.status_code == 403
+
+    def test_same_origin_whoami_allowed(self, client):
+        # The legitimate loopback GUI / same-origin discovery case keeps working
+        # (and this is exactly what still discloses root_dir to a trusted caller).
+        client.app.state.root_dir = "/home/someuser/project"
+        r = client.get("/whoami",
+                       headers={"Origin": "http://testserver", "Host": "testserver"})
+        assert r.status_code == 200
+        assert r.json().get("root_dir") == "/home/someuser/project"
+
+    def test_no_origin_whoami_allowed(self, client):
+        # A non-browser client (CLI instance discovery) sends no Origin at all -
+        # unaffected by the cross-origin refusal.
+        assert client.get("/whoami").status_code == 200
+
+    def test_same_origin_debug_stacks_allowed(self, client):
+        r = client.get("/debug/stacks",
+                       headers={"Origin": "http://testserver", "Host": "testserver"})
+        assert r.status_code == 200
+        assert "threads" in r.json()
+
+    def test_cross_origin_health_still_not_blocked(self, client):
+        # Sanity: only the sensitive GETs are refused; an ordinary safe GET
+        # (/health) stays cross-origin readable as before.
+        r = client.get("/health", headers={"Origin": "http://evil.localhost:1234"})
+        assert r.status_code in (200, 503)
+
+    def test_cross_origin_whoami_refused_in_protected_mode(
+            self, tmp_path, monkeypatch):
+        # /whoami is unauthenticated in BOTH modes, so the disclosure persists in
+        # protected mode too. An open-mode-only refusal (the metadata-GET gate)
+        # would miss it; this all-mode refusal must not.
+        import localm.config as cfg
+        home = tmp_path / ".localm"
+        home.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("LOCALM_HOME", str(home))
+        monkeypatch.setattr(cfg, "HOME_DIR", home)
+        monkeypatch.setattr(cfg, "CONFIG_FILE", home / "config.json")
+        monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
+        from localm.auth import set_api_key
+        set_api_key("k" * 32)
+        app = create_app(None)
+        c = TestClient(app)
+        c.app.state.root_dir = "/home/someuser/project"
+        r = c.get("/whoami", headers={"Origin": "http://evil.localhost:1234"})
+        assert r.status_code == 403
