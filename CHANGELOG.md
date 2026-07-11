@@ -12,6 +12,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Fixed
+- A non-finite number (`NaN` or `Infinity`) can no longer be saved as a config value.
+  Setting one, e.g. `localm config temperature nan` or a crafted Settings request, used
+  to be accepted and written to `config.json`, after which the Settings page failed to
+  load (HTTP 500) every time until the file was hand-edited. Such values are now
+  rejected up front with a clear message and never persisted.
 - A single malformed entry in `registry.json` (from a hand-edit or a partial write)
   no longer crashes `localm list` / `rm` / `add` / `pull` with an "unexpected error"
   and a bug-report offer. The bad entry is shown as `[corrupt]`, can be removed with

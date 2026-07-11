@@ -573,10 +573,20 @@ def _to_number(key: str, val, *, want_int: bool, lo, hi):
     if isinstance(val, bool):       # bool is an int subclass - reject as a number
         raise ValueError(f"{key}: expected a number, not a boolean")
     try:
+        # OverflowError: int(float("inf")) raises it, and it is neither a
+        # TypeError nor a ValueError - without this an inf into an int field
+        # would leak an uncaught OverflowError out of validate_update.
         num = int(val) if want_int else float(val)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         kind = "an integer" if want_int else "a number"
         raise ValueError(f"{key}: expected {kind}, got {val!r}")
+    # NaN/inf pass every < / > bounds check below (NaN compares False to all, inf
+    # only trips a finite upper bound), so a non-finite float would otherwise be
+    # persisted and then 500 every GET/PATCH /v1/config (FastAPI renders with
+    # allow_nan=False). int coercion can never produce a non-finite value, so this
+    # only guards the float path. Mirrors the gpu_split_ratios guard below.
+    if not want_int and not math.isfinite(num):
+        raise ValueError(f"{key}: expected a finite number, got {val!r}")
     if lo is not None and num < lo:
         raise ValueError(f"{key}: {num} is below the minimum {lo}")
     if hi is not None and num > hi:
@@ -705,10 +715,10 @@ def _validate_one(key: str, val, field: "SettingField", default):
         if key == "gpu_split_ratios":
             # Same shape as gpu_split_indices, but positive floats (a ratio of
             # 0 or below is meaningless - llama.cpp would give that device no
-            # share at all, silently dropping it from the split). inf/nan are
-            # rejected explicitly: _to_number's bounds check (lo/hi=None here)
-            # would let both through, and a non-finite value would otherwise
-            # cross straight into the native tensor_split ctypes buffer.
+            # share at all, silently dropping it from the split). _to_number now
+            # rejects non-finite floats itself; the explicit isfinite check below
+            # stays as defense-in-depth right at the native tensor_split ctypes
+            # boundary, alongside the >0 check that _to_number does not do.
             if val is None:
                 return None
             tokens = _to_str_list(key, val)

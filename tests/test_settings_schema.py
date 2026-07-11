@@ -3,6 +3,8 @@
 
 import json
 
+import pytest
+
 from localm import settings_schema as ss
 from localm.config import DEFAULT_CONFIG
 
@@ -113,6 +115,52 @@ def test_net_allow_private_is_admin_only():
         "the SSRF-guard-disable toggle must be owner-only"
     # A sibling network field the scoped key legitimately manages stays non-admin.
     assert by_key["net_allow"].admin_only is False
+
+
+# --- non-finite (NaN / inf) numbers are rejected (fuzzing finding LM-FZ-001) --- #
+#
+# _to_number coerced with float(val)/int(val) and NO isfinite guard, so a NaN
+# slipped past every bounds check (NaN fails all < / > comparisons), an inf
+# slipped past any field with no upper bound, and an int field given inf raised
+# an uncaught OverflowError. A persisted NaN then 500s every GET/PATCH /v1/config
+# (FastAPI renders with allow_nan=False), bricking the Settings page across
+# restarts. The coercion must reject non-finite values up front.
+
+@pytest.mark.parametrize("key, bad", [
+    ("temperature", float("nan")),     # bounded [0,2]: NaN slips past both bounds
+    ("top_p", float("nan")),           # bounded [0,1]: NaN slips past both bounds
+    ("repeat_penalty", float("inf")),  # float, no upper bound: inf slips through
+    ("max_tokens", float("inf")),      # int field: int(inf) is an OverflowError
+    ("top_k", float("inf")),           # int field, no upper bound: OverflowError
+])
+def test_validate_update_rejects_non_finite_numbers(key, bad):
+    with pytest.raises(ValueError):
+        ss.validate_update({key: bad})
+
+
+def test_validate_update_keeps_finite_numbers():
+    """The guard must not reject legitimate finite values, edges included."""
+    assert ss.validate_update({"temperature": 0.5}) == {"temperature": 0.5}
+    assert ss.validate_update({"max_tokens": 2048}) == {"max_tokens": 2048}
+    assert ss.validate_update({"top_p": 0.0}) == {"top_p": 0.0}
+    assert ss.validate_update({"temperature": 2}) == {"temperature": 2}
+
+
+def test_to_number_rejects_non_finite_directly():
+    """Unit-level: _to_number itself is the guard, independent of field bounds.
+
+    -inf is covered here (with lo=None) because on a real field its lower bound
+    would mask it; the isfinite guard must reject it on its own."""
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError):
+            ss._to_number("x", bad, want_int=False, lo=None, hi=None)
+    # int() of a non-finite float must surface as a clean ValueError, never as
+    # an uncaught OverflowError leaking out of validate_update.
+    with pytest.raises(ValueError):
+        ss._to_number("x", float("inf"), want_int=True, lo=None, hi=None)
+    # Finite values pass through untouched.
+    assert ss._to_number("x", 0.5, want_int=False, lo=0, hi=2) == 0.5
+    assert ss._to_number("x", 5, want_int=True, lo=None, hi=None) == 5
 
 
 def test_schema_json_hides_admin_only_for_non_owner():
