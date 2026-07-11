@@ -26,7 +26,7 @@ per-surface config > global config > **privacy** (the default). See
 | Mode | What it saves automatically |
 | --- | --- |
 | **privacy** (default) | **Nothing.** No session audit log, no transcript, no chat history on disk. Memory is not grown (no new facts written); existing memories are recalled only if you turn on "Allow memory recall in privacy mode". No automatic diagnostic traces either (see below). This is the "no traces" mode. |
-| **log** | A JSONL audit trail of chat traffic under `~/.localm/sessions/` (one record per exchange). No markdown transcript. |
+| **log** | A JSONL audit trail of chat traffic under `<data dir>/sessions/` (one record per exchange). No markdown transcript. |
 | **full** | Everything `log` does, PLUS a human-readable markdown transcript of each session. |
 
 Notes:
@@ -62,7 +62,7 @@ and asyncio task list on demand, independent of the watchdog.
 ### The debug log (`--debug` / `LOCALM_DEBUG`)
 
 `localm gui --debug` (or `LOCALM_DEBUG=1`) writes a debug log under
-`~/.localm/logs/`, captures native llama.cpp stderr (model metadata/timings), and
+`<data dir>/logs/`, captures native llama.cpp stderr (model metadata/timings), and
 logs each request (method, path, status, timing - never request bodies). It does
 NOT record your chat content in privacy mode (see the guarantee below).
 

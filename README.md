@@ -6,7 +6,7 @@
 ![Python 3.12](https://img.shields.io/badge/python-3.12-blue)
 ![Platform: Windows | Linux](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey)
 
-LocaLM runs GGUF models through a pure-Python ctypes binding to `llama.dll` (no `llama-cpp-python`), runs HuggingFace Transformers models, and exposes both through an OpenAI-compatible HTTP server. At its core it is a **model loader plus a plugin engine**: the only always-present feature is **chat**, shipped as a protected, preinstalled plugin. Everything else - the coder agent, image/music/video generation, Knowledge (RAG), web access, voice, text-to-speech, scheduled jobs, and MCP - is a plugin you install when you want it. One CLI, no cloud required.
+LocaLM runs GGUF models through a pure-Python ctypes binding to `llama.dll` (no `llama-cpp-python`), runs HuggingFace Transformers models, and exposes both through an OpenAI-compatible HTTP server. At its core it is a **model loader plus a plugin engine**: the only always-present feature is **chat**, shipped as a protected, preinstalled plugin. Everything else - the coder agent, image/music/video generation, Knowledge (RAG), web access, durable memory, voice, text-to-speech, scheduled jobs, and MCP - is a plugin you install when you want it. One CLI, no cloud required.
 
 Everything that does not strictly need the internet works fully offline. Online providers (OpenAI, Anthropic) exist only as explicit opt-ins for the coder agent and are never a default. When a task does need the web (current docs, the weather), the coder and chat reach it through a single policy choke point: `off` / `ask` / `allow` modes, domain allow/deny lists, and a private-address SSRF guard ([guide](docs/network.md)).
 
@@ -45,6 +45,8 @@ localm serve mymodel                        # OpenAI-compatible API server
 - **Media generation (image/music/video plugins).** localm drives a local media-generation server (**ComfyUI is the supported backend today**, with a seam for others later). Point it at your own ComfyUI, or let localm run its **own** managed ComfyUI (opt-in) so it can pin a known-good version and carry fixes without touching your install ([guide](docs/managed-comfyui.md)). Either way localm orchestrates generation and VRAM handover from the LLM, and surfaces it as the Images/Music/Video pages and chat commands.
 
 - **Bring your own data (rag, voice, and tts plugins).** Attach files or index whole folders and chat against them with citations (Knowledge), dictate with local Whisper speech-to-text, or have replies read back to you with in-browser Kokoro text-to-speech.
+
+- **Remembers you across chats (memory plugin).** Opt in and localm keeps durable facts about you - your preferences, projects, and ongoing context - and recalls them in later chats, so you do not repeat yourself every session.
 
 - **Schedule it (jobs plugin).** Run a chat or coder prompt on an interval or a cron schedule from an in-app scheduler, the terminal, or a REST API ([guide](docs/jobs.md)).
 
@@ -112,7 +114,7 @@ A pip extra and a plugin install are two separate steps. The extra installs a pl
 | `rag` | PDF parsing for Knowledge (`pypdf`); other formats are stdlib |
 | `voice` | Whisper speech-to-text for the GUI mic (`faster-whisper`, CPU, no torch) |
 | `monitor` | Live hardware monitor in the GUI status bar (`psutil`) |
-| `qr` | QR code for phone pairing (the Settings key QR / companion onboarding) |
+| `qr` | Experimental startup LAN-URL QR for `localm gui --qr` (phone pairing itself needs no extra; `qrcode` is core) |
 | `grammar` | Grammar-constrained decoding for HuggingFace models (`xgrammar`, layers on `[gpu]`) |
 | `gguf` | Optional `llama-cpp-python` path (rarely needed; core ships its own ctypes binding) |
 | `cpu` | Explicit CPU-only marker (empty; core already runs GGUF on CPU) |
@@ -214,7 +216,7 @@ Model management:
 ```bash
 localm pull SPEC                  # download from HuggingFace or URL
 localm search QUERY               # search HuggingFace for GGUF models
-localm add PATH                   # register a local model (--store copy|move to import it into ~/.localm/models)
+localm add PATH                   # register a local model (--store copy|move to import it into <data dir>/models)
 localm alias MODEL NEWNAME        # add a second name
 localm set-type MODEL TYPE        # fix a model's detected type (llm, vae, lora, unknown, ...)
 localm list [--type TYPE]        # registered models, optionally filtered by type
@@ -237,7 +239,7 @@ Full reference: [docs/cli.md](docs/cli.md).
 
 localm core is a model loader plus a plugin engine. Chat is preinstalled and active out of the box; every other feature is a plugin you install when you want it.
 
-**Plugin states.** Bundled plugins live read-only in `localm/plugins/builtin/` (the "store"). *Installing* copies one into `~/.localm/plugins/` (installed = on disk); *enabling* adds it to `config["plugins_enabled"]`; a plugin is *active* only when it is both installed and enabled. Chat is protected (cannot be disabled or uninstalled) and `default_enabled`, so it is active on first run; nothing else is.
+**Plugin states.** Bundled plugins live read-only in `localm/plugins/builtin/` (the "store"). *Installing* copies one into `<data dir>/plugins/` (installed = on disk); *enabling* adds it to `config["plugins_enabled"]`; a plugin is *active* only when it is both installed and enabled. Chat is protected (cannot be disabled or uninstalled) and `default_enabled`, so it is active on first run; nothing else is.
 
 **First-party store plugins** are managed by name:
 
@@ -250,7 +252,7 @@ localm plugin uninstall NAME    # remove it (add --delete-data to drop its data)
 localm plugin setup             # pick a starter set interactively
 ```
 
-The store names are `coder`, `image`, `music`, `video`, `rag`, `web`, `voice`, `tts`, `jobs`, and `mcp` (plus the protected `chat`). For plugins with heavy Python dependencies, also install the matching pip extra (for example `pip install "localm[rag]"` alongside `localm plugin install rag`); see [Install](#install). A running GUI server picks up new HTTP routes and tabs at runtime, while stdio plugins like mcp take effect on the next `localm mcp`.
+The store names are `coder`, `image`, `music`, `video`, `rag`, `web`, `memory`, `voice`, `tts`, `jobs`, and `mcp` (plus the protected `chat`). For plugins with heavy Python dependencies, also install the matching pip extra (for example `pip install "localm[rag]"` alongside `localm plugin install rag`); see [Install](#install). A running GUI server picks up new HTTP routes and tabs at runtime, while stdio plugins like mcp take effect on the next `localm mcp`.
 
 **Third-party plugins** are folders containing a `plugin.toml` manifest and Python files. Install a third-party plugin from a local path with `localm plugin install <path>` (the same command takes a store name or a directory); installation is a local directory copy, fully offline. See [docs/plugins.md](docs/plugins.md) for the full authoring contract.
 
