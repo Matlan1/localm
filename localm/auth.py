@@ -62,12 +62,52 @@ def generate_key(nbytes: int = 32) -> str:
     return secrets.token_urlsafe(nbytes)
 
 
+# Transient read retry for the owner key file, mirroring config._read_json: a
+# concurrent atomic replace (set_api_key), an antivirus / indexer, or a backup
+# scanner can hold auth.key open for a microsecond on Windows, making read_text
+# raise a TRANSIENT PermissionError (WinError 5). Ride it out with a short bounded
+# retry rather than momentarily reading the owner key as absent, which would flap
+# the owner's own auth. A PERSISTENT failure still returns None here; the
+# fail-closed guard in any_key_configured() (via _owner_key_present) then keeps
+# auth IN EFFECT so the server locks instead of dropping to open mode.
+_KEY_READ_RETRIES = 8
+_KEY_READ_BACKOFF = 0.01       # seconds; escalates linearly to the cap
+_KEY_READ_BACKOFF_CAP = 0.05
+
+
 def _read_key_file() -> Optional[str]:
-    try:
-        text = key_file().read_text(encoding="utf-8").strip()
-    except (OSError, ValueError):
-        return None
-    return text or None
+    """The persisted owner key, or None when the file is absent or persistently
+    unreadable. A transient Windows sharing violation is ridden out with a bounded
+    retry (see the constants above); a persistent unreadable file returns None but
+    is separately treated as auth-in-effect by any_key_configured() (fail closed).
+    A read failure is SURFACED (rule 5), never silently equated with "no key"."""
+    path = key_file()
+    for attempt in range(_KEY_READ_RETRIES):
+        try:
+            text = path.read_text(encoding="utf-8").strip()
+            return text or None
+        except FileNotFoundError:
+            return None                        # genuinely absent -> open by design
+        except PermissionError as e:
+            # Transient class on Windows (a concurrent replace / AV / indexer).
+            # Retry briefly; a persistent failure falls through to the warning.
+            if attempt < _KEY_READ_RETRIES - 1:
+                time.sleep(min(_KEY_READ_BACKOFF * (attempt + 1),
+                               _KEY_READ_BACKOFF_CAP))
+                continue
+            logger.warning("owner key file %s exists but is unreadable (%s); "
+                           "treating auth as IN EFFECT (fail closed) until it can "
+                           "be read - fix its permissions", path, e)
+            return None
+        except (OSError, ValueError) as e:
+            # Not the transient sharing-violation class (a real IO/permission
+            # error, a directory, or non-UTF-8 content): do not spin the retry
+            # budget. Still surfaced, and still fails closed via _owner_key_present.
+            logger.warning("owner key file %s exists but is unreadable (%s); "
+                           "treating auth as IN EFFECT (fail closed) until it can "
+                           "be read - fix its permissions", path, e)
+            return None
+    return None
 
 
 def get_api_key() -> Optional[str]:
@@ -385,13 +425,41 @@ def _keystore_configured() -> bool:
     return bool(data) if isinstance(data, list) else True
 
 
+def _owner_key_present() -> bool:
+    """True when an owner key is in effect: the LOCALM_API_KEY env var is set, OR
+    the auth.key file EXISTS - readable or NOT.
+
+    A present-but-unreadable file counts as present so auth stays IN EFFECT (fail
+    CLOSED) instead of silently dropping to open/keyless mode when a read glitch
+    (a transient AV/indexer lock, or a persistent permissions/profile change)
+    makes auth.key unreadable to the running process. This mirrors
+    _keystore_configured's own missing-vs-unreadable branching; only a genuinely
+    ABSENT file (and no env key) is "no owner key" -> open by design.
+
+    Distinct from get_api_key(), which still returns the key VALUE (or None when it
+    cannot be read): when the file is present but unreadable this returns True
+    (auth in effect) while verify() matches nothing, so every request is rejected
+    (401 / locked) rather than served open - the safe direction."""
+    env = os.environ.get(ENV_VAR)
+    if env and env.strip():
+        return True
+    try:
+        return key_file().exists()
+    except OSError:
+        # Cannot even stat the path (e.g. a parent-directory permission problem):
+        # fail CLOSED rather than assume the owner key is absent.
+        return True
+
+
 def any_key_configured() -> bool:
-    """True when auth is in effect: an owner key (env/auth.key) OR a configured
-    scoped keystore. When this is False the server runs open (unless
-    require_auth_enabled()). A corrupt or unreadable keystore counts as
-    configured so it fails CLOSED rather than silently open: a scoped-keys-only
-    install must not lose its auth to a damaged auth.json."""
-    return get_api_key() is not None or _keystore_configured()
+    """True when auth is in effect: an owner key (env, or an auth.key file that is
+    present even if unreadable - see _owner_key_present) OR a configured scoped
+    keystore. When this is False the server runs open (unless
+    require_auth_enabled()). A corrupt/unreadable keystore, and now a
+    present-but-unreadable owner key, both count as configured so they fail CLOSED
+    rather than silently open: a keyed install must not lose its auth to a damaged
+    or unreadable credential file (checkup 2026-07-11 HIGH)."""
+    return _owner_key_present() or _keystore_configured()
 
 
 # Throttle for last-used stamping: verify() runs on EVERY request, so it must not
