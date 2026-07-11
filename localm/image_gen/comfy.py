@@ -379,6 +379,15 @@ def _strip_png_metadata(output_path: Path) -> str:
                     clean.extend(png_bytes[pos:pos + total_len])
                 pos += total_len
             output_path.write_bytes(bytes(clean))
+        else:
+            # Not a PNG. A custom workflow save node can emit WebP/JPEG to the
+            # hardcoded .png path; we only know how to strip PNG chunks. Do NOT
+            # touch bytes we cannot parse, and do NOT report success: surface
+            # that the retained copy may still carry the prompt/EXIF, so the
+            # caller's "Image saved" line stops implying a clean strip (rule 5:
+            # a strip that did not run must never read as clean).
+            return ("WARNING: generated file is not a PNG; image metadata could "
+                    "not be stripped and may still contain prompt/EXIF data.")
     except (OSError, ValueError) as e:
         return ("WARNING: could not strip image metadata "
                 f"({e}); the file may still contain prompt/EXIF data.")

@@ -23,7 +23,9 @@ Covered:
 from __future__ import annotations
 
 import json
+import struct
 import threading
+import zlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -31,6 +33,22 @@ import pytest
 
 from localm.image_gen import comfy
 from localm.music_gen import comfy as music_comfy
+
+
+def _minimal_png() -> bytes:
+    """A structurally valid 1x1 PNG for the stub's image outputs.
+
+    ComfyUI writes real PNGs, so the stub must too: otherwise generate_image's
+    _strip_png_metadata gets non-PNG bytes and (correctly) warns the strip could
+    not run, which is not what these containment tests are exercising. Real PNG
+    bytes let the actual strip path run clean, as it does in production."""
+    def chunk(ctype: bytes, data: bytes) -> bytes:
+        return (len(data).to_bytes(4, "big") + ctype + data
+                + zlib.crc32(ctype + data).to_bytes(4, "big"))
+    ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+    idat = zlib.compress(b"\x00\xff\x00\x00")  # 1 filter byte + one RGB pixel
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+            + chunk(b"IDAT", idat) + chunk(b"IEND", b""))
 
 
 class _ComfyStub(HTTPServer):
@@ -102,7 +120,10 @@ class _Handler(BaseHTTPRequestHandler):
             pid = f"pid-{s._counter}"
             fn = f"ComfyUI_{s._counter:05d}_{s.file_ext}"
             s.output_dir.mkdir(parents=True, exist_ok=True)
-            (s.output_dir / fn).write_bytes(b"FAKEMEDIADATA")
+            # Images get real PNG bytes so the strip path runs as in production;
+            # audio (music tests) is not PNG-stripped, so placeholder bytes are fine.
+            media = _minimal_png() if s.output_kind == "images" else b"FAKEMEDIADATA"
+            (s.output_dir / fn).write_bytes(media)
             s.history[pid] = {"9": {s.output_kind: [
                 {"filename": fn, "subfolder": "", "type": "output"}]}}
             return self._json(200, {"prompt_id": pid})
