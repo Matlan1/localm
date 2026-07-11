@@ -24,12 +24,20 @@ the chat path writes no trace of its own.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from pathlib import Path
 from typing import Optional
 
 from localm.debuglog import logger
 from localm.plugins.builtin.jobs.store import Job
+
+# Upper bound on how long the runner blocks its worker thread waiting for the
+# server loop to complete a guarded shared-engine unload (see
+# _evict_shared_engine_for_media). unload_one_model's own VRAM-release wait tops out
+# at ~5s (localm.vram.wait_for_vram_release), so this is deliberately generous: if it
+# is ever hit the loop is wedged, and we degrade (load alongside) rather than hang.
+_EVICT_TIMEOUT_S = 60.0
 
 
 def run_job(job: Job, *, engine=None) -> dict:
@@ -38,15 +46,29 @@ def run_job(job: Job, *, engine=None) -> dict:
 
     When no *engine* is passed for a chat/memory job, the runner loads one itself and
     UNLOADS it again afterwards, so a sequence of headless runs (a scheduler tick with
-    no host model, or a CLI run) does not stack model loads in VRAM (U-4). An engine
-    passed in by the live server (the host's shared model) is never unloaded here."""
+    no host model, or a CLI run) does not stack model loads in VRAM (U-4). A shared
+    engine is NEVER unloaded here - neither one passed in by the live server, nor the
+    live server's shared engine that _load_engine may REUSE even for an engine=None
+    call (see the ownership guard below); only a genuinely fresh, runner-loaded engine
+    is freed in the finally."""
     started = time.time()
     owned_engine = None
     try:
         eng = engine
         if job.task_kind in ("chat", "memory") and eng is None:
-            eng = _load_engine(job.model)   # may raise (model not found) -> caught below
-            owned_engine = eng              # we loaded it, so we unload it after the run
+            # _load_engine reports whether it REUSED the live server's shared engine
+            # (http_server._engine) or loaded a FRESH one. Own (and later unload in
+            # the finally) ONLY a fresh engine: a reused shared engine belongs to the
+            # host and must be treated exactly like a passed-in one, or the finally
+            # frees the host's live chat model (the docstring guarantee above). The
+            # reuse can happen even for a job that started with engine=None (the
+            # resolver saw no live engine, but _live transitioned unloaded->loaded in
+            # the TOCTOU gap before _load_engine's re-check). Trusting _load_engine's
+            # verdict - decided where the reuse happens - avoids a second racy read of
+            # _engine here.
+            eng, reused = _load_engine(job.model)   # may raise (model not found) -> caught below
+            if eng is not None and not reused:
+                owned_engine = eng          # we loaded it, so we unload it after the run
         if job.task_kind == "chat":
             output = _run_chat(job, engine=eng)
         elif job.task_kind == "coder":
@@ -79,6 +101,57 @@ def run_job(job: Job, *, engine=None) -> dict:
     finally:
         if owned_engine is not None:
             _unload_engine(owned_engine)
+
+
+def _evict_shared_engine_for_media(live) -> str:
+    """Free the shared live-server chat engine to make VRAM room for this job's
+    model, through the SAME guarded path the server's own unload uses.
+
+    The engine belongs to the running server, so a raw ``live.unload()`` on this
+    worker thread is unsafe two ways:
+      * it ignores the in-flight-request PIN (``active_requests``): a chat may be
+        generating on it right now, and unloading frees VRAM out from under that
+        request while racing the native free (AUDIT-CRIT-1); and
+      * it runs OFF the event loop, so a concurrent request's ``get_engine()`` fast
+        path can hand the being-freed engine back and pin it (pin-during-unload -
+        the gguf backend clears ``.loaded`` only AFTER ``_llm.close()``, so the
+        engine still reads loaded mid-free).
+    ``unload_one_model`` closes both: it SKIPS a pinned engine (``active_requests``
+    > 0 -> ``"in_use"``) and, run ON the loop, serializes with ``get_engine`` and
+    the synchronous ``_pin`` (the loop is the mutex). So submit it to the server
+    loop via ``run_coroutine_threadsafe`` and block this thread on the result. It
+    also does its own VRAM-release wait on the loop, so no separate wait here.
+
+    Returns the unload status (``"unloaded"`` / ``"in_use"`` / ``"already_unloaded"``),
+    or ``"skipped"`` when the server loop is unreachable - in which case we
+    deliberately do NOT raw-unload the shared engine (that reintroduces the race)
+    and leave it resident: the job model loads alongside it (possibly tight on VRAM,
+    but never a use-after-free). Rule 5: every degrade is logged, not silent."""
+    from localm.debuglog import logger as _dbg
+    from localm.inference import http_server as _hs
+
+    loop = getattr(_hs, "_server_loop", None)
+    name = getattr(live, "display_name", None)
+    if loop is None or not loop.is_running() or not name:
+        _dbg.debug("jobs: cannot reach the server loop to evict the shared chat "
+                   "engine safely; leaving it resident and loading the job model "
+                   "alongside it (may be tight on VRAM)")
+        return "skipped"
+    try:
+        fut = asyncio.run_coroutine_threadsafe(_hs.unload_one_model(name), loop)
+        res = fut.result(timeout=_EVICT_TIMEOUT_S)
+    except Exception as e:
+        # The guarded unload could not complete (loop wedged, unload raised, or the
+        # wait timed out). Do NOT fall back to a raw unload - report and let the
+        # caller load alongside the still-resident engine (degraded, never a crash).
+        _dbg.debug("jobs: guarded shared-engine unload did not complete (%s); "
+                   "loading the job model without evicting the live engine", e)
+        return "error"
+    status = res.get("status", "unloaded") if isinstance(res, dict) else "unloaded"
+    if status == "in_use":
+        _dbg.debug("jobs: the shared chat engine is serving a request (pinned), so "
+                   "it was not evicted for this job; loading the job model alongside it")
+    return status
 
 
 def _unload_engine(eng) -> None:
@@ -115,10 +188,20 @@ def _run_chat(job: Job, *, engine=None) -> str:
     return webtool.run_chat_with_web(eng, job.prompt)
 
 
-def _load_engine(model: Optional[str]):
-    """Load an inference Engine for *model* (or the active/first registered
-    model) via the model manager. Returns a loaded Engine, or None when no model
-    can be resolved."""
+def _load_engine(model: Optional[str]) -> "tuple[Optional[object], bool]":
+    """Resolve an inference Engine for *model* (or the active/first registered
+    model). Returns ``(engine, reused)``:
+
+      * ``reused=True`` only when the returned engine IS the live server's shared
+        engine (``http_server._engine``), which the runner must never unload. This
+        fact is decided HERE, at the reuse branch, so ``run_job`` never has to
+        re-derive ownership with a second, racy read of ``_engine`` (a concurrent
+        model switch could otherwise reassign it in the gap and trick the finally
+        into freeing the still-registered shared engine).
+      * ``reused=False`` for a genuinely fresh engine the runner loaded itself (safe
+        to unload after the run) - it is never registered in the server's engine
+        table, so nothing else can reach or pin it.
+      * ``(None, False)`` when no model can be resolved."""
     from localm.config import load_config, load_registry
     from localm.inference.engine import Engine
     from localm.model_manager import get_model_info
@@ -129,7 +212,7 @@ def _load_engine(model: Optional[str]):
         from localm.inference.http_server import _engine as _live
         if _live is not None and _live.loaded:
             if not name or _live.display_name == name:
-                return _live          # reuse - no VRAM cost, no load time
+                return _live, True    # reuse the shared engine - no VRAM cost, no load
             
             # VRAM gate: unload the live engine if VRAM is tight. Uses
             # vram_capacity() (combined free across a configured multi-GPU
@@ -142,10 +225,13 @@ def _load_engine(model: Optional[str]):
             free = vram_capacity().get("free")
             est = _vram.media_estimate_bytes("chat")
             if _vram.should_swap_for_media(free, est):
-                _live.unload()
-                _vram.wait_for_vram_release(
-                    lambda: vram_capacity().get("free"),
-                    before_bytes=free)
+                # Route the eviction through the guarded server-loop path instead of
+                # a raw _live.unload() on this worker thread: unload_one_model honors
+                # the in-flight pin and serializes with get_engine, so the shared
+                # engine is never freed out from under a live request (see
+                # _evict_shared_engine_for_media). It also does its own VRAM-release
+                # wait on the loop, so no separate wait_for_vram_release here.
+                _evict_shared_engine_for_media(_live)
     except Exception as e:
         # Best-effort live-engine reuse + VRAM gate. If anything here fails
         # (http_server not importable in this context, vram_info unavailable on
@@ -167,14 +253,14 @@ def _load_engine(model: Optional[str]):
         # a job explicitly configures default_model/model above).
         name = next((n for n in sorted(reg) if is_auto_chat_eligible(reg[n])), None)
     if not name:
-        return None
+        return None, False
     info = get_model_info(name)
     if info is None:
         raise RuntimeError(f"model not found: {name}")
     model_path, display_hint = info
     eng = Engine(str(model_path), display_name=(name if model else display_hint))
     eng.load()
-    return eng
+    return eng, False   # freshly loaded by the runner - owned, safe to unload after
 
 
 # --------------------------------------------------------------------------- #
