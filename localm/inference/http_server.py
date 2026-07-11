@@ -1770,6 +1770,35 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         return JSONResponse(status_code=500,
                             content={"detail": "Internal server error"})
 
+    from fastapi.exceptions import RequestValidationError
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error(request, exc):  # noqa: ANN001 - framework signature
+        # A 422 body must stay serializable. pydantic records the offending value
+        # under `input`; when a client sends a NON-FINITE number (NaN / Infinity),
+        # Starlette's JSONResponse serializes the error with allow_nan=False and
+        # CRASHES into a 500 - so a bad numeric param turned a clean 422 into an
+        # unhandled 500 (live-confirmed: `top_k: NaN`, `seed: NaN`, and any float
+        # field once allow_inf_nan=False rejects it). Replace non-finite floats in
+        # the error detail so the 422 always renders. Same shape as FastAPI's
+        # default handler for every other (finite) validation error.
+        import math
+
+        from fastapi.encoders import jsonable_encoder
+
+        def _finite_safe(v):
+            if isinstance(v, float) and not math.isfinite(v):
+                return repr(v)      # "nan" / "inf" / "-inf"
+            if isinstance(v, dict):
+                return {k: _finite_safe(x) for k, x in v.items()}
+            if isinstance(v, (list, tuple)):
+                return [_finite_safe(x) for x in v]
+            return v
+
+        return JSONResponse(
+            status_code=422,
+            content={"detail": _finite_safe(jsonable_encoder(exc.errors()))})
+
     # Chat-pipeline hooks: plugins register inlet/stream/outlet transforms that
     # run on every /v1/chat/completions turn. Created here so it exists before
     # plugins load (attach_engine, below) and stays reachable as
