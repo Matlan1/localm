@@ -23,7 +23,9 @@ from __future__ import annotations
 import json
 import hashlib
 import math
+import os
 import re
+import stat as _stat
 import threading
 import time
 from pathlib import Path
@@ -63,6 +65,41 @@ def _well_formed_vectors(vectors) -> bool:
     degrade to BM25 with a reason instead of shipping a delayed crash."""
     return isinstance(vectors, list) and all(
         (not v) or isinstance(v, (list, tuple)) for v in vectors)
+
+
+def _vectors_finite(vectors) -> bool:
+    """True when every component of every present vector is a FINITE number.
+
+    A single NaN/inf component makes ``_cosine`` return ``nan``; the blended query
+    score is then ``nan``, and ``nan > 0`` is False, so the chunk is SILENTLY
+    dropped from results (a query for a word that IS indexed returns everything
+    except the matching chunk) with no error and no degrade reason. A non-finite
+    or non-numeric vector store must therefore degrade to BM25 with a surfaced
+    reason, never be trusted (AGENTS rule 5). Structure is already validated by
+    ``_well_formed_vectors``; this checks the values."""
+    try:
+        import numpy as np
+        for v in vectors:
+            if not v:
+                continue
+            try:
+                arr = np.asarray(v, dtype="float64")
+            except (ValueError, TypeError):
+                return False                       # non-numeric component
+            if not np.isfinite(arr).all():
+                return False
+        return True
+    except ImportError:
+        for v in vectors:
+            if not v:
+                continue
+            for x in v:
+                try:
+                    if not math.isfinite(x):
+                        return False
+                except TypeError:
+                    return False
+        return True
 
 # Directories never worth indexing when a folder is added
 _SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__",
@@ -105,6 +142,56 @@ def _path_within(child: Path, parent: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+# Cap the folder-walk recursion depth. Real document trees are nowhere near
+# this deep; the cap is a backstop against a pathological directory cycle.
+_MAX_WALK_DEPTH = 50
+
+
+def _walk_files(root: Path, *, max_depth: int = _MAX_WALK_DEPTH):
+    """Yield regular files under *root*, WITHOUT following symlinks or Windows
+    reparse points (junctions), bounded by depth and a visited-realpath set.
+
+    ``rglob('*')`` follows NTFS junctions - which report ``is_symlink() == False``,
+    so pathlib's symlink-loop guard misses them - and a self-referential junction
+    makes the walk spin until the path length overflows (a folder-index DoS, B3).
+    This manual walk skips every reparse point / symlink and refuses to revisit a
+    resolved directory, so no directory cycle (junction OR bind-mount OR symlink)
+    can hang indexing. ``_SKIP_DIRS`` are pruned during descent too."""
+    reparse_flag = getattr(_stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    seen: set = set()
+    stack: list = [(root, 0)]
+    while stack:
+        d, depth = stack.pop()
+        if depth > max_depth:
+            continue
+        try:
+            real = os.path.realpath(d)
+        except OSError:
+            continue
+        if real in seen:
+            continue
+        seen.add(real)
+        try:
+            entries = list(os.scandir(d))
+        except OSError:
+            continue
+        for e in entries:
+            try:
+                if e.is_symlink():
+                    continue
+                attrs = getattr(e.stat(follow_symlinks=False), "st_file_attributes", 0)
+                if attrs & reparse_flag:
+                    continue                       # Windows junction / mount point
+                if e.is_dir(follow_symlinks=False):
+                    if e.name in _SKIP_DIRS:
+                        continue                   # prune .git/node_modules/etc.
+                    stack.append((Path(e.path), depth + 1))
+                elif e.is_file(follow_symlinks=False):
+                    yield Path(e.path)
+            except OSError:
+                continue
 
 
 class ConfinementError(ValueError):
@@ -322,6 +409,7 @@ class Collection:
         # the chunks and then reconstruct a minimal docs map from their sources so
         # `rag repair` can rebuild and the next _save() self-heals meta.json.
         self.corrupt = False
+        meta_corrupt = False
         try:
             meta = json.loads((self.dir / "meta.json").read_text(encoding="utf-8"))
             if not isinstance(meta, dict):
@@ -329,15 +417,37 @@ class Collection:
             self._meta = meta
         except (json.JSONDecodeError, ValueError, OSError):
             self.corrupt = True
+            meta_corrupt = True
             self._meta = {"name": self.name, "docs": {}}
         self._chunks = []
         chunks_file = self.dir / "chunks.jsonl"
         if chunks_file.is_file():
+            bad_lines = 0
             for line in chunks_file.read_text(encoding="utf-8").splitlines():
-                try:
-                    self._chunks.append(json.loads(line))
-                except json.JSONDecodeError:
+                if not line.strip():
                     continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    bad_lines += 1
+                    continue
+                # A chunk MUST be a dict carrying a str "text": query(),
+                # remove_doc() and add_paths() all assume that shape. A
+                # valid-JSON-but-wrong-shape line (an externally appended scalar or
+                # array, or a dict missing "text") would otherwise crash every one
+                # of those with TypeError/AttributeError/KeyError and brick the
+                # collection while stats() reported it healthy. Skip it and surface
+                # the corruption - symmetric with the meta.json and vectors.json
+                # guards (AGENTS rule 5: validate shape, do not silently trust).
+                if not isinstance(obj, dict) or not isinstance(obj.get("text"), str):
+                    bad_lines += 1
+                    continue
+                self._chunks.append(obj)
+            if bad_lines:
+                self.corrupt = True
+                _log.warning("RAG collection %r: skipped %d malformed line(s) in "
+                             "chunks.jsonl; run 'localm rag repair'",
+                             self.name, bad_lines)
         self._vectors = None
         self._vec_dim = None
         self.vector_degrade_reason = None
@@ -362,8 +472,16 @@ class Collection:
                         "vectors.json is malformed (entries are not vectors); "
                         "using BM25 lexical retrieval only", warn=True)
                 elif len(vectors) == len(self._chunks):
-                    self._vectors = vectors
-                    self._vec_dim = data.get("dim") or _first_dim(vectors)
+                    if not _vectors_finite(vectors):
+                        # Structurally a vector list, but a component is NaN/inf or
+                        # non-numeric - would silently drop chunks at query time
+                        # (nan cosine, nan !> 0). Degrade + surface, do not trust.
+                        self._note_vector_degrade(
+                            "vectors.json has non-finite (NaN/inf) or non-numeric "
+                            "values; using BM25 lexical retrieval only", warn=True)
+                    else:
+                        self._vectors = vectors
+                        self._vec_dim = data.get("dim") or _first_dim(vectors)
                 elif vectors:
                     # A non-empty vectors list that does not line up with the
                     # chunks is a stale/partial index, not "no embeddings yet".
@@ -378,8 +496,10 @@ class Collection:
         # real source files WITHOUT duplicating chunks (add_paths keys its
         # replace-in-place on a known doc), and self-heals meta.json on the next
         # _save(). The reconstructed entries lack mtime/size/hash, so a later
-        # add/repair re-reads the file - correct.
-        if self.corrupt and self._chunks:
+        # add/repair re-reads the file - correct. Gated on META corruption
+        # specifically: a valid meta whose chunks.jsonl merely had a bad line must
+        # keep its real docs map (with mtime/size/hash), not have it overwritten.
+        if meta_corrupt and self._chunks:
             rebuilt: dict = {}
             for c in self._chunks:
                 src = c.get("source")
@@ -439,9 +559,11 @@ class Collection:
             if p.is_file():
                 out.append(p.resolve())
             elif p.is_dir():
-                for f in sorted(p.rglob("*")):
-                    if (f.is_file()
-                            and f.suffix.lower() not in BLACKLISTED_SUFFIXES
+                # _walk_files (NOT rglob) so a Windows junction loop cannot hang
+                # the index walk (B3); it also skips symlinks/reparse points and
+                # prunes _SKIP_DIRS during descent.
+                for f in sorted(_walk_files(p)):
+                    if (f.suffix.lower() not in BLACKLISTED_SUFFIXES
                             and not is_secret_index_name(f.name)
                             and not any(part in _SKIP_DIRS for part in f.parts)):
                         out.append(f.resolve())
@@ -558,21 +680,29 @@ class Collection:
                     say(f"embeddings unavailable ({e}) - indexing lexical-only")
                 else:
                     if len(vecs) == len(new_chunks):
-                        new_dim = _first_dim(vecs)
-                        # A different embedding dimensionality means a different
-                        # model: refuse rather than store mixed-dim vectors that
-                        # would silently mis-score every query (C3).
-                        if (self._vec_dim is not None and new_dim is not None
-                                and new_dim != self._vec_dim):
-                            raise ValueError(
-                                f"Embedding dimension changed "
-                                f"({self._vec_dim} -> {new_dim}): this "
-                                f"collection was built with a different "
-                                f"embedding model. Rebuild it (delete and "
-                                f"re-add) or index with the original model.")
-                        vectors = vecs
-                        if self._vec_dim is None and new_dim is not None:
-                            self._vec_dim = new_dim
+                        if not _vectors_finite(vecs):
+                            # A NaN/inf component would silently drop this doc's
+                            # chunks from every query (nan cosine !> 0). Store no
+                            # vectors for it (lexical-only) and surface why, rather
+                            # than persist a poison vector (AGENTS rule 5).
+                            say(f"embeddings had non-finite (NaN/inf) values for "
+                                f"{f.name} - indexing it lexical-only")
+                        else:
+                            new_dim = _first_dim(vecs)
+                            # A different embedding dimensionality means a different
+                            # model: refuse rather than store mixed-dim vectors that
+                            # would silently mis-score every query (C3).
+                            if (self._vec_dim is not None and new_dim is not None
+                                    and new_dim != self._vec_dim):
+                                raise ValueError(
+                                    f"Embedding dimension changed "
+                                    f"({self._vec_dim} -> {new_dim}): this "
+                                    f"collection was built with a different "
+                                    f"embedding model. Rebuild it (delete and "
+                                    f"re-add) or index with the original model.")
+                            vectors = vecs
+                            if self._vec_dim is None and new_dim is not None:
+                                self._vec_dim = new_dim
 
             # Replace any previous chunks (and vectors) for this document
             if known:
@@ -678,18 +808,24 @@ class Collection:
                     say(f"embeddings unavailable ({e}) - indexing lexical-only")
                 else:
                     if len(vecs) == len(new_chunks):
-                        new_dim = _first_dim(vecs)
-                        if (self._vec_dim is not None and new_dim is not None
-                                and new_dim != self._vec_dim):
-                            raise ValueError(
-                                f"Embedding dimension changed "
-                                f"({self._vec_dim} -> {new_dim}): this collection "
-                                f"was built with a different embedding model. "
-                                f"Rebuild it (delete and re-add) or index with the "
-                                f"original model.")
-                        vectors = vecs
-                        if self._vec_dim is None and new_dim is not None:
-                            self._vec_dim = new_dim
+                        if not _vectors_finite(vecs):
+                            # See add_paths: a NaN/inf component silently drops this
+                            # doc from every query, so index it lexical-only and say why.
+                            say(f"embeddings had non-finite (NaN/inf) values for "
+                                f"{filename} - indexing it lexical-only")
+                        else:
+                            new_dim = _first_dim(vecs)
+                            if (self._vec_dim is not None and new_dim is not None
+                                    and new_dim != self._vec_dim):
+                                raise ValueError(
+                                    f"Embedding dimension changed "
+                                    f"({self._vec_dim} -> {new_dim}): this collection "
+                                    f"was built with a different embedding model. "
+                                    f"Rebuild it (delete and re-add) or index with the "
+                                    f"original model.")
+                            vectors = vecs
+                            if self._vec_dim is None and new_dim is not None:
+                                self._vec_dim = new_dim
 
             if known:
                 keep = [i for i, c in enumerate(self._chunks)
@@ -820,6 +956,13 @@ class Collection:
                 f"{stored_dim}); using BM25 lexical retrieval only - rebuild the "
                 f"collection to restore semantic search", warn=True)
             return None
+        if not _vectors_finite([qvec]):
+            # A non-finite query embedding would make every cosine nan and empty
+            # the result set (nan !> 0), defeating the BM25-always promise.
+            self._note_vector_degrade(
+                "query embedding has non-finite (NaN/inf) values; using BM25 "
+                "lexical retrieval only", warn=True)
+            return None
         # Vectors are usable: clear any stale query-time degrade note.
         self.vector_degrade_reason = None
         out = []
@@ -870,9 +1013,13 @@ def _cosine(a: list, b: list) -> float:
         import numpy as np
         va, vb = np.asarray(a, dtype="float32"), np.asarray(b, dtype="float32")
         denom = float(np.linalg.norm(va) * np.linalg.norm(vb))
-        return float(va @ vb) / denom if denom else 0.0
+        sim = float(va @ vb) / denom if denom else 0.0
     except ImportError:
         dot = sum(x * y for x, y in zip(a, b))
         na = math.sqrt(sum(x * x for x in a))
         nb = math.sqrt(sum(y * y for y in b))
-        return dot / (na * nb) if na and nb else 0.0
+        sim = dot / (na * nb) if na and nb else 0.0
+    # A NaN/inf component (corrupt/degenerate vector) makes the similarity
+    # non-finite; nan silently drops the chunk (nan !> 0) and inf mis-ranks it to
+    # the top. Treat non-finite as a miss (0.0), never let it leave this function.
+    return sim if math.isfinite(sim) else 0.0

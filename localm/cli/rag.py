@@ -34,8 +34,8 @@ def rag_list():
     for n in names:
         s = Collection(n).stats()
         retrieval = "hybrid" if s["has_vectors"] else "BM25"
-        marker = ("  [yellow](corrupt meta, rebuilt from chunks - run "
-                  "'localm rag repair')[/yellow]" if s.get("corrupt") else "")
+        marker = ("  [yellow](corrupt index - run 'localm rag repair')[/yellow]"
+                  if s.get("corrupt") else "")
         console.print(f"[cyan]{n}[/cyan]  {s['n_docs']} docs · "
                       f"{s['n_chunks']} chunks · {retrieval}{marker}")
 
@@ -111,14 +111,14 @@ def rag_repair(collection):
         if coll.corrupt:
             # Corrupt is not the same as empty: say so instead of the misleading
             # "no indexed documents" (AGENTS rule 5 - do not hide the problem).
-            console.print(f"[yellow]'{collection}' metadata is corrupt and no "
-                          "chunk sources survived to rebuild from.[/yellow]")
+            console.print(f"[yellow]'{collection}' index is corrupt and no "
+                          "document sources survived to rebuild from.[/yellow]")
         else:
             console.print(f"[yellow]'{collection}' has no indexed documents.[/yellow]")
         return
     if coll.corrupt:
-        console.print(f"[yellow]'{collection}' metadata was corrupt; rebuilding "
-                      f"from {len(paths)} recovered source(s).[/yellow]")
+        console.print(f"[yellow]'{collection}' index was corrupt; rebuilding "
+                      f"from {len(paths)} source(s).[/yellow]")
     result = coll.add_paths(paths, force=True,
                             on_progress=lambda t: console.print(f"  [dim]{t}[/dim]"))
     console.print(f"[green]repaired: {result['updated']} re-indexed, "

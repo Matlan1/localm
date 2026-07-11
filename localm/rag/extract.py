@@ -597,19 +597,34 @@ def _extract_tar_or_stream(data: bytes, filename: str,
 def _extract_tar_members(tf, filename: str, describe_image_fn, *, _depth: int = 0) -> str:
     texts: list = []
     total = 0
-    processed = 0
     truncated = False
     limit = MAX_ARCHIVE_MEMBER_BYTES
+    # Collect at most MAX_ARCHIVE_MEMBERS headers by iterating the tar LAZILY.
+    # `getmembers()` parses EVERY member header up front, so a small compressed
+    # tarball of hundreds of thousands of members (a member-count bomb) took ~20s
+    # to enumerate BEFORE the per-loop cap ever applied - unbounded work under the
+    # size cap, and no exception, so it slipped past the ExtractError guards. The
+    # lazy scan stops reading headers at the cap; we sort only that bounded subset
+    # for deterministic order.
+    members: list = []
     try:
-        for member in sorted(tf.getmembers(), key=lambda m: m.name):
+        for member in tf:
+            if len(members) >= MAX_ARCHIVE_MEMBERS:
+                truncated = True
+                break
+            members.append(member)
+    except Exception as e:
+        raise ExtractError(f"Cannot parse {filename} as tar archive: {e}")
+    members.sort(key=lambda m: m.name)
+    try:
+        for member in members:
             if not member.isfile():
                 continue
             if any(part in _SKIP_DIRS or part.startswith(".") for part in Path(member.name).parts):
                 continue
-            if total >= _archive_budget() or processed >= MAX_ARCHIVE_MEMBERS:
+            if total >= _archive_budget():
                 truncated = True
                 break
-            processed += 1
             try:
                 f = tf.extractfile(member)
                 if f is None:
@@ -709,7 +724,14 @@ def _extract_docx(data: bytes, filename: str) -> str:
     # a single paragraph chunk and cannot backtrack across paragraph boundaries.
     paragraphs = []
     for para in xml.split("</w:p>"):
-        runs = re.findall(r"<w:t\b[^>]*>(.*?)</w:t>", para, flags=re.DOTALL)
+        # LINEAR run extraction. The content group is `[^<]*`, NOT `.*?`: a lazy
+        # `.*?` rescans to end-of-paragraph once per `<w:t>` opener, so a paragraph
+        # with tens of thousands of UNCLOSED openers is O(n^2) and pins a CPU for
+        # minutes on a tiny file (a CPU-DoS the ExtractError-only route guards
+        # can't stop, since it raises only after the burn). XML text is escaped,
+        # so a real run never contains a raw '<'; `[^<]*` stops at the next tag and
+        # cannot backtrack across openers, making this O(n) while staying correct.
+        runs = re.findall(r"<w:t\b[^>]*>([^<]*)</w:t>", para)
         if runs:
             paragraphs.append(_unescape_xml("".join(runs)))
     return "\n\n".join(paragraphs)
@@ -723,8 +745,12 @@ def _unescape_xml(s: str) -> str:
 def _extract_ipynb(data: bytes, filename: str) -> str:
     try:
         nb = json.loads(data.decode("utf-8", errors="replace"))
-    except json.JSONDecodeError as e:
-        raise ExtractError(f"Cannot parse {filename} as a notebook: {e}")
+    except (json.JSONDecodeError, ValueError, RecursionError) as e:
+        # Deeply-nested JSON makes json.loads raise RecursionError (a
+        # RuntimeError, NOT a JSONDecodeError), which would otherwise escape this
+        # guard and surface as an unhandled HTTP 500 from the extract route. Fold
+        # it into a clean ExtractError -> 422, like sniff_format already does.
+        raise ExtractError(f"Cannot parse {filename} as a notebook: {type(e).__name__}")
     # A notebook is a JSON object with a "cells" list, but an uploaded file may
     # be malformed (cells as a string, a cell as an int, source as a non-list).
     # Validate the shape and coerce defensively so a wrong type raises a clean
