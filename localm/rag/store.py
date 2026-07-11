@@ -179,11 +179,19 @@ def _walk_files(root: Path, *, max_depth: int = _MAX_WALK_DEPTH):
             continue
         for e in entries:
             try:
-                if e.is_symlink():
-                    continue
                 attrs = getattr(e.stat(follow_symlinks=False), "st_file_attributes", 0)
-                if attrs & reparse_flag:
-                    continue                       # Windows junction / mount point
+                if e.is_symlink() or (attrs & reparse_flag):
+                    # A symlink / Windows junction is not followed (loop + escape
+                    # safety). Log a LINKED DIRECTORY at debug so a user who
+                    # expected a symlinked docs folder to be indexed can discover
+                    # why (we do not hide problems); files are skipped quietly.
+                    try:
+                        if e.is_dir(follow_symlinks=True):
+                            _log.debug("rag: not following linked directory during "
+                                       "index walk: %s", e.path)
+                    except OSError:
+                        pass
+                    continue
                 if e.is_dir(follow_symlinks=False):
                     if e.name in _SKIP_DIRS:
                         continue                   # prune .git/node_modules/etc.

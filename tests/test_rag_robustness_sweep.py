@@ -31,6 +31,7 @@ import zipfile
 import pytest
 
 from localm.rag import Collection
+from localm.rag import extract
 from localm.rag.chunk import chunk_text
 from localm.rag.extract import ExtractError, extract_bytes
 
@@ -102,17 +103,31 @@ def _tgz_many_empty_members(n: int) -> bytes:
     return buf.getvalue()
 
 
-def test_compressed_tar_member_bomb_is_bounded():
-    # 60k empty members (>> the 5000 member cap): getmembers()+sorted() used to
-    # materialise ALL of them before the cap applied. The bounded lazy scan stops
-    # reading headers at the cap. (Building the tarball dominates this test's time;
-    # extraction itself must be fast.)
-    data = _tgz_many_empty_members(60_000)
-    t0 = time.time()
+def test_compressed_tar_member_scan_is_capped(monkeypatch):
+    # DETERMINISTIC guard (timing at 60k members did not discriminate - pre-fix
+    # getmembers() was still only ~1.4s there). The fix's essence is "read at most
+    # MAX_ARCHIVE_MEMBERS headers, never getmembers() the whole archive". Count the
+    # per-member header reads (TarFile.next): the lazy scan stops at the cap; the
+    # old sorted(getmembers()) read EVERY member. Shrink the cap so the test stays
+    # tiny.
+    import tarfile
+    monkeypatch.setattr(extract, "MAX_ARCHIVE_MEMBERS", 50)
+    data = _tgz_many_empty_members(5_000)
+    calls = {"n": 0}
+    real_next = tarfile.TarFile.next
+
+    def counting_next(self):
+        calls["n"] += 1
+        return real_next(self)
+
+    monkeypatch.setattr(tarfile.TarFile, "next", counting_next)
     out = extract_bytes(data, "bomb.tgz")
-    elapsed = time.time() - t0
-    assert elapsed < 5.0, f"tar member enumeration is not bounded ({elapsed:.1f}s)"
     assert isinstance(out, str)
+    # Bounded to ~the cap (a couple past it for the break check), NOWHERE near the
+    # 5000 members that getmembers() would have parsed.
+    assert calls["n"] <= 200, (
+        f"scanned {calls['n']} member headers for a {50}-cap - getmembers() "
+        "materialised the whole archive")
 
 
 def test_small_tarball_still_extracts():
@@ -131,23 +146,37 @@ def test_small_tarball_still_extracts():
 #  B3 - the indexing walk must not loop on a Windows junction                  #
 # --------------------------------------------------------------------------- #
 @pytest.mark.skipif(sys.platform != "win32", reason="NTFS junctions are Windows-only")
-def test_indexing_walk_skips_junction_loops(tmp_path):
+def test_indexing_walk_skips_junction_loops(tmp_path, monkeypatch):
+    # BRANCHING junctions: a single self-referential junction is depth-capped by
+    # Windows itself (rglob finishes in ~0.1s), so it does NOT exercise the bug.
+    # Two junctions per directory make rglob's descent EXPONENTIAL (pre-fix >20s);
+    # _walk_files skips reparse points and scandirs each real dir exactly once.
+    import os as _os
+    from pathlib import Path
     d = tmp_path / "docs"
     d.mkdir()
     (d / "real.txt").write_text("genuine indexable content", encoding="utf-8")
-    loop = d / "loop"
-    r = subprocess.run(["cmd", "/c", "mklink", "/J", str(loop), str(d)],
-                       capture_output=True, text=True)
-    if r.returncode != 0:
-        pytest.skip(f"could not create junction: {r.stderr.strip()}")
+    for jn in ("loop1", "loop2"):
+        r = subprocess.run(["cmd", "/c", "mklink", "/J", str(d / jn), str(d)],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            pytest.skip(f"could not create junction: {r.stderr.strip()}")
+
+    import localm.rag.store as store_mod
+    calls = {"n": 0}
+    real_scandir = _os.scandir
+
+    def counting_scandir(p):
+        calls["n"] += 1
+        return real_scandir(p)
+
+    monkeypatch.setattr(store_mod.os, "scandir", counting_scandir)
     c = Collection("kb", base=tmp_path / "rag").create()
-    t0 = time.time()
     files = c._expand([str(d)])
-    elapsed = time.time() - t0
-    assert elapsed < 10.0, f"indexing walk looped on the junction ({elapsed:.1f}s)"
-    from pathlib import Path
-    names = [Path(f).name for f in files]
-    assert "real.txt" in names, "the real file must still be indexed"
+    # Each REAL directory is scanned once; the junctions are never descended, so
+    # the walk cannot blow up (pre-fix rglob would scandir exponentially and hang).
+    assert calls["n"] <= 5, f"walk scandir'd {calls['n']} dirs - junctions were followed"
+    assert any(Path(f).name == "real.txt" for f in files), "real file must be indexed"
 
 
 # --------------------------------------------------------------------------- #
@@ -205,6 +234,22 @@ def test_chunk_line_missing_text_key_does_not_crash(tmp_path):
     assert c.stats()["corrupt"] is True
 
 
+def test_valid_meta_docs_map_preserved_on_chunk_corruption(tmp_path):
+    # meta.json is VALID; only a chunk line is corrupt. The real docs map (with
+    # hash/mtime/size) must be kept, NOT overwritten by the chunk-source
+    # reconstruction, which is gated on META corruption specifically.
+    base = _seed(tmp_path)
+    meta_before = json.loads((base / "kb" / "meta.json").read_text(encoding="utf-8"))
+    doc_key = next(iter(meta_before["docs"]))
+    assert "hash" in meta_before["docs"][doc_key]
+    with (base / "kb" / "chunks.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write("\n999\n")
+    c = Collection("kb", base=base)
+    assert c.stats()["corrupt"] is True
+    assert c._meta["docs"].get(doc_key, {}).get("hash") == \
+        meta_before["docs"][doc_key]["hash"], "valid docs map must not be clobbered"
+
+
 # --------------------------------------------------------------------------- #
 #  B6 - a non-finite embedding must degrade to BM25, never drop a chunk        #
 # --------------------------------------------------------------------------- #
@@ -255,6 +300,20 @@ def test_nan_in_vectors_json_degrades_with_reason(tmp_path):
     # score NaN.
     assert c2.query("mitochondria"), "must still answer lexically"
     assert c2.stats()["vector_degrade_reason"], "non-finite vectors must be surfaced"
+
+
+def test_nan_query_embedding_degrades_not_empties(tmp_path):
+    # A NaN/inf QUERY embedding must not empty the result set (every cosine would
+    # be nan, nan !> 0); it degrades to BM25 with a surfaced reason.
+    base = tmp_path / "rag"
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "a.txt").write_text("photosynthesis converts sunlight into energy", encoding="utf-8")
+    c = Collection("kb", base=base).create()
+    c.add_paths([str(d / "a.txt")], embed_fn=lambda ts: [[1.0, 0.0, 0.0] for _ in ts])
+    hits = c.query("photosynthesis", embed_fn=lambda ts: [[float("nan"), 0.0, 0.0]])
+    assert hits, "a NaN query embedding must not empty results (BM25 must answer)"
+    assert c.stats()["vector_degrade_reason"], "non-finite query embedding must be surfaced"
 
 
 # --------------------------------------------------------------------------- #
