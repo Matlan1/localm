@@ -578,25 +578,10 @@ class GgufBackend(BaseBackend):
                 mmproj_path=self.mmproj_path,   # C1: in-process vision via mtmd
                 cancel_event=self._load_cancel,  # abort mid-load if superseded
                 vram_check=self._check_context_fit,  # guard context GROWTH too
-                # Free-VRAM reader for the load-time KV-placement decision (a big
-                # model that fills VRAM keeps its KV cache in system RAM so the
-                # first decode does not crash Vulkan - LlamaCpp._initial_offload_kqv).
-                free_vram=self._free_vram_bytes,
                 verbose=False,
             )
 
         self._loaded = True
-
-        # If the load put the KV cache in system RAM because the model nearly fills
-        # VRAM (LlamaCpp._initial_offload_kqv), say so: generation will be slower.
-        # Surfaced here where the other load notices print; the mechanism also logs
-        # a debug line.
-        if getattr(self._llm, "_offload_kqv", True) is False:
-            console.print(
-                "[yellow]  KV cache in system RAM[/yellow] (model nearly fills "
-                "VRAM) - generation is slower but stable. Free VRAM or lower the "
-                "context for a full-speed GPU KV cache."
-            )
 
         # Remember the model's true transformer layer count (read once during the
         # native load - the only place it is knowable) so the next load and the

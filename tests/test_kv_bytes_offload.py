@@ -19,11 +19,12 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import os
+
 import pytest
 
 from localm.inference.backends.llamacpp import _api
 from localm.inference.backends.llamacpp.llama import LlamaCpp
-from tests._fake_batch import fake_batch_init
 
 _LOAD_LIB = "localm.inference.backends.llamacpp._api.load_lib"
 _API = "localm.inference.backends.llamacpp.llama.api"
@@ -136,173 +137,42 @@ class TestReadKvBytesPerToken:
 
 
 # --------------------------------------------------------------------------- #
-#  _initial_offload_kqv(): where the INITIAL context's KV cache lives
+#  Vulkan dedicated-VRAM flag (loader._force_vulkan_dedicated_vram)
 # --------------------------------------------------------------------------- #
 
-def _bare_offload(kv_per_token, free_fn) -> LlamaCpp:
-    llm = LlamaCpp.__new__(LlamaCpp)
-    llm.kv_bytes_per_token = kv_per_token
-    llm._free_vram_fn = free_fn
-    return llm
+class TestForceVulkanDedicatedVram:
+    """On a Windows Vulkan build, load_lib sets GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM
+    so ggml-vulkan keeps model weights in DEDICATED VRAM - WDDM otherwise backs the
+    host-visible allocation with shared system RAM (~13x slower). Respect an explicit
+    user value; do nothing on non-Windows or a non-Vulkan build."""
 
-
-GB = 1024 ** 3
-
-
-class TestInitialOffloadKqv:
-    @pytest.fixture(autouse=True)
-    def _force_vulkan(self, monkeypatch):
-        # The preemptive offload is gated on the Vulkan backend (the only one that
-        # crashes); these tests exercise the offload MATH, so force the gate on.
-        # test_non_vulkan_backend_keeps_kv_in_vram overrides it to check the gate.
+    def _run(self, tmp_path, monkeypatch, *, platform, files, preset=None):
         from localm.inference.backends.llamacpp import _loader
-        monkeypatch.setattr(_loader, "gpu_backend_is_vulkan", lambda: True)
+        for f in files:
+            (tmp_path / f).write_bytes(b"x")
+        monkeypatch.setattr(_loader.sys, "platform", platform)
+        monkeypatch.delenv("GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM", raising=False)
+        if preset is not None:
+            monkeypatch.setenv("GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM", preset)
+        _loader._force_vulkan_dedicated_vram(tmp_path)
+        return os.environ.get("GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM")
 
-    def test_keeps_vram_when_kv_size_unknown(self):
-        # No accurate KV size (stripped build): keep the VRAM default rather than
-        # needlessly slowing a model that may well fit.
-        llm = _bare_offload(0, lambda: 200_000)
-        assert llm._initial_offload_kqv(4096) is True
+    def test_sets_flag_on_windows_vulkan_build(self, tmp_path, monkeypatch):
+        assert self._run(tmp_path, monkeypatch, platform="win32",
+                         files=["llama.dll", "ggml-vulkan.dll"]) == "1"
 
-    def test_keeps_vram_when_no_free_reader(self):
-        llm = _bare_offload(200_000, None)
-        assert llm._initial_offload_kqv(4096) is True
+    def test_no_flag_on_windows_rocm_build(self, tmp_path, monkeypatch):
+        assert self._run(tmp_path, monkeypatch, platform="win32",
+                         files=["llama.dll", "ggml-hip.dll"]) is None
 
-    def test_keeps_vram_when_free_unmeasurable(self):
-        llm = _bare_offload(200_000, lambda: None)
-        assert llm._initial_offload_kqv(4096) is True
+    def test_no_flag_off_windows(self, tmp_path, monkeypatch):
+        assert self._run(tmp_path, monkeypatch, platform="linux",
+                         files=["libllama.so", "libggml-vulkan.so"]) is None
 
-    def test_keeps_vram_when_reader_raises(self):
-        def _boom():
-            raise RuntimeError("torch fell over")
-        llm = _bare_offload(200_000, _boom)
-        assert llm._initial_offload_kqv(4096) is True
-
-    def test_moves_kv_to_ram_when_model_fills_vram(self):
-        # The crash case: gemma12b-scale KV (~320 KiB/token) at 4096 tokens is
-        # ~1.25 GB; plus the ~3 GB compute reserve that far exceeds the 0.2 GB
-        # free after weights -> KV cache goes to system RAM (return False).
-        llm = _bare_offload(327_680, lambda: int(0.2 * GB))
-        assert llm._initial_offload_kqv(4096) is False
-
-    def test_keeps_kv_in_vram_for_a_model_that_fits(self):
-        # A ~7B with plenty of headroom: whole KV (~0.8 GB) + 3 GB reserve fits
-        # comfortably in 11 GB free -> KV stays in VRAM (full speed), no needless
-        # RAM offload.
-        llm = _bare_offload(200_000, lambda: int(11 * GB))
-        assert llm._initial_offload_kqv(4096) is True
-
-    def test_boundary_reserve_is_respected(self):
-        # whole_kv + reserve must be strictly greater than free to move to RAM.
-        llm = _bare_offload(200_000, None)
-        llm._free_vram_fn = lambda: 4096 * 200_000 + LlamaCpp._COMPUTE_RESERVE_BYTES
-        assert llm._initial_offload_kqv(4096) is True          # exactly fits -> VRAM
-        llm._free_vram_fn = lambda: 4096 * 200_000 + LlamaCpp._COMPUTE_RESERVE_BYTES - 1
-        assert llm._initial_offload_kqv(4096) is False         # one byte short -> RAM
-
-    def test_logs_a_hint_when_moving_to_ram(self):
-        llm = _bare_offload(327_680, lambda: int(0.2 * GB))
-        fake_logger = MagicMock()
-        with patch("localm.debuglog.logger", fake_logger):
-            assert llm._initial_offload_kqv(4096) is False
-        assert fake_logger.warning.called
-        msg = fake_logger.warning.call_args[0][0]
-        assert "system RAM" in msg
-
-    def test_non_vulkan_backend_keeps_kv_in_vram(self, monkeypatch):
-        # ROCm/CUDA/Metal never had the Vulkan compute-buffer crash; even a model
-        # that fills VRAM must KEEP its KV cache in VRAM (return True) so it runs
-        # full-speed as before - the fix must not regress those backends.
-        from localm.inference.backends.llamacpp import _loader
-        monkeypatch.setattr(_loader, "gpu_backend_is_vulkan", lambda: False)
-        llm = _bare_offload(327_680, lambda: int(0.2 * GB))   # would offload on Vulkan
-        assert llm._initial_offload_kqv(4096) is True
-
-
-class TestGpuBackendIsVulkan:
-    def test_false_when_lib_not_loaded(self, monkeypatch):
-        from localm.inference.backends.llamacpp import _loader
-        monkeypatch.setattr(_loader, "_loaded_lib", None)
-        assert _loader.gpu_backend_is_vulkan() is False
-
-    def test_true_for_vulkan_device(self, monkeypatch):
-        from localm.inference.backends.llamacpp import _loader
-        monkeypatch.setattr(_loader, "_loaded_lib", object())
-        monkeypatch.setattr(_loader, "compute_devices",
-                            lambda: [("CPU", 0), ("Vulkan0", 1)])
-        assert _loader.gpu_backend_is_vulkan() is True
-
-    def test_false_for_rocm_device(self, monkeypatch):
-        from localm.inference.backends.llamacpp import _loader
-        monkeypatch.setattr(_loader, "_loaded_lib", object())
-        monkeypatch.setattr(_loader, "compute_devices",
-                            lambda: [("ROCm0", 1), ("CPU", 0)])
-        assert _loader.gpu_backend_is_vulkan() is False
-
-
-# --------------------------------------------------------------------------- #
-#  Sticky placement: a RAM-placed KV cache stays in RAM across a grow
-# --------------------------------------------------------------------------- #
-
-def _bare_grow(offload_kqv, vram_check) -> LlamaCpp:
-    llm = LlamaCpp.__new__(LlamaCpp)
-    llm._n_ctx = 4096
-    llm._n_ctx_max = None
-    llm._n_ctx_grow = 4096
-    llm._cached_tokens = []
-    llm._ctx_capacity = 4096
-    llm._ctx_ptr = 222
-    llm._model_ptr = 111
-    llm._tokenizer = MagicMock()
-    llm._vram_check = vram_check
-    llm._offload_kqv = offload_kqv
-    return llm
-
-
-def _grow_api():
-    m = MagicMock()
-    cp = MagicMock()
-    m.llama_context_default_params.return_value = cp
-    m.llama_init_from_model.return_value = 444
-    m.llama_decode.return_value = 0
-    m.llama_batch_init.side_effect = fake_batch_init
-    return m, cp
-
-
-class TestStickyRamOnGrow:
-    def test_ram_placement_sticks_and_skips_the_hook(self):
-        # KV already in system RAM (a big model). A grow must KEEP it in RAM and
-        # must NOT re-consult the hook (a larger context cannot suddenly fit VRAM;
-        # moving it back risks the very crash the RAM offload avoids).
-        hook = MagicMock(return_value=True)   # would say "VRAM fits" if asked
-        llm = _bare_grow(offload_kqv=False, vram_check=hook)
-        m, cp = _grow_api()
-        with patch(_API, m):
-            llm._prefill_fresh_context(list(range(100)), needed=5000)
-        assert cp.offload_kqv is False        # stayed in RAM
-        assert llm._offload_kqv is False      # and remembered
-        hook.assert_not_called()              # not reconsidered
-
-    def test_vram_placement_still_consults_the_hook(self):
-        # KV in VRAM: the shipped behaviour is unchanged - the hook decides, and a
-        # False flips it to RAM and is then remembered.
-        hook = MagicMock(return_value=False)
-        llm = _bare_grow(offload_kqv=True, vram_check=hook)
-        m, cp = _grow_api()
-        with patch(_API, m):
-            llm._prefill_fresh_context(list(range(100)), needed=5000)
-        hook.assert_called_once_with(8192, 4096)
-        assert cp.offload_kqv is False
-        assert llm._offload_kqv is False      # transition VRAM->RAM remembered
-
-    def test_vram_stays_vram_when_hook_approves(self):
-        hook = MagicMock(return_value=True)
-        llm = _bare_grow(offload_kqv=True, vram_check=hook)
-        m, cp = _grow_api()
-        with patch(_API, m):
-            llm._prefill_fresh_context(list(range(100)), needed=5000)
-        assert cp.offload_kqv is True
-        assert llm._offload_kqv is True
+    def test_respects_explicit_user_optout(self, tmp_path, monkeypatch):
+        # An explicit "0" must survive - never override a user's choice.
+        assert self._run(tmp_path, monkeypatch, platform="win32",
+                         files=["llama.dll", "ggml-vulkan.dll"], preset="0") == "0"
 
 
 # --------------------------------------------------------------------------- #
