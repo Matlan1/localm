@@ -5,12 +5,18 @@ import os
 import socket
 import sys
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Callable, Optional
 
 
 _warned_unconfigured_home = False
+
+# config files already warned about (present but not a JSON object), so a
+# non-dict config.json is surfaced once per process, not on every load_config
+# call (see _merge_stored_config).
+_warned_bad_config: set = set()
 
 
 def _warn_unconfigured_home(path: Path) -> None:
@@ -432,8 +438,13 @@ def pick_port(requested: Optional[int] = None, host: str = "127.0.0.1"):
 
 
 def _mkdir_or_explain(path: Path, *, is_home: bool) -> None:
-    """``path.mkdir(exist_ok=True)`` with one user-error case turned into a clean
-    message instead of a crash.
+    """``path.mkdir(parents=True, exist_ok=True)`` with one user-error case turned
+    into a clean message instead of a crash.
+
+    ``parents=True`` so an explicit ``LOCALM_HOME`` a level or two below a
+    not-yet-existing folder (a fresh ``D:\\localm\\data``) is created like
+    ``mkdir -p`` rather than crashing with WinError 3 - LOCALM_HOME is an explicit
+    "keep my data here" choice, so localm creates the whole path (AUD-ENSUREDIRS).
 
     ``exist_ok=True`` already swallows "exists AND is a directory", so a
     ``FileExistsError`` from mkdir means exactly "exists but is NOT a directory"
@@ -443,10 +454,10 @@ def _mkdir_or_explain(path: Path, *, is_home: bool) -> None:
     handler passes those straight through (a clean "Error: ..." line, exit 1),
     never routing them to the generic "unexpected error" + bug-report path. This
     SURFACES the real problem with an actionable fix (do-not-hide-problems); it
-    does not swallow it. Other OSErrors (permission denied, missing parent) are
-    left to propagate unchanged - they are not this case."""
+    does not swallow it. Other OSErrors (permission denied) are left to propagate
+    unchanged - they are not this case."""
     try:
-        path.mkdir(exist_ok=True)
+        path.mkdir(parents=True, exist_ok=True)
     except FileExistsError:
         import click  # lazy: keep the CLI framework out of config's import graph
         env = os.environ.get("LOCALM_HOME", "").strip()
@@ -476,13 +487,52 @@ def ensure_dirs() -> None:
 # crash-proof (fall back to the .bak snapshot, then to the default).
 _io_lock = threading.RLock()
 
+# A concurrent open handle makes a Windows os.replace / open raise a TRANSIENT
+# PermissionError (WinError 5); a bounded retry rides it out. The lock is usually
+# microseconds, but a loaded box (antivirus scanning the file, an indexer, a slow
+# second process) can hold it tens of ms, so the backoff escalates and the total
+# budget is ~1 s before a PERSISTENT failure is re-raised / falls back
+# (do-not-hide-problems). See _replace_atomic / _read_json (AUD-WINREPLACE).
+_REPLACE_RETRIES = 16
+_REPLACE_BACKOFF = 0.01      # seconds; escalates up to the cap
+_REPLACE_BACKOFF_CAP = 0.1   # seconds
+
+
+def _transient_backoff(attempt: int) -> None:
+    """Sleep before the next retry, escalating linearly to a cap so a lock that
+    lingers on a busy machine is ridden out without a hot spin."""
+    time.sleep(min(_REPLACE_BACKOFF * (attempt + 1), _REPLACE_BACKOFF_CAP))
+
+
+def _replace_atomic(src: Path, dst: Path) -> None:
+    """``os.replace(src, dst)`` with a bounded retry on a transient Windows
+    sharing violation.
+
+    os.replace IS atomic, but on Windows it raises PermissionError (WinError 5)
+    when another handle has *dst* open at that instant: a second localm process
+    reading the file, an antivirus / indexer / backup scanner, Windows Search.
+    That window is short, so retrying briefly rides it out instead of crashing
+    the save. A genuine, persistent permission problem still surfaces (re-raised
+    after the last attempt) - we retry the transient race, we never hide a real
+    failure. On POSIX os.replace does not hit this, so the loop succeeds first
+    try."""
+    for attempt in range(_REPLACE_RETRIES):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == _REPLACE_RETRIES - 1:
+                raise
+            _transient_backoff(attempt)
+
 
 def _atomic_write_json(path: Path, data) -> None:
     """Write *data* as JSON to *path* atomically (temp file + os.replace).
 
     Keeps a one-step .bak of the previous good file so a corrupt read can
     recover. os.replace is atomic on Windows and POSIX when src/dst share a
-    filesystem, which they do (same directory)."""
+    filesystem, which they do (same directory); _replace_atomic additionally
+    rides out the transient Windows sharing violation a concurrent reader causes."""
     tmp = path.with_name(path.name + ".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
@@ -490,10 +540,18 @@ def _atomic_write_json(path: Path, data) -> None:
         os.fsync(f.fileno())
     if path.exists():
         try:
-            path.replace(path.with_name(path.name + ".bak"))
-        except OSError:
-            pass  # a missing .bak is not worth failing the write over
-    os.replace(tmp, path)
+            _replace_atomic(path, path.with_name(path.name + ".bak"))
+        except OSError as e:
+            # The .bak snapshot is best-effort: a failed one must NOT fail the
+            # primary write (which still proceeds below). But _replace_atomic
+            # already rode out the transient sharing violation, so reaching here
+            # means a PERSISTENT problem (a lock that outlasted the retries, disk
+            # full, a real permission error) - note it at a low level so it is
+            # discoverable rather than totally silent (do-not-hide-problems),
+            # without escalating a legitimate best-effort path into a hard fail.
+            print(f"[localm] note: could not refresh {path.name}.bak ({e}); "
+                  "the main write still succeeded.", file=sys.stderr)
+    _replace_atomic(tmp, path)
 
 
 def _read_json(path: Path, default):
@@ -502,20 +560,33 @@ def _read_json(path: Path, default):
     for candidate in (path, path.with_name(path.name + ".bak")):
         if not candidate.is_file():
             continue
-        try:
-            with open(candidate, encoding="utf-8") as f:
-                return json.load(f)
-        except (ValueError, OSError, RecursionError) as e:
-            # Broadened from (JSONDecodeError, OSError): a non-UTF-8 file raises
-            # UnicodeDecodeError, a huge integer raises ValueError, and a deeply
-            # nested document raises RecursionError - all of which previously
-            # ESCAPED and crashed the app instead of honouring the documented
-            # "fall back to .bak then default, never take the app down"
-            # guarantee (AUD-CFGFALLBACK). JSONDecodeError/UnicodeDecodeError are
-            # ValueError subclasses, so this tuple covers them too.
-            print(f"[localm] {candidate.name} is unreadable ({e}); "
-                  "falling back.", file=sys.stderr)
-            continue
+        for attempt in range(_REPLACE_RETRIES):
+            try:
+                with open(candidate, encoding="utf-8") as f:
+                    return json.load(f)
+            except PermissionError as e:
+                # TRANSIENT on Windows: a concurrent atomic replace (another
+                # process, or antivirus/indexer) has the file locked for a
+                # microsecond. Retry the SAME file before giving up, so a passing
+                # scanner does not make us spuriously fall back to .bak/defaults
+                # and momentarily discard live settings. A persistent EACCES
+                # surfaces after the retries via the same warning + fall-through.
+                if attempt < _REPLACE_RETRIES - 1:
+                    _transient_backoff(attempt)
+                    continue
+                print(f"[localm] {candidate.name} is unreadable ({e}); "
+                      "falling back.", file=sys.stderr)
+            except (ValueError, OSError, RecursionError) as e:
+                # NOT transient (corrupt/non-UTF-8 JSON -> ValueError incl.
+                # JSONDecodeError/UnicodeDecodeError, a huge integer -> ValueError,
+                # deep nesting -> RecursionError, or a hard OS error): fall back
+                # immediately without wasting the retry budget. Previously these
+                # ESCAPED and crashed the app instead of honouring the documented
+                # "fall back to .bak then default, never take the app down"
+                # guarantee (AUD-CFGFALLBACK).
+                print(f"[localm] {candidate.name} is unreadable ({e}); "
+                      "falling back.", file=sys.stderr)
+            break
     return default() if callable(default) else default
 
 
@@ -568,6 +639,27 @@ def instance_id() -> str:
         return val
 
 
+def _merge_stored_config(cfg: dict, stored) -> None:
+    """Overlay the persisted config delta *stored* onto *cfg* (the defaults).
+
+    A present-but-non-dict config.json - valid JSON that is a list / string /
+    number / null, or any non-object - is ignored so it cannot corrupt the merge,
+    but that discard is SURFACED once per process (do-not-hide-problems): the
+    user's saved settings are being dropped, which must never be silent. A MISSING
+    file arrives here as the ``{}`` default (a dict) and is a normal no-op, not a
+    warning; a genuinely unparseable file already warned in _read_json and also
+    arrives as ``{}``. stderr, not the logger (see _detect_home / AUD-DETECTHOME)."""
+    if isinstance(stored, dict):
+        cfg.update(stored)
+        return
+    key = str(CONFIG_FILE)
+    if key not in _warned_bad_config:
+        _warned_bad_config.add(key)
+        print(f"[localm] config.json is not a JSON object (got "
+              f"{type(stored).__name__}); ignoring it and using defaults. The file "
+              "is left untouched so you can recover it by hand.", file=sys.stderr)
+
+
 def load_config() -> dict:
     ensure_dirs()
     # DEEP copy: a shallow .copy() shares the nested mutable defaults (e.g. the
@@ -577,8 +669,7 @@ def load_config() -> dict:
     cfg = copy.deepcopy(DEFAULT_CONFIG)
     with _io_lock:
         stored = _read_json(CONFIG_FILE, {})
-    if isinstance(stored, dict):
-        cfg.update(stored)
+    _merge_stored_config(cfg, stored)
     return cfg
 
 
@@ -650,8 +741,7 @@ def update_config(mutator: Callable[[dict], None]) -> dict:
     with _io_lock:
         cfg = copy.deepcopy(DEFAULT_CONFIG)   # deep: see load_config (nested dicts)
         stored = _read_json(CONFIG_FILE, {})
-        if isinstance(stored, dict):
-            cfg.update(stored)
+        _merge_stored_config(cfg, stored)
         mutator(cfg)
         # The mutator and the return value see the full merged dict; only the
         # user-set delta hits the disk (see _user_delta / save_config).
