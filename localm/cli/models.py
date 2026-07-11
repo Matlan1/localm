@@ -529,15 +529,28 @@ def gpus_cmd():
     \b
       localm config gpu_split_indices 0,1
     """
-    from ..discover import list_gpus
+    from .. import discover
 
     cfg = load_config()
     configured = cfg.get("main_gpu_index")
     split = cfg.get("gpu_split_indices") or []
-    gpus = list_gpus()
+    # A one-shot CLI is NOT on the server event loop, so it can wait out a slow
+    # COLD GPU driver init (the first torch.cuda / HIP call, measured ~6.5s)
+    # instead of the 4s server cap misreporting it as "no GPU". The status tells a
+    # genuine empty result apart from a timeout so the message never blames "no
+    # torch" for a probe that simply had not finished (AGENTS.md rule 5).
+    gpus, status = discover.list_gpus(
+        deadline=discover._GPU_PROBE_CLI_DEADLINE, return_status=True)
     if not gpus:
-        console.print("[dim]No GPUs detected (or VRAM detection is unavailable - "
-                      "no torch, no nvidia-smi).[/dim]")
+        if status == discover.GPU_PROBE_OK:
+            console.print("[dim]No GPUs detected (or VRAM detection is unavailable - "
+                          "no torch, no nvidia-smi).[/dim]")
+        else:
+            console.print(
+                "[yellow]GPU detection timed out[/yellow] before the driver "
+                "responded (a cold GPU driver can take several seconds to "
+                "initialize on first use). Run [cyan]localm gpus[/cyan] again - "
+                "the driver is usually warm on a second try.")
         return
     for g in gpus:
         markers = []

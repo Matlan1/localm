@@ -14,6 +14,7 @@ import pytest
 
 from localm import settings_schema as ss
 from localm.config import DEFAULT_CONFIG
+from localm.discover import GPU_PROBE_OK
 
 
 # --------------------------------------------------------------------------- #
@@ -357,7 +358,8 @@ class TestGpusCli:
 
     def test_lists_detected_gpus(self, cli_runner):
         from localm.cli import main
-        with patch("localm.discover.list_gpus", return_value=self._GPUS):
+        with patch("localm.discover.list_gpus",
+                   return_value=(self._GPUS, GPU_PROBE_OK)):
             r = cli_runner.invoke(main, ["gpus"])
         assert r.exit_code == 0, r.output
         assert "RTX 4090" in r.output
@@ -367,14 +369,17 @@ class TestGpusCli:
     def test_marks_the_configured_device(self, cli_runner):
         from localm.cli import main
         cli_runner.invoke(main, ["config", "main_gpu_index", "1"])
-        with patch("localm.discover.list_gpus", return_value=self._GPUS):
+        with patch("localm.discover.list_gpus",
+                   return_value=(self._GPUS, GPU_PROBE_OK)):
             r = cli_runner.invoke(main, ["gpus"])
         assert r.exit_code == 0, r.output
         assert "configured" in r.output.lower()
 
     def test_no_gpus_detected(self, cli_runner):
         from localm.cli import main
-        with patch("localm.discover.list_gpus", return_value=[]):
+        # A COMPLETED probe that finds nothing (status OK): the genuine
+        # no-torch/no-nvidia-smi box, which keeps the original message.
+        with patch("localm.discover.list_gpus", return_value=([], GPU_PROBE_OK)):
             r = cli_runner.invoke(main, ["gpus"])
         assert r.exit_code == 0, r.output
         assert "no gpus detected" in r.output.lower()
@@ -382,10 +387,38 @@ class TestGpusCli:
     def test_warns_when_configured_index_is_stale(self, cli_runner):
         from localm.cli import main
         cli_runner.invoke(main, ["config", "main_gpu_index", "5"])
-        with patch("localm.discover.list_gpus", return_value=self._GPUS[:1]):
+        with patch("localm.discover.list_gpus",
+                   return_value=(self._GPUS[:1], GPU_PROBE_OK)):
             r = cli_runner.invoke(main, ["gpus"])
         assert r.exit_code == 0, r.output
         assert "does not match any gpu" in r.output.lower()
+
+    def test_timeout_reports_retry_not_no_torch(self, cli_runner, monkeypatch):
+        """A GPU probe that overruns the deadline (a cold ROCm/CUDA driver init)
+        must be reported as a TIMEOUT with a retry hint, NOT as 'no torch / no
+        GPU'. Misattributing a slow cold probe to 'no torch' is exactly the
+        rule-5 bug this fixes (torch IS installed; a warm retry works)."""
+        import threading
+        from localm.cli import main
+
+        release = threading.Event()
+
+        def _slow():
+            release.wait(10)     # a cold driver init that overruns the deadline
+            return [{"index": 0, "name": "GPU0", "total": 8, "free": 8}]
+
+        monkeypatch.setattr("localm.discover._list_gpus_probe", _slow)
+        # Shrink the CLI's generous deadline so the test is fast; the probe still
+        # overruns it, exercising the timeout branch with the real status logic.
+        monkeypatch.setattr("localm.discover._GPU_PROBE_CLI_DEADLINE", 0.2)
+        r = cli_runner.invoke(main, ["gpus"])
+        release.set()            # let the abandoned probe thread finish now
+        assert r.exit_code == 0, r.output
+        out = r.output.lower()
+        assert "no torch" not in out, (
+            "a timed-out GPU probe was misreported as 'no torch' (rule 5)")
+        assert ("timed out" in out or "timeout" in out)
+        assert ("again" in out or "retry" in out)
 
 
 # --------------------------------------------------------------------------- #
