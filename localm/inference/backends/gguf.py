@@ -273,59 +273,69 @@ class GgufBackend(BaseBackend):
             f"  Continuing anyway - load may be slow or fail."
         )
 
-    def _check_context_fit(self, n_ctx: int) -> None:
-        """Preflight for GROWING the live context to *n_ctx* tokens after the
-        model is already loaded - wired as LlamaCpp's ``vram_check`` hook,
-        consulted by ``_prefill_fresh_context()`` before it (re)creates a
-        bigger context. Model weights are already resident by this point (this
-        runs after ``_check_vram()``'s one-time load gate), so unlike that
-        gate this must NOT add weights to ``need`` again - only the NEW KV
-        cache plus buffers has to fit in currently free VRAM; re-adding
-        weights would double-count them and false-refuse an ordinary grow.
+    def _check_context_fit(self, n_ctx: int, current_ctx: int = 0) -> Optional[bool]:
+        """Decide WHERE the KV cache for a context of *n_ctx* tokens must live -
+        wired as LlamaCpp's ``vram_check`` hook, consulted by
+        ``_prefill_fresh_context()`` before it (re)creates a bigger context.
 
-        This closes the same class of gap _check_vram() closed for the
-        initial load, at the call site that actually needs it in practice:
-        _prefill_fresh_context() runs on literally the first prompt for
-        anyone on default settings, because the default max_tokens (4096)
-        already exceeds the default base n_ctx (4096), forcing an immediate
-        grow to 8192 tokens - doubling the KV cache with, until this hook, no
-        VRAM check at all (see dev-notes/, CHK-KVCACHE-OVERFLOW).
+        Returns True to keep the KV cache in VRAM (``offload_kqv`` - full speed),
+        False to place it in SYSTEM RAM (slower, but keeps the FULL context window),
+        or None when VRAM is unmeasurable / irrelevant (caller keeps the default,
+        VRAM). It NEVER shrinks the window and NEVER raises: when the KV cache does
+        not fit free VRAM we move it to RAM and generation runs slower - a degrade,
+        not an abort. A model that CAN run always runs; a genuine can't-fit-even-in-
+        RAM case is still surfaced by ``_prefill_fresh_context``'s NULL-pointer check
+        on the native context (so a real problem is not hidden).
+
+        Only the NET growth over the CURRENTLY-RESIDENT context is charged.
+        ``_prefill_fresh_context`` frees the live context (*current_ctx* tokens of KV)
+        BEFORE allocating the bigger one, so that KV is reclaimed; charging the whole
+        target KV against the free VRAM measured while the old cache is still resident
+        double-counts it. Weights and the compute buffers are already resident and do
+        not change with the context length (n_batch is unchanged), so neither is
+        charged - only the KV delta. Historic context: the old hard-refusing version
+        false-aborted the first-prompt grow on a model that fills the card yet
+        generates fine once the old KV is reclaimed; then a cap-to-fit version still
+        shrank the window and errored when a big prompt did not fit. Moving the KV to
+        RAM keeps the window and keeps generating (see dev-notes/vram-grow-fail-rootcause.md).
         """
         # Gate on the RESOLVED offload count (auto may have chosen it), not the raw
-        # configured n_gpu_layers - otherwise an auto-sized CPU-only load
-        # (effective_gpu_layers == 0, e.g. a too-big model on a tiny card) still
-        # carries n_gpu_layers==99 and would false-raise here on the first grow
-        # even though nothing is on the GPU (twin of _check_vram's resolution).
+        # configured n_gpu_layers - a CPU-only auto load (effective 0) still carries
+        # n_gpu_layers==99 and would false-act here (twin of _check_vram's resolution).
         gpu_layers = (self.effective_gpu_layers
                       if self.effective_gpu_layers is not None
                       else self.n_gpu_layers)
         if gpu_layers == 0:
-            return  # CPU-only run, VRAM is irrelevant
+            return None  # CPU-only run: KV already lives in RAM, nothing to decide
         free = self._free_vram_bytes()
         if free is None:
-            return  # can't measure (no torch / no GPU) - nothing useful to say
-        kv_cache = n_ctx * self._bytes_per_token(self._model_bytes())
-        # For a partial offload only the offloaded layers keep their KV in VRAM
-        # (offload_kqv); the CPU layers' KV lives in system RAM. Charge just that
-        # GPU fraction - mirroring _check_vram's weight fraction - so a partial
-        # auto load (now the default path for a too-big model) is not false-refused
-        # its first grow by being charged the whole KV cache.
+            return None  # can't measure (no torch / no GPU) - keep the default (VRAM)
+        # KV bytes per token on the GPU: only the offloaded layers keep their KV in
+        # VRAM (offload_kqv); CPU layers' KV lives in system RAM. Mirror _check_vram's
+        # weight fraction so a partial auto load is charged only its GPU share.
+        per_token = self._bytes_per_token(self._model_bytes())
         if gpu_layers < self._DEFAULT_GPU_LAYERS:
             layers = self._cached_layer_count() or self._ASSUMED_LAYERS
-            kv_cache = int(kv_cache * min(1.0, gpu_layers / layers))
-        need = kv_cache + self._VRAM_OVERHEAD_BYTES
-        if need <= free:
-            return
-        raise RuntimeError(
-            f"Context too large for available VRAM: growing this "
-            f"conversation to {n_ctx:,} tokens needs roughly "
-            f"{need / 1024**3:.1f} GB of additional KV cache + buffers, but "
-            f"only {free / 1024**3:.1f} GB is free.\n"
-            f"  Options:\n"
-            f"    - Start a new chat (clears the context)\n"
-            f"    - Ask for shorter replies (lower max_tokens)\n"
-            f"    - Lower the context ceiling:  localm config n_ctx_max 8192"
-        )
+            per_token = int(per_token * min(1.0, gpu_layers / layers))
+        if per_token <= 0:
+            return None
+        # The currently-resident context (>= base n_ctx) whose KV is reclaimed on
+        # recreation. current_ctx==0 means "not told" (a direct/test call) -> the
+        # base n_ctx is the safe stand-in (the first grow's real current size).
+        current = max(int(current_ctx), self.n_ctx)
+        delta = (n_ctx - current) * per_token          # NET KV growth to allocate
+        if delta <= free:
+            return True                                # KV cache fits VRAM - keep it there
+        # Does not fit VRAM: keep the FULL window, put the KV cache in system RAM and
+        # let generation run slower. A one-time hint so the slowdown is explained,
+        # not mysterious.
+        from localm.debuglog import logger as _dbg
+        _dbg.warning(
+            "large context (%s tokens): the KV cache does not fit free VRAM "
+            "(net %.2f GB > %.2f GB free), so it is kept in system RAM and generation "
+            "will be slower. Free VRAM or lower n_ctx_max for full-speed GPU KV cache.",
+            f"{n_ctx:,}", delta / 1024**3, free / 1024**3)
+        return False
 
     # Bounds for VRAM-derived context ceilings
     _AUTO_CTX_MIN = 4096
