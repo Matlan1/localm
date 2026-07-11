@@ -119,7 +119,8 @@ def test_self_loaded_engine_is_unloaded(home, monkeypatch):
     from localm.plugins.builtin.jobs import runner
     monkeypatch.setenv("LOCALM_NET_MODE", "off")     # keep the chat path simple
     eng = _Eng()
-    monkeypatch.setattr(runner, "_load_engine", lambda model: eng)
+    # _load_engine returns (engine, reused); a fresh runner-loaded engine is reused=False.
+    monkeypatch.setattr(runner, "_load_engine", lambda model: (eng, False))
 
     result = runner.run_job(_make_job(task_kind="chat", prompt="hello"), engine=None)
     assert result["status"] == "ok"

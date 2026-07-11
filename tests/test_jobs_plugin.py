@@ -405,8 +405,8 @@ def test_runner_chat_error_is_caught(home):
 
 def test_runner_chat_no_engine_no_model_errors(home, monkeypatch):
     from localm.plugins.builtin.jobs import runner
-    # No model resolvable -> _load_engine returns None -> error result.
-    monkeypatch.setattr(runner, "_load_engine", lambda model: None)
+    # No model resolvable -> _load_engine returns (None, False) -> error result.
+    monkeypatch.setattr(runner, "_load_engine", lambda model: (None, False))
     job = _make_job(task_kind="chat", prompt="hi")
     result = runner.run_job(job, engine=None)
     assert result["status"] == "error"
