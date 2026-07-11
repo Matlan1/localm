@@ -100,8 +100,19 @@ def test_rag_indexing_fields_are_owner_only():
         assert by_key[key].admin_only is True, f"{key} must be owner-only"
 
 
-def test_admin_only_keys_lists_the_rag_settings():
-    assert ss.admin_only_keys() == RAG_OWNER_KEYS
+def test_admin_only_keys_lists_the_owner_only_settings():
+    # The rag_* folder keys widen a filesystem-read boundary; net_allow_private
+    # disables the SSRF guard (a network trust boundary). Both are owner-only, so
+    # a non-owner config:write key cannot flip either (pentest finding LM-PT-001).
+    assert ss.admin_only_keys() == RAG_OWNER_KEYS | {"net_allow_private"}
+
+
+def test_net_allow_private_is_admin_only():
+    by_key = {f.key: f for f in ss.CORE_FIELDS}
+    assert by_key["net_allow_private"].admin_only is True, \
+        "the SSRF-guard-disable toggle must be owner-only"
+    # A sibling network field the scoped key legitimately manages stays non-admin.
+    assert by_key["net_allow"].admin_only is False
 
 
 def test_schema_json_hides_admin_only_for_non_owner():
