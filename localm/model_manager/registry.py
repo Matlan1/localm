@@ -75,6 +75,24 @@ def _entry_path(entry) -> Optional[str]:
     Callers that only need the path skip an entry when this returns None; the
     user-facing lister marks it visibly corrupt so it can be dropped with
     ``localm rm <name>`` instead of forcing a hand-edit of the JSON.
+
+    INVARIANT (grep ``_entry_path`` before adding a new registry consumer): EVERY
+    site that iterates ``load_registry()`` (or looks an entry up by name) and then
+    reads the entry's ``path`` / ``source`` / ``model_type`` MUST route that access
+    through this helper (or an explicit ``isinstance(entry, dict)`` guard). A raw
+    ``entry["path"]`` / ``entry.get("path")`` crashes on a non-dict or null/int
+    path. The known consumers, all guarded, are: this module (list/info/vision/
+    external/alias/dedup/sync), the MCP ``list_models``
+    (plugins/mcpserver/server.py), the GUI ``/api/models`` + ``/api/vram-estimate``
+    (plugins/gui/routes/models.py), the API ``model_detail``
+    (inference/routes/models.py), the pull dedup scan (model_manager/pull.py), and
+    the ComfyUI scan (model_manager/scan.py). There is deliberately no blanket
+    syntactic linter for this - ``["path"]`` / ``.get("source")`` occur all over
+    unrelated code (coder sessions, RAG cells, HF listings), so a scan would be
+    false-positive noise; the guard is enforced by the malformed-entry test matrix
+    (tests/test_model_dedup.py::TestMalformedRegistryResilience and
+    tests/test_registry_corruption_consumers.py), which drives every consumer with
+    the six BAD_ENTRIES shapes.
     """
     if not isinstance(entry, dict):
         return None
@@ -1050,7 +1068,11 @@ def _register_with_dedup(
 
     # Same name, DIFFERENT file - real conflict, never overwrite silently
     if model_name in reg:
-        old_path = reg[model_name].get("path", "?")
+        # _entry_path guards a pre-existing MALFORMED entry at this name: a non-dict
+        # value would AttributeError on .get here. Extends #562's registry hardening
+        # to this write-side by-name dedup lookup; a corrupt entry shows as '?' and
+        # is cleared with `localm rm <name>`.
+        old_path = _entry_path(reg[model_name]) or "?"
         console.print(
             f"[yellow]'{model_name}' already points to a different file:"
             f"[/yellow] {old_path}"

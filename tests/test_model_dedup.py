@@ -559,3 +559,21 @@ class TestMalformedRegistryResilience:
         assert isinstance(mm.vision_capable_models(), list)
         assert mm.model_is_external(bad_key) is False
         assert isinstance(mm.model_is_external("good"), bool)
+
+    @pytest.mark.parametrize("bad_key,bad_val", list(BAD_ENTRIES.items()))
+    def test_register_over_a_corrupt_named_entry(self, fake_registry, tmp_path,
+                                                 bad_key, bad_val):
+        # Registering a NEW file under the exact name of a corrupt entry must not
+        # crash: _register_with_dedup's "same name, different file" conflict branch
+        # looked up reg[name].get("path") with no dict guard, so a non-dict entry
+        # (str / null) raised AttributeError before the overwrite prompt. Non-tty
+        # -> it reports the conflict and skips, leaving the corrupt entry in place
+        # (cleared with `localm rm <name>`), the good model untouched.
+        store, _ = fake_registry
+        self._seed(store, tmp_path, bad_key, bad_val)
+        new = _file(tmp_path, "brand-new.gguf")
+        with patch("localm.model_manager.sys.stdin") as fake_stdin:
+            fake_stdin.isatty.return_value = False
+            mm._register_with_dedup(bad_key, new, "local", on_duplicate="register")
+        assert bad_key in store          # not crashed, not silently overwritten
+        assert "good" in store
