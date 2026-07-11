@@ -69,15 +69,25 @@ class NetworkPolicyError(Exception):
 # ---------------------------------------------------------------------------
 
 def network_mode() -> str:
-    """Resolve the active mode: LOCALM_NET_MODE env > config > "ask"."""
+    """Resolve the active mode: LOCALM_NET_MODE env > config > "ask".
+
+    On a config-read failure we resolve to "off", NOT "ask" (HON-2): returning
+    "ask" would silently RE-ENABLE network access for a user who set
+    net_mode="off" as a kill switch - the exact fail-open a safety toggle must
+    never do. Failing closed (and warning) keeps the switch honest; a transiently
+    unreadable config errs toward no network, never toward more. The valid-config
+    path is unchanged: an unset or unrecognised value still resolves to "ask"."""
     env = os.environ.get(NET_MODE_ENV_VAR, "").strip().lower()
     if env in NET_MODES:
         return env
     try:
         from localm.config import load_config
         mode = str(load_config().get("net_mode", "ask")).strip().lower()
-    except Exception:
-        return "ask"
+    except Exception as exc:
+        logger.warning("netpolicy: could not load config (%s); resolving "
+                       "net_mode to 'off' (fail-safe) so an unreadable config "
+                       "cannot silently re-enable network access", exc)
+        return "off"
     return mode if mode in NET_MODES else "ask"
 
 

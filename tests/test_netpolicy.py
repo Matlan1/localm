@@ -2,6 +2,8 @@
 """Tests for localm.netpolicy - the network policy for model-initiated requests."""
 
 
+import logging
+
 import pytest
 
 from localm.netpolicy import (
@@ -50,6 +52,30 @@ class TestNetworkMode:
     def test_default_is_ask(self, monkeypatch):
         _with_config(monkeypatch, {})
         assert network_mode() == "ask"
+
+    def test_config_read_failure_resolves_off(self, monkeypatch, caplog):
+        # HON-2: an unreadable config must NOT silently downgrade an explicit
+        # net_mode="off" kill switch to "ask" (fail-open). It fails SAFE to
+        # "off" and surfaces a warning; erring toward no network, never toward
+        # more.
+        def boom():
+            raise OSError("config unreadable")
+        monkeypatch.setattr("localm.config.load_config", boom)
+        with caplog.at_level(logging.WARNING, logger="localm"):
+            assert network_mode() == "off"
+        assert any("net_mode" in r.message and "off" in r.message.lower()
+                   for r in caplog.records), \
+            "config-read failure resolved silently (no warning)"
+
+    def test_config_read_failure_env_override_still_wins(self, monkeypatch):
+        # The env var short-circuits before config is read, so an explicit env
+        # value is still honored even when the config file is unreadable.
+        monkeypatch.setenv("LOCALM_NET_MODE", "allow")
+
+        def boom():
+            raise OSError("config unreadable")
+        monkeypatch.setattr("localm.config.load_config", boom)
+        assert network_mode() == "allow"
 
 
 # ------------------------------------------------------------------ #
