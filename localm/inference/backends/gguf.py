@@ -56,6 +56,14 @@ class GgufBackend(BaseBackend):
         self._llm = None
         self._loaded = False
         self._load_cancel = None         # threading.Event to abort a load mid-flight
+        # One-time guard for the RAM-offload notice in _check_context_fit: a
+        # card-filling model with the default grow step overflows free VRAM on
+        # EVERY grow, so without this the "kept in system RAM" warning would repeat
+        # on each grow of one conversation. load() clears it, so the hint fires once
+        # per loaded-model session even when the SAME backend instance is reloaded
+        # (Engine.chat_stream's auto-reload reuses the instance, unlike a fresh
+        # switch_engine load).
+        self._ram_kv_hint_shown = False
 
     def set_load_cancel(self, event) -> None:
         """Install (or clear with None) the cancel event honoured by load() via
@@ -304,13 +312,14 @@ class GgufBackend(BaseBackend):
         RAM case is still surfaced by ``_prefill_fresh_context``'s NULL-pointer check
         on the native context (so a real problem is not hidden).
 
-        Only the NET growth over the CURRENTLY-RESIDENT context is charged.
-        ``_prefill_fresh_context`` frees the live context (*current_ctx* tokens of KV)
-        BEFORE allocating the bigger one, so that KV is reclaimed; charging the whole
-        target KV against the free VRAM measured while the old cache is still resident
-        double-counts it. Weights and the compute buffers are already resident and do
-        not change with the context length (n_batch is unchanged), so neither is
-        charged - only the KV delta. Historic context: the old hard-refusing version
+        The charge depends on WHERE the currently-resident KV lives (see the inline
+        comment). When it is in VRAM, only the NET growth is charged: recreation frees
+        that KV back to VRAM, and ``free`` was measured with it still resident, so
+        charging the delta double-counts nothing. When a prior grow already moved the
+        KV to system RAM, the GPU holds none, so the FULL target must be charged - else
+        the delta undercount would flip it back to VRAM and overflow. Weights and the
+        compute buffers are already resident and do not change with the context length
+        (n_batch is unchanged), so neither is charged. Historic context: the old hard-refusing version
         false-aborted the first-prompt grow on a model that fills the card yet
         generates fine once the old KV is reclaimed; then a cap-to-fit version still
         shrank the window and errored when a big prompt did not fit. Moving the KV to
@@ -343,22 +352,41 @@ class GgufBackend(BaseBackend):
             per_token = int(per_token * min(1.0, gpu_layers / layers))
         if per_token <= 0:
             return None
-        # The currently-resident context (>= base n_ctx) whose KV is reclaimed on
-        # recreation. current_ctx==0 means "not told" (a direct/test call) -> the
-        # base n_ctx is the safe stand-in (the first grow's real current size).
+        # How much NEW KV must land in VRAM to grow to n_ctx depends on WHERE the
+        # currently-resident KV lives (the recreate frees it first):
+        #  - current KV in VRAM (normal): freeing it returns that KV to the VRAM pool,
+        #    so only the NET growth over it is a new VRAM charge. `free` was measured
+        #    with the old KV still resident, so charging the delta correctly answers
+        #    "does the FULL target fit VRAM" (delta <= free  <=>  full target <= budget).
+        #  - current KV already in SYSTEM RAM (a prior grow chose offload_kqv=False):
+        #    the GPU holds NO KV, so `free` reads the whole KV budget and freeing the
+        #    old (RAM) context reclaims RAM, not VRAM. Charging only the delta would
+        #    wrongly call it a VRAM fit, flip offload_kqv back to True, and overflow
+        #    VRAM with the FULL target -> a NULL context in _prefill_fresh_context ->
+        #    an abort of a reply that was generating fine (this defeats #554). So charge
+        #    the FULL target: it returns to VRAM only when the whole KV genuinely fits,
+        #    otherwise stays in RAM. Never aborts a model that can run.
+        # current_ctx==0 means "not told" (a direct/test call) -> the base n_ctx is the
+        # safe stand-in (the first grow's real current size).
+        kv_in_ram = getattr(self._llm, "_offload_kqv", True) is False
         current = max(int(current_ctx), self.n_ctx)
-        delta = (n_ctx - current) * per_token          # NET KV growth to allocate
-        if delta <= free:
+        charge = (n_ctx * per_token if kv_in_ram
+                  else (n_ctx - current) * per_token)   # NET when the old VRAM KV is reclaimed
+        if charge <= free:
             return True                                # KV cache fits VRAM - keep it there
         # Does not fit VRAM: keep the FULL window, put the KV cache in system RAM and
-        # let generation run slower. A one-time hint so the slowdown is explained,
-        # not mysterious.
-        from localm.debuglog import logger as _dbg
-        _dbg.warning(
-            "large context (%s tokens): the KV cache does not fit free VRAM "
-            "(net %.2f GB > %.2f GB free), so it is kept in system RAM and generation "
-            "will be slower. Free VRAM or lower n_ctx_max for full-speed GPU KV cache.",
-            f"{n_ctx:,}", delta / 1024**3, free / 1024**3)
+        # let generation run slower. A one-time hint (per loaded-model session) so the
+        # slowdown is explained without spamming the log on every subsequent grow -
+        # each grow of a card-filling model overflows the same way, so repeating it
+        # adds noise, not information.
+        if not self._ram_kv_hint_shown:
+            self._ram_kv_hint_shown = True
+            from localm.debuglog import logger as _dbg
+            _dbg.warning(
+                "large context (%s tokens): the KV cache does not fit free VRAM "
+                "(need %.2f GB > %.2f GB free), so it is kept in system RAM and generation "
+                "will be slower. Free VRAM or lower n_ctx_max for full-speed GPU KV cache.",
+                f"{n_ctx:,}", charge / 1024**3, free / 1024**3)
         return False
 
     # Bounds for VRAM-derived context ceilings
@@ -499,6 +527,9 @@ class GgufBackend(BaseBackend):
         return auto
 
     def load(self) -> None:
+        # Fresh loaded-model session: let the RAM-offload notice fire once again
+        # (the same instance can be reloaded via Engine.chat_stream's auto-reload).
+        self._ram_kv_hint_shown = False
         # Split GGUF pre-flight: all sibling parts must be present, otherwise
         # llama.cpp fails with a cryptic native error mid-load.
         from localm.model_manager import missing_split_parts
