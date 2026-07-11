@@ -16,6 +16,7 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, HTTPException, Request
 
 from localm import scopes
+from localm.debuglog import logger
 from localm.inference.http_server import (principal_id, require_scope,
                                           unload_all_models, unload_one_model)
 import localm.inference.http_server as _hs
@@ -44,14 +45,24 @@ def register(app: FastAPI, ctx) -> None:
         # (issue #435). A builtin like ``str`` always resolves, and "" is the
         # same "no filter" sentinel the sibling routes use (q="", model="").
         from localm.config import load_registry
+        from localm.model_manager import _entry_path
         registry = load_registry()
         current = active_model()
         models = []
         for name, entry in sorted(registry.items()):
-            mtype = entry.get("model_type", "llm")
+            epath = _entry_path(entry)
+            if epath is None:
+                # A hand-corrupted / cross-version registry entry (non-dict, or a
+                # null / non-string / empty path). Skip it so one bad row never
+                # 500s the whole Models page; the CLI `localm list` shows it as
+                # [corrupt] and `localm rm <name>` drops it. Mirrors #562, which
+                # routes every registry consumer through _entry_path.
+                logger.debug("skipping malformed registry entry %r in /api/models", name)
+                continue
+            mtype = str(entry.get("model_type", "llm"))
             if type and mtype != type:
                 continue
-            path = Path(entry.get("path", ""))
+            path = Path(epath)
             size = None
             try:
                 if path.is_file():
@@ -61,7 +72,7 @@ def register(app: FastAPI, ctx) -> None:
             engine = _hs._engines.get(name)
             models.append({
                 "name": name,
-                "source": entry.get("source", ""),
+                "source": str(entry.get("source", "")),
                 "size_bytes": size,
                 "active": name == current,
                 # Independent of "active": a model can be resident in VRAM
@@ -135,14 +146,20 @@ def register(app: FastAPI, ctx) -> None:
         from localm.config import load_registry
         from localm.discover import vram_capacity
         from localm.model_meta import cached_n_layers
+        from localm.model_manager import _entry_path
         from localm.sysstats import estimate_vram
         name = model or active_model()
         model_bytes = 0
         n_layers = None
-        entry = load_registry().get(name)
-        if entry:
+        # _entry_path returns None for a malformed / corrupt entry (non-dict, or a
+        # null / non-string / empty path). The route's own guard below is
+        # except OSError, which would NOT catch the AttributeError / TypeError such
+        # an entry raises; routing through _entry_path keeps a corrupt entry from
+        # 500ing the VRAM readout (model_bytes stays 0 -> still a valid estimate).
+        epath = _entry_path(load_registry().get(name))
+        if epath is not None:
             try:
-                p = Path(entry.get("path", ""))
+                p = Path(epath)
                 if p.is_file():
                     model_bytes = p.stat().st_size
                     # A prior load caches the model's true layer count, so a

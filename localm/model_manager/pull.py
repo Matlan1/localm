@@ -591,10 +591,18 @@ def _pull_hf_snapshot(
     # Same repo already pulled under a different name?
     if not redownload:
         reg = _mm.load_registry()
-        same_source = sorted(
-            n for n, info in reg.items()
-            if info.get("source") == f"hf:{repo_id}" and Path(info.get("path", "")).is_dir()
-        )
+
+        def _is_same_repo(info) -> bool:
+            # Skip a malformed sibling entry (non-dict, or a null / non-string /
+            # empty path): a single corrupt entry must not crash the pull-dedup
+            # scan (a str entry's .get / Path(None) would). Mirrors #562's registry
+            # consumers - route every entry through _entry_path.
+            epath = _mm._entry_path(info)
+            if epath is None:
+                return False
+            return info.get("source") == f"hf:{repo_id}" and Path(epath).is_dir()
+
+        same_source = sorted(n for n, info in reg.items() if _is_same_repo(info))
         if same_source:
             console.print(
                 f"[yellow]This repo is already downloaded - registered as "
