@@ -2255,8 +2255,17 @@ async def _stream_sse(
     cancel_event = threading.Event()
 
     def _generate():
-        gen = engine.chat_stream(messages, **gen_kwargs)
+        # engine.chat_stream is called INSIDE the try: Engine.chat_stream is not a
+        # generator - it eagerly runs the auto-reload (backend.load()) and
+        # load_config() before returning the token generator, so it can RAISE here
+        # (a reload OOM, a since-removed GGUF). If that raise escaped the try, the
+        # thread would die before the finally enqueued the sentinel and the consumer
+        # would block forever at `await token_queue.get()` holding the per-model
+        # semaphore - a permanent per-model deadlock. Inside the try, the except
+        # surfaces it and the finally still enqueues _DONE.
+        gen = None
         try:
+            gen = engine.chat_stream(messages, **gen_kwargs)
             for token in gen:
                 if cancel_event.is_set():
                     break
@@ -2279,9 +2288,11 @@ async def _stream_sse(
             # "generator already executing"). close() propagates GeneratorExit down
             # through the backend wrappers into llama.py _generate, whose
             # `with self._inference_lock` then exits and frees the lock
-            # deterministically - the whole point of the cancel path.
+            # deterministically - the whole point of the cancel path. gen is None
+            # if chat_stream raised eagerly (nothing to close then).
             try:
-                gen.close()
+                if gen is not None:
+                    gen.close()
             except Exception:
                 from localm.debuglog import logger as _dbg
                 _dbg.exception("closing generation stream failed")
@@ -2400,8 +2411,12 @@ async def _stream_sse_completion(
     cancel_event = threading.Event()
 
     def _generate():
-        gen = engine.chat_stream(messages, **gen_kwargs)
+        # chat_stream INSIDE the try: it eagerly runs the auto-reload before
+        # returning the generator, so an eager raise must not escape the try and
+        # orphan the consumer (see the fuller note in _stream_sse).
+        gen = None
         try:
+            gen = engine.chat_stream(messages, **gen_kwargs)
             for token in gen:
                 if cancel_event.is_set():
                     break
@@ -2417,9 +2432,11 @@ async def _stream_sse_completion(
         finally:
             # Close the generator chain from this (suspended) thread so a cancel
             # propagates GeneratorExit into llama.py _generate and frees
-            # _inference_lock (see the fuller note in _stream_sse).
+            # _inference_lock (see the fuller note in _stream_sse). gen is None if
+            # chat_stream raised eagerly (nothing to close then).
             try:
-                gen.close()
+                if gen is not None:
+                    gen.close()
             except Exception:
                 from localm.debuglog import logger as _dbg
                 _dbg.exception("closing completion generation stream failed")
