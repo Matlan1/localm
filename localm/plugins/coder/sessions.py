@@ -13,7 +13,6 @@ queue into the event loop.
 
 from __future__ import annotations
 
-import difflib
 import queue
 import threading
 import time
@@ -21,6 +20,8 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
+from .diffutil import compute_tool_diff, read_old_content
 
 # How long a confirmation may sit unanswered before it is auto-rejected.
 # Overridable via the "coder_confirm_timeout" config key (seconds).
@@ -211,25 +212,12 @@ class CoderSession:
         """Unified diff of what a write/edit/patch call would change, or None."""
         try:
             if call.name == "patch_file":
-                return call.args.get("diff") or None
+                return compute_tool_diff(call.name, call.args, "")
             path_arg = call.args.get("path", "")
             if not path_arg or call.name not in ("write_file", "edit_file"):
                 return None
-            abs_path = (self.cwd / path_arg).resolve()
-            old_text = ""
-            if abs_path.is_file():
-                old_text = abs_path.read_text(encoding="utf-8", errors="replace")
-            if call.name == "write_file":
-                new_text = call.args.get("content", "")
-            else:
-                new_text = old_text.replace(
-                    call.args.get("old", ""), call.args.get("new", ""), 1)
-            diff = "".join(difflib.unified_diff(
-                old_text.splitlines(keepends=True),
-                new_text.splitlines(keepends=True),
-                fromfile=f"a/{path_arg}", tofile=f"b/{path_arg}",
-            ))
-            return diff or None
+            old_text = read_old_content(self.cwd, path_arg)
+            return compute_tool_diff(call.name, call.args, old_text)
         except Exception:
             return None
 

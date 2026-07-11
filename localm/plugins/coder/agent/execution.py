@@ -13,6 +13,7 @@ import localm.plugins.coder.agent as _agent
 from ..display import (
     console, print_tool_call, print_tool_error, print_tool_result,
 )
+from ..diffutil import compute_tool_diff, read_old_content, resolve_new_content
 from ..parser import ToolCall
 from ..tools import ToolResult
 from ..audit import SessionMode
@@ -333,37 +334,9 @@ class _ExecutionMixin:
 
         Returns the diff string, or None if the diff cannot be computed.
         """
-        import difflib as _difflib
-
         path_arg = call.args.get("path", "")
-        abs_path = (self.cwd / path_arg).resolve() if path_arg else None
-        old_text = ""
-        if abs_path and abs_path.is_file():
-            try:
-                old_text = abs_path.read_text(encoding="utf-8", errors="replace")
-            except Exception:
-                pass
-
-        if call.name == "write_file":
-            new_text = call.args.get("content", "")
-        elif call.name == "edit_file":
-            old_str = call.args.get("old", "")
-            new_str = call.args.get("new", "")
-            new_text = old_text.replace(old_str, new_str, 1)
-        elif call.name == "patch_file":
-            # diff is already a unified diff - wrap it as-is
-            diff = call.args.get("diff", "")
-            return diff if diff else None
-        else:
-            return None
-
-        diff_lines = list(_difflib.unified_diff(
-            old_text.splitlines(keepends=True),
-            new_text.splitlines(keepends=True),
-            fromfile=f"a/{path_arg}",
-            tofile=f"b/{path_arg}",
-        ))
-        return "".join(diff_lines) if diff_lines else None
+        old_text = read_old_content(self.cwd, path_arg)
+        return compute_tool_diff(call.name, call.args, old_text)
 
     def flush_patch(self, output_path: Optional[Path] = None) -> str:
         """
@@ -391,31 +364,10 @@ class _ExecutionMixin:
         confirm = _agent.confirm
         confirm_diff = _agent.confirm_diff
         print_diff_preview = _agent.print_diff_preview
-        if call.name == "write_file":
+        if call.name in ("write_file", "edit_file"):
             path_arg = call.args.get("path", "")
-            new_content = call.args.get("content", "")
-            abs_path = (self.cwd / path_arg).resolve() if path_arg else None
-            old_content = ""
-            if abs_path and abs_path.is_file():
-                try:
-                    old_content = abs_path.read_text(encoding="utf-8", errors="replace")
-                except Exception:
-                    pass
-            print_diff_preview(old_content, new_content, path_label=path_arg)
-            return confirm_diff(path_arg or "file")
-
-        if call.name == "edit_file":
-            path_arg    = call.args.get("path", "")
-            old_string  = call.args.get("old", "")
-            new_string  = call.args.get("new", "")
-            abs_path    = (self.cwd / path_arg).resolve() if path_arg else None
-            old_content = ""
-            if abs_path and abs_path.is_file():
-                try:
-                    old_content = abs_path.read_text(encoding="utf-8", errors="replace")
-                except Exception:
-                    pass
-            new_content = old_content.replace(old_string, new_string, 1)
+            old_content = read_old_content(self.cwd, path_arg)
+            new_content = resolve_new_content(call.name, call.args, old_content)
             print_diff_preview(old_content, new_content, path_label=path_arg)
             return confirm_diff(path_arg or "file")
 
