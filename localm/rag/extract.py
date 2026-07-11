@@ -34,6 +34,17 @@ MAX_ARCHIVE_MEMBER_BYTES = 80_000_000
 MAX_ARCHIVE_MEMBERS = 5_000
 _ARCHIVE_TRUNCATED_NOTE = "[archive truncated: content budget reached]"
 
+# Hard cap on how deeply extraction may descend into nested containers. The
+# archive extractors already SKIP nested zip/tar members, but the single-stream
+# fallback (a bare .gz/.bz2/.xz that is NOT a tarball) re-enters extract_bytes on
+# its decompressed inner bytes, so gzip(gzip(gzip(...))) - a ~30 KB file - would
+# recurse without bound and raise RecursionError (not an ExtractError, so it
+# escapes every `except ExtractError` guard in the add/upload/extract routes: a
+# decompression-amplification DoS). A small bound is plenty: the deepest LEGIT
+# nesting is ~2 (a .gz wrapping a .zip of text), and this defends the whole
+# recursive extractor, not just the one known vector.
+MAX_EXTRACT_DEPTH = 8
+
 # Tar-family containers (plain tar plus single-stream gzip/bzip2/xz, which may be
 # a compressed tarball OR a single compressed file). All route to the tar-or-
 # stream handler, which falls back to single-stream decompression when the
@@ -421,9 +432,20 @@ def extract_text(path: Path,
 
 
 def extract_bytes(data: bytes, filename: str,
-                  describe_image_fn: Optional[Callable[[bytes, str], Optional[str]]] = None) -> str:
+                  describe_image_fn: Optional[Callable[[bytes, str], Optional[str]]] = None,
+                  *, _depth: int = 0) -> str:
     """Extract plain text from in-memory file content (chat attachments) -
-    nothing is written to disk, so privacy mode stays trace-free."""
+    nothing is written to disk, so privacy mode stays trace-free.
+
+    ``_depth`` is an INTERNAL recursion counter: the archive/compression handlers
+    re-enter this function on contained or decompressed bytes with ``_depth + 1``,
+    and a value past ``MAX_EXTRACT_DEPTH`` is refused (a nested-container bomb).
+    Callers never pass it."""
+    if _depth > MAX_EXTRACT_DEPTH:
+        raise ExtractError(
+            f"{filename}: nested containers/compression too deep "
+            f"(>{MAX_EXTRACT_DEPTH}); refusing to extract (possible "
+            "decompression bomb).")
     suffix = Path(filename).suffix.lower()
 
     # Determine type using sniffer if suffix is not known/supported
@@ -437,9 +459,9 @@ def extract_bytes(data: bytes, filename: str,
         inferred_ext = inferred
 
     if inferred_ext == ".zip":
-        text = _extract_zip(data, filename, describe_image_fn)
+        text = _extract_zip(data, filename, describe_image_fn, _depth=_depth)
     elif inferred_ext in _TAR_LIKE_SUFFIXES:
-        text = _extract_tar_or_stream(data, filename, describe_image_fn)
+        text = _extract_tar_or_stream(data, filename, describe_image_fn, _depth=_depth)
     elif inferred_ext in _IMAGE_SUFFIXES:
         if not describe_image_fn:
             raise ExtractError(
@@ -508,7 +530,8 @@ def _join_archive(texts: list, truncated: bool) -> str:
 
 
 def _extract_zip(data: bytes, filename: str,
-                 describe_image_fn: Optional[Callable[[bytes, str], Optional[str]]] = None) -> str:
+                 describe_image_fn: Optional[Callable[[bytes, str], Optional[str]]] = None,
+                 *, _depth: int = 0) -> str:
     """Extract and merge text from a ZIP archive, BOUNDED in total output and
     member count so a many-member archive cannot amplify into a RAM DoS
     (AUDIT-HIGH-8). Per-member read failures are logged, not folded into the
@@ -538,7 +561,8 @@ def _extract_zip(data: bytes, filename: str,
                     inferred = sniff_format(member_data, member)
                     # Skip nested archives (zip / tar-family) to avoid loops.
                     if inferred and inferred != ".zip" and inferred not in _TAR_LIKE_SUFFIXES:
-                        txt = extract_bytes(member_data, member, describe_image_fn)
+                        txt = extract_bytes(member_data, member, describe_image_fn,
+                                            _depth=_depth + 1)
                         if txt.strip():
                             block = f"[file: {member}]\n{txt}"
                             texts.append(block)
@@ -552,12 +576,17 @@ def _extract_zip(data: bytes, filename: str,
 
 
 def _extract_tar_or_stream(data: bytes, filename: str,
-                           describe_image_fn: Optional[Callable[[bytes, str], Optional[str]]] = None) -> str:
+                           describe_image_fn: Optional[Callable[[bytes, str], Optional[str]]] = None,
+                           *, _depth: int = 0) -> str:
     """Extract a tar-family payload. Handles plain and compressed TARBALLS
     (.tar/.tgz/.tbz/.txz/.tar.gz) via tarfile; when the payload is a SINGLE
     gzip/bzip2/xz-compressed file rather than a tar, decompresses that one stream
     and extracts its inner content (AUDIT-MED-17: previously a single .gz was
-    mis-routed here and failed, and .tgz/.tbz/.txz had no handler at all)."""
+    mis-routed here and failed, and .tgz/.tbz/.txz had no handler at all).
+
+    The single-stream branch RECURSES into extract_bytes on the decompressed
+    bytes, so it passes ``_depth + 1`` - a nested .gz.gz.gz... is bounded by
+    MAX_EXTRACT_DEPTH instead of recursing until RecursionError."""
     import tarfile
     import io
     try:
@@ -565,14 +594,14 @@ def _extract_tar_or_stream(data: bytes, filename: str,
     except tarfile.ReadError:
         inner = _decompress_single_stream(data, filename)
         return extract_bytes(inner, _strip_compression_suffix(filename),
-                             describe_image_fn)
+                             describe_image_fn, _depth=_depth + 1)
     try:
-        return _extract_tar_members(tf, filename, describe_image_fn)
+        return _extract_tar_members(tf, filename, describe_image_fn, _depth=_depth)
     finally:
         tf.close()
 
 
-def _extract_tar_members(tf, filename: str, describe_image_fn) -> str:
+def _extract_tar_members(tf, filename: str, describe_image_fn, *, _depth: int = 0) -> str:
     texts: list = []
     total = 0
     processed = 0
@@ -599,7 +628,8 @@ def _extract_tar_members(tf, filename: str, describe_image_fn) -> str:
                     continue
                 inferred = sniff_format(member_data, member.name)
                 if inferred and inferred != ".zip" and inferred not in _TAR_LIKE_SUFFIXES:
-                    txt = extract_bytes(member_data, member.name, describe_image_fn)
+                    txt = extract_bytes(member_data, member.name, describe_image_fn,
+                                        _depth=_depth + 1)
                     if txt.strip():
                         block = f"[file: {member.name}]\n{txt}"
                         texts.append(block)

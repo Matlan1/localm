@@ -71,13 +71,19 @@ def register(app: FastAPI, ctx) -> None:
         path = entry.get("path", "")
         p = Path(path)
         size = None
-        try:
-            if p.is_file():
-                size = p.stat().st_size
-            elif p.is_dir():
-                size = sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
-        except OSError:
-            pass
+        # Only stat/walk a REAL path. An empty path (a virtual startup entry, or a
+        # malformed registry row) makes Path("") resolve to "." -> the server's CWD,
+        # whose is_dir() is True and rglob("*") walks the entire working tree: an
+        # aggregate-size info leak plus a filesystem-walk DoS. The path field below
+        # is already scrubbed to "" for an empty path; guard the size branch to match.
+        if path:
+            try:
+                if p.is_file():
+                    size = p.stat().st_size
+                elif p.is_dir():
+                    size = sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+            except OSError:
+                pass
         aliases = sorted(
             n for n, e in registry.items()
             if e.get("path") == path and n != model_id

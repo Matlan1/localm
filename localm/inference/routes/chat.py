@@ -24,7 +24,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 import localm.inference.http_server as _hs
-from localm.inference.backends.base import messages_contain_image
+from localm.inference.backends.base import InvalidGrammarError, messages_contain_image
 from localm.inference.chat_pipeline import ChatHookContext
 from localm.inference.protocol import (
     ChatRequest, CompletionRequest, EmbeddingRequest, make_chunk_id,
@@ -124,6 +124,18 @@ def register(app: FastAPI, ctx) -> None:
                         400, "grammar_lazy requires both grammar and grammar_triggers")
                 gen_kwargs["grammar_lazy"] = True
                 gen_kwargs["grammar_triggers"] = req.grammar_triggers
+
+            # Reject a malformed grammar with a clean 400 UP FRONT (before streaming
+            # starts, so both the stream and non-stream paths get a real 4xx). A bad
+            # grammar reaching generation NULL-derefs the native sampler, which the
+            # GGUF backend catches by latching _grammar_unsupported - silently
+            # stripping grammar from every LATER request too. Validating here keeps a
+            # per-request user error from poisoning the feature for all clients.
+            if req.grammar:
+                try:
+                    engine.validate_grammar(req.grammar)
+                except InvalidGrammarError as e:
+                    raise HTTPException(400, f"Invalid grammar: {e}")
 
             if req.stream:
                 # Ownership of the pin transfers to _pin_engine, which releases it
@@ -260,6 +272,15 @@ def register(app: FastAPI, ctx) -> None:
                         400, "grammar_lazy requires both grammar and grammar_triggers")
                 gen_kwargs["grammar_lazy"] = True
                 gen_kwargs["grammar_triggers"] = req.grammar_triggers
+
+            # Same up-front grammar validation as /v1/chat/completions: a malformed
+            # grammar is a clean 400, never a native fault that latches the silent
+            # _grammar_unsupported degrade for every later request.
+            if req.grammar:
+                try:
+                    engine.validate_grammar(req.grammar)
+                except InvalidGrammarError as e:
+                    raise HTTPException(400, f"Invalid grammar: {e}")
 
             if req.stream:
                 streaming_handoff = True

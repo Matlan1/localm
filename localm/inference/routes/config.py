@@ -78,9 +78,11 @@ def register(app: FastAPI, ctx) -> None:
         readonly = {"effective_mode", "effective_coder_mode", "effective_ctx_max",
                     "instance_id"}
         body = {k: v for k, v in body.items() if k not in readonly}
-        # REC-OWNER-SETTINGS: an owner-only key widens a trust boundary (the rag_*
-        # indexing settings define which host folders the indexer may read), so
-        # a non-owner config:write key must not set it. Mirrors the media
+        # REC-OWNER-SETTINGS: an admin_only key widens a trust boundary, so a
+        # non-owner config:write key must not set it. Today that is the rag_*
+        # indexing settings (which host folders the indexer may read) and
+        # net_allow_private (which DISABLES the SSRF guard, widening network reach)
+        # - a filesystem boundary and a network one. Mirrors the media
         # launch_cmd/api_url guard: require an ADMIN principal; open mode (the
         # trusted local owner) has caller_scopes None and passes. Checked on the
         # RAW body before validation, so an unauthorized caller is refused up front
@@ -91,7 +93,8 @@ def register(app: FastAPI, ctx) -> None:
             if held is not None and scopes.ADMIN not in held:
                 raise HTTPException(
                     403, "Changing " + ", ".join(sorted(locked)) + " requires an "
-                    "owner (admin) key: it widens which folders the server may read.")
+                    "owner (admin) key: it widens a trust boundary (which host "
+                    "folders the server may read, or its network reach).")
         try:
             validated = validate_update(body)
         except ValueError as e:

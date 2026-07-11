@@ -1770,6 +1770,35 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
         return JSONResponse(status_code=500,
                             content={"detail": "Internal server error"})
 
+    from fastapi.exceptions import RequestValidationError
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error(request, exc):  # noqa: ANN001 - framework signature
+        # A 422 body must stay serializable. pydantic records the offending value
+        # under `input`; when a client sends a NON-FINITE number (NaN / Infinity),
+        # Starlette's JSONResponse serializes the error with allow_nan=False and
+        # CRASHES into a 500 - so a bad numeric param turned a clean 422 into an
+        # unhandled 500 (live-confirmed: `top_k: NaN`, `seed: NaN`, and any float
+        # field once allow_inf_nan=False rejects it). Replace non-finite floats in
+        # the error detail so the 422 always renders. Same shape as FastAPI's
+        # default handler for every other (finite) validation error.
+        import math
+
+        from fastapi.encoders import jsonable_encoder
+
+        def _finite_safe(v):
+            if isinstance(v, float) and not math.isfinite(v):
+                return repr(v)      # "nan" / "inf" / "-inf"
+            if isinstance(v, dict):
+                return {k: _finite_safe(x) for k, x in v.items()}
+            if isinstance(v, (list, tuple)):
+                return [_finite_safe(x) for x in v]
+            return v
+
+        return JSONResponse(
+            status_code=422,
+            content={"detail": _finite_safe(jsonable_encoder(exc.errors()))})
+
     # Chat-pipeline hooks: plugins register inlet/stream/outlet transforms that
     # run on every /v1/chat/completions turn. Created here so it exists before
     # plugins load (attach_engine, below) and stays reachable as
@@ -2255,8 +2284,17 @@ async def _stream_sse(
     cancel_event = threading.Event()
 
     def _generate():
-        gen = engine.chat_stream(messages, **gen_kwargs)
+        # engine.chat_stream is called INSIDE the try: Engine.chat_stream is not a
+        # generator - it eagerly runs the auto-reload (backend.load()) and
+        # load_config() before returning the token generator, so it can RAISE here
+        # (a reload OOM, a since-removed GGUF). If that raise escaped the try, the
+        # thread would die before the finally enqueued the sentinel and the consumer
+        # would block forever at `await token_queue.get()` holding the per-model
+        # semaphore - a permanent per-model deadlock. Inside the try, the except
+        # surfaces it and the finally still enqueues _DONE.
+        gen = None
         try:
+            gen = engine.chat_stream(messages, **gen_kwargs)
             for token in gen:
                 if cancel_event.is_set():
                     break
@@ -2279,9 +2317,11 @@ async def _stream_sse(
             # "generator already executing"). close() propagates GeneratorExit down
             # through the backend wrappers into llama.py _generate, whose
             # `with self._inference_lock` then exits and frees the lock
-            # deterministically - the whole point of the cancel path.
+            # deterministically - the whole point of the cancel path. gen is None
+            # if chat_stream raised eagerly (nothing to close then).
             try:
-                gen.close()
+                if gen is not None:
+                    gen.close()
             except Exception:
                 from localm.debuglog import logger as _dbg
                 _dbg.exception("closing generation stream failed")
@@ -2400,8 +2440,12 @@ async def _stream_sse_completion(
     cancel_event = threading.Event()
 
     def _generate():
-        gen = engine.chat_stream(messages, **gen_kwargs)
+        # chat_stream INSIDE the try: it eagerly runs the auto-reload before
+        # returning the generator, so an eager raise must not escape the try and
+        # orphan the consumer (see the fuller note in _stream_sse).
+        gen = None
         try:
+            gen = engine.chat_stream(messages, **gen_kwargs)
             for token in gen:
                 if cancel_event.is_set():
                     break
@@ -2417,9 +2461,11 @@ async def _stream_sse_completion(
         finally:
             # Close the generator chain from this (suspended) thread so a cancel
             # propagates GeneratorExit into llama.py _generate and frees
-            # _inference_lock (see the fuller note in _stream_sse).
+            # _inference_lock (see the fuller note in _stream_sse). gen is None if
+            # chat_stream raised eagerly (nothing to close then).
             try:
-                gen.close()
+                if gen is not None:
+                    gen.close()
             except Exception:
                 from localm.debuglog import logger as _dbg
                 _dbg.exception("closing completion generation stream failed")

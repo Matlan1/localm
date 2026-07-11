@@ -277,6 +277,16 @@ class Engine:
                     self._backend.load()
         return self._backend.embed(texts)
 
+    def validate_grammar(self, grammar: Optional[str]) -> None:
+        """Best-effort up-front grammar validation. Delegates to the backend when
+        it can parse GBNF (the GGUF/llama backend); a backend without the check is
+        a no-op. Raises :class:`InvalidGrammarError` for a malformed grammar so the
+        request path can reject it with a clean 400 instead of a native fault that
+        silently degrades the whole feature."""
+        fn = getattr(self._backend, "validate_grammar", None)
+        if callable(fn):
+            fn(grammar)
+
     def chat_stream(
         self,
         messages: List[dict],

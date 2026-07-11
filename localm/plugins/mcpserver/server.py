@@ -216,12 +216,20 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
 
     def list_models(args: dict) -> dict:
         from localm.config import load_registry
+        from localm.model_manager import _entry_path
         reg = load_registry()
         if not reg:
             return _text_result("No models registered.")
         lines = []
         for name, info in sorted(reg.items()):
-            p = Path(info.get("path", ""))
+            epath = _entry_path(info)
+            if epath is None:
+                # Match the CLI: a single malformed entry is shown corrupt, never
+                # allowed to crash / blank the whole listing (removable via the
+                # remove_model tool). Guards a hand-edited/half-written registry.
+                lines.append(f"{name}  [corrupt]  (malformed registry entry)")
+                continue
+            p = Path(epath)
             if p.is_dir():
                 size = "dir (HF format)"
             elif p.is_file():

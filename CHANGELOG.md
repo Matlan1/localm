@@ -11,7 +11,38 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Fixed
+- A single malformed entry in `registry.json` (from a hand-edit or a partial write)
+  no longer crashes `localm list` / `rm` / `add` / `pull` with an "unexpected error"
+  and a bug-report offer. The bad entry is shown as `[corrupt]`, can be removed with
+  `localm rm <name>`, and your other models still list normally (the same resilience
+  applies to the MCP server's `list_models`).
+- `localm pull <local file> --sha256 <hash>` now actually verifies the checksum and
+  refuses on a mismatch, instead of registering the file and reporting success while
+  silently ignoring the hash you asked it to check.
+- `localm alias <existing> <new-name>` now cleans the new name the same way every
+  other model name is cleaned, so it can no longer write an unsafe (`../x`, `a/b`) or
+  empty key into the registry.
+- A nonexistent model name made only of dots (e.g. `localm run ....`) now reports
+  "Model not found" instead of crashing with an internal error on Windows.
+
 ### Security
+- **Disabling the private-network (SSRF) guard now requires an owner key.** The
+  "Allow private/loopback targets" setting (`net_allow_private`) turns off the
+  guard that blocks model-initiated requests to localhost, your LAN, and
+  cloud-metadata addresses. It was changeable by any key with `config:write`;
+  now, like the other trust-widening settings (the RAG indexing folders, a media
+  backend's launch command), it is owner-only, so a scoped device key can no
+  longer weaken this protection. No change for an owner running the app normally.
+- **`localm key recover` and `localm key clear` now sign out browser sessions.**
+  Rotating the owner key with `key recover` (the compromise-recovery path) or
+  removing it with `key clear` now also invalidates every active browser (cookie)
+  session, matching what the in-app "clear key" button already did. A browser
+  session is deliberately decoupled from the key so a routine key roll does not
+  log you out - but that meant a captured session cookie could keep owner access
+  after a recovery meant to lock an attacker out. Your scoped device keys are
+  untouched, so devices keep working; just sign in again in the browser with the
+  new key.
 - **Knowledge-base indexing refuses credential files named directly through the
   API:** the folder scan already skipped key and secret material (`.pem`, `.key`,
   `id_rsa`, `.env`, and the like) and model-weight binaries, but a file named

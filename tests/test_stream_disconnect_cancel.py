@@ -537,3 +537,93 @@ def test_real_uvicorn_nonstream_disconnect_releases_inference_lock():
     finally:
         server.should_exit = True
         th.join(timeout=10.0)
+
+
+# --------------------------------------------------------------------------- #
+# Eager engine error in the producer thread must not orphan the consumer.
+#
+# Engine.chat_stream is NOT a generator: it eagerly runs the auto-reload
+# (self._backend.load()) and load_config() BEFORE returning the token generator,
+# so it can RAISE at call time (a reload that OOMs, a since-removed GGUF). The
+# producer body used to call it OUTSIDE its try/finally, so such a raise killed
+# the thread before the sentinel was enqueued and the consumer blocked forever at
+# `await token_queue.get()` inside `async with sem` - a permanent per-model
+# deadlock (every later request to that model hangs). These tests drive the REAL
+# _stream_sse / _stream_sse_completion coroutines and require the failure to be
+# surfaced and the semaphore released.
+# --------------------------------------------------------------------------- #
+
+
+class _EagerRaiseEngine:
+    """Engine whose chat_stream raises EAGERLY, before returning a generator -
+    exactly what Engine.chat_stream does when its auto-reload load() fails."""
+
+    def __init__(self):
+        self.display_name = "raise-model"
+        self.last_finish_reason = "stop"
+        self.calls = 0
+
+    def count_messages_tokens(self, messages):
+        return 3
+
+    def count_tokens(self, text):
+        return 1
+
+    def context_capacity(self):
+        return None   # skip the compaction branch
+
+    def chat_stream(self, messages, **kwargs):
+        self.calls += 1
+        raise RuntimeError("reload failed (VRAM OOM)")
+
+
+async def _drain(agen):
+    chunks = []
+    async for c in agen:
+        chunks.append(c)
+    return chunks
+
+
+def test_chat_stream_eager_engine_error_releases_sem_and_surfaces_error():
+    async def scenario():
+        eng = _EagerRaiseEngine()
+        sem = asyncio.Semaphore(1)
+
+        # Must COMPLETE, not hang: a broken producer never enqueues the sentinel,
+        # so the consumer awaits the queue forever and this wait_for times out.
+        chunks = await asyncio.wait_for(
+            _drain(_stream_sse(eng, _MSG, "raise-model", sem)), timeout=5.0)
+
+        assert any("inference error" in c for c in chunks), \
+            "the eager failure must be surfaced to the client, not swallowed"
+        assert not sem.locked(), "semaphore leaked after an eager engine error"
+        assert eng.calls == 1
+
+        # And a brand-new request to the SAME model is not deadlocked behind a
+        # held semaphore - it runs its handler (which also raises, also completes).
+        chunks2 = await asyncio.wait_for(
+            _drain(_stream_sse(eng, _MSG, "raise-model", sem)), timeout=5.0)
+        assert any("inference error" in c for c in chunks2)
+        assert not sem.locked()
+
+    asyncio.run(scenario())
+
+
+def test_completions_stream_eager_engine_error_releases_sem_and_surfaces_error():
+    async def scenario():
+        eng = _EagerRaiseEngine()
+        sem = asyncio.Semaphore(1)
+
+        chunks = await asyncio.wait_for(
+            _drain(_stream_sse_completion(eng, _MSG, "raise-model", sem)), timeout=5.0)
+
+        assert any("inference error" in c for c in chunks), \
+            "the eager failure must be surfaced to the client (completions path)"
+        assert not sem.locked(), "semaphore leaked after an eager engine error (completions)"
+
+        chunks2 = await asyncio.wait_for(
+            _drain(_stream_sse_completion(eng, _MSG, "raise-model", sem)), timeout=5.0)
+        assert any("inference error" in c for c in chunks2)
+        assert not sem.locked()
+
+    asyncio.run(scenario())
