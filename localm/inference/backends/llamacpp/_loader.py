@@ -449,6 +449,35 @@ GGML_DEV_TYPE_GPU = 1
 GGML_DEV_TYPE_ACCEL = 2
 
 
+def _ggml_dev_handles() -> "List[ctypes.CDLL]":
+    """Every loaded handle that MIGHT export the ggml_backend_dev_* registry
+    symbols: the main library on a monolithic build, ggml.dll / ggml-base.dll on a
+    split one (the symbols are split across them). Same candidate set as
+    _register_ggml_backends."""
+    handles: List[ctypes.CDLL] = []
+    if _loaded_lib is not None:
+        handles.append(_loaded_lib)
+    binary_dir = runtime_binary_dir()
+    if binary_dir is not None:
+        try:
+            for p in sorted(binary_dir.glob(_ggml_glob())):
+                try:
+                    handles.append(ctypes.CDLL(str(p)))
+                except OSError:
+                    pass
+        except OSError:
+            pass
+    return handles
+
+
+def _ggml_sym(handles: "List[ctypes.CDLL]", name: str):
+    for h in handles:
+        fn = getattr(h, name, None)
+        if fn is not None:
+            return fn
+    return None
+
+
 def compute_devices() -> "List[tuple]":
     """The ggml compute DEVICES the provisioned runtime registers, as a list of
     ``(name, type)`` where *type* follows ggml_backend_dev_type (0=CPU, 1=GPU,
@@ -459,29 +488,10 @@ def compute_devices() -> "List[tuple]":
     older build without ``ggml_backend_dev_*``); the caller then has no
     device-level signal and must fall back to the provisioned-backend name."""
     load_lib()
-    binary_dir = runtime_binary_dir()
-    # The registry-query symbols live in ggml.dll on a split build, or in the
-    # main library on a monolithic one - gather every handle that might export
-    # them (same candidate set as _register_ggml_backends).
-    handles: List[ctypes.CDLL] = []
-    if _loaded_lib is not None:
-        handles.append(_loaded_lib)
-    if binary_dir is not None:
-        try:
-            for p in sorted(binary_dir.glob(_ggml_glob())):
-                try:
-                    handles.append(ctypes.CDLL(str(p)))
-                except OSError:
-                    pass
-        except OSError:
-            pass
+    handles = _ggml_dev_handles()
 
     def _sym(sym_name: str):
-        for h in handles:
-            fn = getattr(h, sym_name, None)
-            if fn is not None:
-                return fn
-        return None
+        return _ggml_sym(handles, sym_name)
 
     cnt = _sym("ggml_backend_dev_count")
     get = _sym("ggml_backend_dev_get")
@@ -513,3 +523,92 @@ def compute_devices() -> "List[tuple]":
             # device, not silent for the whole probe).
             continue
     return devices
+
+
+# Cache of (gpu_device_handle, bound ggml_backend_dev_memory) once resolved, or
+# False when unavailable (no GPU / no symbol / multi-GPU). The native lib is loaded
+# once for the process lifetime, so the device handle is stable.
+_gpu_mem_cache = None
+
+
+def _resolve_gpu_memory():
+    """Resolve (single GPU device handle, bound ggml_backend_dev_memory fn), or
+    None when there is not exactly one GPU device or the symbol is missing."""
+    handles = _ggml_dev_handles()
+    cnt = _ggml_sym(handles, "ggml_backend_dev_count")
+    get = _ggml_sym(handles, "ggml_backend_dev_get")
+    type_fn = _ggml_sym(handles, "ggml_backend_dev_type")
+    mem_fn = _ggml_sym(handles, "ggml_backend_dev_memory")
+    if not (cnt and get and type_fn and mem_fn):
+        return None
+    cnt.restype = ctypes.c_size_t
+    get.restype = ctypes.c_void_p
+    get.argtypes = [ctypes.c_size_t]
+    type_fn.restype = ctypes.c_int
+    type_fn.argtypes = [ctypes.c_void_p]
+    mem_fn.restype = None
+    mem_fn.argtypes = [ctypes.c_void_p,
+                       ctypes.POINTER(ctypes.c_size_t),
+                       ctypes.POINTER(ctypes.c_size_t)]
+    gpus = []
+    try:
+        n = int(cnt())
+    except Exception:
+        return None
+    for i in range(n):
+        try:
+            dev = get(i)
+            if int(type_fn(dev)) != GGML_DEV_TYPE_CPU:
+                gpus.append(dev)
+        except Exception:
+            continue
+    # Exactly one GPU: an unambiguous device to budget against. Zero GPUs (CPU
+    # build) or two+ (a tensor-split spans devices, and picking one would be
+    # arbitrary) fall back to the torch path, which honours main_gpu_index.
+    if len(gpus) != 1:
+        return None
+    return (gpus[0], mem_fn)
+
+
+def gpu_memory() -> "Optional[tuple]":
+    """(free, total) VRAM bytes of the GPU compute device as the ACTIVE ggml
+    backend itself sees it (ggml_backend_dev_memory), or None when unavailable.
+
+    This is the free-VRAM signal that matches how the model's OWN backend budgets
+    its allocations - the Vulkan / CUDA / Metal / bundled-ROCm runtime actually
+    running the model - so a KV-offload decision reasons with the same numbers the
+    backend enforces when it allocates the KV cache and compute buffers. Two
+    concrete advantages over the torch.cuda.mem_get_info reading it supplements:
+
+      * No torch needed. The Vulkan and Metal builds target boxes with no CUDA/
+        ROCm torch at all; there torch.cuda.mem_get_info answers nothing and the
+        offload decision was blind. ggml_backend_dev_memory always answers.
+      * Right runtime. torch.cuda is a SEPARATE context whose view can diverge
+        from the backend that does the real allocating; this reads the very
+        device the model runs on.
+
+    Returns None when the native lib is not loaded yet (we do NOT force-load it
+    just to measure - a pre-load preflight falls back to the torch reading), the
+    build lacks the symbol, or there is not exactly one GPU device (see
+    _resolve_gpu_memory). NOTE this still reflects the driver's committed budget,
+    not necessarily physical dedicated VRAM: on Windows/WDDM a backend allocation
+    that the driver pages to shared system memory still counts against this number
+    - which is correct, because that same budget is what governs whether the
+    backend's NEXT allocation fits or spills."""
+    if _loaded_lib is None:
+        return None
+    global _gpu_mem_cache
+    if _gpu_mem_cache is None:
+        _gpu_mem_cache = _resolve_gpu_memory() or False
+    if not _gpu_mem_cache:
+        return None
+    dev, mem_fn = _gpu_mem_cache
+    free = ctypes.c_size_t(0)
+    total = ctypes.c_size_t(0)
+    try:
+        mem_fn(dev, ctypes.byref(free), ctypes.byref(total))
+    except Exception:
+        return None
+    if total.value <= 0:
+        return None
+    return (int(free.value), int(total.value))

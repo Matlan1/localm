@@ -455,6 +455,7 @@ class LlamaCpp:
         mmproj_path: Optional[str] = None,
         cancel_event: Optional["threading.Event"] = None,
         vram_check: Optional[Callable[[int], None]] = None,
+        free_vram: Optional[Callable[[], Optional[int]]] = None,
         **_ignored,
     ) -> None:
         self._n_ctx       = n_ctx
@@ -464,6 +465,11 @@ class LlamaCpp:
         # the target n_ctx and raises if it cannot fit. None = no check (the
         # pre-existing behaviour - only a NULL-pointer check after the fact).
         self._vram_check  = vram_check
+        # Optional "free VRAM in bytes, or None" reader, used ONCE at initial
+        # context creation to decide whether the whole-context KV cache fits in
+        # VRAM alongside the decode compute buffers (see _initial_offload_kqv).
+        # None = no reading available (keep the VRAM default).
+        self._free_vram_fn = free_vram
         # Dynamic context window: starts at n_ctx, grows in n_ctx_grow steps
         # up to n_ctx_max when a conversation outgrows it. None/0 = unlimited
         # (the pre-dynamic behaviour: grow exactly as far as needed).
@@ -571,6 +577,17 @@ class LlamaCpp:
         except Exception:
             pass  # introspection is best-effort; never block a successful load
 
+        # Architecture-accurate KV-cache size PER TOKEN, in bytes, read once here
+        # from the model's attention shape (see _read_kv_bytes_per_token). This is
+        # what a full-context KV cache costs per token when offloaded to VRAM, and
+        # it is the number the load-time offload_kqv decision (_initial_offload_kqv)
+        # and the grow-time decision (GgufBackend._check_context_fit, which reads
+        # this attribute) both reason with. It replaces a file-size heuristic that
+        # under-counted wide-KV models by ~2.6x - enough that a big model's load
+        # "fit" per the estimate yet the real KV overflowed VRAM and crashed the
+        # Vulkan backend on the first decode.
+        self.kv_bytes_per_token: int = self._read_kv_bytes_per_token()
+
         # REC-GPULAYERS-CLAMP: llama.cpp already offloads min(n_gpu_layers, actual),
         # so an over-large value is harmless - but silently clamping a SPECIFIC
         # number is confusing, so surface a message. 99 = "offload all", so skip it.
@@ -586,7 +603,12 @@ class LlamaCpp:
         cp.n_ctx             = n_ctx
         cp.n_batch           = min(n_ctx, 2048)
         cp.n_ubatch          = cp.n_batch   # match micro-batch to batch
-        cp.offload_kqv       = True
+        # Where the KV cache lives: VRAM (fast) by default, but system RAM when a
+        # big model has already nearly filled VRAM (else the first decode's
+        # compute buffers have no room and Vulkan crashes natively). Remembered on
+        # self so _prefill_fresh_context keeps a RAM-placed cache in RAM on growth.
+        cp.offload_kqv       = self._initial_offload_kqv(n_ctx)
+        self._offload_kqv    = cp.offload_kqv
         cp.flash_attn_type   = -1  # keep default (unspecified)
         if n_threads is not None:
             cp.n_threads       = n_threads
@@ -615,6 +637,96 @@ class LlamaCpp:
                 from localm.debuglog import logger
                 logger.debug("mmproj load failed (%s); model stays text-only", exc)
                 self._mtmd = None
+
+    def _read_kv_bytes_per_token(self) -> int:
+        """Architecture-accurate KV-cache size PER TOKEN in bytes, from the loaded
+        model's attention shape, or 0 when it cannot be determined (a stripped DLL
+        without the head accessors, or unreadable metadata) so callers fall back to
+        the size-class estimate.
+
+        K and V cache = n_layers x n_head_kv x head_dim, times 2 (K and V) and
+        times 2 bytes/element (the f16 KV cache, llama.cpp's default type_k/type_v).
+        head_dim = n_embd / n_head. n_head_kv (fewer than n_head under grouped-query
+        attention) is exactly why the true KV cost is smaller than a naive n_head
+        estimate - and why estimating it from file size alone is unreliable."""
+        try:
+            if self.n_layers and api.has_kv_head_api():
+                n_embd    = int(api.llama_model_n_embd(self._model_ptr))
+                n_head    = int(api.llama_model_n_head(self._model_ptr))
+                n_head_kv = int(api.llama_model_n_head_kv(self._model_ptr))
+                if n_embd > 0 and n_head > 0 and n_head_kv > 0:
+                    head_dim = n_embd // n_head
+                    return self.n_layers * n_head_kv * head_dim * 2 * 2
+        except Exception as exc:
+            # A genuine failure here (NOT the expected has_kv_head_api-False path,
+            # which skips the block and returns 0 cleanly) silently drops back to
+            # the under-counting size heuristic - which can re-enable the very
+            # Vulkan crash this figure exists to avoid. Log it so that regression is
+            # discoverable rather than invisible (rule 5: surface, then degrade).
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("kv_bytes_per_token computation failed (%s); falling back to "
+                       "the size-class estimate", type(exc).__name__)
+        return 0
+
+    # VRAM the decode graph reserves on TOP of the model weights and the KV cache:
+    # activation/compute buffers and the scheduler reserve. Measured at ~2 GB for a
+    # 12B at n_batch=2048; 3 GB leaves margin. A big model can load with its weights
+    # AND a VRAM KV cache resident yet leave less than this for the first decode's
+    # compute buffers - on Vulkan that faults natively (0xe06d7363) instead of
+    # spilling (ROCm spills). Class attribute so a test can shrink it. See
+    # _initial_offload_kqv.
+    _COMPUTE_RESERVE_BYTES = 3 * 1024 ** 3
+
+    def _initial_offload_kqv(self, n_ctx: int) -> bool:
+        """Decide where the INITIAL context's KV cache lives: return True to keep
+        it in VRAM (offload_kqv, full speed), False to place it in system RAM
+        (slower, but the model runs instead of crashing).
+
+        Default True. But when the model weights have already nearly filled VRAM,
+        keeping the whole-context KV cache in VRAM too leaves no room for the
+        decode compute buffers, and the very first llama_decode then faults with a
+        native C++ crash on the Vulkan backend (ROCm spills to RAM gracefully
+        instead). So when the whole-context KV cache plus a compute reserve would
+        not fit the VRAM left free AFTER the weights are resident, return False and
+        keep the KV cache in system RAM. This is the load-time twin of
+        _prefill_fresh_context's grow-time RAM offload: a model that CAN run must
+        run, never crash.
+
+        Acts only when free VRAM is measurable (the free_vram reader returns a
+        value - it reads the active backend's own device budget, see
+        GgufBackend._free_vram_bytes / loader.gpu_memory) AND the architecture-
+        accurate per-token KV size is known; otherwise it keeps the VRAM default,
+        so a model that fits fine is never needlessly slowed. Free VRAM is read
+        HERE, right before context creation, so it reflects what the already-loaded
+        weights left behind."""
+        if not self.kv_bytes_per_token:
+            return True   # no accurate KV size (stripped build) - keep the default
+        free_fn = getattr(self, "_free_vram_fn", None)
+        if free_fn is None:
+            return True   # no free-VRAM reader wired - keep the default
+        try:
+            free = free_fn()
+        except Exception:
+            free = None
+        if free is None:
+            return True   # unmeasurable (no torch / device not visible) - default
+        # Whole-context KV for ALL layers (kv_bytes_per_token is the full-model
+        # figure). A PARTIAL GPU offload keeps only the offloaded layers' KV in
+        # VRAM, so this over-charges for one - deliberately: it only ever errs
+        # toward the safe side (KV to RAM), never toward the crash, and the crash
+        # case is a FULL offload that fills the card anyway.
+        whole_kv = n_ctx * self.kv_bytes_per_token
+        if whole_kv + self._COMPUTE_RESERVE_BYTES > free:
+            from localm.debuglog import logger as _dbg
+            _dbg.warning(
+                "large model fills VRAM: keeping the KV cache in system RAM - "
+                "generation will be slower (whole-context KV %.2f GB + ~%.0f GB "
+                "compute reserve > %.2f GB VRAM free after weights).",
+                whole_kv / 1024 ** 3,
+                self._COMPUTE_RESERVE_BYTES / 1024 ** 3,
+                free / 1024 ** 3)
+            return False
+        return True
 
     @property
     def supports_images(self) -> bool:
@@ -1091,9 +1203,14 @@ class LlamaCpp:
         native call already ran.
         """
         target = self._target_ctx(needed)
-        offload_kqv = True
+        # Inherit the current context's KV placement (default VRAM). Once the KV
+        # cache is in system RAM - the initial load or an earlier grow put it there
+        # because VRAM was too tight - keep it there: a LARGER context's KV cannot
+        # suddenly fit VRAM, and moving it back risks the very native crash the RAM
+        # offload exists to avoid. Only re-ask the hook while the KV is still in VRAM.
+        offload_kqv = getattr(self, "_offload_kqv", True)
         vram_check = getattr(self, "_vram_check", None)
-        if vram_check is not None:
+        if offload_kqv and vram_check is not None:
             # Ask WHERE this context's KV cache must live (it charges only the NET KV
             # growth - the old context's KV is reclaimed when we free it below). If it
             # does not fit VRAM, keep the FULL window but put the KV cache in system
@@ -1124,6 +1241,9 @@ class LlamaCpp:
                 f"free some memory."
             )
         self._ctx_capacity = cp.n_ctx
+        # Remember where this (re)created context's KV cache lives, so the next
+        # grow inherits it (sticky RAM - see the offload_kqv decision above).
+        self._offload_kqv = offload_kqv
         # Update the tokenizer's ctx reference
         self._tokenizer._ctx = self._ctx_ptr
 
