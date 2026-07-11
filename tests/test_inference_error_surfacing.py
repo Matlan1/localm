@@ -184,3 +184,42 @@ def test_completions_stream_success_keeps_stop():
     assert r.status_code == 200
     assert "[inference error" not in r.text
     assert _terminal_finish_reason(r.text) == "stop"
+
+
+# --------------------------------------------------------------------------- #
+# The NON-STREAMING path (_generate_full) had a try/finally with NO except, so a
+# generation failure (e.g. not enough free VRAM for the prompt) escaped as a raw
+# HTTP 500 "Internal server error" instead of the clean surfacing the streaming
+# path already does. It must now match: 200, the error as content, finish_reason
+# "error".
+# --------------------------------------------------------------------------- #
+
+def test_chat_completions_nonstream_surfaces_inference_error():
+    engine = _raising_engine()
+    engine.last_finish_reason = "stop"   # prove the HTTP layer sets "error", not the engine
+    with TestClient(create_app(engine)) as client:
+        r = client.post("/v1/chat/completions", json={
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": False,
+        })
+    assert r.status_code == 200          # NEVER a raw 500
+    choice = r.json()["choices"][0]
+    assert "[inference error" in choice["message"]["content"]
+    assert "outgrown" in choice["message"]["content"]
+    assert choice["finish_reason"] == "error"
+
+
+def test_chat_completions_nonstream_success_keeps_stop():
+    # The error override must not leak into a clean non-streaming generation.
+    engine = _yielding_engine(reason="stop")
+    with TestClient(create_app(engine)) as client:
+        r = client.post("/v1/chat/completions", json={
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": False,
+        })
+    assert r.status_code == 200
+    choice = r.json()["choices"][0]
+    assert "[inference error" not in choice["message"]["content"]
+    assert choice["finish_reason"] == "stop"

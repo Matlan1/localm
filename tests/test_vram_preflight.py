@@ -147,43 +147,53 @@ class TestKvCacheAwarePreflight:
 
 
 class TestCheckContextFit:
-    """CHK-KVCACHE-OVERFLOW (growth path): GgufBackend._check_context_fit() is
-    the vram_check callback wired into LlamaCpp so context GROWTH (e.g. the
-    first prompt, since default max_tokens=4096 already forces a grow past the
-    default base n_ctx=4096 - see _prefill_fresh_context) gets the same
-    preflight the initial load already has. Unlike _check_vram() (which runs
-    before anything is resident, so must include model weights), weights are
-    ALREADY resident by growth time - the check must compare only the NEW KV
-    cache + overhead against currently free VRAM, never weights again (that
-    would double-count them and false-refuse an ordinary-sized grow)."""
+    """GgufBackend._check_context_fit() is the vram_check callback wired into
+    LlamaCpp: it decides WHERE a growing context's KV cache must live. Returns True
+    to keep the KV cache in VRAM (offload_kqv - fast), False to place it in system
+    RAM (slower, but keeps the FULL window - a degrade, not a shrink or an abort),
+    or None when VRAM is unmeasurable / irrelevant.
 
-    def test_raises_when_new_kv_cache_exceeds_free_vram(self, tmp_path):
-        b = _backend(tmp_path, size_bytes=80_000_000)
+    It NEVER raises and NEVER charges weights (already resident). Because
+    _prefill_fresh_context frees the live context (current_ctx KV) BEFORE allocating
+    the bigger one, only the NET KV growth over the resident context is charged; the
+    resident compute-buffer overhead is not re-charged. Regression: the old version
+    charged the WHOLE target KV + a 1.5 GB overhead against free VRAM measured while
+    the old KV was still resident, and hard-raised - false-aborting the very first
+    prompt on a model that fills the card yet generates fine once the old KV is
+    reclaimed (vram-grow-fail-rootcause.md)."""
+
+    def test_uses_ram_when_kv_growth_does_not_fit_vram(self, tmp_path):
+        # A grow whose NET KV growth cannot fit VRAM keeps the FULL window but puts
+        # the KV cache in system RAM (return False) - never shrinks, never aborts.
+        b = _backend(tmp_path, size_bytes=80_000_000, n_ctx=4096)
         with patch.object(GgufBackend, "_free_vram_bytes", return_value=50_000_000):
-            with pytest.raises(RuntimeError) as exc:
-                b._check_context_fit(2_000_000)   # kv alone ~32GB, no weights term
-        msg = str(exc.value)
-        assert "too large" in msg.lower()
-        assert "2,000,000" in msg
+            assert b._check_context_fit(2_000_000, current_ctx=4096) is False
+
+    def test_charges_only_net_growth_over_resident_context(self, tmp_path):
+        # The old context's KV is reclaimed before the new is allocated, so only the
+        # DELTA (target - current) is charged. Free here holds the delta but NOT the
+        # whole target KV + overhead: the OLD hard check would have false-refused;
+        # the delta check passes -> KV fits VRAM (return True).
+        # per_token ~= 90_000; delta(8192 from 4096) ~= 368 MB; whole target KV
+        # ~= 737 MB, + 1.5 GB overhead ~= 2.2 GB. Free = 500 MB.
+        b = _backend(tmp_path, size_bytes=9_000_000_000, n_ctx=4096)
+        with patch.object(GgufBackend, "_free_vram_bytes", return_value=500_000_000):
+            assert b._check_context_fit(8192, current_ctx=4096) is True
 
     def test_does_not_double_count_resident_weights(self, tmp_path):
-        # Free VRAM here is LESS than the model's weight size (as expected,
-        # since the weights are already resident and thus already NOT free) -
-        # a check that wrongly re-added weights to "need" would false-refuse
-        # this ordinary small grow. Only the new KV cache + overhead may count.
         b = _backend(tmp_path, size_bytes=9_000_000_000, n_ctx=4096)
         with patch.object(GgufBackend, "_free_vram_bytes", return_value=4_000_000_000):
-            b._check_context_fit(8192)   # must not raise
+            assert b._check_context_fit(8192, current_ctx=4096) is True   # KV fits VRAM
 
-    def test_silent_when_vram_not_measurable(self, tmp_path):
+    def test_returns_none_when_vram_not_measurable(self, tmp_path):
         b = _backend(tmp_path, size_bytes=80_000_000)
         with patch.object(GgufBackend, "_free_vram_bytes", return_value=None):
-            b._check_context_fit(2_000_000)   # must not raise - unmeasurable
+            assert b._check_context_fit(2_000_000) is None   # unmeasurable -> keep default (VRAM)
 
-    def test_silent_for_cpu_only_run(self, tmp_path):
+    def test_returns_none_for_cpu_only_run(self, tmp_path):
         b = _backend(tmp_path, size_bytes=80_000_000, n_gpu_layers=0)
         with patch.object(GgufBackend, "_free_vram_bytes", return_value=0):
-            b._check_context_fit(2_000_000)   # must not raise - CPU-only
+            assert b._check_context_fit(2_000_000) is None   # CPU-only -> KV already in RAM
 
     def test_load_native_wires_check_context_fit_into_llamacpp(self, tmp_path):
         """End to end: _load_native() must pass GgufBackend's OWN bound

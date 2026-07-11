@@ -2634,16 +2634,32 @@ async def _complete(
                 prompt_tokens = engine.count_messages_tokens(messages)
 
     # Serialise inference - only one request runs at a time
+    gen_error: Exception | None = None
     async with sem:
         gen_start = time.perf_counter()
         # Cancelable on client disconnect so an aborted request releases the
         # per-model _inference_lock (and this semaphore) instead of generating to
         # end-of-budget behind the next request's back.
-        text = await _generate_full(engine, messages, request, **gen_kwargs)
+        try:
+            text = await _generate_full(engine, messages, request, **gen_kwargs)
+        except RuntimeError as e:
+            # A generation FAILURE (not enough free VRAM for this prompt, a
+            # conversation that outgrew n_ctx_max, a native decode error) is raised
+            # as RuntimeError; it must reach the client as a clean reply, never a
+            # raw HTTP 500 - the non-streaming twin of the streaming path's
+            # gen_error handling. Catch ONLY RuntimeError, not Exception: a broken
+            # engine (e.g. a method-less mock -> AttributeError) is a real bug that
+            # must surface loudly, not be masked as an "inference error" (rule 5);
+            # and CancelledError (client disconnect) must not be swallowed either.
+            from localm.debuglog import logger as _dbg
+            _dbg.exception("non-streaming generation failed")
+            gen_error = e
+            text = f"\n[inference error: {e}]"
         gen_elapsed = time.perf_counter() - gen_start
 
-    # Outlet fully controls the returned content in the non-streaming path.
-    if pipeline is not None and ctx is not None and pipeline.has("outlet"):
+    # Outlet fully controls the returned content in the non-streaming path (but a
+    # failed generation surfaces its error verbatim, not reshaped by the outlet).
+    if gen_error is None and pipeline is not None and ctx is not None and pipeline.has("outlet"):
         text = await pipeline.run_outlet(text, messages, ctx)
 
     _audit_exchange(audit, transcript, messages, text)
@@ -2670,7 +2686,8 @@ async def _complete(
             FullChoice(
                 message=Message(role="assistant", content=answer,
                                 reasoning_content=reasoning or None),
-                finish_reason=_engine_finish_reason(engine),
+                finish_reason=("error" if gen_error is not None
+                               else _engine_finish_reason(engine)),
             )
         ],
         usage=usage,
