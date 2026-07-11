@@ -106,8 +106,25 @@ class GgufBackend(BaseBackend):
 
     @staticmethod
     def _free_vram_bytes() -> Optional[int]:
-        """Free VRAM in bytes on the configured main GPU device, or None when
-        not measurable."""
+        """Free VRAM in bytes on the GPU the model runs on, or None when not
+        measurable.
+
+        Prefers the ACTIVE ggml backend's own view (loader.gpu_memory): the same
+        runtime that allocates the model, so a KV-offload decision budgets against
+        the numbers the backend will actually enforce. It also needs no torch, so
+        it works on the Vulkan/Metal builds that ship without a CUDA/ROCm torch -
+        where torch.cuda.mem_get_info answered nothing and the offload decision was
+        blind. Falls back to torch.cuda on the configured main GPU when the native
+        backend is not loaded yet (a preflight before the first load), the build
+        lacks the query, or a multi-GPU split is configured (torch honours
+        main_gpu_index). See loader.gpu_memory for the WDDM committed-budget caveat."""
+        try:
+            from localm.inference.backends.llamacpp import _loader
+            mem = _loader.gpu_memory()
+            if mem is not None:
+                return mem[0]
+        except Exception:
+            pass  # backend query unavailable - fall back to the torch reading
         return GgufBackend._free_total_vram_bytes()[0]
 
     @staticmethod
@@ -313,7 +330,14 @@ class GgufBackend(BaseBackend):
         # KV bytes per token on the GPU: only the offloaded layers keep their KV in
         # VRAM (offload_kqv); CPU layers' KV lives in system RAM. Mirror _check_vram's
         # weight fraction so a partial auto load is charged only its GPU share.
-        per_token = self._bytes_per_token(self._model_bytes())
+        # Prefer the architecture-accurate per-token KV size computed at load
+        # (LlamaCpp.kv_bytes_per_token) over the size-class heuristic, which
+        # under-counts wide-KV models badly (~2.6x low on a 12B) and would judge a
+        # KV cache that actually overflows VRAM to fit. Fall back to the estimate
+        # only when the accurate value is unavailable (model not loaded yet in a
+        # direct/test call, or a stripped DLL without the head accessors).
+        per_token = (getattr(self._llm, "kv_bytes_per_token", 0)
+                     or self._bytes_per_token(self._model_bytes()))
         if gpu_layers < self._DEFAULT_GPU_LAYERS:
             layers = self._cached_layer_count() or self._ASSUMED_LAYERS
             per_token = int(per_token * min(1.0, gpu_layers / layers))
@@ -554,10 +578,25 @@ class GgufBackend(BaseBackend):
                 mmproj_path=self.mmproj_path,   # C1: in-process vision via mtmd
                 cancel_event=self._load_cancel,  # abort mid-load if superseded
                 vram_check=self._check_context_fit,  # guard context GROWTH too
+                # Free-VRAM reader for the load-time KV-placement decision (a big
+                # model that fills VRAM keeps its KV cache in system RAM so the
+                # first decode does not crash Vulkan - LlamaCpp._initial_offload_kqv).
+                free_vram=self._free_vram_bytes,
                 verbose=False,
             )
 
         self._loaded = True
+
+        # If the load put the KV cache in system RAM because the model nearly fills
+        # VRAM (LlamaCpp._initial_offload_kqv), say so: generation will be slower.
+        # Surfaced here where the other load notices print; the mechanism also logs
+        # a debug line.
+        if getattr(self._llm, "_offload_kqv", True) is False:
+            console.print(
+                "[yellow]  KV cache in system RAM[/yellow] (model nearly fills "
+                "VRAM) - generation is slower but stable. Free VRAM or lower the "
+                "context for a full-speed GPU KV cache."
+            )
 
         # Remember the model's true transformer layer count (read once during the
         # native load - the only place it is knowable) so the next load and the

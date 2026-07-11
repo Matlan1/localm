@@ -134,6 +134,25 @@ def _reset_gpu_probe_cache():
     discover._reset_gpu_probe_cache()
 
 
+@pytest.fixture(autouse=True)
+def _neutralise_backend_vram_query():
+    """loader.gpu_memory() reads the ACTIVE ggml backend's free VRAM (the signal
+    GgufBackend._free_vram_bytes prefers). The real_gguf resource gate above calls
+    load_lib() at COLLECTION time, so _loaded_lib is set for the whole session -
+    which would make gpu_memory() return THIS machine's real free VRAM inside the
+    many unit tests that simulate VRAM by patching _free_total_vram_bytes, silently
+    defeating their mock. Force the resolver cache to the 'unavailable' sentinel so
+    gpu_memory() returns None (and _free_vram_bytes falls back to the patched torch
+    reader) unless a test opts in by setting the cache / patching gpu_memory itself.
+    We do NOT reset _loaded_lib: dropping that reference could unload the DLL out
+    from under an integration test's live model."""
+    from localm.inference.backends.llamacpp import _loader
+    saved = _loader._gpu_mem_cache
+    _loader._gpu_mem_cache = False   # falsy, non-None -> gpu_memory() returns None
+    yield
+    _loader._gpu_mem_cache = saved
+
+
 @pytest.fixture
 def cli_runner(tmp_path, monkeypatch):
     """End-to-end CLI harness: a click CliRunner with a throwaway LOCALM_HOME.
