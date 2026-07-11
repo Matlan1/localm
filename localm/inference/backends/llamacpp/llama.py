@@ -469,15 +469,17 @@ class LlamaCpp:
         n_ctx_grow: int = 4096,
         mmproj_path: Optional[str] = None,
         cancel_event: Optional["threading.Event"] = None,
-        vram_check: Optional[Callable[[int], None]] = None,
+        vram_check: Optional[Callable[[int, int], Optional[bool]]] = None,
         **_ignored,
     ) -> None:
         self._n_ctx       = n_ctx
         # Optional preflight consulted by _prefill_fresh_context() before
         # (re)creating a BIGGER context (conversation growth, not just the
-        # initial load already guarded by the caller's own preflight): takes
-        # the target n_ctx and raises if it cannot fit. None = no check (the
-        # pre-existing behaviour - only a NULL-pointer check after the fact).
+        # initial load already guarded by the caller's own preflight). Called
+        # with (target_n_ctx, current_ctx_capacity); returns True to keep the KV
+        # cache in VRAM, False to place it in system RAM (a degrade, never an
+        # abort), or None when VRAM is unmeasurable (keep the default). None (the
+        # attribute) = no check (only a NULL-pointer check on the result after).
         self._vram_check  = vram_check
         # Dynamic context window: starts at n_ctx, grows in n_ctx_grow steps
         # up to n_ctx_max when a conversation outgrows it. None/0 = unlimited
@@ -505,6 +507,13 @@ class LlamaCpp:
         # Persistent KV cache bookkeeping (prefix reuse across calls)
         self._cached_tokens: List[int] = []   # tokens currently in the KV cache
         self._ctx_capacity  = n_ctx           # n_ctx of the live context
+        # Where the live context's KV cache actually lives: True = VRAM (offload_kqv),
+        # False = system RAM (a prior grow found VRAM too tight). The initial context
+        # below is created with offload_kqv=True. _prefill_fresh_context updates this,
+        # and GgufBackend._check_context_fit reads it so a further grow charges the KV
+        # correctly (full target vs net delta) - otherwise a RAM-resident KV would be
+        # under-charged and wrongly flipped back to VRAM, overflowing and aborting.
+        self._offload_kqv   = True
         self._kv_supported: Optional[bool] = None   # lazy llama_memory_* probe
 
         _ctx = _quiet_stderr if not verbose else contextlib.nullcontext
@@ -1168,11 +1177,13 @@ class LlamaCpp:
         offload_kqv = True
         vram_check = getattr(self, "_vram_check", None)
         if vram_check is not None:
-            # Ask WHERE this context's KV cache must live (it charges only the NET KV
-            # growth - the old context's KV is reclaimed when we free it below). If it
-            # does not fit VRAM, keep the FULL window but put the KV cache in system
-            # RAM (slower) rather than shrinking the window or refusing - a degrade,
-            # not an abort, so a model that can run always runs.
+            # Ask WHERE this context's KV cache must live. The check reads
+            # self._offload_kqv (the CURRENT placement) to charge correctly: the net
+            # growth when the old KV is in VRAM and reclaimed by the free below, or the
+            # full target when the old KV is already in system RAM (nothing to reclaim).
+            # If it does not fit VRAM, keep the FULL window but put the KV cache in
+            # system RAM (slower) rather than shrinking the window or refusing - a
+            # degrade, not an abort, so a model that can run always runs.
             decision = vram_check(target, self._ctx_capacity)
             if decision is False:
                 offload_kqv = False
@@ -1190,14 +1201,18 @@ class LlamaCpp:
 
         self._ctx_ptr = api.llama_init_from_model(self._model_ptr, cp)
         if not self._ctx_ptr:
-            # Last resort: it did not fit even with the KV cache in system RAM
-            # (offload_kqv set False above when VRAM was tight). Surface it clearly.
+            # The native context could not be created. Report HONESTLY where the KV was
+            # placed (rule 5): "even in system RAM" only when we actually chose RAM;
+            # if we judged it fit VRAM and it still failed, say so - do not claim a RAM
+            # fallback we never attempted.
+            where = ("even with the KV cache in system RAM"
+                     if not offload_kqv else "with the KV cache in VRAM")
             raise RuntimeError(
-                f"Not enough memory to create a {target:,}-token context, even with "
-                f"the KV cache in system RAM. Start a new chat, lower n_ctx_max, or "
-                f"free some memory."
+                f"Not enough memory to create a {target:,}-token context, {where}. "
+                f"Start a new chat, lower n_ctx_max, or free some memory."
             )
         self._ctx_capacity = cp.n_ctx
+        self._offload_kqv = offload_kqv   # record the new context's KV placement
         # Update the tokenizer's ctx reference
         self._tokenizer._ctx = self._ctx_ptr
 
