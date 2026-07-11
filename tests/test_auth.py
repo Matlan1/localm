@@ -165,6 +165,45 @@ def test_empty_keystore_is_not_configured(auth):
     assert auth.any_key_configured() is True
 
 
+def test_unreadable_owner_key_fails_closed(auth):
+    # SEC (checkup 2026-07-11 HIGH): an OWNER key file that EXISTS but cannot be
+    # read (here a directory, which makes read_text raise OSError) must count as
+    # auth-in-effect (fail CLOSED) - the server locks (every request needs a key,
+    # none verify) instead of silently dropping to open/keyless mode. Mirrors
+    # test_unreadable_keystore_fails_closed, for the owner key path.
+    auth.key_file().mkdir(parents=True, exist_ok=True)
+    assert auth.any_key_configured() is True          # fail closed, not open
+
+
+def test_absent_owner_key_is_open(auth):
+    # The genuinely ABSENT owner key (no file, no env, no keystore) stays open by
+    # design - must remain DISTINCT from the present-but-unreadable case above.
+    assert not auth.key_file().exists()
+    assert auth.any_key_configured() is False
+
+
+def test_transient_unreadable_owner_key_is_retried(auth, monkeypatch):
+    # A TRANSIENT read failure on auth.key (a concurrent atomic replace / an
+    # antivirus / an indexer holding it for a microsecond on Windows) must be
+    # ridden out with a bounded retry, not read as "no key" for that request
+    # (which would flap the owner's own auth), matching config._read_json.
+    from pathlib import Path
+    auth.set_api_key("s3cret-key")
+    real_read = Path.read_text
+    key_path = auth.key_file()
+    seen = {"n": 0}
+
+    def flaky(self, *a, **k):
+        if self == key_path and seen["n"] == 0:
+            seen["n"] += 1
+            raise PermissionError("simulated transient sharing violation")
+        return real_read(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", flaky)
+    assert auth.get_api_key() == "s3cret-key"          # rode out the transient
+    assert seen["n"] == 1                               # proved it hit that path
+
+
 def test_owner_key_is_admin(auth, monkeypatch):
     from localm import scopes as S
     monkeypatch.setenv("LOCALM_API_KEY", "ownersecret")
