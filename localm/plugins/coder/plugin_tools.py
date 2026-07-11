@@ -36,7 +36,8 @@ from __future__ import annotations
 from typing import List, Tuple
 
 from .provenance import neutralise
-from .tools import TOOL_REGISTRY, ToolDef, ToolResult
+from .tool_registration import register_foreign_tool
+from .tools import ToolResult
 
 
 def _neutralise_params(params: dict) -> dict:
@@ -113,16 +114,6 @@ def register_plugin_tools() -> Tuple[List[str], List[str]]:
         for export in manifest.tool_exports:
             reg_name = f"plugin_{manifest.name}_{export}".replace("-", "_")
 
-            if reg_name in TOOL_REGISTRY:
-                existing = TOOL_REGISTRY[reg_name]
-                if existing.description.startswith(f"[plugin:{manifest.name}]"):
-                    # Already registered by us in a prior agent init (e.g. a
-                    # sub-agent): reuse it, still surface it to the model.
-                    registered.append(reg_name)
-                else:
-                    warnings.append(f"Plugin tool name clash, skipped: {reg_name}")
-                continue
-
             fn = getattr(module, export, None)
             if not callable(fn):
                 warnings.append(
@@ -142,17 +133,19 @@ def register_plugin_tools() -> Tuple[List[str], List[str]]:
             params = _neutralise_params(params)
             destructive = bool(getattr(fn, "tool_destructive", True))
 
-            TOOL_REGISTRY[reg_name] = ToolDef(
-                name=reg_name,
+            register_foreign_tool(
+                reg_name,
                 fn=_make_plugin_tool_fn(fn, reg_name),
-                # A plugin tool's description lands in the system prompt; defang
-                # control tokens / frame markers in it so an installed plugin (or
-                # one whose description is sourced non-locally) cannot forge a role
-                # boundary. A no-op for ordinary descriptions.
-                description=neutralise(f"[plugin:{manifest.name}] {description}".strip()),
+                description=f"[plugin:{manifest.name}] {description}",
                 params=params,
                 destructive=destructive,
+                source_label="Plugin",
+                registered=registered,
+                warnings=warnings,
+                # Already registered by us in a prior agent init (e.g. a
+                # sub-agent): reuse it, still surface it to the model.
+                reuse_if_already_ours=lambda existing, _n=manifest.name:
+                    existing.description.startswith(f"[plugin:{_n}]"),
             )
-            registered.append(reg_name)
 
     return registered, warnings

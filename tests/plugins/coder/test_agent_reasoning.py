@@ -120,6 +120,62 @@ class TestCallLLMInteractive:
         assert call.args[0] == "ok"
         assert call.kwargs["reasoning"] == "thinking..."
 
+    def test_interrupted_stream_still_records_partial_text(self, tmp_path):
+        """A KeyboardInterrupt mid-stream (Ctrl-C at the terminal) must still
+        record and return whatever text streamed before the interrupt, not
+        lose it - the original inline code did this via a bare try/except
+        wrapping the whole consume+record sequence; _stream_and_record must
+        preserve that exact behaviour."""
+        agent = _make_agent(tmp_path)
+
+        def fake_chat_stream(messages, on_reasoning=None, **kw):
+            yield "partial "
+            raise KeyboardInterrupt()
+
+        agent.backend.chat_stream.side_effect = fake_chat_stream
+
+        with patch("localm.plugins.coder.agent.context.print_reasoning_token"), \
+             patch("localm.plugins.coder.agent.context.print_streaming_token"), \
+             patch("localm.plugins.coder.agent.context.print_streaming_done") as mock_done, \
+             patch("localm.plugins.coder.agent.context.print_info") as mock_info:
+            result = agent._call_llm([{"role": "user", "content": "hi"}], interactive=True)
+
+        assert result == "partial "
+        mock_done.assert_called_once()
+        mock_info.assert_called_once_with("(interrupted)")
+        agent._audit.llm.assert_called_once()
+
+    def test_event_sink_and_interactive_share_one_streaming_implementation(self, tmp_path):
+        """CODER-3 regression guard: a comment in this module's history records
+        that the interactive branch once silently missed a fix (the lazy
+        tool-call grammar) the event-sink branch got, because the two branches
+        duplicated the whole consume-and-record loop. Both must now call the
+        SAME _stream_and_record method, so a future fix can never land in only
+        one of them again."""
+        from localm.plugins.coder.agent.context import _ContextMixin
+
+        agent = _make_agent(tmp_path, on_event=lambda e: None)
+        calls = []
+        original = _ContextMixin._stream_and_record
+
+        def _spy(self, *a, **kw):
+            calls.append("event_sink" if self.on_event is not None else "interactive")
+            return original(self, *a, **kw)
+
+        _reasoning_stream_backend(agent.backend, ["ok"], [])
+        with patch.object(_ContextMixin, "_stream_and_record", _spy):
+            agent._call_llm([{"role": "user", "content": "hi"}], interactive=False)
+        assert calls == ["event_sink"]
+
+        agent2 = _make_agent(tmp_path)
+        _reasoning_stream_backend(agent2.backend, ["ok"], [])
+        calls.clear()
+        with patch.object(_ContextMixin, "_stream_and_record", _spy), \
+             patch("localm.plugins.coder.agent.context.print_reasoning_token"), \
+             patch("localm.plugins.coder.agent.context.print_streaming_token"):
+            agent2._call_llm([{"role": "user", "content": "hi"}], interactive=True)
+        assert calls == ["interactive"]
+
     def test_interactive_response_and_history_never_contain_raw_think_tags(self, tmp_path):
         """The coder loop has no ThinkSplitter downstream (unlike cli/chat.py),
         so the returned response - which agent/loop.py stores verbatim via

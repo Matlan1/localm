@@ -307,6 +307,53 @@ ws     ::= [ \t\n\r]*
             kw["grammar_lazy"] = True
         return kw
 
+    def _stream_and_record(self, messages: list[dict], *, on_token, on_reasoning,
+                           on_interrupt=None) -> str:
+        """
+        Consume backend.chat_stream, hiding tool-call blocks from *on_token*,
+        routing reasoning deltas to *on_reasoning*, honouring a mid-stream stop
+        request, then recording usage/audit.
+
+        Shared by ``_call_llm``'s event-sink and interactive branches (CODER-3)
+        - previously each duplicated this entire consume-and-record loop, a
+        divergence that already caused a real bug once (see the historical note
+        on the lazy tool-call grammar at the interactive call site below).
+
+        *on_interrupt*, when given, is called on a ``KeyboardInterrupt`` raised
+        mid-stream instead of letting it propagate (the interactive terminal's
+        "(interrupted)" display); the partial text streamed so far is still
+        recorded and returned, matching the original interactive behaviour.
+        """
+        full = ""
+        reasoning_parts: list[str] = []
+
+        def _capture_reasoning(piece: str) -> None:
+            reasoning_parts.append(piece)
+            on_reasoning(piece)
+
+        try:
+            # _llm_kwargs (not raw gen_kwargs): every dispatch branch must get
+            # the lazy tool-call grammar - the terminal REPL branch previously
+            # skipped it, a divergence this shared helper closes for good.
+            for piece, hidden in self._stream_hiding_tool_calls(
+                self.backend.chat_stream(
+                    messages, on_reasoning=_capture_reasoning, **self._llm_kwargs())
+            ):
+                full += piece
+                if not hidden:
+                    on_token(piece)
+                if self._stop_requested:
+                    break
+        except KeyboardInterrupt:
+            if on_interrupt is None:
+                raise
+            on_interrupt()
+
+        self._accumulate_usage()
+        self._audit.llm(full, tokens=self._total_tokens,
+                        reasoning="".join(reasoning_parts))
+        return full
+
     def _call_llm(self, messages: list[dict], interactive: bool) -> str:
         from ..backends.http import CoderAuthError
         first_attempt = True
@@ -320,56 +367,33 @@ ws     ::= [ \t\n\r]*
                     # visible answer on the client (AUD-HIGH-17-3) instead of
                     # being silently dropped (this backend never yields it inline;
                     # see BaseLLMBackend.chat_stream's docstring).
-                    full = ""
-                    reasoning_parts: list[str] = []
-
-                    def _on_reasoning(piece: str) -> None:
-                        reasoning_parts.append(piece)
-                        self._emit("reasoning", text=piece)
-
-                    for piece, hidden in self._stream_hiding_tool_calls(
-                        self.backend.chat_stream(
-                            messages, on_reasoning=_on_reasoning, **self._llm_kwargs())
-                    ):
-                        full += piece
-                        if not hidden:
-                            self._emit("token", text=piece)
-                        if self._stop_requested:
-                            break
-                    self._accumulate_usage()
-                    self._audit.llm(full, tokens=self._total_tokens,
-                                    reasoning="".join(reasoning_parts))
-                    return full
+                    return self._stream_and_record(
+                        messages,
+                        on_token=lambda piece: self._emit("token", text=piece),
+                        on_reasoning=lambda piece: self._emit("reasoning", text=piece),
+                    )
                 if interactive:
                     if first_attempt:
                         print_thinking()
                         print_assistant_label(self.name)
                         first_attempt = False
-                    full = ""
-                    reasoning_parts: list[str] = []
 
-                    def _on_reasoning(piece: str) -> None:
-                        reasoning_parts.append(piece)
-                        print_reasoning_token(piece)
+                    interrupted = False
 
-                    try:
-                        # _llm_kwargs (not raw gen_kwargs): the terminal REPL is
-                        # the third dispatch branch and previously skipped the
-                        # lazy tool-call grammar the other two applied.
-                        for piece, hidden in self._stream_hiding_tool_calls(
-                            self.backend.chat_stream(
-                                messages, on_reasoning=_on_reasoning, **self._llm_kwargs())
-                        ):
-                            full += piece
-                            if not hidden:
-                                print_streaming_token(piece)
-                        print_streaming_done()
-                    except KeyboardInterrupt:
+                    def _on_interrupt() -> None:
+                        nonlocal interrupted
+                        interrupted = True
                         print_streaming_done()
                         print_info("(interrupted)")
-                    self._accumulate_usage()
-                    self._audit.llm(full, tokens=self._total_tokens,
-                                    reasoning="".join(reasoning_parts))
+
+                    full = self._stream_and_record(
+                        messages,
+                        on_token=print_streaming_token,
+                        on_reasoning=print_reasoning_token,
+                        on_interrupt=_on_interrupt,
+                    )
+                    if not interrupted:
+                        print_streaming_done()
                     return full
                 else:
                     # Silent call - used by sub-agents and non-interactive mode.
@@ -386,11 +410,11 @@ ws     ::= [ \t\n\r]*
                 import os
                 from ..display import print_error
                 import getpass
-                
+
                 # Cannot prompt for a key if there's no TTY or we are in CI
                 if not sys.stdin.isatty() or os.environ.get("CI"):
                     raise
-                    
+
                 print_error(str(e))
                 new_key = ""
                 while not new_key:

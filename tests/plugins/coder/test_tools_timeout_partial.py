@@ -113,3 +113,44 @@ class TestGitTimeout:
         assert r.ok is False
         assert "timed out" in r.output
         assert "On branch master" in r.output
+
+
+class TestGoalVerifyTimeout:
+    """CODER-2: cli/goal.py's _run_verify used to silently drop any output the
+    verification command produced before a timeout - unlike run_shell/run_tests/
+    git, which all preserve it via _partial_on_timeout. Now that all four go
+    through the shared run_subprocess() primitive, goal.py must get the same
+    partial-output behaviour, not just a bare 'timed out' message."""
+
+    def test_partial_output_included(self, tmp_path):
+        import localm.plugins.coder.cli as cli
+
+        exc = _timeout_exc(output="1 passed\n2 running", stderr="slow fixture")
+        with patch("localm.plugins.coder.tools.base.subprocess.run", side_effect=exc):
+            code, output = cli._run_verify("slow-command", tmp_path, timeout=30)
+
+        assert code == 124
+        assert "timed out after 30s" in output
+        assert "2 running" in output
+        assert "STDERR:" in output and "slow fixture" in output
+
+    def test_no_partial_keeps_plain_message(self, tmp_path):
+        import localm.plugins.coder.cli as cli
+
+        with patch("localm.plugins.coder.tools.base.subprocess.run",
+                   side_effect=_timeout_exc()):
+            code, output = cli._run_verify("slow-command", tmp_path, timeout=30)
+
+        assert code == 124
+        assert "timed out after 30s" in output
+        assert "partial output" not in output
+
+    def test_command_not_found_reports_failure_not_a_crash(self, tmp_path):
+        import localm.plugins.coder.cli as cli
+
+        with patch("localm.plugins.coder.tools.base.subprocess.run",
+                   side_effect=FileNotFoundError("no such file")):
+            code, output = cli._run_verify("ghost-command", tmp_path)
+
+        assert code == 125
+        assert "failed to run verification command" in output

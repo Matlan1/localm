@@ -4,11 +4,10 @@ privacy-env hook) and ``run_tests`` (test-runner autodetection)."""
 
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
 
-from .base import ToolResult, _partial_on_timeout, _truncate
+from .base import ToolResult, _partial_on_timeout, _truncate, run_subprocess
 
 def _needs_shell(command: str) -> bool:
     """Return True when the command uses shell operators that require a real shell."""
@@ -77,32 +76,23 @@ def tool_run_shell(
         from ..privacy import subprocess_privacy_env
         env = subprocess_privacy_env()
 
-    try:
-        proc = subprocess.run(
-            shell_cmd,
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            encoding="utf-8",
-            errors="replace",
-            env=env,
-        )
-    except subprocess.TimeoutExpired as e:
+    result = run_subprocess(shell_cmd, cwd, timeout=timeout, env=env)
+
+    if result.timed_out:
         return ToolResult.error(
-            f"Command timed out after {timeout}s{_partial_on_timeout(e)}")
-    except Exception as e:
-        return ToolResult.error(str(e))
+            f"Command timed out after {timeout}s{_partial_on_timeout(result)}")
+    if result.error is not None:
+        return ToolResult.error(result.error)
 
     combined = ""
-    if proc.stdout:
-        combined += proc.stdout
-    if proc.stderr:
-        combined += ("\n" if combined else "") + "STDERR:\n" + proc.stderr
+    if result.stdout:
+        combined += result.stdout
+    if result.stderr:
+        combined += ("\n" if combined else "") + "STDERR:\n" + result.stderr
 
     combined = combined.strip() or "(no output)"
     output, trunc = _truncate(combined)
-    rc = proc.returncode
+    rc = result.returncode
     status = "ok" if rc == 0 else f"exit {rc}"
 
     return ToolResult(
@@ -169,45 +159,37 @@ def tool_run_tests(
     if extra_args:
         cmd.extend(extra_args.split())
 
-    try:
-        proc = subprocess.run(
-            cmd,
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            timeout=120,
-            encoding="utf-8",
-            errors="replace",
-        )
-    except FileNotFoundError:
+    result = run_subprocess(cmd, cwd, timeout=120)
+
+    if result.not_found:
         return ToolResult.error(
             f"Test runner not found: {cmd[0]}. "
             "Make sure it is installed and on PATH."
         )
-    except subprocess.TimeoutExpired as e:
+    if result.timed_out:
         return ToolResult.error(
-            f"Test run timed out after 120s{_partial_on_timeout(e)}")
-    except Exception as e:
-        return ToolResult.error(str(e))
+            f"Test run timed out after 120s{_partial_on_timeout(result)}")
+    if result.error is not None:
+        return ToolResult.error(result.error)
 
     combined = ""
-    if proc.stdout:
-        combined += proc.stdout
-    if proc.stderr:
-        combined += ("\n" if combined else "") + proc.stderr
+    if result.stdout:
+        combined += result.stdout
+    if result.stderr:
+        combined += ("\n" if combined else "") + result.stderr
     combined = combined.strip() or "(no output)"
     output, trunc = _truncate(combined)
 
-    ok = proc.returncode == 0
+    ok = result.returncode == 0
     if ok:
         status = "passed"
-    elif proc.returncode == 5 and "pytest" in " ".join(cmd):
+    elif result.returncode == 5 and "pytest" in " ".join(cmd):
         # pytest exit 5 = no tests collected - not a failure, but worth
         # distinguishing so the agent doesn't "fix" passing code
         ok = True
         status = "no tests found"
     else:
-        status = f"failed (exit {proc.returncode})"
+        status = f"failed (exit {result.returncode})"
     return ToolResult(
         ok=ok,
         output=f"<runner>{' '.join(cmd[:2])}</runner>\n"
