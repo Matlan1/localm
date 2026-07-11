@@ -27,14 +27,13 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import os
-import threading
 import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from localm.rag.bm25 import BM25
+from localm.rag import BM25
 from localm.rag.store import _cosine
+from localm.storekit import NamespaceLockRegistry, atomic_write as _storekit_atomic_write
 
 from .record import MemoryRecord
 
@@ -159,18 +158,13 @@ def _maxnorm(scores: list[float]) -> list[float]:
 # CHK-RAG-LOCK, reproduced for memory (see _COLLECTION_LOCKS there). Keyed by
 # namespace_hash, so the map is bounded by the number of active namespaces, not
 # per-call. RLock so prune() calling replace(), or a caller batching several
-# save=False mutations under store.lock(), does not deadlock.
-_NAMESPACE_LOCKS: dict = {}
-_LOCKS_GUARD = threading.Lock()
+# save=False mutations under store.lock(), does not deadlock. Shared registry
+# implementation (storekit.NamespaceLockRegistry) - see CF-9/CF-10.
+_NAMESPACE_LOCKS = NamespaceLockRegistry()
 
 
 def _namespace_lock(ns_hash: str):
-    with _LOCKS_GUARD:
-        lock = _NAMESPACE_LOCKS.get(ns_hash)
-        if lock is None:
-            lock = threading.RLock()
-            _NAMESPACE_LOCKS[ns_hash] = lock
-        return lock
+    return _NAMESPACE_LOCKS.get(ns_hash)
 
 
 class MemoryStore:
@@ -281,15 +275,14 @@ class MemoryStore:
 
     @staticmethod
     def _atomic_write(path: Path, content: str) -> None:
-        # Unique per-write temp name (pid + thread id), not a fixed "<file>.tmp":
-        # the namespace lock now serialises writers to one namespace, but the
-        # crash-safety property of tmp+replace should hold even for a caller that
-        # writes a sidecar file outside the lock, not just for serialized writers
-        # (CHK-MEM-LOCK). Two writers racing on the OLD fixed name could otherwise
-        # collide mid-write, raising PermissionError on Windows.
-        tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-        tmp.write_text(content, encoding="utf-8")
-        tmp.replace(path)
+        # storekit.atomic_write: unique per-writer temp name (CHK-MEM-LOCK -
+        # the crash-safety property of tmp+replace should hold even for a
+        # caller that writes a sidecar file outside the namespace lock, not
+        # just for serialized writers) PLUS the Windows PermissionError retry
+        # rag/store.py's copy had and this one previously lacked (an AV
+        # real-time scan / Search Indexer can transiently hold a handle to
+        # the target, which would otherwise fail a good write).
+        _storekit_atomic_write(path, content)
 
     # ------------------------------------------------------------- basics -- #
     def all(self) -> list[MemoryRecord]:
