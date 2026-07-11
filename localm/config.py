@@ -431,9 +431,38 @@ def pick_port(requested: Optional[int] = None, host: str = "127.0.0.1"):
     return get_free_port(), True
 
 
+def _mkdir_or_explain(path: Path, *, is_home: bool) -> None:
+    """``path.mkdir(exist_ok=True)`` with one user-error case turned into a clean
+    message instead of a crash.
+
+    ``exist_ok=True`` already swallows "exists AND is a directory", so a
+    ``FileExistsError`` from mkdir means exactly "exists but is NOT a directory"
+    (a regular file / symlink; WinError 183 on Windows, EEXIST on POSIX). That is
+    user misconfiguration - typically ``LOCALM_HOME`` set to a file - not a localm
+    bug, so we surface it as a ``click.ClickException``: the CLI's cross-cutting
+    handler passes those straight through (a clean "Error: ..." line, exit 1),
+    never routing them to the generic "unexpected error" + bug-report path. This
+    SURFACES the real problem with an actionable fix (do-not-hide-problems); it
+    does not swallow it. Other OSErrors (permission denied, missing parent) are
+    left to propagate unchanged - they are not this case."""
+    try:
+        path.mkdir(exist_ok=True)
+    except FileExistsError:
+        import click  # lazy: keep the CLI framework out of config's import graph
+        env = os.environ.get("LOCALM_HOME", "").strip()
+        if is_home and env and Path(env).expanduser() == path:
+            msg = (f"LOCALM_HOME points at a file, not a directory: {path}. "
+                   "Set it to a directory (or remove/rename that file).")
+        else:
+            msg = (f"localm's data path is a file, not a directory: {path}. "
+                   "localm needs it to be a directory; remove or rename that "
+                   "file, or point LOCALM_HOME at a directory.")
+        raise click.ClickException(msg) from None
+
+
 def ensure_dirs() -> None:
-    HOME_DIR.mkdir(exist_ok=True)
-    MODELS_DIR.mkdir(exist_ok=True)
+    _mkdir_or_explain(HOME_DIR, is_home=True)
+    _mkdir_or_explain(MODELS_DIR, is_home=False)
 
 
 # Registry and config are mutated from several places at once - the GUI server
