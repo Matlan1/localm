@@ -13,11 +13,6 @@ from typing import Callable, Optional
 
 _warned_unconfigured_home = False
 
-# (registry file, sorted dropped names) already warned about this process, so a
-# malformed-entry warning is surfaced once per distinct corruption instead of on
-# every load_registry call (see _sanitize_registry).
-_warned_bad_registry_entries: set = set()
-
 # config files already warned about (present but not a JSON object), so a
 # non-dict config.json is surfaced once per process, not on every load_config
 # call (see _merge_stored_config).
@@ -442,14 +437,43 @@ def pick_port(requested: Optional[int] = None, host: str = "127.0.0.1"):
     return get_free_port(), True
 
 
+def _mkdir_or_explain(path: Path, *, is_home: bool) -> None:
+    """``path.mkdir(parents=True, exist_ok=True)`` with one user-error case turned
+    into a clean message instead of a crash.
+
+    ``parents=True`` so an explicit ``LOCALM_HOME`` a level or two below a
+    not-yet-existing folder (a fresh ``D:\\localm\\data``) is created like
+    ``mkdir -p`` rather than crashing with WinError 3 - LOCALM_HOME is an explicit
+    "keep my data here" choice, so localm creates the whole path (AUD-ENSUREDIRS).
+
+    ``exist_ok=True`` already swallows "exists AND is a directory", so a
+    ``FileExistsError`` from mkdir means exactly "exists but is NOT a directory"
+    (a regular file / symlink; WinError 183 on Windows, EEXIST on POSIX). That is
+    user misconfiguration - typically ``LOCALM_HOME`` set to a file - not a localm
+    bug, so we surface it as a ``click.ClickException``: the CLI's cross-cutting
+    handler passes those straight through (a clean "Error: ..." line, exit 1),
+    never routing them to the generic "unexpected error" + bug-report path. This
+    SURFACES the real problem with an actionable fix (do-not-hide-problems); it
+    does not swallow it. Other OSErrors (permission denied) are left to propagate
+    unchanged - they are not this case."""
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except FileExistsError:
+        import click  # lazy: keep the CLI framework out of config's import graph
+        env = os.environ.get("LOCALM_HOME", "").strip()
+        if is_home and env and Path(env).expanduser() == path:
+            msg = (f"LOCALM_HOME points at a file, not a directory: {path}. "
+                   "Set it to a directory (or remove/rename that file).")
+        else:
+            msg = (f"localm's data path is a file, not a directory: {path}. "
+                   "localm needs it to be a directory; remove or rename that "
+                   "file, or point LOCALM_HOME at a directory.")
+        raise click.ClickException(msg) from None
+
+
 def ensure_dirs() -> None:
-    # parents=True: LOCALM_HOME is an explicit "keep my data here" choice, so a
-    # nested path a level or two below an existing dir (a fresh D:\localm\data)
-    # must be created like `mkdir -p`, not crash with WinError 3 the way a bare
-    # mkdir does when a parent is missing (AUD-ENSUREDIRS). exist_ok stays so a
-    # re-run is a no-op.
-    HOME_DIR.mkdir(parents=True, exist_ok=True)
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    _mkdir_or_explain(HOME_DIR, is_home=True)
+    _mkdir_or_explain(MODELS_DIR, is_home=False)
 
 
 # Registry and config are mutated from several places at once - the GUI server
@@ -725,51 +749,11 @@ def update_config(mutator: Callable[[dict], None]) -> dict:
         return cfg
 
 
-def _sanitize_registry(reg: dict) -> dict:
-    """Return only the WELL-FORMED entries of *reg*: a dict value carrying a
-    non-empty string ``path`` - the invariant every registry writer guarantees
-    (``_register`` / ``alias_model`` always write ``{"path": str(...), ...}``)
-    and every reader assumes.
-
-    A malformed entry (value not a dict, or a missing / non-string / empty
-    ``path``) would otherwise crash the first consumer that does ``entry["path"]``
-    or ``entry.get(...)`` - ``localm list`` / ``run`` / ``sync_models_dir`` all
-    do, with no per-entry guard - so a single hand-edited or externally-corrupted
-    entry took the whole command down (AUD-REGSANITIZE). Dropping just the bad
-    entries keeps the good models usable instead of losing every model to one bad
-    row, and it never rewrites the file here, so the bad entry stays
-    hand-recoverable on disk (a later atomic save snapshots it to .bak first).
-
-    Dropped keys are surfaced on stderr (do-not-hide-problems), not silently
-    discarded. stderr, not the logger: importing debuglog here would be circular
-    (see _detect_home / AUD-DETECTHOME)."""
-    clean, dropped = {}, []
-    for name, entry in reg.items():
-        if isinstance(entry, dict) and isinstance(entry.get("path"), str) and entry["path"]:
-            clean[name] = entry
-        else:
-            dropped.append(str(name))
-    if dropped:
-        # Warn once per distinct corruption per process: load_registry is called
-        # several times per command (sync_models_dir alone re-reads 3x), so an
-        # un-deduped warning would spam the same line and train the user to ignore
-        # it. Keying on (file, dropped-names) still re-surfaces a CHANGED set.
-        sig = (str(REGISTRY_FILE), tuple(sorted(dropped)))
-        if sig not in _warned_bad_registry_entries:
-            _warned_bad_registry_entries.add(sig)
-            shown = ", ".join(sorted(dropped)[:10]) + (", ..." if len(dropped) > 10 else "")
-            print(f"[localm] registry.json: ignoring {len(dropped)} malformed "
-                  f"entr{'y' if len(dropped) == 1 else 'ies'} ({shown}); the file "
-                  "is left untouched so you can recover them by hand.",
-                  file=sys.stderr)
-    return clean
-
-
 def load_registry() -> dict:
     ensure_dirs()
     with _io_lock:
         reg = _read_json(REGISTRY_FILE, {})
-    return _sanitize_registry(reg) if isinstance(reg, dict) else {}
+    return reg if isinstance(reg, dict) else {}
 
 
 def save_registry(reg: dict) -> None:
@@ -789,7 +773,8 @@ def update_registry(mutator: Callable[[dict], None]) -> dict:
     but each write stays atomic and non-corrupting.)"""
     with _io_lock:
         reg = _read_json(REGISTRY_FILE, {})
-        reg = _sanitize_registry(reg) if isinstance(reg, dict) else {}
+        if not isinstance(reg, dict):
+            reg = {}
         mutator(reg)
         _atomic_write_json(REGISTRY_FILE, reg)
         return reg

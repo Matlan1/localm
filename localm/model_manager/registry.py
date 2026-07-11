@@ -60,6 +60,28 @@ def is_llm(entry: dict) -> bool:
     return isinstance(entry, dict) and entry.get("model_type", "llm") == "llm"
 
 
+def _entry_path(entry) -> Optional[str]:
+    """The stored file path of a registry *entry*, or None when the entry is
+    malformed (not a dict, or its ``path`` is missing / null / not a non-empty
+    string).
+
+    registry.json is normally written only by localm and is always well-formed,
+    but it is a real, user-visible file (``localm info`` names it) that can be
+    hand-edited, half-written, or left behind by an older/newer version. A single
+    JSON-valid-but-wrong-shape entry must never crash a read / list / remove /
+    dedup / sync operation and take the whole registry down with it: that is the
+    same "a damaged file must never take the app down" guarantee load_registry
+    already gives for whole-file corruption, extended from the file to the entry.
+    Callers that only need the path skip an entry when this returns None; the
+    user-facing lister marks it visibly corrupt so it can be dropped with
+    ``localm rm <name>`` instead of forcing a hand-edit of the JSON.
+    """
+    if not isinstance(entry, dict):
+        return None
+    p = entry.get("path")
+    return p if isinstance(p, str) and p else None
+
+
 def _detect_local_model_type(path: Path, *, is_gguf: bool, is_hf: bool,
                              is_blob: bool = False) -> str:
     """Deterministically classify a LOCAL model's type from HARD metadata only.
@@ -152,9 +174,11 @@ def get_model_info(name: str):
     """
     reg = _mm.load_registry()
     if name in reg:
-        p = Path(reg[name]["path"])
-        if p.exists():
-            return p, None
+        epath = _entry_path(reg[name])   # None for a malformed entry -> fall through
+        if epath is not None:
+            p = Path(epath)
+            if p.exists():
+                return p, None
 
     direct = Path(name)
     if not direct.exists():
@@ -279,8 +303,11 @@ def vision_capable_models() -> List[str]:
     a model already known to be vision-capable instead of dead-ending."""
     out: List[str] = []
     for name, info in _mm.load_registry().items():
+        epath = _entry_path(info)   # skip malformed entries (a str entry's .get
+        if epath is None:           # would raise AttributeError, not caught below)
+            continue
         try:
-            p = Path(info.get("path", ""))
+            p = Path(epath)
         except (TypeError, ValueError):
             continue
         if p.is_dir() and _hf_is_vision(p):
@@ -332,7 +359,8 @@ def vision_input_guidance(mmproj_failed: bool = False) -> str:
 def list_models(type_filter: Optional[str] = None) -> None:
     reg = _mm.load_registry()
     if type_filter:
-        reg = {k: v for k, v in reg.items() if v.get("model_type", "llm") == type_filter}
+        reg = {k: v for k, v in reg.items()
+               if isinstance(v, dict) and v.get("model_type", "llm") == type_filter}
     if not reg:
         console.print("[dim]No models yet. Use [bold]localm pull <name>[/bold] to download one.[/dim]")
         console.print("[dim]Run [bold]localm models[/bold] to see what's available.[/dim]")
@@ -347,9 +375,19 @@ def list_models(type_filter: Optional[str] = None) -> None:
     table.add_column("Path", style="dim")
 
     for name, info in sorted(reg.items()):
-        path = Path(info["path"])
-        source = info.get("source", "local")
-        role = info.get("model_type", "llm")
+        epath = _entry_path(info)
+        if epath is None:
+            # A hand-corrupted / wrong-shape entry (not a dict, or no usable
+            # path). Show it VISIBLY so the user sees which entry is broken and
+            # can drop it with `localm rm <name>` - never crash the whole listing
+            # on one bad entry (extends load_registry's damaged-file guarantee).
+            table.add_row(f"[red]{name}[/red]", "[red]corrupt[/red]", "-",
+                          "[red]-[/red]", "-",
+                          "[red](malformed registry entry)[/red]")
+            continue
+        path = Path(epath)
+        source = str(info.get("source", "local"))
+        role = str(info.get("model_type", "llm"))
 
         if path.is_dir():
             kind = "hf"
@@ -370,7 +408,14 @@ def list_models(type_filter: Optional[str] = None) -> None:
 
     console.print(table)
 
-    if any(not Path(i["path"]).exists() for i in reg.values()):
+    def _is_missing(i) -> bool:
+        # A well-formed entry whose file is simply gone (the relocate/autoprune
+        # case). Malformed entries are already shown as 'corrupt' above, so they
+        # do not trigger the missing-file hint.
+        p = _entry_path(i)
+        return p is not None and not Path(p).exists()
+
+    if any(_is_missing(i) for i in reg.values()):
         console.print(
             "[dim]Models marked [red]missing[/red] have no file on disk. "
             "Re-point one you MOVED with [bold]localm relocate <name> <new-path>[/bold], "
@@ -393,8 +438,8 @@ def is_external_path(path) -> bool:
 
 def model_is_external(name: str) -> bool:
     """Whether the registered model *name* lives outside the managed models dir."""
-    info = _mm.load_registry().get(name)
-    return bool(info) and is_external_path(info.get("path", ""))
+    epath = _entry_path(_mm.load_registry().get(name))   # None -> malformed/absent
+    return epath is not None and is_external_path(epath)
 
 
 def relocate_model(name: str, new_path: str) -> bool:
@@ -499,10 +544,17 @@ def find_aliases_by_path(path: Path, reg: Optional[dict] = None) -> List[str]:
     """Registered names whose path resolves to the same file/dir as *path*."""
     reg = reg if reg is not None else _mm.load_registry()
     target = str(Path(path).resolve())
-    return sorted(
-        name for name, info in reg.items()
-        if str(Path(info.get("path", "")).resolve()) == target
-    )
+    out: List[str] = []
+    for name, info in reg.items():
+        epath = _entry_path(info)   # skip a malformed sibling entry, never crash
+        if epath is None:
+            continue
+        try:
+            if str(Path(epath).resolve()) == target:
+                out.append(name)
+        except OSError:
+            continue
+    return sorted(out)
 
 
 
@@ -515,7 +567,9 @@ def find_by_sha256(digest: str, reg: Optional[dict] = None) -> List[str]:
     d = digest.lower()
     return sorted(
         name for name, info in reg.items()
-        if info.get("sha256", "").lower() == d
+        # Guard a malformed sibling entry (not a dict, or a non-string sha256):
+        # a corrupt entry must not crash the dedup scan run by add / pull.
+        if isinstance(info, dict) and str(info.get("sha256", "") or "").lower() == d
     )
 
 
@@ -533,8 +587,8 @@ def find_by_size(size: int, reg: Optional[dict] = None) -> List[str]:
     reg = reg if reg is not None else _mm.load_registry()
     out = []
     for name, info in reg.items():
-        path = info.get("path")
-        if not path:
+        path = _entry_path(info)   # skip a malformed entry, never crash the scan
+        if path is None:
             continue
         try:
             p = Path(path)
@@ -557,16 +611,22 @@ def alias_model(existing: str, new_name: str) -> bool:
     if existing not in reg:
         console.print(f"[red]Not found:[/red] {existing}")
         return False
-    if new_name in reg:
-        console.print(f"[red]Name already in use:[/red] {new_name}")
+    # Sanitize the user-supplied new name through the SAME filter add_local /
+    # pull / sync all use (GAP-CLI-1), so `localm alias real ../../evil`, an empty
+    # name, or `a/b/c` can never become a raw registry key. alias was the one
+    # registry-key-creating path that skipped this guard. Internal callers already
+    # pass a sanitized name, so re-sanitizing is a harmless no-op for them.
+    safe_name = _sanitize_name(new_name)
+    if safe_name in reg:
+        console.print(f"[red]Name already in use:[/red] {safe_name}")
         return False
     # Atomic RMW (re-read inside the lock) so a concurrent writer is not lost.
     def _apply(r: dict) -> None:
-        if existing in r and new_name not in r:
-            r[new_name] = dict(r[existing])
+        if existing in r and safe_name not in r:
+            r[safe_name] = dict(r[existing])
     _mm.update_registry(_apply)
     console.print(
-        f"[green]✓[/green] [bold]{new_name}[/bold] is now an alias of "
+        f"[green]✓[/green] [bold]{safe_name}[/bold] is now an alias of "
         f"[bold]{existing}[/bold]"
     )
     return True
@@ -712,11 +772,15 @@ def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
     _mm.ensure_dirs()
     reg = _mm.load_registry()
 
-    known = {
-        str(Path(entry["path"]).resolve())
-        for entry in reg.values()
-        if entry.get("path")
-    }
+    known = set()
+    for entry in reg.values():
+        p = _entry_path(entry)   # skip malformed entries; never crash the sync
+        if p is None:
+            continue
+        try:
+            known.add(str(Path(p).resolve()))
+        except OSError:
+            continue
 
     added = 0
     if _mm.MODELS_DIR.is_dir():
@@ -771,9 +835,10 @@ def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
     managed = [
         name
         for name, entry in reg.items()
-        if entry.get("path") and _under_models_dir(Path(entry["path"]))
+        if _entry_path(entry) is not None
+        and _under_models_dir(Path(_entry_path(entry)))
     ]
-    managed_missing = [n for n in managed if not Path(reg[n]["path"]).exists()]
+    managed_missing = [n for n in managed if not Path(_entry_path(reg[n])).exists()]
 
     # Guardrail: if pruning would delete *every* managed model at once, the folder
     # is almost certainly unavailable (unmounted drive, wrong path) rather than the
@@ -787,8 +852,11 @@ def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
 
     for name in list(reg.keys()):
         entry = reg[name]
-        path_str = entry.get("path")
-        if not path_str:
+        # Skip a malformed / non-dict entry: it has no valid path to reconcile,
+        # and (crucially) `entry` may not be a dict, so entry.get/pop below would
+        # raise. It stays in the registry and is shown 'corrupt' by list_models.
+        path_str = _entry_path(entry)
+        if path_str is None:
             continue
         path = Path(path_str)
 
@@ -1064,7 +1132,19 @@ def remove_model(name: str) -> None:
     if name not in reg:
         console.print(f"[red]Not found:[/red] {name}")
         return
-    path = Path(reg[name]["path"])
+
+    epath = _entry_path(reg[name])
+    if epath is None:
+        # A malformed / corrupt entry (hand-edited registry, half-written state,
+        # a shape from another version): there is no valid file to consider
+        # deleting, so just drop the NAME. This is the CLI recovery path for a
+        # registry that `localm list` / `add` would otherwise choke on - without
+        # it, a single bad entry could only be cleared by hand-editing the JSON.
+        _mm.update_registry(lambda r: r.pop(name, None))
+        console.print(f"[green]✓[/green] Removed corrupt entry [bold]{name}[/bold]")
+        return
+
+    path = Path(epath)
 
     # Alias-aware: if other names still point at this file, only unregister
     # this name - never delete a file out from under another alias.
@@ -1112,10 +1192,18 @@ def _resolve_ollama_manifest(p: Path):
     """
     import json as _json
 
-    if not p.is_dir():
+    try:
+        if not p.is_dir():
+            return None
+        tag_files = [f for f in p.iterdir() if f.is_file()]
+    except OSError:
+        # A pathological name must resolve to "not an Ollama manifest", not crash
+        # the caller. On Windows, Path('....').is_dir() succeeds (trailing dots are
+        # stripped when the path is stat'd) but iterdir() then does os.scandir on
+        # the RAW '....' and raises FileNotFoundError - which used to escape as an
+        # uncaught traceback out of get_model_info, so `localm run ....` mis-reported
+        # a nonexistent-model typo as an internal localm crash + bug report.
         return None
-
-    tag_files = [f for f in p.iterdir() if f.is_file()]
     if not tag_files:
         return None
 

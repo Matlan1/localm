@@ -79,6 +79,58 @@ class TestOwnerKey:
 
 
 # --------------------------------------------------------------------------- #
+#  LM-PT-002: recover / clear must revoke live browser sessions                #
+# --------------------------------------------------------------------------- #
+
+class TestOwnerSessionRevocation:
+    """`key recover` / `key clear` must sign out live browser sessions.
+
+    Owner (ADMIN) browser sessions are decoupled from the key value (S1) and are
+    exempt from the per-request keystore recheck, so they SURVIVE an owner-key roll
+    by design - correct for the GUI's own roll, but the CLI recovery path exists to
+    lock a compromised owner OUT, so a captured owner cookie must not outlive it.
+    Both commands mirror /api/auth/key/clear and call sessions.revoke_all(); scoped
+    DEVICE keys in the keystore stay untouched (only browser SESSIONS are dropped).
+    """
+
+    _KEY = "owner-key-for-revoke-test-abcdef"
+
+    def _mint_owner_session(self):
+        from localm import auth, sessions
+        from localm import scopes as S
+        auth.set_api_key(self._KEY)
+        return sessions.create(scopes={S.ADMIN},
+                               key_hash=auth._hash_key(self._KEY),
+                               fs_access="host")
+
+    def test_recover_revokes_browser_sessions(self, runner, monkeypatch):
+        from localm import auth, sessions
+        # Module-level session cache is process-wide; reset it so this test's
+        # throwaway store is never read through a prior test's cached view.
+        monkeypatch.setattr(sessions, "_CACHE", {"mtime": None, "records": None})
+        sid = self._mint_owner_session()
+        # A scoped DEVICE key exists too; recovery must rotate the owner key and
+        # drop sessions but leave the device key working (the docstring promise).
+        auth.create_key("phone", ["models:read"], allow_privileged=False)
+        assert sessions.lookup(sid) is not None            # session valid pre-recover
+        r = runner.invoke(main, ["key", "recover"])
+        assert r.exit_code == 0, r.output
+        assert sessions.lookup(sid) is None                # NEGATIVE: owner cookie dead
+        assert len(auth.list_keys()) == 1                  # device key untouched
+        assert "session" in r.output.lower()               # the user is told
+
+    def test_clear_revokes_browser_sessions(self, runner, monkeypatch):
+        from localm import auth, sessions
+        monkeypatch.setattr(sessions, "_CACHE", {"mtime": None, "records": None})
+        sid = self._mint_owner_session()
+        assert sessions.lookup(sid) is not None
+        r = runner.invoke(main, ["key", "clear", "--yes"])
+        assert r.exit_code == 0, r.output
+        assert auth.get_api_key() is None                  # clear truly clears
+        assert sessions.lookup(sid) is None                # NEGATIVE: owner cookie dead
+
+
+# --------------------------------------------------------------------------- #
 #  Named scoped keys: list / create / rm                                       #
 # --------------------------------------------------------------------------- #
 

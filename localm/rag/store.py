@@ -313,7 +313,15 @@ class Collection:
 
     def _load(self) -> None:
         # A corrupt meta.json must not crash construction (and thus the whole
-        # collections listing) - flag it and present an empty collection.
+        # collections listing). Flag it - but do NOT discard the INDEPENDENT
+        # chunks.jsonl / vectors.json files: meta.json holds only
+        # {name, created, docs}, none of which retrieval needs, so intact chunks
+        # stay fully queryable. Collapsing "meta corrupt" into "empty collection"
+        # silently loses recoverable data (AGENTS rule 5: a "missing" and a
+        # "corrupt" input must not share one silent path). We fall through to load
+        # the chunks and then reconstruct a minimal docs map from their sources so
+        # `rag repair` can rebuild and the next _save() self-heals meta.json.
+        self.corrupt = False
         try:
             meta = json.loads((self.dir / "meta.json").read_text(encoding="utf-8"))
             if not isinstance(meta, dict):
@@ -322,11 +330,6 @@ class Collection:
         except (json.JSONDecodeError, ValueError, OSError):
             self.corrupt = True
             self._meta = {"name": self.name, "docs": {}}
-            self._chunks = []
-            self._vectors = None
-            self._vec_dim = None
-            self._bm25 = None
-            return
         self._chunks = []
         chunks_file = self.dir / "chunks.jsonl"
         if chunks_file.is_file():
@@ -369,6 +372,24 @@ class Collection:
                         f"{len(self._chunks)} chunks (stale or partial index); "
                         f"using BM25 lexical retrieval only", warn=True)
         self._bm25 = None
+        # If meta.json was corrupt but chunks survived, rebuild a minimal docs
+        # map from the chunk sources. This makes stats()/documents() reflect the
+        # recoverable data (not a false "empty"), lets `rag repair` re-index the
+        # real source files WITHOUT duplicating chunks (add_paths keys its
+        # replace-in-place on a known doc), and self-heals meta.json on the next
+        # _save(). The reconstructed entries lack mtime/size/hash, so a later
+        # add/repair re-reads the file - correct.
+        if self.corrupt and self._chunks:
+            rebuilt: dict = {}
+            for c in self._chunks:
+                src = c.get("source")
+                if not src:
+                    continue
+                entry = rebuilt.setdefault(src, {"chunks": 0})
+                entry["chunks"] += 1
+                if str(src).startswith("upload:"):
+                    entry["uploaded"] = True
+            self._meta["docs"] = rebuilt
 
     def _save(self) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)

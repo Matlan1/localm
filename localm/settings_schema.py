@@ -516,7 +516,12 @@ CORE_FIELDS: list = [
                  "Allow private/loopback targets (disables the SSRF guard)",
                  "Permit requests to localhost and private IP ranges. Off by "
                  "default (a common SSRF vector); only enable for a trusted setup.",
-                 group="Network", owner="web"),
+                 # admin_only: flipping this DISABLES the server-wide SSRF guard, so
+                 # it widens a network trust boundary exactly like the rag_* folder
+                 # keys widen a filesystem one - a non-owner config:write key must not
+                 # be able to set it (else it could reach loopback/metadata via any
+                 # model-initiated fetch). See routes/config.py admin_only gate.
+                 group="Network", owner="web", admin_only=True),
     SettingField("net_search_url", Widget.TEXT, "Search backend URL",
                  "A SearXNG JSON search endpoint for web search. Blank uses "
                  "DuckDuckGo (no key needed).",

@@ -17,6 +17,22 @@ class UnsupportedInputError(ValueError):
     """
 
 
+class InvalidGrammarError(ValueError):
+    """Raised when a GBNF grammar string cannot be parsed by the native grammar
+    engine, so the request can be rejected with a clean 400 up front.
+
+    Why this exists: ``llama_sampler_init_grammar`` returns NULL for a malformed
+    grammar; adding that NULL sampler to the chain NULL-derefs at sample time (a
+    native access violation). The GGUF backend used to CATCH that fault and latch
+    a persistent ``_grammar_unsupported`` flag, silently stripping grammar from
+    EVERY later request (valid ones too) until the model reloaded - a single bad
+    grammar poisoned the whole feature for all clients. Surfacing the parse failure
+    as this typed error (instead of a native crash) lets the request path reject a
+    bad grammar cleanly and keeps a per-request user error from disabling the
+    feature globally.
+    """
+
+
 class ModelLoadCancelled(Exception):
     """Raised by ``load()`` when an in-flight model load was deliberately aborted
     because a newer model selection superseded it (preemptive model switching).
