@@ -2064,6 +2064,17 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     _cors_allowlist = cors_cfg if isinstance(cors_cfg, list) else []
     _cors_wildcard = cors_cfg == "*"
 
+    # LM-PT-002 (CWE-200): a short list of UNAUTHENTICATED GETs that disclose host
+    # detail and, unlike the /api,/v1 metadata reads below, have NO route-level
+    # auth to fall back on. The default CORS policy hands an ACAO to any
+    # http(s)://localhost:PORT origin, so without an explicit refusal a drive-by
+    # local page could read them cross-origin: /whoami leaks root_dir (an absolute
+    # path -> the OS username) on a loopback bind, and /debug/stacks leaks thread
+    # stacks. They sit OUTSIDE the /api,/v1 metadata-GET gate, so they are refused
+    # here instead - cross-origin, in EVERY mode (they are unauthenticated in
+    # protected mode too, so an open-mode-only refusal would miss them).
+    _CROSS_ORIGIN_GET_REFUSED = ("/whoami", "/debug/stacks")
+
     def _cross_origin_refused(request) -> bool:
         """True when this request carries an Origin header that is neither
         same-origin nor CORS-allow-listed. Shared by the CSRF check (unsafe
@@ -2087,9 +2098,14 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
 
     @app.middleware("http")
     async def _origin_guard(request, call_next):
-        if (request.method in _UNSAFE_METHODS
-                and not request.url.path.startswith(_CROSS_ORIGIN_OK)):
-            # Same-origin / CORS-allowlist check.
+        _path = request.url.path
+        # Cross-origin refusal (every mode): every state-changing method (CSRF),
+        # plus the sensitive UNAUTHENTICATED GETs in _CROSS_ORIGIN_GET_REFUSED
+        # (host-detail disclosure, LM-PT-002). Both are subject to the same
+        # same-origin / CORS-allowlist check.
+        if ((request.method in _UNSAFE_METHODS
+             or (request.method == "GET" and _path in _CROSS_ORIGIN_GET_REFUSED))
+                and not _path.startswith(_CROSS_ORIGIN_OK)):
             if _cross_origin_refused(request):
                 return JSONResponse(
                     status_code=403,

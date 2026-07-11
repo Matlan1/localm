@@ -253,14 +253,30 @@ class MemoryStore:
         if vf.is_file():
             try:
                 data = json.loads(vf.read_text(encoding="utf-8"))
-                vecs = data.get("vectors", {})
+                # A non-object top level (a bare list/number) has no .get and used
+                # to raise AttributeError straight out of _load, breaking the whole
+                # store; treat it as corrupt, like the records path treats a
+                # non-object line above.
+                vecs = data.get("vectors", {}) if isinstance(data, dict) else None
+                if not isinstance(vecs, dict):
+                    raise ValueError("vector sidecar has an unexpected structure")
                 ids = {r.id for r in self._records}
-                if isinstance(vecs, dict):
-                    self._vectors = {k: v for k, v in vecs.items() if k in ids and v}
-                    self._dim = data.get("dim") or _first_dim(self._vectors)
-            except (json.JSONDecodeError, OSError, ValueError):
+                self._vectors = {k: v for k, v in vecs.items() if k in ids and v}
+                self._dim = data.get("dim") or _first_dim(self._vectors)
+            except (json.JSONDecodeError, OSError, ValueError) as exc:
+                # The sidecar EXISTS but is corrupt/unreadable: degrade to no
+                # vectors (recall falls back to lexical BM25) but SURFACE it -
+                # unlike an absent sidecar (a normal cold start, handled by the
+                # is_file() gate), a present-yet-unparseable one is an unexpected
+                # fault the operator should see (LM-DA-002 / HON-3, mirrors the
+                # records warning above). The next _save() rewrites a clean file.
                 self._vectors = {}
                 self._dim = None
+                from localm.debuglog import logger as _dbg
+                _dbg.warning(
+                    "memory store %s: vector sidecar corrupt/unreadable (%s); "
+                    "recall degrades to lexical until the next save rewrites it",
+                    vf, exc)
         self._bm25 = None
 
     def _save(self) -> None:
