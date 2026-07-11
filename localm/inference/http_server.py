@@ -2255,7 +2255,15 @@ async def _stream_sse(
             from localm.inference.compact import compact_messages
             def _gen_for_compact(ms: list[dict], max_t: int) -> str:
                 return "".join(engine.chat_stream(ms, max_tokens=max_t, temperature=0.3))
-            new_messages, changed = compact_messages(messages, _gen_for_compact)
+            # Off the event loop: compact_messages runs a FULL summarization
+            # generation (engine.chat_stream holds the per-model inference lock for
+            # up to ~1024 tokens). Run directly on the single-threaded loop it would
+            # freeze every other request, the heartbeat, and the disconnect watchers
+            # for its whole duration - the same event-loop-block class #541 fixed for
+            # the GPU probes. So offload it, exactly as the real generation below is.
+            _loop = asyncio.get_running_loop()
+            new_messages, changed = await _loop.run_in_executor(
+                None, compact_messages, messages, _gen_for_compact)
             if changed:
                 messages = list(new_messages)
                 prompt_tokens = engine.count_messages_tokens(messages)
@@ -2674,7 +2682,11 @@ async def _complete(
             from localm.inference.compact import compact_messages
             def _gen_for_compact(ms: list[dict], max_t: int) -> str:
                 return "".join(engine.chat_stream(ms, max_tokens=max_t, temperature=0.3))
-            new_messages, changed = compact_messages(messages, _gen_for_compact)
+            # Off the event loop (see the same fix in _stream_sse): compaction runs a
+            # full generation and must not block the single-threaded loop.
+            _loop = asyncio.get_running_loop()
+            new_messages, changed = await _loop.run_in_executor(
+                None, compact_messages, messages, _gen_for_compact)
             if changed:
                 messages = list(new_messages)
                 prompt_tokens = engine.count_messages_tokens(messages)
