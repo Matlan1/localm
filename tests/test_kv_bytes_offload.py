@@ -223,6 +223,83 @@ class TestGrowCheckUsesAccurateKv:
             assert b._check_context_fit(8192, current_ctx=4096) is True
 
 
+class TestRamResidentKvChargesFullTarget:
+    """Once a prior grow placed the KV cache in SYSTEM RAM (offload_kqv=False), the
+    GPU holds no KV, so free VRAM reads large. The delta-only charge then wrongly
+    says a further grow 'fits VRAM', offload_kqv flips back to True, and the FULL
+    target KV overflows VRAM -> llama_init_from_model NULLs -> _prefill_fresh_context
+    raises and truncates a reply that was generating fine (defeats #554). When the
+    resident KV is already in RAM, the FULL target must be charged, not the delta."""
+
+    def test_ram_resident_kv_charges_full_target_stays_ram(self, tmp_path):
+        b = _gguf_backend(tmp_path, size_bytes=2_000_000_000, n_ctx=4096)
+        b._llm = _StubLlm(300_000)              # accurate per-token KV
+        b._llm._offload_kqv = False             # prior grow put the KV in system RAM
+        # Grow 8192 -> 12288: delta = 4096*300k = 1.23 GB (fits 2 GB free), but the
+        # FULL target 12288*300k = 3.69 GB does NOT. With the KV already in RAM there
+        # is no VRAM KV to reclaim, so the honest answer is: still does not fit -> RAM.
+        with patch.object(type(b), "_free_vram_bytes", return_value=2_000_000_000):
+            assert b._check_context_fit(12288, current_ctx=8192) is False
+
+    def test_ram_resident_kv_returns_to_vram_when_full_target_fits(self, tmp_path):
+        b = _gguf_backend(tmp_path, size_bytes=2_000_000_000, n_ctx=4096)
+        b._llm = _StubLlm(300_000)
+        b._llm._offload_kqv = False             # currently in RAM
+        # Now free VRAM is large enough for the WHOLE target (12288*300k = 3.69 GB):
+        # moving back to VRAM genuinely fits, so it should.
+        with patch.object(type(b), "_free_vram_bytes", return_value=4_000_000_000):
+            assert b._check_context_fit(12288, current_ctx=8192) is True
+
+    def test_vram_resident_kv_still_uses_net_delta(self, tmp_path):
+        # Regression guard: when the current KV is in VRAM (the normal case), the net
+        # delta is charged (the old VRAM KV IS reclaimed on recreation).
+        b = _gguf_backend(tmp_path, size_bytes=2_000_000_000, n_ctx=4096)
+        b._llm = _StubLlm(300_000)
+        b._llm._offload_kqv = True               # current KV in VRAM
+        with patch.object(type(b), "_free_vram_bytes", return_value=2_000_000_000):
+            # delta = 4096*300k = 1.23 GB <= 2.0 GB free -> VRAM, even though the full
+            # 3.69 GB target would not fit (the reclaimed old KV covers the difference).
+            assert b._check_context_fit(12288, current_ctx=8192) is True
+
+
+class TestRamOffloadHintFiresOnce:
+    """The RAM-offload notice is documented (and #554's commit) as a 'one-time
+    hint', so a conversation that keeps growing past free VRAM must explain the
+    slowdown ONCE, not spam the debug log on every grow. A card-filling model with
+    the default grow step overflows on EVERY grow, so without a guard the warning
+    repeats indefinitely."""
+
+    def test_hint_fires_once_across_repeated_ram_grows(self, tmp_path, caplog):
+        import logging
+        b = _gguf_backend(tmp_path, size_bytes=2_000_000_000, n_ctx=4096)
+        b._llm = _StubLlm(300_000)                     # accurate, large KV
+        # Free stays tiny, so each grow's delta overflows -> RAM (False) every time.
+        with patch.object(type(b), "_free_vram_bytes", return_value=100_000_000):
+            with caplog.at_level(logging.WARNING, logger="localm"):
+                assert b._check_context_fit(8192, current_ctx=4096) is False
+                assert b._check_context_fit(12288, current_ctx=8192) is False
+                assert b._check_context_fit(16384, current_ctx=12288) is False
+        hits = [r for r in caplog.records
+                if "large context" in r.getMessage()
+                and "kept in system RAM" in r.getMessage()]
+        assert len(hits) == 1, (
+            f"RAM-offload hint should fire once, fired {len(hits)} times")
+
+    def test_load_resets_the_hint_for_a_reloaded_instance(self, tmp_path, monkeypatch):
+        # The SAME backend instance can be reloaded (Engine.chat_stream auto-reload),
+        # so load() must clear the guard - otherwise the hint would fire once EVER
+        # instead of once per loaded-model session. load() resets it on its first
+        # line, before any native work; bail right after via missing_split_parts.
+        import localm.model_manager as mm
+        b = _gguf_backend(tmp_path, size_bytes=1_000_000_000)
+        b._ram_kv_hint_shown = True                       # simulate "already shown"
+        monkeypatch.setattr(mm, "missing_split_parts",
+                            lambda p: [tmp_path / "phantom.gguf"])
+        with pytest.raises(FileNotFoundError):
+            b.load()
+        assert b._ram_kv_hint_shown is False
+
+
 # --------------------------------------------------------------------------- #
 #  Backend-view free-VRAM signal (loader.gpu_memory) + _free_vram_bytes prefers it
 # --------------------------------------------------------------------------- #
