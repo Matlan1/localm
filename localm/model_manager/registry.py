@@ -1068,7 +1068,11 @@ def _register_with_dedup(
 
     # Same name, DIFFERENT file - real conflict, never overwrite silently
     if model_name in reg:
-        old_path = reg[model_name].get("path", "?")
+        # _entry_path guards a pre-existing MALFORMED entry at this name: a non-dict
+        # value would AttributeError on .get here. Extends #562's registry hardening
+        # to this write-side by-name dedup lookup; a corrupt entry shows as '?' and
+        # is cleared with `localm rm <name>`.
+        old_path = _entry_path(reg[model_name]) or "?"
         console.print(
             f"[yellow]'{model_name}' already points to a different file:"
             f"[/yellow] {old_path}"
