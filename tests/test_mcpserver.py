@@ -170,6 +170,25 @@ class TestToolCalls:
                         {"name": "list_models", "arguments": {}})
         assert "m1" in resp["result"]["content"][0]["text"]
 
+    def test_list_models_survives_malformed_entries(self):
+        # One malformed entry must not blank / crash the whole MCP listing: the
+        # good model still lists and each bad entry is shown as corrupt (mirrors
+        # the CLI's resilience so a hand-edited registry stays inspectable).
+        server, _ = _server()
+        bad_reg = {
+            "good": {"path": "x", "source": "local"},
+            "bad_str": "oops",
+            "bad_null": None,
+            "bad_nopath": {"source": "local"},
+        }
+        with patch("localm.config.load_registry", return_value=bad_reg):
+            resp = _req(server, "tools/call",
+                        {"name": "list_models", "arguments": {}})
+        text = resp["result"]["content"][0]["text"]
+        assert resp["result"].get("isError") in (None, False)
+        assert "good" in text
+        assert text.count("corrupt") == 3
+
 
 class TestEngineCache:
     def test_same_model_reuses_engine(self):

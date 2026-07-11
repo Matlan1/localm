@@ -11,6 +11,21 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Fixed
+- A single malformed entry in `registry.json` (from a hand-edit or a partial write)
+  no longer crashes `localm list` / `rm` / `add` / `pull` with an "unexpected error"
+  and a bug-report offer. The bad entry is shown as `[corrupt]`, can be removed with
+  `localm rm <name>`, and your other models still list normally (the same resilience
+  applies to the MCP server's `list_models`).
+- `localm pull <local file> --sha256 <hash>` now actually verifies the checksum and
+  refuses on a mismatch, instead of registering the file and reporting success while
+  silently ignoring the hash you asked it to check.
+- `localm alias <existing> <new-name>` now cleans the new name the same way every
+  other model name is cleaned, so it can no longer write an unsafe (`../x`, `a/b`) or
+  empty key into the registry.
+- A nonexistent model name made only of dots (e.g. `localm run ....`) now reports
+  "Model not found" instead of crashing with an internal error on Windows.
+
 ### Security
 - **Disabling the private-network (SSRF) guard now requires an owner key.** The
   "Allow private/loopback targets" setting (`net_allow_private`) turns off the

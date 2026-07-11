@@ -52,6 +52,7 @@ from .gguf import (
 from .registry import (
     _add_local_gguf_dir,
     _backup_registry,
+    _entry_path,
     _hf_is_vision,
     _prompt_duplicate_action,
     _prompt_predownload_dup,
@@ -121,6 +122,7 @@ __all__ = [
     "relocate_model", "set_model_type", "is_auto_chat_eligible", "is_llm",
     "is_external_path", "model_is_external",
     "find_aliases_by_path", "find_by_sha256", "find_by_size", "alias_model",
+    "_entry_path",
     "_register", "_sanitize_name", "_unique_registry_name", "ModelSyncResult",
     "_backup_registry", "sync_models_dir", "_register_with_dedup", "remove_model",
     "_add_local_gguf_dir", "add_local", "show_shortcuts", "_prompt_duplicate_action",
