@@ -17,6 +17,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   and a bug-report offer. The bad entry is shown as `[corrupt]`, can be removed with
   `localm rm <name>`, and your other models still list normally (the same resilience
   applies to the MCP server's `list_models`).
+- That same corrupt-entry resilience now also covers the surfaces that were still
+  missed: the GUI **Models** page and the `/api/vram-estimate` readout, the model
+  detail API, `localm pull`, and the ComfyUI model **Scan** no longer error out on a
+  single malformed registry entry - the bad entry is skipped and your good models
+  keep working.
 - `localm pull <local file> --sha256 <hash>` now actually verifies the checksum and
   refuses on a mismatch, instead of registering the file and reporting success while
   silently ignoring the hash you asked it to check.

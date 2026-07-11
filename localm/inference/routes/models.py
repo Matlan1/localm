@@ -58,17 +58,31 @@ def register(app: FastAPI, ctx) -> None:
     async def model_detail(model_id: str):
         """Registry metadata for one model: path, source, size, hash, aliases."""
         from localm.config import load_registry
+        from localm.model_manager import _entry_path
         registry = load_registry()
         entry = registry.get(model_id)
-        
+
         # If it is the default startup model but not in registry, provide a virtual entry
         if entry is None and _hs._default_model_name == model_id:
             entry = {"path": getattr(_hs._engine, "model_path", ""), "source": "startup"}
-            
+
         if entry is None:
             raise HTTPException(404, f"Model not registered: {model_id}")
-            
-        path = entry.get("path", "")
+
+        # A non-dict registry value (a hand-edited / cross-version corrupt entry) is
+        # not a usable model record: 404 rather than a 500 from entry.get(...) below.
+        # A dict entry with a missing / null / non-string / empty path is still
+        # rendered as a pathless model (see the empty-path guard below and
+        # test_model_detail_empty_path_does_not_walk_cwd), never a Path(None)/Path(int)
+        # crash. Mirrors #562's _entry_path registry hardening.
+        if not isinstance(entry, dict):
+            raise HTTPException(404, f"Model not registered: {model_id}")
+
+        # _entry_path -> None for a missing / null / non-string / empty path; treat
+        # that as pathless ("") so the `if path:` guard below scrubs it (exactly like
+        # the virtual startup entry) instead of Path(None)/Path(int) raising a 500.
+        epath = _entry_path(entry)
+        path = epath if epath is not None else ""
         p = Path(path)
         size = None
         # Only stat/walk a REAL path. An empty path (a virtual startup entry, or a
@@ -86,7 +100,9 @@ def register(app: FastAPI, ctx) -> None:
                 pass
         aliases = sorted(
             n for n, e in registry.items()
-            if e.get("path") == path and n != model_id
+            # Skip a malformed sibling: a non-dict entry's .get would AttributeError,
+            # so one corrupt sibling must not crash a healthy model's detail lookup.
+            if isinstance(e, dict) and e.get("path") == path and n != model_id
         )
         return {
             "id": model_id,

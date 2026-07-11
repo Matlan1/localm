@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Optional, NamedTuple, Dict
 
 from localm.config import load_config, load_registry
-from localm.model_manager.registry import _register_with_dedup
+from localm.model_manager.registry import _register_with_dedup, _entry_path
 from localm.media.comfy_client import comfy_object_info, _MODEL_FILE_EXTS, _looks_like_model_files
 from localm.debuglog import logger
 
@@ -118,7 +118,20 @@ def scan_comfy_models(comfy_url: Optional[str] = None) -> ScanResult:
 
     # Now register the found files
     reg = load_registry()
-    existing_paths = {Path(entry["path"]).resolve() for entry in reg.values() if "path" in entry}
+    # Build the set of already-registered paths, skipping any malformed entry
+    # (non-dict, or a null / non-string / empty path). `"path" in entry` TypeErrors
+    # on a null entry and `Path(entry["path"])` raises on a null / int path; route
+    # every entry through _entry_path so one corrupt row cannot crash the scan.
+    # Mirrors #562's registry consumers.
+    existing_paths = set()
+    for entry in reg.values():
+        epath = _entry_path(entry)
+        if epath is None:
+            continue
+        try:
+            existing_paths.add(Path(epath).resolve())
+        except OSError:
+            continue
 
     added = 0
     skipped = 0
