@@ -328,6 +328,37 @@ def _register_ggml_backends(binary_dir: Path, lib: ctypes.CDLL) -> bool:
     return loaded_any
 
 
+def _force_vulkan_dedicated_vram(binary_dir: Path) -> None:
+    """On a Windows Vulkan build, keep model weights in DEDICATED VRAM.
+
+    By default ggml-vulkan allocates the model into HOST-VISIBLE video memory (to
+    skip a staging copy) whenever the device exposes a large host-visible +
+    device-local heap - which resizable-BAR and UMA systems do. On Windows/WDDM
+    that host-visible allocation is then physically backed by SHARED system RAM, so
+    the ENTIRE model runs at PCIe speed: measured ~13x slower than dedicated VRAM on
+    an RX 6900 XT (a 12B ran 2.5 tok/s in shared RAM vs 32.9 tok/s in dedicated; a
+    7B, 4.7 vs 62.7). It is also the fragile path behind the large-model first-decode
+    crash on Vulkan. Setting GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM makes ggml-vulkan
+    allocate DEVICE_LOCAL (dedicated VRAM) + a staging buffer instead, so the model
+    stays in VRAM and any compute-buffer overflow falls to host memory gracefully.
+
+    Scope: only a Vulkan build (the var is ggml-vulkan-specific), only on Windows
+    (the WDDM shared-memory backing is Windows-specific; on Linux/amdgpu host-visible
+    VRAM is real device memory and disabling it would only add a needless staging
+    copy), and only when the user has not set the var themselves (an explicit choice
+    always wins - e.g. a true UMA/integrated GPU may legitimately prefer host-visible
+    memory). setdefault respects an existing value, including an explicit "0"."""
+    if sys.platform != "win32":
+        return
+    try:
+        is_vulkan = ((binary_dir / "ggml-vulkan.dll").exists()
+                     or any(binary_dir.glob("*ggml-vulkan*")))
+    except OSError:
+        return
+    if is_vulkan:
+        os.environ.setdefault("GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM", "1")
+
+
 def load_lib() -> ctypes.CDLL:
     """Load (and cache) the native llama shared library.
 
@@ -354,6 +385,10 @@ def load_lib() -> ctypes.CDLL:
             f"  or set LLAMA_CPP_LIB=/path/to/{name} for a one-off."
         )
     lib_path = binary_dir / name
+
+    # Keep the Vulkan backend's model weights in DEDICATED VRAM (must be set before
+    # ggml-vulkan initialises, i.e. before the preload below).
+    _force_vulkan_dedicated_vram(binary_dir)
 
     # Make the binary dir AND the venv's ROCm runtime resolvable by the loader.
     _add_to_search_path(binary_dir)
@@ -523,26 +558,6 @@ def compute_devices() -> "List[tuple]":
             # device, not silent for the whole probe).
             continue
     return devices
-
-
-def gpu_backend_is_vulkan() -> bool:
-    """True when the active GPU compute device is a Vulkan device.
-
-    The load-time KV-cache-to-RAM offload (LlamaCpp._initial_offload_kqv) is gated
-    on this. The near-VRAM-limit compute-buffer crash it prevents (native
-    0xe06d7363 on the first decode) is SPECIFIC to the Vulkan backend; ROCm / CUDA
-    / Metal handle a tight fit gracefully - they fit it, spill to system memory, or
-    error cleanly - so preemptively forcing THEIR KV cache to system RAM would only
-    slow a model that used to run full-speed with its KV cache in VRAM (a
-    regression). Does not force-load the native lib (returns False when it is not
-    loaded yet); safe/quiet on any failure."""
-    if _loaded_lib is None:
-        return False
-    try:
-        return any(t != GGML_DEV_TYPE_CPU and str(n).lower().startswith("vulkan")
-                   for n, t in compute_devices())
-    except Exception:
-        return False
 
 
 # Cache of (gpu_device_handle, bound ggml_backend_dev_memory) once resolved, or
