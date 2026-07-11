@@ -71,3 +71,34 @@ def test_reporting_failure_does_not_recurse(tmp_path, monkeypatch):
     res = CliRunner().invoke(_group(), ["boom"])
     assert res.exit_code == 1
     assert "localm failed" in res.output
+
+
+def test_broken_pipe_passes_through_without_reporting(tmp_path, monkeypatch):
+    # `localm ... | head` closes the pipe early; the OSError that surfaces
+    # (BrokenPipeError, or EPIPE/EINVAL from the stdout flush on Windows) must NOT be
+    # misclassified as a bug - no report, no traceback cascade, a clean SIGPIPE-style
+    # exit. Regression for the 3-traceback + report-path-re-crash on an early pipe close.
+    import errno as _errno
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
+    reported = []
+    monkeypatch.setattr(bugreport, "report_failure",
+                        lambda **k: reported.append(k))
+
+    @click.group(cls=_GracefulGroup)
+    def g():
+        pass
+
+    @g.command()
+    def bpipe():
+        raise BrokenPipeError(_errno.EPIPE, "broken pipe")
+
+    @g.command()
+    def winpipe():
+        raise OSError(_errno.EINVAL, "closed pipe")  # Windows shape
+
+    for cmd in ("bpipe", "winpipe"):
+        res = CliRunner().invoke(g, [cmd])
+        assert res.exit_code == 0, cmd          # clean exit, not a crash/exit 1
+        assert reported == [], cmd              # NOT reported as a bug
+        assert "Sorry -" not in res.output
+        assert "localm failed" not in res.output
