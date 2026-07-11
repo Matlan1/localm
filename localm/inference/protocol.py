@@ -101,11 +101,18 @@ class CompletionRequest(BaseModel):
     model: str = "localm"
     prompt: str
     stream: bool = False
-    max_tokens: Optional[int] = None
-    temperature: Optional[float] = None
-    top_p: Optional[float] = None
+    # A request-level cap must be >= 1. The engine uses max_tokens <= 0 internally
+    # as an "unlimited" sentinel, so an unvalidated 0/negative from a client would
+    # silently become an unbounded generation (a soft DoS) instead of the short/no
+    # reply the client asked for. Reject it (matching OpenAI) rather than misread it.
+    max_tokens: Optional[int] = Field(None, ge=1)
+    # allow_inf_nan=False: stdlib json parses the bare NaN/Infinity tokens, and a
+    # non-finite temperature/top_p/penalty flows straight into the native sampler.
+    # Reject it with a clean 422 instead of feeding NaN into logit scaling.
+    temperature: Optional[float] = Field(None, allow_inf_nan=False)
+    top_p: Optional[float] = Field(None, allow_inf_nan=False)
     top_k: Optional[int] = None
-    repeat_penalty: Optional[float] = None
+    repeat_penalty: Optional[float] = Field(None, allow_inf_nan=False)
     grammar: Optional[str] = None
     # Lazy grammar: unconstrained until the output matches a trigger pattern,
     # then the grammar enforces (text-or-tool). Requires grammar_triggers.
@@ -118,11 +125,14 @@ class ChatRequest(BaseModel):
     model: str = "localm"
     messages: List[Message]
     stream: bool = False
-    max_tokens: Optional[int] = None
-    temperature: Optional[float] = None
-    top_p: Optional[float] = None
+    # See CompletionRequest for the rationale: a request cap must be >= 1 (0/negative
+    # collides with the internal "unlimited" sentinel), and temperature/top_p/penalty
+    # must be finite (a non-finite value would poison the native sampler).
+    max_tokens: Optional[int] = Field(None, ge=1)
+    temperature: Optional[float] = Field(None, allow_inf_nan=False)
+    top_p: Optional[float] = Field(None, allow_inf_nan=False)
     top_k: Optional[int] = None
-    repeat_penalty: Optional[float] = None
+    repeat_penalty: Optional[float] = Field(None, allow_inf_nan=False)
     grammar: Optional[str] = None  # GBNF grammar string for constrained sampling
     # Lazy grammar: unconstrained until the output matches a trigger pattern,
     # then the grammar enforces (text-or-tool). Requires grammar_triggers.
