@@ -545,6 +545,38 @@ class TestCollection:
             c2.add_paths([docs_dir],
                          embed_fn=lambda ts: [[1.0, 0.0, 0.0] for _ in ts])  # dim 3
 
+    def test_mid_batch_dim_mismatch_persists_earlier_files(self, tmp_path, docs_dir):
+        # A folder with >1 file where a LATER file's embedding dimension
+        # mismatches must not discard the EARLIER file(s) already processed in
+        # the SAME add_paths() call: _save() only ran once at the very end of
+        # the loop, so raising mid-loop used to lose everything done before the
+        # raise, not just the offending file (silent data loss, AGENTS rule 5).
+        base = tmp_path / "rag"
+        c = Collection("kb", base=base).create()
+
+        calls = {"n": 0}
+
+        def embed_then_switch(texts):
+            calls["n"] += 1
+            # _expand() sorts files, so 'bread.txt' is embedded before 'gpu.md'.
+            if calls["n"] == 1:
+                return [[1.0, 0.0] for _ in texts]              # dim 2
+            return [[1.0, 0.0, 0.0, 0.0] for _ in texts]          # dim 4 - mismatch
+
+        with pytest.raises(ValueError, match="dimension"):
+            c.add_paths([docs_dir], embed_fn=embed_then_switch)
+
+        # Reload from disk (a fresh instance, so this proves it was actually
+        # persisted, not just left in the live object's memory).
+        reloaded = Collection("kb", base=base)
+        docs = reloaded.documents()
+        assert any("bread" in d for d in docs), \
+            "the file embedded BEFORE the mismatch must survive the raise"
+        assert not any("gpu" in d for d in docs), \
+            "the mismatched file itself must not be (partially) indexed"
+        assert reloaded.stats()["has_vectors"] is True, \
+            "the surviving file's vector must be persisted, not dropped"
+
     def test_failed_files_reported(self, tmp_path):
         base = tmp_path / "rag"
         c = Collection("kb", base=base).create()

@@ -161,3 +161,95 @@ def test_rag_add_embed_flag_passes_embed_fn(env, monkeypatch):
     # with --embed: an embed_fn is threaded to add_paths (index-time embeddings)
     r3 = runner.invoke(ragcli.rag_add, ["coll", str(env / "f.txt"), "--embed"])
     assert callable(captured["embed_fn"]), r3.output
+
+
+# --------------------------------------------------------------------------- #
+#  REC-RAG-REPAIR-EMBED - `rag repair` must not SILENTLY strip embeddings
+# --------------------------------------------------------------------------- #
+
+def _fake_repair_collection(monkeypatch, ragcli, *, has_vectors, captured):
+    class _FakeColl:
+        def __init__(self, name):
+            self.name = name
+
+        @property
+        def corrupt(self):
+            return False
+
+        def documents(self):
+            return ["/x/a.txt"]
+
+        def stats(self):
+            return {"has_vectors": has_vectors}
+
+        def add_paths(self, paths, *, force=False, embed_fn=None, on_progress=None):
+            captured["embed_fn"] = embed_fn
+            captured["ran"] = True
+            return {"added": 0, "updated": len(paths), "skipped": 0,
+                    "chunks": len(paths), "failed": []}
+
+    import localm.rag as ragpkg
+    monkeypatch.setattr(ragcli, "Collection", _FakeColl, raising=False)
+    monkeypatch.setattr(ragpkg, "Collection", _FakeColl, raising=False)
+
+
+def test_repair_without_embed_on_hybrid_collection_asks_before_dropping_vectors(
+        env, monkeypatch):
+    from click.testing import CliRunner
+    from localm.cli import rag as ragcli
+    captured = {}
+    _fake_repair_collection(monkeypatch, ragcli, has_vectors=True, captured=captured)
+    monkeypatch.setattr(ragcli, "_cli_rag_embed_fn", lambda url: (lambda texts: []))
+
+    runner = CliRunner()
+    # Declining the confirmation must NOT run add_paths at all.
+    r = runner.invoke(ragcli.rag_repair, ["coll"], input="n\n")
+    assert "has_vectors" not in captured, r.output   # never got as far as add_paths
+    assert not captured.get("ran"), r.output
+    assert r.exit_code != 0
+
+    # Confirming proceeds, but WITHOUT an embedder (embed_fn is None) - the
+    # user was warned and chose to drop semantic search anyway.
+    r2 = runner.invoke(ragcli.rag_repair, ["coll"], input="y\n")
+    assert captured.get("ran"), r2.output
+    assert captured["embed_fn"] is None, r2.output
+
+
+def test_repair_yes_flag_skips_confirmation(env, monkeypatch):
+    from click.testing import CliRunner
+    from localm.cli import rag as ragcli
+    captured = {}
+    _fake_repair_collection(monkeypatch, ragcli, has_vectors=True, captured=captured)
+
+    runner = CliRunner()
+    r = runner.invoke(ragcli.rag_repair, ["coll", "--yes"])
+    assert r.exit_code == 0, r.output
+    assert captured.get("ran"), r.output
+    assert captured["embed_fn"] is None
+
+
+def test_repair_with_embed_flag_needs_no_confirmation_and_keeps_vectors(env, monkeypatch):
+    from click.testing import CliRunner
+    from localm.cli import rag as ragcli
+    captured = {}
+    _fake_repair_collection(monkeypatch, ragcli, has_vectors=True, captured=captured)
+    monkeypatch.setattr(ragcli, "_cli_rag_embed_fn", lambda url: (lambda texts: []))
+
+    runner = CliRunner()
+    r = runner.invoke(ragcli.rag_repair, ["coll", "--embed"])
+    assert r.exit_code == 0, r.output
+    assert captured.get("ran"), r.output
+    assert callable(captured["embed_fn"]), r.output
+
+
+def test_repair_on_bm25_only_collection_needs_no_confirmation(env, monkeypatch):
+    # Nothing to lose (no existing vectors) - repair proceeds without asking.
+    from click.testing import CliRunner
+    from localm.cli import rag as ragcli
+    captured = {}
+    _fake_repair_collection(monkeypatch, ragcli, has_vectors=False, captured=captured)
+
+    runner = CliRunner()
+    r = runner.invoke(ragcli.rag_repair, ["coll"])
+    assert r.exit_code == 0, r.output
+    assert captured.get("ran"), r.output

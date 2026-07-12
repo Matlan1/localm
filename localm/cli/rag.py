@@ -86,11 +86,25 @@ def rag_add(collection, paths, force, embed, url):
 
 @rag_group.command("repair")
 @click.argument("collection")
-def rag_repair(collection):
+@click.option("--embed", is_flag=True,
+              help="Also compute embeddings while repairing, via a running localm "
+                   "server - matching 'rag add --embed' / the GUI. Without this, "
+                   "repairing a collection that already has embeddings REMOVES them "
+                   "for every re-indexed document (you will be asked to confirm).")
+@click.option("--url", default=None,
+              help="Server base URL for --embed (default: auto-discover a running "
+                   "instance, else the configured port on localhost).")
+@click.option("-y", "--yes", is_flag=True,
+              help="Skip the embeddings-loss confirmation.")
+def rag_repair(collection, embed, url, yes):
     """Re-index every file in COLLECTION, rebuilding stale entries.
 
     Use this when an index may be out of date (e.g. files edited in place
     without a size change). Re-reads and re-chunks every indexed document.
+    Pass --embed to also (re)compute embeddings; without it, a collection that
+    already has semantic search goes back to lexical-only (BM25) - repair is a
+    full re-index, not an in-place patch, and cannot tell the difference
+    between "no embeddings were ever computed" and "you want to keep them".
     """
     from rich.console import Console
     from ..rag import Collection
@@ -110,7 +124,20 @@ def rag_repair(collection):
     if coll.corrupt:
         console.print(f"[yellow]'{collection}' index was corrupt; rebuilding "
                       f"from {len(paths)} source(s).[/yellow]")
-    result = coll.add_paths(paths, force=True,
+    # A repair is force=True on every doc: without --embed, every re-indexed
+    # chunk gets NO vector, silently dropping a collection that currently has
+    # semantic search back to BM25-only (this is exactly the bug behind
+    # REC-RAG-REPAIR-EMBED - a plain "repaired" success line gave no hint that
+    # embeddings had just been removed). Surface it and require an explicit
+    # yes rather than hiding a real capability loss (AGENTS rule 5).
+    if not embed and coll.stats().get("has_vectors") and not yes:
+        console.print(
+            f"[yellow]'{collection}' currently has semantic (hybrid) search. "
+            "Repairing without --embed will REMOVE the existing embeddings for "
+            "every re-indexed document (it goes back to BM25/lexical-only).[/yellow]")
+        click.confirm("Continue and drop the embeddings?", abort=True)
+    embed_fn = _cli_rag_embed_fn(url) if embed else None
+    result = coll.add_paths(paths, force=True, embed_fn=embed_fn,
                             on_progress=lambda t: console.print(f"  [dim]{t}[/dim]"))
     console.print(f"[green]repaired: {result['updated']} re-indexed, "
                   f"{result['added']} added[/green] - "

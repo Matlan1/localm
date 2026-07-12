@@ -712,6 +712,17 @@ class Collection:
                             # would silently mis-score every query (C3).
                             if (self._vec_dim is not None and new_dim is not None
                                     and new_dim != self._vec_dim):
+                                # Persist every file this call already finished before
+                                # raising: this exception intentionally HALTS the
+                                # batch (the file(s) after this one, including this
+                                # one, are not indexed), but a mid-batch model switch
+                                # must not also silently discard the WORK ALREADY DONE
+                                # on earlier files in the same call - add_paths()/
+                                # add_uploads() only _save() once at the very end, so
+                                # without this the caller's except ValueError (plug.py)
+                                # would report just an error line while N-1 already-
+                                # embedded files vanish with no trace (AGENTS rule 5).
+                                self._save()
                                 raise ValueError(
                                     f"Embedding dimension changed "
                                     f"({self._vec_dim} -> {new_dim}): this "
@@ -835,6 +846,10 @@ class Collection:
                             new_dim = _first_dim(vecs)
                             if (self._vec_dim is not None and new_dim is not None
                                     and new_dim != self._vec_dim):
+                                # See add_paths: persist this call's already-completed
+                                # uploads before halting, so a mid-batch model switch
+                                # does not silently discard their work (AGENTS rule 5).
+                                self._save()
                                 raise ValueError(
                                     f"Embedding dimension changed "
                                     f"({self._vec_dim} -> {new_dim}): this collection "
