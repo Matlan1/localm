@@ -1471,6 +1471,13 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
 }
 .msg-meta button.action:hover { color: var(--accent); border-color: var(--accent); }
 
+/* F11: "used N memories" chip on an assistant turn (chat.js buildMemoryChip). */
+.msg-meta button.mem-chip {
+  background: none; border: 1px solid var(--border); color: var(--text-dim);
+  border-radius: 5px; font-size: 11px; padding: 2px 8px; cursor: pointer;
+}
+.msg-meta button.mem-chip:hover { color: var(--accent); border-color: var(--accent); }
+
 /* file/folder picker modal (app/picker.js) - replaces the old .dir-picker-*
    modal list. The .dir-picker-row/-btn rules below are a separate thing (the
    settings FOLDER/PATH field row) and stay. */

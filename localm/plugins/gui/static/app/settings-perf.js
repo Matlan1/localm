@@ -1136,6 +1136,25 @@ $("persona-delete").onclick = () => {
 
 /* sending */
 
+/** F11 observability: read the per-turn memory-recall summary the server attaches
+ *  to a chat completion (the `X-Localm-Memory` response header) so the UI can show
+ *  a "used N memories" chip and the recall degrade reason. Returns null when the
+ *  header is absent or unparseable - best-effort, never throws. */
+export function parseMemoryHeader(resp) {
+  try {
+    const raw = resp && resp.headers && resp.headers.get
+      ? resp.headers.get("X-Localm-Memory") : null;
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    if (!data || typeof data.n !== "number") return null;
+    return {
+      n: data.n,
+      degrade: data.degrade ?? null,
+      items: Array.isArray(data.items) ? data.items : [],
+    };
+  } catch (e) { return null; }
+}
+
 export async function runCompletion(conv, webDepth = 0, web = null) {
   // R36: per-send web state. `seen` dedupes already-issued queries so the model
   // cannot loop on the same search; `ask` caches the net policy so a transient
@@ -1228,6 +1247,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   let finishReason = null;
   let aborted = false;
   let visionRejected = false;
+  let memUsed = null;   // F11: server's "used N memories" summary (X-Localm-Memory)
   try {
     const r = await fetch("/v1/chat/completions", {
       method: "POST",
@@ -1241,6 +1261,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       err.status = r.status;   // so the catch can recover an image-reject 400
       throw err;
     }
+    memUsed = parseMemoryHeader(r);   // F11: read before the body stream
     await readSSE(r, (payload) => {
       if (payload === "[DONE]") return;
       let chunk;
@@ -1326,6 +1347,9 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     reply.truncated = true;
     toast("Reply hit the max-tokens limit - raise “Max tokens” in ⚙ parameters, or reply “continue”", true);
   }
+  // F11: record which remembered facts steered this reply so the transcript can
+  // show a "used N memories" chip (survives reload; opens the memory modal).
+  if (memUsed && memUsed.n > 0) reply.memory = memUsed;
   conv.messages.push(reply);
   saveConversations(conv);
   if (usage) {

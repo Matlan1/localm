@@ -8,7 +8,7 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { $, authHeaders, autoGrow, confirmDanger, el, fetchImageURL, INSTANCE_SCOPED_KEYS, readStoredJSON, reconcileInstanceId, renderMarkdown, scrubMarkers, stripThink, toast } from "./helpers.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
-import { runCompletion, speak, setWebAskSession } from "./settings-perf.js";
+import { openMemoryModal, runCompletion, speak, setWebAskSession } from "./settings-perf.js";
 import { showView } from "./tabs.js";
 
 /* ================================================================ */
@@ -700,6 +700,36 @@ export function openImageLightbox(src, name) {
 }
 window.openImageLightbox = openImageLightbox;
 
+// F11 observability: human-readable labels for the recall degrade reasons the
+// server reports (store._vector_status). Shown in the memory chip's tooltip so
+// lexical-only / pending-embedding recall is visible, not invisible.
+const MEMORY_DEGRADE_LABELS = {
+  no_embedder: "keyword match only - no embedding model installed",
+  no_vectors: "keyword match only - memories not embedded yet (run setup-embeddings)",
+  low_coverage: "partial semantic match - some memories not embedded yet",
+  dim_mismatch: "keyword match only - the embedding model changed",
+  query_embed_failed: "keyword match only - could not embed this message",
+};
+
+/** F11: build the "🧠 N" chip for an assistant turn - how many remembered facts
+ *  the server injected into that reply. Click opens the memory modal so a wrong or
+ *  stale fact steering an answer is correctable in place. The tooltip lists the
+ *  facts used and any recall degrade reason. */
+export function buildMemoryChip(mem) {
+  const n = mem.n | 0;
+  const chip = el("button", "mem-chip", "🧠 " + n);
+  const facts = (mem.items || []).map((it) => it && it.text).filter(Boolean);
+  const reason = MEMORY_DEGRADE_LABELS[mem.degrade];
+  chip.title = [
+    `${n} remembered ${n === 1 ? "fact" : "facts"} used for this reply`,
+    facts.length ? facts.map((t) => "- " + t).join("\n") : "",
+    reason ? "(" + reason + ")" : "",
+  ].filter(Boolean).join("\n");
+  chip.setAttribute("aria-label", "Memory used: " + n + " - open memory");
+  chip.onclick = () => openMemoryModal();
+  return chip;
+}
+
 export function addMessageRow(container, role, text, opts = {}) {
   const row = el("div", "msg-row " + role + (opts.cls ? " " + opts.cls : ""));
   const mName = opts.model && opts.model !== "MODEL" ? opts.model : (modelCache.active || "Model");
@@ -792,6 +822,7 @@ export function addMessageRow(container, role, text, opts = {}) {
     btn.onclick = fn;
     meta.appendChild(btn);
   }
+  if (opts.memory && opts.memory.n > 0) meta.appendChild(buildMemoryChip(opts.memory));
   row.appendChild(meta);
   container.appendChild(row);
   return { row, body, meta };
@@ -879,6 +910,7 @@ export function renderChat() {
       actions,
       variant,
       model: m.model,
+      memory: m.memory,           // F11: "used N memories" chip (assistant turns)
       cls: tag ? "web-note" : "",
       label: tag ? NOTE_LABELS[tag] : undefined,
       // A settled turn from history: let renderMarkdown surface a "(no reply
