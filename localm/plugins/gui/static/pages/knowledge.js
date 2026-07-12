@@ -91,6 +91,15 @@ export async function refreshKnowledgePage() {
     add.onclick = () => kbAddDocs(c.name);
     actions.appendChild(add);
 
+    const reindex = el("button", "", "reindex");
+    reindex.title = "Re-embed every document already in this collection - use "
+      + "this after switching the embedding model in Settings, or any time "
+      + "this shows BM25 for a collection you expected to be hybrid. Just "
+      + "clicking 'add docs' again does NOT do this: unchanged files are "
+      + "skipped, not re-embedded.";
+    reindex.onclick = () => kbReindexCollection(c.name);
+    actions.appendChild(reindex);
+
     const search = el("button", "", "search");
     search.onclick = () => kbSearchModal(c.name);
     actions.appendChild(search);
@@ -298,13 +307,17 @@ export async function kbAddDocs(name) {
 }
 
 /** POST the add job. If the server replies 409 needs_consent (a whitelist miss,
- *  owner only), offer to add the folders to the allowed list and retry ONCE. */
-export async function kbRunAdd(name, paths, embed, log, retried = false) {
+ *  owner only), offer to add the folders to the allowed list and retry ONCE.
+ *  Pass reindex=true to force re-embedding of files that already look
+ *  unchanged (mtime/size/hash match) - a plain "add docs" click otherwise
+ *  skips them, which is why re-adding a folder after turning on/switching the
+ *  embedding model does nothing on its own. */
+export async function kbRunAdd(name, paths, embed, log, retried = false, reindex = false) {
   try {
     const r = await fetch(
       `/api/rag/collections/${encodeURIComponent(name)}/add`, {
         method: "POST", headers: authHeaders(),
-        body: JSON.stringify({ paths, embed }),
+        body: JSON.stringify({ paths, embed, reindex }),
       });
     if (r.status === 409 && !retried) {
       const info = await r.json().catch(() => ({}));
@@ -316,7 +329,7 @@ export async function kbRunAdd(name, paths, embed, log, retried = false) {
         }
         if (!(await kbAppendAllowedRoots(folders))) return;   // PATCH failed (toasted)
         log.textContent += "Added to your allowed folders. Indexing…\n";
-        return kbRunAdd(name, paths, embed, log, true);       // retry once
+        return kbRunAdd(name, paths, embed, log, true, reindex);   // retry once
       }
     }
     const data = await r.json();
@@ -333,6 +346,75 @@ export async function kbRunAdd(name, paths, embed, log, retried = false) {
     log.textContent += "failed: " + e.message + "\n";
     toast("Indexing failed: " + e.message, true);
   }
+}
+
+/** Re-embed every document already indexed in *name*, e.g. after switching
+ *  or first setting up the embedding model. Unlike kbAddDocs (which needs the
+ *  user to browse to the folder again, and then skips unchanged files),
+ *  this reuses the collection's own known document list and forces the
+ *  server to reindex regardless of whether the files look unchanged - the
+ *  documents() list (not upload: entries) is exactly what "add its docs
+ *  again" should have meant. */
+export async function kbReindexCollection(name) {
+  let data;
+  try {
+    const r = await fetch("/api/rag/collections/" + encodeURIComponent(name),
+                          { headers: authHeaders() });
+    data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+  } catch (e) {
+    toast("Could not load collection: " + e.message, true);
+    return;
+  }
+  const docs = data.docs || [];
+  const paths = docs.filter((d) => !d.uploaded).map((d) => d.path);
+  const uploadedCount = docs.length - paths.length;
+  if (!paths.length) {
+    toast(uploadedCount
+      ? "Nothing to reindex - every document here was uploaded from a "
+        + "device and can't be re-read from the server disk. Re-upload "
+        + "them to refresh their embeddings."
+      : "This collection has no documents yet.", true);
+    return;
+  }
+  const embed = $("kb-embed") ? $("kb-embed").checked : true;
+  if (!(await kbConfirmReindex(name, paths.length, uploadedCount, embed))) return;
+  const log = $("kb-log");
+  log.style.display = "block";
+  log.textContent = `Re-indexing ${paths.length} document(s) in '${name}'`
+    + (embed ? "" : " (BM25 only)") + "…\n";
+  if (uploadedCount) {
+    log.textContent += `Skipping ${uploadedCount} uploaded document(s) - `
+      + `re-upload them if you need to refresh those too.\n`;
+  }
+  await kbRunAdd(name, paths, embed, log, false, /* reindex */ true);
+}
+
+/** In-page confirm before a full reindex (which re-embeds every document and
+ *  may take a while on a large collection). */
+export function kbConfirmReindex(name, count, uploadedCount, embed) {
+  return new Promise((resolve) => {
+    openModal(`Re-index '${name}'?`, (body) => {
+      body.appendChild(el("p", "",
+        `This re-embeds all ${count} document(s) currently indexed in `
+        + `'${name}'` + (embed ? "" : " (lexical/BM25 only - check "
+        + "'Compute embeddings' above first if you want semantic search)")
+        + `. Use this after switching the embedding model in Settings, or `
+        + `any time this collection shows BM25 when you expected hybrid.`));
+      if (uploadedCount) {
+        body.appendChild(el("p", "sub",
+          `${uploadedCount} uploaded document(s) can't be re-read from the `
+          + `server disk and will be skipped.`));
+      }
+      const row = el("div", "actions");
+      const cancel = el("button", "btn-secondary", "Cancel");
+      cancel.onclick = () => { $("modal").style.display = "none"; resolve(false); };
+      const ok = el("button", "btn-secondary btn-primary", "Re-index");
+      ok.onclick = () => { $("modal").style.display = "none"; resolve(true); };
+      row.append(cancel, ok);
+      body.appendChild(row);
+    });
+  });
 }
 
 /** In-page confirm (window.confirm is suppressed in some PWAs) asking whether to

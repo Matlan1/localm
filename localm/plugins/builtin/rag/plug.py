@@ -542,8 +542,10 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
                  "embedding model. Switch to the internal default "
                  "(bge-small-en-v1.5).")
             return False
-        line(f"Ready: {model} ({dim}-dim). Semantic search is on. Re-index a "
-             "collection (add its docs again) to add vectors to existing documents.")
+        line(f"Ready: {model} ({dim}-dim). Semantic search is on. Click "
+             "'reindex' on a collection below to add vectors to its existing "
+             "documents (adding the same docs again does not re-embed unchanged "
+             "files).")
         return True
 
     from localm.inference.http_server import principal_id
