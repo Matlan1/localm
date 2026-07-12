@@ -676,10 +676,8 @@ def mark_managed_comfy_setup_offered() -> None:
     persist must not break the media error path (worst case the offer reappears next
     time - annoying, not harmful), so it is logged at debug, never muted blind."""
     try:
-        from localm.config import load_config, save_config
-        cfg = load_config()
-        cfg[_MANAGED_SETUP_OFFERED_KEY] = True
-        save_config(cfg)
+        from localm.config import update_config
+        update_config(lambda cfg: cfg.__setitem__(_MANAGED_SETUP_OFFERED_KEY, True))
     except Exception:
         from localm.debuglog import logger
         logger.debug("could not persist %s (the managed-ComfyUI offer may show "

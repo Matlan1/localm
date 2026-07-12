@@ -53,10 +53,8 @@ def _offer_open(path: Path) -> None:
 def _remember_func_shim() -> None:
     """Persist comfy_func_shim=True so every future localm-spawned ComfyUI gets the
     in-memory __func__ shim automatically (the "remember, stop asking" choice)."""
-    from ..config import load_config, save_config
-    cfg = load_config()
-    cfg["comfy_func_shim"] = True
-    save_config(cfg)
+    from ..config import update_config
+    update_config(lambda cfg: cfg.__setitem__("comfy_func_shim", True))
 
 
 def _maybe_apply_func_shim_and_retry(message: str, api_url: str, retry):

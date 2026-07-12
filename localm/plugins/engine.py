@@ -411,11 +411,13 @@ class PluginHost:
         return dict(load_config().get("plugins", {}).get(self._own_config_key(name), {}))
 
     def save_plugin_config(self, name: Optional[str] = None, cfg: Optional[dict] = None) -> None:
-        from localm.config import load_config, save_config
+        from localm.config import update_config
         key = self._own_config_key(name)
-        c = load_config()
-        c.setdefault("plugins", {})[key] = cfg if cfg is not None else {}
-        save_config(c)
+        value = cfg if cfg is not None else {}
+
+        def _mutate(c: dict) -> None:
+            c.setdefault("plugins", {})[key] = value
+        update_config(_mutate)
 
     def has_scope(self, scope: str) -> bool:
         # NOT implemented: the host has no request context - per-request scope
