@@ -459,7 +459,9 @@ def synthesize_memory(complete, *, principal: str | None = None, max_facts: int 
     res = run_consolidation(store, sessions, complete, embed_fn=embed_fn,
                             surface="chat", max_candidates=max_facts)
     new_facts = [r.text for r in store.all() if r.id not in before]
-    episodic = _store_episode(store, sessions, complete)
+    # Episodic capture is per-session + watermarked (memory-audit [14]): one episode
+    # per NEW session, not one blob summary over all of them.
+    episodic = _store_episodes(store, complete)
     # Backfill vectors for records stored before an embedder was available, so
     # semantic recall turns on RETROACTIVELY after 'localm setup-embeddings'. Bounded
     # per pass; a large store fills over several passes. No-op when no embedder.
@@ -476,28 +478,115 @@ def synthesize_memory(complete, *, principal: str | None = None, max_facts: int 
             "episodic": episodic, "facts": new_facts}
 
 
-def _store_episode(store, sessions: str, complete) -> int:
-    """Store a one-line EPISODIC summary of the session (what was discussed) so chat
-    recalls past topics, not only durable facts. Deduped against existing episodic
-    records; best-effort. Returns 1 if one was stored, else 0. The caller has
-    already confirmed writes are allowed (privacy)."""
+def _episodic_watermark_path(store) -> Path:
+    """Sidecar next to the episodic store holding the newest session mtime already
+    turned into an episode, so a processed session is never re-summarised
+    (memory-audit 2026-07-02 [14])."""
+    p = store.path
+    return p.with_name(p.stem + ".episodic-watermark.json")
+
+
+def _read_episodic_watermark(store) -> float:
     try:
-        from localm.memory import MemoryRecord, summarize_session
-        summ = summarize_session(complete, sessions)
-        if not summ:
-            return 0
+        data = json.loads(_episodic_watermark_path(store).read_text(encoding="utf-8"))
+        return float(data.get("last_mtime", 0.0))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return 0.0                               # absent/corrupt -> process from scratch
+
+
+def _write_episodic_watermark(store, mtime: float) -> None:
+    p = _episodic_watermark_path(store)
+    try:
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text(json.dumps({"last_mtime": float(mtime)}), encoding="utf-8")
+        tmp.replace(p)
+    except OSError as e:
+        from localm.debuglog import logger
+        logger.debug("episodic watermark write skipped: %s", e)
+
+
+def _session_text(path: Path, max_chars: int = 6000) -> str:
+    """User+assistant content of ONE session file, chronological, capped (keeping the
+    most recent turns). Assistant reasoning (<think>) is stripped so a summary never
+    ingests scratchpad. Empty when the file has no usable turns."""
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    pieces: list[str] = []
+    total = 0
+    for line in reversed(raw.splitlines()):        # newest-first, so the cap keeps recent
+        try:
+            rec = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(rec, dict) or rec.get("type") not in ("user", "llm"):
+            continue
+        data = rec.get("data") or {}
+        content = data.get("content", "") if isinstance(data, dict) else ""
+        if not isinstance(content, str) or not content.strip():
+            continue
+        who = "User" if rec.get("type") == "user" else "Assistant"
+        if who == "Assistant":
+            from localm.inference.textnorm import strip_think
+            content = strip_think(content)
+            if not content.strip():
+                continue
+        piece = f"{who}: {content.strip()}"
+        if total + len(piece) + 1 > max_chars:
+            break
+        pieces.insert(0, piece)                    # rebuild chronological order
+        total += len(piece) + 1
+    return "\n".join(pieces)
+
+
+def _store_episodes(store, complete) -> int:
+    """Store one EPISODIC summary PER NEW session file (past the watermark), so N
+    sessions become N episodes instead of collapsing into <=1 blob summary
+    (memory-audit 2026-07-02 [14]). Each episode is tagged with its source session id
+    + mtime. The watermark advances to the newest session SEEN (even one that yields
+    no usable summary), so nothing is re-summarised or retried forever. Deduped
+    against existing episodics (0.85). Best-effort; the caller confirmed writes are
+    allowed (privacy). Returns the number of episodes stored."""
+    try:
         from difflib import SequenceMatcher
-        lo = summ.lower()
-        for r in store.all():
-            if r.kind == "episodic" and \
-                    SequenceMatcher(None, lo, r.text.lower()).ratio() > 0.85:
-                return 0                         # already have this episode
-        store.add(MemoryRecord(text=summ, kind="episodic", source="synth",
-                               importance=0.4), embed_fn=_embed_fn())
-        return 1
+
+        from localm.memory import MemoryRecord, summarize_session
+        sdir = _home() / "sessions"
+        if not sdir.is_dir():
+            return 0
+        watermark = _read_episodic_watermark(store)
+        new_files = sorted(
+            (f for f in sdir.glob("*.jsonl") if f.stat().st_mtime > watermark),
+            key=lambda p: p.stat().st_mtime)       # oldest-first: watermark advances monotonically
+        if not new_files:
+            return 0
+        stored = 0
+        newest = watermark
+        for f in new_files:
+            mt = f.stat().st_mtime
+            newest = max(newest, mt)
+            text = _session_text(f)
+            if not text.strip():
+                continue
+            summ = summarize_session(complete, text)
+            if not summ:
+                continue
+            lo = summ.lower()
+            if any(r.kind == "episodic"
+                   and SequenceMatcher(None, lo, r.text.lower()).ratio() > 0.85
+                   for r in store.all()):
+                continue                           # already have this episode
+            store.add(MemoryRecord(text=summ, kind="episodic", source="synth",
+                                   importance=0.4,
+                                   meta={"session": f.stem, "session_mtime": mt}),
+                      embed_fn=_embed_fn())
+            stored += 1
+        _write_episodic_watermark(store, newest)
+        return stored
     except Exception as e:
         from localm.debuglog import logger
-        logger.debug("episodic summary skipped: %s", e)
+        logger.debug("episodic capture skipped: %s", e)
         return 0
 
 

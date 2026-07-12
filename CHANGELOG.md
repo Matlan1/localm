@@ -27,6 +27,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   and stays quiet when nothing is relevant. Follow-up questions ("yes, do that")
   recall better too, and a long remembered fact is shown in full instead of being cut
   off mid-sentence.
+- **Each conversation is remembered on its own.** Automatic memory used to blur all of
+  your recent sessions into a single one-line recollection (and re-summarise the same
+  ones every time it ran). It now records one summary per conversation, tagged to that
+  conversation, and never re-processes a session it has already summarised - so past
+  topics are recalled distinctly instead of collapsing into one vague note.
 
 ### Fixed
 - A non-finite number (`NaN` or `Infinity`) can no longer be saved as a config value.

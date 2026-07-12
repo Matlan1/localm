@@ -8,6 +8,8 @@ plugin now (localm/plugins/builtin/memory); privacy mode disables it entirely.
 
 from __future__ import annotations
 
+import json
+import os
 import types
 
 import pytest
@@ -209,18 +211,29 @@ def test_summarize_session_guard_and_sentence():
                              "x") == "Discussed the database migration plan."
 
 
-def test_store_episode_dedup_and_guard(home):
+def test_store_episodes_dedup_and_guard(home):
     store = plug._chat_store()
-    n = plug._store_episode(store, "user talked about postgres",
-                            lambda p: "Discussed migrating to Postgres 16.")
+    sdir = home / "sessions"
+    sdir.mkdir(exist_ok=True)
+
+    def _sess(name, content, mtime):
+        p = sdir / f"{name}.jsonl"
+        p.write_text(json.dumps({"type": "user", "data": {"content": content}}),
+                     encoding="utf-8")
+        os.utime(p, (mtime, mtime))
+
+    # One new session with a usable summary -> one episode.
+    _sess("s1", "user talked about postgres", 1000)
+    n = plug._store_episodes(store, lambda p: "Discussed migrating to Postgres 16.")
     assert n == 1
     epi = [r for r in store.all() if r.kind == "episodic"]
     assert len(epi) == 1 and "Postgres" in epi[0].text and epi[0].source == "synth"
-    # a near-duplicate episode is not stored again
-    assert plug._store_episode(store, "x",
-                               lambda p: "Discussed migrating to Postgres 16.") == 0
-    # a degenerate summary stores nothing
-    assert plug._store_episode(store, "x", lambda p: "{}") == 0
+    # A NEW session whose summary near-duplicates the existing episode is skipped.
+    _sess("s2", "more postgres talk", 2000)
+    assert plug._store_episodes(store, lambda p: "Discussed migrating to Postgres 16.") == 0
+    # A degenerate summary stores nothing.
+    _sess("s3", "some other topic", 3000)
+    assert plug._store_episodes(store, lambda p: "{}") == 0
     assert len([r for r in store.all() if r.kind == "episodic"]) == 1
 
 
