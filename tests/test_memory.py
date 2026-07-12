@@ -186,14 +186,16 @@ def test_blend_beats_bare_topk(tmp_path):
 
 
 def test_tiny_corpus_ranks_by_recency_importance(tmp_path):
-    """Below TINY_CORPUS, relevance is skipped; recency+importance decide."""
+    """Below TINY_CORPUS, relevance is skipped; among records that CLEAR the
+    relevance gate (here both share the query's content words), recency+importance
+    decide the order."""
     s = _store(tmp_path)
-    old = s.add(_rec("cats are independent animals", importance=0.3,
+    old = s.add(_rec("project atlas shipped last spring", importance=0.3,
                      last_used=NOW - 20 * DAY))
-    fresh = s.add(_rec("user works at a robotics lab", importance=0.9,
+    fresh = s.add(_rec("project atlas is the current focus", importance=0.9,
                        last_used=NOW))
     assert len(s) < TINY_CORPUS
-    top = s.recall("anything at all", k=2, now=NOW)
+    top = s.recall("project atlas", k=2, now=NOW)      # both eligible (lexical hit)
     assert top[0].id == fresh.id and top[-1].id == old.id
 
 
@@ -312,10 +314,12 @@ def test_user_facts_exempt_from_recency_decay(tmp_path):
     s.add(_rec("The user's favorite language is Rust", source="user",
                importance=0.7, last_used=old, created=old))
     for i in range(5):
-        s.add(_rec(f"recent chatter {i}", source="synth", importance=0.5,
-                   last_used=NOW - i * 60))
-    # < TINY_CORPUS records -> ranked by recency + importance (where the fix matters)
-    top = s.recall("anything", k=6, now=NOW)
+        s.add(_rec(f"a quick note about the language topic {i}", source="synth",
+                   importance=0.5, last_used=NOW - i * 60))
+    # All share the query's content word ("language") so all clear the relevance
+    # gate; < TINY_CORPUS -> ranked by recency + importance, where the user fact's
+    # recency exemption (the fix under test) must keep it on top of recent synth.
+    top = s.recall("language", k=6, now=NOW)
     assert top and top[0].source == "user"
 
 

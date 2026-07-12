@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from localm.rag import BM25
+from localm.rag.bm25 import tokenize as _tokenize
 from localm.rag.store import _cosine
 from localm.storekit import NamespaceLockRegistry, atomic_write as _storekit_atomic_write
 
@@ -65,6 +66,39 @@ TAU_DAYS = 30.0             # recency e-folding time: 30d -> 0.37, 90d -> 0.05
 FLOOR = 0.05               # a recalled memory must beat this normalized score
 TINY_CORPUS = 8            # below this, BM25 idf is noisy -> rank by rec+imp only
 VEC_COVERAGE = 0.8         # blend cosine only when >= this fraction have vectors
+
+# ---- absolute relevance gate (recall precision) --------------------------- #
+# Recall injects a memory ONLY when it actually relates to the query, mirroring the
+# coder's episode gate (plugins/coder/episodes.py), so an OFF-TOPIC turn injects
+# NOTHING instead of the old always-surface-the-top-k behaviour (memory-audit
+# 2026-07-02 [10]: FLOOR was arithmetically dead - user/import were recency-pinned
+# at 1.0 and the min synth importance cleared it, so recall never fell silent, and
+# a static 6-fact block distracted small local models). Gates are ABSOLUTE (not
+# max-normalised) so silence-when-irrelevant holds:
+#   lexical: the query shares a CONTENT word (stopwords removed) with the record, OR
+#   semantic: the raw cosine to the record clears REL_COS_MIN (when vectors usable).
+# The blended score below still RANKS the eligible records; the gate only decides
+# eligibility. Note the pinned user/import recency is now harmless for the "never
+# silent" property (an off-topic user fact fails the gate regardless), and it still
+# keeps a relevant durable fact prominent among the eligible records.
+REL_COS_MIN = 0.50         # absolute cosine floor for the semantic gate (~coder 0.55)
+# Stopwords stripped from the LEXICAL gate: a query and a fact sharing only "the"
+# must NOT clear it (that would break silence-when-irrelevant). Mirrors the coder
+# episode store's _STOPWORDS; a future refactor could share one copy.
+_STOPWORDS = frozenset(
+    "a an and are as at be been but by can could did do does done for from had has "
+    "have he her him his i if in into is it its me my no not of on only or our over "
+    "own same she should so some such than that the their them then there these they "
+    "this to too under up us very was we were what when where which who will with "
+    "would you your".split()
+)
+
+
+def _content_tokens(text: str) -> set:
+    """Lowercased CONTENT-word token set (stopwords removed) for the lexical relevance
+    gate. Reuses the shared rag tokenizer (unicode-aware) so CJK/accented queries work;
+    empty when *text* is all stopwords/punctuation."""
+    return {t for t in _tokenize(text or "") if t not in _STOPWORDS}
 
 # ---- forgetting ----------------------------------------------------------- #
 PRUNE_FLOOR = 0.02         # decayed(importance*recency) below this is forgettable
@@ -577,6 +611,33 @@ class MemoryStore:
             diagnostics["degrade_reason"] = None       # semantic signal active
         return _maxnorm(out)
 
+    def _eligible(self, query: str, embed_fn: Optional[EmbedFn]) -> list[bool]:
+        """Per-record ABSOLUTE relevance eligibility for the recall precision gate
+        (memory-audit [10]): a record is eligible for injection only when the query
+        shares a CONTENT word with it (lexical) OR its raw cosine to the query clears
+        REL_COS_MIN (semantic, when vectors are usable). A record failing BOTH is
+        dropped, so recall stays SILENT when nothing is relevant. The query is
+        embedded once here - a single short-string embed against the cached embedder
+        singleton, negligible next to the turn's own inference."""
+        q_tokens = _content_tokens(query)
+        usable, _reason = self._vector_status(embed_fn)
+        cos = None
+        if usable:
+            try:
+                qv = embed_fn([query])[0]
+            except Exception:
+                qv = None
+            stored_dim = len(next(iter(self._vectors.values())))
+            if qv and len(qv) == stored_dim:
+                cos = [(_cosine(qv, self._vectors[r.id]) if r.id in self._vectors
+                        else 0.0) for r in self._records]
+        out = []
+        for i, r in enumerate(self._records):
+            lex = bool(q_tokens & _content_tokens(r.text))
+            sem = cos is not None and cos[i] >= REL_COS_MIN
+            out.append(lex or sem)
+        return out
+
     def recall(self, query: str, *, k: int = 6, embed_fn: Optional[EmbedFn] = None,
                reinforce: bool = False, now: Optional[float] = None,
                diagnostics: Optional[dict] = None) -> list[MemoryRecord]:
@@ -622,7 +683,11 @@ class MemoryStore:
             scored.append((score, i, r))
         # Sort by score desc; ties keep insertion order (index asc) for determinism.
         scored.sort(key=lambda t: (-t[0], t[1]))
-        hits = [(s, r) for s, i, r in scored if s > FLOOR][:k]
+        # Absolute relevance gate (memory-audit [10]): only inject records that
+        # actually relate to the query (lexical content-word hit or cosine over
+        # REL_COS_MIN); an off-topic turn injects nothing rather than the top-k.
+        eligible = self._eligible(query, embed_fn)
+        hits = [(s, r) for s, i, r in scored if s > FLOOR and eligible[i]][:k]
         results = [r for _s, r in hits]
         if reinforce and results:
             # CHK-MEM-LOCK: recall() is called with reinforce=True on every chat

@@ -141,8 +141,9 @@ def test_small_store_without_embedder_still_works(tmp_path):
     s = MemoryStore("owner", "chat", root=tmp_path)
     s.add(MemoryRecord(text="User prefers metric units", source="user",
                        importance=0.9))
-    # No embedder: falls back to recency+importance ranking (never crashes).
-    hits = s.recall("anything", k=3, embed_fn=None)
+    # No embedder: a relevant (content-word) query still recalls via lexical match,
+    # ranked by recency+importance, and never crashes.
+    hits = s.recall("what metric units", k=3, embed_fn=None)
     assert hits and hits[0].text == "User prefers metric units"
 
 
