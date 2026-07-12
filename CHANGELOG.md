@@ -19,6 +19,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   example, before an embedding model is installed), so semantic recall being off is
   no longer invisible.
 
+### Changed
+- **Memory recall is now relevant-only.** Chat memory used to inject the same handful
+  of remembered facts into every reply regardless of the question, adding noise and
+  distracting smaller models. It now surfaces only the facts that actually relate to
+  what you asked - by keyword, or by meaning when an embedding model is installed -
+  and stays quiet when nothing is relevant. Follow-up questions ("yes, do that")
+  recall better too, and a long remembered fact is shown in full instead of being cut
+  off mid-sentence.
+
 ### Fixed
 - A non-finite number (`NaN` or `Infinity`) can no longer be saved as a config value.
   Setting one, e.g. `localm config temperature nan` or a crafted Settings request, used

@@ -612,21 +612,37 @@ def _maybe_auto_consolidate(principal: str | None = None) -> None:
 #  Chat hooks: recall injection (inlet) + consolidation trigger (outlet)
 # ------------------------------------------------------------------ #
 
-def _last_user_text(messages) -> str:
-    """The most recent user message's text, used only as the recall QUERY. For
-    multimodal content the text parts are joined - best-effort, only steers
-    relevance ranking (recalled memories are neutralised before injection)."""
+def _user_msg_text(m) -> str:
+    """The text of one user message (multimodal text parts joined)."""
+    content = m.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(p.get("text", "") for p in content
+                        if isinstance(p, dict) and p.get("type") == "text")
+    return ""
+
+
+def _recall_query(messages, *, max_chars: int = 400, max_user_turns: int = 3) -> str:
+    """The recall QUERY: the most recent user message plus a short window of prior
+    user turns, so an anaphoric follow-up ("yes, do that") still carries the earlier
+    turn's topic (memory-audit 2026-07-02 [58]: a last-message-only query recalls
+    poorly and, with the [10] relevance gate, would wrongly fall silent). Newest-first
+    and truncated to max_chars so the latest turn is never dropped. Only steers
+    relevance ranking + the eligibility gate; recalled memories are neutralised before
+    injection."""
+    texts = []
     for m in reversed(messages):
         if m.get("role") != "user":
             continue
-        content = m.get("content")
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            return " ".join(
-                p.get("text", "") for p in content
-                if isinstance(p, dict) and p.get("type") == "text")
-    return ""
+        t = _user_msg_text(m).strip()
+        if t:
+            texts.append(t)
+        if len(texts) >= max_user_turns:
+            break
+    if not texts:
+        return ""
+    return "\n".join(texts)[:max_chars].strip()      # texts[0] is the newest turn
 
 
 def _memory_outlet(text, messages, ctx):
@@ -703,7 +719,7 @@ def _memory_inlet(messages, ctx):
         return None
     try:
         from localm import memory as _mem
-        query = _last_user_text(messages)
+        query = _recall_query(messages)
         if not query.strip():
             return None
         store = _chat_store(getattr(ctx, "principal", None))

@@ -57,7 +57,9 @@ def test_inlet_injects_relevant_memory(home):
 
 def test_inlet_inserts_system_message_when_none(home):
     plug._chat_store().add(MemoryRecord(text="User is called Sam", source="user"))
-    messages = [{"role": "user", "content": "who am I"}]
+    # A relevant query (shares the content word "called") clears the recall gate;
+    # an all-stopword query like "who am I" would not, absent an embedder.
+    messages = [{"role": "user", "content": "what am I called"}]
     out = plug._memory_inlet(messages, _ctx())
     assert out[0]["role"] == "system" and "Sam" in out[0]["content"]
 
