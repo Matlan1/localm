@@ -2805,6 +2805,29 @@ async def _generate_full(engine, messages: list, request=None, **gen_kwargs) -> 
             pass
 
 
+def _memory_used_header(ctx) -> dict:
+    """F11 observability: render the memory plugin's per-turn recall (stashed in
+    ``ctx.state`` by its inlet) into a response-header dict so a client can show a
+    "used N memories" chip and the recall degrade reason. Empty when memory did
+    not run for this turn (plugin disabled, privacy mode, recall off). The value is
+    compact ASCII JSON, header-safe: ``{"n":<int>,"degrade":<reason|null>,"items":
+    [{"id","text","source","kind"}...]}`` - json.dumps(ensure_ascii=True) escapes
+    newlines and non-ASCII, so the blob is a single header-legal line."""
+    if ctx is None:
+        return {}
+    used = getattr(ctx, "state", {}).get("memory_used")
+    if used is None:
+        return {}
+    payload = {"n": len(used),
+               "degrade": ctx.state.get("memory_degrade_reason"),
+               "items": used}
+    try:
+        blob = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return {}
+    return {"X-Localm-Memory": blob}
+
+
 async def _complete(
     engine: Engine,
     messages: list,

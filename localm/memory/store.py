@@ -508,10 +508,32 @@ class MemoryStore:
             self._save()
 
     # --------------------------------------------------------- retrieval -- #
-    def _relevance(self, query: str,
-                   embed_fn: Optional[EmbedFn]) -> list[float]:
+    def _vector_status(self, embed_fn: Optional[EmbedFn]) -> tuple[bool, Optional[str]]:
+        """Whether the semantic (cosine) signal is usable for recall right now,
+        and, when it is not, a short reason (surfaced to callers as the recall
+        DEGRADE reason, mirroring RAG's lexical-only fallback). Single source of
+        truth for ``_vector_relevance`` and ``recall``'s diagnostics, so the
+        surfaced reason can never drift from the branch actually taken.
+
+        Reasons: ``no_embedder`` (no embedding model resolved), ``no_vectors``
+        (records not embedded yet, e.g. before ``setup-embeddings``),
+        ``low_coverage`` (< VEC_COVERAGE of records carry a vector), ``dim_mismatch``
+        (mixed vector dimensions in the sidecar)."""
+        if embed_fn is None:
+            return False, "no_embedder"
+        if not self._vectors:
+            return False, "no_vectors"
         n = len(self._records)
-        vec_rel = self._vector_relevance(query, embed_fn)
+        if n == 0 or len(self._vectors) / n < VEC_COVERAGE:
+            return False, "low_coverage"
+        if len({len(v) for v in self._vectors.values()}) != 1:
+            return False, "dim_mismatch"
+        return True, None
+
+    def _relevance(self, query: str, embed_fn: Optional[EmbedFn],
+                   diagnostics: Optional[dict] = None) -> list[float]:
+        n = len(self._records)
+        vec_rel = self._vector_relevance(query, embed_fn, diagnostics=diagnostics)
         if n < TINY_CORPUS:
             # BM25 idf is unstable on a handful of records, so the LEXICAL signal
             # is skipped here - but the SEMANTIC (cosine) signal is not noisy on a
@@ -528,41 +550,57 @@ class MemoryStore:
                    for a, b in zip(rel, vec_rel)]
         return rel
 
-    def _vector_relevance(self, query: str,
-                          embed_fn: Optional[EmbedFn]) -> Optional[list[float]]:
-        if embed_fn is None or not self._vectors:
+    def _vector_relevance(self, query: str, embed_fn: Optional[EmbedFn],
+                          diagnostics: Optional[dict] = None) -> Optional[list[float]]:
+        usable, reason = self._vector_status(embed_fn)
+        if not usable:
+            if diagnostics is not None:
+                diagnostics["degrade_reason"] = reason
             return None
-        n = len(self._records)
-        if n == 0 or len(self._vectors) / n < VEC_COVERAGE:
-            return None
-        dims = {len(v) for v in self._vectors.values()}
-        if len(dims) != 1:
-            return None
-        stored_dim = next(iter(dims))
+        # _vector_status verified a single shared dimension across all vectors.
+        stored_dim = len(next(iter(self._vectors.values())))
         try:
             qvec = embed_fn([query])[0]
         except Exception:
+            if diagnostics is not None:
+                diagnostics["degrade_reason"] = "query_embed_failed"
             return None
         if not qvec or len(qvec) != stored_dim:
+            if diagnostics is not None:
+                diagnostics["degrade_reason"] = "query_embed_failed"
             return None
         out = [
             _cosine(qvec, self._vectors[r.id]) if r.id in self._vectors else 0.0
             for r in self._records
         ]
+        if diagnostics is not None:
+            diagnostics["degrade_reason"] = None       # semantic signal active
         return _maxnorm(out)
 
     def recall(self, query: str, *, k: int = 6, embed_fn: Optional[EmbedFn] = None,
-               reinforce: bool = False, now: Optional[float] = None) -> list[MemoryRecord]:
+               reinforce: bool = False, now: Optional[float] = None,
+               diagnostics: Optional[dict] = None) -> list[MemoryRecord]:
         """Top-*k* records for *query* by relevance+recency+importance.
 
         ``reinforce=True`` bumps last_used/uses on the returned records (a WRITE):
         the caller passes ``reinforce=gating.writes_allowed(surface)`` so privacy
-        mode recalls WITHOUT any side effect. Deterministic (stable tie-break)."""
+        mode recalls WITHOUT any side effect. Deterministic (stable tie-break).
+
+        ``diagnostics`` (optional): when a dict is passed it is filled with the
+        recall's observability (``degrade_reason`` - why the semantic/cosine signal
+        was not used, or None when it was; ``n_records``/``n_vectors``/
+        ``n_recalled``) so a caller can surface "used N memories" + the degrade
+        reason. Default None keeps the call side-effect-free (no behaviour change)."""
         if not (query or "").strip() or not self._records:
+            if diagnostics is not None:
+                diagnostics.update({"degrade_reason": None,
+                                    "n_records": len(self._records),
+                                    "n_vectors": len(self._vectors),
+                                    "n_recalled": 0})
             return []
         k = max(1, min(int(k), K_CAP))
         now = time.time() if now is None else now
-        rel = self._relevance(query, embed_fn)
+        rel = self._relevance(query, embed_fn, diagnostics=diagnostics)
         # Recency is RAW exponential decay (already in [0,1]), NOT max-normalised:
         # max-normalising would make the newest record always score 1.0, so recall
         # could never fall silent on a store of only stale/irrelevant memories.
@@ -613,6 +651,12 @@ class MemoryStore:
                         reinforced.append(r)
                 self._save()
                 results = reinforced
+        if diagnostics is not None:
+            # degrade_reason was set by _vector_relevance during _relevance above.
+            diagnostics.setdefault("degrade_reason", None)
+            diagnostics["n_records"] = len(self._records)
+            diagnostics["n_vectors"] = len(self._vectors)
+            diagnostics["n_recalled"] = len(results)
         return results
 
     # --------------------------------------------------------- forgetting - #

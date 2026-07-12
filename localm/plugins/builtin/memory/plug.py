@@ -647,6 +647,46 @@ def _memory_outlet(text, messages, ctx):
     return text
 
 
+def _stash_memory_used(ctx, records, diag) -> None:
+    """Record, in the per-request ``ctx.state``, WHICH memories the inlet injected
+    and WHY recall degraded (F11 observability), so the chat route can surface a
+    "used N memories" affordance + the degrade reason in a response header. Only
+    metadata + the already-injected memory text is stashed (in-memory, per request,
+    returned to the same authenticated user) - never written to any log; the debug
+    line carries the COUNT and reason only, no memory content (privacy). Best-effort
+    and side-effect free: a stash failure never affects the reply. No-op without a
+    ctx (e.g. a pipeline-less test call)."""
+    if ctx is None:
+        return
+    try:
+        from localm.memory import INJECT_LINE_CHARS
+        items = []
+        for r in records:
+            if isinstance(r, dict):
+                rid, text = r.get("id"), r.get("text", "")
+                source, kind = r.get("source"), r.get("kind")
+            else:
+                rid = getattr(r, "id", None)
+                text = getattr(r, "text", "") or ""
+                source, kind = getattr(r, "source", None), getattr(r, "kind", None)
+            item = {"text": (text or "").strip()[:INJECT_LINE_CHARS]}
+            if rid:
+                item["id"] = rid
+            if source:
+                item["source"] = source
+            if kind:
+                item["kind"] = kind
+            items.append(item)
+        ctx.state["memory_used"] = items
+        ctx.state["memory_degrade_reason"] = diag.get("degrade_reason")
+        from localm.debuglog import logger
+        logger.debug("memory recall: injected %d record(s), degrade=%s",
+                     len(items), diag.get("degrade_reason"))
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.debug("memory stash skipped: %s", e)
+
+
 def _memory_inlet(messages, ctx):
     """Inject recalled memories into the system message. Off when the `memory_enabled`
     recall knob is off. In privacy mode it is off too UNLESS the user opted into
@@ -670,13 +710,19 @@ def _memory_inlet(messages, ctx):
 
         if writes_ok:
             _migrate_legacy(store)                 # migration is a write
+        diag: dict = {}
         block_records = store.recall(query, k=_mem.MAX_INJECT,
-                                     embed_fn=_embed_fn(), reinforce=writes_ok)
+                                     embed_fn=_embed_fn(), reinforce=writes_ok,
+                                     diagnostics=diag)
         if not block_records and not writes_ok:
             # Privacy-recall opt-in with an un-migrated store: read the legacy flat
             # file, strictly read-only (no migration/write).
             block_records = [{"text": b}
                              for b in _legacy_bullets()[:_mem.MAX_INJECT]]
+        # F11 observability: stash what recall selected + why it degraded BEFORE the
+        # empty-block early return, so a zero-recall / degraded turn is still visible
+        # to the client (rule 5: no silent recall).
+        _stash_memory_used(ctx, block_records, diag)
         block = _mem.render_memories(block_records)
         if not block:
             return None

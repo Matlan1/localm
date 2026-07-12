@@ -47,6 +47,7 @@ def register(app: FastAPI, ctx) -> None:
     _messages_prompt_text = _hs._messages_prompt_text
     _audit_exchange = _hs._audit_exchange
     _pin_engine = _hs._pin_engine
+    _memory_used_header = _hs._memory_used_header
 
     @app.post("/v1/chat/completions", dependencies=[Depends(_require_auth)])
     async def chat_completions(req: ChatRequest, request: Request):
@@ -149,12 +150,19 @@ def register(app: FastAPI, ctx) -> None:
                     headers={
                         "Cache-Control": "no-cache",
                         "X-Accel-Buffering": "no",
+                        # F11: "used N memories" + recall degrade reason (the inlet
+                        # already ran above, so ctx.state is populated). No-op when
+                        # memory did not run this turn.
+                        **_memory_used_header(ctx),
                     },
                 )
-            return await _complete(engine, messages, req.model, sem,
+            resp = await _complete(engine, messages, req.model, sem,
                                    audit=_audit, transcript=_transcript,
                                    pipeline=pipeline, ctx=ctx,
                                    request=request, **gen_kwargs)
+            for _hk, _hv in _memory_used_header(ctx).items():
+                resp.headers[_hk] = _hv          # F11: same surface, non-streaming
+            return resp
         finally:
             if not streaming_handoff:
                 _hs._unpin(engine)

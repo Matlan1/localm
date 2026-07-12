@@ -11,6 +11,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Added
+- **See which memories a reply used.** When chat memory is on, each reply that drew
+  on remembered facts now shows a small "🧠 N" chip; hovering lists the facts used,
+  and clicking opens the memory panel so a wrong or stale fact is easy to correct.
+  The chip's tooltip also says when recall fell back to keyword-only matching (for
+  example, before an embedding model is installed), so semantic recall being off is
+  no longer invisible.
+
 ### Fixed
 - A non-finite number (`NaN` or `Infinity`) can no longer be saved as a config value.
   Setting one, e.g. `localm config temperature nan` or a crafted Settings request, used
