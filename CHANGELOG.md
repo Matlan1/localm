@@ -46,6 +46,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   that moment could momentarily fall back to defaults. Saves now use a unique temp
   file per write and both saves and reads ride out the brief lock, so concurrent
   access no longer crashes a save or drops settings.
+- **A concurrent config/model-registry change from a SEPARATE localm process is no
+  longer silently lost:** `localm config <key> <value>` (or a client's `PATCH
+  /v1/config`) racing a different localm process's own config change - e.g. a
+  running server's settings save, or two CLI invocations - could each read the
+  file before the other had written it, so whichever finished last silently
+  overwrote the other's already-saved change; the same applied to two `localm
+  pull`/model-registry writes racing each other. Config and registry updates now
+  hold a lock across the whole read-then-write, so a concurrent writer in another
+  process waits its turn instead of clobbering the first one's change.
 - **A `config.json` that is not a JSON object is no longer ignored silently:** if
   the file somehow becomes valid JSON but not an object (a list, a bare string, a
   number), localm now says it is ignoring it and using defaults, instead of quietly
