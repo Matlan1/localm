@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import contextlib
 import copy
 import json
 import os
@@ -754,15 +755,187 @@ def save_config(cfg: dict) -> None:
         _atomic_write_json(CONFIG_FILE, _user_delta(cfg))
 
 
-def update_config(mutator: Callable[[dict], None]) -> dict:
-    """Atomically read-modify-write the config under the I/O lock.
+# update_config()/update_registry() are read-modify-write: read the file, let a
+# mutator edit the in-memory dict, then write it back. _io_lock only serializes
+# that whole cycle within THIS process - a genuinely separate localm OS process
+# (the CLI `localm config` racing a running server's PATCH /v1/config, or two CLI
+# invocations) has its OWN _io_lock and can interleave its own read-modify-write
+# entirely inside this process's window, silently losing whichever change gets
+# read-before-written-back last (reproduced directly: see
+# tests/test_config_cross_process_lock.py). A lock FILE closes that gap across
+# processes. Deliberately not the `filelock` package: huggingface-hub (a CORE,
+# always-installed dependency - pyproject.toml's base `dependencies`, not the
+# `gpu` extra) pulls filelock in transitively, so it IS present in every install
+# today - but it is not a DIRECT dependency of THIS project (no pyproject.toml
+# entry of its own), so importing it here would rely on another package's
+# transitive dependency choice rather than a contract localm actually owns; a
+# future huggingface-hub release dropping or relocating it would silently break
+# config.py, the one module every install (including a minimal one with no GPU
+# extras) needs to work. os.open(..., O_CREAT | O_EXCL) is an atomic
+# create-only-if-absent op on both Windows and POSIX, so exactly one process at
+# a time can hold the lock.
+_CROSS_LOCK_TIMEOUT = 10.0      # seconds to wait for a lock held by another process
+_CROSS_LOCK_STALE_AGE = 30.0    # a lock file older than this is presumed abandoned
+                                 # by a crashed holder and is reclaimed, so a dead
+                                 # process can never wedge every future write forever
+_CROSS_LOCK_POLL = 0.02         # seconds between acquire attempts; escalates up to
+_CROSS_LOCK_POLL_CAP = 0.25     # this cap under sustained contention
 
-    *mutator* receives the loaded config dict (defaults merged) and edits it in
-    place; the result is persisted with a single atomic write. Use this instead of
-    a bare load_config()/save_config() pair wherever a lost update would matter
-    (e.g. two in-process writers toggling different plugins concurrently)."""
+
+def _cross_lock_backoff(attempt: int) -> None:
+    time.sleep(min(_CROSS_LOCK_POLL * (attempt + 1), _CROSS_LOCK_POLL_CAP))
+
+
+def _lock_owner_pid(raw: bytes):
+    """Extract the PID from a lock file's ``<pid>:<nonce>`` token (or a bare
+    ``<pid>``, what a test double may write directly). None if unparseable -
+    including an orphaned/empty file left by a write that failed partway
+    through (see _cross_process_lock's acquire-failure cleanup)."""
+    try:
+        return int(raw.split(b":", 1)[0])
+    except (ValueError, IndexError):
+        return None
+
+
+@contextlib.contextmanager
+def _cross_process_lock(target: Path):
+    """Hold an exclusive, cross-process lock on *target* (a sibling ``<name>.lock``
+    marker file) for the duration of the ``with`` block.
+
+    Bounded retry with an escalating backoff, matching _replace_atomic's
+    established pattern, but on a wall-clock budget (_CROSS_LOCK_TIMEOUT) rather
+    than a fixed attempt count, since a full read-modify-write held by another
+    process can legitimately take longer than a single os.replace. Timing out
+    raises TimeoutError rather than silently proceeding unprotected - a lock that
+    cannot be acquired must never be treated as "acquired" (do-not-hide-problems).
+
+    FENCING TOKEN: each acquisition writes a unique ``<pid>:<nonce>`` token into
+    the lock file, not just a bare marker. This closes a real hole a bare
+    create/delete marker has: a holder whose critical section legitimately
+    outlasts _CROSS_LOCK_STALE_AGE (not crashed, just slow - heavy antivirus
+    scanning, a paused debugger) would otherwise have its lock silently stolen
+    by a waiter that assumes staleness means "crashed," and when the ORIGINAL
+    holder finally finishes and unconditionally deletes "the lock file," it
+    would actually be deleting the NEW holder's still-active lock, letting a
+    THIRD writer in - reopening the exact silent-clobber race this whole
+    mechanism exists to close, via its own recovery path. With the token,
+    release only removes the file if it still holds the token THIS call wrote;
+    if it doesn't (this call's lock was reclaimed as stale while still legitimately
+    held), the file is left alone - whoever's token is on disk owns cleanup, so a
+    stale-reclaim can never cascade into deleting a live holder's lock.
+
+    The same token also turns a same-thread NESTED call (a mutator passed to
+    update_config()/update_registry() that calls back into either for the same
+    file - not supported, this lock is not reentrant like _io_lock) from a
+    confusing _CROSS_LOCK_TIMEOUT-long stall into an immediate, clear error: the
+    PID embedded in the token reveals "this is already held by ME," which is
+    only possible via the calling process's own nested acquisition (a sibling
+    thread in this process would already be blocked on the outer _io_lock before
+    ever reaching here).
+
+    A lock file older than _CROSS_LOCK_STALE_AGE (and not self-held) is assumed
+    to belong to a crashed holder (a killed CLI, a hard-killed server) and is
+    reclaimed instead of wedging every future config/registry write for the rest
+    of the install's life; the reclaim is logged, never silent."""
+    lockpath = target.with_name(target.name + ".lock")
+    token = f"{os.getpid()}:{uuid.uuid4().hex}".encode("ascii")
+    deadline = time.time() + _CROSS_LOCK_TIMEOUT
+    attempt = 0
+    while True:
+        try:
+            fd = os.open(str(lockpath), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                held = lockpath.read_bytes()
+            except OSError:
+                held = b""
+            if _lock_owner_pid(held) == os.getpid():
+                raise RuntimeError(
+                    f"{lockpath.name} is already held by this same process "
+                    f"(pid {os.getpid()}) - a mutator passed to update_config()/"
+                    "update_registry() called back into update_config()/"
+                    "update_registry() on the same file. That is not supported "
+                    "(the cross-process lock is not reentrant); make both changes "
+                    "in one mutator instead of nesting the calls.")
+            try:
+                age = time.time() - lockpath.stat().st_mtime
+            except OSError:
+                # The lock vanished between our failed create and this stat (the
+                # holder just released it) - retry the create immediately rather
+                # than waiting out a backoff for a lock that is already gone.
+                continue
+            if age > _CROSS_LOCK_STALE_AGE:
+                print(f"[localm] note: reclaiming stale lock {lockpath.name} "
+                      f"({age:.0f}s old) - the process that held it appears to "
+                      "have crashed without releasing it.", file=sys.stderr)
+                try:
+                    lockpath.unlink()
+                except OSError:
+                    pass
+                continue
+            if time.time() >= deadline:
+                raise TimeoutError(
+                    f"timed out after {_CROSS_LOCK_TIMEOUT:.0f}s waiting for "
+                    f"{lockpath.name}, held by another localm process")
+            _cross_lock_backoff(attempt)
+            attempt += 1
+            continue
+        # We created the lock file (os.open succeeded). Everything from here
+        # must clean up OUR OWN just-created file on failure, or a transient
+        # write error (ENOSPC, a momentary AV lock on the file we just made)
+        # would leak an orphaned, unowned lock file that blocks every other
+        # config/registry writer install-wide until the next staleness reclaim.
+        try:
+            try:
+                os.write(fd, token)
+            finally:
+                os.close(fd)
+        except BaseException:
+            try:
+                lockpath.unlink()
+            except OSError:
+                pass
+            raise
+        break
+    try:
+        yield
+    finally:
+        # Fencing-token release (see docstring): only remove the lock file if it
+        # still holds the token WE wrote. If it doesn't, another process reclaimed
+        # it as stale while we were still legitimately inside our critical section
+        # (a write that outlasted _CROSS_LOCK_STALE_AGE) - deleting THEIR live
+        # lock here would let a third writer in while they still believe they
+        # hold exclusive access, so we leave it alone instead.
+        try:
+            current = lockpath.read_bytes()
+        except OSError:
+            current = None
+        if current == token:
+            try:
+                lockpath.unlink()
+            except OSError:
+                pass
+        elif current is not None:
+            print(f"[localm] note: {lockpath.name} was reclaimed by another "
+                  "localm process while this process still held it (this "
+                  f"write took longer than _CROSS_LOCK_STALE_AGE={_CROSS_LOCK_STALE_AGE:.0f}s) "
+                  "- not deleting the new holder's lock.", file=sys.stderr)
+
+
+def update_config(mutator: Callable[[dict], None]) -> dict:
+    """Atomically read-modify-write the config.
+
+    Holds _io_lock (serializes threads within this process) AND a cross-process
+    lock file (serializes separate localm OS processes - e.g. the CLI
+    `localm config` racing a running server's PATCH /v1/config, or two CLI
+    invocations) across the WHOLE read-modify-write, so no writer, in this
+    process or another, can read a stale copy and silently clobber a concurrent
+    change. *mutator* receives the loaded config dict (defaults merged) and edits
+    it in place; the result is persisted with a single atomic write. Use this
+    instead of a bare load_config()/save_config() pair wherever a lost update
+    would matter."""
     ensure_dirs()
-    with _io_lock:
+    with _io_lock, _cross_process_lock(CONFIG_FILE):
         cfg = copy.deepcopy(DEFAULT_CONFIG)   # deep: see load_config (nested dicts)
         stored = _read_json(CONFIG_FILE, {})
         _merge_stored_config(cfg, stored)
@@ -787,15 +960,21 @@ def save_registry(reg: dict) -> None:
 
 
 def update_registry(mutator: Callable[[dict], None]) -> dict:
-    """Atomically read-modify-write the registry under the I/O lock.
+    """Atomically read-modify-write the registry.
 
-    *mutator* receives the registry dict and edits it in place; the result is
-    persisted with a single atomic write. Use this instead of a bare
-    load_registry()/save_registry() pair wherever a lost update would matter,
-    so two in-process writers can't clobber each other. (Cross-process writers
-    - e.g. a CLI `pull` running alongside the GUI - are still last-writer-wins,
-    but each write stays atomic and non-corrupting.)"""
-    with _io_lock:
+    Holds _io_lock (serializes threads within this process) AND a cross-process
+    lock file (serializes separate localm OS processes - e.g. a CLI `pull`
+    running alongside the GUI, or two CLI invocations) across the WHOLE
+    read-modify-write, so no writer, in this process or another, can read a
+    stale copy and silently clobber a concurrent change (the same closed gap as
+    update_config(), see its docstring / _cross_process_lock). *mutator*
+    receives the registry dict and edits it in place; the result is persisted
+    with a single atomic write. Use this instead of a bare
+    load_registry()/save_registry() pair wherever a lost update would matter.
+    (save_registry() itself remains a blind overwrite - last-writer-wins by
+    design, not a read-modify-write, so it needs no lock beyond the atomic
+    write it already has.)"""
+    with _io_lock, _cross_process_lock(REGISTRY_FILE):
         reg = _read_json(REGISTRY_FILE, {})
         if not isinstance(reg, dict):
             reg = {}

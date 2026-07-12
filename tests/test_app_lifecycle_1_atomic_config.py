@@ -122,18 +122,38 @@ def test_update_config_never_loses_a_concurrent_write(home):
 #  must go through update_config(), not a bare load/save pair.                #
 # --------------------------------------------------------------------------- #
 
-def _install_slow_write(monkeypatch, delay=0.15):
-    """Widen update_config()'s critical section (still INSIDE its real
-    _io_lock) so a genuinely concurrent second writer reliably overlaps it,
-    without needing to touch either call site's source - this proves the
-    ACTUAL call sites are race-safe, not a reimplementation of them."""
-    real = cfg._atomic_write_json
+def _install_slow_merge(monkeypatch, delay=0.15):
+    """Widen the read-modify-write critical section via _merge_stored_config,
+    the one internal step whose LOCK STATUS actually differs between the fixed
+    and the old, buggy call-site shape:
 
-    def slow(path, data):
+      - load_config() calls _merge_stored_config() AFTER its own `with _io_lock`
+        block has already exited (config.py:694-697) - so in the OLD bare
+        load_config()/save_config() pattern this delay lands OUTSIDE any lock,
+        in the exact unlocked read-to-write gap the bug report describes.
+      - update_config() calls _merge_stored_config() INSIDE its `with _io_lock`
+        block (config.py) - so in the FIXED call-site shape this delay widens
+        a window that IS held under the lock.
+
+    A previous version of this helper patched _atomic_write_json instead. That
+    point is inside the lock in BOTH the old and the new shape (bare
+    save_config() also takes _io_lock around its own _atomic_write_json call),
+    so delaying it only ever widened an already-locked window and could not
+    tell the two call-site shapes apart - both "pass" whether or not the call
+    site actually routes through update_config(). That made
+    test_cli_config_cmd_survives_a_concurrent_writer and
+    test_http_patch_config_survives_a_concurrent_writer pass identically on
+    pre-fix code (see PR #584 follow-up verification). Patching
+    _merge_stored_config fixes that: it is genuinely unlocked in the old shape
+    and genuinely locked in the new one, so only the correct (update_config-
+    routed) call site can survive a concurrent writer landing in that window."""
+    real = cfg._merge_stored_config
+
+    def slow(cfgd, stored):
         time.sleep(delay)
-        return real(path, data)
+        return real(cfgd, stored)
 
-    monkeypatch.setattr(cfg, "_atomic_write_json", slow)
+    monkeypatch.setattr(cfg, "_merge_stored_config", slow)
 
 
 def test_cli_config_cmd_survives_a_concurrent_writer(home, monkeypatch):
@@ -142,7 +162,7 @@ def test_cli_config_cmd_survives_a_concurrent_writer(home, monkeypatch):
     itself now uses the atomic path."""
     from localm.cli.models import config_cmd
     cfg.save_config({"n_ctx": 4096})
-    _install_slow_write(monkeypatch)
+    _install_slow_merge(monkeypatch)
     barrier = threading.Barrier(2)
 
     def run_cli_command():
@@ -187,7 +207,7 @@ def test_http_patch_config_survives_a_concurrent_writer(home, monkeypatch):
         and "PATCH" in getattr(r, "methods", set())
     ).endpoint
 
-    _install_slow_write(monkeypatch)
+    _install_slow_merge(monkeypatch)
     barrier = threading.Barrier(2)
 
     class _FakeRequest:
