@@ -232,3 +232,143 @@ def test_http_patch_config_survives_a_concurrent_writer(home, monkeypatch):
     assert final["main_gpu_index"] == 1, (
         "patch_config() must use update_config() (atomic), not load_config()/"
         "save_config() - a concurrent write during its mutation was lost")
+
+
+# --------------------------------------------------------------------------- #
+#  Follow-up to #584/#586: four more call sites had the exact same bare      #
+#  load_config()/mutate/save_config() shape (found by an adversarial review  #
+#  of the #586 PR). Same technique (_install_slow_merge), same proof: each   #
+#  site must survive a concurrent update_config() writer landing in its      #
+#  widened merge window instead of silently losing it on the final save.     #
+# --------------------------------------------------------------------------- #
+
+def test_save_plugin_config_survives_a_concurrent_writer(home, monkeypatch):
+    """PluginHost.save_plugin_config() (the public plugin Host API,
+    docs/plugins.md's "write a plugin's config atomically") must not lose a
+    concurrent update_config() write during its own mutation."""
+    from unittest.mock import MagicMock
+
+    from localm.plugins.engine import PluginHost
+
+    cfg.save_config({"n_ctx": 4096})
+    _install_slow_merge(monkeypatch)
+    spec = MagicMock()
+    spec.name = "alpha"
+    host = PluginHost(MagicMock(), MagicMock(), spec)
+    barrier = threading.Barrier(2)
+
+    def run_save():
+        barrier.wait()
+        host.save_plugin_config(cfg=[{"secret": "alpha-owns-this"}][0])
+
+    def concurrent_writer():
+        barrier.wait()
+        time.sleep(0.02)
+        cfg.update_config(lambda c: c.__setitem__("main_gpu_index", 1))
+
+    t1 = threading.Thread(target=run_save)
+    t2 = threading.Thread(target=concurrent_writer)
+    t1.start(); t2.start()
+    t1.join(timeout=10); t2.join(timeout=10)
+
+    final = cfg.load_config()
+    assert final["plugins"]["alpha"]["secret"] == "alpha-owns-this"
+    assert final["main_gpu_index"] == 1, (
+        "save_plugin_config() must use update_config() (atomic), not "
+        "load_config()/save_config() - a concurrent write during its "
+        "mutation was lost")
+
+
+def test_set_auto_deps_survives_a_concurrent_writer(home, monkeypatch):
+    """localm.cli.plugins._set_auto_deps() must not lose a concurrent
+    update_config() write during its own mutation."""
+    from localm.cli.plugins import _set_auto_deps
+
+    cfg.save_config({"n_ctx": 4096})
+    _install_slow_merge(monkeypatch)
+    barrier = threading.Barrier(2)
+
+    def run_set():
+        barrier.wait()
+        _set_auto_deps(False)
+
+    def concurrent_writer():
+        barrier.wait()
+        time.sleep(0.02)
+        cfg.update_config(lambda c: c.__setitem__("main_gpu_index", 1))
+
+    t1 = threading.Thread(target=run_set)
+    t2 = threading.Thread(target=concurrent_writer)
+    t1.start(); t2.start()
+    t1.join(timeout=10); t2.join(timeout=10)
+
+    final = cfg.load_config()
+    assert final["auto_install_plugin_deps"] is False
+    assert final["main_gpu_index"] == 1, (
+        "_set_auto_deps() must use update_config() (atomic), not "
+        "load_config()/save_config() - a concurrent write during its "
+        "mutation was lost")
+
+
+def test_remember_func_shim_survives_a_concurrent_writer(home, monkeypatch):
+    """localm.cli.media._remember_func_shim() must not lose a concurrent
+    update_config() write during its own mutation."""
+    from localm.cli.media import _remember_func_shim
+
+    cfg.save_config({"n_ctx": 4096})
+    _install_slow_merge(monkeypatch)
+    barrier = threading.Barrier(2)
+
+    def run_remember():
+        barrier.wait()
+        _remember_func_shim()
+
+    def concurrent_writer():
+        barrier.wait()
+        time.sleep(0.02)
+        cfg.update_config(lambda c: c.__setitem__("main_gpu_index", 1))
+
+    t1 = threading.Thread(target=run_remember)
+    t2 = threading.Thread(target=concurrent_writer)
+    t1.start(); t2.start()
+    t1.join(timeout=10); t2.join(timeout=10)
+
+    final = cfg.load_config()
+    assert final["comfy_func_shim"] is True
+    assert final["main_gpu_index"] == 1, (
+        "_remember_func_shim() must use update_config() (atomic), not "
+        "load_config()/save_config() - a concurrent write during its "
+        "mutation was lost")
+
+
+def test_mark_managed_comfy_setup_offered_survives_a_concurrent_writer(home, monkeypatch):
+    """localm.media.comfy_client.mark_managed_comfy_setup_offered() must not
+    lose a concurrent update_config() write during its own mutation (lower
+    stakes than the other three - its own docstring frames it as best-effort -
+    but it now uses the same atomic helper for consistency)."""
+    from localm.media.comfy_client import mark_managed_comfy_setup_offered
+
+    cfg.save_config({"n_ctx": 4096})
+    _install_slow_merge(monkeypatch)
+    barrier = threading.Barrier(2)
+
+    def run_mark():
+        barrier.wait()
+        mark_managed_comfy_setup_offered()
+
+    def concurrent_writer():
+        barrier.wait()
+        time.sleep(0.02)
+        cfg.update_config(lambda c: c.__setitem__("main_gpu_index", 1))
+
+    t1 = threading.Thread(target=run_mark)
+    t2 = threading.Thread(target=concurrent_writer)
+    t1.start(); t2.start()
+    t1.join(timeout=10); t2.join(timeout=10)
+
+    final = cfg.load_config()
+    assert final["comfy_managed_setup_offered"] is True
+    assert final["main_gpu_index"] == 1, (
+        "mark_managed_comfy_setup_offered() must use update_config() "
+        "(atomic), not load_config()/save_config() - a concurrent write "
+        "during its mutation was lost")
