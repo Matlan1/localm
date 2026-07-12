@@ -144,7 +144,7 @@ instant and clean.
 | `add_settings(fields)` | Add fields to the plugin's settings section in the GUI. |
 | `register_tab(surface)` | Register a GUI tab in the SPA. |
 | `plugin_config(name=None)` | Read this (or another) plugin's config block (`config["plugins"][name]`). |
-| `save_plugin_config(name, cfg)` | Write a plugin's config atomically. |
+| `save_plugin_config(name, cfg)` | Write a plugin's config block, atomically (safe against a concurrent config write from another plugin, the CLI, or the HTTP API). |
 | `engine()` | Handle to the inference engine. |
 | `audit(event, data)` | Log a plugin event. |
 | `browse_dirs(path)` | Server-side folder picker helper. |

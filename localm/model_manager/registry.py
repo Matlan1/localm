@@ -843,72 +843,79 @@ def sync_models_dir(prune: Optional[bool] = None) -> ModelSyncResult:
                 continue
 
     # Reconcile missing / restored / pruned against the (possibly grown) registry.
-    reg = _mm.load_registry()
+    # The whole load-reconcile-save cycle runs inside a single update_registry()
+    # call so it is atomic and cross-process-locked, like every other write path
+    # in this file (_register() above, add_local, remove_model, alias, ...):
+    # this loop does real per-entry filesystem stat calls (path.exists()), which
+    # take actual wall-clock time, and a concurrent update_registry() write (a
+    # `pull`/`rm`/`alias` in another thread or process) landing during that scan
+    # must not be silently discarded by a blind save_registry() overwrite at the
+    # end - which is exactly what a load-once/mutate/save-once shape allows.
     models_root = _mm.MODELS_DIR.resolve()
 
     def _under_models_dir(p: Path) -> bool:
         return models_root in p.resolve().parents
 
-    # Managed models = those whose file lives under the models folder.
-    managed = [
-        name
-        for name, entry in reg.items()
-        if _entry_path(entry) is not None
-        and _under_models_dir(Path(_entry_path(entry)))
-    ]
-    managed_missing = [n for n in managed if not Path(_entry_path(reg[n])).exists()]
-
-    # Guardrail: if pruning would delete *every* managed model at once, the folder
-    # is almost certainly unavailable (unmounted drive, wrong path) rather than the
-    # user having deleted everything - refuse to prune and flag instead.
-    suspicious = prune and len(managed) >= 2 and len(managed_missing) == len(managed)
-
     flagged = restored = pruned = 0
     note = ""
     backed_up = False
-    dirty = False
 
-    for name in list(reg.keys()):
-        entry = reg[name]
-        # Skip a malformed / non-dict entry: it has no valid path to reconcile,
-        # and (crucially) `entry` may not be a dict, so entry.get/pop below would
-        # raise. It stays in the registry and is shown 'corrupt' by list_models.
-        path_str = _entry_path(entry)
-        if path_str is None:
-            continue
-        path = Path(path_str)
+    def _reconcile(reg: dict) -> None:
+        nonlocal flagged, restored, pruned, note, backed_up
 
-        if path.exists():
-            # A previously-missing model is back - clear the flag.
-            if entry.pop("missing", None):
-                restored += 1
-                dirty = True
-            continue
+        # Managed models = those whose file lives under the models folder.
+        managed = [
+            name
+            for name, entry in reg.items()
+            if _entry_path(entry) is not None
+            and _under_models_dir(Path(_entry_path(entry)))
+        ]
+        managed_missing = [n for n in managed if not Path(_entry_path(reg[n])).exists()]
 
-        # File is gone.
-        if prune and not suspicious and _under_models_dir(path):
-            if not backed_up:
-                # Snapshot the registry before the first deletion so the sync can
-                # be reverted one step if it goes wrong.
-                _mm._backup_registry()
-                backed_up = True
-            del reg[name]
-            pruned += 1
-            dirty = True
-        elif not entry.get("missing"):
-            entry["missing"] = True
-            flagged += 1
-            dirty = True
+        # Guardrail: if pruning would delete *every* managed model at once, the
+        # folder is almost certainly unavailable (unmounted drive, wrong path)
+        # rather than the user having deleted everything - refuse to prune and
+        # flag instead.
+        suspicious = prune and len(managed) >= 2 and len(managed_missing) == len(managed)
 
-    if suspicious:
-        note = (
-            f"Skipped autoprune: all {len(managed)} models under the models folder "
-            "appear missing - is the folder/drive available? Left them flagged "
-            "rather than deleting the registry."
-        )
+        for name in list(reg.keys()):
+            entry = reg[name]
+            # Skip a malformed / non-dict entry: it has no valid path to
+            # reconcile, and (crucially) `entry` may not be a dict, so
+            # entry.get/pop below would raise. It stays in the registry and is
+            # shown 'corrupt' by list_models.
+            path_str = _entry_path(entry)
+            if path_str is None:
+                continue
+            path = Path(path_str)
 
-    if dirty:
-        _mm.save_registry(reg)
+            if path.exists():
+                # A previously-missing model is back - clear the flag.
+                if entry.pop("missing", None):
+                    restored += 1
+                continue
+
+            # File is gone.
+            if prune and not suspicious and _under_models_dir(path):
+                if not backed_up:
+                    # Snapshot the registry before the first deletion so the
+                    # sync can be reverted one step if it goes wrong.
+                    _mm._backup_registry()
+                    backed_up = True
+                del reg[name]
+                pruned += 1
+            elif not entry.get("missing"):
+                entry["missing"] = True
+                flagged += 1
+
+        if suspicious:
+            note = (
+                f"Skipped autoprune: all {len(managed)} models under the models "
+                "folder appear missing - is the folder/drive available? Left "
+                "them flagged rather than deleting the registry."
+            )
+
+    _mm.update_registry(_reconcile)
 
     return ModelSyncResult(
         added=added, flagged=flagged, restored=restored, pruned=pruned, note=note

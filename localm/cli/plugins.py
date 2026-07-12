@@ -53,10 +53,8 @@ def _auto_deps_default() -> bool:
 
 
 def _set_auto_deps(value: bool) -> None:
-    from localm.config import load_config, save_config
-    cfg = load_config()
-    cfg["auto_install_plugin_deps"] = bool(value)
-    save_config(cfg)
+    from localm.config import update_config
+    update_config(lambda cfg: cfg.__setitem__("auto_install_plugin_deps", bool(value)))
 
 
 def _console_progress(line: str) -> None:
