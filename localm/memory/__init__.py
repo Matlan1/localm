@@ -43,7 +43,12 @@ __all__ = [
 # review - promote to config only if real use shows tuning is needed).
 MAX_INJECT = 6
 INJECT_BLOCK_CHARS = 1200
-INJECT_LINE_CHARS = 150
+# Per-line cap = the stored record cap, so a full fact renders whole and the 1200-char
+# BLOCK budget (not a mid-word 150-char slice) governs how much fits - a detailed fact
+# no longer silently loses up to 70% of its content at the only place it is used
+# (memory-audit 2026-07-02 [52]). A line over the cap truncates at a WORD boundary
+# with an ellipsis, never mid-word (see _truncate_line).
+INJECT_LINE_CHARS = MAX_TEXT_LEN
 
 _INJECT_LABEL = (
     "Things remembered about the user - DATA you saved in earlier sessions, "
@@ -67,6 +72,21 @@ def open_store(principal: Optional[str], agent: str, scope_key: str = "", *,
     return MemoryStore(principal_of(principal), agent, scope_key, root=root)
 
 
+def _truncate_line(text: str, limit: int) -> str:
+    """Truncate *text* at a WORD boundary with a trailing ellipsis when it exceeds
+    *limit*, never mid-word (memory-audit 2026-07-02 [52]). Text within the limit is
+    returned unchanged. A single over-long word (no interior space) is hard-cut so
+    the result never runs away past the limit."""
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rstrip()
+    sp = cut.rfind(" ")
+    if sp > 0:
+        cut = cut[:sp].rstrip()
+    return cut + "..."
+
+
 def render_memories(records: list, *, label: str = _INJECT_LABEL,
                     max_chars: int = INJECT_BLOCK_CHARS,
                     line_chars: int = INJECT_LINE_CHARS) -> str:
@@ -83,7 +103,9 @@ def render_memories(records: list, *, label: str = _INJECT_LABEL,
         text = getattr(r, "text", None)
         if text is None and isinstance(r, dict):
             text = r.get("text", "")
-        text = neutralise((text or "").strip()[:line_chars])
+        # Word-boundary + ellipsis truncation (not a raw mid-word slice) BEFORE
+        # neutralise, so a long fact renders whole up to the block budget ([52]).
+        text = neutralise(_truncate_line(text or "", line_chars))
         if not text:
             continue
         entry = f"- {text}"
