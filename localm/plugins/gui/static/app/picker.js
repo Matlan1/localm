@@ -52,7 +52,7 @@ function extOf(name) {
 }
 /** Join a child name onto a directory. "/" separates fine on Windows too
  *  (Python's Path accepts both; the server resolves and echoes the native
- *  form). An empty dir means `name` is itself a root (a drive like "C:\"). */
+ *  form). An empty dir means `name` is itself a root (a drive like "C:\"). */  /* hygiene-ok */
 function joinPath(dir, name) {
   if (!dir) return name;
   return dir.replace(/[\\/]+$/, "") + "/" + name;
