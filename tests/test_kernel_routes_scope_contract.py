@@ -14,6 +14,7 @@ the live app's routes) and assert every entry is accounted for, so an
 omission fails CI instead of relying on a manual checklist alone.
 """
 
+import pytest
 from fastapi.routing import APIRoute
 
 from localm.inference.http_server import create_app
@@ -49,6 +50,8 @@ _PUBLIC_ROUTES = {
     ("GET", "/api/session"),             # "am I logged in?" state check
     ("POST", "/api/session"),            # login: exchanges a key for a cookie
     ("POST", "/api/session/logout"),     # logout: must work post-key-clear
+    # api_landing=True only (localm serve): a bare redirect to /docs, no data.
+    ("GET", "/"),
 }
 
 # Gated by a bespoke, documented mechanism OTHER than a FastAPI Depends (the
@@ -64,12 +67,19 @@ _BESPOKE_GATED_ROUTES = {
 }
 
 
-def test_every_kernel_route_is_gated_or_explicitly_allowlisted():
+@pytest.mark.parametrize("api_landing", [False, True], ids=["gui-mode", "api-landing"])
+def test_every_kernel_route_is_gated_or_explicitly_allowlisted(api_landing):
     """Walk the live app's routes; every one must be either scope/auth-gated
     via a recognized FastAPI dependency, or present on one of the two
     hardcoded, commented allowlists above. A future route added with
-    neither - the exact gap LM-DA-016 flagged - fails this test."""
-    app = create_app(None)
+    neither - the exact gap LM-DA-016 flagged - fails this test.
+
+    Parametrized over both real app shapes: ``create_app(None)`` (GUI mode)
+    and ``create_app(None, api_landing=True)`` (the ``localm serve`` API-only
+    shape), which registers one extra inline route (``GET /``) that the
+    GUI-mode shape never exercises - walking only one shape would leave that
+    route permanently outside this test's blast radius."""
+    app = create_app(None, api_landing=api_landing)
     api_routes = [r for r in app.routes if isinstance(r, APIRoute)]
     # Sanity floor: if create_app()'s shape changes so drastically that far
     # fewer routes are found, the walk below would trivially "pass" over
