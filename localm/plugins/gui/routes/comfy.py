@@ -14,8 +14,8 @@ no provisioning logic of their own (S2/S3 own that in localm/media/managed_comfy
                                      (the shared remove_managed_comfy helper).
 
 Off by default: nothing here changes behaviour until the user opts in. The S1
-coexistence toggle (managed_comfy_enabled / comfy_target) is NOT duplicated here -
-it stays a Settings field; this only adds the set-up/status/remove actions around it.
+coexistence toggle (comfy_target) is NOT duplicated here - it stays a Settings
+field; this only adds the set-up/status/remove actions around it.
 
 Design: dev-notes/DESIGN-localm-managed-comfyui-2026-07-08.md (decision 8).
 """
@@ -51,7 +51,6 @@ def register(app: FastAPI, ctx) -> None:
             "path": str(paths.root) if installed else None,
             "models_dir": str(paths.models_dir) if installed else None,
             "api_url": MANAGED_COMFY_API_URL,
-            "enabled": bool(cfg.get("managed_comfy_enabled", False)),
             "target": cfg.get("comfy_target", "own"),
             "managed_active": managed_comfy_active(cfg),
         }

@@ -61,7 +61,6 @@ def _install_managed(home_dir: Path) -> mc.ManagedComfyPaths:
 
 def test_defaults_are_off(home):
     c = cfg.load_config()
-    assert c["managed_comfy_enabled"] is False
     assert c["comfy_target"] == "own"          # decision 6: prefer own WHEN one exists
 
 
@@ -98,26 +97,13 @@ def test_off_does_not_create_managed_dirs(home):
     assert not paths.models_dir.exists()
 
 
-def test_enabled_but_not_installed_still_targets_user(home):
-    """Enabling the flag without an installed instance must NOT reroute: a
-    missing managed instance means the user's ComfyUI, regardless of the flag."""
-    cfg.save_config({**cfg.load_config(),
-                     "managed_comfy_enabled": True, "comfy_target": "own"})
-    assert mc.managed_comfy_active() is False
-    t = mc.resolve_comfy_target()
-    assert t.managed is False
-    assert t.api_url == "http://127.0.0.1:8188"
-    assert comfy_client.default_api_url() == "http://127.0.0.1:8188"
-
-
 # --------------------------------------------------------------------------- #
 #  Coexistence routing (decision 6).                                          #
 # --------------------------------------------------------------------------- #
 
 def test_installed_and_own_targets_managed(home):
     paths = _install_managed(home)
-    cfg.save_config({**cfg.load_config(),
-                     "managed_comfy_enabled": True, "comfy_target": "own"})
+    cfg.save_config({**cfg.load_config(), "comfy_target": "own"})
     assert mc.managed_comfy_active() is True
     t = mc.resolve_comfy_target()
     assert t.managed is True
@@ -131,8 +117,7 @@ def test_installed_and_own_targets_managed(home):
 
 def test_installed_but_target_user_targets_user(home):
     _install_managed(home)
-    cfg.save_config({**cfg.load_config(),
-                     "managed_comfy_enabled": True, "comfy_target": "user"})
+    cfg.save_config({**cfg.load_config(), "comfy_target": "user"})
     assert mc.managed_comfy_active() is False
     t = mc.resolve_comfy_target()
     assert t.managed is False
@@ -215,8 +200,7 @@ def test_cli_status_reports_managed_when_installed(cli_runner, monkeypatch):
     import localm.config as cfg2
     from localm.cli import main
     _install_managed(cfg2.home_dir())
-    cfg2.save_config({**cfg2.load_config(),
-                      "managed_comfy_enabled": True, "comfy_target": "own"})
+    cfg2.save_config({**cfg2.load_config(), "comfy_target": "own"})
     res = cli_runner.invoke(main, ["comfy", "status"])
     assert res.exit_code == 0, res.output
     assert mc.MANAGED_COMFY_API_URL in res.output

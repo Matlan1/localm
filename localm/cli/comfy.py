@@ -22,8 +22,9 @@ def comfy_group() -> None:
 
     localm can run its OWN ComfyUI under the data folder instead of depending on
     your install - so it can pin a known-good version and carry fixes. Off by
-    default; your own ComfyUI is never modified. Turn it on in Settings -> Media
-    (or: localm config managed_comfy_enabled true) once an instance is installed.
+    default (inert until you set one up); your own ComfyUI is never modified.
+    Run 'localm comfy setup', then leave comfy_target on its default 'own' (or
+    set it in Settings -> Media) to route media to it.
     """
 
 
@@ -42,7 +43,6 @@ def comfy_status() -> None:
     installed = is_managed_comfy_installed()
 
     console.print("[bold]Managed ComfyUI[/bold]")
-    console.print(f"  Enabled (setting) : {cfg.get('managed_comfy_enabled', False)}")
     console.print(f"  Preferred target  : {cfg.get('comfy_target', 'own')}")
     if installed:
         console.print(f"  Installed         : yes, at {paths.root}")
@@ -145,9 +145,12 @@ def comfy_setup(copy_custom_nodes) -> None:
         console.print(f"  Custom nodes copied    : {result.custom_nodes_copied}")
     elif result.status == "fresh":
         console.print(f"  Custom nodes installed : {result.custom_nodes_copied}")
-    console.print("Turn it on so localm uses it: "
-                  "localm config managed_comfy_enabled true "
-                  "(comfy_target=own already targets it).")
+    if cfg.get("comfy_target", "own") == "own":
+        console.print("localm will now route media to it (comfy_target is "
+                      "already 'own', the default).")
+    else:
+        console.print("Switch to it: localm config comfy_target own "
+                      "(currently set to 'user').")
 
 
 @comfy_group.command("update")

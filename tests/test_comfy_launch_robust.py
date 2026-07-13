@@ -236,6 +236,68 @@ def test_disable_auto_launch_absent_by_default(tmp_path):
     assert "--disable-auto-launch" not in str(argv_false)
 
 
+def test_ensure_comfy_launches_the_managed_instance_when_active(tmp_path):
+    """#621 follow-up: when localm's own managed ComfyUI is installed and
+    selected, ensure_comfy must launch IT (its own venv + main.py) - the
+    managed install is a raw checkout with no bundled launcher script for
+    discovery to find, so before this fix it fell through to "not reachable,
+    configure your own ComfyUI install" even with a working managed instance."""
+    comfy_client._confirmed_alive.clear()
+    cfg = {"comfy_launch_cmd": None, "comfy_workdir": None,
+           "comfy_launch_timeout": 30}
+    managed_root = tmp_path / "comfyui"
+    managed_root.mkdir()
+    managed_cmd = f'"{tmp_path / "venv" / "python.exe"}" "{managed_root / "main.py"}" --listen 127.0.0.1 --port 8189'
+    alive = iter([False, True])
+    spawned = {}
+
+    def fake_popen(argv, cwd=None, **kw):
+        spawned["argv"], spawned["cwd"] = argv, cwd
+        proc = MagicMock()
+        proc.poll.return_value = None
+        return proc
+
+    with patch("localm.config.load_config", return_value=cfg), \
+         patch.object(comfy_client, "_comfy_alive", side_effect=lambda *a, **k: next(alive)), \
+         patch("localm.media.managed_comfy.managed_comfy_active", return_value=True), \
+         patch("localm.media.managed_comfy.managed_comfy_workdir", return_value=str(managed_root)), \
+         patch("localm.media.managed_comfy.managed_comfy_launch_cmd", return_value=managed_cmd), \
+         patch("subprocess.Popen", side_effect=fake_popen):
+        ok, msg = comfy.ensure_comfy("http://127.0.0.1:8189")
+
+    assert ok is True, msg
+    assert spawned["cwd"] == str(managed_root)
+    assert "main.py" in str(spawned["argv"])
+    assert "8189" in str(spawned["argv"])
+
+
+def test_ensure_comfy_caller_override_beats_managed_routing(tmp_path):
+    """A caller that passes its OWN explicit workdir/launch_cmd (e.g. a
+    per-plugin override) must win over managed routing - same "caller override
+    wins" precedent default_api_url() already follows for the URL."""
+    comfy_client._confirmed_alive.clear()
+    own_launcher = tmp_path / f"comfyui.{_ext()}"
+    own_launcher.write_text("echo hi\n", encoding="utf-8")
+    alive = iter([False, True])
+    spawned = {}
+
+    def fake_popen(argv, cwd=None, **kw):
+        spawned["argv"], spawned["cwd"] = argv, cwd
+        proc = MagicMock()
+        proc.poll.return_value = None
+        return proc
+
+    with patch("localm.config.load_config", return_value={"comfy_launch_timeout": 30}), \
+         patch.object(comfy_client, "_comfy_alive", side_effect=lambda *a, **k: next(alive)), \
+         patch("localm.media.managed_comfy.managed_comfy_active", return_value=True), \
+         patch("subprocess.Popen", side_effect=fake_popen):
+        ok, msg = comfy.ensure_comfy("http://127.0.0.1:8188", workdir=str(tmp_path))
+
+    assert ok is True, msg
+    assert spawned["cwd"] == str(tmp_path)
+    assert "comfyui" in str(spawned["argv"])
+
+
 def test_ensure_comfy_error_points_at_the_folder():
     cfg = {"comfy_launch_cmd": None, "comfy_workdir": None,
            "comfy_launch_timeout": 30}

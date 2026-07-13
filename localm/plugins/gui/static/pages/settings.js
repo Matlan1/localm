@@ -1025,13 +1025,12 @@ export async function buildMediaSection(form, fields) {
     + "independently. A blank field uses the shared default."));
 
   // S5: localm's OWN managed ComfyUI (set up / status / remove), plus the S1
-  // coexistence fields (comfy_target / managed_comfy_enabled) it needs to be
-  // useful - a compact box of its own, ahead of the three per-plugin boxes.
-  const enabledField = (fields || []).find(f => f.key === "managed_comfy_enabled");
+  // coexistence field (comfy_target) it needs to be useful - a compact box of
+  // its own, ahead of the three per-plugin boxes.
   const targetField = (fields || []).find(f => f.key === "comfy_target");
   const managed = el("div", "media-comfy-box");
   panel.appendChild(managed);
-  renderManagedComfyPanel(managed, { enabledField, targetField });
+  renderManagedComfyPanel(managed, { targetField });
 
   // R11/R12: register every subsection's node + label first (empty), so that when
   // we render each, its "Copy from <other>" buttons can see the other subsections,
@@ -1060,10 +1059,10 @@ export async function buildMediaSection(form, fields) {
 
 /** (Re)render the compact "localm's own ComfyUI" box in *host*: read
  *  /api/comfy/managed-status, then show either a Set-up button (not installed
- *  yet, so the coexistence fields below would be inert - progressive
+ *  yet, so the coexistence field below would be inert - progressive
  *  disclosure keeps the box small) or, once installed, the install path plus
- *  the two coexistence controls (managed_comfy_enabled / comfy_target, from
- *  *toggleFields*) with their own small Save, and a Remove button. Set-up
+ *  the coexistence control (comfy_target, from *toggleFields*) with its own
+ *  small Save, and a Remove button. Set-up
  *  POSTs /api/comfy/setup and streams the install job; Remove POSTs
  *  /api/comfy/remove. Re-renders itself in place after either finishes, so the
  *  view always matches what is on disk. Off by default: nothing here runs
@@ -1098,15 +1097,15 @@ export async function renderManagedComfyPanel(host, toggleFields) {
     info.appendChild(el("code", null, st.path || ""));
     host.appendChild(info);
 
-    // The S1 coexistence controls only matter once an instance exists; render
-    // them here (rather than earlier as inert fields) and save them with the
-    // Media section's own generic save path (they are ordinary core fields).
+    // The S1 coexistence control only matters once an instance exists; render
+    // it here (rather than earlier as an inert field) and save it with the
+    // Media section's own generic save path (it is an ordinary core field).
     // Built independently of the actions row below: Remove must always be
-    // offered once installed, even if the schema fetch is missing these two
-    // fields for some reason (rule 5 - a partial schema must not hide Remove).
+    // offered once installed, even if the schema fetch is missing this field
+    // for some reason (rule 5 - a partial schema must not hide Remove).
     const row = el("div", "media-comfy-row");
     const ctrls = [];
-    for (const field of [toggleFields.enabledField, toggleFields.targetField]) {
+    for (const field of [toggleFields.targetField]) {
       if (!field) continue;
       const ctrl = buildSettingControl(field);
       if (!ctrl) continue;

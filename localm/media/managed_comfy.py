@@ -10,10 +10,11 @@ anything: copying the user's stack is S2, the fresh hardware-matched install is
 S3. Everything here is inert until a managed instance exists on disk.
 
 The single source of truth for "which ComfyUI does localm talk to" is
-``resolve_comfy_target()``. The rule (locked decision 6):
+``resolve_comfy_target()``. The rule (decision 6, simplified from an earlier
+two-flag design - see git history for the retired ``managed_comfy_enabled``
+toggle, which never had a reachable state distinct from ``comfy_target``):
 
-    target the MANAGED instance  IFF  managed_comfy_enabled
-                                  AND  comfy_target == "own"
+    target the MANAGED instance  IFF  comfy_target == "own"
                                   AND  a managed instance is actually installed
     otherwise                         the user's ComfyUI, exactly as today.
 
@@ -171,13 +172,24 @@ def managed_comfy_workdir() -> str:
     return str(managed_comfy_paths().root)
 
 
+def managed_comfy_launch_cmd() -> str:
+    """The command that starts the managed instance: its OWN venv interpreter
+    running its OWN ``main.py``, on the managed port - never the user's
+    ``comfy_launch_cmd``/auto-discovered launcher script, which only make sense
+    for a user-provided ComfyUI (their own launcher, possibly ZLUDA-wrapped). A
+    fresh/copied managed install is a raw checkout with no bundled .bat/.sh
+    launcher of its own, so discovery would always find nothing here. Quoted the
+    same way a user's own launch command is expected to be (see ensure_comfy's
+    shlex/cmd handling). No-op-safe: a pure string, creates nothing."""
+    paths = managed_comfy_paths()
+    return f'"{paths.venv_python}" "{paths.main_py}" --listen 127.0.0.1 --port {MANAGED_COMFY_PORT}'
+
+
 def managed_comfy_active(cfg: Optional[dict] = None) -> bool:
     """True when media calls should target the MANAGED instance (decision 6):
-    the toggle is on, the target is "own", AND an instance is installed. Any of
-    those false -> the user's ComfyUI, exactly as today."""
+    the target is "own" AND an instance is installed. Either false -> the
+    user's ComfyUI, exactly as today."""
     cfg = cfg if cfg is not None else load_config()
-    if not cfg.get("managed_comfy_enabled"):
-        return False
     if cfg.get("comfy_target", "own") != "own":
         return False
     return is_managed_comfy_installed()
@@ -194,31 +206,37 @@ def managed_comfy_api_url_if_active(cfg: Optional[dict] = None) -> Optional[str]
 
 @dataclass(frozen=True)
 class ComfyTarget:
-    """Which ComfyUI localm targets: its URL, working dir, and whether it is the
-    managed instance (True) or the user's own (False)."""
+    """Which ComfyUI localm targets: its URL, working dir, launch command (None
+    when the caller should fall back to its own discovery, e.g. the user's own
+    install), and whether it is the managed instance (True) or the user's own
+    (False)."""
     api_url: str
     workdir: Optional[str]
+    launch_cmd: Optional[str]
     managed: bool
 
 
 def resolve_comfy_target(cfg: Optional[dict] = None) -> ComfyTarget:
     """THE single coexistence resolver (decision 6). Returns the managed
-    instance's (api_url, workdir) when managed routing is active, else the user's
-    ComfyUI exactly as today: the same api_url ``default_api_url()`` yields and
-    the ``comfy_workdir`` config value.
+    instance's (api_url, workdir, launch_cmd) when managed routing is active,
+    else the user's ComfyUI exactly as today: the same api_url
+    ``default_api_url()`` yields, the ``comfy_workdir`` config value, and no
+    launch_cmd (the caller resolves/discovers its own, as before).
 
-    Media modules can call this to get BOTH the URL and the workdir at once; the
-    URL alone also flows automatically through ``default_api_url()`` (which
-    consults ``managed_comfy_api_url_if_active``)."""
+    Media modules can call this to get the URL, workdir, AND launch command at
+    once; the URL alone also flows automatically through ``default_api_url()``
+    (which consults ``managed_comfy_api_url_if_active``)."""
     cfg = cfg if cfg is not None else load_config()
     if managed_comfy_active(cfg):
         return ComfyTarget(api_url=managed_comfy_api_url(),
-                           workdir=managed_comfy_workdir(), managed=True)
+                           workdir=managed_comfy_workdir(),
+                           launch_cmd=managed_comfy_launch_cmd(), managed=True)
     # User's ComfyUI, untouched. Import here (not at module load) to avoid a
     # circular import: comfy_client imports this module lazily too.
     from localm.media.comfy_client import default_api_url
     return ComfyTarget(api_url=default_api_url(),
-                       workdir=cfg.get("comfy_workdir"), managed=False)
+                       workdir=cfg.get("comfy_workdir"), launch_cmd=None,
+                       managed=False)
 
 
 # --------------------------------------------------------------------------- #

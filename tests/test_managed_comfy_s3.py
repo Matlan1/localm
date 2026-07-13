@@ -382,10 +382,9 @@ def test_provision_fresh_end_to_end(home, fake_fresh_sources, monkeypatch):
     assert marker.is_file()
     import json
     assert json.loads(marker.read_text(encoding="utf-8")).get("source") == "fresh"
-    # 7) Installed -> S1 routing targets the managed instance when enabled.
+    # 7) Installed -> S1 routing targets the managed instance (comfy_target=own).
     assert mc.is_managed_comfy_installed() is True
-    cfg.save_config({**cfg.load_config(),
-                     "managed_comfy_enabled": True, "comfy_target": "own"})
+    cfg.save_config({**cfg.load_config(), "comfy_target": "own"})
     target = mc.resolve_comfy_target()
     assert target.managed is True
     assert target.workdir == str(paths.root)

@@ -32,6 +32,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   ones every time it ran). It now records one summary per conversation, tagged to that
   conversation, and never re-processes a session it has already summarised - so past
   topics are recalled distinctly instead of collapsing into one vague note.
+- **One control for which ComfyUI localm uses, not two.** Settings > Media used to
+  have both a "Use localm's own managed ComfyUI" checkbox and a separate "ComfyUI to
+  use: own/user" dropdown - two controls for one decision, and confusing when they
+  disagreed (checkbox on, dropdown set to "user"). There is now just the dropdown:
+  "own" routes to localm's managed ComfyUI once you set one up (`localm comfy
+  setup`), "user" always uses your own install. Nothing else changes - your own
+  ComfyUI's settings and localm's managed instance both keep their state regardless
+  of which one is currently selected, so switching back and forth never loses either.
 
 ### Fixed
 - **Semantic knowledge search now works on password-protected servers.** When localm

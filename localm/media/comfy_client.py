@@ -1020,19 +1020,37 @@ def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
 
     cfg = load_config()
 
-    # Resolve the ComfyUI folder (working dir) FIRST: explicit arg, then config.
-    # It anchors both launcher discovery and the cwd a relative launcher name
-    # runs from, so a bare "launch-comfyui.bat" works once the folder is known.
+    # A localm-managed instance (decision 6) knows its own launch command - its
+    # own venv + main.py, never the user's comfy_workdir/comfy_launch_cmd/
+    # discovery (a raw managed checkout has no bundled launcher script for
+    # discovery to find). Only applies when the CALLER did not already pass an
+    # explicit workdir/launch_cmd of its own - same "caller override wins"
+    # precedent default_api_url() already follows for the URL.
+    managed_launch_cmd = None
+    if workdir is None and not launch_cmd:
+        try:
+            from localm.media.managed_comfy import (
+                managed_comfy_active, managed_comfy_launch_cmd, managed_comfy_workdir)
+            if managed_comfy_active(cfg):
+                workdir = managed_comfy_workdir()
+                managed_launch_cmd = managed_comfy_launch_cmd()
+        except Exception:
+            managed_launch_cmd = None
+
+    # Resolve the ComfyUI folder (working dir): explicit arg / managed, then
+    # config. It anchors both launcher discovery and the cwd a relative
+    # launcher name runs from, so a bare "launch-comfyui.bat" works once the
+    # folder is known.
     if workdir is None:
         workdir = cfg.get("comfy_workdir")
 
-    # Resolve the launch command: explicit arg, then config, then - when the
-    # ComfyUI folder is known - auto-discover a launcher inside it (the user's
-    # own launch-comfyui.bat, else the stock comfyui.bat / run.bat). This is the
-    # "work with the install the user already has" path: pointing localm at the
-    # ComfyUI folder is enough; naming a script is optional.
+    # Resolve the launch command: explicit arg / managed, then config, then -
+    # when the ComfyUI folder is known - auto-discover a launcher inside it
+    # (the user's own launch-comfyui.bat, else the stock comfyui.bat / run.bat).
+    # This is the "work with the install the user already has" path: pointing
+    # localm at the ComfyUI folder is enough; naming a script is optional.
     if not launch_cmd:
-        launch_cmd = cfg.get("comfy_launch_cmd")
+        launch_cmd = managed_launch_cmd or cfg.get("comfy_launch_cmd")
     discovered = False
     if not launch_cmd and workdir:
         found = discover_launch_cmd(Path(workdir))
