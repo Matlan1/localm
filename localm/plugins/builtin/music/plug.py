@@ -24,7 +24,7 @@ import shutil
 import time
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -149,17 +149,17 @@ async def music(req: MusicRequest, request: Request):
     return {"job_id": job.id}
 
 
-@_router.get("/api/music/file/{name}")
-async def music_file(name: str, request: Request):
-    gallery.owned_or_404(request, "music", name)
+@_router.get("/api/music/file/{name}",
+             dependencies=[Depends(gallery.require_owner("music"))])
+async def music_file(name: str):
     path = _music_path(name)
     media = "audio/mpeg" if path.suffix.lower() == ".mp3" else "audio/flac"
     return FileResponse(str(path), media_type=media)
 
 
-@_router.delete("/api/music/file/{name}")
-async def music_delete(name: str, request: Request):
-    gallery.owned_or_404(request, "music", name)
+@_router.delete("/api/music/file/{name}",
+                dependencies=[Depends(gallery.require_owner("music"))])
+async def music_delete(name: str):
     path = _music_path(name)
     sidecar = path.with_suffix(path.suffix + ".json")
     path.unlink()
@@ -169,9 +169,9 @@ async def music_delete(name: str, request: Request):
     return {"status": "deleted", "name": name}
 
 
-@_router.post("/api/music/file/{name}/move")
-async def music_move(name: str, req: MoveFileRequest, request: Request):
-    gallery.owned_or_404(request, "music", name)
+@_router.post("/api/music/file/{name}/move",
+              dependencies=[Depends(gallery.require_owner("music"))])
+async def music_move(name: str, req: MoveFileRequest):
     path = _music_path(name)
     dest_dir = Path(req.dest).expanduser()
     try:
@@ -195,7 +195,7 @@ async def music_move(name: str, req: MoveFileRequest, request: Request):
 async def music_history(request: Request):
     """Generated tracks, newest first, with their sidecar metadata - filtered to
     the caller's own (an admin/owner sees all; unowned/legacy entries stay
-    visible to everyone, matching gallery.owned_or_404)."""
+    visible to everyone, matching gallery.require_owner)."""
     music_dir = _music_dir()
     items = []
     if music_dir.is_dir():

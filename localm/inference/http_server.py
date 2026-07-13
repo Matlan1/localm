@@ -1441,6 +1441,32 @@ def job_owner_ok(request: Request, job_owner: Optional[str]) -> bool:
     return principal_id(request) == job_owner
 
 
+def require_owner(resolve):
+    """FastAPI dependency factory: promote a per-route ownership check into a
+    Depends()-injectable gate, the same pattern require_scope already uses for
+    scope checks - so a new per-owner route cannot omit the check by
+    construction (design-audit LM-DA-020, reaffirming LM-DA-SEC-06).
+
+    *resolve* is itself an ordinary FastAPI dependency - its own path/query
+    params (e.g. ``job_id``, ``name``) are auto-injected the same as an
+    endpoint function's - that returns ``(resource, owner, not_found_detail)``:
+    *resource* is the object the route needs (or None if it does not exist),
+    *owner* is its recorded creator (None = unrestricted, see job_owner_ok),
+    and *not_found_detail* is the 404 message to raise. The SAME 404 is raised
+    whether the resource is missing or the caller does not own it - never
+    distinguished, so a foreign key cannot even confirm the resource exists
+    (KEY-SCOPE-2). On success the gate returns *resource*, so a route can
+    declare ``thing = Depends(require_owner(resolve))`` and receive it
+    directly. Use as ``dependencies=[Depends(require_owner(resolve))]`` when
+    the route does not need the resource itself."""
+    def dep(request: Request, resolved=Depends(resolve)):
+        resource, owner, not_found_detail = resolved
+        if resource is None or not job_owner_ok(request, owner):
+            raise HTTPException(404, not_found_detail)
+        return resource
+    return dep
+
+
 def effective_fs_access(request: Request) -> str:
     """The caller's effective reach into the SERVER HOST filesystem: "host" (the
     whole disk), "shared" (confined to owner-designated shared roots), or "none"

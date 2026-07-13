@@ -12,25 +12,30 @@ from __future__ import annotations
 import asyncio
 import json
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI
 from fastapi.responses import StreamingResponse
 
 import localm.plugins.gui.web as _web
-from localm.inference.http_server import _require_auth, job_owner_ok
+from localm.inference.http_server import _require_auth, require_owner
 
 
 def register(app: FastAPI, ctx) -> None:
     jobs = ctx.jobs
 
-    @app.get("/api/jobs/{job_id}/events", dependencies=[Depends(_require_auth)])
-    async def job_events(job_id: str, request: Request):
+    def _resolve_job(job_id: str):
+        """require_owner() resolver: the GUI-tracked job named by the job_id
+        path param (JobManager, NOT the scheduled-jobs plugin's JobStore)."""
         job = jobs.get(job_id)
-        # A job is reachable only by the key that created it (or an admin/owner).
-        # Return 404 - not 403 - on an ownership mismatch so a non-owner cannot even
-        # confirm the (unguessable) id exists (KEY-SCOPE-2).
-        if job is None or not job_owner_ok(request, job.owner):
-            raise HTTPException(404, f"No such job: {job_id}")
+        return job, (job.owner if job else None), f"No such job: {job_id}"
 
+    # FastAPI dependency: fetch + enforce ownership, Depends()-injectable so
+    # job_events/job_cancel cannot omit the check by construction (LM-DA-020).
+    # Same 404 whether the job is missing or belongs to someone else, so a
+    # non-owner cannot even confirm the (unguessable) id exists (KEY-SCOPE-2).
+    owned_job = require_owner(_resolve_job)
+
+    @app.get("/api/jobs/{job_id}/events", dependencies=[Depends(_require_auth)])
+    async def job_events(job=Depends(owned_job)):
         async def _stream():
             # Each connection gets its own subscriber queue (fed the full history
             # plus every event pushed from here on) so concurrent viewers of the
@@ -57,11 +62,6 @@ def register(app: FastAPI, ctx) -> None:
         )
 
     @app.post("/api/jobs/{job_id}/cancel", dependencies=[Depends(_require_auth)])
-    async def job_cancel(job_id: str, request: Request):
-        job = jobs.get(job_id)
-        # Same owner-binding as the events stream: only the creating key (or an
-        # admin/owner) may cancel; others get an indistinguishable 404.
-        if job is None or not job_owner_ok(request, job.owner):
-            raise HTTPException(404, f"No such job: {job_id}")
+    async def job_cancel(job=Depends(owned_job)):
         job.cancel()
         return {"status": "cancelling"}
