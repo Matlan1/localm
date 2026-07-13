@@ -263,6 +263,8 @@ _resp_q = None
 def _spawn_worker() -> None:
     """Start a fresh worker. Caller holds ``_mgr_lock``."""
     global _proc, _req_q, _resp_q
+    from localm._mp_spawn import ensure_spawn_uses_venv_python
+    ensure_spawn_uses_venv_python()   # #617: avoid a renamed-launcher WinError 2
     ctx = mp.get_context("spawn")               # explicit: identical on every OS
     _req_q = ctx.Queue()
     _resp_q = ctx.Queue()
