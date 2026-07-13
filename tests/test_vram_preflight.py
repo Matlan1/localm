@@ -195,19 +195,11 @@ class TestCheckContextFit:
         with patch.object(GgufBackend, "_free_vram_bytes", return_value=0):
             assert b._check_context_fit(2_000_000) is None   # CPU-only -> KV already in RAM
 
-    def test_load_native_wires_check_context_fit_into_llamacpp(self, tmp_path):
-        """End to end: _load_native() must pass GgufBackend's OWN bound
-        _check_context_fit as LlamaCpp's vram_check - not omit it (which would
-        leave context growth unguarded again, a facade fix)."""
-        b = _backend(tmp_path, size_bytes=1_000_000)
-        fake_llamacpp = MagicMock()
-        with patch.object(GgufBackend, "_vram_levels", return_value=[]), \
-             patch("localm.inference.backends.llamacpp._loader.load_lib"), \
-             patch.dict(sys.modules,
-                        {"localm.inference.backends.llamacpp": fake_llamacpp}):
-            b._load_native()
-        _, kwargs = fake_llamacpp.LlamaCpp.call_args
-        assert kwargs.get("vram_check") == b._check_context_fit
+    # test_load_native_wires_check_context_fit_into_llamacpp moved to
+    # tests/test_gguf_worker.py (TestLoad.test_load_wires_check_context_fit_and_returns_metadata):
+    # the real LlamaCpp construction (and the vram_check wiring) now happens
+    # in GgufWorker, inside the isolated worker process, not in
+    # GgufBackend._load_native() - see llamacpp/_runner.py.
 
 
 class TestVramReport:
@@ -237,22 +229,22 @@ class TestVramReport:
             assert GgufBackend._vram_levels() == []
 
     def test_load_reports_usage_delta(self, tmp_path, capsys):
-        """End to end through _load_native with a stubbed LlamaCpp: the
-        printed line shows in-use/total and the delta this load consumed."""
-        import sys
-        from unittest.mock import MagicMock
+        """End to end through _load_native with a stubbed ModelRunner: the
+        printed line shows in-use/total and the delta this load consumed.
+        The VRAM-delta report stays parent-side (it reads driver-global
+        state, correct from either process) even though the real model load
+        now happens in an isolated worker - see llamacpp/_runner.py."""
         b = _backend(tmp_path, size_bytes=1_000_000)
         # 12 GiB free before the load, 4 GiB free after -> 8 GiB this load.
         # Sizes are displayed in binary units (GiB labelled "GB").
         GIB = 1024 ** 3
         levels = iter([[(12 * GIB, 16 * GIB)],
                        [(4 * GIB, 16 * GIB)]])
-        fake_llamacpp = MagicMock()
         with patch.object(GgufBackend, "_vram_levels",
                           side_effect=lambda: next(levels)), \
-             patch("localm.inference.backends.llamacpp._loader.load_lib"), \
-             patch.dict(sys.modules,
-                        {"localm.inference.backends.llamacpp": fake_llamacpp}):
+             patch("localm.inference.backends.llamacpp._runner.ModelRunner.spawn_and_load",
+                   return_value={"n_layers": None, "kv_bytes_per_token": 0,
+                                 "supports_images": False}):
             b._load_native()
         out = capsys.readouterr().out
         assert "12.00 GB in use / 16.00 GB total" in out

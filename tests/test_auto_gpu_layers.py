@@ -14,7 +14,7 @@ of raising, while an explicit -g is always honoured verbatim.
 import json
 
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from localm.inference.backends.gguf import GgufBackend
 
@@ -264,17 +264,18 @@ class TestLoadResolvesGpuLayers:
 
 class TestPostLoadLayerCountCache:
     def test_load_native_caches_true_layer_count(self, tmp_path, monkeypatch):
-        import sys
+        """The real load now happens in the isolated worker (see
+        llamacpp/_runner.py) - it reports n_layers back in the load response,
+        and GgufBackend._load_native persists it exactly as before (this
+        disk write itself stays parent-side)."""
         import localm.config as cfg
         monkeypatch.setattr(cfg, "HOME_DIR", tmp_path)
 
         b = _model(tmp_path, 1_000_000, n_gpu_layers=99, auto=False)
-        fake_llamacpp = MagicMock()
-        fake_llamacpp.LlamaCpp.return_value.n_layers = 42   # llama_model_n_layer
         with patch.object(GgufBackend, "_vram_levels", return_value=[]), \
-             patch("localm.inference.backends.llamacpp._loader.load_lib"), \
-             patch.dict(sys.modules,
-                        {"localm.inference.backends.llamacpp": fake_llamacpp}):
+             patch("localm.inference.backends.llamacpp._runner.ModelRunner.spawn_and_load",
+                   return_value={"n_layers": 42, "kv_bytes_per_token": 0,
+                                 "supports_images": False}):
             b._load_native()
 
         from localm.model_meta import cached_n_layers

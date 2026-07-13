@@ -58,6 +58,45 @@ def test_gguf_loads_and_generates_real_text(gguf_backend):
     assert gguf_backend.loaded, "model should remain loaded after a normal generation"
 
 
+def test_gguf_load_populates_metadata_from_isolated_worker(gguf_backend):
+    """The model's whole lifecycle now runs in an isolated worker process (see
+    llamacpp/_runner.py) - this proves the metadata it reports back
+    (effective_ctx_max/effective_gpu_layers/supports_images) actually reaches
+    the parent-side GgufBackend correctly end to end, through a REAL load, not
+    just a mocked one (test_gguf_worker.py/test_vram_preflight.py already
+    cover the wiring with mocks; this is the real thing)."""
+    # The fixture constructs GgufBackend directly with ctx_auto=False (the
+    # constructor default) and no explicit n_ctx_max, so "no ceiling" (None)
+    # is the CORRECT resolved value here - not a positive int (that only
+    # happens with ctx_auto=True or an explicit n_ctx_max, covered by
+    # test_dynamic_ctx.py's mocked unit tests).
+    assert gguf_backend.effective_ctx_max is None
+    assert isinstance(gguf_backend.effective_gpu_layers, int) and gguf_backend.effective_gpu_layers >= 0
+    # SmolLM2-135M-Instruct has no mmproj - text-only, so this must be False,
+    # not just "truthy" (proves the flag is read from the real load response,
+    # not defaulting to some other stand-in value).
+    assert gguf_backend.supports_images is False
+
+
+def test_gguf_unload_reload_cycle_through_isolated_worker(gguf_backend):
+    """unload() must cleanly tear down the isolated worker process, and a
+    subsequent load() must spawn a fresh one and generate real text again -
+    proving the runner lifecycle (not just a single load) works end to end.
+    Leaves gguf_backend loaded afterward, matching the fixture's steady
+    state for any later test in this module."""
+    gguf_backend.unload()
+    assert not gguf_backend.loaded
+    assert gguf_backend._runner is None or not gguf_backend._runner.is_alive()
+
+    gguf_backend.load()
+    assert gguf_backend.loaded
+    out = "".join(gguf_backend.chat_stream(
+        [{"role": "user", "content": "Say hello in one word."}],
+        max_tokens=10, temperature=0.0, seed=1,
+    )).strip()
+    assert any(c.isalpha() for c in out), f"reload-then-generate broke: {out!r}"
+
+
 def test_gguf_grammar_request_never_breaks_chat(gguf_backend):
     """A grammar request must be SAFE on GGUF: where the native build supports
     grammar it constrains output, and where it does not (some prebuilt llama.dll
