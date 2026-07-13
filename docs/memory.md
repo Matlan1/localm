@@ -165,7 +165,10 @@ A namespace holds at most 256 records, each capped at 500 characters. Low-value
 synthesized memories decay over time and are pruned. User-typed and imported
 facts are never dropped by decay; only the size cap can evict them, weakest
 first, and every eviction is archived to a recoverable `.forgotten.jsonl`
-sidecar next to the store, never silently hard-deleted.
+sidecar next to the store, never silently hard-deleted. `GET
+/api/memory/forgotten` lists what is archived and `POST
+/api/memory/forgotten/{id}/restore` recovers one record back into the live
+store.
 
 ## Privacy: what runs in each mode
 
