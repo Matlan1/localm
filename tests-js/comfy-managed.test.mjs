@@ -4,9 +4,12 @@
 // (image/music/video) boxes. When no managed instance is installed it shows a
 // "Set up localm's own ComfyUI" button that POSTs /api/comfy/setup (dispatched
 // as a job, streamed). When one IS installed it shows "installed at <path>", the
-// S1 coexistence controls (managed_comfy_enabled / comfy_target - core schema
-// fields with group="Media", otherwise skipped from the flat form) with their
-// own small Save, and a Remove button that POSTs /api/comfy/remove.
+// S1 coexistence control (comfy_target - a core schema field with group="Media",
+// otherwise skipped from the flat form) with its own small Save, and a Remove
+// button that POSTs /api/comfy/remove. There used to be a second
+// managed_comfy_enabled toggle alongside comfy_target; it was retired (the two
+// were ANDed with no reachable state where they meaningfully disagreed) - see
+// localm/media/managed_comfy.py's module docstring.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages, runScript } from "./harness.mjs";
@@ -15,14 +18,11 @@ const SCHEMA = { fields: [
   { key: "comfy_workdir", widget: "folder", label: "ComfyUI folder", help: "",
     group: "Media", owner: "image", default: "/shared" },
 ]};
-// A schema that also carries the two S1 coexistence fields, for the tests that
-// exercise them specifically (kept separate from SCHEMA above so the minimal
-// no-toggle-fields case - Remove must still render even then - stays covered).
-const SCHEMA_WITH_TOGGLES = { fields: [
+// A schema that also carries the S1 coexistence field, for the tests that
+// exercise it specifically (kept separate from SCHEMA above so the minimal
+// no-target-field case - Remove must still render even then - stays covered).
+const SCHEMA_WITH_TARGET = { fields: [
   ...SCHEMA.fields,
-  { key: "managed_comfy_enabled", widget: "toggle",
-    label: "Use localm's own managed ComfyUI", help: "", group: "Media",
-    owner: "image", default: false },
   { key: "comfy_target", widget: "select", label: "ComfyUI to use", help: "",
     group: "Media", owner: "image", options: ["own", "user"], default: "own" },
 ]};
@@ -33,12 +33,12 @@ const MEDIA = { plugins: [
 const INSTALLED = {
   installed: true, path: "/home/user/.localm/comfyui",
   models_dir: "/home/user/.localm/comfyui-models",
-  api_url: "http://127.0.0.1:8189", enabled: false, target: "own",
+  api_url: "http://127.0.0.1:8189", target: "own",
   managed_active: false,
 };
 const NOT_INSTALLED = {
   installed: false, path: null, api_url: "http://127.0.0.1:8189",
-  enabled: false, target: "own", managed_active: false,
+  target: "own", managed_active: false,
 };
 
 function makeFetch(calls, { installed, schema = SCHEMA }) {
@@ -121,20 +121,17 @@ test("clicking Remove POSTs /api/comfy/remove", async () => {
   assert.ok(post, "Remove POSTed /api/comfy/remove");
 });
 
-test("installed + toggle fields in schema -> coexistence controls render inside the top box, ahead of the three-mode grid", async () => {
+test("installed + target field in schema -> the coexistence control renders inside the top box, ahead of the three-mode grid", async () => {
   const calls = [];
   const { window: win } = loadAppWithPages(
-    { fetchImpl: makeFetch(calls, { installed: true, schema: SCHEMA_WITH_TOGGLES }) });
+    { fetchImpl: makeFetch(calls, { installed: true, schema: SCHEMA_WITH_TARGET }) });
   await render(win);
   const doc = win.document;
   const box = doc.querySelector(".media-comfy-box");
   assert.ok(box, "media-comfy-box present");
 
-  const enabledCtrl = box.querySelector('input[data-key="managed_comfy_enabled"]');
   const targetCtrl = box.querySelector('select[data-key="comfy_target"]');
-  assert.ok(enabledCtrl, "managed_comfy_enabled control renders inside the top box");
   assert.ok(targetCtrl, "comfy_target control renders inside the top box");
-  assert.equal(enabledCtrl.type, "checkbox", "managed_comfy_enabled is the toggle widget");
 
   // "its own little thing on the top": the compact box precedes the three-mode
   // grid in DOM order, not after it.
@@ -151,16 +148,16 @@ test("installed + toggle fields in schema -> coexistence controls render inside 
   assert.equal(saveButtons.length, 1, "the top box has exactly one Save button");
 });
 
-test("toggling managed_comfy_enabled and clicking the top box's Save PATCHes /v1/config with just that key", async () => {
+test("changing comfy_target and clicking the top box's Save PATCHes /v1/config with just that key", async () => {
   const calls = [];
   const { window: win } = loadAppWithPages(
-    { fetchImpl: makeFetch(calls, { installed: true, schema: SCHEMA_WITH_TOGGLES }) });
+    { fetchImpl: makeFetch(calls, { installed: true, schema: SCHEMA_WITH_TARGET }) });
   await render(win);
   const doc = win.document;
   const box = doc.querySelector(".media-comfy-box");
-  const enabledCtrl = box.querySelector('input[data-key="managed_comfy_enabled"]');
-  enabledCtrl.checked = true;
-  enabledCtrl.dispatchEvent(new win.Event("change", { bubbles: true }));
+  const targetCtrl = box.querySelector('select[data-key="comfy_target"]');
+  targetCtrl.value = "user";
+  targetCtrl.dispatchEvent(new win.Event("change", { bubbles: true }));
 
   const save = [...box.querySelectorAll(".actions button")]
     .find((b) => b.textContent === "Save");
@@ -172,12 +169,6 @@ test("toggling managed_comfy_enabled and clicking the top box's Save PATCHes /v1
   const patch = calls.find((c) => c.url === "/v1/config" && c.method === "PATCH");
   assert.ok(patch, "Save PATCHed /v1/config");
   const body = JSON.parse(patch.opts.body);
-  assert.equal(body.managed_comfy_enabled, true, "the changed toggle is in the PATCH body");
-  // comfy_target is a SELECT widget: read() always returns its current value
-  // (unlike a text/number field, which reports `undefined` when untouched), so
-  // it rides along even though only the toggle was actually changed here - this
-  // matches every other SELECT field's save behavior on this page, not
-  // something specific to the managed-ComfyUI box.
-  assert.equal(body.comfy_target, "own", "the untouched select's current value rides along too");
-  assert.equal(Object.keys(body).length, 2, "exactly these two keys are sent, nothing else");
+  assert.equal(body.comfy_target, "user", "the changed select's value is in the PATCH body");
+  assert.equal(Object.keys(body).length, 1, "exactly this one key is sent, nothing else");
 });
