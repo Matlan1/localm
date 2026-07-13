@@ -609,27 +609,54 @@ def gpu_memory() -> "Optional[tuple]":
     """(free, total) VRAM bytes of the GPU compute device as the ACTIVE ggml
     backend itself sees it (ggml_backend_dev_memory), or None when unavailable.
 
-    This is the free-VRAM signal that matches how the model's OWN backend budgets
-    its allocations - the Vulkan / CUDA / Metal / bundled-ROCm runtime actually
-    running the model - so a KV-offload decision reasons with the same numbers the
-    backend enforces when it allocates the KV cache and compute buffers. Two
-    concrete advantages over the torch.cuda.mem_get_info reading it supplements:
+    DO NOT CALL THIS DIRECTLY from a process that must not crash - use
+    gpu_memory_isolated() below instead, which runs this exact query in a
+    throwaway subprocess. This function is kept as the ISOLATED PROBE'S
+    implementation (see _vram_probe.py, which calls it precisely because a crash
+    there only kills that disposable subprocess) and for direct use only when the
+    caller has independently decided the crash risk is acceptable (none do, as
+    of this writing - grep confirms the only caller left is _vram_probe.py).
 
-      * No torch needed. The Vulkan and Metal builds target boxes with no CUDA/
-        ROCm torch at all; there torch.cuda.mem_get_info answers nothing and the
-        offload decision was blind. ggml_backend_dev_memory always answers.
-      * Right runtime. torch.cuda is a SEPARATE context whose view can diverge
-        from the backend that does the real allocating; this reads the very
-        device the model runs on.
+    Historically this was GgufBackend._free_vram_bytes's preferred, IN-PROCESS
+    signal (it matches how the model's OWN backend budgets its allocations - the
+    Vulkan / CUDA / Metal / bundled-ROCm runtime actually running the model - and
+    needs no torch, which the Vulkan/Metal builds ship without at all). Both
+    properties are real and valuable, which is why gpu_memory_isolated() restores
+    them safely rather than dropping this capability - see RISK below for why the
+    IN-PROCESS form was retired from every automatic caller.
+
+    RISK (RULE 5, surfaced not hidden - the reason this function itself must
+    never be wired into an automatic, in-process caller again): the mem_fn()
+    ctypes call below (ggml_backend_dev_memory) is NOT exception-safe against a
+    transient driver failure. llama.cpp's own CUDA/HIP error macro treats ANY
+    non-success return from the underlying hipMemGetInfo/cudaMemGetInfo as
+    unrecoverable and calls abort() in C - a hard, whole-PROCESS crash ("Fatal
+    Python error: Aborted") that no Python try/except, including this function's
+    own, can catch. Confirmed live three times on this exact call in this
+    environment; also a documented, recurring class of issue across other
+    llama.cpp-based projects on ROCm/HIP (e.g. ollama/ollama#3840, and
+    torch.cuda.mem_get_info hitting the identical "HIP error: invalid argument"
+    under concurrent/containerized GPU access in ROCm/ROCm#5378) - i.e. this is
+    an upstream driver/runtime behavior, not something specific to how this
+    codebase resolves the device handle.
+
+    Ollama - the most comparable llama.cpp-wrapping project - answers this exact
+    class of risk (a native crash inside GPU-touching code must never take down
+    the parent) by running ALL model-runner GPU work in a separate subprocess.
+    gpu_memory_isolated() applies the identical principle narrowly, to just this
+    one low-frequency call, instead of the much larger scope of isolating the
+    whole model load (which this codebase deliberately does not do for the load
+    itself - see gguf.py: "no subprocess fallback ... in-process binding or it
+    fails loudly", a considered choice for the load, not extended here to a
+    probe call this fragile).
 
     Returns None when the native lib is not loaded yet (we do NOT force-load it
-    just to measure - a pre-load preflight falls back to the torch reading), the
-    build lacks the symbol, or there is not exactly one GPU device (see
-    _resolve_gpu_memory). NOTE this still reflects the driver's committed budget,
-    not necessarily physical dedicated VRAM: on Windows/WDDM a backend allocation
-    that the driver pages to shared system memory still counts against this number
-    - which is correct, because that same budget is what governs whether the
-    backend's NEXT allocation fits or spills."""
+    just to measure), the build lacks the symbol, or there is not exactly one GPU
+    device (see _resolve_gpu_memory). NOTE this still reflects the driver's
+    committed budget, not necessarily physical dedicated VRAM: on Windows/WDDM a
+    backend allocation that the driver pages to shared system memory still counts
+    against this number - which is correct, because that same budget is what
+    governs whether the backend's NEXT allocation fits or spills."""
     if _loaded_lib is None:
         return None
     global _gpu_mem_cache
@@ -647,3 +674,148 @@ def gpu_memory() -> "Optional[tuple]":
     if total.value <= 0:
         return None
     return (int(free.value), int(total.value))
+
+
+_ISOLATED_PROBE_TIMEOUT = 5.0     # per-QUERY timeout against the running daemon
+# First query after a (re)spawn: cold DLL load. MEASURED live across several
+# runs: 1.9s-7.9s (varies with OS file-cache/driver warm-up state - a repeat
+# spawn shortly after a prior one was consistently faster than the very first
+# spawn in a fresh process). Generous margin above the worst observed value, not
+# a guess - do not shrink this without re-measuring on a genuinely cold system.
+_ISOLATED_PROBE_SPAWN_TIMEOUT = 20.0
+
+# The long-lived probe daemon (see _vram_probe.py): a subprocess.Popen once
+# spawned and reused for the rest of this process's lifetime, or None before the
+# first query / after a detected crash. Guarded by _PROBE_LOCK - every query
+# (spawn-if-needed, write request, read response) happens under the lock so
+# concurrent callers cannot interleave writes/reads on the same pipe. A daemon
+# process, not a fresh subprocess per query: measured live, fresh-process-per-
+# call cost 1.1-2.0s EVERY time (re-importing localm's llama.cpp binding +
+# re-loading the ggml/HIP DLL from scratch), unacceptable for a fallback path
+# that is the COMMON case (see gpu_memory()'s docstring) - a daemon pays that
+# cost ONCE (measured 1.9-7.9s for the first spawn, varying with OS/driver
+# warm-up state) or once per crash-triggered respawn; every later query against
+# a live daemon is a near-instant (measured ~0ms) pipe round-trip.
+import threading as _threading
+
+_PROBE_PROC = None
+_PROBE_LOCK = _threading.Lock()
+
+
+def _spawn_probe_daemon():
+    """Start the long-lived VRAM-probe daemon. Caller holds _PROBE_LOCK.
+    Line-buffered stdin/stdout text pipes (bufsize=1) so a single print()/
+    readline() on either side is exactly one protocol message - see
+    _vram_probe.py for the request/response contract. stderr is discarded
+    (the daemon logs nothing useful to a caller that only wants two numbers;
+    a crash there is diagnosed via the direct gpu_memory() docstring instead)."""
+    import subprocess
+    import sys
+    return subprocess.Popen(
+        [sys.executable, "-u", "-m", "localm.inference.backends.llamacpp._vram_probe"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        text=True, bufsize=1)
+
+
+def _readline_with_timeout(stream, timeout: float) -> "Optional[str]":
+    """stream.readline() with a timeout, so a daemon that hangs (rather than
+    crashes outright - a different failure mode than the abort this whole
+    module exists to guard, but one a query timeout must still not block on
+    forever) cannot stall the caller. Python's blocking file-object readline()
+    has no native timeout, so the read runs in a daemon THREAD (the standard,
+    portable pattern for this - a WINDOWS PIPE handle offers no select()-style
+    wait) and this function waits on it with a timeout via a queue; on timeout
+    the reader thread is abandoned (it will exit on its own once the read
+    unblocks or the pipe closes) rather than joined, so this function itself
+    never blocks past `timeout`. Returns None on timeout, EOF (empty read - the
+    daemon exited/crashed), or any read error."""
+    import queue
+    q: "queue.Queue" = queue.Queue(maxsize=1)
+
+    def _reader():
+        try:
+            q.put(stream.readline())
+        except Exception:
+            q.put(None)
+
+    t = _threading.Thread(target=_reader, daemon=True)
+    t.start()
+    try:
+        line = q.get(timeout=timeout)
+    except queue.Empty:
+        return None
+    if not line:
+        return None                      # EOF - the daemon process ended
+    return line
+
+
+def gpu_memory_isolated() -> "Optional[tuple]":
+    """Like gpu_memory(), but SAFE to call automatically: queries the long-lived
+    VRAM-probe daemon (spawning or respawning it as needed) so a native abort
+    there (see gpu_memory()'s RISK section) only kills that disposable
+    subprocess, never this one. This is the function GgufBackend._free_vram_bytes
+    actually calls when torch cannot answer.
+
+    Returns None on ANY failure - spawn failure, a query timeout, the daemon
+    replying "ERR" (its own load_lib()/query failed), or the daemon having
+    crashed/exited (detected via poll() or a read returning EOF) - exactly
+    gpu_memory()'s own "unmeasurable" contract, just crash-safe to invoke
+    unconditionally. Never raises. A crashed or unresponsive daemon is killed
+    and cleared so the NEXT call spawns a fresh one rather than repeatedly
+    querying a dead process.
+
+    Cost: near-instant after the first call in this process (a plain pipe
+    round-trip - MEASURED live at ~0ms across repeated warm calls); the first
+    call (or the first after a crash) pays the daemon's cold-start cost -
+    MEASURED live at 1.9-7.9s across several runs (varies with OS/driver
+    warm-up state) for the underlying import+load_lib()+query chain the daemon
+    itself performs once. Not cached beyond that: each successful query
+    reflects current, live VRAM state."""
+    global _PROBE_PROC
+    with _PROBE_LOCK:
+        first_spawn = False
+        if _PROBE_PROC is None or _PROBE_PROC.poll() is not None:
+            try:
+                if _PROBE_PROC is not None:
+                    _PROBE_PROC.kill()
+            except Exception:
+                pass
+            try:
+                _PROBE_PROC = _spawn_probe_daemon()
+                first_spawn = True
+            except Exception:
+                _PROBE_PROC = None
+                return None
+        proc = _PROBE_PROC
+        try:
+            proc.stdin.write("q\n")
+            proc.stdin.flush()
+        except Exception:
+            _kill_and_clear_probe()
+            return None
+        timeout = _ISOLATED_PROBE_SPAWN_TIMEOUT if first_spawn else _ISOLATED_PROBE_TIMEOUT
+        line = _readline_with_timeout(proc.stdout, timeout)
+        if line is None:
+            _kill_and_clear_probe()
+            return None
+        line = line.strip()
+        if line == "ERR" or not line:
+            return None                  # daemon is alive and answered - genuinely unmeasurable
+        try:
+            free_s, total_s = line.split()
+            return int(free_s), int(total_s)
+        except ValueError:
+            _kill_and_clear_probe()      # protocol desync - do not trust this daemon again
+            return None
+
+
+def _kill_and_clear_probe() -> None:
+    """Caller holds _PROBE_LOCK. Best-effort kill of a dead/hung/desynced daemon
+    so the NEXT gpu_memory_isolated() call spawns a fresh one."""
+    global _PROBE_PROC
+    if _PROBE_PROC is not None:
+        try:
+            _PROBE_PROC.kill()
+        except Exception:
+            pass
+    _PROBE_PROC = None

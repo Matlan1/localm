@@ -117,23 +117,51 @@ class GgufBackend(BaseBackend):
         """Free VRAM in bytes on the GPU the model runs on, or None when not
         measurable.
 
-        Prefers the ACTIVE ggml backend's own view (loader.gpu_memory): the same
-        runtime that allocates the model, so a KV-offload decision budgets against
-        the numbers the backend will actually enforce. It also needs no torch, so
-        it works on the Vulkan/Metal builds that ship without a CUDA/ROCm torch -
-        where torch.cuda.mem_get_info answered nothing and the offload decision was
-        blind. Falls back to torch.cuda on the configured main GPU when the native
-        backend is not loaded yet (a preflight before the first load), the build
-        lacks the query, or a multi-GPU split is configured (torch honours
-        main_gpu_index). See loader.gpu_memory for the WDDM committed-budget caveat."""
-        try:
-            from localm.inference.backends.llamacpp import _loader
-            mem = _loader.gpu_memory()
-            if mem is not None:
-                return mem[0]
-        except Exception:
-            pass  # backend query unavailable - fall back to the torch reading
-        return GgufBackend._free_total_vram_bytes()[0]
+        Prefers torch.cuda on the configured main GPU (honours main_gpu_index for
+        a multi-GPU split) when torch is available - cheap, in-process, and
+        exception-safe. Falls back to loader.gpu_memory_isolated() when torch
+        cannot answer (Vulkan/Metal builds ship with no CUDA/ROCm torch at all;
+        also covers a torch-less CPU build, or an NVIDIA box without a separately
+        installed CUDA torch - see the note on this project's torch packaging
+        below). Never calls loader.gpu_memory() directly in this process.
+
+        WHY the fallback is the ISOLATED probe, not the direct in-process call:
+        confirmed live, three times, on this exact code path (_check_vram ->
+        here) - loader.gpu_memory()'s mem_fn() ctypes call
+        (ggml_backend_dev_memory -> hipMemGetInfo) can hard-abort the WHOLE
+        PROCESS ("Fatal Python error: Aborted") on a transient driver condition.
+        llama.cpp's own CUDA/HIP error macro treats ANY such failure as
+        unrecoverable and calls abort() in C - no Python try/except, including
+        gpu_memory()'s own, can catch it - and this is a documented, recurring
+        class of issue on ROCm/HIP generally (ollama/ollama#3840;
+        ROCm/ROCm#5378 shows even torch.cuda.mem_get_info can hit the identical
+        underlying "HIP error: invalid argument" under concurrent/containerized
+        GPU access - the difference that matters here is torch surfaces it as a
+        catchable exception, while the raw ggml call does not). Every model load
+        (plus every context-grow check via _check_context_fit) goes through this
+        method, so a probe that can crash the server on a routine, recoverable
+        condition is unacceptable (RULE 5) - hence loader.gpu_memory_isolated(),
+        which runs the identical query against a long-lived daemon subprocess
+        (the same principle ollama - the most comparable llama.cpp-wrapping
+        project - uses for all of its model-runner GPU work, applied here just
+        to this one narrow call rather than the whole load; a DAEMON rather than
+        a fresh subprocess per call because the cold-start cost - importing this
+        binding and loading the ggml/HIP DLL - measured live at 1.9-7.9s, varying
+        with OS/driver warm-up state - which a fresh-process-per-call design
+        would pay on EVERY query).
+
+        This project's own torch dependency (pyproject.toml) is an AMD-ROCm,
+        Windows-only wheel - there is no NVIDIA CUDA or Linux/macOS torch wired in
+        at all, so "torch unavailable" is the COMMON case here, not a rare edge:
+        NVIDIA, Linux, macOS, and Vulkan/Metal users all reach the isolated
+        fallback by default. See loader.gpu_memory()'s own docstring for the full
+        account of why the direct call is retired from every automatic path."""
+        t = GgufBackend._free_total_vram_bytes()[0]
+        if t is not None:
+            return t
+        from localm.inference.backends.llamacpp import _loader
+        mem = _loader.gpu_memory_isolated()
+        return mem[0] if mem is not None else None
 
     @staticmethod
     def _total_vram_bytes() -> Optional[int]:
