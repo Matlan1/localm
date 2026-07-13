@@ -86,13 +86,29 @@ def _base_interpreter() -> Optional[Path]:
     ``python.exe`` is a trampoline that launches this one as a child; copying THIS
     (``sys._base_executable``) gives a single genuine LocaLM process rather than a
     trampoline whose child is still python.exe. Resolved (follows a POSIX symlink)
-    so we copy a real binary. Falls back to ``sys.executable``."""
+    so we copy a real binary. Falls back to ``sys.executable``.
+
+    ``sys._base_executable`` is computed by CPython as ``<base_prefix>/<basename
+    of the CURRENTLY RUNNING exe>``. When this process IS ALREADY the branded
+    LocaLM.exe copy (e.g. ``make-launcher --force`` invoked from LocaLM.exe
+    itself, to refresh the launcher after a Python upgrade), that resolves to
+    ``<base_prefix>/LocaLM.exe`` - a file that never exists, since LocaLM.exe is
+    only ever copied into ``<venv>/localm-app/`` (verified live during the #621
+    follow-up investigation). Fall back to ``_mp_spawn.real_base_python()``
+    (``<base_prefix>/python.exe``) in that case - the same base-interpreter
+    lookup already proven for #617's multiprocessing-spawn redirect - so a
+    ``--force`` relaunch from the branded launcher itself can still find a real
+    interpreter to copy. Windows-only (the fallback's filename is hardcoded);
+    on other platforms a failed resolution still returns None, unchanged."""
     be = getattr(sys, "_base_executable", None) or sys.executable
     try:
         p = Path(be).resolve()
     except OSError:
         p = Path(be)
-    return p if p.is_file() else None
+    if p.is_file():
+        return p
+    from localm._mp_spawn import real_base_python
+    return real_base_python()
 
 
 @dataclass
@@ -169,6 +185,49 @@ def windows_launcher_path() -> Path:
     return windows_launcher_dir() / f"{APP_NAME}.exe"
 
 
+def _copy_replacing_possibly_running_exe(src: Path, dst: Path) -> bool:
+    """Copy *src* onto *dst*, handling *dst* being the image THIS process is
+    currently executing from (``make-launcher --force`` invoked from the
+    branded LocaLM.exe launcher itself, to refresh it after a Python upgrade -
+    ``_base_interpreter`` then resolves *src* to the real base interpreter, a
+    different file than *dst*).
+
+    Verified live (see dev-notes): Windows blocks a direct content-overwrite of
+    a running exe's file (``OSError`` / WinError 32, sharing violation) but DOES
+    allow renaming that same running exe's file out of the way first (the
+    loader holds it open with ``FILE_SHARE_DELETE``), after which a fresh copy
+    can be written at the freed path. The fast path (plain copy) is tried
+    first since *dst* is USUALLY not running. Returns True if the rename
+    fallback was needed.
+
+    Deleting the renamed-aside file while the original process is still alive
+    also fails live (WinError 5) - not a real failure, just Windows not
+    releasing the name until the last handle closes - so that cleanup is
+    best-effort: a straggling ``.old`` file is harmless and is cleared on the
+    NEXT successful rebuild, once the old process has exited."""
+    try:
+        shutil.copy2(src, dst)
+        return False
+    except OSError as copy_err:
+        old = dst.with_name(dst.name + ".old")
+        try:
+            if old.exists():
+                old.unlink()
+            dst.rename(old)
+            shutil.copy2(src, dst)
+        except OSError:
+            # Surface the ORIGINAL failure (why the fallback was needed at
+            # all) as the primary error; Python's implicit chaining still
+            # attaches the fallback's own error as __context__, so neither is
+            # hidden if this ever reaches a full traceback.
+            raise copy_err
+        try:
+            old.unlink()
+        except OSError:
+            pass  # still running; freed on the next rebuild instead
+        return True
+
+
 def make_windows_launcher(*, force: bool = False) -> LauncherResult:
     """Create ``<venv>/localm-app/LocaLM.exe`` as a copy of the base interpreter (+
     its loader DLLs) and stamp the LocaLM icon into it. Idempotent: an existing
@@ -186,16 +245,16 @@ def make_windows_launcher(*, force: bool = False) -> LauncherResult:
         if not force and dst.is_file():
             notes.append(f"{dst.name} already present (use --force to refresh)")
             return LauncherResult(ok=True, path=dst, notes=notes)
-        # Rebuilding via the already-built LocaLM.exe: base resolves to dst itself,
-        # so skip the (same-file) copy and just refresh the DLLs + icon below.
-        if dst.resolve() == base.resolve():
-            dlls = _copy_runtime_dlls(base.parent, dst.parent)
-            notes.append(f"{dst.name} is already the base interpreter; refreshed "
-                         f"{len(dlls)} runtime DLL(s)")
-        else:
-            shutil.copy2(base, dst)
-            dlls = _copy_runtime_dlls(base.parent, dst.parent)
-            notes.append(f"built {dst.name} from {base.name} + {len(dlls)} runtime DLL(s)")
+        # base is always a different file than dst (the base interpreter never
+        # lives under dst's own <venv>/localm-app/ dir) - but when rebuilding
+        # via --force from the already-running LocaLM.exe, dst IS this
+        # process's own executing image, so the copy needs the running-exe
+        # fallback below rather than a plain shutil.copy2.
+        replaced_running = _copy_replacing_possibly_running_exe(base, dst)
+        dlls = _copy_runtime_dlls(base.parent, dst.parent)
+        notes.append(f"built {dst.name} from {base.name} + {len(dlls)} runtime DLL(s)"
+                     + (" (it was running; renamed the old copy aside to replace it)"
+                        if replaced_running else ""))
     except OSError as e:
         return LauncherResult(ok=False, path=dst,
                               notes=[f"could not build {dst.name}: {e}"])

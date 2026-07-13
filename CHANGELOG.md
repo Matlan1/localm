@@ -105,6 +105,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   is itself a launcher that re-spawns the real one as a further child, one hop too
   many for Windows to hand the worker its synchronization handles correctly).
   Model loads and voice transcription now spawn correctly under LocaLM.exe.
+- **Rebuilding the LocaLM.exe launcher after a Python upgrade (Windows) no
+  longer fails when run from LocaLM.exe itself.** `localm make-launcher
+  --force` - used to refresh the branded launcher after upgrading Python -
+  failed outright ("could not locate the base interpreter to copy") when
+  invoked from the already-built LocaLM.exe, since Python could no longer
+  find itself under its own renamed identity. It now resolves correctly and
+  replaces the running launcher's file in place.
 - **Bug reports no longer lose the actual error.** The "Recent log (tail)"
   section used to be a blind cut of the last ~120 log lines, so a session that
   kept running afterward (even routine polling) could push the real error out

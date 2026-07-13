@@ -53,6 +53,21 @@ from __future__ import annotations
 import multiprocessing
 import sys
 from pathlib import Path
+from typing import Optional
+
+
+def real_base_python() -> Optional[Path]:
+    """The real base interpreter directly under ``sys.base_prefix``
+    (``<base_prefix>/python.exe``) - a single hop, unaffected by CPython's
+    ``sys._base_executable`` (which assumes the base install's binary keeps
+    its original basename; wrong once the running exe has been renamed, e.g.
+    localm's branded ``LocaLM.exe`` copy - see module docstring and
+    ``applaunch._base_interpreter``). Windows-only (the filename is
+    hardcoded); returns None off Windows or if no such file exists."""
+    if sys.platform != "win32":
+        return None
+    base_python = Path(sys.base_prefix) / "python.exe"
+    return base_python if base_python.is_file() else None
 
 
 def ensure_spawn_uses_venv_python() -> None:
@@ -62,8 +77,6 @@ def ensure_spawn_uses_venv_python() -> None:
     Best-effort: leaves multiprocessing's default untouched if the expected
     layout is not found - this must never block a normal launch, branded or
     not."""
-    if sys.platform != "win32":
-        return
-    base_python = Path(sys.base_prefix) / "python.exe"
-    if base_python.is_file():
+    base_python = real_base_python()
+    if base_python is not None:
         multiprocessing.set_executable(str(base_python))

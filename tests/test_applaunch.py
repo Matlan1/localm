@@ -8,9 +8,14 @@ be a no-op, never raise, off its platform). The live LocaLM.exe end-to-end
 (process name, tray, restart) is verified by hand on Windows - see
 dev-notes/native-app-identity/WORKLOG.md."""
 
+import os
+import shutil
 import struct
+import subprocess
 import sys
 from pathlib import Path, PurePosixPath
+
+import pytest
 
 from localm import applaunch
 
@@ -145,7 +150,6 @@ def test_apply_window_identity_never_raises():
 
 
 def test_apply_window_identity_skips_console_own_in_debug(monkeypatch):
-    import os
     monkeypatch.delenv("LOCALM_OWN_CONSOLE", raising=False)
     monkeypatch.setenv("LOCALM_DEBUG", "1")
     # Mock sys.executable basename to be localm.exe
@@ -164,3 +168,106 @@ def test_make_launcher_returns_result_without_raising():
     if sys.platform not in ("win32",) and not sys.platform.startswith("linux"):
         res = applaunch.make_launcher()
         assert res.ok is False and res.notes
+
+
+# ------------------------------------------------------------------ #
+#  --force rebuild FROM the already-running branded launcher          #
+# ------------------------------------------------------------------ #
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only bug")
+class TestForceRebuildFromRunningLauncher:
+    """Regression test for the follow-up to #621: ``localm make-launcher
+    --force`` run FROM the already-built LocaLM.exe itself (e.g. to refresh
+    the copy after a Python upgrade) used to fail outright.
+
+    ``sys._base_executable`` is computed by CPython as ``<base_prefix>/
+    <basename of the CURRENTLY RUNNING exe>`` - so once running AS the
+    renamed LocaLM.exe copy, it resolves to ``<base_prefix>/LocaLM.exe``, a
+    file that never exists (LocaLM.exe only ever lives under
+    ``<venv>/localm-app/``). ``_base_interpreter()`` returned None and
+    ``make_windows_launcher()`` failed immediately. Fixed by falling back to
+    ``_mp_spawn.real_base_python()``, and then handling the SECOND wrinkle
+    live: once ``base`` correctly resolves to a DIFFERENT file than ``dst``,
+    copying onto ``dst`` needs the running-exe rename fallback because ``dst``
+    IS this process's own executing image (verified live: a direct
+    ``shutil.copy2`` onto it raises WinError 32, a sharing violation).
+
+    Mirrors ``TestRealRenamedLauncherEndToEnd`` in test_mp_spawn_fix.py (an
+    ACTUAL renamed-copy launcher, driven as a real subprocess) but goes one
+    step further: the fake launcher must be named exactly ``LocaLM.exe`` (so
+    ``windows_launcher_path()`` resolves to ITS OWN path) and it invokes the
+    real ``localm make-launcher --force`` CLI command on itself, not just a
+    bare interpreter round trip.
+    """
+
+    @staticmethod
+    def _build_fake_launcher(tmp_path: Path) -> Path:
+        """A fake venv (pyvenv.cfg pointing at the REAL base interpreter's own
+        directory) with a renamed copy of that base interpreter one level
+        under it, named LocaLM.exe - exactly applaunch.py's
+        ``<venv>/localm-app/LocaLM.exe`` layout, so ``windows_launcher_path()``
+        resolves to this same file when run from it."""
+        real_base = Path(getattr(sys, "_base_executable", None) or sys.executable).resolve()
+        fake_venv = tmp_path / "fakevenv"
+        fake_venv.mkdir()
+        (fake_venv / "pyvenv.cfg").write_text(
+            f"home = {real_base.parent}\n", encoding="utf-8")
+        launcher_dir = fake_venv / "localm-app"
+        launcher_dir.mkdir()
+        fake_launcher = launcher_dir / "LocaLM.exe"
+        shutil.copy2(real_base, fake_launcher)
+        for pattern in ("python3*.dll", "vcruntime*.dll"):
+            for dll in real_base.parent.glob(pattern):
+                shutil.copy2(dll, launcher_dir / dll.name)
+        return fake_launcher
+
+    @staticmethod
+    def _child_pythonpath(repo_root: Path) -> str:
+        """The fake launcher is a bare copied interpreter with no site-packages
+        of its own. Forward the worktree source (first, so it wins over any
+        other localm on sys.path) plus every entry already on THIS process's
+        sys.path (site-packages, editable-install source, ...) so the child
+        can import click/rich/pydantic/... exactly as the real LocaLM.exe
+        would - without hardcoding a venv location that only exists on one
+        machine (rule 1: no machine-specific paths)."""
+        entries = [str(repo_root)] + [p for p in sys.path if p]
+        return os.pathsep.join(dict.fromkeys(entries))
+
+    def test_force_rebuild_from_running_launcher_succeeds(self, tmp_path):
+        fake_launcher = self._build_fake_launcher(tmp_path)
+        repo_root = Path(__file__).resolve().parents[1]
+        script = tmp_path / "run_make_launcher.py"
+        script.write_text(
+            "import sys\n"
+            "from localm.cli import main as cli_main\n"
+            "print('_base_executable:', getattr(sys, '_base_executable', None))\n"
+            "try:\n"
+            "    cli_main(['make-launcher', '--force'], standalone_mode=False)\n"
+            "except SystemExit as e:\n"
+            "    if e.code not in (0, None):\n"
+            "        print(f'REGRESSION_TEST: FAILED (exit {e.code})')\n"
+            "        sys.exit(e.code)\n"
+            "print('REGRESSION_TEST: SUCCESS')\n",
+            encoding="utf-8")
+
+        env = os.environ.copy()
+        env["PYTHONPATH"] = self._child_pythonpath(repo_root)
+        # LOCALM_HOME is inherited from the autouse _isolate_localm_home
+        # fixture (conftest.py), so this never touches the developer's real
+        # data dir or the repo's own portable-mode home/.
+
+        result = subprocess.run(
+            [str(fake_launcher), str(script)],
+            capture_output=True, text=True, timeout=60, env=env)
+
+        assert result.returncode == 0, (
+            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}")
+        assert "REGRESSION_TEST: SUCCESS" in result.stdout
+        # The original bug's exact failure note must never reappear.
+        assert "could not locate the base interpreter to copy" not in result.stdout
+        # And the second wrinkle's fallback must have actually been exercised
+        # (dst really was this process's own running image), not just skipped
+        # because it happened not to be needed this run.
+        assert "renamed the old copy aside to replace it" in result.stdout
+        # The launcher file itself must have survived the rebuild.
+        assert fake_launcher.is_file()
