@@ -101,12 +101,12 @@ test("settings renders a typed control per schema field, split into sections", a
   assert.notEqual(nctx.closest(".settings-section"), webSec,
     "core and plugin settings live in separate sections");
 
-  // Left nav lists the 6 top-level GROUPS (not one link per section); the web
+  // Left nav lists the 7 top-level GROUPS (not one link per section); the web
   // plugin's section lives INSIDE the Plugins group.
   const navLabels = [...doc.querySelectorAll("#settings-nav .settings-nav-link")]
     .map((l) => l.textContent);
   assert.deepEqual(navLabels,
-    ["Model", "Server & network", "Security", "Plugins", "Privacy & data", "System"],
+    ["Model", "Server & network", "Security", "Plugins", "Media", "Privacy & data", "System"],
     "nav shows one link per top-level group");
   assert.equal(webSec.dataset.group, "plugins", "the web plugin section is in the Plugins group");
   // A group shows all its sections stacked; only ONE group is active at a time.
