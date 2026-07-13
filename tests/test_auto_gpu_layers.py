@@ -36,9 +36,27 @@ def _model(tmp_path, size_bytes, *, n_gpu_layers=99, auto=True, n_ctx=4096):
 
 
 def _vram(free, total):
-    """Patch the single (free, total) VRAM reader both helpers delegate to."""
-    return patch.object(GgufBackend, "_free_total_vram_bytes",
-                        return_value=(free, total))
+    """Patch VRAM measurement so a test gets a deterministic (free, total)
+    reading regardless of the box this runs on.
+
+    ``_free_vram_bytes`` prefers ``_free_total_vram_bytes`` (torch.cuda) but
+    falls back to ``loader.gpu_memory_isolated()`` (the isolated VRAM-probe
+    daemon) when torch cannot answer - on a box with a real GPU and a
+    provisioned native runtime, that fallback can succeed for real and return
+    genuine driver numbers, defeating a test that wants "VRAM is totally
+    unmeasurable" (free=None). Both paths must be patched together, not just
+    the torch one, or `_vram(None, None)` is not actually unmeasurable on a
+    GPU-equipped dev machine."""
+    from contextlib import ExitStack
+    from localm.inference.backends.llamacpp import _loader
+
+    stack = ExitStack()
+    stack.enter_context(patch.object(
+        GgufBackend, "_free_total_vram_bytes", return_value=(free, total)))
+    stack.enter_context(patch.object(
+        _loader, "gpu_memory_isolated",
+        return_value=(None if free is None else (free, total))))
+    return stack
 
 
 # --------------------------------------------------------------------------- #
