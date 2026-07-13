@@ -82,9 +82,18 @@ small dedicated embedding model instead:
   normalised BM25 and cosine similarity. The Knowledge page shows `hybrid` vs
   `BM25` per collection.
 - Embedding failures **degrade, never break**: indexing falls back to
-  lexical-only with a note in the job log, and a query that cannot use its
-  vectors falls back to BM25 and records the reason on the collection's status
-  (a corrupt or dimension-mismatched vector sidecar is also logged at WARNING).
+  lexical-only. Through the GUI, indexing runs as a background job and the
+  fallback is noted in that job's log. A headless `localm serve` (no GUI
+  attached) runs `/api/rag/collections/{name}/add` and `/upload`
+  synchronously with no job to log into, so that note goes to the server log
+  instead: it prints when `--debug` / `LOCALM_DEBUG=1` is on, and is always
+  captured in the always-on in-memory activity buffer a bug report can
+  include, even without `--debug`. A headless caller that needs to confirm a
+  document was actually vectored (not just indexed) can compare the
+  collection's `has_vectors` stat from `GET /api/rag/collections/{name}`
+  before and after. A query that cannot use its vectors falls back to BM25 and
+  records the reason on the collection's status (a corrupt or
+  dimension-mismatched vector sidecar is also logged at WARNING).
 
 By default CLI indexing is lexical-only (no running engine); pass `--embed` to
 `localm rag add` / `localm rag query` to compute vectors via a running localm
@@ -104,6 +113,9 @@ server, matching the GUI.
 - One indexing job per collection at a time is the supported pattern; the
   files are rewritten atomically, so a concurrent query sees a consistent
   snapshot.
+- `POST .../add` accepts up to 50 paths per request (a path may itself be a
+  folder); `POST .../upload` accepts up to 50 files per request, 30 MB each
+  and 100 MB total. Split a larger batch across multiple calls.
 
 ## Troubleshooting
 
