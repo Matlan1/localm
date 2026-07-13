@@ -295,3 +295,264 @@ class TestFreeVramBytesDeviceSelection:
         with self._fake_torch([(1_000, 2_000)]):
             free = GgufBackend._free_vram_bytes()
         assert free == 1_000
+
+
+class TestFreeVramBytesUsesIsolatedNativeFallback:
+    """_free_vram_bytes() must prefer torch.cuda.mem_get_info, and must NEVER
+    call the DIRECT, abort-prone loader.gpu_memory() - only the crash-safe
+    loader.gpu_memory_isolated() (subprocess-isolated) as a fallback when torch
+    cannot answer.
+
+    Root cause this guards: loader.gpu_memory()'s mem_fn() ctypes call
+    (ggml_backend_dev_memory) is not exception-safe - llama.cpp's own CUDA/HIP
+    error macro aborts the WHOLE PROCESS on a transient driver failure. Confirmed
+    live three times on this exact call, and a documented, recurring class of
+    issue on ROCm/HIP generally (ollama/ollama#3840; ROCm/ROCm#5378). This
+    project's own torch dependency (pyproject.toml) is an AMD-ROCm, Windows-only
+    wheel - there is no NVIDIA/Linux/macOS torch wired in at all - so the
+    fallback path is the COMMON case for NVIDIA/Linux/macOS/Vulkan/Metal users,
+    not a rare edge, which is why it must actually work (not just degrade to
+    None) rather than simply avoiding the direct native call."""
+
+    def _fake_torch_ok(self):
+        fake = MagicMock()
+        fake.cuda.is_available.return_value = True
+        fake.cuda.device_count.return_value = 1
+        fake.cuda.mem_get_info.return_value = (7_000, 9_000)
+        return patch.dict(sys.modules, {"torch": fake})
+
+    def test_isolated_fallback_never_called_when_torch_answers(self, monkeypatch):
+        sentinel = MagicMock(side_effect=AssertionError(
+            "gpu_memory_isolated() must not be called when torch already answered"))
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._loader.gpu_memory_isolated", sentinel)
+        with self._fake_torch_ok():
+            free = GgufBackend._free_vram_bytes()
+        assert free == 7_000
+        sentinel.assert_not_called()
+
+    def test_direct_native_ggml_query_never_called(self, monkeypatch):
+        """The DIRECT, abort-prone native call must never be reached from
+        _free_vram_bytes under any condition - only the isolated wrapper."""
+        fake = MagicMock()
+        fake.cuda.is_available.return_value = False
+        sentinel = MagicMock(side_effect=AssertionError(
+            "loader.gpu_memory() (direct, abort-prone) must never be called "
+            "from _free_vram_bytes - only gpu_memory_isolated()"))
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._loader.gpu_memory", sentinel)
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._loader.gpu_memory_isolated",
+            lambda: (3_000, 5_000))
+        with patch.dict(sys.modules, {"torch": fake}):
+            free = GgufBackend._free_vram_bytes()
+        assert free == 3_000
+        sentinel.assert_not_called()
+
+    def test_falls_back_to_isolated_probe_when_torch_unmeasurable(self, monkeypatch):
+        """Vulkan/Metal/NVIDIA-without-torch/Linux/macOS (no CUDA/ROCm torch):
+        the isolated probe must be consulted and its answer used - VRAM
+        measurement must keep working, not just degrade to None."""
+        fake = MagicMock()
+        fake.cuda.is_available.return_value = False
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._loader.gpu_memory_isolated",
+            lambda: (3_000, 5_000))
+        with patch.dict(sys.modules, {"torch": fake}):
+            free = GgufBackend._free_vram_bytes()
+        assert free == 3_000
+
+    def test_none_when_neither_torch_nor_isolated_probe_can_answer(self, monkeypatch):
+        fake = MagicMock()
+        fake.cuda.is_available.return_value = False
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._loader.gpu_memory_isolated",
+            lambda: None)
+        with patch.dict(sys.modules, {"torch": fake}):
+            free = GgufBackend._free_vram_bytes()
+        assert free is None
+
+    def test_none_when_torch_itself_raises(self, monkeypatch):
+        """A torch import/query failure (e.g. the observed ROCm-init hiccup) must
+        degrade via _free_total_vram_bytes' own try/except and still try the
+        isolated fallback, not propagate."""
+        class _BoomModule:
+            def __getattr__(self, name):
+                raise RuntimeError("simulated torch ROCm-init failure")
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._loader.gpu_memory_isolated",
+            lambda: (3_000, 5_000))
+        with patch.dict(sys.modules, {"torch": _BoomModule()}):
+            free = GgufBackend._free_vram_bytes()
+        assert free == 3_000
+
+
+class _FakeStream:
+    """A minimal write()/flush() or readline() double for a fake daemon proc's
+    stdin/stdout, scripted with a fixed queue of responses."""
+
+    def __init__(self, lines=None):
+        self._lines = list(lines or [])
+        self.written = []
+
+    def write(self, s):
+        self.written.append(s)
+
+    def flush(self):
+        pass
+
+    def readline(self):
+        return self._lines.pop(0) if self._lines else ""     # "" == EOF
+
+
+class _FakeDaemonProc:
+    """A minimal subprocess.Popen double: scripted stdout lines, a `killed`
+    flag that flips poll() from None (running) to an exit code (dead)."""
+
+    def __init__(self, response_lines):
+        self.stdin = _FakeStream()
+        self.stdout = _FakeStream(response_lines)
+        self._killed = False
+
+    def poll(self):
+        return -9 if self._killed else None
+
+    def kill(self):
+        self._killed = True
+
+
+class TestGpuMemoryIsolated:
+    """loader.gpu_memory_isolated() must degrade to None on every failure mode
+    of the daemon subprocess, and never raise - this is what makes it safe to
+    call unconditionally from _free_vram_bytes. Every test resets the module-
+    level daemon singleton (_PROBE_PROC) before and after, since it is shared
+    global state across calls by design (that is the whole point of the
+    daemon - reuse across calls within one process)."""
+
+    def _loader(self):
+        from localm.inference.backends.llamacpp import _loader
+        return _loader
+
+    @pytest.fixture(autouse=True)
+    def _isolate_probe_singleton(self):
+        loader = self._loader()
+        saved = loader._PROBE_PROC
+        loader._PROBE_PROC = None
+        yield
+        loader._PROBE_PROC = saved
+
+    def _patch_readline_passthrough(self, monkeypatch, loader):
+        """Replace the real threaded timeout wrapper with a direct readline()
+        call for these higher-level tests (the timeout mechanism itself has its
+        own dedicated tests below) - keeps these fast and deterministic."""
+        monkeypatch.setattr(
+            loader, "_readline_with_timeout",
+            lambda stream, timeout: (stream.readline() or None))
+
+    def test_first_call_spawns_daemon_and_parses_response(self, monkeypatch):
+        loader = self._loader()
+        self._patch_readline_passthrough(monkeypatch, loader)
+        fake = _FakeDaemonProc(["123456 789012\n"])
+        monkeypatch.setattr(loader, "_spawn_probe_daemon", lambda: fake)
+        assert loader.gpu_memory_isolated() == (123456, 789012)
+        assert fake.stdin.written == ["q\n"]
+
+    def test_second_call_reuses_running_daemon_without_respawning(self, monkeypatch):
+        loader = self._loader()
+        self._patch_readline_passthrough(monkeypatch, loader)
+        fake = _FakeDaemonProc(["100 200\n", "300 400\n"])
+        spawn_calls = []
+        monkeypatch.setattr(
+            loader, "_spawn_probe_daemon",
+            lambda: spawn_calls.append(1) or fake)
+        assert loader.gpu_memory_isolated() == (100, 200)
+        assert loader.gpu_memory_isolated() == (300, 400)
+        assert len(spawn_calls) == 1, "the second call must reuse the daemon, not respawn"
+
+    def test_daemon_err_reply_returns_none_but_keeps_daemon_alive(self, monkeypatch):
+        """A daemon that is alive and answered "unmeasurable" is not the same
+        as a crashed daemon - it must not be killed/respawned for that alone."""
+        loader = self._loader()
+        self._patch_readline_passthrough(monkeypatch, loader)
+        fake = _FakeDaemonProc(["ERR\n", "50 100\n"])
+        monkeypatch.setattr(loader, "_spawn_probe_daemon", lambda: fake)
+        assert loader.gpu_memory_isolated() is None
+        assert not fake._killed
+        assert loader.gpu_memory_isolated() == (50, 100)
+
+    def test_dead_daemon_triggers_respawn(self, monkeypatch):
+        loader = self._loader()
+        self._patch_readline_passthrough(monkeypatch, loader)
+        dead = _FakeDaemonProc([])
+        dead.kill()                          # already dead before any query
+        loader._PROBE_PROC = dead            # simulate a daemon that died between calls
+        fresh = _FakeDaemonProc(["10 20\n"])
+        monkeypatch.setattr(loader, "_spawn_probe_daemon", lambda: fresh)
+        assert loader.gpu_memory_isolated() == (10, 20)
+
+    def test_eof_on_read_kills_and_clears_daemon_for_next_respawn(self, monkeypatch):
+        """The exact scenario this exists for: the daemon hard-aborts mid-query
+        (native crash) - the OS closes its pipes, so the next read returns EOF,
+        never an exception that could propagate into the parent."""
+        loader = self._loader()
+        self._patch_readline_passthrough(monkeypatch, loader)
+        crashing = _FakeDaemonProc([])       # readline() -> "" == EOF immediately
+        monkeypatch.setattr(loader, "_spawn_probe_daemon", lambda: crashing)
+        assert loader.gpu_memory_isolated() is None
+        assert loader._PROBE_PROC is None, "a crashed daemon must be cleared, not reused"
+
+    def test_garbage_response_kills_and_clears_daemon(self, monkeypatch):
+        loader = self._loader()
+        self._patch_readline_passthrough(monkeypatch, loader)
+        fake = _FakeDaemonProc(["not a valid pair of ints\n"])
+        monkeypatch.setattr(loader, "_spawn_probe_daemon", lambda: fake)
+        assert loader.gpu_memory_isolated() is None
+        assert fake._killed
+        assert loader._PROBE_PROC is None
+
+    def test_spawn_failure_degrades_to_none(self, monkeypatch):
+        loader = self._loader()
+
+        def _raise():
+            raise OSError("could not spawn python")
+
+        monkeypatch.setattr(loader, "_spawn_probe_daemon", _raise)
+        assert loader.gpu_memory_isolated() is None
+        assert loader._PROBE_PROC is None
+
+
+class TestReadlineWithTimeout:
+    """The low-level timeout wrapper itself: a genuinely blocking stream must
+    not hang the caller past `timeout`, and a normal read must pass through."""
+
+    def _loader(self):
+        from localm.inference.backends.llamacpp import _loader
+        return _loader
+
+    def test_normal_read_passes_through(self):
+        loader = self._loader()
+        stream = _FakeStream(["hello\n"])
+        assert loader._readline_with_timeout(stream, timeout=2.0) == "hello\n"
+
+    def test_eof_returns_none(self):
+        loader = self._loader()
+        stream = _FakeStream([])
+        assert loader._readline_with_timeout(stream, timeout=2.0) is None
+
+    def test_genuinely_blocking_read_times_out(self):
+        """A stream whose readline() never returns must not hang this call past
+        the timeout - uses a small timeout so the test itself stays fast."""
+        import threading
+
+        loader = self._loader()
+
+        class _HangingStream:
+            def readline(self):
+                threading.Event().wait()      # blocks forever
+
+        import time
+        t0 = time.time()
+        result = loader._readline_with_timeout(_HangingStream(), timeout=0.2)
+        elapsed = time.time() - t0
+        assert result is None
+        assert elapsed < 2.0, f"timeout wrapper did not return promptly: {elapsed:.2f}s"
