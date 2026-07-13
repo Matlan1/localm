@@ -43,6 +43,22 @@ _ROOT_MARKERS = (".git", ".localcoder")
 
 
 def _version() -> str:
+    """The running version, advertised in the registry and served by /whoami.
+
+    Prefers the LIVE VERSION file (localm/_version.py:read_version()) over
+    installed dist-info: the install is editable and .venv is never touched by a
+    file-swap update (_apply_update.py's NEVER_TOUCH), so a reboot-class update
+    (the common case) changes VERSION on disk but does not refresh dist-info.
+    /whoami's version is what the post-update health watchdog compares against
+    the just-applied version (LM-DA-011); the stale dist-info path would make
+    every good reboot-class update look like a failed health check."""
+    try:
+        from localm._version import read_version
+        v = read_version()
+        if v and v != "unknown":
+            return v
+    except Exception:
+        pass
     try:
         from importlib.metadata import version
         return version("localm")

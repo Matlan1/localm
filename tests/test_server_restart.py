@@ -70,3 +70,97 @@ def test_do_restart_disarms_crash_guard_before_relaunch(monkeypatch):
     except SystemExit:
         pass
     assert disarmed == [True]
+
+
+# ------------------------ LM-DA-011: post-update watchdog -------------------
+#
+# _do_restart's update_watchdog param is the ONLY thing that distinguishes the
+# post-update auto-restart from a plain /v1/server/restart click; these tests
+# prove the plain path is untouched and the update path wires through correctly.
+
+def test_do_restart_spawns_watchdog_when_given(monkeypatch):
+    from localm import updater
+    calls = []
+    monkeypatch.setattr(updater, "spawn_health_watchdog",
+                        lambda **kw: calls.append(kw) or True)
+    monkeypatch.setattr(http_server, "_engine", None)
+
+    def _stop_here(*_a):
+        raise SystemExit(0)
+
+    monkeypatch.setattr(os, "execv", _stop_here)
+
+    watchdog = {"host": "127.0.0.1", "port": 8642, "scheme": "http",
+               "expect_version": "0.2.0"}
+    try:
+        http_server._do_restart(update_watchdog=watchdog)
+    except SystemExit:
+        pass
+    assert calls == [{"host": "127.0.0.1", "port": 8642, "scheme": "http",
+                      "expect_version": "0.2.0"}]
+
+
+def test_do_restart_no_watchdog_by_default(monkeypatch):
+    """The plain restart path (/v1/server/restart) must NEVER spawn a watchdog -
+    it has no update to verify and no version to roll back to."""
+    from localm import updater
+
+    def _must_not_be_called(**_kw):
+        raise AssertionError("spawn_health_watchdog must not fire for a plain restart")
+
+    monkeypatch.setattr(updater, "spawn_health_watchdog", _must_not_be_called)
+    monkeypatch.setattr(http_server, "_engine", None)
+
+    def _stop_here(*_a):
+        raise SystemExit(0)
+
+    monkeypatch.setattr(os, "execv", _stop_here)
+    try:
+        http_server._do_restart()
+    except SystemExit:
+        pass   # no AssertionError means the watchdog was correctly never spawned
+
+
+def test_do_restart_watchdog_spawn_exception_does_not_block_execv(monkeypatch):
+    """A watchdog spawn failure must never prevent the restart itself - a broken
+    watchdog must not make updates worse than having none at all."""
+    from localm import updater
+
+    def _boom(**_kw):
+        raise RuntimeError("spawn blew up")
+
+    monkeypatch.setattr(updater, "spawn_health_watchdog", _boom)
+    monkeypatch.setattr(http_server, "_engine", None)
+    reached = []
+
+    def _fake_execv(exe, argv):
+        reached.append(True)
+        raise SystemExit(0)
+
+    monkeypatch.setattr(os, "execv", _fake_execv)
+    try:
+        http_server._do_restart(update_watchdog={
+            "host": "127.0.0.1", "port": 1, "scheme": "http", "expect_version": "x"})
+    except SystemExit:
+        pass
+    assert reached == [True]   # execv still ran despite the watchdog spawn raising
+
+
+def test_request_restart_threads_update_watchdog_through(monkeypatch):
+    # Run the inner thread body synchronously so the test is not timing-dependent.
+    class _SyncThread:
+        def __init__(self, target, daemon=None):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    monkeypatch.setattr("threading.Thread", _SyncThread)
+    captured = []
+    monkeypatch.setattr(http_server, "_do_restart",
+                        lambda **kw: captured.append(kw.get("update_watchdog")))
+
+    watchdog = {"host": "127.0.0.1", "port": 9, "scheme": "https",
+               "expect_version": "1.0.0"}
+    http_server._request_restart(delay=0, update_watchdog=watchdog)
+    assert captured == [watchdog]
