@@ -5,7 +5,7 @@ delete, move, or rename another principal's generated media, and the history
 listing must not leak another principal's items.
 
 Mirrors jobs' test_jobs_owner_binding.py - the sibling plugin family that
-already had this gate (job_owner_ok / _owned_job_or_404); image/music/video did
+already had this gate (job_owner_ok / owned_job); image/music/video did
 not (HIGH-6 in CONSOLIDATED-FINDINGS-2026-07-09.md, #19 in
 QUALITY-ARCHITECTURE-REVIEW-2026-07-09.md - independently found by three
 separate audit methods). Fixed via localm.media.gallery, shared by all three

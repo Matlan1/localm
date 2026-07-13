@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from localm.plugins.builtin.jobs import runner as _runner
@@ -127,13 +127,19 @@ def _job_dict(job: Job) -> dict:
 #  Routes                                                             #
 # ------------------------------------------------------------------ #
 
-def _owned_job_or_404(store: JobStore, job_id: str, request: Request) -> Job:
-    """Fetch a job and enforce per-principal ownership: only the creating key (or
-    an admin/owner) may touch it. A mismatch returns the SAME 404 as a missing id
-    so a foreign jobs-scoped key cannot even confirm another principal's job
-    exists. owner=None (a tokenless / open-mode creation) stays unrestricted."""
+def owned_job(job_id: str, request: Request) -> Job:
+    """FastAPI dependency: fetch the job named by the job_id path param and
+    enforce per-principal ownership - only the creating key (or an
+    admin/owner) may touch it. Depends()-injectable (``job: Job =
+    Depends(owned_job)``), so a new per-job route cannot omit the ownership
+    check by construction (design-audit LM-DA-020). A mismatch returns the
+    SAME 404 as a missing id so a foreign jobs-scoped key cannot even confirm
+    another principal's job exists. owner=None (a tokenless / open-mode
+    creation) stays unrestricted. Imports http_server lazily (not at module
+    level) so this plugin still imports cleanly under a headless/no-engine
+    harness."""
     from localm.inference.http_server import job_owner_ok
-    job = store.get(job_id)
+    job = _store().get(job_id)
     if job is None or not job_owner_ok(request, getattr(job, "owner", None)):
         raise HTTPException(404, f"No such job: {job_id}")
     return job
@@ -179,14 +185,14 @@ async def create_job(req: JobCreate, request: Request):
 
 
 @_router.get("/api/jobs/{job_id}")
-async def get_job(job_id: str, request: Request):
-    return _job_dict(_owned_job_or_404(_store(), job_id, request))
+async def get_job(job: Job = Depends(owned_job)):
+    return _job_dict(job)
 
 
 @_router.put("/api/jobs/{job_id}")
-async def update_job(job_id: str, req: JobUpdate, request: Request):
+async def update_job(job_id: str, req: JobUpdate, request: Request,
+                     job: Job = Depends(owned_job)):
     store = _store()
-    job = _owned_job_or_404(store, job_id, request)   # ownership gate before any change
     changes = {k: v for k, v in req.model_dump().items() if v is not None}
     can_shell = _caller_can_allow_shell(request)
     # Escalating an existing job to shell execution is privileged (same gate as
@@ -212,18 +218,16 @@ async def update_job(job_id: str, req: JobUpdate, request: Request):
 
 
 @_router.delete("/api/jobs/{job_id}")
-async def delete_job(job_id: str, request: Request):
+async def delete_job(job_id: str, job: Job = Depends(owned_job)):
     store = _store()
-    _owned_job_or_404(store, job_id, request)     # only the owner may delete
     if not store.remove(job_id):
         raise HTTPException(404, f"No such job: {job_id}")
     return {"status": "deleted", "id": job_id}
 
 
 @_router.post("/api/jobs/{job_id}/run")
-async def run_now(job_id: str, request: Request):
+async def run_now(job_id: str, request: Request, job: Job = Depends(owned_job)):
     store = _store()
-    job = _owned_job_or_404(store, job_id, request)
     # Defense in depth (crown-jewel invariant): an on-demand run of a SHELL-enabled
     # job must re-check the CALLER, not just the stored flag - so an unowned/legacy
     # allow_shell job (owner=None) can never be triggered into run_shell by a plain
@@ -254,10 +258,9 @@ async def run_now(job_id: str, request: Request):
 
 
 @_router.get("/api/jobs/{job_id}/results")
-async def job_results(job_id: str, request: Request,
-                      limit: int = 100, offset: int = 0):
+async def job_results(job_id: str, limit: int = 100, offset: int = 0,
+                      job: Job = Depends(owned_job)):
     store = _store()
-    _owned_job_or_404(store, job_id, request)     # only the owner sees a job's results
     # Page the results so a high-frequency job's history cannot load every result
     # file into memory and OOM the API (CHK-JOBS-RESULTS-PAGE). Default + hard cap.
     limit = max(1, min(int(limit), 1000))

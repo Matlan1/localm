@@ -24,7 +24,7 @@ import shutil
 import time
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -191,9 +191,9 @@ async def video(req: VideoRequest, request: Request):
     return {"job_id": job.id}
 
 
-@_router.get("/api/video/file/{name}")
-async def video_file(name: str, request: Request):
-    gallery.owned_or_404(request, "video", name)
+@_router.get("/api/video/file/{name}",
+             dependencies=[Depends(gallery.require_owner("video"))])
+async def video_file(name: str):
     path = _video_path(name)
     media = {".mp4": "video/mp4", ".webm": "video/webm",
              ".gif": "image/gif"}.get(path.suffix.lower(),
@@ -201,9 +201,9 @@ async def video_file(name: str, request: Request):
     return FileResponse(str(path), media_type=media)
 
 
-@_router.delete("/api/video/file/{name}")
-async def video_delete(name: str, request: Request):
-    gallery.owned_or_404(request, "video", name)
+@_router.delete("/api/video/file/{name}",
+                dependencies=[Depends(gallery.require_owner("video"))])
+async def video_delete(name: str):
     path = _video_path(name)
     sidecar = path.with_suffix(path.suffix + ".json")
     path.unlink()
@@ -213,9 +213,9 @@ async def video_delete(name: str, request: Request):
     return {"status": "deleted", "name": name}
 
 
-@_router.post("/api/video/file/{name}/move")
-async def video_move(name: str, req: MoveFileRequest, request: Request):
-    gallery.owned_or_404(request, "video", name)
+@_router.post("/api/video/file/{name}/move",
+              dependencies=[Depends(gallery.require_owner("video"))])
+async def video_move(name: str, req: MoveFileRequest):
     path = _video_path(name)
     dest_dir = Path(req.dest).expanduser()
     try:
@@ -239,7 +239,7 @@ async def video_move(name: str, req: MoveFileRequest, request: Request):
 async def video_history(request: Request):
     """Generated clips, newest first, with their sidecar metadata - filtered to
     the caller's own (an admin/owner sees all; unowned/legacy entries stay
-    visible to everyone, matching gallery.owned_or_404)."""
+    visible to everyone, matching gallery.require_owner)."""
     video_dir = _video_dir()
     items = []
     if video_dir.is_dir():
