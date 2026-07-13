@@ -62,6 +62,30 @@ const systemOf = (completion) =>
 const eq = (out, expected) => assert.equal(JSON.stringify(out), JSON.stringify(expected));
 
 // ---------------------------------------------------------------------------
+//  LM-DA-014: requestWebTool fences server-returned content as untrusted, so
+//  the model is told (in-band) that it is data, not instructions - the server
+//  side (web/plug.py) already defangs literal control tokens; this is the
+//  complementary client-side framing layer, matching the coder plugin's own
+//  provenance.py treatment of fetch_url/web_search output.
+// ---------------------------------------------------------------------------
+
+test("requestWebTool: search results are wrapped in the untrusted_content fence", async () => {
+  const { impl } = recordingFetch([{ title: "T", url: "https://example.com/", snippet: "S" }]);
+  const { window: w } = loadApp({ fetchImpl: impl });
+  const note = await w.requestWebTool({ name: "web_search", args: { query: "x" } });
+  assert.match(note, /<untrusted_content>[\s\S]*T[\s\S]*<\/untrusted_content>/);
+  assert.match(note, /UNTRUSTED EXTERNAL CONTENT/);
+});
+
+test("requestWebTool: fetched page text is wrapped in the untrusted_content fence", async () => {
+  const { impl } = recordingFetch([]);
+  const { window: w } = loadApp({ fetchImpl: impl });
+  const note = await w.requestWebTool({ name: "fetch_url", args: { url: "https://example.com/" } });
+  assert.match(note, /<untrusted_content>\npage text\n<\/untrusted_content>/);
+  assert.match(note, /UNTRUSTED EXTERNAL CONTENT/);
+});
+
+// ---------------------------------------------------------------------------
 //  parseWebCall: tolerate the formats local models actually emit
 // ---------------------------------------------------------------------------
 
