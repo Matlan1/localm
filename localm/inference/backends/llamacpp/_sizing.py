@@ -58,14 +58,62 @@ class VramSizingMixin:
     # attribute (not read from the module directly) so tests can monkeypatch it.
     _VRAM_OVERHEAD_BYTES = VRAM_OVERHEAD_BYTES
 
+    # Set once `import torch` is confirmed broken IN THIS PROCESS - see
+    # _free_total_vram_bytes()'s docstring for the exact, root-caused
+    # mechanism. A class attribute (shared across every GgufBackend/GgufWorker
+    # instance in this process, which is exactly the right scope: the
+    # conflict is process-wide, not per-instance) so tests can reset it like
+    # other per-process caches in this codebase.
+    _torch_rocm_init_broken: bool = False
+
     @staticmethod
     def _free_total_vram_bytes() -> "tuple[Optional[int], Optional[int]]":
         """(free, total) bytes on the configured main GPU device (device 0 when
         unset - see main_gpu_index / discover.resolve_main_gpu_index), or
         (None, None) when not measurable. Shared by _free_vram_bytes() and
-        _total_vram_bytes() so both read the same device in one call."""
+        _total_vram_bytes() so both read the same device in one call.
+
+        Skips the attempt entirely once `import torch` has been CONFIRMED
+        broken in this process (see below) - not merely "torch unavailable"
+        (that case is a normal, cheap ImportError every call, harmless to
+        retry), but a specific, root-caused DLL conflict that otherwise
+        retries and re-faults on EVERY call for the rest of the process's
+        life.
+
+        ROOT CAUSE (confirmed live, reproduced on demand, not assumed):
+        once llama.cpp's bundled HIP/ROCm runtime is loaded into this process
+        (via `_loader.load_lib()` - both `GgufWorker` in the isolated worker
+        process, which owns the real loaded model, and any other code path
+        that reaches `load_lib()`, e.g. the embedder), a LATER `import torch`
+        triggers torch's separate `rocm_sdk` package to `ctypes.CDLL()` its
+        own ROCm library, which resolves to an incompatible DLL already
+        present in this process's address space (`OSError: [WinError 127]
+        The specified procedure could not be found` - a classic Windows DLL
+        entry-point mismatch, not a driver race). ctypes wraps native DLL
+        loads in Windows SEH specifically so a bad DLL raises a catchable
+        exception instead of crashing the interpreter, which is why this is
+        caught here rather than taking the whole process down - but Python's
+        import machinery evicts a module that faults during import from
+        `sys.modules`, so an uncached failure re-attempts (and re-faults) on
+        every single subsequent VRAM check for the rest of the process's
+        life, each one printing a scary "Windows fatal exception" diagnostic
+        to stderr even though it is fully handled. Two entirely separate
+        native ROCm/HIP runtimes (llama.cpp's bundled one and torch's own)
+        cannot safely coexist in one process on this box - caching the
+        failure stops the pointless, noisy retry loop without hiding the
+        underlying incompatibility."""
+        if VramSizingMixin._torch_rocm_init_broken:
+            return None, None
         try:
             import torch
+        except Exception as e:
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("torch import failed (%s); VRAM reads will use the "
+                       "isolated native probe fallback for the rest of this "
+                       "process", type(e).__name__)
+            VramSizingMixin._torch_rocm_init_broken = True
+            return None, None
+        try:
             if torch.cuda.is_available():
                 from localm.config import load_config
                 from localm.discover import resolve_main_gpu_index

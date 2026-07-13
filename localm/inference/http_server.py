@@ -2450,7 +2450,7 @@ async def _stream_sse(
     ts = int(time.time())
     think = ThinkSplitter()   # route <think> reasoning into delta.reasoning_content (H4)
 
-    prompt_tokens = engine.count_messages_tokens(messages)
+    prompt_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_messages_tokens, messages)
 
     # Context-limit handling: compact_messages when close to the limit; reserve a
     # 2048-token buffer for compaction overhead + response generation.
@@ -2472,7 +2472,7 @@ async def _stream_sse(
                 None, compact_messages, messages, _gen_for_compact)
             if changed:
                 messages = list(new_messages)
-                prompt_tokens = engine.count_messages_tokens(messages)
+                prompt_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_messages_tokens, messages)
 
     # Role announcement
     role_chunk = ChatChunk(
@@ -2606,7 +2606,7 @@ async def _stream_sse(
     _audit_exchange(audit, transcript, messages, reply)
 
     # Count tokens on the streamed text - what the client actually received
-    completion_tokens = engine.count_tokens(streamed)
+    completion_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_tokens, streamed)
 
     usage = UsageInfo(
         prompt_tokens=prompt_tokens,
@@ -2641,7 +2641,8 @@ async def _stream_sse_completion(
     ts = int(time.time())
     # *messages* arrive already inlet-transformed; count tokens on what
     # inference sees (matches the chat path).
-    prompt_tokens = engine.count_tokens(_messages_prompt_text(messages))
+    prompt_tokens = await asyncio.get_running_loop().run_in_executor(
+        None, engine.count_tokens, _messages_prompt_text(messages))
 
     loop = asyncio.get_running_loop()
     token_queue: asyncio.Queue = asyncio.Queue()
@@ -2743,7 +2744,7 @@ async def _stream_sse_completion(
         reply = await pipeline.run_outlet(streamed, messages, ctx)
     _audit_exchange(audit, transcript, messages, reply)
 
-    completion_tokens = engine.count_tokens(streamed)
+    completion_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_tokens, streamed)
     # Honesty (mirrors the chat path): a mid-stream error is reported as "error",
     # not "stop", so a client keying off finish_reason detects the failure even
     # though the error text was already streamed as a visible chunk.
@@ -2902,7 +2903,7 @@ async def _complete(
     # completion tokens) let a method-less mock pass through, so a broken engine
     # returned a fabricated 200 instead of surfacing the failure (AUDIT rule 5 /
     # no facade).
-    prompt_tokens = engine.count_messages_tokens(messages)
+    prompt_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_messages_tokens, messages)
 
     capacity = engine.context_capacity()
     if capacity is not None and len(messages) > 3:
@@ -2918,7 +2919,7 @@ async def _complete(
                 None, compact_messages, messages, _gen_for_compact)
             if changed:
                 messages = list(new_messages)
-                prompt_tokens = engine.count_messages_tokens(messages)
+                prompt_tokens = await asyncio.get_running_loop().run_in_executor(None, engine.count_messages_tokens, messages)
 
     # Serialise inference - only one request runs at a time
     gen_error: Exception | None = None
@@ -2957,7 +2958,8 @@ async def _complete(
     from localm.inference.textnorm import split_think
     answer, reasoning = split_think(text)
 
-    completion_tokens = engine.count_tokens(text)
+    completion_tokens = await asyncio.get_running_loop().run_in_executor(
+        None, engine.count_tokens, text)
     usage = UsageInfo(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
