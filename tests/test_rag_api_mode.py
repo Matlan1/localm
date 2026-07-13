@@ -1,14 +1,22 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """api-mode (``localm serve`` without the GUI) regression tests for the RAG
-plugin (checkup audit, CONSOLIDATED-FINDINGS-2026-07-09 items 8 and 9).
+plugin (checkup audit, CONSOLIDATED-FINDINGS-2026-07-09 items 8 and 9; then
+memory-audit 2026-07-02 cluster 24 / batch F14).
 
 Item 8 (HIGH): rag_add / rag_upload / rag_query read
 ``request.app.state.self_url`` / ``.active_model`` / ``.jobs`` unguarded. Those
 are only published by ``attach_gui`` - a bare ``localm serve`` never calls it -
 so any client hitting the documented REST API directly got an unhandled
-AttributeError -> opaque HTTP 500. Fixed by mirroring the coder plugin's
-``getattr(..., None)`` + clean 503 guard, and degrading self-embedding to
-lexical-only (an already-supported ``embed_fn=None`` path) rather than crashing.
+AttributeError -> opaque HTTP 500. First fixed (2026-07-09) by mirroring the
+coder plugin's ``getattr(..., None)`` guard so the crash became a clean 503.
+
+Cluster 24 / F14 (memory campaign): a clean 503 stopped the crash but headless
+API users still could not index at all ("run localm gui"). Now /add and /upload
+run the index SYNCHRONOUSLY on the plugin pool (off the event loop, like
+/extract) when no background job manager is attached, and ``_self_services``
+derives self_url/active_model from the kernel's own bind coordinates so
+self-embedding works headless too - so a bare ``localm serve`` can actually
+index, not just fail cleanly.
 
 Item 9 (HIGH): rag_extract ran extract_bytes() synchronously inside an async
 route with no executor offload, freezing the whole single-worker event loop for
@@ -65,33 +73,50 @@ def api_mode_app(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  Item 8: api-mode must not crash with an AttributeError                     #
+#  Item 8 / cluster 24: api-mode must not crash AND must actually index        #
 # --------------------------------------------------------------------------- #
 
-class TestApiModeDoesNotCrash:
-    def test_add_returns_clean_503_not_500(self, api_mode_app):
+class TestApiModeIndexesHeadless:
+    def test_add_indexes_synchronously_when_no_job_manager(self, api_mode_app):
+        """Headless serve has no background job manager (attach_gui is never
+        called), yet a documented REST client must still be able to index. Pre-fix
+        this 503'd ("run localm gui"); now /add runs the index synchronously on the
+        plugin pool and returns the result directly, so a bare ``localm serve`` can
+        index (memory-audit cluster 24). The doc is really indexed - a query
+        returns it."""
         with TestClient(api_mode_app) as c:
             c.post("/api/rag/collections", json={"name": "kb"})
             # Under Path.home() (pinned by the fixture), so the confinement
-            # whitelist check (which runs BEFORE the jobs guard) passes and the
-            # request actually reaches the 503 under test, on every platform.
+            # whitelist check (which runs BEFORE the jobs branch) passes on every
+            # platform and the request reaches the synchronous index under test.
             target = Path.home() / "doc.txt"
-            target.write_text("hello world", encoding="utf-8")
+            target.write_text("gfx1030 rocm runtime notes", encoding="utf-8")
             r = c.post("/api/rag/collections/kb/add",
                        json={"paths": [str(target)], "embed": False})
-            assert r.status_code == 503, r.text
-            assert "background indexing" in r.text.lower()
-            assert "localm gui" in r.text.lower()
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body.get("status") == "done", body
+            assert body["added"] == 1, body
+            assert "job_id" not in body           # synchronous, not a streamed job
+            q = c.post("/api/rag/collections/kb/query",
+                       json={"query": "gfx1030", "k": 4})
+            assert q.status_code == 200, q.text
+            hits = q.json()["hits"]
+            assert hits and "gfx1030" in hits[0]["text"].lower()
 
-    def test_upload_returns_clean_503_not_500(self, api_mode_app):
+    def test_upload_indexes_synchronously_when_no_job_manager(self, api_mode_app):
+        """Same for device-file /upload: synchronous index headless, no 503."""
         with TestClient(api_mode_app) as c:
             c.post("/api/rag/collections", json={"name": "kb"})
             r = c.post("/api/rag/collections/kb/upload", json={
-                "files": [{"filename": "a.md", "content_b64": _b64(b"hi there")}],
+                "files": [{"filename": "a.md",
+                           "content_b64": _b64(b"hello gfx1030 world")}],
                 "embed": False})
-            assert r.status_code == 503, r.text
-            assert "background indexing" in r.text.lower()
-            assert "localm gui" in r.text.lower()
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body.get("status") == "done", body
+            assert body["added"] == 1, body
+            assert "job_id" not in body
 
     def test_embedding_set_returns_clean_503_not_500(self, api_mode_app):
         with TestClient(api_mode_app) as c:
@@ -106,15 +131,15 @@ class TestApiModeDoesNotCrash:
             assert "localm gui" in r.text.lower()
 
     def test_query_succeeds_and_degrades_to_lexical_only(self, api_mode_app):
-        # THE POINT (finding 1): query needs no background job, only optional
-        # self-embedding, so it must NOT 503 - it degrades to the store's
-        # existing lexical-only fallback (embed_fn=None) and keeps working.
+        # THE POINT (finding 1): with no bind coordinates on app.state (this bare
+        # fixture never runs advertise()), _self_services derives no self_url, so
+        # query has no embedder and degrades to the store's lexical-only fallback
+        # (embed_fn=None) instead of 503-ing or crashing.
         from localm.rag.store import Collection
         with TestClient(api_mode_app) as c:
             c.post("/api/rag/collections", json={"name": "kb"})
-            # /add and /upload need a job manager (unavailable here); index
-            # directly through the store, exactly as a CLI-driven `localm rag
-            # add` would, so this test proves the QUERY path, not indexing.
+            # Index directly through the store to isolate the QUERY path under
+            # test (the synchronous /add path is covered above).
             coll = Collection("kb")
             coll.add_uploads([{"filename": "notes.md",
                                 "data": b"rocm gfx1030 runtime notes"}])
@@ -131,6 +156,42 @@ class TestApiModeDoesNotCrash:
                        json={"query": "anything", "k": 4})
             assert r.status_code == 200, r.text
             assert r.json()["hits"] == []
+
+
+# --------------------------------------------------------------------------- #
+#  Cluster 24: self-services derived from the kernel's bind coordinates        #
+# --------------------------------------------------------------------------- #
+
+def test_self_services_derived_from_kernel_state_when_headless():
+    """attach_gui (the GUI shell) is the only setter of app.state.self_url /
+    active_model, but a bare ``localm serve`` still advertises its bind
+    coordinates (instance_scheme / instance_port). The rag plugin derives
+    self_url + a live-engine active_model from those, so self-embedding (and the
+    format / image self-classify helpers) work headless instead of every index
+    silently degrading to lexical-only (memory-audit cluster 24)."""
+    from types import SimpleNamespace
+
+    from localm.plugins.builtin.rag import plug
+
+    # No self_url / active_model published, but advertise()-style coordinates are.
+    req = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
+        instance_scheme="http", instance_port=8699)))
+    self_embed, self_classify, self_describe = plug._self_services(req)
+    assert self_embed is not None
+    assert self_classify is not None
+    assert self_describe is not None
+
+
+def test_self_services_none_when_no_coordinates():
+    """With neither the GUI services nor bind coordinates on app.state (a bare
+    create_app, or before advertise()), self-embedding stays off (None trio) and
+    indexing degrades cleanly to lexical-only rather than dialling a bogus URL."""
+    from types import SimpleNamespace
+
+    from localm.plugins.builtin.rag import plug
+
+    req = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    assert plug._self_services(req) == (None, None, None)
 
 
 # --------------------------------------------------------------------------- #

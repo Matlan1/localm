@@ -19,13 +19,17 @@ chats can use documents without leaving traces.
 
 Background indexing and self-embedding use the kernel's shared services
 (``request.app.state.jobs`` / ``.self_url`` / ``.active_model``), published by
-``attach_gui``. Under a bare ``localm serve`` (api-mode) these are never set, so
-indexing/upload/embedding-setup - which need a job to run in - degrade to a clean
-503 ("run `localm gui`"), mirroring the coder plugin's ``_sessions`` guard. Query
-only needs self-embedding, not a job, so it degrades further: with no self_url/
-active_model it falls back to lexical-only search (embed_fn=None), the same
-degrade path used when embed=False or the embedder itself is unavailable. The job
-stream is served by the kernel's /api/jobs/* endpoints.
+``attach_gui``. Under a bare ``localm serve`` (api-mode) ``jobs`` is never set, so
+indexing/upload run SYNCHRONOUSLY on the plugin pool instead of as a streamed
+background job (``_index_sync``), and self-embedding is derived from the kernel's
+own advertised bind coordinates + live engine (``_kernel_self_services``) - so a
+headless server can actually index, not just fail cleanly (memory-audit cluster
+24). Embedding-model SETUP still needs a job for its download-progress stream, so
+it degrades to a clean 503 ("run `localm gui`"), mirroring the coder plugin's
+``_sessions`` guard. Query never needed a job; with no embedder reachable it falls
+back to lexical-only search (embed_fn=None), the same degrade path used when
+embed=False or the embedder itself is unavailable. The background job stream is
+served by the kernel's /api/jobs/* endpoints.
 """
 
 from __future__ import annotations
@@ -237,21 +241,81 @@ def _require_jobs(request: Request, *, needs: str = "Background indexing"):
     return jobs
 
 
+def _kernel_self_services(request: Request):
+    """Derive ``(self_url, active_model)`` from the KERNEL's own state when the GUI
+    shell never published them. ``attach_gui`` is the only setter of
+    ``app.state.self_url`` / ``.active_model``, so a bare ``localm serve`` (api-mode)
+    would otherwise have no way to self-embed - every headless index silently
+    degrading to lexical-only (memory-audit cluster 24). But ``localm serve`` still
+    advertises its bind coordinates (``instance_scheme`` / ``instance_port``, set by
+    ``instances.advertise`` before uvicorn accepts a request), and the live engine
+    is ``http_server._engine`` - the same two sources ``mount_gui_surface`` uses to
+    build these very callables. Returns ``(None, None)`` when the coordinates are
+    absent (a bare ``create_app`` test, or before ``advertise``), so the caller
+    degrades cleanly to lexical-only rather than dialling a bogus URL."""
+    port = getattr(request.app.state, "instance_port", None)
+    if not port:
+        return None, None
+    scheme = getattr(request.app.state, "instance_scheme", None) or "http"
+    self_url = f"{scheme}://127.0.0.1:{port}/v1"
+
+    def _active() -> str:
+        import localm.inference.http_server as _hs
+        eng = getattr(_hs, "_engine", None)
+        return eng.display_name if eng is not None else ""
+
+    return self_url, _active
+
+
 def _self_services(request: Request):
     """Best-effort self_embed/self_classify/self_describe helpers built from this
-    server's own /v1/* endpoints, or a matching trio of ``None`` when the GUI
-    server isn't attached (api-mode never publishes ``self_url`` /
-    ``active_model``). ``embed_fn=None`` etc. are already-supported degrade paths
-    in the store layer (lexical-only search, no format tie-break, no image
-    description) - the same fallback used when embed=False or the embedder
-    itself is unavailable, so this never crashes the request."""
+    server's own /v1/* endpoints, or a matching trio of ``None`` when neither the
+    GUI shell nor the kernel's bind coordinates are available. The GUI shell
+    publishes ``self_url`` / ``active_model`` via ``attach_gui``; a bare ``localm
+    serve`` (api-mode) does not, so we fall back to deriving them from the kernel's
+    own advertised coordinates (see ``_kernel_self_services``) rather than degrading
+    every headless index to lexical-only (memory-audit cluster 24). ``embed_fn=None``
+    etc. are already-supported degrade paths in the store layer (lexical-only search,
+    no format tie-break, no image description) - the same fallback used when
+    embed=False or the embedder itself is unavailable, so this never crashes the
+    request."""
     self_url = getattr(request.app.state, "self_url", None)
     active_model = getattr(request.app.state, "active_model", None)
+    if not self_url or active_model is None:
+        derived_url, derived_active = _kernel_self_services(request)
+        self_url = self_url or derived_url
+        if active_model is None:
+            active_model = derived_active
     if not self_url or active_model is None:
         return None, None, None
     return (_make_self_embed(self_url, active_model),
             _make_self_classify(self_url, active_model),
             _make_self_describe_image(self_url, active_model))
+
+
+async def _index_sync(index_call):
+    """Run a blocking ``coll.add_*`` index on the plugin pool (off the single-worker
+    event loop, exactly like /extract) and return its result as the HTTP response.
+
+    Used in headless api-mode, where no background job manager is attached, so a
+    bare ``localm serve`` can index instead of 503-ing (memory-audit cluster 24 -
+    "headless API users cannot index at all"). The pool is the plugin executor, kept
+    off the inference pool so a slow index never starves chat completions; a
+    concurrent self-embed HTTP call back to /v1/embeddings is handled by the event
+    loop while this runs, the same threading model the background-job path uses."""
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(get_plugin_executor(), index_call)
+    except ValueError as e:
+        # e.g. an embedding-model dimension change (C3): a clean 400, not a crash -
+        # mirrors the background path's "error" line, surfaced synchronously here.
+        raise HTTPException(400, str(e))
+    return {"status": "done",
+            "added": result["added"],
+            "updated": result["updated"],
+            "skipped": result["skipped"],
+            "failed": result["failed"],
+            "chunks": result["chunks"]}
 
 
 @_router.get("/api/rag/collections")
@@ -338,11 +402,19 @@ async def rag_add(name: str, req: RagAddRequest, request: Request):
             "only the owner can widen the list: "
             + ", ".join(sorted(set(addable))[:5]))
     embed = req.embed
-    jobs = _require_jobs(request)
     self_embed, self_classify, self_describe = _self_services(request)
+    embed_fn = self_embed if embed else None
+    jobs = getattr(request.app.state, "jobs", None)
+    if jobs is None:
+        # Headless api-mode: no background job manager (attach_gui was never
+        # called). Index synchronously and return the result directly, so a bare
+        # `localm serve` can index (was a 503 before; memory-audit cluster 24). The
+        # GUI always attaches a job manager, so it keeps the streamed-job path below.
+        return await _index_sync(lambda: coll.add_paths(
+            paths, embed_fn=embed_fn, classify_fn=self_classify,
+            describe_image_fn=self_describe, policy=policy, force=req.reindex))
 
     def _index(job):
-        embed_fn = self_embed if embed else None
         try:
             result = coll.add_paths(
                 paths, embed_fn=embed_fn, classify_fn=self_classify,
@@ -409,11 +481,16 @@ async def rag_upload(name: str, req: RagUploadRequest, request: Request):
         uploads.append({"filename": item.filename, "data": data})
 
     embed = req.embed
-    jobs = _require_jobs(request)
     self_embed, self_classify, self_describe = _self_services(request)
+    embed_fn = self_embed if embed else None
+    jobs = getattr(request.app.state, "jobs", None)
+    if jobs is None:
+        # Headless api-mode: index the uploaded bytes synchronously (see rag_add).
+        return await _index_sync(lambda: coll.add_uploads(
+            uploads, embed_fn=embed_fn, classify_fn=self_classify,
+            describe_image_fn=self_describe, force=req.reindex))
 
     def _index(job):
-        embed_fn = self_embed if embed else None
         try:
             result = coll.add_uploads(
                 uploads, embed_fn=embed_fn, classify_fn=self_classify,

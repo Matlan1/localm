@@ -41,6 +41,45 @@ def test_builds_auth_header_from_env_key(monkeypatch):
     assert captured["timeout"] == 300
 
 
+def test_builds_auth_header_from_persisted_key_file(monkeypatch):
+    """A keyed server whose owner key lives in auth.key (``localm key generate`` /
+    the launcher) but NOT in the environment must still authenticate its OWN
+    loopback self-calls. Pre-fix self_request read ``LOCALM_API_KEY`` only, so on
+    such a server RAG self-embedding got a 401 and silently degraded to
+    lexical-only while the embedding model sat ready on disk (memory-audit
+    2026-07-02 cluster 19). Now the key is resolved via ``auth.get_api_key()``
+    (env, then the persisted auth.key)."""
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    from localm import auth
+    auth.set_api_key("file-only-key-123")   # writes <throwaway home>/auth.key
+    captured = {}
+
+    def fake_request(method, url, **kwargs):
+        captured.update(kwargs)
+        return _FakeResp()
+
+    monkeypatch.setattr(requests, "request", fake_request)
+    self_request("POST", "/embeddings", base_url="http://127.0.0.1:8642/v1")
+    assert captured["headers"]["Authorization"] == "Bearer file-only-key-123"
+
+
+def test_env_key_wins_over_persisted_file(monkeypatch):
+    """The env var still takes precedence over the persisted file (the launcher's
+    one-run override), matching auth.get_api_key()'s own precedence."""
+    from localm import auth
+    auth.set_api_key("file-key-000")
+    monkeypatch.setenv("LOCALM_API_KEY", "env-key-999")
+    captured = {}
+
+    def fake_request(method, url, **kwargs):
+        captured.update(kwargs)
+        return _FakeResp()
+
+    monkeypatch.setattr(requests, "request", fake_request)
+    self_request("GET", "/health", base_url="http://127.0.0.1:8642/v1")
+    assert captured["headers"]["Authorization"] == "Bearer env-key-999"
+
+
 def test_no_auth_header_in_open_mode(monkeypatch):
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     captured = {}
