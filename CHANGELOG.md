@@ -34,6 +34,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   topics are recalled distinctly instead of collapsing into one vague note.
 
 ### Fixed
+- **Semantic knowledge search now works on password-protected servers.** When localm
+  is started with an API key saved to disk (`localm key generate`, or the launcher),
+  indexing a document used to silently fall back to keyword-only search: the server
+  could not authenticate its own embedding call and quietly dropped to lexical
+  retrieval while the embedding model sat ready. Keyed servers now embed correctly -
+  whether the key comes from the environment or the saved key file - so semantic
+  (hybrid) search works again, including `localm rag add/query --embed`.
+- **You can index documents on a headless `localm serve`.** A bare API server (no GUI)
+  could not index into a knowledge collection at all - `POST /api/rag/collections/
+  {name}/add` and `/upload` refused with a "run localm gui" error. They now index the
+  documents directly and return the result, so the documented REST API works without
+  the GUI (semantic embeddings included, when an embedding model is installed).
 - A non-finite number (`NaN` or `Infinity`) can no longer be saved as a config value.
   Setting one, e.g. `localm config temperature nan` or a crafted Settings request, used
   to be accepted and written to `config.json`, after which the Settings page failed to

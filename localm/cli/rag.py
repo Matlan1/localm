@@ -154,8 +154,6 @@ def _cli_rag_embed_fn(url):
     query is actually embedded, so a missing server degrades to lexical-only
     inside Collection.query rather than failing the command. *url* overrides the
     auto-discovered base URL."""
-    import os
-
     base = url
     if not base:
         try:
@@ -174,8 +172,13 @@ def _cli_rag_embed_fn(url):
     def _embed(texts: list) -> list:
         import requests
         from localm import tls as _tls
+        from localm.auth import get_api_key
         headers = {}
-        key = os.environ.get("LOCALM_API_KEY")
+        # env var, else the persisted <home>/auth.key: a `localm key generate` /
+        # launcher-keyed server keeps the key in auth.key, not the env, so reading
+        # env-only 401'd every --embed call and silently indexed lexical-only
+        # (memory-audit cluster 19).
+        key = get_api_key()
         if key:
             headers["Authorization"] = f"Bearer {key}"
         r = requests.post(embeddings_url, json={"input": texts, "model": "localm"},
