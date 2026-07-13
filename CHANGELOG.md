@@ -125,6 +125,20 @@ permanent public record of what shipped and are never rewritten; the in-progress
   traceback) in addition to the console notice - previously it was
   console-only, so a report filed afterward showed no sign anything had gone
   wrong.
+- **A failed setup job (ComfyUI, a model pull, image generation) no longer
+  hides its own error.** Two separate problems compounded: the job's live
+  progress log in Settings disappeared the instant it failed - right as a
+  toast told you to go read it - because the panel immediately re-rendered
+  itself from scratch; and the job's real output (the actual git/pip/native
+  error) was never written anywhere else either, so once that log vanished
+  the reason was gone for good. The log now stays on screen after a failure,
+  and it's also logged (so a bug report carries it too).
+- **The managed-ComfyUI setup no longer fails cloning under a long
+  `LOCALM_HOME` path.** A sufficiently nested data directory (a long
+  username, a OneDrive-redirected profile, a custom install path) could push
+  a cloned repo's internal file paths past Windows' legacy 260-character
+  limit, failing with a cryptic "Filename too long" / "invalid index-pack
+  output" git error.
 
 ### Security
 - **Disabling the private-network (SSRF) guard now requires an owner key.** The

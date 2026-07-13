@@ -271,7 +271,13 @@ def _clone_source(user_workdir: Path, managed_root: Path, commit: str,
     commit. A local clone is offline and brings ONLY tracked source - the user's
     .gitignore keeps venv/models/custom_nodes/outputs out - so the managed checkout
     is a clean copy at the same history, without dragging the un-portable venv."""
-    ok, out = _run(["git", "clone", "--quiet", str(user_workdir), str(managed_root)],
+    # core.longpaths: without it, a deeply-nested LOCALM_HOME (a long username, a
+    # OneDrive-redirected profile, a nested custom data dir) can push a pack
+    # object's path past Windows' legacy 260-char MAX_PATH, failing clone with
+    # "Filename too long" / "invalid index-pack output" - reproduced live (#621).
+    # A per-invocation -c override, not a global git config change.
+    ok, out = _run(["git", "-c", "core.longpaths=true", "clone", "--quiet",
+                    str(user_workdir), str(managed_root)],
                    on_progress=on_progress, timeout=600)
     if not ok:
         return False, out
