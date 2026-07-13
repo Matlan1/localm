@@ -378,6 +378,47 @@ class TestFreeVramBytesUsesIsolatedNativeFallback:
             free = GgufBackend._free_vram_bytes()
         assert free == 3_000
 
+    @pytest.fixture(autouse=True)
+    def _reset_torch_broken_flag(self):
+        """_torch_rocm_init_broken is a process-lifetime cache (deliberately -
+        see its docstring in _sizing.py) - reset it around every test in this
+        class so one test setting it can never leak into another."""
+        from localm.inference.backends.llamacpp._sizing import VramSizingMixin
+        saved = VramSizingMixin._torch_rocm_init_broken
+        VramSizingMixin._torch_rocm_init_broken = False
+        yield
+        VramSizingMixin._torch_rocm_init_broken = saved
+
+    def test_torch_import_failure_is_cached_and_never_retried(self, monkeypatch):
+        """The real bug this guards (found live, reproduced on demand - see
+        _sizing.py's VramSizingMixin._free_total_vram_bytes docstring): once
+        llama.cpp's bundled HIP runtime is loaded in-process (as GgufWorker's
+        isolated worker process does for every real load), a LATER `import
+        torch` hits a genuine DLL entry-point conflict in torch's separate
+        rocm_sdk ROCm runtime. A module that faults during import is evicted
+        from sys.modules, so an uncached failure would retry - and re-fault -
+        on EVERY subsequent VRAM check for the rest of the process's life.
+        `sys.modules[name] = None` is the standard way to simulate `import
+        torch` itself raising (as opposed to _BoomModule above, which
+        simulates torch importing fine but a later attribute access failing
+        - a different, NOT cached, failure mode)."""
+        monkeypatch.setitem(sys.modules, "torch", None)
+        assert GgufBackend._free_total_vram_bytes() == (None, None)
+        from localm.inference.backends.llamacpp._sizing import VramSizingMixin
+        assert VramSizingMixin._torch_rocm_init_broken is True
+
+        # Second call must be answered from the cached flag WITHOUT
+        # re-attempting the import - proven by making torch "recover" to a
+        # working fake and confirming it is still never consulted.
+        fake = MagicMock()
+        fake.cuda.is_available.return_value = True
+        fake.cuda.mem_get_info.return_value = (1, 2)
+        monkeypatch.setitem(sys.modules, "torch", fake)
+        assert GgufBackend._free_total_vram_bytes() == (None, None), (
+            "a cached broken-import must not be retried, even once torch "
+            "would now succeed")
+        fake.cuda.is_available.assert_not_called()
+
 
 class _FakeStream:
     """A minimal write()/flush() or readline() double for a fake daemon proc's
