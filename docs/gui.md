@@ -24,7 +24,7 @@ localm gui --pull bartowski/Qwen2.5-7B-Instruct-GGUF:Qwen2.5-7B-Instruct-Q4_K_M.
 
 ## Chat
 
-Ask questions and have conversations with the model. The model can access documents, search the web, and remember facts across sessions (if enabled).
+Ask questions and have conversations with the model. The model can access documents, search the web, and remember facts across sessions (with the memory plugin - see [memory.md](memory.md)).
 
 **Basic features:**
 - Model selector in the sidebar switches between registered models. Switching unloads the old one and loads the new one.
@@ -37,8 +37,8 @@ Ask questions and have conversations with the model. The model can access docume
 **Commands:** Type `/` to open the command menu.
 - `/web <query>` - search the web and answer with cited sources (requires the web plugin; see network.md).
 - `/generate-image <prompt>` - generate an image inline (image plugin required).
-- `/remember <fact>` - save a fact to `chat-memory.md` in the data directory so the model knows it across every chat.
-- `/memory` - view or edit the full memory file.
+- `/remember <fact>` - save a fact to your long-term memory so the model recalls it in later chats (requires the memory plugin).
+- `/memory` - view or edit remembered facts in the memory manager.
 - `/persona <name>` - apply a saved persona (system prompt + sampling values).
 - `/clear` - clear this chat.
 - `/compact` - compact old turns to free context.
@@ -58,7 +58,7 @@ Ask questions and have conversations with the model. The model can access docume
 - **Output:** The speaker button reads the reply aloud. By default this uses the browser's built-in `speechSynthesis` voices (no setup). Install and enable the tts plugin to upgrade to neural Kokoro voices synthesised entirely in the browser (the ~86 MB model is cached client-side, so no text leaves the machine).
 
 **Memory and personas:**
-- `/remember <fact>` adds a line to `chat-memory.md` in the data directory; the 🧠 drawer toggle injects it into the system prompt so the model knows it across every session. In privacy mode, writes are blocked (no traces) but the model still injects previously saved facts.
+- `/remember <fact>` saves a durable fact to your memory store (via the memory plugin); the 🧠 drawer toggle recalls the relevant facts into the system prompt each turn, and memory also grows on its own as you chat. Memory needs `log` or `full` mode: in privacy mode (the default) nothing is written and, unless you opt into read-only privacy recall, nothing is recalled. A "used N memories" chip on the reply shows what was recalled. See [memory.md](memory.md).
 - Personas save the current system prompt and sampling values under a name (drawer → save), then apply them with `/persona <name>` or pick from the drawer select. Stored in `prompts.json` in the data directory.
 
 **Usage and context:** The line under the composer shows total tokens, time to first token, and tokens per second for the last reply. The sidebar also shows model name, current session mode, and whether memory is enabled.

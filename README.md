@@ -46,7 +46,7 @@ localm serve mymodel                        # OpenAI-compatible API server
 
 - **Bring your own data (rag, voice, and tts plugins).** Attach files or index whole folders and chat against them with citations (Knowledge), dictate with local Whisper speech-to-text, or have replies read back to you with in-browser Kokoro text-to-speech.
 
-- **Remembers you across chats (memory plugin).** Opt in and localm keeps durable facts about you - your preferences, projects, and ongoing context - and recalls them in later chats, so you do not repeat yourself every session.
+- **Remembers you across chats (memory plugin).** Opt in and localm keeps durable facts about you - your preferences, projects, and ongoing context - and recalls them in later chats, so you do not repeat yourself every session ([guide](docs/memory.md)).
 
 - **Schedule it (jobs plugin).** Run a chat or coder prompt on an interval or a cron schedule from an in-app scheduler, the terminal, or a REST API ([guide](docs/jobs.md)).
 
@@ -323,6 +323,7 @@ See [docs/llamacpp-binding.md](docs/llamacpp-binding.md) for the binding interna
 | [docs/managed-comfyui.md](docs/managed-comfyui.md) | localm's own managed ComfyUI: `localm comfy setup`, coexistence, shared models |
 | [docs/video.md](docs/video.md) | Wan 2.2 video generation: model setup, timing, workflow override |
 | [docs/rag.md](docs/rag.md) | Knowledge: chat with your documents, collections, retrieval design |
+| [docs/memory.md](docs/memory.md) | Durable memory: recall across chats, consolidation, privacy, `/api/memory` |
 | [docs/network.md](docs/network.md) | Internet access for coder and chat: modes, domain rules, SSRF guard |
 | [docs/tls.md](docs/tls.md) | API keys, TLS, and reverse proxies for LAN serving |
 | [docs/naming.md](docs/naming.md) | Reaching localm by name on your LAN: the localm.local mDNS address |
