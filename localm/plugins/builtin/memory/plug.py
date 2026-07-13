@@ -238,6 +238,24 @@ def _item(rec) -> dict:
             "updated": rec.updated}
 
 
+def _correction_item(c, target) -> dict:
+    """A pending supersede proposal rendered for the memory modal: what it wants to
+    change and how stale the targeted fact is (its last-confirmed timestamp), so the
+    user can accept or reject it (memory-audit 2026-07-02 [9])."""
+    return {"id": c.id, "action": c.action, "proposed_text": c.proposed_text,
+            "target_id": c.target_id, "target_text": c.target_text,
+            "confidence": c.confidence, "created": c.created,
+            "target_updated": getattr(target, "updated", None)}
+
+
+def _corrections_payload(store) -> list:
+    """Pending corrections for GET /api/memory, each paired with its (still-present)
+    target record so the modal can show the was/now and the fact's staleness."""
+    corrs = store.corrections()                 # already filtered to live targets
+    by_id = {r.id: r for r in store.all()}
+    return [_correction_item(c, by_id.get(c.target_id)) for c in corrs]
+
+
 def _rendered_text(store) -> str:
     """The store's facts as a markdown bullet list (what the memory modal textarea
     shows). Falls back to the legacy flat file when the structured store is still
@@ -255,10 +273,16 @@ def _rendered_text(store) -> str:
 @_router.get("/api/memory")
 async def memory_get(request: Request = None):
     store = _request_store(request)
-    if _persist_enabled():
+    writable = _persist_enabled()
+    if writable:
         _migrate_legacy(store)
-    return {"text": _rendered_text(store), "writable": _persist_enabled(),
+    # Corrections are only surfaced when writes are allowed: they are useless
+    # read-only (accept/reject need a write), and store.corrections() prunes stale
+    # entries as a side effect, which must never run in privacy mode (no new
+    # traces). So privacy mode returns an empty list without touching the sidecar.
+    return {"text": _rendered_text(store), "writable": writable,
             "items": [_item(r) for r in store.all()],
+            "corrections": _corrections_payload(store) if writable else [],
             "path": str(store.path)}
 
 
@@ -348,6 +372,30 @@ async def memory_delete(mem_id: str, request: Request = None):
     store = _request_store(request)
 
     return {"status": "deleted" if store.delete(mem_id) else "absent", "id": mem_id}
+
+
+@_router.post("/api/memory/corrections/{cid}/accept")
+async def memory_correction_accept(cid: str, request: Request = None):
+    """Apply a proposed supersession of a trusted fact: replace its text (or delete
+    it), archiving the old value to the recoverable .forgotten sidecar. The user is
+    the one deciding - a synth candidate never auto-overwrites a user fact ([9])."""
+    return _apply_correction(cid, True, request)
+
+
+@_router.post("/api/memory/corrections/{cid}/reject")
+async def memory_correction_reject(cid: str, request: Request = None):
+    """Dismiss a proposed supersession: keep the fact as-is and reset its
+    last-confirmed staleness so it is not immediately re-proposed."""
+    return _apply_correction(cid, False, request)
+
+
+def _apply_correction(cid: str, accept: bool, request):
+    _require_writable()
+    store = _request_store(request)
+    out = store.resolve_correction(cid, accept, embed_fn=_embed_fn())
+    if out is None:
+        raise HTTPException(404, "No such correction")
+    return out
 
 
 @_router.post("/api/memory/consolidate")
@@ -475,7 +523,8 @@ def synthesize_memory(complete, *, principal: str | None = None, max_facts: int 
             logger.debug("memory vector backfill skipped: %s", e)
     return {"status": res.get("status", "ok"), "added": res.get("added", 0),
             "updated": res.get("updated", 0), "deleted": res.get("deleted", 0),
-            "episodic": episodic, "facts": new_facts}
+            "proposed": res.get("proposed", 0), "episodic": episodic,
+            "facts": new_facts}
 
 
 def _episodic_watermark_path(store) -> Path:

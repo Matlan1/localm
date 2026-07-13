@@ -36,9 +36,10 @@ from typing import Callable, Optional
 
 from localm.inference.textnorm import strip_think
 
+from .corrections import PendingCorrection
 from .gating import writes_allowed
 from .record import MemoryRecord
-from .store import MAX_TEXT_LEN, N_MAX, MemoryStore
+from .store import MAX_TEXT_LEN, N_MAX, TRUSTED_SOURCES, MemoryStore
 
 Complete = Callable[[str], str]
 EmbedFn = Callable[[list[str]], list[list[float]]]
@@ -54,6 +55,12 @@ NEAR_DUP_RATIO = 0.90       # candidate ~= existing -> NO_OP without an LLM call
 # NO_OP them). True updates/dups overlap well above 0.7 lexically anyway.
 MATCH_THRESHOLD = 0.7
 UPDATE_MIN_CONF = 0.7       # below this, an UPDATE is downgraded to ADD (keep both)
+# A synth candidate may never silently rewrite a TRUSTED (user/import) fact, but
+# dropping a high-confidence contradiction to a silent NO_OP left a stale user fact
+# permanently uncorrectable (memory-audit 2026-07-02 [9]). At or above this decide
+# confidence, the contradiction is surfaced as a PENDING CORRECTION for the user to
+# accept/reject instead; below it, it is ignored (a weak contradiction does not nag).
+SUPERSEDE_MIN_CONF = 0.7
 SYNTH_IMP_CAP = 0.85        # synth memories never reach user-confirmed importance
 # Semantic-match gate (F9): when the lexical ratio is below MATCH_THRESHOLD but
 # an embedder is present, a candidate whose cosine to an existing record clears
@@ -345,7 +352,8 @@ def run_consolidation(store: MemoryStore, session_text: str, complete: Complete,
     concurrent writer blocks until this consolidation finishes and then runs
     against the fresh post-consolidation state, rather than racing it and losing
     its write."""
-    counts = {"status": "ok", "added": 0, "updated": 0, "deleted": 0, "noop": 0}
+    counts = {"status": "ok", "added": 0, "updated": 0, "deleted": 0, "noop": 0,
+              "proposed": 0}
     if not writes_allowed(surface):
         return {**counts, "status": "skipped", "reason": "privacy"}
     now = time.time() if now is None else now
@@ -373,6 +381,7 @@ def _consolidate_locked(store: MemoryStore, candidates: list, complete: Complete
     working = store.all()
     processed: set = set()
     updated_ids: set = set()
+    proposals: list[PendingCorrection] = []
     for cand in candidates:
         text, conf = cand["text"], cand["confidence"]
         key = text.lower()
@@ -399,13 +408,24 @@ def _consolidate_locked(store: MemoryStore, candidates: list, complete: Complete
             decision = "NO_OP"                    # deterministic dedupe, no LLM
         else:
             decision, conf2 = _decide(complete, text, matched.text)
-            # A synth candidate may never rewrite/delete a user-typed fact.
-            if matched.source == "user" and decision in ("UPDATE", "DELETE"):
+            # A synth candidate may never SILENTLY rewrite/delete a TRUSTED
+            # (user/import) fact. But a high-confidence contradiction is no longer
+            # dropped to a silent NO_OP (which left a stale user fact permanently
+            # uncorrectable, memory-audit [9]): surface it as a PENDING CORRECTION
+            # for the user to accept/reject. The record itself stays untouched
+            # (decision NO_OP); the proposal carries the new info, so nothing is
+            # silently lost. A low-confidence contradiction is still just ignored.
+            if matched.source in TRUSTED_SOURCES and decision in ("UPDATE", "DELETE"):
+                if conf2 >= SUPERSEDE_MIN_CONF:
+                    proposals.append(PendingCorrection(
+                        target_id=matched.id, action=decision.lower(),
+                        proposed_text="" if decision == "DELETE" else text,
+                        target_text=matched.text, confidence=conf2))
                 decision = "NO_OP"
             # Unsure UPDATE -> keep both rather than risk losing a true fact.
             elif decision == "UPDATE" and conf2 < UPDATE_MIN_CONF:
                 decision = "ADD"
-            # Unsure DELETE -> keep (a user-fact DELETE is already NO_OP above).
+            # Unsure DELETE -> keep (a trusted-fact DELETE is proposed/NO_OP above).
             elif decision == "DELETE" and conf2 < UPDATE_MIN_CONF:
                 decision = "NO_OP"
 
@@ -437,6 +457,10 @@ def _consolidate_locked(store: MemoryStore, candidates: list, complete: Complete
     # invalidate call would silently restore the stale vector from disk.
     store.replace(working, embed_fn=embed_fn, invalidate_ids=updated_ids)
     store.prune(now=now)
+    # Persist any proposed supersessions of trusted facts (deduped vs pending) and
+    # surface the count so the run never silently swallows a contradiction ([9]).
+    if proposals:
+        counts["proposed"] = store.propose_corrections(proposals)
     return _with_eviction_note(counts, store)
 
 

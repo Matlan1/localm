@@ -307,16 +307,22 @@ def _run_memory(job: Job, *, engine=None) -> str:
     result = synthesize_memory(complete)
     if result.get("status") == "skipped":
         return f"memory synthesis skipped ({result.get('reason')})"
+    # A contradiction to a saved (user-typed) fact is surfaced, never silently
+    # applied or dropped: it waits as a suggested correction for the user to review
+    # in the memory panel (memory-audit 2026-07-02 [9], rule 5 - do not hide).
+    proposed = result.get("proposed", 0)
+    suffix = ("\n%d suggested correction(s) to your saved facts await review in the "
+              "memory panel" % proposed) if proposed else ""
     facts = result.get("facts") or []
     if not facts:
         if state["empty_replies"]:
             return ("memory synthesis: no facts extracted - the model produced "
                     "only reasoning output (%d reply/replies were empty after "
                     "removing the think channel; likely truncated by the "
-                    "completion limit)" % state["empty_replies"])
-        return "memory synthesis: no new durable facts found"
+                    "completion limit)" % state["empty_replies"]) + suffix
+        return "memory synthesis: no new durable facts found" + suffix
     return ("memory synthesis: added %d fact(s):\n" % result["added"]) + \
-           "\n".join(f"- {f}" for f in facts)
+           "\n".join(f"- {f}" for f in facts) + suffix
 
 
 # --------------------------------------------------------------------------- #
