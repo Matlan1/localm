@@ -538,14 +538,19 @@ def resolve_main_gpu_index(configured, *, gpus: Optional[list] = None) -> int:
     device 0), so it is surfaced as a WARNING and swapped for device 0 rather
     than trusted blindly (rule 5, do-not-hide-problems).
 
+    An index above ``_MAX_GPU_SPLIT_INDEX`` is rejected unconditionally, the
+    same sanity ceiling :func:`resolve_gpu_split` applies to its indices -
+    checked BEFORE any device-membership branching below, so it still applies
+    when detection is unmeasurable or skipped (see next paragraph).
+
     When detection itself is unmeasurable (``list_gpus()`` returns nothing -
     no torch, no nvidia-smi) OR the active native backend is ``vulkan``
     (whose real device enumeration list_gpus() cannot see at all - see
     :func:`_native_backend_has_vulkan`), the configured index cannot be
     cross-checked against a reliable, backend-matching device list either
-    way; it is passed through unchecked rather than discarding an explicit
-    user choice we have no way to disprove (the same documented boundary as
-    the Windows-registry VRAM fallback)."""
+    way; it is passed through unchecked (aside from the ceiling above) rather
+    than discarding an explicit user choice we have no way to disprove (the
+    same documented boundary as the Windows-registry VRAM fallback)."""
     if configured is None:
         return 0
     try:
@@ -556,6 +561,11 @@ def resolve_main_gpu_index(configured, *, gpus: Optional[list] = None) -> int:
         return 0
     if idx < 0:
         logger.warning("main_gpu_index=%d is negative; using device 0", idx)
+        return 0
+    if idx > _MAX_GPU_SPLIT_INDEX:
+        logger.warning(
+            "main_gpu_index=%d is above the sanity ceiling (%d); using device 0",
+            idx, _MAX_GPU_SPLIT_INDEX)
         return 0
     if idx == 0:
         return 0   # the native default anyway - no need to enumerate devices
@@ -617,6 +627,10 @@ _TENSOR_SPLIT_FALLBACK_CAPACITY = 16
 # MAX_GPU_SPLIT_INDEX applies the same value at config WRITE time; this is the
 # independent check at READ time, so a hand-edited config.json that bypasses
 # schema validation entirely is still bounded here.
+#
+# Also used by resolve_main_gpu_index below to bound a single main_gpu_index:
+# the same sanity reasoning applies to one device index as to a list of them,
+# and both values reach the identical ctypes.c_int32 main_gpu field.
 _MAX_GPU_SPLIT_INDEX = 127
 
 
