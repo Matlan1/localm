@@ -57,6 +57,90 @@ def test_html_is_in_code_exts():
     assert ".html" in ch._CODE_EXTS
 
 
+# ---- check 3: .js/.mjs/.yaml/.yml coverage (LM-DA-022) ----------------------
+# The absolute-path heuristic (check 3) was gated on _CODE_EXTS, which omitted
+# .js/.mjs/.yaml/.yml, so a hardcoded drive-letter path in the GUI's
+# hand-written JS frontend (or a workflow/config YAML file) would slip
+# through, even though the em-dash and disclosure checks already covered
+# these extensions. These tests pin that .js/.mjs/.yaml/.yml are scanned too.
+
+def test_js_absolute_path_is_detected(tmp_path, monkeypatch):
+    """NEGATIVE: a drive-letter path in a .js file must be flagged.
+
+    Pre-fix .js is not in _CODE_EXTS so _scan returns no absolute-path
+    problem and this fails; post-fix it is flagged.
+    """
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    p = tmp_path / "app.js"
+    p.write_text('const DEFAULT_DIR = "D:\\\\projects\\\\x";\n', encoding="utf-8")
+    problems = ch._scan(p)
+    assert any("absolute/machine path" in x for x in problems), problems
+
+
+def test_mjs_absolute_path_is_detected(tmp_path, monkeypatch):
+    """Same coverage for the .mjs extension (used by the frontend test/tooling
+    scripts and playwright.config.mjs)."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    p = tmp_path / "config.mjs"
+    p.write_text('export const dir = "/home/someone/models";\n', encoding="utf-8")
+    problems = ch._scan(p)
+    assert any("absolute/machine path" in x for x in problems), problems
+
+
+def test_yaml_absolute_path_is_detected(tmp_path, monkeypatch):
+    """Same coverage for .yaml/.yml (CI workflows, dependabot config, etc.)."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    p = tmp_path / "workflow.yml"
+    p.write_text('path: "C:\\\\Users\\\\someone\\\\build"\n', encoding="utf-8")
+    problems = ch._scan(p)
+    assert any("absolute/machine path" in x for x in problems), problems
+
+
+def test_js_neutral_placeholder_is_clean(tmp_path, monkeypatch):
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    p = tmp_path / "app.js"
+    p.write_text('const label = "path to your project";\n', encoding="utf-8")
+    assert not [x for x in ch._scan(p) if "absolute/machine path" in x]
+
+
+def test_js_and_yaml_are_in_code_exts():
+    ch = _load_check_hygiene()
+    for ext in (".js", ".mjs", ".yaml", ".yml"):
+        assert ext in ch._CODE_EXTS
+
+
+def test_frontend_test_suite_fixtures_stay_exempt(tmp_path, monkeypatch):
+    """The Python is_test heuristic (tests/, test_*.py) doesn't match the
+    frontend suites' own conventions (tests-js/*.test.mjs, tests-e2e/*.spec.mjs),
+    which legitimately use synthetic absolute paths as mock fixtures - these
+    must stay exempt now that .mjs is in scope, the same way tests/test_*.py
+    already is."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    for rel in ("tests-js/upload.test.mjs", "tests-e2e/boot-and-click.spec.mjs"):
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text('const dir = "/home/uploads";\n', encoding="utf-8")
+        problems = ch._scan(p)
+        assert not [x for x in problems if "absolute/machine path" in x], (rel, problems)
+
+
+def test_shipped_frontend_js_has_no_machine_paths():
+    """Regression guard: the real GUI/CLI JS files must stay free of drive-letter
+    or /home//Users absolute paths now that .js/.mjs are in scope."""
+    ch = _load_check_hygiene()
+    tracked = ch._tracked_files()
+    problems = []
+    for f in tracked:
+        if f.suffix.lower() in (".js", ".mjs"):
+            problems.extend(x for x in ch._scan(f) if "absolute/machine path" in x)
+    assert not problems, problems
+
+
 # ---- check 2: secret disclosure --------------------------------------------
 # The synthetic tokens below are assembled from fragments at runtime so this
 # test file does not itself contain a literal secret that the hygiene check
