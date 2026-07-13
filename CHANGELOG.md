@@ -94,6 +94,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   number), localm now says it is ignoring it and using defaults, instead of quietly
   dropping your settings with no explanation. The file is left untouched so you can
   recover it.
+- **Model loading no longer fails under the LocaLM.exe launcher (Windows).**
+  Loading any GGUF model after launching via the branded LocaLM.exe (the desktop
+  shortcut / launcher's default) failed with a misleading "Native llama runtime
+  failed to load: [WinError 2] The system cannot find the file specified" - even
+  with the runtime fully provisioned. Python's own multiprocessing redirects a
+  spawned worker (the isolated process every model load and the voice/STT engine
+  run in) to the base interpreter behind a renamed launcher, and could not find it
+  under its new name. Model loads and voice transcription now spawn correctly
+  under LocaLM.exe.
 
 ### Security
 - **Disabling the private-network (SSRF) guard now requires an owner key.** The
