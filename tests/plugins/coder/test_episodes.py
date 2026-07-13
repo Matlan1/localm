@@ -284,6 +284,70 @@ def test_reflect_survives_a_model_error(home, tmp_path):
     assert store.all() == []        # best-effort: no crash, nothing stored
 
 
+def test_reflect_feeds_error_trace_to_the_model(home, tmp_path):
+    # Cluster 13: the reflection must SEE the tool/command failures, not just the
+    # diff, so it can actually fill what_failed. Capture the prompt the model gets.
+    store = EpisodeStore(tmp_path)
+    seen = {}
+
+    def capture(prompt):
+        seen["prompt"] = prompt
+        return ('{"summary": "s", "what_failed": "the pytest run failed", '
+                '"lesson": "check imports first"}')
+
+    reflect_and_store(
+        store, task="fix the failing test", diff="--- a\n+++ b", outcome="incomplete",
+        files=["t.py"], turns=4,
+        errors="run_tests: ModuleNotFoundError: no module named foo\n"
+               "run_shell: git apply failed: patch does not apply",
+        complete=capture, ts=1.0)
+    p = seen["prompt"]
+    assert "TOOL FAILURES AND ERRORS" in p
+    assert "ModuleNotFoundError" in p and "git apply failed" in p
+    stored = store.all()
+    assert stored and stored[0].what_failed == "the pytest run failed"
+
+
+def test_reflect_stores_thin_failure_episode_when_model_unusable(home, tmp_path):
+    # Cluster 11: a failed session whose model produces nothing usable must still
+    # record the failure lesson from the raw error evidence - deterministically.
+    store = EpisodeStore(tmp_path)
+    reflect_and_store(
+        store, task="add the migration", diff="", outcome="incomplete",
+        files=[], turns=6,
+        errors="run_shell: alembic: command not found\n"
+               "run_shell: alembic: command not found",   # deduped in the summary
+        complete=lambda p: "hmm, I am not sure", ts=1.0)
+    stored = store.all()
+    assert len(stored) == 1
+    ep = stored[0]
+    assert ep.summary == "session did not complete"
+    assert "alembic: command not found" in ep.what_failed
+    # deduped: the repeated identical line collapses to one
+    assert ep.what_failed.count("alembic: command not found") == 1
+
+
+def test_reflect_thin_failure_label_when_completed_with_errors(home, tmp_path):
+    store = EpisodeStore(tmp_path)
+    reflect_and_store(
+        store, task="t", diff="", outcome="ok", files=[], turns=2,
+        errors="read_file: no such file: missing.py",
+        complete=lambda p: "no idea", ts=1.0)
+    stored = store.all()
+    assert len(stored) == 1
+    assert stored[0].summary == "session completed with errors"
+    assert "missing.py" in stored[0].what_failed
+
+
+def test_reflect_no_thin_episode_without_error_evidence(home, tmp_path):
+    # Unusable model reply AND no error trace -> still nothing stored (unchanged):
+    # a blank record would only dilute retrieval.
+    store = EpisodeStore(tmp_path)
+    reflect_and_store(store, task="t", diff="", outcome="incomplete", files=[],
+                      turns=0, errors="", complete=lambda p: "no idea", ts=1.0)
+    assert store.all() == []
+
+
 # --------------------------------------------------------------------------- #
 #  Rendering                                                                  #
 # --------------------------------------------------------------------------- #

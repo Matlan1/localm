@@ -322,19 +322,44 @@ _REFLECT_HEADER = (
 
 
 def _build_reflect_prompt(task: str, outcome: str, files: list, diff: str,
-                          max_diff_chars: int) -> str:
+                          max_diff_chars: int, errors: str = "",
+                          max_error_chars: int = 2000) -> str:
     # neutralise() defangs frame markers / chat-template control tokens so the
     # work log cannot forge a role boundary for the reflection model.
     task_s = neutralise((task or "").strip()[:1000])
     files_s = ", ".join(files) if files else "(none)"
     diff_s = neutralise((diff or "").strip()[:max_diff_chars]) or "(no diff captured)"
-    return (
+    prompt = (
         _REFLECT_HEADER
         + "TASK:\n" + task_s
         + "\n\nOUTCOME: " + outcome
         + "\nCHANGED FILES: " + files_s
         + "\n\nWORK LOG (unified diff of the changes):\n" + diff_s
     )
+    # The tool/command failures the session actually hit: real evidence for
+    # what_failed, so the lesson is more than a restatement of the diff (audit
+    # cluster 13). Capped + neutralised exactly like the diff.
+    err_s = neutralise((errors or "").strip()[:max_error_chars])
+    if err_s:
+        prompt += (
+            "\n\nTOOL FAILURES AND ERRORS (commands and tools that failed during "
+            "the session - use these to fill what_failed):\n" + err_s
+        )
+    return prompt
+
+
+def _summarise_errors(errors: str, limit: int = 400) -> str:
+    """Collapse the session's error trace into one deduped line for a thin failure
+    episode: the raw evidence stored deterministically when the model produced no
+    usable reflection (so a failure lesson is not lost to a weak model)."""
+    seen: set = set()
+    uniq: list = []
+    for ln in (errors or "").splitlines():
+        ln = " ".join(ln.split())
+        if ln and ln not in seen:
+            seen.add(ln)
+            uniq.append(ln)
+    return "; ".join(uniq)[:limit]
 
 
 def _extract_json(raw: str) -> dict:
@@ -373,18 +398,25 @@ def reflect_and_store(
     files: list,
     turns: int,
     complete: Callable[[str], str],
+    errors: str = "",
     ts: Optional[float] = None,
     max_diff_chars: int = 6000,
+    max_error_chars: int = 2000,
 ) -> Episode:
     """Ask the model to reflect on a finished session, then store one episode.
 
     Caller gates this on the privacy contract (privacy mode / restricted sessions
-    must not call it). Any model or parse failure yields an EMPTY episode that is
-    NOT stored (a blank record would only dilute retrieval) - the skip is logged
-    so a silently non-learning setup is discoverable (rule 5); episodic memory
-    is best-effort and must never break a coder run.
+    must not call it). *errors* is a bounded trace of the tool/command failures the
+    session hit; it is fed to the reflection as evidence for what_failed (cluster
+    13), and, when the model produces nothing usable, is stored as a thin FAILURE
+    episode so the most valuable lessons (what went wrong) are not lost to a weak
+    model (cluster 11). A no-evidence unusable reply yields an EMPTY episode that is
+    NOT stored (a blank record would only dilute retrieval) - the skip is logged so
+    a silently non-learning setup is discoverable (rule 5); episodic memory is
+    best-effort and must never break a coder run.
     """
-    prompt = _build_reflect_prompt(task, outcome, files, diff, max_diff_chars)
+    prompt = _build_reflect_prompt(task, outcome, files, diff, max_diff_chars,
+                                   errors, max_error_chars)
     try:
         raw = complete(prompt) or ""
     except Exception:
@@ -406,13 +438,21 @@ def reflect_and_store(
         turns=int(turns or 0),
         ts=ts if ts is not None else time.time(),
     )
-    # Don't store an empty episode: if the model produced nothing usable (a failed
-    # call or unparseable reply), there is no lesson worth recalling, and writing a
-    # blank record would only dilute future retrieval. But say so: this exact
-    # silent drop hid the fact that thinking models NEVER stored an episode
-    # (memory-audit 2026-07-02), i.e. episodic memory was off without anyone
-    # knowing. A log line keeps the failure discoverable without breaking the run.
     if not (ep.summary or ep.what_worked or ep.what_failed or ep.lesson):
+        # The model produced nothing usable. If the session nonetheless hit real
+        # tool/command failures, store a THIN failure episode from that raw
+        # evidence: failure lessons are the most valuable and were systematically
+        # absent, so they must survive a model that cannot reflect (cluster 11).
+        err_summary = _summarise_errors(errors)
+        if err_summary:
+            ep.what_failed = err_summary
+            ep.summary = ("session did not complete" if outcome == "incomplete"
+                          else "session completed with errors")
+            store.add(ep)
+            return ep
+        # Otherwise there is no lesson worth recalling; a blank record would only
+        # dilute retrieval. Say so, though: this exact silent drop once hid that
+        # thinking models NEVER stored an episode (memory-audit 2026-07-02).
         from localm.debuglog import logger
         logger.warning(
             "episodic memory: reflection produced no usable lesson "

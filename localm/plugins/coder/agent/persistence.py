@@ -97,6 +97,131 @@ class _PersistenceMixin:
             entry["writes"] += 1
             entry["last_tool"] = tool
 
+    def _absorb_child_state(self, child) -> None:
+        """Fold a spawned child agent's changed-files and error trace into this
+        parent (audit cluster 11).
+
+        A child from ``spawn_agent`` shares this cwd but is never ``close()``d, so
+        without this its delegated file changes and failures would never reach an
+        episode. Merging them here lets the parent's single close-time episode
+        cover the delegated work too. Best-effort: called guarded so bookkeeping
+        never breaks the tool."""
+        from .constants import _MAX_ERROR_TRACE
+        for key, centry in getattr(child, "_changed_files", {}).items():
+            pentry = self._changed_files.get(key)
+            if pentry is None:
+                # Keep the child's first-seen original so session_diff() shows the
+                # full change; copy so later parent edits do not mutate the child.
+                self._changed_files[key] = dict(centry)
+            else:
+                pentry["writes"] = pentry.get("writes", 0) + centry.get("writes", 0)
+                if centry.get("last_tool"):
+                    pentry["last_tool"] = centry["last_tool"]
+        child_errors = getattr(child, "_error_trace", None)
+        if child_errors:
+            self._error_trace.extend(child_errors)
+            if len(self._error_trace) > _MAX_ERROR_TRACE:
+                self._error_trace = self._error_trace[-_MAX_ERROR_TRACE:]
+
+    def _git_status_map(self) -> "dict[str, str] | None":
+        """Map of dirty path -> 2-char ``git status --porcelain`` code in cwd, or
+        None when cwd is not a git work tree or git is unavailable. Best-effort
+        helper for episodic change detection - never raises. The code lets the
+        caller tell an untracked new file (``??``) from a tracked edit so the diff
+        can be built correctly."""
+        from ..tools.base import run_subprocess
+        try:
+            r = run_subprocess(["git", "status", "--porcelain"], self.cwd, timeout=10)
+        except Exception:
+            return None
+        if r.not_found or r.error is not None or r.returncode != 0:
+            return None      # not a git work tree, or git unavailable
+        out: dict[str, str] = {}
+        for line in str(r.stdout or "").splitlines():
+            if len(line) < 4:
+                continue
+            code = line[:2]
+            p = line[3:].strip()
+            if " -> " in p:                     # rename: "R  old -> new"
+                p = p.split(" -> ", 1)[1].strip()
+            p = p.strip().strip('"')
+            if p:
+                out[p] = code
+        return out
+
+    def _git_status_paths(self) -> "frozenset[str] | None":
+        """The set of dirty (changed/untracked) paths at cwd, or None when cwd is
+        not a git work tree. The pre-shell baseline for episodic change detection."""
+        m = self._git_status_map()
+        return None if m is None else frozenset(m)
+
+    def _git_delta_diff(self, paths: list, status: dict) -> str:
+        """A unified diff SCOPED to *paths* (this session's detected delta), so a
+        pre-existing dirty file OUTSIDE the delta never leaks into the work log.
+
+        Tracked edits among the delta come from ``git diff HEAD -- <paths>`` (a
+        pathspec, not the whole tree); untracked new files (``??``, which
+        ``git diff`` omits entirely) get a capped content snapshot appended so the
+        session's actual output still appears. Best-effort - '' on any failure."""
+        from ..tools.base import run_subprocess
+        parts: list[str] = []
+        tracked = [p for p in paths if status.get(p, "") != "??"]
+        if tracked:
+            for argv in (["git", "diff", "HEAD", "--", *tracked],
+                         ["git", "diff", "--", *tracked]):
+                try:
+                    r = run_subprocess(argv, self.cwd, timeout=15)
+                except Exception:
+                    r = None
+                if r is not None and r.returncode == 0 and r.error is None:
+                    if r.stdout:
+                        parts.append(str(r.stdout))
+                    break
+        for p in paths:
+            if status.get(p, "") != "??":
+                continue
+            fp = self.cwd / p
+            try:
+                if fp.is_file():
+                    text = fp.read_text(encoding="utf-8", errors="replace")[:4000]
+                    body = "".join("+" + ln + "\n" for ln in text.splitlines())
+                    parts.append(f"--- /dev/null\n+++ b/{p}\n{body}")
+            except Exception:
+                pass          # unreadable/binary new file: skip its snapshot
+        return "\n".join(p for p in parts if p)
+
+    def _detect_shell_changes(self) -> "tuple[list[dict], str]":
+        """Best-effort detection of files changed via run_shell (git apply, a
+        formatter, codegen) that the write-tool tracker never recorded.
+
+        Returns ``(changed_files_list, unified_diff)``, or ``([], "")`` when no
+        run_shell ran, cwd is not a git work tree, or nothing new changed since the
+        pre-shell baseline. BOTH the file list and the diff are scoped to THIS
+        session by subtracting the baseline captured before the first run_shell, so
+        a pre-existing dirty tree is not misattributed (audit cluster 11)."""
+        if not self._shell_baseline_captured or self._git_baseline is None:
+            return [], ""
+        current = self._git_status_map()
+        if current is None:
+            return [], ""
+        delta = sorted(set(current) - self._git_baseline)
+        if not delta:
+            return [], ""
+        # Only `path` is consumed by the reflection; keep the other fields to match
+        # the changed_files() dict shape for any future reader (created is True for
+        # an untracked new file, "??").
+        changed = [{
+            "path": p,
+            "writes": 1,
+            "created": current.get(p, "") == "??",
+            "exists": (self.cwd / p).is_file(),
+            "last_tool": "run_shell",
+        } for p in delta]
+        from localm.debuglog import logger
+        logger.debug("episodic memory: %d file(s) detected via git after a "
+                     "shell-driven session", len(delta))
+        return changed, self._git_delta_diff(delta, current)
+
     def undo_list(self) -> list[dict]:
         """The undo stack, most recent first: ``[{tool, path}, ...]``."""
         return [{"tool": e["tool"], "path": str(e["path"])}

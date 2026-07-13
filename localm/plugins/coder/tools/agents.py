@@ -106,6 +106,16 @@ def tool_spawn_agent(
     result_text = child.run_task(full_task)
     turns_used  = child.turns
 
+    # Fold the child's changed-files + failure trace into the parent so a
+    # delegation-heavy session still reflects at close (audit cluster 11): the
+    # child is never close()d and shares this cwd, so without this the parent's
+    # episode omits all delegated work and its failures. Best-effort - never let
+    # episodic bookkeeping break the tool.
+    try:
+        _parent_agent._absorb_child_state(child)
+    except Exception:
+        pass
+
     # A sub-agent may have fetched untrusted web / MCP content and quoted it
     # verbatim in its summary; that text re-enters the PARENT loop as a (trusted)
     # spawn_agent result. Defang frame markers + chat-template control tokens in
