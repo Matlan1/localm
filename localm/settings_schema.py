@@ -30,6 +30,13 @@ from typing import Optional
 # native loader is ever invoked. discover.resolve_gpu_split re-applies the same
 # ceiling at read time (defense in depth: a hand-edited config.json bypasses
 # this write-time check entirely).
+#
+# Also the ceiling for main_gpu_index: the same "no machine has this many GPU
+# devices" reasoning bounds a single device index exactly as much as a list of
+# split indices, and both values ultimately land in the same ctypes.c_int32
+# main_gpu field (llamacpp/_structs.py) before llama_load_model_from_file.
+# discover.resolve_main_gpu_index re-applies this ceiling at read time, same
+# defense-in-depth reasoning as gpu_split_indices above.
 MAX_GPU_SPLIT_INDEX = 127
 
 
@@ -138,7 +145,8 @@ CORE_FIELDS: list = [
     SettingField("main_gpu_index", Widget.HIDDEN, "Main GPU",
                  "Which GPU device to load models onto, for multi-GPU systems. "
                  "Blank uses device 0.",
-                 group="Engine", applies=Applies.NEXT_LOAD, min=0),
+                 group="Engine", applies=Applies.NEXT_LOAD, min=0,
+                 max=MAX_GPU_SPLIT_INDEX),
     # HIDDEN: rendered by a "Split across GPUs" checkbox row next to the Main
     # GPU selector (populated from GET /api/gpus), not the generic settings
     # form - same reasoning as main_gpu_index above. Still accepted by PATCH

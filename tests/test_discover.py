@@ -622,6 +622,24 @@ class TestResolveMainGpuIndex:
         monkeypatch.setattr("localm.discover.list_gpus", lambda: [])
         assert resolve_main_gpu_index(3) == 3
 
+    def test_index_above_sanity_ceiling_falls_back_to_zero_with_warning(
+            self, monkeypatch, caplog):
+        # LM-DA-017: mirrors resolve_gpu_split's ceiling check - must reject
+        # an absurd index even when gpus is unmeasurable (list_gpus() -> []),
+        # the exact path the ceiling protects (without it, an index like
+        # 500000 would reach ctypes.c_int32 main_gpu unchecked).
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: [])
+        with caplog.at_level("WARNING", logger="localm"):
+            idx = resolve_main_gpu_index(500_000)
+        assert idx == 0
+        assert any("main_gpu_index" in r.message and "ceiling" in r.message
+                   for r in caplog.records)
+
+    def test_index_at_ceiling_boundary_is_used(self):
+        gpus = [{"index": 0}, {"index": _MAX_GPU_SPLIT_INDEX}]
+        assert resolve_main_gpu_index(_MAX_GPU_SPLIT_INDEX, gpus=gpus) == \
+            _MAX_GPU_SPLIT_INDEX
+
 
 class TestApplyMainGpu:
     def test_unset_leaves_native_default_untouched(self):
