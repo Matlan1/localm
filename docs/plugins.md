@@ -237,8 +237,9 @@ Scope and limits:
 - Hooks see scrubbed content text, not model-internal control markers (the
   pipeline sits downstream of the engine's marker scrubbing).
 - This is a server-side seam. It is independent of localm's existing
-  client-side RAG / memory / web injection (assembled in the SPA before the
-  request is sent), which it does not replace.
+  client-side RAG / web injection (assembled in the SPA before the request is
+  sent), which it does not replace. The memory plugin, by contrast, injects
+  recalled facts through an `inlet` hook on this very chain (server-side).
 - In a streaming turn, `outlet` runs after all chunks have been sent, so it only
   shapes the recorded reply (audit / transcript). Use a `stream` hook to rewrite
   streamed output live.
