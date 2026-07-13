@@ -20,12 +20,32 @@ file specified``. The GGUF loader (gguf.py) reports that as a misleading "Native
 llama runtime failed to load" error that has nothing to do with the actual
 llama.cpp runtime - confirmed live via GitHub issue #617.
 
-Fix: point multiprocessing at the venv's own (never renamed) python.exe/python3
-launcher instead of trusting ``sys.executable``/``sys._base_executable`` as-is.
-That file's basename always matches a real file in the base install directory,
-so CPython's own substitution resolves correctly one hop later. Calling this when
-NOT running under a renamed launcher is a harmless no-op (it just repoints at the
-interpreter that is already running).
+FIRST FIX ATTEMPT (WRONG, do not repeat): redirect to the venv's own
+``<prefix>/Scripts/python.exe``. That resolves the FileNotFoundError (spawn
+succeeds), but breaks a SECOND, subtler thing: under a uv-managed Python,
+``<prefix>/Scripts/python.exe`` is itself a TRAMPOLINE that re-spawns the real
+base interpreter as ANOTHER, nested child process. Windows multiprocessing hands
+a spawned child its Queue/Lock semaphore handles via a DIRECT
+``DuplicateHandle`` call targeting that child's own process handle
+(``Popen.duplicate_for_child``, in ``popen_spawn_win32.py`` - see
+``synchronize.py``'s ``SemLock.__getstate__``). That handle is injected into the
+TRAMPOLINE's process, not into the base interpreter it then spawns as its own
+child - so the real worker process receives a handle that was never duplicated
+into ITS OWN table, and its first ``Queue.get()``/``Lock`` use fails with
+``OSError: [WinError 6] The handle is invalid``. Reproduced live: redirecting to
+the trampoline fails this way; redirecting to the base interpreter directly does
+not (confirmed with a real ``multiprocessing.Queue`` round trip, not just a bare
+spawn-and-exit check - the earlier verification of the first fix only checked
+that spawning succeeded, which is why this second bug was missed).
+
+FIX: redirect straight to the base interpreter (``<sys.base_prefix>/python.exe``)
+instead of the venv trampoline - a single hop, no nested re-spawn, so the
+directly-duplicated handle lands in the same process that actually uses it.
+``sys.base_prefix`` (a directory) is unaffected by the renamed-executable bug
+above - only ``sys._base_executable`` (which also assumes a basename) is wrong -
+so this sidesteps that bug too without needing to touch the broken attribute at
+all. Calling this when NOT running under a renamed launcher is a harmless no-op
+(it just repoints at the interpreter that is already running, one hop earlier).
 """
 
 from __future__ import annotations
@@ -36,13 +56,14 @@ from pathlib import Path
 
 
 def ensure_spawn_uses_venv_python() -> None:
-    """Make ``multiprocessing.get_context("spawn")`` children spawn via the venv's
-    own interpreter rather than trusting a possibly-renamed ``sys.executable`` (see
-    module docstring). Windows-only; a no-op elsewhere. Best-effort: leaves
-    multiprocessing's default untouched if the expected venv layout is not found -
-    this must never block a normal launch, branded or not."""
+    """Make ``multiprocessing.get_context("spawn")`` children spawn via the base
+    interpreter directly (never a venv trampoline, never a possibly-renamed
+    ``sys.executable``) - see module docstring. Windows-only; a no-op elsewhere.
+    Best-effort: leaves multiprocessing's default untouched if the expected
+    layout is not found - this must never block a normal launch, branded or
+    not."""
     if sys.platform != "win32":
         return
-    venv_python = Path(sys.prefix) / "Scripts" / "python.exe"
-    if venv_python.is_file():
-        multiprocessing.set_executable(str(venv_python))
+    base_python = Path(sys.base_prefix) / "python.exe"
+    if base_python.is_file():
+        multiprocessing.set_executable(str(base_python))

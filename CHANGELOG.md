@@ -97,12 +97,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Model loading no longer fails under the LocaLM.exe launcher (Windows).**
   Loading any GGUF model after launching via the branded LocaLM.exe (the desktop
   shortcut / launcher's default) failed with a misleading "Native llama runtime
-  failed to load: [WinError 2] The system cannot find the file specified" - even
-  with the runtime fully provisioned. Python's own multiprocessing redirects a
-  spawned worker (the isolated process every model load and the voice/STT engine
-  run in) to the base interpreter behind a renamed launcher, and could not find it
-  under its new name. Model loads and voice transcription now spawn correctly
-  under LocaLM.exe.
+  failed to load" error, in two different ways: first "[WinError 2] The system
+  cannot find the file specified" (Python's own multiprocessing redirects a
+  spawned worker to the base interpreter behind a renamed launcher, and could not
+  find it under its new name), and then, once that was redirected to the venv's
+  own interpreter instead, "[WinError 6] The handle is invalid" (that interpreter
+  is itself a launcher that re-spawns the real one as a further child, one hop too
+  many for Windows to hand the worker its synchronization handles correctly).
+  Model loads and voice transcription now spawn correctly under LocaLM.exe.
 - **Bug reports no longer lose the actual error.** The "Recent log (tail)"
   section used to be a blind cut of the last ~120 log lines, so a session that
   kept running afterward (even routine polling) could push the real error out
