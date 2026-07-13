@@ -90,6 +90,13 @@ _GLOBAL_ERROR_ABORT = 6
 # last-resort catch for a succeeding-but-pointless one (REC-CODER-LOOPBREAK).
 _REPEAT_RESPONSE_ABORT = 5
 
+# Max entries kept in the per-session tool/command failure trace that feeds the
+# close-time episode reflection (audit cluster 13: reflection was evidence-starved,
+# so failure lessons could not be captured). Bounded so a long spin-loop cannot grow
+# it without limit; the NEWEST failures are kept (they include the ones that tripped
+# the circuit breakers / ended the run incomplete).
+_MAX_ERROR_TRACE = 20
+
 # Code file extensions that should be verified (tests / syntax) after writes
 _CODE_EXTS: frozenset[str] = frozenset({
     ".py", ".js", ".ts", ".jsx", ".tsx", ".rs", ".go", ".java",

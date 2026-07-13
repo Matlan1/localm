@@ -150,6 +150,18 @@ class Agent(
         # last_tool: str}. The first-seen original is kept so session_diff()
         # can show the cumulative change, not just the last edit.
         self._changed_files: dict[str, dict] = {}
+        # Bounded trace of tool/command failures this session, fed into the
+        # close-time episode reflection so it can capture what_failed (audit
+        # cluster 13). Newest kept, capped at _MAX_ERROR_TRACE.
+        self._error_trace: list[str] = []
+        # git change-detection baseline for the close-time episode: the set of
+        # dirty paths captured just BEFORE the first run_shell, so run_shell writes
+        # (git apply, formatters, codegen) the write-tool tracker never records can
+        # be attributed to THIS session at close, without misattributing a
+        # pre-existing dirty tree (audit cluster 11). None until captured / when cwd
+        # is not a git work tree.
+        self._shell_baseline_captured: bool = False
+        self._git_baseline: Optional[frozenset] = None
         # Mid-task steering: messages queued (possibly from another thread)
         # while the loop runs, delivered at the next turn boundary.
         self._queued_messages: list[str] = []
@@ -372,6 +384,18 @@ class Agent(
             self.on_event({"type": event_type, **data})
         except Exception:
             pass  # a broken sink must not kill the agent loop
+
+    def _record_error(self, tool: str, output: str) -> None:
+        """Append a tool/command failure to the bounded session error trace that
+        feeds the close-time episode reflection (audit cluster 13). Each entry is
+        collapsed to one trimmed line; the newest _MAX_ERROR_TRACE are kept."""
+        from .constants import _MAX_ERROR_TRACE
+        line = " ".join((output or "").split())[:200]
+        if not line:
+            return
+        self._error_trace.append(f"{tool}: {line}")
+        if len(self._error_trace) > _MAX_ERROR_TRACE:
+            self._error_trace = self._error_trace[-_MAX_ERROR_TRACE:]
 
     def request_stop(self) -> None:
         """Ask the loop to stop at the next safe point (turn or token boundary)."""

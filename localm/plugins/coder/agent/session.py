@@ -30,6 +30,9 @@ class _SessionMixin:
         self._last_run_ok = True
         self._unverified_writes.clear()
         self._review_task = ""
+        self._error_trace.clear()
+        self._shell_baseline_captured = False
+        self._git_baseline = None
 
     def _rebuild_system_prompt(self) -> None:
         """Single source of truth for (re)building the system prompt.
@@ -121,28 +124,47 @@ class _SessionMixin:
         """Distil this finished session into one episodic-memory record.
 
         Gated on the privacy contract: skipped in privacy mode and for restricted
-        sessions, so no trace is written that the mode forbids. Only fires when the
-        session actually changed files, so a read-only or no-op session adds
-        nothing. GUI/web sessions (which have an event sink and a still-running
-        server) run the reflection in a background thread so the model call never
-        blocks the close path / event loop; CLI runs reflect synchronously because
-        the process is about to exit and a daemon thread might not finish.
+        sessions, so no trace is written that the mode forbids. Fires when the
+        session changed files (via the write-tool tracker, OR via run_shell detected
+        against a git baseline), or when it FAILED (incomplete, or repeated tool /
+        command errors) even with no file change - failure lessons are the most
+        valuable and were systematically absent before (audit cluster 11). A clean
+        read-only / no-op session still adds nothing. GUI/web sessions (event sink,
+        still-running server) run the reflection in a background thread so the model
+        call never blocks the close path / event loop; CLI runs reflect synchronously
+        because the process is about to exit and a daemon thread might not finish.
         """
         if not self._episodic or self._episode_store is None:
             return
         if self.mode == SessionMode.PRIVACY or self.restricted:
             return
         changed = self.changed_files()
+        diff_override = None
         if not changed:
+            # run_shell writes (git apply, formatters, codegen) are invisible to
+            # the write-tool tracker; recover them from git so a shell-driven
+            # session still reflects (audit cluster 11).
+            changed, git_diff = self._detect_shell_changes()
+            if changed:
+                diff_override = git_diff
+        # A failure with no file change (an investigation-only or
+        # failed-before-first-write session) still carries a lesson.
+        had_failure = (not self._last_run_ok) or len(self._error_trace) >= 2
+        if not changed and not had_failure:
             return
         if self.on_event is not None:
-            threading.Thread(target=self._reflect_into_episode,
-                             args=(changed,), daemon=True).start()
+            threading.Thread(
+                target=self._reflect_into_episode, args=(changed,),
+                kwargs={"diff_override": diff_override}, daemon=True).start()
         else:
-            self._reflect_into_episode(changed)
+            self._reflect_into_episode(changed, diff_override=diff_override)
 
-    def _reflect_into_episode(self, changed: list) -> None:
-        """Build and store one episode for this session (best-effort)."""
+    def _reflect_into_episode(self, changed: list, diff_override=None) -> None:
+        """Build and store one episode for this session (best-effort).
+
+        *diff_override* supplies the work-log diff when the changes were detected
+        outside the write-tool tracker (e.g. run_shell writes via git); None means
+        use the tracker's cumulative session_diff()."""
         print_warning = _agent.print_warning  # live: honour a patched agent.print_warning
         try:
             import time as _time
@@ -153,6 +175,10 @@ class _SessionMixin:
                 (m.get("content", "") for m in self._messages
                  if m.get("role") == "user"), "")
             outcome = "ok" if self._last_run_ok else "incomplete"
+            diff = diff_override if diff_override is not None else self.session_diff()
+            # Real evidence of what went wrong, so the reflection can actually fill
+            # what_failed instead of restating the diff (audit cluster 13).
+            errors = "\n".join(self._error_trace)
 
             def _complete(prompt: str) -> str:
                 # 1024 tokens, not 400: thinking models spend the first
@@ -166,9 +192,9 @@ class _SessionMixin:
                     max_tokens=1024) or "")
 
             reflect_and_store(
-                self._episode_store, task=task, diff=self.session_diff(),
+                self._episode_store, task=task, diff=diff,
                 outcome=outcome, files=files, turns=self.turns,
-                complete=_complete, ts=_time.time())
+                errors=errors, complete=_complete, ts=_time.time())
         except Exception as e:
             print_warning("episodic memory: reflection skipped (%s)" % e)
 
