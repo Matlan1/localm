@@ -107,7 +107,14 @@ def chat_backend(native_runtime):
 
 
 @pytest.fixture(scope="module")
-def real_embed_fn(native_runtime):
+def real_embedder(native_runtime):
+    """The real bge GGUFEmbedder instance (not just its bound ``.embed``): the
+    test monkeypatches ``localm.inference.embedder.get_embedder`` to return
+    this SAME instance, so ``plug._embed_fn()`` (the real consolidation path)
+    and the test's own ``recall()`` checks share one embedder/vector space
+    instead of ``get_embedder()`` resolving nothing in the throwaway
+    LOCALM_HOME (no config.json, no models/embeddings/ dir) and every
+    consolidation-added record silently landing with no vector."""
     from huggingface_hub import hf_hub_download
 
     from localm.inference.embedder import KNOWN_EMBEDDING_MODELS
@@ -122,8 +129,13 @@ def real_embed_fn(native_runtime):
         emb = GGUFEmbedder(path)
     except Exception as e:
         pytest.skip(f"bge embedder failed to load on this machine: {e}")
-    yield emb.embed
+    yield emb
     emb.close()
+
+
+@pytest.fixture(scope="module")
+def real_embed_fn(real_embedder):
+    return real_embedder.embed
 
 
 # --------------------------------------------------------------------------- #
@@ -219,12 +231,22 @@ def _seed_bounded_store_scenario(store, embed_fn) -> None:
 # --------------------------------------------------------------------------- #
 
 def test_longitudinal_memory_compounds_across_sessions(
-        tmp_path, monkeypatch, chat_backend, real_embed_fn):
+        tmp_path, monkeypatch, chat_backend, real_embed_fn, real_embedder):
     home = tmp_path / ".localm"
     sessions_dir = home / "sessions"
     sessions_dir.mkdir(parents=True)
     monkeypatch.setenv("LOCALM_HOME", str(home))
     monkeypatch.setenv("LOCALM_MODE", "log")       # writes allowed (not privacy)
+
+    # The throwaway LOCALM_HOME has no config.json and no models/embeddings/
+    # dir, so the real get_embedder() singleton (what plug._embed_fn() - the
+    # actual consolidation path - calls) would resolve nothing and every
+    # consolidation-added record would silently land with no vector, even
+    # though real_embed_fn itself works. Point get_embedder() at the SAME
+    # already-loaded instance real_embed_fn uses, so consolidation and recall
+    # share one real embedder/vector space.
+    monkeypatch.setattr(
+        "localm.inference.embedder.get_embedder", lambda: real_embedder)
 
     from localm.plugins.builtin.memory import plug
 
