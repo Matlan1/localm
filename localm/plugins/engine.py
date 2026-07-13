@@ -1041,6 +1041,34 @@ class PluginManager:
         return bool(spec and spec.protected) or name in _cat.protected()
 
     # ---- shared install-sequence helpers (PLUGIN-ENGINE-1/2/3) -------------
+    def _reject_scope_collision(self, spec0: PluginSpec) -> None:
+        """Refuse a third-party manifest whose scope collides with a kernel
+        capability, a first-party plugin's scope, a privileged scope, or
+        another already-installed plugin's scope (LM-DA-019). A manifest that
+        omits ``scope`` defaults to the plugin's own NAME
+        (``PluginSpec.__post_init__``), so this triggers via a plausible
+        plugin name like "rag"/"web"/"voice", not only a deliberate
+        ``scope = "chat"`` line: ``mount_router`` gates every route the
+        plugin registers on this raw string, so an unnoticed collision would
+        silently widen what every key already holding that scope can reach."""
+        from localm import scopes as S
+        scope = spec0.scope
+        # all_known_scopes() is KERNEL_SCOPES | BUILTIN_PLUGIN_SCOPES |
+        # EXTRA_SCOPES, and PRIVILEGED_SCOPES is a subset of that union, so
+        # this one check covers all three reserved categories from the audit.
+        if scope in S.all_known_scopes():
+            raise ValueError(
+                f"plugin {spec0.name!r} declares scope {scope!r}, which is a "
+                f"reserved localm scope and cannot be claimed by a "
+                f"third-party plugin")
+        self.discover()
+        collision = next((n for n, sp in self._specs.items()
+                           if n != spec0.name and sp.scope == scope), None)
+        if collision:
+            raise ValueError(
+                f"plugin {spec0.name!r} declares scope {scope!r}, which is "
+                f"already used by installed plugin {collision!r}")
+
     def _copy_third_party_source(self, source: Path, *, force: bool):
         """Validate + copy a third-party plugin source dir into the installed
         folder. ``install_external()``/``set_installed_from_dir()`` did this
@@ -1057,6 +1085,7 @@ class PluginManager:
         if name in _RESERVED_NAMES:
             raise ValueError(
                 f"plugin name {name!r} clashes with a built-in command")
+        self._reject_scope_collision(spec0)
         dest = self._installed_dir(name)
         if dest.exists():
             if not force:

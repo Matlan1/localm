@@ -116,6 +116,9 @@ def plugin_install_engine(target, force, with_deps):
             sys.exit(1)
         console.print(f"[green]Installed[/green] plugin [bold]{spec.name}[/bold] "
                       f"v{spec.version}")
+        console.print(f"[dim]Granted scope:[/dim] [bold]{spec.scope}[/bold] "
+                      f"(every route/tool it registers is gated on this "
+                      f"capability)")
         _warn_missing_requires(mgr, spec.name)
         # A third-party plugin's extras are its own (not localm's); we do not
         # auto-resolve those here. Point the user at its own instructions.
