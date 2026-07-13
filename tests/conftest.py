@@ -68,6 +68,17 @@ def _playwright_available() -> bool:
     return importlib.util.find_spec("playwright") is not None
 
 
+def _vulkan_split_configured() -> bool:
+    """True once a second real Vulkan device is set up (e.g. Mesa lavapipe
+    registered via VK_ADD_DRIVER_FILES) and its ICD manifest path is exported.
+    Mirrors _comfy_configured()'s style deliberately: the gate only checks that
+    the resource was set up, the actual "does the native ggml-vulkan backend
+    really see 2 devices and split across them" assertion is the test body's
+    job, not the gate's - see dev-notes/split-gpu-testing-research-2026-07-13.md
+    Tier 1 and tests/test_gpu_split_native_vulkan.py."""
+    return bool(os.environ.get("LOCALM_TEST_LAVAPIPE_ICD"))
+
+
 _RESOURCE_GATES = (
     ("real_gguf", _runtime_available,
      "native llama runtime not provisioned (run 'localm setup-llama')"),
@@ -75,6 +86,9 @@ _RESOURCE_GATES = (
      "set LOCALM_TEST_COMFY_URL to a running ComfyUI"),
     ("real_browser", _playwright_available,
      "Playwright not installed (pip install playwright && playwright install)"),
+    ("real_vulkan_split", _vulkan_split_configured,
+     "set LOCALM_TEST_LAVAPIPE_ICD to a second Vulkan device's ICD manifest "
+     "path (see dev-notes/split-gpu-testing-research-2026-07-13.md Tier 1)"),
 )
 
 
