@@ -573,8 +573,20 @@ async def test_switch_engine_vram_probe_does_not_block_event_loop(monkeypatch):
         switch_task = asyncio.ensure_future(
             hs.switch_engine("model-a", hs._engine_factory, preempt=False))
 
+        # This is a precondition wait (has the executor thread actually been
+        # scheduled by the OS yet), not itself the property under test - the
+        # LATER ticks_before/ticks_after assertions are what actually prove
+        # the event loop stayed responsive. Found live (not assumed): under
+        # genuine full-suite-scale parallel load (~5000 tests, many
+        # concurrent xdist worker PROCESSES all competing for real CPU
+        # cores), the OS can take longer than 2s just to give this test's
+        # OWN worker thread its first timeslice - confirmed by re-running
+        # standalone (passes 1/1) and this whole file alone under -n auto
+        # (passes 3/3); it only ever failed at full-suite scale. A generous
+        # budget here tolerates that real scheduling jitter without
+        # weakening what the test actually proves.
         probe_started = False
-        for _ in range(200):
+        for _ in range(1500):
             if probe_entered.is_set():
                 probe_started = True
                 break
