@@ -16,7 +16,6 @@ drift.
 
 from __future__ import annotations
 
-import os
 from typing import Optional
 
 import requests
@@ -27,10 +26,15 @@ def self_request(method: str, path: str, *, json: Optional[dict] = None,
     """Call this server's own API: ``method`` *path* against *base_url*, with
     the auth/TLS handling every self-call needs.
 
-    Builds an ``Authorization: Bearer`` header from ``LOCALM_API_KEY`` when one
-    is set (open mode sends none - the endpoint allows it), and resolves the
-    TLS verify argument via ``localm.tls.requests_verify`` so a loopback HTTPS
-    self-call trusts this install's own local CA.
+    Builds an ``Authorization: Bearer`` header from the ACTIVE owner key
+    (``localm.auth.get_api_key`` - the ``LOCALM_API_KEY`` env var, else the
+    persisted ``<home>/auth.key``) when one is configured; open mode sends none
+    (the endpoint allows it). Reading env-ONLY was the bug behind memory-audit
+    cluster 19: on a ``localm key generate`` / launcher-keyed server the key
+    lives in auth.key, not the env, so every self-call (RAG self-embed, the
+    chat<->media VRAM swap) got a 401 and RAG silently degraded to lexical-only.
+    Resolves the TLS verify argument via ``localm.tls.requests_verify`` so a
+    loopback HTTPS self-call trusts this install's own local CA.
 
     *base_url* is the caller's already-resolved self-URL (e.g.
     ``http://127.0.0.1:PORT/v1``) - required, since every caller already has
@@ -43,7 +47,8 @@ def self_request(method: str, path: str, *, json: Optional[dict] = None,
     if not base_url:
         raise ValueError("self_request: base_url is required")
     headers = {}
-    key = os.environ.get("LOCALM_API_KEY")
+    from localm.auth import get_api_key
+    key = get_api_key()          # env var, else the persisted <home>/auth.key
     if key:
         headers["Authorization"] = f"Bearer {key}"
     from localm import tls as _tls
