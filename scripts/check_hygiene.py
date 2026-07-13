@@ -80,7 +80,7 @@ _DISCLOSURE = [
 
 # ---- check 3: absolute paths in code/config (escapable) --------------------
 _CODE_EXTS = {".py", ".pyw", ".bat", ".cmd", ".ps1", ".sh", ".toml",
-              ".json", ".cfg", ".ini", ".html"}
+              ".json", ".cfg", ".ini", ".html", ".js", ".mjs", ".yaml", ".yml"}
 _ABS_PATH = re.compile(
     r"""(["'(]|\br['"])\s*          # opening quote / r-string
         (?:[A-Za-z]:[\\/]           # Windows drive path
@@ -123,7 +123,15 @@ def _scan(path: Path) -> list[str]:
     # Tests legitimately use synthetic absolute paths as fixtures (fake drive
     # letters, nonexistent dirs, file URLs). The dash and disclosure checks
     # still apply to them; only the absolute-path heuristic is skipped.
-    is_test = rel.startswith("tests/") or "/test_" in "/" + rel or Path(rel).name.startswith("test_")
+    # The frontend test suites don't follow the Python tests/test_*.py
+    # convention: they live under tests-js/ and tests-e2e/ and are named
+    # *.test.mjs / *.spec.mjs, so those conventions are recognized too now
+    # that .js/.mjs are in _CODE_EXTS.
+    fname = Path(rel).name
+    is_test = (rel.startswith("tests/") or rel.startswith("tests-js/")
+               or rel.startswith("tests-e2e/") or "/test_" in "/" + rel
+               or fname.startswith("test_")
+               or fname.endswith((".test.js", ".test.mjs", ".spec.js", ".spec.mjs")))
     is_code = path.suffix.lower() in _CODE_EXTS and not is_test
     problems = []
     for i, line in enumerate(text.splitlines(), 1):
