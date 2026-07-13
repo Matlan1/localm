@@ -490,6 +490,41 @@ def _list_gpus_probe() -> list:
     return []
 
 
+def _native_backend_has_vulkan() -> bool:
+    """True when the currently-resolved native runtime directory ships the
+    Vulkan ggml backend (a ``ggml-vulkan.*`` file) - i.e. the active install
+    is the ``vulkan`` build.
+
+    Exists because ``list_gpus()`` (above) enumerates ONLY via torch.cuda
+    (CUDA, or HIP under a ROCm-build torch) or nvidia-smi - it never calls the
+    Vulkan loader, so it is structurally blind to any device only visible
+    through Vulkan. On the vulkan build, the REAL device selection at load
+    time happens entirely inside ggml-vulkan/llama.dll's own enumeration, a
+    different index space list_gpus() cannot see or validate against (see
+    GPU-SPLIT-VKINDEX: confirmed live to silently drop a valid configured
+    split device and a valid configured main_gpu_index alike, because
+    list_gpus() reported a non-empty but VULKAN-INCOMPLETE device list rather
+    than an empty one - the two callers below already handle "empty" as
+    "unmeasurable, pass through unchecked"; this handles "non-empty but for
+    the wrong backend" the same way).
+
+    Checks the actual shipped DLL/SO set, NOT the ``.localm-backend``
+    provisioning marker (setup_llama.py): the marker can be absent (a
+    ``--from`` build, an install predating the marker) or generic (e.g.
+    ``"custom"`` for a ``--url``/``--sha256`` provision) - the real file set
+    is always authoritative for which backend will actually be loaded."""
+    try:
+        from localm.inference.backends.llamacpp._loader import (
+            runtime_binary_dir, _ggml_glob,
+        )
+        d = runtime_binary_dir()
+        if d is None:
+            return False
+        return any("vulkan" in p.name.lower() for p in d.glob(_ggml_glob()))
+    except Exception:
+        return False
+
+
 def resolve_main_gpu_index(configured, *, gpus: Optional[list] = None) -> int:
     """The GPU device index to actually use, given the user's ``main_gpu_index``
     config value.
@@ -504,10 +539,13 @@ def resolve_main_gpu_index(configured, *, gpus: Optional[list] = None) -> int:
     than trusted blindly (rule 5, do-not-hide-problems).
 
     When detection itself is unmeasurable (``list_gpus()`` returns nothing -
-    no torch, no nvidia-smi), the configured index cannot be cross-checked
-    either way; it is passed through unchecked rather than discarding an
-    explicit user choice we have no way to disprove (the same documented
-    boundary as the Windows-registry VRAM fallback)."""
+    no torch, no nvidia-smi) OR the active native backend is ``vulkan``
+    (whose real device enumeration list_gpus() cannot see at all - see
+    :func:`_native_backend_has_vulkan`), the configured index cannot be
+    cross-checked against a reliable, backend-matching device list either
+    way; it is passed through unchecked rather than discarding an explicit
+    user choice we have no way to disprove (the same documented boundary as
+    the Windows-registry VRAM fallback)."""
     if configured is None:
         return 0
     try:
@@ -526,8 +564,12 @@ def resolve_main_gpu_index(configured, *, gpus: Optional[list] = None) -> int:
     # Check membership by the "index" field, NOT list position: a device that
     # fails to report (list_gpus() skips it rather than hide the rest) leaves a
     # gap, so "idx < len(gpus)" alone could wrongly wave through an idx that
-    # does not actually correspond to any detected device.
-    if gpus and not any(g.get("index") == idx for g in gpus):
+    # does not actually correspond to any detected device. Skipped entirely
+    # when the active backend is vulkan (GPU-SPLIT-VKINDEX): list_gpus() is
+    # blind to Vulkan-only devices, so a non-empty result here does not mean
+    # it is authoritative for THIS backend's index space.
+    if gpus and not _native_backend_has_vulkan() and not any(
+            g.get("index") == idx for g in gpus):
         logger.warning(
             "main_gpu_index=%d does not match any of the %d GPU(s) detected "
             "right now; falling back to device 0", idx, len(gpus))
@@ -592,7 +634,13 @@ def resolve_gpu_split(configured_indices, configured_ratios=None, *,
     mis-targeting VRAM or crashing a load. Duplicate indices keep their first
     occurrence. Fewer than 2 valid indices after validation means "no split"
     (returns ``[]``) - the single-GPU path driven by ``apply_main_gpu`` is
-    unaffected.
+    unaffected. This validation is SKIPPED (indices pass through unchecked)
+    when the active native backend is ``vulkan`` - see
+    :func:`_native_backend_has_vulkan` and GPU-SPLIT-VKINDEX: ``list_gpus()``
+    cannot see Vulkan-only devices, so on that backend a non-empty result here
+    is not authoritative and previously caused a live, confirmed bug (a
+    configured split silently collapsed to single-device, with the user's
+    ``gpu_split_ratios`` replaced by llama.cpp's own unrelated auto-split).
 
     ``configured_ratios``, when given, must be the SAME LENGTH as
     ``configured_indices`` (before validation) to be honoured - a length
@@ -632,7 +680,7 @@ def resolve_gpu_split(configured_indices, configured_ratios=None, *,
 
     if gpus is None:
         gpus = list_gpus()
-    if gpus:
+    if gpus and not _native_backend_has_vulkan():
         known = {g.get("index") for g in gpus}
         valid = [i for i in deduped if i in known]
         dropped = [i for i in deduped if i not in known]
@@ -642,7 +690,10 @@ def resolve_gpu_split(configured_indices, configured_ratios=None, *,
                 "detected (%s); dropping them from the split",
                 len(dropped), dropped)
     else:
-        # Detection unmeasurable (no torch, no nvidia-smi): same documented
+        # Detection unmeasurable (no torch, no nvidia-smi) OR the active
+        # native backend is vulkan (GPU-SPLIT-VKINDEX - list_gpus() cannot see
+        # Vulkan-only devices, so a non-empty result here would not be
+        # authoritative for this backend's index space): same documented
         # boundary as resolve_main_gpu_index - cannot cross-check either way,
         # so the configured indices pass through rather than discarding an
         # explicit user choice we have no way to disprove.
