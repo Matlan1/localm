@@ -1204,9 +1204,18 @@ export async function renderManagedComfyPanel(host, toggleFields) {
     });
     const ok = !!(end && end.status === "done");
     toast(ok ? "localm's ComfyUI is ready" : "Setup did not finish (see the log)", !ok);
-    // Re-read status: installed on success (swaps to the coexistence-fields +
-    // Remove view), or back to the Set-up button so the user can retry.
-    renderManagedComfyPanel(host, toggleFields);
+    if (ok) {
+      // Re-read status: swaps to the coexistence-fields + Remove view.
+      renderManagedComfyPanel(host, toggleFields);
+    } else {
+      // Do NOT re-render on failure: renderManagedComfyPanel starts with
+      // host.replaceChildren(), which would destroy the log this toast just
+      // told the user to check, the instant it appears - the log window
+      // "vanishes when it errors" with no way to read the real reason.
+      // Leave it visible; re-enable the button so a retry is one click away
+      // (its own onclick clears the log itself, before starting fresh).
+      reset();
+    }
   };
 }
 
