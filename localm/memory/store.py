@@ -362,12 +362,16 @@ class MemoryStore:
         """Embed *text*, honouring the single-dimensionality invariant. A vector
         of a different dim than the store's (a switched embedding model) is
         dropped, not stored, so cosine never mixes dims (best-effort, never
-        raises - memory writes must not crash on an embedder hiccup)."""
+        raises - memory writes must not crash on an embedder hiccup, but a
+        real failure is still surfaced at debug level, not swallowed silently -
+        rule 5; mirrors get_embedder()'s own load-failure logging)."""
         if embed_fn is None:
             return None
         try:
             vec = embed_fn([text])[0]
-        except Exception:
+        except Exception as e:
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("memory embed_one failed for %r: %s", text[:80], e)
             return None
         if not vec:
             return None
@@ -469,7 +473,9 @@ class MemoryStore:
             return -1, 0.0
         try:
             qvec = embed_fn([text])[0]
-        except Exception:
+        except Exception as e:
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("memory semantic_nearest query embed failed: %s", e)
             return -1, 0.0
         if not qvec:
             return -1, 0.0
