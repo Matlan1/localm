@@ -127,6 +127,12 @@ DEFAULT_CONFIG: dict = {
     # being refused. An explicit n_gpu_layers (any value other than 99, e.g.
     # `-g 24`) is always honoured verbatim. Off => request full offload as-is.
     "n_gpu_layers_auto": True,
+    # Ceiling (seconds) for a GGUF model load in its isolated worker process
+    # (see llamacpp/_runner.py) before it is treated as hung and killed. A
+    # stalled load has no safe "unmeasurable" fallback (unlike a VRAM probe),
+    # so raise this only if a genuinely huge model on slow storage needs
+    # longer than the generous default.
+    "gguf_load_timeout_s": 900.0,
     # GPU device to load onto / read VRAM from on a multi-GPU box. None = no
     # explicit selection (device 0). A stale index falls back to device 0 with
     # a logged warning, not a wrong/out-of-range GPU (see

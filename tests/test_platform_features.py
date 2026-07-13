@@ -37,9 +37,13 @@ class TestReadEnv:
 
 class TestGgufEmbedUnsupported:
     def test_clear_not_implemented_when_binding_lacks_embeddings(self):
+        # The real model now lives in an isolated worker process (see
+        # llamacpp/_runner.py), not as a self._llm attribute here - embed()
+        # always raises regardless (the ctypes binding never implements
+        # create_embedding), gated only on "loaded", not on _llm.
         from localm.inference.backends.gguf import GgufBackend
         backend = GgufBackend.__new__(GgufBackend)
-        backend._llm = object()   # no create_embedding attribute
+        backend._loaded = True
         try:
             backend.embed(["text"])
             assert False, "expected NotImplementedError"
