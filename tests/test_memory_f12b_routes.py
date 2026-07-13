@@ -86,7 +86,8 @@ def test_privacy_mode_get_hides_corrections(tmp_path, monkeypatch):
     assert data["corrections"] == []                   # not surfaced, sidecar untouched
 
 
-def test_privacy_mode_blocks_resolution(tmp_path, monkeypatch):
+@pytest.mark.parametrize("route", ["memory_correction_accept", "memory_correction_reject"])
+def test_privacy_mode_blocks_resolution(tmp_path, monkeypatch, route):
     monkeypatch.setattr(plug, "_home", lambda: tmp_path)
     monkeypatch.setattr(plug, "_persist_enabled", lambda: True)
     monkeypatch.setenv("LOCALM_MODE", "log")
@@ -94,10 +95,23 @@ def test_privacy_mode_blocks_resolution(tmp_path, monkeypatch):
     cid = s.corrections()[0].id
     monkeypatch.setattr(plug, "_persist_enabled", lambda: False)   # flip to privacy
     with pytest.raises(HTTPException) as ei:
-        asyncio.run(plug.memory_correction_accept(cid, None))
+        asyncio.run(getattr(plug, route)(cid, None))
     assert ei.value.status_code == 403
     monkeypatch.setattr(plug, "_persist_enabled", lambda: True)
     assert len(_store(tmp_path).corrections()) == 1                # untouched
+
+
+def test_archive_failure_surfaces_as_500(tmp_path, monkeypatch):
+    monkeypatch.setattr(plug, "_home", lambda: tmp_path)
+    monkeypatch.setattr(plug, "_persist_enabled", lambda: True)
+    monkeypatch.setenv("LOCALM_MODE", "log")
+    s, _target = _seed(tmp_path)
+    cid = s.corrections()[0].id
+    monkeypatch.setattr(MemoryStore, "_archive_forgotten", lambda self, recs: False)
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(plug.memory_correction_accept(cid, None))
+    assert ei.value.status_code == 500
+    assert len(_store(tmp_path).corrections()) == 1                # not applied
 
 
 if __name__ == "__main__":

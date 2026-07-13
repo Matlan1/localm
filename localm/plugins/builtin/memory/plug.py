@@ -384,8 +384,9 @@ async def memory_correction_accept(cid: str, request: Request = None):
 
 @_router.post("/api/memory/corrections/{cid}/reject")
 async def memory_correction_reject(cid: str, request: Request = None):
-    """Dismiss a proposed supersession: keep the fact as-is and reset its
-    last-confirmed staleness so it is not immediately re-proposed."""
+    """Dismiss a proposed supersession: keep the fact as-is, reset its
+    last-confirmed staleness, and remember the dismissal so consolidation does not
+    re-propose the same change on the next pass."""
     return _apply_correction(cid, False, request)
 
 
@@ -395,6 +396,13 @@ def _apply_correction(cid: str, accept: bool, request):
     out = store.resolve_correction(cid, accept, embed_fn=_embed_fn())
     if out is None:
         raise HTTPException(404, "No such correction")
+    if out.get("status") == "archive_failed":
+        # The old value could not be archived; resolve_correction left the record
+        # and the correction intact rather than destroy an un-recoverable fact.
+        # Surface it as an error (rule 5: never report a failed safety step as done).
+        raise HTTPException(
+            500, "Could not archive the old value, so the correction was not "
+            "applied (your saved fact is unchanged). Please try again.")
     return out
 
 
@@ -523,8 +531,12 @@ def synthesize_memory(complete, *, principal: str | None = None, max_facts: int 
             logger.debug("memory vector backfill skipped: %s", e)
     return {"status": res.get("status", "ok"), "added": res.get("added", 0),
             "updated": res.get("updated", 0), "deleted": res.get("deleted", 0),
-            "proposed": res.get("proposed", 0), "episodic": episodic,
-            "facts": new_facts}
+            "proposed": res.get("proposed", 0),
+            # TOTAL pending corrections awaiting review (not just this run's new
+            # ones): a job whose new proposals dedup to zero must still tell the
+            # user that earlier suggestions are outstanding (rule 5).
+            "pending": len(store.corrections()),
+            "episodic": episodic, "facts": new_facts}
 
 
 def _episodic_watermark_path(store) -> Path:

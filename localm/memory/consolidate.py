@@ -457,10 +457,17 @@ def _consolidate_locked(store: MemoryStore, candidates: list, complete: Complete
     # invalidate call would silently restore the stale vector from disk.
     store.replace(working, embed_fn=embed_fn, invalidate_ids=updated_ids)
     store.prune(now=now)
-    # Persist any proposed supersessions of trusted facts (deduped vs pending) and
-    # surface the count so the run never silently swallows a contradiction ([9]).
+    # Persist proposed supersessions of trusted facts (deduped vs pending + already
+    # rejected) and surface the count so a contradiction is never silently swallowed
+    # ([9]). Persist AFTER prune and only for targets that SURVIVED it: prune's size
+    # cap can evict an old low-value trusted record, and a proposal against an
+    # evicted target would report a false `proposed` count and then be silently
+    # dropped by corrections(). A target lost to the cap is already surfaced via
+    # prune's user-eviction warning (_with_eviction_note).
     if proposals:
-        counts["proposed"] = store.propose_corrections(proposals)
+        live_ids = {r.id for r in store.all()}
+        survivors = [p for p in proposals if p.target_id in live_ids]
+        counts["proposed"] = store.propose_corrections(survivors)
     return _with_eviction_note(counts, store)
 
 

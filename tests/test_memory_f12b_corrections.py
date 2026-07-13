@@ -233,5 +233,97 @@ def test_resolve_unknown_id_returns_none(tmp_path, allow_writes):
     assert len(s.corrections()) == 1                   # untouched
 
 
+def test_resolve_target_gone_clears_stale_entry(tmp_path, allow_writes):
+    # Accepting a correction whose target was deleted/evicted after it was proposed
+    # must not raise; it drops the stale pending entry and archives nothing.
+    s, target = _seed_pending(tmp_path)
+    cid = s.corrections()[0].id
+    s.delete(target.id)                                # target vanishes
+    out = s.resolve_correction(cid, accept=True)
+    assert out["status"] == "target_gone"
+    fresh = MemoryStore("owner", "chat", root=tmp_path)
+    assert fresh.corrections() == []                   # stale entry cleared
+    assert _forgotten_texts(fresh) == []               # nothing archived
+
+
+def test_accept_aborts_and_reports_when_archive_fails(tmp_path, allow_writes,
+                                                      monkeypatch):
+    # If the recoverable-archive step fails, accept must NOT destroy the trusted
+    # record and must NOT report success (rule 5): the record and the pending
+    # correction stay intact so the user can retry.
+    s, _target = _seed_pending(tmp_path)
+    cid = s.corrections()[0].id
+    monkeypatch.setattr(MemoryStore, "_archive_forgotten",
+                        lambda self, recs: False)      # simulate an archive failure
+    out = s.resolve_correction(cid, accept=True)
+    assert out["status"] == "archive_failed"
+    fresh = MemoryStore("owner", "chat", root=tmp_path)
+    assert [r.text for r in fresh.all()] == ["User lives in Berlin"]   # intact
+    assert len(fresh.corrections()) == 1                               # still pending
+
+
+def test_rejected_correction_is_not_reproposed(tmp_path, allow_writes):
+    # A dismissed suggestion must NOT come back every consolidation while the same
+    # contradicting session is still in the recent window (the reject route used to
+    # only clear the pending entry, so the next pass re-created it and nagged).
+    s = MemoryStore("owner", "chat", root=tmp_path)
+    s.add(MemoryRecord(text="User lives in Berlin", source="user"),
+          embed_fn=_fake_embed)
+    res1 = run_consolidation(s, "User: I moved to Munich", _update_completer(0.9),
+                             embed_fn=_fake_embed)
+    assert res1["proposed"] == 1
+    cid = s.corrections()[0].id
+    s.resolve_correction(cid, accept=False)            # user clicks "Keep as is"
+    assert s.corrections() == []
+
+    # Re-run consolidation over the identical content: it must NOT resurrect it.
+    res2 = run_consolidation(s, "User: I moved to Munich", _update_completer(0.9),
+                             embed_fn=_fake_embed)
+    assert res2["proposed"] == 0, "a dismissed correction was re-proposed"
+    assert s.corrections() == []
+    assert [r.text for r in s.all()] == ["User lives in Berlin"]
+
+
+def test_proposal_for_size_cap_evicted_target_is_not_falsely_counted(tmp_path,
+                                                                     allow_writes):
+    # prune's SIZE cap can evict an old low-value trusted record; a proposal against
+    # a target the same run then evicts must not report a false `proposed` count and
+    # then be silently dropped by corrections() (memory-audit [9] is about never
+    # losing a contradiction silently). The eviction itself is surfaced separately.
+    from localm.memory import store as store_mod
+    from localm.memory.store import N_MAX
+
+    s = MemoryStore("owner", "chat", root=tmp_path)
+    # An OLD, weak trusted fact - the one the contradiction targets, and the one the
+    # size cap will drop first (lowest decayed score).
+    old = 1_000_000.0
+    s.add(MemoryRecord(text="User lives in Berlin", source="user", importance=0.3,
+                       created=old, last_used=old), embed_fn=_fake_embed)
+    # Fill to the cap with fresh synth facts so the store is over-cap after this run
+    # and Berlin is the weakest (evicted).
+    now = 2_000_000.0
+    for i in range(N_MAX):
+        s.add(MemoryRecord(text=f"User fact number {i} about topic {i}",
+                           source="synth", importance=0.9, created=now,
+                           last_used=now), embed_fn=_fake_embed, save=False)
+    s._save()
+
+    def complete(prompt: str) -> str:
+        if "durable" in prompt:
+            return json.dumps({"facts": [
+                {"fact": "User moved to Munich", "confidence": 0.9}]})
+        return json.dumps({"decision": "UPDATE", "confidence": 0.9})
+
+    res = run_consolidation(s, "User: I moved to Munich", complete,
+                            embed_fn=_fake_embed, now=now)
+    texts = [r.text for r in s.all()]
+    # Berlin was evicted by the size cap (surfaced), so the proposal against it is
+    # NOT persisted and NOT counted - no false success, no stale sidecar entry.
+    assert "User lives in Berlin" not in texts
+    assert res["proposed"] == 0, "proposal counted against an evicted target"
+    assert s.corrections() == []
+    assert res.get("evicted_user", 0) >= 1             # the eviction IS surfaced
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

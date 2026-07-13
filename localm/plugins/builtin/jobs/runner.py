@@ -309,10 +309,12 @@ def _run_memory(job: Job, *, engine=None) -> str:
         return f"memory synthesis skipped ({result.get('reason')})"
     # A contradiction to a saved (user-typed) fact is surfaced, never silently
     # applied or dropped: it waits as a suggested correction for the user to review
-    # in the memory panel (memory-audit 2026-07-02 [9], rule 5 - do not hide).
-    proposed = result.get("proposed", 0)
+    # in the memory panel (memory-audit 2026-07-02 [9], rule 5 - do not hide). Report
+    # the TOTAL pending (not just this run's new ones): a run whose proposals dedup
+    # to zero must still flag that earlier suggestions are outstanding.
+    pending = result.get("pending", result.get("proposed", 0))
     suffix = ("\n%d suggested correction(s) to your saved facts await review in the "
-              "memory panel" % proposed) if proposed else ""
+              "memory panel" % pending) if pending else ""
     facts = result.get("facts") or []
     if not facts:
         if state["empty_replies"]:
