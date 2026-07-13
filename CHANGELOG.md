@@ -105,20 +105,6 @@ permanent public record of what shipped and are never rewritten; the in-progress
   is itself a launcher that re-spawns the real one as a further child, one hop too
   many for Windows to hand the worker its synchronization handles correctly).
   Model loads and voice transcription now spawn correctly under LocaLM.exe.
-- **Rebuilding the LocaLM.exe launcher after a Python upgrade (Windows) no
-  longer fails when run from LocaLM.exe itself.** `localm make-launcher
-  --force` - used to refresh the branded launcher after upgrading Python -
-  failed outright ("could not locate the base interpreter to copy") when
-  invoked from the already-built LocaLM.exe, since Python could no longer
-  find itself under its own renamed identity. It now resolves correctly and
-  replaces the running launcher's file in place.
-- **Bug reports no longer lose the actual error.** The "Recent log (tail)"
-  section used to be a blind cut of the last ~120 log lines, so a session that
-  kept running afterward (even routine polling) could push the real error out
-  before the report was filed. It now keeps every warning/error from the whole
-  run and collapses long runs of near-identical routine lines (e.g. repeated
-  status polling) into one line with a repeat count, so the actual failure is
-  never buried or pushed out - no matter how long the session ran after it.
 - **`localm doctor` now actually verifies model loads will work.** Its native
   runtime and GPU checks run their probes in a plain subprocess, a different
   mechanism from the isolated worker process every real GGUF model load and
@@ -126,12 +112,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   while every model load still failed (the exact LocaLM.exe launcher bug
   above). Doctor now spawns a worker the same way a real model load does and
   reports it as a failed check if that does not work.
-- **A failed automatic model preload is no longer silent in the log.** When
-  `localm gui` warms up the last-used model in the background at startup and
-  that load fails, the failure now reaches the debug log (with its full
-  traceback) in addition to the console notice - previously it was
-  console-only, so a report filed afterward showed no sign anything had gone
-  wrong.
+- **Rebuilding the LocaLM.exe launcher after a Python upgrade (Windows) no
+  longer fails when run from LocaLM.exe itself.** `localm make-launcher
+  --force` - used to refresh the branded launcher after upgrading Python -
+  failed outright ("could not locate the base interpreter to copy") when
+  invoked from the already-built LocaLM.exe, since Python could no longer
+  find itself under its own renamed identity. It now resolves correctly and
+  replaces the running launcher's file in place.
 - **A failed setup job (ComfyUI, a model pull, image generation) no longer
   hides its own error.** Two separate problems compounded: the job's live
   progress log in Settings disappeared the instant it failed - right as a
@@ -146,6 +133,35 @@ permanent public record of what shipped and are never rewritten; the in-progress
   a cloned repo's internal file paths past Windows' legacy 260-character
   limit, failing with a cryptic "Filename too long" / "invalid index-pack
   output" git error.
+- **The managed-ComfyUI setup no longer fails creating its own venv under the
+  LocaLM.exe launcher (Windows).** After cloning ComfyUI, the "Creating a
+  fresh localm venv" step could fail with the same misleading "[WinError 2]
+  The system cannot find the file specified" as the model-loading bug above,
+  for a related but distinct reason: Python's own venv module matches file
+  names against the running interpreter's own name to decide what to copy
+  into the new venv, and a renamed launcher's name never exists in the base
+  install, so the new venv silently ended up with no interpreter of its own
+  and the mandatory pip bootstrap then failed. Setup now creates the venv
+  using the real base interpreter directly, so it succeeds under the branded
+  launcher too.
+- **`localm doctor` now also verifies venv creation will work.** Alongside
+  the worker-spawn check above, doctor now also creates (and immediately
+  discards) a throwaway venv the same way the managed-ComfyUI installer
+  does, so a machine that cannot create nested venvs is flagged up front
+  instead of failing silently mid-setup.
+- **Bug reports no longer lose the actual error.** The "Recent log (tail)"
+  section used to be a blind cut of the last ~120 log lines, so a session that
+  kept running afterward (even routine polling) could push the real error out
+  before the report was filed. It now keeps every warning/error from the whole
+  run and collapses long runs of near-identical routine lines (e.g. repeated
+  status polling) into one line with a repeat count, so the actual failure is
+  never buried or pushed out - no matter how long the session ran after it.
+- **A failed automatic model preload is no longer silent in the log.** When
+  `localm gui` warms up the last-used model in the background at startup and
+  that load fails, the failure now reaches the debug log (with its full
+  traceback) in addition to the console notice - previously it was
+  console-only, so a report filed afterward showed no sign anything had gone
+  wrong.
 
 ### Security
 - **Disabling the private-network (SSRF) guard now requires an owner key.** The
