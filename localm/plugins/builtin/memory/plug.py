@@ -148,7 +148,9 @@ def _embed_fn():
         from localm.inference.embedder import get_embedder
         emb = get_embedder()
         return emb.embed if emb is not None else None
-    except Exception:
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.debug("memory _embed_fn resolution failed: %s", e)
         return None
 
 
@@ -512,12 +514,23 @@ def synthesize_memory(complete, *, principal: str | None = None, max_facts: int 
     # reuses its id (not counted) and only true ADDs appear.
     before = {r.id for r in store.all()}
     embed_fn = _embed_fn()
+    if embed_fn is None:
+        # A CLEAN None (no embedder resolvable) is an expected, non-error state
+        # in general (recall/consolidation fall back to lexical BM25) - but it
+        # was otherwise invisible at the point records are actually added: a
+        # silent embed_fn=None here was indistinguishable from a per-record
+        # embed exception (_embed_one's own except-block), both surfacing only
+        # as a downstream low_coverage recall degrade with no trace back to
+        # the cause.
+        from localm.debuglog import logger
+        logger.debug("memory synthesize_memory: no embedder resolved, "
+                     "this round's records will have no vector")
     res = run_consolidation(store, sessions, complete, embed_fn=embed_fn,
                             surface="chat", max_candidates=max_facts)
     new_facts = [r.text for r in store.all() if r.id not in before]
     # Episodic capture is per-session + watermarked (memory-audit [14]): one episode
     # per NEW session, not one blob summary over all of them.
-    episodic = _store_episodes(store, complete)
+    episodic = _store_episodes(store, complete, embed_fn=embed_fn)
     # Backfill vectors for records stored before an embedder was available, so
     # semantic recall turns on RETROACTIVELY after 'localm setup-embeddings'. Bounded
     # per pass; a large store fills over several passes. No-op when no embedder.
@@ -601,14 +614,23 @@ def _session_text(path: Path, max_chars: int = 6000) -> str:
     return "\n".join(pieces)
 
 
-def _store_episodes(store, complete) -> int:
+_UNSET = object()
+
+
+def _store_episodes(store, complete, embed_fn=_UNSET) -> int:
     """Store one EPISODIC summary PER NEW session file (past the watermark), so N
     sessions become N episodes instead of collapsing into <=1 blob summary
     (memory-audit 2026-07-02 [14]). Each episode is tagged with its source session id
     + mtime. The watermark advances to the newest session SEEN (even one that yields
     no usable summary), so nothing is re-summarised or retried forever. Deduped
     against existing episodics (0.85). Best-effort; the caller confirmed writes are
-    allowed (privacy). Returns the number of episodes stored."""
+    allowed (privacy). Returns the number of episodes stored.
+
+    *embed_fn*: reuse an already-resolved embedder (synthesize_memory calls this
+    right after run_consolidation, in the same round, so it passes its own
+    embed_fn instead of this function re-resolving get_embedder() a second
+    time). Omit to resolve independently (existing test callers)."""
+    ef = _embed_fn() if embed_fn is _UNSET else embed_fn
     try:
         from difflib import SequenceMatcher
 
@@ -641,7 +663,7 @@ def _store_episodes(store, complete) -> int:
             store.add(MemoryRecord(text=summ, kind="episodic", source="synth",
                                    importance=0.4,
                                    meta={"session": f.stem, "session_mtime": mt}),
-                      embed_fn=_embed_fn())
+                      embed_fn=ef)
             stored += 1
         _write_episodic_watermark(store, newest)
         return stored
