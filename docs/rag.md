@@ -82,7 +82,9 @@ small dedicated embedding model instead:
   normalised BM25 and cosine similarity. The Knowledge page shows `hybrid` vs
   `BM25` per collection.
 - Embedding failures **degrade, never break**: indexing falls back to
-  lexical-only with a note in the job log; queries fall back silently.
+  lexical-only with a note in the job log, and a query that cannot use its
+  vectors falls back to BM25 and records the reason on the collection's status
+  (a corrupt or dimension-mismatched vector sidecar is also logged at WARNING).
 
 By default CLI indexing is lexical-only (no running engine); pass `--embed` to
 `localm rag add` / `localm rag query` to compute vectors via a running localm
@@ -95,6 +97,10 @@ server, matching the GUI.
 - Chunks are capped (4 × ~1200 chars injected per question) to fit small
   context windows; the dynamic context growth and auto-compaction handle the
   rest.
+- Each query loads the collection from disk and scores every chunk (there is no
+  query-time index cache), so retrieval is brute force by design: fast at home
+  scale (thousands of chunks), but query latency grows with collection size and
+  it is not built for millions of chunks.
 - One indexing job per collection at a time is the supported pattern; the
   files are rewritten atomically, so a concurrent query sees a consistent
   snapshot.

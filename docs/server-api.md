@@ -49,6 +49,8 @@ tokenizer plus performance numbers:
 
 `ttft_ms` (time to first token) is reported on streaming responses only; a non-streaming response still returns the token counts and `tokens_per_sec`, but no `ttft_ms`.
 
+When the memory plugin is active and recalls facts for a turn, the response also carries an `X-Localm-Memory` header (see [Memory endpoints](#memory-endpoints-memory-plugin)).
+
 Multimodal input uses the standard multipart content format with base64
 data-URIs (`{"type": "image_url", "image_url": {"url": "data:image/..."}}`)
 and requires a vision-capable model (a GGUF paired with a multimodal projector
@@ -129,6 +131,26 @@ non-builtin plugin returns 404; any other refresh failure returns 400.
 Toggle an installed plugin active or inactive in config. Disabling a
 protected plugin (chat) returns 409; enabling a plugin that is not installed
 returns 409; an unknown plugin returns 404.
+
+## Memory endpoints (memory plugin)
+
+These routes exist only when the `memory` plugin is installed and enabled;
+otherwise they `404`. Memory is owner-scoped and off in privacy mode: every
+write returns `403` in privacy mode (no new traces). See [memory.md](memory.md).
+
+| Route | Purpose |
+|---|---|
+| `GET /api/memory` | The current facts (text + per-item metadata) and whether writes are allowed. |
+| `PUT /api/memory` | Bulk edit. A line matching an existing fact keeps that record; new lines are added; omitted lines are deleted. `413` past the 256-record or 64k-char cap. |
+| `POST /api/memory/append` | Add one fact. |
+| `PATCH /api/memory/{id}` | Edit one record's text or importance. |
+| `DELETE /api/memory/{id}` | Delete one record. |
+| `POST /api/memory/consolidate` | Distil durable facts from recent sessions now; `503` until a model is loaded. |
+
+When the memory plugin recalls facts for a chat turn, `POST /v1/chat/completions`
+returns an `X-Localm-Memory` response header: a compact JSON blob with the count
+of injected facts, the items, and a degrade reason when semantic recall could not
+be used (for example `no_embedder` before `localm setup-embeddings`).
 
 ## Client example
 
