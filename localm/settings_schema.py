@@ -157,6 +157,12 @@ CORE_FIELDS: list = [
                  "(0 = never; the model stays resident). The next message reloads "
                  "it automatically.",
                  group="Engine", min=0, step=30),
+    SettingField("gguf_load_timeout_s", Widget.NUMBER, "GGUF load timeout (s)",
+                 "How long a GGUF model load may run in its isolated worker "
+                 "process before it is treated as hung and cancelled. Raise this "
+                 "only if a genuinely huge model on slow storage needs longer "
+                 "than the default.",
+                 group="Engine", min=10, step=60),
     SettingField("import_max_depth", Widget.NUMBER, "Folder import depth",
                  "Subfolder levels `localm add <dir>` scans for models.",
                  group="Models", min=1, max=10, step=1),

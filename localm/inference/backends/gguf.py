@@ -1,9 +1,24 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""GGUF backend - uses our native ctypes wrapper around llama.dll.
+"""GGUF backend - drives our native ctypes wrapper around llama.dll through an
+isolated worker PROCESS (see llamacpp/_runner.py and llamacpp/_worker.py).
 
-The native wrapper (localm.inference.backends.llamacpp) handles GPU DLL
-loading automatically. There is no subprocess fallback: GGUF runs through this
-in-process binding or it fails loudly, pointing you at `localm setup-llama`.
+The model's whole lifecycle (load, generate, tokenize, grammar-check, unload)
+runs in a disposable child process, not here: llama_load_model_from_file (and
+every later context-grow, which hits the same native call class) can
+hard-abort the WHOLE PROCESS on a native CUDA/HIP driver failure - no Python
+try/except can catch that. Isolating just the load call is not enough (a
+model must go on to serve many later requests, and context growth is just as
+abort-prone as the initial load), and isolating just a native handle back to
+this process is not possible (a ctypes.c_void_p model/context pointer is
+meaningless outside the process that created it) - so the isolation boundary
+wraps the model's entire lifecycle. A crash in the child kills only the
+child; this process reports it as a clean, catchable error and the backend
+reloads fresh on the next request, exactly like today's in-process contract.
+
+This class itself (GgufBackend) stays a thin, parent-side proxy: preflight
+VRAM sizing (VramSizingMixin, shared with the child) still runs here, before
+a child is even spawned, so a load that can never fit still fails fast
+without paying a process-spawn cost.
 """
 
 from __future__ import annotations
@@ -23,10 +38,10 @@ class GgufBackend(VramSizingMixin, BaseBackend):
     """
     Inference backend for GGUF model files.
 
-    Runs in-process via our own ctypes binding to llama.dll (no
-    llama-cpp-python, no subprocess), keeping the model in memory between
-    calls. If the native runtime cannot be loaded, load() raises rather than
-    degrading to a slower, lower-fidelity path.
+    Drives our own ctypes binding to llama.dll inside an isolated worker
+    process (see the module docstring) - this class never imports LlamaCpp or
+    touches a native pointer itself. If the native runtime cannot be loaded,
+    load() raises rather than degrading to a slower, lower-fidelity path.
     """
 
     def __init__(
@@ -53,8 +68,21 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         self.n_gpu_layers_auto = n_gpu_layers_auto
         self.effective_ctx_max: Optional[int] = None   # resolved ceiling of the last load
         self.effective_gpu_layers: Optional[int] = None  # resolved gpu layers of the last load
+        # The isolated worker process holding the real model - see
+        # llamacpp/_runner.py. None until load() succeeds.
+        self._runner = None
+        # True once loaded, from the child's load response - supports_images
+        # used to read self._llm.supports_images directly; the real LlamaCpp
+        # instance now lives in the child, so this is cached instead.
+        self._supports_images = False
+        # Kept only for the VramSizingMixin test-monkeypatch surface (e.g.
+        # test_kv_bytes_offload.py assigns a stub here to drive
+        # _check_context_fit directly) - never set to a real object in
+        # production; the real LlamaCpp instance lives in GgufWorker, inside
+        # the child process, not here.
         self._llm = None
         self._loaded = False
+        self._grammar_unsupported = False
         self._load_cancel = None         # threading.Event to abort a load mid-flight
         # One-time guard for the RAM-offload notice in _check_context_fit: a
         # card-filling model with the default grow step overflows free VRAM on
@@ -80,9 +108,12 @@ class GgufBackend(VramSizingMixin, BaseBackend):
 
     @property
     def supports_images(self) -> bool:
-        """True once loaded with a working mmproj (mtmd vision, C1)."""
-        return bool(self._loaded and self._llm is not None
-                    and self._llm.supports_images)
+        """True once loaded with a working mmproj (mtmd vision, C1).
+
+        Cached from the child's load response (self._supports_images) rather
+        than read live off a real LlamaCpp instance - that instance now lives
+        in the isolated worker process, not here."""
+        return bool(self._loaded and self._supports_images)
 
     # ------------------------------------------------------------------ #
     #  Load / unload                                                       #
@@ -127,9 +158,9 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                     " The GPU is low on memory - free VRAM or retry with "
                     "fewer GPU layers (-g 24, or -g 0 for CPU)."
                 )
-            # No subprocess fallback by design: GGUF runs through our in-process
-            # ctypes binding to llama.dll or not at all. Fail loud and actionable
-            # instead of silently degrading to a slower, lower-fidelity path.
+            # The isolated worker itself already failed (or crashed) loading
+            # the model - fail loud and actionable here too, rather than
+            # silently degrading to a slower, lower-fidelity path.
             raise RuntimeError(
                 f"Native llama runtime failed to load: {exc}.{vram_hint}\n"
                 "Provision or repair it with  localm setup-llama  "
@@ -137,15 +168,38 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             ) from exc
 
     def _load_native(self) -> None:
-        """Load via our own ctypes wrapper (no llama-cpp-python required)."""
-        from localm.inference.backends.llamacpp._loader import load_lib
-        load_lib()   # ensure DLLs are loaded before importing the class
-
-        from localm.inference.backends.llamacpp import LlamaCpp
+        """Load by spawning an isolated worker process and handing it the
+        already-resolved parameters (see the module docstring for why this
+        runs out-of-process). Preflight sizing (ctx_max/gpu_layers) stays
+        here, exactly as when the native call was made in-process - none of
+        it touches the abort-prone call, so it can safely run before a child
+        even exists."""
+        from localm.inference.backends.llamacpp._runner import ModelRunner
         from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
         vram_before = self._vram_levels()
 
+        ctx_max = self._effective_ctx_max()
+        self.effective_ctx_max = ctx_max
+        # load() resolves this before _check_vram; fall back for a direct
+        # _load_native() call (e.g. in tests) so the value is never None here.
+        gpu_layers = self.effective_gpu_layers
+        if gpu_layers is None:
+            gpu_layers = self._effective_gpu_layers()
+            self.effective_gpu_layers = gpu_layers
+
+        params = dict(
+            model_path=self.model_path,
+            mmproj_path=self.mmproj_path,       # C1: vision via mtmd, in the child
+            n_ctx=self.n_ctx,
+            n_gpu_layers=gpu_layers,
+            n_ctx_max=ctx_max,
+            n_ctx_grow=self.n_ctx_grow,
+        )
+        timeout = self._load_timeout_seconds()
+
+        cap_label = f"→{ctx_max}" if ctx_max else "→∞"
+        self._runner = ModelRunner()
         with Progress(
             SpinnerColumn(),
             TextColumn("[dim]{task.description}[/dim]"),
@@ -153,49 +207,36 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             transient=True,
             console=console,
         ) as progress:
-            ctx_max = self._effective_ctx_max()
-            self.effective_ctx_max = ctx_max
-            # load() resolves this before _check_vram; fall back for a direct
-            # _load_native() call (e.g. in tests) so the value is never None here.
-            gpu_layers = self.effective_gpu_layers
-            if gpu_layers is None:
-                gpu_layers = self._effective_gpu_layers()
-                self.effective_gpu_layers = gpu_layers
-            cap_label = f"→{ctx_max}" if ctx_max else "→∞"
             progress.add_task(
                 f"Loading model  (ctx={self.n_ctx}{cap_label}, "
                 f"gpu_layers={gpu_layers})",
                 total=None,
             )
-            self._llm = LlamaCpp(
-                model_path=self.model_path,
-                n_ctx=self.n_ctx,
-                n_gpu_layers=gpu_layers,
-                n_ctx_max=ctx_max,
-                n_ctx_grow=self.n_ctx_grow,
-                mmproj_path=self.mmproj_path,   # C1: in-process vision via mtmd
-                cancel_event=self._load_cancel,  # abort mid-load if superseded
-                vram_check=self._check_context_fit,  # guard context GROWTH too
-                verbose=False,
-            )
+            # cancel_event abort mid-load if superseded (relayed to the child
+            # over its control queue - see ModelRunner.spawn_and_load).
+            meta = self._runner.spawn_and_load(
+                params, cancel_event=self._load_cancel, timeout=timeout)
 
         self._loaded = True
+        self._supports_images = bool(meta.get("supports_images"))
 
-        # Remember the model's true transformer layer count (read once during the
-        # native load - the only place it is knowable) so the next load and the
+        # Remember the model's true transformer layer count (reported once by
+        # the child, the only place it is knowable) so the next load and the
         # GUI VRAM estimate can size a partial GPU offload precisely instead of
         # from _ASSUMED_LAYERS. Static model metadata, not chat/session content -
         # written regardless of privacy mode (see localm.model_meta).
-        n_layers = getattr(self._llm, "n_layers", None)
+        n_layers = meta.get("n_layers")
         if isinstance(n_layers, int) and n_layers > 0:
             from localm.model_meta import store_n_layers
             store_n_layers(self.model_path, n_layers)
 
-        # VRAM usage after load - device-level driver numbers, because
-        # torch's allocator counters (memory_allocated/reserved) can only
-        # see torch's own allocations and always read 0.00 for llama.dll.
-        # "in use" therefore includes every process on the GPU; the delta
-        # is what this load itself consumed.
+        # VRAM usage after load - device-level driver numbers (a global,
+        # cross-process view - measured from THIS process exactly as
+        # accurately as from the child, since it reflects the whole GPU, not
+        # a single process's allocations). torch's allocator counters
+        # (memory_allocated/reserved) can only see torch's own allocations and
+        # always read 0.00 for llama.dll. "in use" therefore includes every
+        # process on the GPU; the delta is what this load itself consumed.
         for i, (free, total) in enumerate(self._vram_levels()):
             used = (total - free) / 1024**3
             line = (f"  vram     : {used:.2f} GB in use / "
@@ -207,20 +248,40 @@ class GgufBackend(VramSizingMixin, BaseBackend):
 
         console.print("[green]✓[/green] Model loaded")
 
+    @staticmethod
+    def _load_timeout_seconds() -> float:
+        """Model-load timeout, from config (``gguf_load_timeout_s``) or the
+        generous built-in default. Unlike the VRAM-probe daemon's short
+        bounded wait (which has a safe "unmeasurable, skip" fallback), a
+        stalled model load has no safe default - see ModelRunner.spawn_and_load
+        for why this always raises rather than silently reporting not-loaded.
+        Configurable because a multi-GB model on a slow disk can legitimately
+        take minutes, and that varies far more by install than a fixed
+        constant could ever cover."""
+        from localm.inference.backends.llamacpp._runner import LOAD_TIMEOUT_DEFAULT
+        from localm.config import load_config
+        try:
+            return float(load_config().get("gguf_load_timeout_s") or LOAD_TIMEOUT_DEFAULT)
+        except (TypeError, ValueError):
+            return LOAD_TIMEOUT_DEFAULT
+
     def unload(self) -> None:
-        # Close explicitly so native teardown (and its stderr suppression)
-        # happens now, not whenever the garbage collector gets around to it
-        if self._llm is not None and hasattr(self._llm, "close"):
+        # Ask the isolated worker to close cleanly (native teardown + its
+        # stderr suppression happen there), killing it if it does not exit
+        # promptly. Safe to call when the worker already crashed or was never
+        # spawned - ModelRunner.shutdown() is a no-op in both cases.
+        if self._runner is not None:
             try:
-                self._llm.close()
+                self._runner.shutdown()
             except Exception as e:
-                # Surface the failed native close: leftover VRAM/context here can
-                # make a later load fail mysteriously, so log a correlatable line
-                # rather than swallowing it. Teardown is best-effort, so we still
-                # drop the instance below instead of escalating to a hard failure.
+                # Leftover VRAM/context here can make a later load fail
+                # mysteriously, so log a correlatable line rather than
+                # swallowing it. Teardown is best-effort, so we still drop the
+                # reference below instead of escalating to a hard failure.
                 from localm.debuglog import logger as _dbg
-                _dbg.debug("llama close() failed (%s); context may not be fully freed",
-                           type(e).__name__)
+                _dbg.debug("gguf worker shutdown failed (%s); its process may "
+                           "not be fully torn down", type(e).__name__)
+        self._runner = None
         self._llm = None
         self._loaded = False
 
@@ -233,42 +294,28 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         so a bad grammar is a clean 400 rather than a native fault that would latch
         _grammar_unsupported and silently strip grammar from later requests. No-op
         when not loaded (no vocab to parse against) or when *grammar* is empty."""
-        if grammar and self._loaded and self._llm is not None:
-            self._llm.check_grammar(grammar)
+        if grammar and self._loaded and self._runner is not None:
+            self._runner.check_grammar(grammar)
 
     # ------------------------------------------------------------------ #
     #  Tokenisation                                                        #
     # ------------------------------------------------------------------ #
 
     def count_tokens(self, text: str) -> int:
-        """Return exact token count using the loaded model's vocabulary."""
-        if self._llm is not None:
-            return len(self._llm.tokenize(text, add_bos=False))
+        """Return exact token count using the loaded model's vocabulary (an
+        RPC to the isolated worker)."""
+        if self._loaded and self._runner is not None:
+            return self._runner.count_tokens(text)
         # Not loaded yet - fall back to a chars/4 heuristic
         return max(1, len(text) // 4)
 
     def count_messages_tokens(self, messages: List[dict]) -> int:
-        """Return exact token count of the structured messages formatted with the
-        model's embedded chat template."""
-        if self._llm is not None:
+        """Return exact token count of the structured messages formatted with
+        the model's embedded chat template (an RPC to the isolated worker,
+        which alone holds the native model pointer the template needs)."""
+        if self._loaded and self._runner is not None:
             try:
-                from .llamacpp.llama import _apply_model_template
-                # Convert the message content list to text parts if any
-                text_messages = []
-                for m in messages:
-                    content = m.get("content")
-                    if isinstance(content, list):
-                        text = " ".join(
-                            p.get("text", "") for p in content
-                            if isinstance(p, dict) and p.get("type") == "text"
-                        )
-                    else:
-                        text = content or ""
-                    text_messages.append({"role": m.get("role", "user"), "content": text})
-                prompt = _apply_model_template(self._llm._model_ptr, text_messages)
-                bos_markers = ("<bos>", "<s>", "﻿")
-                add_bos = not any(prompt.startswith(m) for m in bos_markers)
-                return len(self._llm.tokenize(prompt.encode("utf-8"), add_bos=add_bos))
+                return self._runner.count_messages_tokens(messages)
             except Exception:
                 pass
         return super().count_messages_tokens(messages)
@@ -285,17 +332,16 @@ class GgufBackend(VramSizingMixin, BaseBackend):
     can_embed: bool = False
 
     def embed(self, texts: List[str]) -> List[List[float]]:
-        if not self._llm:
+        if not self._loaded:
             raise RuntimeError("Model not loaded - call load() first")
-        if not hasattr(self._llm, "create_embedding"):
-            raise NotImplementedError(
-                "Embeddings are not supported by the built-in GGUF binding yet. "
-                "Use a HuggingFace-format model for /v1/embeddings."
-            )
-        result = self._llm.create_embedding(texts)
-        # create_embedding returns {"data": [{"embedding": [...], "index": N}, ...]}
-        data = result.get("data", result) if isinstance(result, dict) else result
-        return [item["embedding"] for item in data]
+        # The isolated worker's GgufWorker never exposes create_embedding (the
+        # ctypes binding does not implement it) - this call always raises, so
+        # there is no RPC to make; see can_embed above and the GGUFEmbedder
+        # class (localm/inference/embedder.py) for the real embedding path.
+        raise NotImplementedError(
+            "Embeddings are not supported by the built-in GGUF binding yet. "
+            "Use a HuggingFace-format model for /v1/embeddings."
+        )
 
     # ------------------------------------------------------------------ #
     #  Inference                                                           #
@@ -339,72 +385,68 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             )
             grammar = None
 
-        def _make_kwargs(g: Optional[str]) -> dict:
-            kw: dict = dict(
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                top_k=top_k,
-                repeat_penalty=repeat_penalty,
-                grammar=g,
-                grammar_lazy=grammar_lazy,
-                grammar_triggers=grammar_triggers,
-                stream=True,
-            )
-            if seed is not None:
-                kw["seed"] = seed
-            return kw
+        kwargs: dict = dict(
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            repeat_penalty=repeat_penalty,
+            grammar=grammar,
+            grammar_lazy=grammar_lazy,
+            grammar_triggers=grammar_triggers,
+        )
+        if seed is not None:
+            kwargs["seed"] = seed
 
-        def _stream(g: Optional[str]) -> Iterator[str]:
-            for chunk in self._llm.create_chat_completion(**_make_kwargs(g)):
-                choice = chunk["choices"][0]
-                if choice.get("finish_reason"):
-                    # "length" = the max_tokens budget ran out mid-reply
-                    self.last_finish_reason = choice["finish_reason"]
-                token = choice.get("delta", {}).get("content", "")
-                if token:
-                    yield token
-
-        # native ctypes path (LlamaCpp)
+        # The grammar-fault retry-without-grammar logic (a genuinely
+        # recoverable native OSError, not a process abort) now runs INSIDE the
+        # isolated worker (GgufWorker.chat_stream) - it already has the real
+        # model, so retrying there is a plain in-process call, no round trip.
+        # This method just relays the resulting stream and, on a normal
+        # finish, re-applies the worker's report of that decision to this
+        # instance's OWN persistent policy state (_grammar_unsupported must
+        # survive across many calls on the same backend, so it stays here).
+        #
+        # yield from (not a manual for-loop) is required so that closing THIS
+        # generator (http_server.py's mid-stream cancel, unchanged) correctly
+        # forwards GeneratorExit into the runner's generator too - that is
+        # what triggers ModelRunner.chat_stream's own cancel-and-drain cleanup
+        # instead of abandoning the runner's generator mid-flight.
         self.last_finish_reason = "stop"
-        yielded = False
         try:
-            for token in _stream(grammar):
-                yielded = True
-                yield token
-        except OSError as e:
-            # A grammar sampler fault on a build that does not implement it: the
-            # model decode context is unharmed (only the sampler threw), so if
-            # nothing was emitted yet, remember it and retry once WITHOUT the
-            # grammar instead of failing the request.
-            if grammar and not yielded:
-                self._grammar_unsupported = True
-                from localm.debuglog import logger as _dbg
-                _dbg.warning("native grammar sampler faulted (%s); "
-                             "degrading to unconstrained generation", e)
-                console.print(
-                    "[yellow]grammar is not supported by this native llama "
-                    "build; generating without constraint.[/yellow]"
-                )
-                self.last_finish_reason = "stop"
-                yield from _stream(None)
-                return
-            # Any other native fault (access violation etc.) leaves the loaded
-            # model in an unknown state. Without this, every later request
-            # returns an instant empty stream - a zombie server. Drop the broken
-            # instance so the next request triggers a clean reload.
-            # Mark the reason so the response doesn't report a clean "stop".
+            yield from self._runner.chat_stream(**kwargs)
+        except RuntimeError:
+            # The isolated worker crashed or stalled (a real native abort, or
+            # an unrecoverable fault GgufWorker.chat_stream deliberately left
+            # uncaught) - the model is gone; without this, every later
+            # request would hit a dead process. Drop it so the next request
+            # triggers a clean reload, matching the in-process contract this
+            # replaces exactly (same user-facing message and effect).
             self.last_finish_reason = "error"
             from localm.debuglog import logger as _dbg
             _dbg.exception("native inference fault - dropping model instance")
             try:
                 self.unload()
             except Exception:
+                self._runner = None
                 self._llm = None
                 self._loaded = False
-            raise RuntimeError(
-                f"Native inference fault ({e}). The model has been unloaded "
-                "and will reload on the next request. See the debug log for "
-                "the native stack trace."
-            ) from e
+            raise
+        else:
+            done = getattr(self._runner, "last_done", None) or {}
+            self.last_finish_reason = done.get("finish_reason", "stop")
+            if done.get("grammar_unsupported") and not self._grammar_unsupported:
+                # First time this model has shown it can't do grammar: latch
+                # it (future calls skip sending grammar at all, see the
+                # up-front check above) and surface the same degrade notice
+                # the in-process path always printed - a degrade must stay
+                # visible even after crossing a process boundary.
+                self._grammar_unsupported = True
+                from localm.debuglog import logger as _dbg
+                _dbg.warning("native grammar sampler faulted; degrading to "
+                             "unconstrained generation")
+                console.print(
+                    "[yellow]grammar is not supported by this native llama "
+                    "build; generating without constraint.[/yellow]"
+                )

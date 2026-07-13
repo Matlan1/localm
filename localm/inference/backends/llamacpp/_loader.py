@@ -644,11 +644,11 @@ def gpu_memory() -> "Optional[tuple]":
     class of risk (a native crash inside GPU-touching code must never take down
     the parent) by running ALL model-runner GPU work in a separate subprocess.
     gpu_memory_isolated() applies the identical principle narrowly, to just this
-    one low-frequency call, instead of the much larger scope of isolating the
-    whole model load (which this codebase deliberately does not do for the load
-    itself - see gguf.py: "no subprocess fallback ... in-process binding or it
-    fails loudly", a considered choice for the load, not extended here to a
-    probe call this fragile).
+    one low-frequency call - the model LOAD itself (llama_load_model_from_file,
+    and the same call class on every later context grow) hits the identical
+    abort risk and is ALSO isolated this way, in a longer-lived worker that
+    serves the model's whole lifecycle, not just one query - see gguf.py and
+    llamacpp/_runner.py / _worker.py.
 
     Returns None when the native lib is not loaded yet (we do NOT force-load it
     just to measure), the build lacks the symbol, or there is not exactly one GPU

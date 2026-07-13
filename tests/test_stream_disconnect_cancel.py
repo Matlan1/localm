@@ -405,27 +405,43 @@ def gguf_backend():
 @pytest.mark.integration
 @pytest.mark.real_gguf
 def test_real_gguf_midstream_close_releases_inference_lock(gguf_backend):
-    """Close the REAL generator chain mid-generation and prove the REAL
-    _inference_lock is freed, so a follow-up generation on the same model is not
-    blocked. This is the production mechanism the disconnect fix relies on."""
+    """Close the REAL generator chain mid-generation and prove the model is
+    NOT left wedged: a follow-up generation on the same loaded model must
+    start and produce output promptly. This is the production mechanism the
+    disconnect fix relies on.
+
+    Cannot inspect the real `_inference_lock` object directly anymore - the
+    real LlamaCpp instance (and its lock) now live inside an isolated worker
+    PROCESS (see llamacpp/_runner.py), not in this one, so no Python object in
+    THIS process can observe its state. The property this test actually cares
+    about - "closing mid-stream doesn't leave the model unusable for the next
+    request" - is proven instead by timing: a bounded wall-clock assertion
+    that the next generation starts promptly rather than hanging behind a
+    still-held lock in the child."""
+    import time
+
     be = gguf_backend
-    lock = be._llm._inference_lock          # the real per-model serialisation lock
 
     gen = be.chat_stream(
         [{"role": "user", "content": "Count from 1 to 300, one number per line."}],
         max_tokens=300, temperature=0.0, seed=1,
     )
-    first = next(gen)                        # prefill + first token(s): lock now held
+    first = next(gen)                        # prefill + first token(s): generation in flight
     assert isinstance(first, str)
-    # Non-reentrant Lock: a failed non-blocking acquire proves it is held (by the
-    # suspended generator), i.e. generation is genuinely in flight.
-    assert not lock.acquire(blocking=False), "lock should be held mid-generation"
 
     gen.close()                             # what the worker does on cancel/disconnect
 
-    acquired = lock.acquire(timeout=5.0)
-    assert acquired, "inference lock still held after mid-stream close(): would block next request"
-    lock.release()
+    t0 = time.monotonic()
+    out = "".join(be.chat_stream(
+        [{"role": "user", "content": "Say only the word: hi"}],
+        max_tokens=10, temperature=0.0, seed=1,
+    ))
+    elapsed = time.monotonic() - t0
+    assert elapsed < 30.0, (
+        f"follow-up generation took {elapsed:.1f}s after mid-stream close() - "
+        "the worker's inference lock may still be held (would block real requests)"
+    )
+    assert out.strip()
 
     # A fresh generation on the SAME loaded model must run, not deadlock.
     out = "".join(be.chat_stream(
