@@ -9,7 +9,10 @@
 // Bump this whenever the cached shell assets (style.css, app/*.js, pages/*.js,
 // index.html, icons) change, so an installed PWA drops the old cache on activate
 // and re-precaches the new files instead of serving stale cache-first assets.
-const CACHE = "localm-shell-v48";
+// v49: pages/settings.js changed (the ComfyUI setup log no longer erases itself
+// on failure, #621) - a stale-cache miss on THIS exact bump is what made that
+// fix invisible to an already-installed PWA in the field.
+const CACHE = "localm-shell-v49";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).
