@@ -22,6 +22,20 @@ Item 9 (HIGH): rag_extract ran extract_bytes() synchronously inside an async
 route with no executor offload, freezing the whole single-worker event loop for
 every route/user for the duration of an archive extraction. Fixed by offloading
 to loop.run_in_executor, mirroring rag_upload's background-job offload.
+
+LM-DA-015 (design audit, Low): the headless sync call sites (this file's
+subject) called add_paths/add_uploads with no ``on_progress``, unlike the
+job-manager and CLI paths. The embed-failure degrade warning
+("embeddings unavailable ... indexing lexical-only", store.py) is only ever
+surfaced through ``on_progress``, so it was silently discarded headless - a
+doc that fell back to lexical-only looked like an ordinary success. Fixed by
+passing a logging-backed on_progress (``plug._log_progress``).
+
+LM-DA-018 (design audit, Low): /add had no path/file-count cap, unlike
+/upload's explicit 50-file cap, despite running on the same shared, bounded
+plugin ThreadPoolExecutor (also used by /extract, /query, web fetch, voice
+transcription, coder sessions) since #593. Fixed with a 50-path cap mirroring
+/upload's.
 """
 
 from __future__ import annotations
@@ -117,6 +131,55 @@ class TestApiModeIndexesHeadless:
             assert body.get("status") == "done", body
             assert body["added"] == 1, body
             assert "job_id" not in body
+
+    def test_add_logs_embed_degrade_when_headless(self, api_mode_app, caplog):
+        """LM-DA-015: a headless /add whose embedder is broken must not silently
+        report ordinary success. Pre-fix, add_paths' on_progress-or-noop
+        (store.py) discarded the "embeddings unavailable ... indexing
+        lexical-only" line entirely when on_progress was None, which it always
+        was for the headless sync call sites - the response looked identical
+        to a fully-vectored success. Now the headless call sites pass
+        plug._log_progress, so the degrade reaches the debug logger.
+
+        Publishes a real (but unreachable) self_url/active_model on
+        app.state, exactly what ``_self_services`` derives ``self_embed``
+        from (see ``_make_self_embed``), so ``embed_fn`` genuinely raises
+        (a connection error) the same way a real down/misconfigured embedder
+        would - not a mocked-away shortcut. The plugin module under test is
+        loaded fresh by ``PluginManager`` via ``importlib`` under a private
+        ``sys.modules`` key, so monkeypatching the normally-imported
+        ``localm.plugins.builtin.rag.plug`` would silently miss the live
+        route entirely."""
+        api_mode_app.state.self_url = "http://127.0.0.1:1"   # nothing listens
+        api_mode_app.state.active_model = lambda: "test-model"
+        with TestClient(api_mode_app) as c:
+            c.post("/api/rag/collections", json={"name": "kb"})
+            target = Path.home() / "doc.txt"
+            target.write_text("gfx1030 rocm runtime notes", encoding="utf-8")
+            with caplog.at_level("WARNING", logger="localm"):
+                r = c.post("/api/rag/collections/kb/add",
+                           json={"paths": [str(target)], "embed": True})
+            # The degrade must not fail the request - it still indexes, lexically.
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body.get("status") == "done", body
+            assert body["added"] == 1, body
+        assert "embeddings unavailable" in caplog.text
+        assert "indexing lexical-only" in caplog.text
+
+    def test_add_rejects_too_many_paths(self, api_mode_app):
+        """LM-DA-018: /add had no cap on path count, unlike /upload's 50-file
+        cap, despite both running on the same shared, bounded executor headless.
+        A 51-path request must be rejected the same way /upload already rejects
+        a 51-file one - before the missing-file check, so this does not depend
+        on any of the paths actually existing."""
+        with TestClient(api_mode_app) as c:
+            c.post("/api/rag/collections", json={"name": "kb"})
+            paths = [str(Path.home() / f"doc{i}.txt") for i in range(51)]
+            r = c.post("/api/rag/collections/kb/add",
+                       json={"paths": paths, "embed": False})
+            assert r.status_code == 400, r.text
+            assert "too many paths" in r.text.lower()
 
     def test_embedding_set_returns_clean_503_not_500(self, api_mode_app):
         with TestClient(api_mode_app) as c:

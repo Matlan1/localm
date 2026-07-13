@@ -43,6 +43,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from localm.debuglog import logger
 from localm.plugins.executor import get_plugin_executor
 from localm.textguard import neutralise
 
@@ -293,6 +294,21 @@ def _self_services(request: Request):
             _make_self_describe_image(self_url, active_model))
 
 
+def _log_progress(text: str) -> None:
+    """``on_progress`` for the headless-api-mode sync indexing calls (LM-DA-015).
+
+    A GUI/job-manager add streams every progress line, including the
+    "embeddings unavailable ... indexing lexical-only" degrade warning
+    (store.py add_paths/add_uploads), into the job log. Headless api-mode has
+    no job, so without an on_progress callback that warning was passed to
+    ``on_progress or (lambda _t: None)`` in store.py and silently discarded -
+    a doc that fell back to lexical-only looked like an ordinary success.
+    Routing it to the debug logger surfaces it: printed when ``--debug`` is
+    on, and always captured in the always-on in-memory activity ring buffer
+    (see debuglog.py) so it shows up in a bug report even without --debug."""
+    logger.warning("rag index (headless): %s", text)
+
+
 async def _index_sync(index_call):
     """Run a blocking ``coll.add_*`` index on the plugin pool (off the single-worker
     event loop, exactly like /extract) and return its result as the HTTP response.
@@ -361,6 +377,15 @@ async def rag_add(name: str, req: RagAddRequest, request: Request):
     paths = [Path(p).expanduser() for p in req.paths if p.strip()]
     if not paths:
         raise HTTPException(400, "No paths given")
+    if len(paths) > 50:
+        # Mirrors /upload's 50-file cap (LM-DA-018). Since #593 this runs on the
+        # shared, bounded plugin ThreadPoolExecutor also used by /extract, /query,
+        # web fetch, voice transcription, and coder session management in
+        # headless api-mode - an unbounded path list is a cheap way to tie up
+        # worker slots. This bounds the number of top-level paths, not the files
+        # within a directory tree, which is the same partial-mitigation shape as
+        # /upload's per-item cap.
+        raise HTTPException(400, "Too many paths in one request (max 50)")
     missing = [str(p) for p in paths if not p.exists()]
     if missing:
         raise HTTPException(400, f"Not found: {', '.join(missing[:5])}")
@@ -412,7 +437,8 @@ async def rag_add(name: str, req: RagAddRequest, request: Request):
         # GUI always attaches a job manager, so it keeps the streamed-job path below.
         return await _index_sync(lambda: coll.add_paths(
             paths, embed_fn=embed_fn, classify_fn=self_classify,
-            describe_image_fn=self_describe, policy=policy, force=req.reindex))
+            describe_image_fn=self_describe, policy=policy, force=req.reindex,
+            on_progress=_log_progress))
 
     def _index(job):
         try:
@@ -488,7 +514,8 @@ async def rag_upload(name: str, req: RagUploadRequest, request: Request):
         # Headless api-mode: index the uploaded bytes synchronously (see rag_add).
         return await _index_sync(lambda: coll.add_uploads(
             uploads, embed_fn=embed_fn, classify_fn=self_classify,
-            describe_image_fn=self_describe, force=req.reindex))
+            describe_image_fn=self_describe, force=req.reindex,
+            on_progress=_log_progress))
 
     def _index(job):
         try:
