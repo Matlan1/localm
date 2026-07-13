@@ -82,7 +82,14 @@ VEC_COVERAGE = 0.8         # blend cosine only when >= this fraction have vector
 # eligibility. Note the pinned user/import recency is now harmless for the "never
 # silent" property (an off-topic user fact fails the gate regardless), and it still
 # keeps a relevant durable fact prominent among the eligible records.
-REL_COS_MIN = 0.50         # absolute cosine floor for the semantic gate (~coder 0.55)
+REL_COS_MIN = 0.55         # absolute cosine floor for the semantic gate, matching the
+# coder episode gate. Was 0.50 until real-model measurement (memory longitudinal
+# harness, real bge-small-en-v1.5) found a genuine off-topic false positive at
+# cos=0.5491 (an incidental lexical collision - a query about Mars vs a record
+# about a "Comet"-named project, both astronomy-adjacent nouns) while every
+# clearly-relevant paraphrase measured stayed >=0.62 and 10/10 unrelated control
+# sentences stayed <=0.45; 0.55 clears the false positive without excluding any
+# measured true positive.
 # Stopwords stripped from the LEXICAL gate: a query and a fact sharing only "the"
 # must NOT clear it (that would break silence-when-irrelevant). Mirrors the coder
 # episode store's _STOPWORDS; a future refactor could share one copy.
