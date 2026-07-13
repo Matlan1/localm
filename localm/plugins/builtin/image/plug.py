@@ -25,7 +25,7 @@ import shutil
 import time
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -188,15 +188,15 @@ async def imagine(req: ImagineRequest, request: Request):
     return {"job_id": job.id}
 
 
-@_router.get("/api/imagine/file/{name}")
-async def imagine_file(name: str, request: Request):
-    gallery.owned_or_404(request, "image", name)
+@_router.get("/api/imagine/file/{name}",
+             dependencies=[Depends(gallery.require_owner("image"))])
+async def imagine_file(name: str):
     return FileResponse(str(_image_path(name)), media_type="image/png")
 
 
-@_router.delete("/api/imagine/file/{name}")
-async def imagine_delete(name: str, request: Request):
-    gallery.owned_or_404(request, "image", name)
+@_router.delete("/api/imagine/file/{name}",
+                dependencies=[Depends(gallery.require_owner("image"))])
+async def imagine_delete(name: str):
     path = _image_path(name)
     sidecar = path.with_suffix(path.suffix + ".json")
     path.unlink()
@@ -206,11 +206,11 @@ async def imagine_delete(name: str, request: Request):
     return {"status": "deleted", "name": name}
 
 
-@_router.post("/api/imagine/file/{name}/move")
-async def imagine_move(name: str, req: MoveFileRequest, request: Request):
+@_router.post("/api/imagine/file/{name}/move",
+              dependencies=[Depends(gallery.require_owner("image"))])
+async def imagine_move(name: str, req: MoveFileRequest):
     """Move a generated image (and its metadata sidecar) to a folder on this
     machine - e.g. into a project or pictures directory."""
-    gallery.owned_or_404(request, "image", name)
     path = _image_path(name)
     dest_dir = Path(req.dest).expanduser()
     try:
@@ -230,10 +230,10 @@ async def imagine_move(name: str, req: MoveFileRequest, request: Request):
     return {"status": "moved", "path": str(target)}
 
 
-@_router.post("/api/imagine/file/{name}/rename")
-async def imagine_rename(name: str, req: RenameFileRequest, request: Request):
+@_router.post("/api/imagine/file/{name}/rename",
+              dependencies=[Depends(gallery.require_owner("image"))])
+async def imagine_rename(name: str, req: RenameFileRequest):
     """Rename a generated image (and its metadata sidecar) in place."""
-    gallery.owned_or_404(request, "image", name)
     path = _image_path(name)
     new_name = req.new_name.strip()
     if not new_name:
@@ -255,7 +255,7 @@ async def imagine_rename(name: str, req: RenameFileRequest, request: Request):
 async def imagine_history(request: Request):
     """Generated images, newest first, with their sidecar metadata - filtered to
     the caller's own (an admin/owner sees all; unowned/legacy entries stay
-    visible to everyone, matching gallery.owned_or_404)."""
+    visible to everyone, matching gallery.require_owner)."""
     images_dir = _images_dir()
     items = []
     if images_dir.is_dir():

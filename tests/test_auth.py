@@ -247,6 +247,52 @@ def test_owner_key_grants_every_scope(auth, monkeypatch):
     assert require_scope(S.KEYS_ADMIN)(cred) is None
 
 
+def test_require_owner_dependency_rejects_non_owner(auth, monkeypatch):
+    """require_owner() (design-audit LM-DA-020, reaffirming LM-DA-SEC-06):
+    job_owner_ok's per-route ownership check is now Depends()-injectable, the
+    same pattern require_scope already uses, so a new per-owner route cannot
+    omit it by construction. Exercises a route wired via
+    Depends(require_owner(...)) through a real TestClient request - mirroring
+    the existing job_owner_ok route-level coverage in
+    test_jobs_owner_binding.py / test_media_gallery_ownership.py - rather than
+    unit-calling the dependency directly, since require_owner's gate composes
+    with a nested path-param-reading resolve() dependency that only a real
+    request can drive end to end."""
+    from fastapi import Depends, FastAPI
+    from fastapi.testclient import TestClient
+    from localm import scopes as S
+    from localm.inference.http_server import principal_id, require_owner
+
+    owner_key = auth.create_key("alice", [S.CHAT])["key"]
+    other_key = auth.create_key("bob", [S.CHAT])["key"]
+    owner_id = principal_id(_req(owner_key))
+    things = {"t1": owner_id}
+
+    def _resolve(thing_id: str):
+        return (thing_id if thing_id in things else None,
+                things.get(thing_id), f"No such thing: {thing_id}")
+
+    app = FastAPI()
+
+    @app.get("/things/{thing_id}")
+    def get_thing(thing: str = Depends(require_owner(_resolve))):
+        return {"thing": thing}
+
+    def _h(key):
+        return {"Authorization": f"Bearer {key}"}
+
+    with TestClient(app) as c:
+        # the owner reaches its own thing
+        assert c.get("/things/t1", headers=_h(owner_key)).status_code == 200
+        # a different valid key gets the SAME 404 a missing id would (never 403,
+        # so a foreign key cannot even confirm the thing exists - KEY-SCOPE-2)
+        assert c.get("/things/t1", headers=_h(other_key)).status_code == 404
+        assert c.get("/things/nope", headers=_h(owner_key)).status_code == 404
+        # the owner/admin key reaches every principal's things
+        monkeypatch.setenv("LOCALM_API_KEY", "ownersecret")
+        assert c.get("/things/t1", headers=_h("ownersecret")).status_code == 200
+
+
 # --------------------------------------------------------------------------- #
 #  Privilege self-escalation: a keys:admin key must not mint privileged keys  #
 # --------------------------------------------------------------------------- #

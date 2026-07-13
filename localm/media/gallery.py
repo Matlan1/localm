@@ -4,7 +4,7 @@
 Each media plugin's file/delete/move/rename/history routes serve artifacts off a
 flat directory on disk with no per-request auth check of their own - the
 generation JOB is owner-stamped (`localm.plugins.builtin.jobs.plug`'s pattern:
-`job_owner_ok` / `_owned_job_or_404` in `localm.inference.http_server`), but the
+`job_owner_ok` / `owned_job` in `localm.inference.http_server`), but the
 resulting FILE never was. This module gives the media plugins the same
 stamp-at-creation + check-at-access pattern jobs already has, applied to
 filesystem artifacts instead of JobStore records.
@@ -21,7 +21,7 @@ import threading
 from pathlib import Path
 from typing import Optional
 
-from fastapi import HTTPException, Request
+from fastapi import Request
 
 _LOCK = threading.Lock()
 
@@ -87,20 +87,24 @@ def forget_owner(media_kind: str, name: str) -> None:
             _write_index(media_kind, idx)
 
 
-def owned_or_404(request: Request, media_kind: str, name: str) -> None:
-    """Enforce per-principal ownership on a gallery artifact route.
+def require_owner(media_kind: str):
+    """FastAPI dependency factory: gate a route on ownership of the gallery
+    artifact named by its ``name`` path param. Depends()-injectable (use as
+    ``dependencies=[Depends(gallery.require_owner("image"))]``), so a new
+    per-owner media route cannot omit the check by construction (design-audit
+    LM-DA-020). Raises the SAME 404 a missing artifact would (never 403), so a
+    foreign key cannot even confirm another principal's media exists. Mirrors
+    jobs' `owned_job` / http_server's `require_owner` factory pattern."""
+    from localm.inference.http_server import require_owner as _require_owner
 
-    Raises the SAME 404 a missing artifact would (never 403), so a foreign key
-    cannot even confirm another principal's media exists. Mirrors jobs'
-    `_owned_job_or_404`."""
-    from localm.inference.http_server import job_owner_ok
-    if not job_owner_ok(request, owner_of(media_kind, name)):
-        raise HTTPException(404, f"No such {media_kind}: {name}")
+    def _resolve(name: str):
+        return name, owner_of(media_kind, name), f"No such {media_kind}: {name}"
+    return _require_owner(_resolve)
 
 
 def owned_names(request: Request, media_kind: str, names: "list[str]") -> "list[str]":
     """Filter already-listed *names* down to the ones the caller may see - same
-    rule as `owned_or_404`, applied to a whole history listing in one index read."""
+    rule as `require_owner`, applied to a whole history listing in one index read."""
     from localm.inference.http_server import job_owner_ok
     idx = _read_index(media_kind)
     return [n for n in names if job_owner_ok(request, idx.get(n))]
