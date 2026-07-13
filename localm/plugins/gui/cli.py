@@ -19,6 +19,18 @@ def _complete_model(ctx, param, incomplete):
         return []
 
 
+def _report_preload_failure(console, exc: Exception) -> None:
+    """The background model-preload thread's failure handler: notify the console
+    AND log it. ``console.print`` alone never reaches the debug log file (it is
+    not a logging call), so a preload failure with no other symptom - the user
+    never explicitly tries to chat - left NO trace a bug report could ever
+    surface, no matter how good the log-tail digest got. Log it too, with the
+    full traceback, so it is captured like any other failure (#617 follow-up)."""
+    console.print(f"[yellow]Background model load failed: {exc}[/yellow]")
+    from localm.debuglog import logger
+    logger.exception("background model preload failed")
+
+
 def _gui_bind_warning(host: str):
     """Warning text when the GUI binds past loopback without auth, or None when
     the bind is safe. Builds on the server's check, then escalates for the GUI:
@@ -543,7 +555,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
         try:
             engine.load()
         except Exception as e:
-            console.print(f"[yellow]Background model load failed: {e}[/yellow]")
+            _report_preload_failure(console, e)
 
     if engine is not None:
         threading.Thread(target=_preload, daemon=True, name="preload").start()

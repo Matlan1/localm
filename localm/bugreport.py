@@ -411,13 +411,21 @@ def _format_error(error: Optional[BaseException]) -> str:
     return "\n".join(lines)
 
 
-def _recent_log_tail(home=None, pid=None, max_lines: int = 120,
-                     max_chars: int = 4000) -> str:
-    """Tail of the crashed run's OWN log, matched by the pid embedded in the log
-    filename (localm_<date>_<time>_<pid>.log). This gives a recovered-crash report
-    the activity leading up to the death even when no native trace was captured -
-    a window-close or OS-kill does not trigger faulthandler, so the trace file is
-    empty (BUG-1). Home paths are scrubbed. Never raises."""
+# Outer safety cap on how much of the raw log FILE is even read before digesting -
+# a per-run debug log is not expected to reach this, but a pathological long-lived
+# run must not make digest-building read (and regex-scan) an unbounded file.
+_LOG_TAIL_READ_BYTES = 2_000_000
+
+
+def _recent_log_tail(home=None, pid=None, max_chars: int = 6000) -> str:
+    """A digest of the crashed run's OWN log, matched by the pid embedded in the
+    log filename (localm_<date>_<time>_<pid>.log): EVERY warning/error (with its
+    full traceback) from the whole run, with runs of near-duplicate benign lines
+    (e.g. routine ``GET /api/stats`` polling) collapsed to one line + a repeat
+    count - see localm/_log_digest.py. A blind last-N-lines tail used to miss the
+    actual failure whenever enough routine activity followed it before the report
+    was filed (#617); this survives that regardless of how long the session ran
+    afterward. Home paths are scrubbed. Never raises."""
     try:
         from pathlib import Path as _P
         if home is None:
@@ -442,8 +450,11 @@ def _recent_log_tail(home=None, pid=None, max_lines: int = 120,
             chosen = next((p for p in logs if not p.name.endswith(cur)), None)
         if chosen is None:
             return ""
-        lines = chosen.read_text(encoding="utf-8", errors="replace").splitlines()
-        return _scrub_secrets("\n".join(lines[-max_lines:]).strip())[-max_chars:]
+        raw = chosen.read_text(encoding="utf-8", errors="replace")
+        if len(raw) > _LOG_TAIL_READ_BYTES:
+            raw = raw[-_LOG_TAIL_READ_BYTES:]
+        from localm._log_digest import build_digest
+        return _scrub_secrets(build_digest(raw, max_chars=max_chars))
     except Exception:
         return ""
 
