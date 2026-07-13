@@ -231,7 +231,19 @@ def test_survives_after_launcher_process_exits(tmp_path):
     subprocess.run([sys.executable, str(launcher)], check=True, timeout=10)
     # subprocess.run() has now returned - the launcher process is confirmed gone.
     # The watchdog it spawned must keep running independently and finish on its own.
-    deadline = time.monotonic() + 8.0
+    #
+    # This window is deliberately generous (verified, not guessed): under this
+    # suite's own full -n auto run, a captured failure here showed the watchdog
+    # WAS alive and progressing past its launcher's exit (its log had two real
+    # "attempt N" lines logged strictly after the trivial launcher had already
+    # returned - proof the detached process was not killed), but then went
+    # unscheduled for 7+ seconds under 16-way CPU contention before this test's
+    # old 8s window gave up - a low-priority detached background process getting
+    # starved of CPU time under heavy parallel load, not a survival/detachment
+    # failure. 45s leaves large margin above that observed worst case while the
+    # common (uncontended) case still exits this loop in well under a second via
+    # the early break.
+    deadline = time.monotonic() + 45.0
     content = ""
     while time.monotonic() < deadline:
         if logfile.exists():
