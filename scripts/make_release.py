@@ -52,6 +52,9 @@ _MUST_SHIP = (
     "scripts/report_issue.py",
     # Recovery tooling must ship, or a broken update cannot be rolled back.
     "scripts/rollback_update.py", "rollback.bat", "rollback.sh",
+    # The post-restart health watchdog must ship, or a broken auto-update is
+    # never detected/rolled back (LM-DA-011).
+    "scripts/update_watchdog.py",
 )
 
 

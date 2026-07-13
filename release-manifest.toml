@@ -100,6 +100,17 @@ patterns = [
     "rollback.sh",
     "scripts/rollback_update.py",
 
+    # --- post-restart update health watchdog (LM-DA-011) -----------------------
+    # updater.spawn_health_watchdog() launches this DETACHED right before the
+    # server re-execs into a just-applied build; it polls the restarted
+    # instance's own /whoami for the expected version and, on failure/timeout,
+    # loads scripts/rollback_update.py (above) by file path to restore the
+    # backup - reusing, not duplicating, the existing recovery mechanics.
+    # Stdlib-only, same file-path-loading philosophy. Spawned programmatically
+    # only (no root shim - a user never runs this by hand). MUST ship, or a
+    # broken post-update build is never auto-detected.
+    "scripts/update_watchdog.py",
+
     # --- repo metadata carried with the canonical source tree ---
     ".gitignore",
     ".gitattributes",

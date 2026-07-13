@@ -66,6 +66,31 @@ def test_register_writes_full_schema(tmp_path):
     assert entry["token"] == "tok-secret"
 
 
+# ------------------------------------------------------------------ #
+#  _version() (LM-DA-011 prerequisite: must reflect the LIVE build,   #
+#  not stale installed dist-info, or the post-update health watchdog  #
+#  would roll back every good reboot-class update)                    #
+# ------------------------------------------------------------------ #
+
+def test_version_prefers_live_version_file(monkeypatch):
+    monkeypatch.setattr("localm._version.read_version", lambda: "9.9.9")
+    assert instances._version() == "9.9.9"
+
+
+def test_version_falls_back_to_dist_info_when_live_unknown(monkeypatch):
+    monkeypatch.setattr("localm._version.read_version", lambda: "unknown")
+    monkeypatch.setattr("importlib.metadata.version", lambda name: "1.2.3-installed")
+    assert instances._version() == "1.2.3-installed"
+
+
+def test_version_falls_back_to_dist_info_when_live_raises(monkeypatch):
+    def boom():
+        raise OSError("no VERSION file")
+    monkeypatch.setattr("localm._version.read_version", boom)
+    monkeypatch.setattr("importlib.metadata.version", lambda name: "1.2.3-installed")
+    assert instances._version() == "1.2.3-installed"
+
+
 def test_list_entries_and_unregister(tmp_path):
     iid = instances.new_instance_id()
     path = instances.register_instance(
