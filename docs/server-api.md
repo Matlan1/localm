@@ -146,6 +146,8 @@ write returns `403` in privacy mode (no new traces). See [memory.md](memory.md).
 | `PATCH /api/memory/{id}` | Edit one record's text or importance. |
 | `DELETE /api/memory/{id}` | Delete one record. |
 | `POST /api/memory/consolidate` | Distil durable facts from recent sessions now; `503` until a model is loaded. |
+| `GET /api/memory/forgotten` | Archived (forgotten) records available for recovery - read-only, available even in privacy mode. |
+| `POST /api/memory/forgotten/{id}/restore` | Recover one archived record back into the live store; `404` if no matching archive entry exists. |
 
 When the memory plugin recalls facts for a chat turn, `POST /v1/chat/completions`
 returns an `X-Localm-Memory` response header: a compact JSON blob with the count
