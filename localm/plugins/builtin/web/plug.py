@@ -14,6 +14,18 @@ A request that reaches here is therefore treated as already-consented (an
 explicit ``/search-web`` command, the per-conversation toggle, or a
 GUI-approved model request); these endpoints do not re-prompt. Domain rules and
 the private-address guard always apply.
+
+Search results and fetched page text are UNTRUSTED content (LM-DA-014): the
+caller only approved the REQUEST, never the bytes a remote page chooses to
+return, and both callers here (the GUI chat and the scheduled-job web tool,
+``jobs/webtool.py``) splice this text straight into the model's message list.
+Both backends tokenise with special-token parsing on, so a literal chat-
+template control token in a page/snippet is parsed as a REAL role delimiter and
+can forge a turn. ``neutralise()`` defangs that here, at the boundary, so every
+consumer gets defanged content by construction - the same fix already applied
+to RAG's retrieved chunks (``rag/plug.py._neutralise_hits``, LM-DA-SEC-03).
+Note ``jobs/webtool.py`` calls ``localm.netpolicy`` directly rather than these
+HTTP endpoints, so it neutralises its own copy at that boundary instead.
 """
 
 from __future__ import annotations
@@ -26,8 +38,28 @@ from pydantic import BaseModel
 from localm.inference.errors import route_errors
 from localm.netpolicy import NetworkPolicyError
 from localm.plugins.executor import get_plugin_executor
+from localm.textguard import neutralise
 
 _router = APIRouter()
+
+
+def _neutralise_results(results: list) -> list:
+    """Defang chat control / frame tokens in each search result's title/snippet
+    before it leaves this boundary (LM-DA-014, indirect prompt injection - the
+    same bug class LM-DA-SEC-03 fixed for RAG's retrieved chunks, mirrored here
+    via ``rag/plug.py._neutralise_hits``). A search result is UNTRUSTED content:
+    a page author who wants their result to poison the chat can embed a control
+    token (``<|im_start|>system ...``) or a frame marker in the title/snippet,
+    which both backends' tokenizers parse as a real role delimiter once spliced
+    into the prompt. ``url`` is a locator, not prose, and is left untouched -
+    like RAG's source/pos/score metadata."""
+    for r in results:
+        if isinstance(r, dict):
+            if isinstance(r.get("title"), str):
+                r["title"] = neutralise(r["title"])
+            if isinstance(r.get("snippet"), str):
+                r["snippet"] = neutralise(r["snippet"])
+    return results
 
 
 class WebSearchRequest(BaseModel):
@@ -53,7 +85,7 @@ async def web_search_endpoint(req: WebSearchRequest):
     results = await loop.run_in_executor(
         get_plugin_executor(),
         lambda: web_search(req.query, max_results=req.max_results))
-    return {"query": req.query, "results": results}
+    return {"query": req.query, "results": _neutralise_results(results)}
 
 
 @_router.post("/api/web/fetch")
@@ -67,9 +99,10 @@ async def web_fetch_endpoint(req: WebFetchRequest):
     final_url, text = await loop.run_in_executor(
         get_plugin_executor(), lambda: fetch_text(req.url))
     max_chars = max(500, min(req.max_chars, 60_000))
+    truncated = len(text) > max_chars
     return {"url": final_url,
-            "text": text[:max_chars],
-            "truncated": len(text) > max_chars}
+            "text": neutralise(text[:max_chars]),
+            "truncated": truncated}
 
 
 def register(host) -> None:
