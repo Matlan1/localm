@@ -5,9 +5,16 @@ A model pull started from a phone/PWA used to be invisible on the host (the pers
 running ``localm gui``): its output went only to the per-job event queue the browser
 reads. _HostAnnouncer mirrors the job's start / throttled progress / end to the host
 stdout + debug log. line() is pure (the throttle), so it is unit-testable; one
-integration test drives start_cli with a mocked subprocess for the full path."""
+integration test drives start_cli with a mocked subprocess for the full path.
+
+#621 follow-up: a job's actual failure reason (the real git/pip/native error
+text) used to reach ONLY the ephemeral per-job SSE stream a browser tab
+happened to have open - a ComfyUI setup failure left nothing more informative
+than "ComfyUI setup failed" anywhere a bug report could read from.
+record_line/announce_failure_detail close that gap."""
 
 import json
+import logging
 import time
 
 from localm.plugins.gui import jobs as gj
@@ -75,3 +82,71 @@ def test_start_cli_mirrors_a_pull_to_the_host(capsys, monkeypatch):
     assert "Model pull foo: 0%" in out         # 5% -> 0% bucket
     assert "Model pull foo: 60%" in out
     assert "Model pull foo done" in out
+
+
+def test_announce_failure_detail_is_noop_when_nothing_recorded(caplog):
+    with caplog.at_level(logging.ERROR, logger="localm"):
+        _HostAnnouncer("p").announce_failure_detail()
+    assert not [r for r in caplog.records if r.name == "localm"]
+
+
+def test_announce_failure_detail_logs_the_recorded_tail(caplog):
+    a = _HostAnnouncer("ComfyUI setup")
+    a.record_line("$ git clone --quiet https://example/repo dest")
+    a.record_line("fatal: could not resolve host: example")
+    with caplog.at_level(logging.ERROR, logger="localm"):
+        a.announce_failure_detail()
+    records = [r for r in caplog.records if r.name == "localm"]
+    assert len(records) == 1
+    assert records[0].levelno == logging.ERROR
+    msg = records[0].getMessage()
+    assert "ComfyUI setup failed" in msg
+    assert "could not resolve host" in msg
+
+
+def test_record_line_tail_is_bounded():
+    a = _HostAnnouncer("p")
+    for i in range(a._TAIL_LINES + 10):
+        a.record_line(f"line {i}")
+    assert len(a._recent_lines) == a._TAIL_LINES
+    # Oldest lines are evicted first - only the most recent tail survives.
+    assert a._recent_lines[0] == f"line {10}"
+    assert a._recent_lines[-1] == f"line {a._TAIL_LINES + 9}"
+
+
+def test_start_cli_logs_failure_detail_from_real_output(caplog):
+    """Regression pin for #621: a job that FAILS must leave its actual output
+    (not just "<label> failed") somewhere a bug report can read from - the
+    debug log, via the localm logger, not only the browser's SSE stream."""
+    class _FakeFailingProc:
+        returncode = 1
+
+        def __init__(self):
+            self.stdout = iter([
+                "$ git clone --quiet https://example/repo dest\n",
+                "fatal: could not resolve host: example\n",
+            ])
+
+        def wait(self):
+            return 1
+
+    import localm.plugins.gui.jobs as gj_mod
+    monkeypatch_target = gj_mod.subprocess
+    original_popen = monkeypatch_target.Popen
+    monkeypatch_target.Popen = lambda *a, **k: _FakeFailingProc()
+    try:
+        mgr = gj_mod.JobManager()
+        with caplog.at_level(logging.ERROR, logger="localm"):
+            job = mgr.start_cli("comfy-setup", ["comfy", "setup"],
+                                host_label="ComfyUI setup")
+            for _ in range(300):
+                if job.status in ("done", "failed", "cancelled"):
+                    break
+                time.sleep(0.01)
+        assert job.status == "failed"
+        records = [r for r in caplog.records
+                  if r.name == "localm" and "ComfyUI setup failed" in r.getMessage()]
+        assert len(records) == 1
+        assert "could not resolve host" in records[0].getMessage()
+    finally:
+        monkeypatch_target.Popen = original_popen

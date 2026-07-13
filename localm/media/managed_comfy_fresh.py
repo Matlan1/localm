@@ -277,8 +277,15 @@ def required_custom_nodes(workflow_files=None) -> RequiredNodes:
 
 def _clone_at_commit(repo: str, dest: Path, commit: str,
                      on_progress: ProgressCb) -> tuple:
-    """git clone *repo* into *dest*, then check out *commit*. Returns (ok, output)."""
-    ok, out = _run(["git", "clone", "--quiet", repo, str(dest)],
+    """git clone *repo* into *dest*, then check out *commit*. Returns (ok, output).
+
+    core.longpaths: without it, a deeply-nested LOCALM_HOME (a long username, a
+    OneDrive-redirected profile, a nested custom data dir) can push a pack
+    object's path past Windows' legacy 260-char MAX_PATH, failing clone with
+    "Filename too long" / "invalid index-pack output" - reproduced live cloning a
+    custom node (#621). A per-invocation -c override, not a global git config
+    change."""
+    ok, out = _run(["git", "-c", "core.longpaths=true", "clone", "--quiet", repo, str(dest)],
                    on_progress=on_progress, timeout=1800)
     if not ok:
         return False, out

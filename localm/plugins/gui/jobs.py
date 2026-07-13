@@ -135,9 +135,18 @@ class _HostAnnouncer:
     log), never a privacy-mode disk trace - the model spec is operational, not
     session content. ``line()`` is pure so the throttling is unit-testable."""
 
+    # A job's per-line CLI output (record_line) used to reach ONLY the
+    # ephemeral per-job SSE history a browser tab happened to have open - never
+    # the debug log or a bug report, even though it carries the actual reason
+    # a job failed (a git/pip/native error). #621: a ComfyUI setup failure
+    # left nothing more informative than "ComfyUI setup failed" anywhere a bug
+    # report could read from. Keep a bounded tail so a failure can log it.
+    _TAIL_LINES = 20
+
     def __init__(self, label: str) -> None:
         self.label = label
         self._last_bucket = -1
+        self._recent_lines: collections.deque = collections.deque(maxlen=self._TAIL_LINES)
 
     def line(self, event: dict) -> Optional[str]:
         """The host message for a job event, or None to stay quiet (non-progress
@@ -171,6 +180,24 @@ class _HostAnnouncer:
 
     def announce_start(self) -> None:
         self._say(f"{self.label} started (requested from a connected client)")
+
+    def record_line(self, text: str) -> None:
+        """Buffer a raw output line (not a progress/end event) so a later
+        failure can log its actual tail - see class docstring."""
+        self._recent_lines.append(text)
+
+    def announce_failure_detail(self) -> None:
+        """Log the job's last few output lines at ERROR level so a debug-log
+        digest or a bug report carries the real reason it failed, not just
+        the bare "<label> failed" summary. No-op if nothing was buffered."""
+        if not self._recent_lines:
+            return
+        try:
+            from localm.debuglog import logger
+            logger.error("%s failed - last output:\n%s", self.label,
+                        "\n".join(self._recent_lines))
+        except Exception:
+            pass
 
     def emit(self, event: dict) -> None:
         msg = self.line(event)
@@ -254,6 +281,8 @@ class JobManager:
                             announcer.emit({"type": "progress", **data})
                         continue
                     job.push({"type": "line", "text": line})
+                    if announcer:
+                        announcer.record_line(line)
                 job._proc.wait()
                 job.returncode = job._proc.returncode
                 if job.status != "cancelled":
@@ -261,8 +290,12 @@ class JobManager:
             except Exception as e:
                 job.status = "failed"
                 job.push({"type": "line", "text": f"job error: {e}"})
+                if announcer:
+                    announcer.record_line(f"job error: {e}")
             finally:
                 if announcer:
+                    if job.status == "failed":
+                        announcer.announce_failure_detail()
                     announcer.emit({"type": "end", "status": job.status})
                 job.push({
                     "type": "end",
