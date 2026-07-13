@@ -103,6 +103,26 @@ permanent public record of what shipped and are never rewritten; the in-progress
   run in) to the base interpreter behind a renamed launcher, and could not find it
   under its new name. Model loads and voice transcription now spawn correctly
   under LocaLM.exe.
+- **Bug reports no longer lose the actual error.** The "Recent log (tail)"
+  section used to be a blind cut of the last ~120 log lines, so a session that
+  kept running afterward (even routine polling) could push the real error out
+  before the report was filed. It now keeps every warning/error from the whole
+  run and collapses long runs of near-identical routine lines (e.g. repeated
+  status polling) into one line with a repeat count, so the actual failure is
+  never buried or pushed out - no matter how long the session ran after it.
+- **`localm doctor` now actually verifies model loads will work.** Its native
+  runtime and GPU checks run their probes in a plain subprocess, a different
+  mechanism from the isolated worker process every real GGUF model load and
+  the voice/STT engine use - so a machine could see every doctor check pass
+  while every model load still failed (the exact LocaLM.exe launcher bug
+  above). Doctor now spawns a worker the same way a real model load does and
+  reports it as a failed check if that does not work.
+- **A failed automatic model preload is no longer silent in the log.** When
+  `localm gui` warms up the last-used model in the background at startup and
+  that load fails, the failure now reaches the debug log (with its full
+  traceback) in addition to the console notice - previously it was
+  console-only, so a report filed afterward showed no sign anything had gone
+  wrong.
 
 ### Security
 - **Disabling the private-network (SSRF) guard now requires an owner key.** The
