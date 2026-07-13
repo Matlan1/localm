@@ -105,13 +105,19 @@ test("media config renders one independent subsection per plugin", async () => {
   assert.equal(musicSub.querySelector('[data-key="fast_dequant"]'), null,
     "music has no fast_dequant control");
 
-  // Each subsection has its own Save; the Media section lives in the Plugins group.
+  // Each subsection has its own Save; the Media section is its own top-level group.
   assert.ok(imageSub.querySelector(".media-save"), "image subsection has a Save");
-  assert.equal(doc.querySelector("#settings-sec-media").dataset.group, "plugins",
-    "the Media section is grouped under Plugins");
+  assert.equal(doc.querySelector("#settings-sec-media").dataset.group, "media",
+    "the Media section is its own top-level group");
   const navLabels = [...doc.querySelectorAll("#settings-nav .settings-nav-link")]
     .map((l) => l.textContent);
-  assert.ok(navLabels.includes("Plugins"), "the Plugins group appears in the settings nav");
+  assert.ok(navLabels.includes("Media"), "the Media group appears in the settings nav");
+
+  // The three subsections are laid out in the responsive grid, not stacked loose.
+  const grid = media.querySelector(".media-grid");
+  assert.ok(grid, "the three subsections sit inside a .media-grid container");
+  assert.equal(grid.querySelectorAll(".media-subsection").length, 3,
+    "all three subsections are inside the grid");
 });
 
 test("saving a media plugin POSTs only the changed fields", async () => {

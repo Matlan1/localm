@@ -1102,12 +1102,28 @@ pre:hover .canvas-btn { opacity: 1; }
    it reads as "this is what would be used", not a value you typed. */
 input.auto-detected { color: var(--text-dim); font-style: italic; }
 
-/* Media section: one subsection per plugin (image/music/video), each its own
-   little card with its own Save, so the three are clearly configured apart. */
-.media-subsection {
-  border: 1px solid var(--border); border-radius: 8px;
-  padding: 10px 12px; margin-top: 12px;
+/* Media section: three per-plugin boxes (image/music/video) side by side on a
+   wide screen, stacking on narrow/mobile - each keeps its own Save so the three
+   are clearly configured apart. */
+.media-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 12px; margin-top: 12px;
 }
+.media-subsection {
+  border: 1px solid var(--border); border-radius: 8px; border-left-width: 3px;
+  border-left-color: var(--accent, var(--border));
+  padding: 10px 12px;
+}
+/* Per-box accent (JS assigns one of these classes by position, cycling, so
+   each installed media plugin gets a distinct identity color instead of all
+   boxes reading as "the same colour" - see MEDIA_ACCENT_CATS in settings.js).
+   Reuses the existing cat-* nav-category tokens, same convention as
+   .settings-nav-link.cat-* above, so the palette matches the rest of the app. */
+.media-subsection.cat-blue   { --accent: var(--cat-blue); }
+.media-subsection.cat-cyan   { --accent: var(--cat-cyan); }
+.media-subsection.cat-teal   { --accent: var(--cat-teal); }
+.media-subsection.cat-violet { --accent: var(--cat-violet); }
+.media-subsection.cat-amber  { --accent: var(--cat-amber); }
 .media-sub-head { margin: 0; font-size: 14px; }
 /* A field inheriting the shared default (no per-plugin override yet): the whole
    row reads dimmer (label AND the value box) so an override clearly stands out
@@ -1115,6 +1131,28 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
 .media-inherited label { color: var(--text-dim); }
 .media-inherited input, .media-inherited select {
   color: var(--text-dim); font-style: italic;
+}
+
+/* "localm's own ComfyUI" - a compact box of its own at the top of the Media
+   section (set-up/remove action + the S1 coexistence fields), visually
+   distinct from the three per-plugin boxes below. */
+.media-comfy-box {
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 12px; margin-top: 12px;
+  background: var(--bg-elevated, rgba(127,127,127,0.04));
+}
+.media-comfy-head { display: flex; align-items: center; gap: 10px; }
+.media-comfy-row {
+  display: flex; flex-wrap: wrap; gap: 4px 20px; margin-top: 8px;
+}
+.media-comfy-row > div { min-width: 200px; }
+.comfy-pill {
+  font-size: 11px; padding: 1px 8px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--text-dim);
+}
+.comfy-pill.ok { color: var(--green); border-color: var(--green); }
+.comfy-managed-log {
+  margin-top: 8px; max-height: 220px; overflow: auto;
 }
 
 /* Per-plugin workflow panel (Image/Music/Video pages). */
