@@ -47,6 +47,7 @@ export const SETTINGS_GROUPS = [
   { id: "server",   label: "Server & network" },
   { id: "security", label: "Security" },
   { id: "plugins",  label: "Plugins" },
+  { id: "media",    label: "Media" },
   { id: "privacy",  label: "Privacy & data" },
   { id: "system",   label: "System" },
 ];
@@ -59,6 +60,7 @@ export const SETTINGS_NAV_META = {
   server:   { icon: "web",      cat: "cat-cyan" },
   security: { icon: "key",      cat: "cat-amber" },
   plugins:  { icon: "plugins",  cat: "cat-violet" },
+  media:    { icon: "studio",   cat: "cat-teal" },
   privacy:  { icon: "memory",   cat: "cat-green" },
   system:   { icon: "settings", cat: "cat-slate" },
 };
@@ -78,8 +80,10 @@ export function settingsSectionHead(heading, groupId) {
 }
 
 // Which top-level group a core schema `group` string belongs to. Plugin (owner)
-// sections and the Media section always go to "plugins". Anything unmapped falls
-// back to "system" (the residual app drawer), so a new core group never vanishes.
+// sections go to "plugins"; the Media section is its own top-level group (built
+// directly with dataset.group = "media", not looked up here). Anything unmapped
+// falls back to "system" (the residual app drawer), so a new core group never
+// vanishes.
 export const CORE_GROUP_TO_TOP = {
   Engine: "model", Models: "model", Sampling: "model",
   Server: "server", Security: "security", Privacy: "privacy",
@@ -905,10 +909,13 @@ export async function refreshSettingsPage() {
     form.appendChild(panel);
   }
 
-  // Per-plugin Media (ComfyUI) config: one "Media" section with image/music/video
-  // subsections, each editing that plugin's own block independently. Appended
-  // after the core schema sections so it sits among the plugin tabs.
-  await buildMediaSection(form);
+  // Per-plugin Media (ComfyUI) config: one "Media" section (its own top-level
+  // nav group) with a compact managed-ComfyUI panel on top and one subsection
+  // per plugin (image/music/video) below. Appended after the core schema
+  // sections; fields is passed through so the two managed-ComfyUI schema
+  // fields (group="Media", skipped from the flat loop above) can be rendered
+  // here instead.
+  await buildMediaSection(form, fields);
   if (myToken !== _settingsRenderToken) return;  // a newer refresh superseded us
 
   // Build the nav now that the schema sections exist, so the first config
@@ -951,6 +958,17 @@ export function syncRagIndexingModeHint() {
 // Media plugins, in display order, that the Media section configures.
 export const MEDIA_PLUGIN_ORDER = ["image", "music", "video"];
 
+// Reliable per-box accent assignment: cycle through this palette BY POSITION
+// (not by plugin name), so each installed media plugin gets a visually
+// distinct identity color even when only a few are installed - three boxes in
+// the same neutral border would otherwise all read as "the same colour".
+// Reuses the app's existing cat-* nav-category tokens (so it matches the rest
+// of the design system instead of inventing new colors); cat-green and
+// cat-slate are left out here since --green already carries the semantic
+// "ComfyUI: Running" meaning on the status badge below - reusing it as a
+// decorative per-box accent too would blur that signal.
+export const MEDIA_ACCENT_CATS = ["cat-blue", "cat-amber", "cat-cyan", "cat-teal", "cat-violet"];
+
 /** Did a media control's value change from what was displayed? Treats
  *  null/undefined/"" as the same "empty", so saving an untouched inherited field
  *  does not pin it as an override. */
@@ -960,11 +978,17 @@ export function _mediaChanged(cur, orig) {
   return cur !== orig;
 }
 
-/** Build the "Media" settings section: one subsection per media plugin
- *  (image/music/video), each editing that plugin's own ComfyUI config block via
- *  /v1/media/config. A field left at its inherited value is not sent, so the
- *  plugin keeps falling back to the shared default until the user overrides it. */
-export async function buildMediaSection(form) {
+/** Build the "Media" settings section (its own top-level nav group): a compact
+ *  "localm's own ComfyUI" panel on top (its own little box - the set-up/remove
+ *  action plus the two coexistence fields), then one subsection per media
+ *  plugin (image/music/video) below, laid out as a responsive grid of three
+ *  boxes. Each subsection edits that plugin's own ComfyUI config block via
+ *  /v1/media/config; a field left at its inherited value is not sent, so the
+ *  plugin keeps falling back to the shared default until the user overrides it.
+ *  *fields* is the full core schema list, so the two managed-ComfyUI toggle
+ *  fields (group="Media", skipped from the flat core loop above) can be pulled
+ *  out and rendered here instead of vanishing. */
+export async function buildMediaSection(form, fields) {
   let data;
   try {
     const r = await fetch("/v1/media/config", { headers: authHeaders() });
@@ -978,9 +1002,9 @@ export async function buildMediaSection(form) {
     const fail = el("section", "card settings-section");
     fail.id = "settings-sec-media";
     fail.dataset.sec = "media";
-    fail.dataset.group = "plugins";
+    fail.dataset.group = "media";
     fail.dataset.secLabel = "Media";
-    fail.appendChild(settingsSectionHead("Media", "plugins"));
+    fail.appendChild(settingsSectionHead("Media", "media"));
     fail.appendChild(el("div", "sub",
       "Could not load media settings (" + e.message + "). The image/music/video "
       + "config is unavailable - check the server logs."));
@@ -993,54 +1017,64 @@ export async function buildMediaSection(form) {
   const panel = el("section", "card settings-section");
   panel.id = "settings-sec-media";
   panel.dataset.sec = "media";
-  panel.dataset.group = "plugins";
+  panel.dataset.group = "media";
   panel.dataset.secLabel = "Media";
-  panel.appendChild(settingsSectionHead("Media", "plugins"));
+  panel.appendChild(settingsSectionHead("Media", "media"));
   panel.appendChild(el("div", "sub",
     "ComfyUI settings for image, music, and video, each configured "
     + "independently. A blank field uses the shared default."));
+
+  // S5: localm's OWN managed ComfyUI (set up / status / remove), plus the S1
+  // coexistence fields (comfy_target / managed_comfy_enabled) it needs to be
+  // useful - a compact box of its own, ahead of the three per-plugin boxes.
+  const enabledField = (fields || []).find(f => f.key === "managed_comfy_enabled");
+  const targetField = (fields || []).find(f => f.key === "comfy_target");
+  const managed = el("div", "media-comfy-box");
+  panel.appendChild(managed);
+  renderManagedComfyPanel(managed, { enabledField, targetField });
 
   // R11/R12: register every subsection's node + label first (empty), so that when
   // we render each, its "Copy from <other>" buttons can see the other subsections,
   // and a later single-subsection re-render (R12) can find its node.
   _mediaSubs = {};
   _mediaControls = {};
+  const grid = el("div", "media-grid");
+  panel.appendChild(grid);
+  let visiblePos = 0;   // counts only boxes actually shown, so the accent cycle
+                        // has no gaps if a plugin is ever absent from byName
   for (const name of MEDIA_PLUGIN_ORDER) {
     const p = byName[name];
     if (!p) continue;
-    const sub = el("div", "media-subsection");
+    const sub = el("div", "media-subsection " + MEDIA_ACCENT_CATS[visiblePos % MEDIA_ACCENT_CATS.length]);
     sub.dataset.plugin = name;
     _mediaSubs[name] = { sub, label: p.label, fields: p.fields || [] };
-    panel.appendChild(sub);
+    grid.appendChild(sub);
+    visiblePos++;
   }
   for (const name of MEDIA_PLUGIN_ORDER) {
     if (_mediaSubs[name]) renderMediaSubsection(name);
   }
 
-  // S5: localm's OWN managed ComfyUI (set up / status / remove). Section-level
-  // (it applies to all media plugins), off by default. The S1 coexistence toggle
-  // (comfy_target / managed_comfy_enabled) is a schema field rendered with the
-  // other Media settings above, NOT duplicated here - this only adds the actions.
-  const managed = el("div", "managed-comfy");
-  panel.appendChild(managed);
-  renderManagedComfyPanel(managed);
-
   form.appendChild(panel);
 }
 
-/** (Re)render the "localm's own ComfyUI" panel in *host*: read
- *  /api/comfy/managed-status, then show either a Set-up button (which POSTs
- *  /api/comfy/setup and streams the install job) or the installed path + a Remove
- *  button (POST /api/comfy/remove). Re-renders itself in place after a setup
- *  finishes or a remove, so the view always matches what is on disk. Off by
- *  default: nothing here runs until the user clicks Set up. */
-export async function renderManagedComfyPanel(host) {
+/** (Re)render the compact "localm's own ComfyUI" box in *host*: read
+ *  /api/comfy/managed-status, then show either a Set-up button (not installed
+ *  yet, so the coexistence fields below would be inert - progressive
+ *  disclosure keeps the box small) or, once installed, the install path plus
+ *  the two coexistence controls (managed_comfy_enabled / comfy_target, from
+ *  *toggleFields*) with their own small Save, and a Remove button. Set-up
+ *  POSTs /api/comfy/setup and streams the install job; Remove POSTs
+ *  /api/comfy/remove. Re-renders itself in place after either finishes, so the
+ *  view always matches what is on disk. Off by default: nothing here runs
+ *  until the user clicks Set up. */
+export async function renderManagedComfyPanel(host, toggleFields) {
   host.replaceChildren();
-  host.appendChild(el("h4", "media-sub-head", "localm's own ComfyUI"));
-  host.appendChild(el("div", "sub",
-    "Optional: let localm run its OWN ComfyUI under the localm data folder so it "
-    + "can pin a known-good version and carry fixes. Off by default; your own "
-    + "ComfyUI is never modified. Pick which one localm uses with the fields above."));
+  const head = el("div", "media-comfy-head");
+  head.appendChild(el("h4", "media-sub-head", "localm's own ComfyUI"));
+  const pill = el("span", "comfy-pill", "checking...");
+  head.appendChild(pill);
+  host.appendChild(head);
 
   let st;
   try {
@@ -1050,16 +1084,53 @@ export async function renderManagedComfyPanel(host) {
   } catch (e) {
     // Surface, do not hide (rule 5): if the managed state cannot be read, say so
     // rather than defaulting to a possibly-wrong (e.g. Set-up) view.
+    pill.textContent = "unknown";
     host.appendChild(el("div", "sub",
       "Could not read the managed ComfyUI status (" + e.message + ")."));
     return;
   }
 
   if (st.installed) {
+    pill.textContent = "installed";
+    pill.classList.add("ok");
     const info = el("div", "sub");
     info.append("Installed at ");
     info.appendChild(el("code", null, st.path || ""));
     host.appendChild(info);
+
+    // The S1 coexistence controls only matter once an instance exists; render
+    // them here (rather than earlier as inert fields) and save them with the
+    // Media section's own generic save path (they are ordinary core fields).
+    // Built independently of the actions row below: Remove must always be
+    // offered once installed, even if the schema fetch is missing these two
+    // fields for some reason (rule 5 - a partial schema must not hide Remove).
+    const row = el("div", "media-comfy-row");
+    const ctrls = [];
+    for (const field of [toggleFields.enabledField, toggleFields.targetField]) {
+      if (!field) continue;
+      const ctrl = buildSettingControl(field);
+      if (!ctrl) continue;
+      ctrls.push(ctrl);
+      row.appendChild(ctrl.node);
+    }
+    if (ctrls.length) {
+      host.appendChild(row);
+      // This panel can re-render in place (after Set up / Remove / Save)
+      // without a full page refresh, which would otherwise leave stale,
+      // detached-node entries for these two keys piling up in the shared
+      // control list every time - drop any prior entries for them first.
+      const keys = new Set(ctrls.map(c => c.field.key));
+      _settingsControls = _settingsControls.filter(c => !keys.has(c.field.key));
+      _settingsControls.push(...ctrls);
+    }
+
+    const actions = el("div", "actions");
+    if (ctrls.length) {
+      const save = el("button", "btn-primary", "Save");
+      save.type = "button";
+      save.onclick = () => saveSettingsSection("media");
+      actions.appendChild(save);
+    }
     const remove = el("button", "btn-secondary comfy-managed-remove-btn", "Remove");
     remove.type = "button";
     remove.onclick = () => confirmDanger(
@@ -1077,21 +1148,30 @@ export async function renderManagedComfyPanel(host) {
         } catch (e) {
           toast("Remove failed", true);
         }
-        renderManagedComfyPanel(host);
+        renderManagedComfyPanel(host, toggleFields);
       });
-    host.appendChild(remove);
+    actions.appendChild(remove);
+    host.appendChild(actions);
     return;
   }
 
+  pill.textContent = "not set up";
+  host.appendChild(el("div", "sub",
+    "Optional: let localm run its OWN ComfyUI under the localm data folder so it "
+    + "can pin a known-good version and carry fixes. Off by default; your own "
+    + "ComfyUI is never modified."));
+
   // Not installed: offer to set it up. Provisioning is long (multi-GB), so it runs
   // as a background job whose log streams into <pre> below - the request never blocks.
-  const setup = el("button", "btn-secondary comfy-managed-setup-btn",
+  const actions = el("div", "actions");
+  const setup = el("button", "btn-primary comfy-managed-setup-btn",
                    "Set up localm's own ComfyUI");
   setup.type = "button";
+  actions.appendChild(setup);
+  host.appendChild(actions);
   const log = el("pre", "comfy-managed-log");
   log.style.display = "none";
-  log.style.maxHeight = "220px";
-  log.style.overflow = "auto";
+  host.appendChild(log);
   const reset = () => {
     setup.disabled = false;
     setup.textContent = "Set up localm's own ComfyUI";
@@ -1124,12 +1204,10 @@ export async function renderManagedComfyPanel(host) {
     });
     const ok = !!(end && end.status === "done");
     toast(ok ? "localm's ComfyUI is ready" : "Setup did not finish (see the log)", !ok);
-    // Re-read status: installed on success (swaps to the Remove view), or back to
-    // the Set-up button so the user can retry.
-    renderManagedComfyPanel(host);
+    // Re-read status: installed on success (swaps to the coexistence-fields +
+    // Remove view), or back to the Set-up button so the user can retry.
+    renderManagedComfyPanel(host, toggleFields);
   };
-  host.appendChild(setup);
-  host.appendChild(log);
 }
 
 // R11/R12: live media subsection registry, so we can re-render just the saved one
@@ -1152,7 +1230,7 @@ export function renderMediaSubsection(name) {
     badge.style.marginLeft = "12px";
     badge.style.padding = "2px 6px";
     badge.style.borderRadius = "4px";
-    badge.style.backgroundColor = "var(--bg-card-hover, #30363d)";
+    badge.style.backgroundColor = "var(--bg-input)";
     head.appendChild(badge);
     
     // NEW-STOPCOMFY: Stop/Restart controls. Stop shows whenever ComfyUI is up
@@ -1180,11 +1258,16 @@ export function renderMediaSubsection(name) {
         .then(r => r.json())
         .then(d => {
           badge.textContent = d.alive ? "ComfyUI: Running" : "ComfyUI: Stopped";
-          badge.style.color = d.alive ? "var(--success-color, #2ea043)" : "var(--error-color, #cb2431)";
+          // Real theme tokens (matches the app's actual light/dark palette),
+          // not the fabricated --success-color/--error-color fallbacks this
+          // used before - those were never defined anywhere, so the badge
+          // always rendered the same hardcoded hex regardless of theme.
+          badge.style.color = d.alive ? "var(--green)" : "var(--red)";
           stopBtn.style.display = d.alive ? "" : "none";
           restartBtn.style.display = d.launched_by_localm ? "" : "none";
         }).catch(() => {
           badge.textContent = "ComfyUI: Unknown";
+          badge.style.color = "";   // drop a stale Running/Stopped color from a prior check
           stopBtn.style.display = "none";
           restartBtn.style.display = "none";
         });
