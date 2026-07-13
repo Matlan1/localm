@@ -336,23 +336,34 @@ class TestGpuMemory:
 
 
 class TestFreeVramBytesPrefersBackend:
-    def test_prefers_backend_over_torch(self, monkeypatch):
-        from localm.inference.backends.llamacpp import _loader
-        from localm.inference.backends.gguf import GgufBackend
-        monkeypatch.setattr(_loader, "gpu_memory",
-                            lambda: (5 * 1024 ** 3, 16 * 1024 ** 3))
-        # torch would say something different; the backend view must win.
-        monkeypatch.setattr(GgufBackend, "_free_total_vram_bytes",
-                            staticmethod(lambda: (99, 99)))
-        assert GgufBackend._free_vram_bytes() == 5 * 1024 ** 3
+    """_free_vram_bytes()'s source-of-truth for the KV-placement decision this
+    file covers (BUG-2): torch.cuda is now ALWAYS preferred when it can answer,
+    and the direct native loader.gpu_memory() call is never made from here at
+    all (only its crash-safe, subprocess-isolated wrapper gpu_memory_isolated()
+    is used, as a fallback, when torch cannot answer) - see
+    tests/test_vram_preflight.py::TestFreeVramBytesUsesIsolatedNativeFallback
+    for the full behavior + the native-abort root cause this order is built
+    around. Updated from the original "prefers the native backend over torch"
+    expectation, which that fix intentionally reversed."""
 
-    def test_falls_back_to_torch_when_backend_unavailable(self, monkeypatch):
+    def test_prefers_torch_over_isolated_fallback(self, monkeypatch):
         from localm.inference.backends.llamacpp import _loader
         from localm.inference.backends.gguf import GgufBackend
-        monkeypatch.setattr(_loader, "gpu_memory", lambda: None)
+        monkeypatch.setattr(_loader, "gpu_memory_isolated",
+                            lambda: (5 * 1024 ** 3, 16 * 1024 ** 3))
+        # the isolated fallback would say something different; torch must win.
         monkeypatch.setattr(GgufBackend, "_free_total_vram_bytes",
                             staticmethod(lambda: (7 * 1024 ** 3, 16 * 1024 ** 3)))
         assert GgufBackend._free_vram_bytes() == 7 * 1024 ** 3
+
+    def test_falls_back_to_isolated_probe_when_torch_unavailable(self, monkeypatch):
+        from localm.inference.backends.llamacpp import _loader
+        from localm.inference.backends.gguf import GgufBackend
+        monkeypatch.setattr(_loader, "gpu_memory_isolated",
+                            lambda: (5 * 1024 ** 3, 16 * 1024 ** 3))
+        monkeypatch.setattr(GgufBackend, "_free_total_vram_bytes",
+                            staticmethod(lambda: (None, None)))
+        assert GgufBackend._free_vram_bytes() == 5 * 1024 ** 3
 
 
 # --------------------------------------------------------------------------- #
