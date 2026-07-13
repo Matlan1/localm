@@ -1634,13 +1634,22 @@ def _restart_argv() -> list:
     return [sys.executable, "-m", "localm", *sys.argv[1:]]
 
 
-def _do_restart() -> None:
+def _do_restart(*, update_watchdog: Optional[dict] = None) -> None:
     """R18: restart this server IN PLACE. Unload the model FIRST (clean native
     teardown, like _do_shutdown - a hard re-exec while it is loaded can segfault),
     clear the crash marker so this intentional restart is not reported as a crash,
     then re-exec the same command line so the server comes back on the same port.
     os.execv replaces the process image and does not return on success. Separated
-    from the route so it can be tested without actually re-execing."""
+    from the route so it can be tested without actually re-execing.
+
+    *update_watchdog*, when given (only by the post-update restart path - see
+    routes/admin.py's /api/update/apply), is a
+    ``{host, port, scheme, expect_version}`` dict describing this instance. A
+    DETACHED health-check watchdog is spawned right before the re-exec (LM-DA-011);
+    it polls the restarted instance's own /whoami and auto-rolls back if the
+    expected version never comes up healthy within its timeout. The plain
+    "restart the server" button (/v1/server/restart) calls this with no
+    update_watchdog, so it is entirely unaffected."""
     # Unload all engines in the multi-model dictionary
     for engine in list(_engines.values()):
         try:
@@ -1715,18 +1724,40 @@ def _do_restart() -> None:
     except Exception:
         pass  # never let fd hygiene block the restart
 
+    if update_watchdog:
+        # Spawned as the LAST step before execv, deliberately: the watchdog's own
+        # timeout clock starts when its process begins executing, so spawning as
+        # late as possible keeps that clock closest to the actual restart moment.
+        try:
+            from localm import updater
+            updater.spawn_health_watchdog(
+                host=update_watchdog["host"], port=update_watchdog["port"],
+                scheme=update_watchdog.get("scheme", "http"),
+                expect_version=update_watchdog["expect_version"])
+        except Exception as e:
+            # spawn_health_watchdog() already never raises; this is
+            # belt-and-suspenders so even a malformed dict here can never block
+            # the restart itself (we do not hide problems - log it, but a broken
+            # watchdog must not make updates worse than having none at all).
+            try:
+                from localm.debuglog import logger as _dbg
+                _dbg.warning("update watchdog not started: %s", e)
+            except Exception:
+                pass
+
     os.execv(sys.executable, _restart_argv())
 
 
-def _request_restart(delay: float = 0.25) -> None:
+def _request_restart(delay: float = 0.25, *, update_watchdog: Optional[dict] = None) -> None:
     """Run _do_restart shortly after returning, so the 200 response flushes to the
-    client before the process re-execs (mirrors _request_shutdown)."""
+    client before the process re-execs (mirrors _request_shutdown). *update_watchdog*
+    is forwarded to _do_restart unchanged - see its docstring."""
     import threading
     import time as _t
 
     def _run():
         _t.sleep(delay)
-        _do_restart()
+        _do_restart(update_watchdog=update_watchdog)
 
     threading.Thread(target=_run, daemon=True).start()
 

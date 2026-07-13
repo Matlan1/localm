@@ -143,6 +143,62 @@ def test_update_apply_setup_class_does_not_restart(monkeypatch):
     assert restarted == [], "a setup-class update must NOT auto-restart"
 
 
+# ------------------- LM-DA-011: post-update health watchdog -----------------
+
+def _monkeypatch_apply_ok(monkeypatch, version="0.2.0"):
+    monkeypatch.setattr(updater, "available", lambda: True)
+    monkeypatch.setattr(updater, "check", lambda: {
+        "current": "0.1.0", "latest": f"v{version}", "newer": True, "asset": {"id": 3}})
+    monkeypatch.setattr(updater, "apply", lambda aid, **kw: {
+        "applied": True, "version": version, "klass": "reboot", "backup": "b"})
+
+
+def test_update_apply_builds_watchdog_from_app_state(monkeypatch):
+    _open_mode(monkeypatch)
+    import localm.inference.http_server as hs
+    calls = []
+    monkeypatch.setattr(hs, "_request_restart",
+                        lambda *a, **k: calls.append(k.get("update_watchdog")))
+    _monkeypatch_apply_ok(monkeypatch)
+    app = create_app(_engine())
+    app.state.bind_host = "0.0.0.0"          # wildcard bind -> probed via loopback
+    app.state.instance_port = 9001
+    app.state.instance_scheme = "http"
+    data = _post(app, "/api/update/apply").json()
+    assert data["applied"] is True
+    assert calls == [{"host": "127.0.0.1", "port": 9001, "scheme": "http",
+                      "expect_version": "0.2.0"}]
+
+
+def test_update_apply_uses_concrete_bind_host_directly(monkeypatch):
+    _open_mode(monkeypatch)
+    import localm.inference.http_server as hs
+    calls = []
+    monkeypatch.setattr(hs, "_request_restart",
+                        lambda *a, **k: calls.append(k.get("update_watchdog")))
+    _monkeypatch_apply_ok(monkeypatch)
+    app = create_app(_engine())
+    app.state.bind_host = "192.168.1.5"      # a concrete, non-loopback bind
+    app.state.instance_port = 9002
+    app.state.instance_scheme = "http"
+    _post(app, "/api/update/apply")
+    assert calls[0]["host"] == "192.168.1.5"   # used as-is, NOT remapped to loopback
+
+
+def test_update_apply_no_watchdog_when_port_missing(monkeypatch):
+    """A bare create_app() that never advertised (instance_port unset) must still
+    restart normally - just without a watchdog, exactly like before this feature."""
+    _open_mode(monkeypatch)
+    import localm.inference.http_server as hs
+    calls = []
+    monkeypatch.setattr(hs, "_request_restart",
+                        lambda *a, **k: calls.append(k.get("update_watchdog")))
+    _monkeypatch_apply_ok(monkeypatch)
+    data = _post(create_app(_engine()), "/api/update/apply").json()
+    assert data["applied"] is True and data.get("restarting") is True
+    assert calls == [None]
+
+
 # ------------------------------- auth -----------------------------------
 
 def test_update_apply_requires_management_auth(monkeypatch):

@@ -5,6 +5,8 @@ exercised here (it has its own detached-helper tests)."""
 
 import base64
 import json
+import subprocess
+import sys
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -371,3 +373,89 @@ def test_rollback_last_falls_back_to_backup_listing_without_manifest(tmp_path, m
     updater.rollback_last(installed=install)
     assert (install / "existing.txt").read_text(encoding="utf-8") == "OLD-preapply"  # restored
     assert (install / "brand_new").exists()   # fallback cannot remove an unrecorded new entry
+
+
+# ------------------------ spawn_health_watchdog (LM-DA-011) ----------------
+#
+# spawn_health_watchdog() never actually runs scripts/update_watchdog.py in these
+# tests - it injects a fake `popen` (matching apply()'s download_opener/runner
+# convention) and asserts what would have been launched. The watchdog script's OWN
+# behavior (polling, rollback invocation, detachment survival) is covered by
+# tests/test_update_watchdog.py.
+
+def _capturing_popen(calls):
+    def popen(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return object()   # a stand-in Popen handle; spawn_health_watchdog ignores it
+    return popen
+
+
+def test_spawn_health_watchdog_builds_expected_argv_and_env(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setattr("localm.config.home_dir", lambda: home)
+    calls = []
+    ok = updater.spawn_health_watchdog(
+        host="127.0.0.1", port=8642, scheme="http", expect_version="0.2.0",
+        popen=_capturing_popen(calls))
+    assert ok is True
+    assert len(calls) == 1
+    argv, kwargs = calls[0]
+    assert argv[0] == sys.executable
+    assert argv[1] == str(updater._watchdog_script())
+    assert "--host" in argv and argv[argv.index("--host") + 1] == "127.0.0.1"
+    assert "--port" in argv and argv[argv.index("--port") + 1] == "8642"
+    assert "--scheme" in argv and argv[argv.index("--scheme") + 1] == "http"
+    assert ("--expect-version" in argv
+            and argv[argv.index("--expect-version") + 1] == "0.2.0")
+    assert ("--install-root" in argv
+            and argv[argv.index("--install-root") + 1] == str(updater.repo_root()))
+    assert ("--log-file" in argv
+            and argv[argv.index("--log-file") + 1] == str(home / "updates" / "watchdog.log"))
+    assert kwargs["stdin"] == subprocess.DEVNULL
+    assert kwargs["stdout"] == subprocess.DEVNULL
+    assert kwargs["stderr"] == subprocess.DEVNULL
+    assert kwargs["env"]["LOCALM_HOME"] == str(home)
+
+
+def test_spawn_health_watchdog_posix_uses_start_new_session(tmp_path, monkeypatch):
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
+    monkeypatch.setattr(sys, "platform", "linux")
+    calls = []
+    updater.spawn_health_watchdog(host="127.0.0.1", port=1, scheme="http",
+                                  expect_version="1", popen=_capturing_popen(calls))
+    _, kwargs = calls[0]
+    assert kwargs.get("start_new_session") is True
+    assert "creationflags" not in kwargs
+
+
+def test_spawn_health_watchdog_windows_uses_detached_flags(tmp_path, monkeypatch):
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
+    monkeypatch.setattr(sys, "platform", "win32")
+    calls = []
+    updater.spawn_health_watchdog(host="127.0.0.1", port=1, scheme="http",
+                                  expect_version="1", popen=_capturing_popen(calls))
+    _, kwargs = calls[0]
+    assert "start_new_session" not in kwargs
+    assert kwargs["creationflags"] & 0x00000008   # DETACHED_PROCESS
+    assert kwargs["creationflags"] & 0x00000200   # CREATE_NEW_PROCESS_GROUP
+
+
+def test_spawn_health_watchdog_never_raises_when_popen_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
+
+    def boom(argv, **kwargs):
+        raise OSError("no processes for you")
+
+    ok = updater.spawn_health_watchdog(host="127.0.0.1", port=1, scheme="http",
+                                       expect_version="1", popen=boom)
+    assert ok is False
+
+
+def test_spawn_health_watchdog_missing_script_returns_false(tmp_path, monkeypatch):
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
+    monkeypatch.setattr(updater, "_watchdog_script", lambda: tmp_path / "nope.py")
+    calls = []
+    ok = updater.spawn_health_watchdog(host="127.0.0.1", port=1, scheme="http",
+                                       expect_version="1", popen=_capturing_popen(calls))
+    assert ok is False
+    assert calls == []

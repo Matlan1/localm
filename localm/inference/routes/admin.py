@@ -17,6 +17,17 @@ from localm import scopes
 from localm.inference.errors import format_localm_error
 
 
+def _watchdog_probe_host(bind_host) -> str:
+    """The address the post-update health watchdog should probe: a wildcard bind
+    (0.0.0.0 / :: / unset) is not itself connectable, mapped to loopback exactly
+    like mount_gui_surface's own self-connect URL (http_server.py, self_url); a
+    concrete single-interface bind is used AS-IS - unlike mount_gui_surface, which
+    always hardcodes 127.0.0.1, that would be wrong here if the server is bound
+    ONLY to a non-loopback interface (loopback would then be unreachable)."""
+    h = (bind_host or "").strip()
+    return "127.0.0.1" if h in ("", "0.0.0.0", "::") else h
+
+
 def register(app: FastAPI, ctx) -> None:
     require_scope = _hs.require_scope
     _request_shutdown = _hs._request_shutdown
@@ -191,6 +202,30 @@ def register(app: FastAPI, ctx) -> None:
         # Restart in place so the swapped (editable) code loads - except a setup-class
         # update, which needs setup.bat re-run by the user.
         if res.get("klass") != "setup":
-            _request_restart()
+            # LM-DA-011: this is the ONLY restart trigger that transitions
+            # automatically with no user watching (the CLI's `localm update` tells
+            # the user to relaunch by hand; the plain /v1/server/restart button is
+            # unrelated to updates) - so it is the one that gets a post-restart
+            # health watchdog. Built from app.state (set by advertise()); a bare
+            # create_app() test harness that never advertised leaves instance_port
+            # unset, so watchdog stays None and the restart proceeds unwatched,
+            # exactly like today.
+            watchdog = None
+            port = getattr(app.state, "instance_port", None)
+            new_version = res.get("version")
+            if port and new_version:
+                watchdog = {
+                    "host": _watchdog_probe_host(getattr(app.state, "bind_host", None)),
+                    "port": port,
+                    "scheme": getattr(app.state, "instance_scheme", None) or "http",
+                    "expect_version": new_version,
+                }
+            else:
+                from localm.debuglog import logger
+                logger.warning(
+                    "update applied but the instance has no bind port/version to "
+                    "probe (never fully advertised); restarting WITHOUT a health "
+                    "watchdog")
+            _request_restart(update_watchdog=watchdog)
             res["restarting"] = True
         return res

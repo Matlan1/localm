@@ -8,9 +8,14 @@ now" button. Most updates are code-only and need just a file swap + reboot (the
 install is editable, so new source is live on restart); ``deps``/``runtime`` escalate
 only when they actually change. The file-swap primitives live in
 ``localm/_apply_update.py``; ``apply()`` below backs up first and rolls back on a
-failed swap or post-step. There is NO post-relaunch health check or auto-rollback
-for a build that misbehaves after the restart (see the LM-DA-011 note in
-``_apply_update.py``); recovery is ``localm update --rollback``.
+failed swap or post-step. The server-initiated restart (the ONLY unattended
+transition - the CLI always tells the user to relaunch by hand) is followed by a
+DETACHED post-relaunch health watchdog (LM-DA-011, ``spawn_health_watchdog()``
+below) that polls the restarted instance's own ``/whoami`` for the applied
+VERSION and automatically invokes the standalone ``scripts/rollback_update.py``
+if it never comes up healthy within its timeout. Manual recovery is still always
+available: ``localm update --rollback``, or ``rollback.bat``/``rollback.sh`` in
+the install root.
 """
 
 from __future__ import annotations
@@ -449,6 +454,92 @@ def _installed_backend() -> str:
         return hwdetect.detect().recommended or "vulkan"
     except Exception:
         return "vulkan"
+
+
+# ------------------------- post-restart health watchdog -------------------
+
+# LM-DA-011: defaults for the detached post-restart health watchdog. TIMEOUT
+# budgets the WHOLE restarted process coming back up and answering /whoami (which
+# does NOT wait on model load) - importing localm's full chain plus unloading a
+# previously-loaded engine plus rebinding the port can run into the tens of
+# seconds on a cold disk / first import. 90s leaves comfortable margin without
+# leaving a genuinely broken build undetected for long; this runs unattended in
+# the background after the update button has already returned 200, so nothing
+# user-facing is blocked waiting on it.
+WATCHDOG_TIMEOUT_S = 90.0
+WATCHDOG_POLL_INTERVAL_S = 2.0
+WATCHDOG_REQUEST_TIMEOUT_S = 3.0
+
+
+def _watchdog_script() -> Path:
+    return repo_root() / "scripts" / "update_watchdog.py"
+
+
+def spawn_health_watchdog(*, host: str, port, scheme: str, expect_version: str,
+                          timeout: float = WATCHDOG_TIMEOUT_S,
+                          poll_interval: float = WATCHDOG_POLL_INTERVAL_S,
+                          request_timeout: float = WATCHDOG_REQUEST_TIMEOUT_S,
+                          popen=None) -> bool:
+    """Spawn ``scripts/update_watchdog.py`` DETACHED to verify the build
+    ``_do_restart`` is about to re-exec into actually comes back up, auto-rolling
+    back if it does not (LM-DA-011). Returns True iff the spawn was attempted and
+    succeeded - NEVER raises: a watchdog that fails to spawn must not block or fail
+    the restart itself (today there is no watchdog at all, so a failed spawn is a
+    no-op, not a new regression). *popen* is injectable for tests, matching
+    apply()'s download_opener/runner convention."""
+    try:
+        import os
+        import subprocess
+        import sys
+        from localm.config import home_dir
+        script = _watchdog_script()
+        if not script.is_file():
+            _watchdog_warn("update watchdog script missing at %s; this restart "
+                           "will not be auto-verified/rolled back", script)
+            return False
+        home = home_dir()
+        log_file = home / "updates" / "watchdog.log"
+        argv = [sys.executable, str(script),
+               "--host", str(host), "--port", str(port), "--scheme", str(scheme),
+               "--expect-version", str(expect_version),
+               "--install-root", str(repo_root()),
+               "--timeout", str(timeout), "--poll-interval", str(poll_interval),
+               "--request-timeout", str(request_timeout),
+               "--log-file", str(log_file)]
+        env = os.environ.copy()
+        # So the watchdog's rollback call (on failure) re-derives the SAME data
+        # home this server was actually using, via rollback_update.py's own
+        # _detect_home() LOCALM_HOME-env precedence - no home-dir logic duplicated
+        # here or in the watchdog itself.
+        env["LOCALM_HOME"] = str(home)
+        kwargs = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                      stderr=subprocess.DEVNULL, env=env, close_fds=True)
+        if sys.platform == "win32":
+            # DETACHED_PROCESS (no console) + CREATE_NEW_PROCESS_GROUP so the
+            # watchdog is not tied to this process's console/process group and
+            # survives past the execv this call precedes. Literal fallback
+            # constants let a test exercise this branch on any platform via a
+            # monkeypatched sys.platform.
+            kwargs["creationflags"] = (
+                getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200))
+        else:
+            # setsid: detaches from the parent's session/process group, so the
+            # watchdog also survives a SIGHUP if the controlling terminal closes.
+            kwargs["start_new_session"] = True
+        (popen or subprocess.Popen)(argv, **kwargs)
+        return True
+    except Exception as e:
+        _watchdog_warn("could not spawn the update health watchdog: %s", e)
+        return False
+
+
+def _watchdog_warn(msg, *args) -> None:
+    try:
+        from localm.debuglog import logger
+        logger.warning(msg, *args)
+    except Exception:
+        pass   # logging must never be the thing that raises here
 
 
 def rollback_last(*, installed=None) -> dict:

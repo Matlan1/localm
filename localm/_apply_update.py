@@ -6,12 +6,16 @@ the post-swap deps/runtime step run by ``updater.apply``) fails partway.
 Runs ONLY from an explicit user action (``localm update`` / the GUI "Update now"
 button), NEVER automatically. The swap runs in-process inside ``updater.apply()``
 and the caller restarts afterwards (the CLI tells the user; the server re-execs).
-KNOWN GAP (LM-DA-011): there is no detached helper process, no post-relaunch
-health check, and no automatic rollback for a build that swaps cleanly but
-misbehaves after the restart. Recovery from such a build is ``localm update
---rollback`` - which lives inside the NEW build, so a build too broken to start
-means restoring the kept backup dir by hand. The health-checked detached
-relauncher must be built before the updater serves real releases.
+LM-DA-011: the server's automatic restart (``_do_restart`` in
+``localm/inference/http_server.py``) spawns a DETACHED helper process right
+before re-exec'ing (``updater.spawn_health_watchdog()`` ->
+``scripts/update_watchdog.py``) that polls the relaunched build's own
+``/whoami`` for the applied VERSION and automatically rolls back - via the
+standalone ``scripts/rollback_update.py``, loaded by file path so it works even
+if the new build's ``localm`` package will not import - if it never comes up
+healthy within a bounded window. Manual recovery (``localm update --rollback``,
+or ``rollback.bat``/``rollback.sh`` in the install root) remains available for
+a build too broken for even the watchdog's own spawn to matter.
 
 The file primitives here are pure and unit-tested; ``updater.apply()`` wires them
 to download, signature verification, and the post-swap step.
