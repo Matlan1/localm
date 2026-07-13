@@ -113,9 +113,11 @@ def test_no_embedder_keeps_lexical_only_behavior(tmp_path, allow_writes):
 
 
 def test_synth_cannot_semantically_override_user_fact(tmp_path, allow_writes):
-    # The existing user-fact guardrail still holds through the semantic path: a
-    # synth candidate that semantically matches a user fact cannot UPDATE/DELETE
-    # it (downgraded to NO_OP).
+    # The user-fact guardrail still holds through the semantic path: a synth
+    # candidate that semantically matches a user fact cannot silently UPDATE/DELETE
+    # it. Post-F12b a HIGH-confidence contradiction is no longer a silent NO_OP - it
+    # is surfaced as a PENDING CORRECTION for the user to accept/reject - but the
+    # trusted record itself is left untouched here (never auto-overwritten).
     s = MemoryStore("owner", "chat", root=tmp_path)
     s.add(MemoryRecord(text="User lives in Berlin", source="user",
                        importance=0.8), embed_fn=_fake_embed)
@@ -126,11 +128,14 @@ def test_synth_cannot_semantically_override_user_fact(tmp_path, allow_writes):
                 {"fact": "User moved to Munich", "confidence": 0.9}]})
         return json.dumps({"decision": "UPDATE", "confidence": 0.9})
 
-    run_consolidation(s, "User: I moved to Munich", complete, embed_fn=_fake_embed)
+    res = run_consolidation(s, "User: I moved to Munich", complete, embed_fn=_fake_embed)
     texts = [r.text for r in s.all()]
-    # The user's Berlin fact is protected; the synth Munich claim is added
-    # alongside (never overwrites a user fact), never deletes it.
-    assert "User lives in Berlin" in texts
+    # The user's Berlin fact is protected (unchanged, not overwritten, not deleted)
+    # and the synth Munich claim is NOT blind-added alongside it.
+    assert texts == ["User lives in Berlin"]
+    # ...but the contradiction is surfaced for review (F12b [9]), not swallowed.
+    assert res["proposed"] == 1
+    assert len(s.corrections()) == 1
 
 
 if __name__ == "__main__":

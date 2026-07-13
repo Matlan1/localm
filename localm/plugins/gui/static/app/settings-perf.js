@@ -934,7 +934,7 @@ export function reconcileActiveView() {
 
 /* ---- assistant memory ---- */
 
-export const memory = { text: "", writable: false };
+export const memory = { text: "", writable: false, corrections: [] };
 
 export async function refreshMemory() {
   try {
@@ -943,7 +943,42 @@ export async function refreshMemory() {
     const data = await r.json();
     memory.text = data.text || "";
     memory.writable = !!data.writable;
+    // Pending supersede proposals: the system spotted a later statement that
+    // contradicts a saved fact but never auto-overwrites it (memory-audit [9]).
+    memory.corrections = Array.isArray(data.corrections) ? data.corrections : [];
   } catch (e) { /* server unreachable */ }
+}
+
+function _relAge(tsSeconds) {
+  // A short "last confirmed N ago" for the staleness affordance. Empty when the
+  // timestamp is missing or in the future (clock skew).
+  if (!tsSeconds) return "";
+  const secs = Date.now() / 1000 - Number(tsSeconds);
+  if (!(secs > 0)) return "just now";
+  const day = 86400;
+  if (secs < 3600) return Math.max(1, Math.round(secs / 60)) + " min ago";
+  if (secs < day) return Math.round(secs / 3600) + " hr ago";
+  if (secs < 30 * day) return Math.round(secs / day) + " day(s) ago";
+  return Math.round(secs / (30 * day)) + " month(s) ago";
+}
+
+export async function resolveCorrection(cid, accept) {
+  // Accept (apply the update/delete, old value archived + recoverable) or reject
+  // (keep the fact, reset its staleness). The user decides; a distilled candidate
+  // never silently overwrites a user-typed fact (memory-audit 2026-07-02 [9]).
+  try {
+    const r = await fetch(
+      "/api/memory/corrections/" + encodeURIComponent(cid) +
+        (accept ? "/accept" : "/reject"),
+      { method: "POST", headers: authHeaders() });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    await refreshMemory();
+    toast(accept ? "Correction applied" : "Suggestion dismissed");
+    return data;
+  } catch (e) {
+    toast("Could not update memory: " + e.message, true);
+  }
 }
 
 export async function rememberFact(fact) {
@@ -1038,6 +1073,58 @@ export function openMemoryModal() {
       row.appendChild(synth);
       body.appendChild(row);
       body.appendChild(status);
+
+      // Suggested corrections: the system found a later statement contradicting a
+      // saved (user-typed) fact. It never auto-overwrites - you accept or reject
+      // each one (memory-audit 2026-07-02 [9]).
+      const corrWrap = el("div");
+      corrWrap.style.marginTop = "16px";
+      body.appendChild(corrWrap);
+      const renderCorrections = () => {
+        corrWrap.textContent = "";
+        const list = memory.corrections || [];
+        if (!list.length) return;
+        corrWrap.appendChild(el("div", "sub",
+          `Suggested corrections (${list.length}) - nothing changes until you choose`));
+        for (const c of list) {
+          const card = el("div");
+          card.style.cssText =
+            "margin-top:8px;padding:8px 10px;border:1px solid var(--border,#3a3a3a);" +
+            "border-radius:6px";
+          const was = el("div", undefined, c.target_text || "");
+          was.style.cssText = "text-decoration:line-through;opacity:.65";
+          card.appendChild(was);
+          card.appendChild(el("div", undefined, c.action === "delete"
+            ? "→ no longer true - suggest forgetting it"
+            : "→ " + (c.proposed_text || "")));
+          const age = _relAge(c.target_updated);
+          if (age) card.appendChild(el("div", "sub", "you last confirmed this " + age));
+          const btns = el("div");
+          btns.style.cssText = "margin-top:6px;display:flex;gap:8px";
+          const acc = el("button", "btn-primary",
+            c.action === "delete" ? "Forget it" : "Apply");
+          acc.onclick = async () => {
+            acc.disabled = true;
+            await resolveCorrection(c.id, true);
+            ta.value = memory.text;              // an applied update changes the list
+            renderCorrections();
+          };
+          const rej = el("button", "btn", "Keep as is");
+          rej.onclick = async () => {
+            rej.disabled = true;
+            await resolveCorrection(c.id, false);
+            renderCorrections();
+          };
+          btns.appendChild(acc);
+          btns.appendChild(rej);
+          card.appendChild(btns);
+          corrWrap.appendChild(card);
+        }
+      };
+      renderCorrections();
+      // Reflect any corrections a fresh synthesis surfaced.
+      const origSynth = synth.onclick;
+      synth.onclick = async () => { await origSynth(); renderCorrections(); };
     }
   });
 }

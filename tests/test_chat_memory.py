@@ -198,6 +198,59 @@ def test_consolidate_requires_model(client):
 
 
 # --------------------------------------------------------------------------- #
+#  F12b: pending-correction routes over the REAL ASGI app (mounting + methods  #
+#  + status codes), independent of the model (memory-audit [9]).              #
+# --------------------------------------------------------------------------- #
+
+def _seed_correction(home):
+    from localm.memory import MemoryStore, PendingCorrection
+    s = MemoryStore("owner", "chat", root=home / "memory")
+    target = s.add(MemoryRecord(text="User lives in Berlin", source="user"))
+    s.propose_corrections([PendingCorrection(
+        target_id=target.id, action="update", proposed_text="User moved to Munich",
+        target_text=target.text, confidence=0.9)])
+    return target
+
+
+def test_corrections_surfaced_and_accepted_over_http(client, home):
+    _seed_correction(home)
+    corrs = client.get("/api/memory").json()["corrections"]
+    assert len(corrs) == 1 and corrs[0]["proposed_text"] == "User moved to Munich"
+    r = client.post(f"/api/memory/corrections/{corrs[0]['id']}/accept")
+    assert r.status_code == 200 and r.json()["status"] == "updated"
+    data = client.get("/api/memory").json()
+    texts = [i["text"] for i in data["items"]]
+    assert "User moved to Munich" in texts and "User lives in Berlin" not in texts
+    assert data["corrections"] == []                   # cleared
+
+
+def test_corrections_reject_over_http(client, home):
+    _seed_correction(home)
+    cid = client.get("/api/memory").json()["corrections"][0]["id"]
+    r = client.post(f"/api/memory/corrections/{cid}/reject")
+    assert r.status_code == 200 and r.json()["status"] == "rejected"
+    data = client.get("/api/memory").json()
+    assert [i["text"] for i in data["items"]] == ["User lives in Berlin"]   # kept
+    assert data["corrections"] == []
+
+
+def test_corrections_unknown_id_404_over_http(client, home):
+    _seed_correction(home)
+    assert client.post("/api/memory/corrections/nope0000nope0000/accept").status_code == 404
+    assert client.post("/api/memory/corrections/nope0000nope0000/reject").status_code == 404
+
+
+def test_corrections_blocked_in_privacy_over_http(client, home, monkeypatch):
+    _seed_correction(home)
+    cid = client.get("/api/memory").json()["corrections"][0]["id"]
+    monkeypatch.setenv("LOCALM_MODE", "privacy")
+    data = client.get("/api/memory").json()
+    assert data["writable"] is False and data["corrections"] == []   # hidden, no write
+    assert client.post(f"/api/memory/corrections/{cid}/accept").status_code == 403
+    assert client.post(f"/api/memory/corrections/{cid}/reject").status_code == 403
+
+
+# --------------------------------------------------------------------------- #
 #  Episodic chat memory                                                       #
 # --------------------------------------------------------------------------- #
 

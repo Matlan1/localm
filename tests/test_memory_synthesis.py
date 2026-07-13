@@ -144,3 +144,37 @@ def test_run_job_memory_kind(memhome):
     assert res["status"] == "ok"
     assert "Sam" in res["output"]
     assert any("Sam" in r.text for r in plug._chat_store().all())
+
+
+def test_run_job_memory_surfaces_pending_corrections(memhome):
+    # A background memory job must TELL the user when a saved fact has a pending
+    # supersede suggestion (rule 5: do not hide), reporting the total outstanding.
+    from localm.plugins.builtin.jobs import runner
+    from localm.plugins.builtin.jobs.store import Job
+
+    plug._chat_store().add(MemoryRecord(text="User lives in Berlin", source="user",
+                                        importance=0.8))
+    sdir = memhome / "sessions"
+    (sdir / "move.jsonl").write_text("\n".join(json.dumps(r) for r in [
+        {"type": "user", "data": {"content": "I live in Munich now, not Berlin."}},
+        {"type": "llm", "data": {"content": "Understood, Munich it is."}},
+    ]), encoding="utf-8")
+
+    class FakeEng:
+        def chat_stream(self, messages):
+            p = messages[0]["content"]
+            if "Extract ONLY durable" in p:
+                yield '{"facts": [{"fact": "User lives in Munich", "confidence": 0.9}]}'
+            elif "Decide the single best action" in p:
+                yield '{"decision": "UPDATE", "confidence": 0.9}'
+            else:
+                yield "{}"
+
+    job = Job(name="m", task_kind="memory", prompt="",
+              schedule_kind="interval", schedule=3600)
+    res = runner.run_job(job, engine=FakeEng())
+    assert res["status"] == "ok"
+    assert "await review" in res["output"], res["output"]     # rule-5 surfacing
+    # the trusted fact is untouched and the correction is pending, not applied
+    assert any("Berlin" in r.text for r in plug._chat_store().all())
+    assert len(plug._chat_store().corrections()) == 1

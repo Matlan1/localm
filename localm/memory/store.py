@@ -36,6 +36,7 @@ from localm.rag.bm25 import tokenize as _tokenize
 from localm.rag.store import _cosine
 from localm.storekit import NamespaceLockRegistry, atomic_write as _storekit_atomic_write
 
+from .corrections import PendingCorrection
 from .record import MemoryRecord
 
 EmbedFn = Callable[[list[str]], list[list[float]]]
@@ -103,7 +104,13 @@ def _content_tokens(text: str) -> set:
 # ---- forgetting ----------------------------------------------------------- #
 PRUNE_FLOOR = 0.02         # decayed(importance*recency) below this is forgettable
 _FORGOTTEN_MAX = 1000      # cap on the recoverable-forgotten archive sidecar
+_CORRECTIONS_MAX = 200     # cap on pending, un-reviewed supersede proposals
 _DAY = 86400.0
+
+# Trusted (non-synth) sources: a distilled synth candidate may never silently
+# rewrite these (see corrections.py / consolidate.py). Grouped identically by
+# recall (recency pin) and prune (decay exemption).
+TRUSTED_SOURCES = ("user", "import")
 
 _AGENTS = ("chat", "coder")
 
@@ -735,14 +742,17 @@ class MemoryStore:
     def _forgotten_file(self) -> Path:
         return self._file.with_suffix(".forgotten.jsonl")
 
-    def _archive_forgotten(self, records: list[MemoryRecord]) -> None:
+    def _archive_forgotten(self, records: list[MemoryRecord]) -> bool:
         """Append evicted records to a ``.forgotten.jsonl`` sidecar so forgetting
         is RECOVERABLE, not a silent hard delete (memory-audit 2026-07-02: the
-        size cap could evict user-typed facts irreversibly). Best-effort: an
-        archival failure must not block the prune, but it is logged, not hidden
-        (AGENTS.md rule 5). The archive is capped so it cannot grow unbounded."""
+        size cap could evict user-typed facts irreversibly). Returns True when the
+        archive is persisted (or there was nothing to archive), False when it
+        failed. prune() treats archival as best-effort (it logs and proceeds), but
+        an interactive accept of a supersession must NOT destroy the trusted record
+        when this returns False (rule 5: a recover-ability step that fails must not
+        be treated as success). The archive is capped so it cannot grow unbounded."""
         if not records:
-            return
+            return True
         try:
             ff = self._forgotten_file()
             prior = []
@@ -753,10 +763,12 @@ class MemoryStore:
                               ensure_ascii=False) for r in records]
             lines = (prior + new)[-_FORGOTTEN_MAX:]
             self._atomic_write(ff, "\n".join(lines) + "\n")
+            return True
         except OSError as e:
             from localm.debuglog import logger
             logger.warning("memory: could not archive %d forgotten record(s): %s",
                            len(records), e)
+            return False
 
     def prune(self, *, now: Optional[float] = None, n_max: int = N_MAX) -> int:
         """Forget decayed, low-value memories and enforce the size cap. User- and
@@ -791,6 +803,188 @@ class MemoryStore:
                 self._archive_forgotten(evicted)
                 self.replace(kept)
             return len(evicted)
+
+    # ------------------------------------------------- pending corrections - #
+    # A synth candidate may never silently rewrite a trusted (user/import) fact,
+    # but the old unconditional NO_OP left a stale user fact uncorrectable
+    # (memory-audit 2026-07-02 [9]). Instead, consolidation records a PENDING
+    # CORRECTION here and the memory modal surfaces it for the user to accept
+    # (apply, old text archived + recoverable) or reject (keep + reset staleness).
+    # Kept in a separate <ns>.corrections.jsonl sidecar so recall/prune/replace
+    # never touch it.
+    def _corrections_file(self) -> Path:
+        return self._file.with_suffix(".corrections.jsonl")
+
+    def _load_corrections(self) -> list[PendingCorrection]:
+        """Read the pending-corrections sidecar. A corrupt/partial line is skipped
+        (best-effort, like the record loader); an absent file is simply empty."""
+        cf = self._corrections_file()
+        if not cf.is_file():
+            return []
+        out: list[PendingCorrection] = []
+        skipped = 0
+        try:
+            lines = cf.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+                if not isinstance(data, dict):
+                    raise ValueError("correction line is not a JSON object")
+                out.append(PendingCorrection.from_dict(data))
+            except (json.JSONDecodeError, TypeError, ValueError):
+                skipped += 1
+        if skipped:
+            from localm.debuglog import logger as _dbg
+            _dbg.warning(
+                "memory corrections %s: skipped %d unparseable line(s) on load",
+                cf, skipped)
+        return out
+
+    def _save_corrections(self, corrections: list[PendingCorrection]) -> None:
+        cf = self._corrections_file()
+        if not corrections:
+            cf.unlink(missing_ok=True)
+            return
+        body = "\n".join(json.dumps(c.to_dict(), ensure_ascii=False)
+                         for c in corrections)
+        self._atomic_write(cf, body + "\n")
+
+    def _dismissed_file(self) -> Path:
+        return self._file.with_suffix(".corrections-dismissed.json")
+
+    def _load_dismissed(self) -> set:
+        """The set of correction dedup keys the user REJECTED. Consolidation skips
+        re-proposing these, so a dismissed supersession does not reappear every pass
+        while the contradicting session is still in the recent window (the reject
+        route otherwise only cleared the pending entry, and the next consolidation
+        re-created it). A corrupt/absent file is treated as empty."""
+        df = self._dismissed_file()
+        if not df.is_file():
+            return set()
+        try:
+            data = json.loads(df.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return {tuple(k) for k in data if isinstance(k, (list, tuple))}
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            pass
+        return set()
+
+    def _save_dismissed(self, keys: set) -> None:
+        df = self._dismissed_file()
+        trimmed = list(keys)[-_CORRECTIONS_MAX:]        # bounded like the sidecar
+        if not trimmed:
+            df.unlink(missing_ok=True)
+            return
+        self._atomic_write(df, json.dumps([list(k) for k in trimmed]))
+
+    def propose_corrections(self, proposals: list[PendingCorrection]) -> int:
+        """Append *proposals* to the pending-corrections sidecar, skipping any that
+        duplicate an already-pending one OR one the user already REJECTED (same
+        target/action/proposed text), so the same contradiction distilled run after
+        run does not stack or re-nag. Newest are kept when the cap is exceeded.
+        Returns the number newly recorded.
+
+        CHK-MEM-LOCK: locked and re-read like the record methods so a proposal from
+        a consolidation pass cannot clobber a concurrent accept/reject."""
+        if not proposals:
+            return 0
+        with _namespace_lock(self._ns_hash):
+            existing = self._load_corrections()
+            dismissed = self._load_dismissed()
+            seen = {c.dedup_key() for c in existing}
+            added = 0
+            for p in proposals:
+                key = p.dedup_key()
+                if key in seen or key in dismissed:
+                    continue                          # already pending, or rejected
+                existing.append(p)
+                seen.add(key)
+                added += 1
+            if added:
+                self._save_corrections(existing[-_CORRECTIONS_MAX:])
+            return added
+
+    def corrections(self) -> list[PendingCorrection]:
+        """Pending corrections whose target record still exists. A proposal whose
+        target was deleted/evicted meanwhile is stale and dropped (and pruned from
+        the sidecar) so the modal never shows an un-actionable suggestion."""
+        with _namespace_lock(self._ns_hash):
+            self._load()
+            corrs = self._load_corrections()
+            ids = {r.id for r in self._records}
+            live = [c for c in corrs if c.target_id in ids]
+            if len(live) != len(corrs):
+                self._save_corrections(live)          # drop stale entries
+            return live
+
+    def resolve_correction(self, correction_id: str, accept: bool, *,
+                           embed_fn: Optional[EmbedFn] = None,
+                           now: Optional[float] = None) -> Optional[dict]:
+        """Apply or dismiss a pending correction. Returns a small status dict, or
+        None when *correction_id* is unknown (a 404 for the route).
+
+        accept: archive the target record to ``.forgotten.jsonl`` (recoverable),
+        then apply the proposed change (replace the text, re-embedding, or delete
+        the record). reject: keep the record, bump its ``updated`` so its
+        last-confirmed staleness resets, and remember the dismissed suggestion so
+        consolidation does not re-propose it (see ``_load_dismissed``). In BOTH
+        cases the pending entry is removed. Atomic. If the target vanished
+        meanwhile, the entry is simply dropped (nothing to apply)."""
+        with _namespace_lock(self._ns_hash):
+            self._load()
+            corrs = self._load_corrections()
+            corr = next((c for c in corrs if c.id == correction_id), None)
+            if corr is None:
+                return None
+            now = time.time() if now is None else now
+            target = self.get(corr.target_id)
+            outcome = "target_gone"
+            if target is not None and accept:
+                # Archive the pre-change record so an accepted supersession is
+                # recoverable, never a silent hard delete (rule 5 / F4). If the
+                # archive FAILS, abort: do NOT destroy the trusted record and do NOT
+                # report success - leave the record and the pending correction intact
+                # so the user can retry (rule 5: a recover-ability step that fails
+                # must not be treated as a success).
+                if not self._archive_forgotten([target]):
+                    return {"status": "archive_failed", "id": correction_id,
+                            "target_id": corr.target_id, "action": corr.action}
+                if corr.action == "delete":
+                    self._records = [r for r in self._records if r.id != target.id]
+                    self._vectors.pop(target.id, None)
+                    outcome = "deleted"
+                else:
+                    target.text = (corr.proposed_text or "").strip()[:MAX_TEXT_LEN]
+                    target.updated = now
+                    target.last_used = now
+                    # Re-embed so semantic recall tracks the new text; if no embedder
+                    # is available, invalidate the stale vector (backfill re-embeds).
+                    self._vectors.pop(target.id, None)
+                    vec = self._embed_one(target.text, embed_fn)
+                    if vec is not None:
+                        self._vectors[target.id] = vec
+                    outcome = "updated"
+                self._save()
+            elif target is not None and not accept:
+                # Rejected: the user confirms the existing fact. Bump updated so the
+                # staleness affordance resets, and REMEMBER this exact suggestion as
+                # dismissed so consolidation does not re-propose it while the
+                # contradicting session is still in the recent window (a bumped
+                # `updated` alone did nothing: the propose path never reads it).
+                target.updated = now
+                self._save()
+                dismissed = self._load_dismissed()
+                dismissed.add(corr.dedup_key())
+                self._save_dismissed(dismissed)
+                outcome = "rejected"
+            self._save_corrections([c for c in corrs if c.id != correction_id])
+            return {"status": outcome, "id": correction_id,
+                    "target_id": corr.target_id, "action": corr.action}
 
 
 def _first_dim(vectors: dict) -> Optional[int]:
