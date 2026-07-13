@@ -2,6 +2,8 @@
 """Tests for the shared API-key auth (localm/auth.py) and its enforcement in
 the HTTP server's _require_auth dependency."""
 
+import logging
+
 import pytest
 from fastapi import HTTPException
 
@@ -76,6 +78,35 @@ def test_require_flag_env_and_config(auth, monkeypatch):
     cfg = load_config()
     cfg["require_auth"] = True
     save_config(cfg)
+    assert auth.require_auth_enabled() is True
+
+
+def test_config_read_failure_resolves_required(auth, monkeypatch, caplog):
+    # LM-DA-021: an unreadable config must NOT silently downgrade an explicit
+    # require_auth: true to "not required" (fail-open). It fails SAFE to
+    # "required" and surfaces a warning, matching the newer fail-closed
+    # precedent this codebase established for the identical question in
+    # netpolicy.network_mode() (HON-2) and this module's own
+    # any_key_configured() - erring toward MORE restriction, never less.
+    def boom():
+        raise OSError("config unreadable")
+    monkeypatch.setattr("localm.config.load_config", boom)
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        assert auth.require_auth_enabled() is True
+    assert any("require_auth" in r.message and "required" in r.message.lower()
+               for r in caplog.records), \
+        "config-read failure resolved silently (no warning)"
+
+
+def test_config_read_failure_env_var_short_circuits(auth, monkeypatch):
+    # LOCALM_REQUIRE_AUTH is checked BEFORE config is ever read, so a truthy
+    # env var must still return True without touching (or being tripped up
+    # by) an unreadable config file - proves the ordering, not just the
+    # fail-closed default above.
+    def boom():
+        raise OSError("config unreadable")
+    monkeypatch.setattr("localm.config.load_config", boom)
+    monkeypatch.setenv("LOCALM_REQUIRE_AUTH", "1")
     assert auth.require_auth_enabled() is True
 
 

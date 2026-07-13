@@ -170,25 +170,39 @@ def require_auth_enabled() -> bool:
     """True when the server must refuse requests if no key is configured.
 
     Enabled via the ``LOCALM_REQUIRE_AUTH`` env var or config
-    ``"require_auth": true``. Default false keeps loopback installs keyless."""
+    ``"require_auth": true``. Default false keeps loopback installs keyless.
+
+    On a config-read failure this resolves to True (LM-DA-021), matching the
+    newer fail-closed precedent this codebase established for the identical
+    "does a security kill-switch fail toward more or less access when config
+    is unreadable" question: netpolicy.network_mode() (HON-2, dbac9e1c) and
+    this module's own _owner_key_present()/any_key_configured() (f9a2ad48)
+    both resolve toward MORE restriction on a read failure, never less - "the
+    exact fail-open a safety toggle must never do". This function used to
+    return False here (reviewed and accepted by the 2026-07-02 security audit
+    at the time) but was left unrevisited when the stricter precedent landed
+    nine days later."""
     if os.environ.get(REQUIRE_ENV_VAR, "").strip().lower() in _TRUTHY:
         return True
     try:
         from localm.config import load_config
         return bool(load_config().get("require_auth", False))
     except Exception:
-        # Surface that we could not confirm require_auth instead of silently
-        # dropping to keyless mode: if an admin set require_auth: true and the
-        # config later becomes unreadable this fails OPEN, so log it loudly.
+        # Fail CLOSED, not open (see docstring, LM-DA-021): an admin who
+        # explicitly set require_auth: true must never silently drop to open
+        # mode because of a read glitch. load_config() itself only raises here
+        # for something severe (e.g. ensure_dirs() hitting an inaccessible home
+        # dir) - ordinary corrupt/locked config.json is already absorbed by its
+        # own .bak/retry fallback in config._read_json and never reaches this
+        # except - so an install that never touched require_auth hitting this
+        # rare path gets a temporary lockout instead of a silently-open server,
+        # the safe direction for a security kill-switch. Admins who need a
+        # config-independent fail-closed switch regardless of this reasoning
+        # can still set LOCALM_REQUIRE_AUTH (checked above, before this try).
         logger.warning(
             "config unreadable; cannot confirm require_auth - treating as "
-            "not-required")
-        # Deliberate fail-open-vs-lockout tradeoff: a local-first loopback
-        # default must not brick itself on a transient config read error, so we
-        # return False rather than hard-locking. Admins who need a
-        # config-independent fail-closed switch can set LOCALM_REQUIRE_AUTH
-        # (checked above the try), which never depends on the config file.
-        return False
+            "required (fail closed) until it can be read")
+        return True
 
 
 def _restrict_perms(path: Path) -> None:
