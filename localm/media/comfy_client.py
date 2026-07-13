@@ -1032,8 +1032,15 @@ def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
             from localm.media.managed_comfy import (
                 managed_comfy_active, managed_comfy_launch_cmd, managed_comfy_workdir)
             if managed_comfy_active(cfg):
-                workdir = managed_comfy_workdir()
+                # Atomic: only adopt the managed workdir if BOTH calls succeed.
+                # Setting `workdir` from the first call and then having the
+                # second raise would leave `workdir` pointed at the managed
+                # folder with no matching launch_cmd, so the code below would
+                # fall through to unrelated global-config/discovery logic
+                # against that folder instead of a clean "not managed" outcome.
+                managed_workdir = managed_comfy_workdir()
                 managed_launch_cmd = managed_comfy_launch_cmd()
+                workdir = managed_workdir
         except Exception:
             managed_launch_cmd = None
 

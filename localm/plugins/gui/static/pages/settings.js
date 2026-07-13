@@ -1090,11 +1090,19 @@ export async function renderManagedComfyPanel(host, toggleFields) {
   }
 
   if (st.installed) {
-    pill.textContent = "installed";
-    pill.classList.add("ok");
+    // Durable disclosure of whether media generation ACTUALLY routes here
+    // right now (matches `localm comfy status`'s "Target now" line) - not
+    // just a one-time setup toast, so it stays visible on every later visit
+    // to this page too, whichever way comfy_target is currently set.
+    pill.textContent = st.managed_active ? "installed - in use" : "installed - not in use";
+    if (st.managed_active) pill.classList.add("ok");
     const info = el("div", "sub");
     info.append("Installed at ");
     info.appendChild(el("code", null, st.path || ""));
+    if (!st.managed_active) {
+      info.append(" - image/music/video generation is using your OWN ComfyUI "
+        + "instead (set \"ComfyUI to use\" to \"own\" below to switch).");
+    }
     host.appendChild(info);
 
     // The S1 coexistence control only matters once an instance exists; render

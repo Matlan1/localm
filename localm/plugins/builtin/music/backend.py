@@ -9,7 +9,12 @@ non-ComfyUI music backend is just another module selected by ``backend`` name.
 
 Legacy global keys (comfy_launch_cmd / comfy_workdir / comfy_output_dir /
 reload_llm_after_imagine) seed the defaults until the user saves per-plugin
-values, so existing setups keep working with no migration step.
+values, so existing setups keep working with no migration step - EXCEPT
+comfy_launch_cmd/comfy_workdir specifically, which are suppressed while the
+managed ComfyUI instance is active (see managed_comfy.legacy_comfy_value):
+otherwise a global value left over from before the managed instance existed
+would silently defeat its auto-launch routing forever. A genuine per-plugin
+override is unaffected and still always wins.
 
 Per-plugin output containment (FAC-3): the shared ``generate_music`` has no
 ``comfy_output_dir`` parameter, so the only way to feed it this plugin's own
@@ -30,6 +35,7 @@ from typing import Optional
 
 from localm import music_gen as _music_gen
 from localm.image_gen import comfy as _comfy
+from localm.media.managed_comfy import legacy_comfy_value
 from localm.plugins import media_config
 from localm.vram import media_estimate_bytes, resolve_swap_policy
 
@@ -72,10 +78,12 @@ def settings(full_config: dict) -> dict:
         # host would otherwise reach the outbound comfy calls (CHK-COMFY-APIURL).
         "api_url": _comfy.sanitize_comfy_url(
             (comfy_blk.get("api_url") or _comfy.default_api_url()).rstrip("/")),
+        # The legacy global fallback is suppressed while the managed instance is
+        # active - a genuine per-plugin comfy_blk override still always wins.
         "launch_cmd": comfy_blk.get("launch_cmd")
-        or full_config.get("comfy_launch_cmd", "") or "",
+        or legacy_comfy_value("comfy_launch_cmd", full_config) or "",
         "workdir": comfy_blk.get("workdir")
-        or full_config.get("comfy_workdir", "") or "",
+        or legacy_comfy_value("comfy_workdir", full_config) or "",
         "output_dir": comfy_blk.get("output_dir")
         or full_config.get("comfy_output_dir", "") or "",
         "reload_after": bool(block.get(

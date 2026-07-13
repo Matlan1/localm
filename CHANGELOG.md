@@ -37,9 +37,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   use: own/user" dropdown - two controls for one decision, and confusing when they
   disagreed (checkbox on, dropdown set to "user"). There is now just the dropdown:
   "own" routes to localm's managed ComfyUI once you set one up (`localm comfy
-  setup`), "user" always uses your own install. Nothing else changes - your own
-  ComfyUI's settings and localm's managed instance both keep their state regardless
-  of which one is currently selected, so switching back and forth never loses either.
+  setup`), "user" always uses your own install. Your own ComfyUI's settings and
+  localm's managed instance both keep their state regardless of which one is
+  currently selected, so switching back and forth never loses either. One real
+  behavior change worth knowing: the old design needed a separate explicit "enable"
+  step after setup; that step is gone. If you ran `comfy setup` on an earlier
+  version but never flipped that switch, generation will now start using the
+  managed instance automatically next time - `localm comfy status` shows what is
+  currently targeted, and `localm config comfy_target user` (or the same dropdown
+  in Settings > Media) opts back out if you'd rather it stay off.
 
 ### Fixed
 - **Semantic knowledge search now works on password-protected servers.** When localm
@@ -157,6 +163,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   discards) a throwaway venv the same way the managed-ComfyUI installer
   does, so a machine that cannot create nested venvs is flagged up front
   instead of failing silently mid-setup.
+- **Selecting localm's own managed ComfyUI now actually uses it for
+  generation.** Two separate bugs meant a correctly installed, correctly
+  selected managed instance could still go unused: (1) nothing knew how to
+  *start* it - image/music/video generation could only discover a launcher
+  script for a user-provided ComfyUI install, so it failed with "ComfyUI is
+  not reachable... point localm at your ComfyUI install" even though the
+  managed instance was right there; (2) if you had ever set a ComfyUI folder
+  for your own install - even long before setting up the managed one - that
+  old value silently kept overriding the managed instance forever, for the
+  same underlying reason. Generation now correctly launches and targets the
+  managed instance in both cases; a genuine per-plugin ComfyUI override
+  (Settings > Media's Image/Music/Video panels) still always wins, as before.
 - **Bug reports no longer lose the actual error.** The "Recent log (tail)"
   section used to be a blind cut of the last ~120 log lines, so a session that
   kept running afterward (even routine polling) could push the real error out

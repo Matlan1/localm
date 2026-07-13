@@ -41,7 +41,7 @@ const NOT_INSTALLED = {
   target: "own", managed_active: false,
 };
 
-function makeFetch(calls, { installed, schema = SCHEMA }) {
+function makeFetch(calls, { installed, schema = SCHEMA, managedActive }) {
   return async (url, opts = {}) => {
     const u = String(url);
     const method = opts.method || "GET";
@@ -54,9 +54,12 @@ function makeFetch(calls, { installed, schema = SCHEMA }) {
       return { ok: true, status: 200, json: async () => MEDIA, text: async () => "" };
     if (u === "/v1/comfy/status")
       return { ok: true, status: 200, json: async () => ({ alive: false, launched_by_localm: false }), text: async () => "" };
-    if (u === "/api/comfy/managed-status")
+    if (u === "/api/comfy/managed-status") {
+      const body = installed ? INSTALLED : NOT_INSTALLED;
       return { ok: true, status: 200, text: async () => "",
-               json: async () => (installed ? INSTALLED : NOT_INSTALLED) };
+               json: async () => (managedActive === undefined ? body
+                 : { ...body, managed_active: managedActive }) };
+    }
     if (u === "/api/comfy/setup" && method === "POST")
       return { ok: true, status: 200, json: async () => ({ job_id: "job123" }), text: async () => "" };
     if (u === "/api/comfy/remove" && method === "POST")
@@ -106,6 +109,35 @@ test("installed -> shows 'installed at <path>' + a Remove button, no Set-up butt
   assert.ok(panel, "media-comfy-box panel present");
   assert.match(panel.textContent, /installed at/i, "shows 'installed at'");
   assert.match(panel.textContent, /\.localm[/\\]comfyui/, "shows the install path");
+});
+
+test("installed but comfy_target is 'user' -> the pill discloses generation is NOT using the managed instance", async () => {
+  // Conserve-mode review finding: managed_active was fetched into `st` but
+  // never read/displayed anywhere - a GUI-only user completing setup had no
+  // durable way to tell whether generation actually routes to the managed
+  // instance (the CLI's `comfy setup`/`comfy status` say so explicitly).
+  const calls = [];
+  const { window: win } = loadAppWithPages(
+    { fetchImpl: makeFetch(calls, { installed: true, managedActive: false }) });
+  await render(win);
+  const panel = win.document.querySelector(".media-comfy-box");
+  const pill = panel.querySelector(".comfy-pill");
+  assert.match(pill.textContent, /not in use/i, "pill discloses it is not routing here");
+  assert.doesNotMatch(pill.className, /\bok\b/, "not styled as active when not in use");
+  assert.match(panel.textContent, /your OWN ComfyUI/i,
+    "explains generation is using the user's own ComfyUI instead");
+});
+
+test("installed and comfy_target is 'own' -> the pill discloses generation IS using the managed instance", async () => {
+  const calls = [];
+  const { window: win } = loadAppWithPages(
+    { fetchImpl: makeFetch(calls, { installed: true, managedActive: true }) });
+  await render(win);
+  const panel = win.document.querySelector(".media-comfy-box");
+  const pill = panel.querySelector(".comfy-pill");
+  assert.match(pill.textContent, /in use/i, "pill discloses it is routing here");
+  assert.doesNotMatch(pill.textContent, /not in use/i);
+  assert.match(pill.className, /\bok\b/, "styled as active when in use");
 });
 
 test("clicking Remove POSTs /api/comfy/remove", async () => {

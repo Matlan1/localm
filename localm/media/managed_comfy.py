@@ -195,6 +195,25 @@ def managed_comfy_active(cfg: Optional[dict] = None) -> bool:
     return is_managed_comfy_installed()
 
 
+def legacy_comfy_value(key: str, full_config: dict) -> str:
+    """A LEGACY GLOBAL comfy_* config value (``comfy_workdir``, ``comfy_launch_cmd``),
+    suppressed to "" whenever the managed instance is active.
+
+    Every media backend.py (image/music/video) falls back to these global keys
+    to seed defaults for setups that pre-date per-plugin config - but
+    ``comfy_client.ensure_comfy()``'s "an explicit caller workdir/launch_cmd
+    always wins over managed routing" precedence cannot tell a deliberate
+    override from a years-old global default. Honouring the legacy value here
+    would silently pass it through as if it WERE a deliberate override,
+    defeating managed-instance auto-routing for anyone who ever set
+    comfy_workdir/comfy_launch_cmd - including users who set it long before a
+    managed instance existed. A genuine PER-PLUGIN override (the caller's own
+    ``comfy_blk.get(...)``) is untouched by this and still wins, as intended."""
+    if managed_comfy_active(full_config):
+        return ""
+    return full_config.get(key, "") or ""
+
+
 def managed_comfy_api_url_if_active(cfg: Optional[dict] = None) -> Optional[str]:
     """The managed api_url when managed routing is active, else None. This is the
     hook ``comfy_client.default_api_url()`` consults so that EVERY existing caller
