@@ -239,6 +239,17 @@ class _ExecutionMixin:
                     "tool": call.name,
                 })
 
+        # Episodic change-detection baseline: snapshot the git work-tree state
+        # just before the FIRST run_shell, PRE-execution, so a mutating shell
+        # command's writes (git apply, a formatter, codegen) can be attributed to
+        # THIS session at close - the write-tool tracker never sees them (audit
+        # cluster 11). Captured before the shell runs so the shell's own changes
+        # are the delta, not part of the baseline; only for episodic sessions.
+        if (call.name == "run_shell" and self._episodic
+                and not self._shell_baseline_captured):
+            self._shell_baseline_captured = True
+            self._git_baseline = self._git_status_paths()
+
         # Inject hidden runtime args into specific tools
         args = dict(call.args)
         if call.name == "spawn_agent":
@@ -279,6 +290,10 @@ class _ExecutionMixin:
         # at 4 identical failures the circuit breaker stops the task after
         # this batch (checked in _loop) instead of burning the turn budget.
         if not result.ok:
+            # Record the ORIGINAL error (before the hint augmentation below) into
+            # the bounded session error trace, so the close-time episode reflection
+            # has real evidence for what_failed (audit cluster 13).
+            self._record_error(call.name, result.output)
             streak = self._consecutive_errors.get(call.name, 0) + 1
             self._consecutive_errors[call.name] = streak
             if streak == 2:
