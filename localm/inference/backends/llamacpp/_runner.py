@@ -266,6 +266,8 @@ class ModelRunner:
         return self._proc is not None and self._proc.is_alive()
 
     def _spawn(self) -> None:
+        from localm._mp_spawn import ensure_spawn_uses_venv_python
+        ensure_spawn_uses_venv_python()   # #617: avoid a renamed-launcher WinError 2
         ctx = mp.get_context("spawn")   # explicit: identical on every OS
         self._req_q = ctx.Queue()
         self._resp_q = ctx.Queue()
