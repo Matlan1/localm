@@ -29,9 +29,15 @@ _MINIMAL_CHAT_TEMPLATE = "{% for m in messages %}{{ m['content'] }}\n{% endfor %
 
 @pytest.fixture(scope="module")
 def hf_backend():
-    pytest.importorskip("torch")
-    pytest.importorskip("transformers")
-    pytest.importorskip("xgrammar")
+    # exc_type=ImportError on all three: each can raise a plain ImportError
+    # (not ModuleNotFoundError) for a reason other than "not installed" - e.g.
+    # transformers' own internal tokenizers version-gate, or a version-clashed
+    # xgrammar/torch build. pytest 9.1 narrowed importorskip's default to
+    # ModuleNotFoundError only, so without this these hard-fail/error instead
+    # of skipping on exactly the case this skip exists for.
+    pytest.importorskip("torch", exc_type=ImportError)
+    pytest.importorskip("transformers", exc_type=ImportError)
+    pytest.importorskip("xgrammar", exc_type=ImportError)
     from huggingface_hub import snapshot_download
 
     try:

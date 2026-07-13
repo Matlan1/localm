@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import multiprocessing as mp
 from typing import Optional
 
 from ._core import console, main
@@ -101,6 +102,71 @@ def _check_native_abi() -> None:
     else:
         console.print(f"  {_WARN_SYM}  native ABI not verified "
                       f"[dim]({abi.get('detail', 'runtime not loadable')})[/dim]")
+
+
+def _worker_spawn_probe(conn) -> None:
+    """Target of the spawn self-check below - runs ONLY in the spawned child.
+    Module-level (not a closure): the "spawn" start method re-imports the
+    target by its module path + name in the child, which only works for a
+    plain top-level function. Does nothing but confirm it started; the point
+    is proving the spawn ITSELF works, not anything the child does afterward."""
+    try:
+        conn.send("ok")
+    finally:
+        conn.close()
+
+
+def _check_worker_spawn() -> None:
+    """Verify localm can actually spawn its isolated worker process - the SAME
+    ``multiprocessing.get_context("spawn")`` mechanism every GGUF model load and
+    the voice/STT engine depend on (see localm/_mp_spawn.py, #617).
+
+    The native-ABI and GPU-probe checks above isolate via a PLAIN subprocess
+    (``_run_probe_subprocess``), a different code path - that proves the native
+    library loads and computes correctly, but it does NOT exercise
+    multiprocessing's own spawn machinery, which on Windows redirects the
+    child's executable under conditions a renamed launcher (LocaLM.exe) can
+    break. That gap is exactly why #617 (every GGUF load failing with
+    "[WinError 2] The system cannot find the file specified") passed a doctor
+    run showing everything green. This check would have caught it."""
+    try:
+        from localm._mp_spawn import ensure_spawn_uses_venv_python
+        ensure_spawn_uses_venv_python()
+        ctx = mp.get_context("spawn")
+        parent_conn, child_conn = mp.Pipe(duplex=False)
+        proc = ctx.Process(target=_worker_spawn_probe, args=(child_conn,), daemon=True)
+    except Exception as e:
+        # Setup itself failed (e.g. the fix helper or Pipe() errored) - rarer
+        # and genuinely different from a spawn failure, so it gets its own line.
+        console.print(f"  {_FAIL_SYM}  background worker spawn check errored: {e}")
+        return
+
+    reply = None
+    error_detail = None
+    try:
+        proc.start()
+        got_reply = parent_conn.poll(20)
+        reply = parent_conn.recv() if got_reply else None
+        proc.join(5)
+        if proc.is_alive():
+            proc.terminate()
+            proc.join(5)
+    except Exception as e:
+        # This IS the #617 failure mode: proc.start() raises directly
+        # (FileNotFoundError: [WinError 2] ...) rather than the child ever
+        # running - treated the same as "no reply", not a separate error line,
+        # so every way this can fail reads as one consistent, actionable verdict.
+        error_detail = str(e)
+
+    if reply == "ok":
+        console.print(f"  {_OK_SYM}  background worker spawn: OK "
+                      "(model loads and voice transcription use this)")
+    else:
+        detail = f" ({error_detail})" if error_detail else ""
+        console.print(
+            f"  {_FAIL_SYM}  background worker spawn FAILED{detail} - GGUF "
+            "model loads and voice transcription will fail even though the "
+            "runtime above checks out")
 
 
 def _check_gpu_driver() -> bool:
@@ -384,6 +450,9 @@ def doctor():
     Verifies:
       - Python version (3.10+ required)
       - llama.dll / llama.so available on PATH or in expected locations
+      - The isolated worker process (used by every GGUF model load and the
+        voice/STT engine) can actually be spawned - a real subprocess.Popen
+        probe passes even when this cannot (#617)
       - GPU inference capability, from the backend localm actually provisioned
         (Vulkan / Metal / bundled-ROCm / CUDA), not just nvidia-smi/rocm-smi/torch
       - Available VRAM
@@ -401,6 +470,7 @@ def doctor():
     # native ABI self-check only when a healthy lib is present.
     if lib_healthy:
         _check_native_abi()
+    _check_worker_spawn()
     # smi/torch are SUPPLEMENTARY detail lines, not the verdict: they miss
     # localm's default Vulkan/Metal/bundled-ROCm GPU paths entirely. The verdict
     # is derived from what localm will actually load (audit doctor-1).

@@ -15,7 +15,13 @@ import pytest
 
 
 def test_chat_tokenization_suppresses_double_bos(monkeypatch):
-    pytest.importorskip("transformers")
+    # exc_type=ImportError: transformers raises a plain ImportError (not
+    # ModuleNotFoundError) when its OWN internal tokenizers version-gate fails
+    # (a mismatched transitive pin, not a "not installed" case) - pytest 9.1
+    # narrowed importorskip's default to ModuleNotFoundError only, so without
+    # this the test hard-fails instead of skipping on exactly the case this
+    # skip exists for.
+    pytest.importorskip("transformers", exc_type=ImportError)
     import transformers
 
     from localm.inference.backends import hf as hfmod
