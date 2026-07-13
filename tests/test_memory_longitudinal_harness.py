@@ -86,12 +86,16 @@ def chat_backend(native_runtime):
     from localm.inference.backends.gguf import GgufBackend
     # CPU-only (n_gpu_layers=0): this harness tests the memory PIPELINE's logic,
     # not GPU inference performance, and a 0.5B model is fast enough on CPU for a
-    # handful of short prompts. Also reduces (but does NOT eliminate) exposure to
-    # a separate, real native-abort risk in llama_load_model_from_file itself -
-    # see dev-notes/memory-fix-campaign/worklog-harness-elated.md "Found: a
-    # second native-abort class" for the full account and why it is NOT fixed
-    # here (needs subprocess-isolating the model load itself, a much larger
-    # change than the VRAM-probe daemon; tracked as its own follow-up).
+    # handful of short prompts - this alone justifies CPU-only regardless of the
+    # note below. Loading (with GPU offload OR CPU-only - both were observed to
+    # crash) can hit a separate, real native-abort risk in
+    # llama_load_model_from_file itself; CPU-only was NOT confirmed to reduce
+    # that risk (no controlled comparison was actually done - do not assume it
+    # helps without re-measuring). See dev-notes/memory-fix-campaign/
+    # worklog-harness-elated.md "Found: a second native-abort class" for the
+    # full account and why it is NOT fixed here (needs subprocess-isolating the
+    # model load itself, a much larger change than the VRAM-probe daemon;
+    # tracked as its own follow-up, task_fb0b68f4).
     be = GgufBackend(path, n_ctx=4096, n_gpu_layers=0)
     try:
         be.load()
@@ -326,28 +330,26 @@ def test_longitudinal_memory_compounds_across_sessions(
     assert off_topic_hits == [], (
         f"an unrelated query must inject nothing (F12 absolute relevance gate); "
         f"got {[r.text for r in off_topic_hits]}")
-    # A "non-vacuous think-stripping" assertion (only meaningful with
-    # LOCALM_TEST_THINKING_MODEL set: verifying at least one raw completion
-    # actually contained a <think> block pre-strip, so the earlier "no <think
-    # substring in the store" check is not vacuously satisfied by a model that
-    # never emits one) was REMOVED from here, not merely disabled. An early
-    # isolation test suggested this ~8-line, zero-native-code trailing block
-    # was somehow the trigger for a separate native abort in
-    # llama_load_model_from_file during chat_backend's fixture setup (code
-    # that had not even executed yet when the crash occurred); that specific
-    # conclusion was later found to be CONFOUNDED (a second, unrelated edit
-    # changed at the same time) and did not hold up under further isolated
-    # testing - removing this block alone did not reliably prevent the crash
-    # in later runs. Left removed anyway on the honest, weaker justification
-    # that it is a non-essential secondary check (the PRIMARY invariant, zero
-    # '<think' in the store unconditionally, is still asserted above and is
-    # NOT weakened by this removal) while the actual native-abort trigger
-    # remains only partially understood - see dev-notes/memory-fix-campaign/
-    # worklog-harness-elated.md "Found: a second native-abort class" for the
-    # full, honest evidence trail (including the confounded conclusion) and
-    # task_fb0b68f4 for the real fix (subprocess-isolating the model load).
-    # Re-add this block once that lands and the harness runs reliably enough
-    # to confirm it is safe to bring back.
+
+    # Think-stripping non-vacuous check: only meaningful when a real thinking
+    # model was actually used (LOCALM_TEST_THINKING_MODEL); otherwise this is
+    # a no-op (the default model never emits a think block to strip). NOTE:
+    # this block was removed and then RESTORED during development - an early,
+    # single-run comparison suggested its mere presence (unexecuted, during an
+    # EARLIER fixture's setup) somehow correlated with the separate
+    # llama_load_model_from_file native-abort bug (task_fb0b68f4), but that
+    # comparison was confounded (a second, unrelated edit changed at the same
+    # time) and did not hold up: every later run with this block ALREADY
+    # removed still crashed just as often. Removing it bought nothing, so it
+    # is back - do not remove it again without a genuinely controlled A/B
+    # comparison (same file, only this block differing, several runs each
+    # side) showing it actually helps; see worklog-harness-elated.md for the
+    # full account of the earlier, unjustified removal.
+    if getattr(chat_backend, "_harness_is_thinking", False):
+        assert think_seen["hit"], (
+            "LOCALM_TEST_THINKING_MODEL was set but no raw completion ever "
+            "contained a <think> block - the think-stripping check would be "
+            "vacuous; verify the model is actually a thinking/reasoning model")
 
 
 if __name__ == "__main__":
