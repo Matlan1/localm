@@ -84,8 +84,10 @@ class TestAutoGpuLayers:
         assert (n / 32) * (8 * GB) <= weight_budget + 1  # +1 for int rounding
 
     def test_none_when_vram_unmeasurable(self, tmp_path):
-        # Vulkan/Metal/CPU builds: no torch.cuda -> (None, None). Auto must fall
-        # back honestly (return None), never fabricate a precise offload.
+        # Genuinely unmeasurable: NEITHER torch.cuda NOR the isolated native
+        # probe can answer (e.g. no GPU present, or the probe daemon itself is
+        # unreachable) -> (None, None). Auto must fall back honestly (return
+        # None), never fabricate a precise offload.
         b = _model(tmp_path, 8 * GB)
         with _vram(None, None):
             assert b._auto_gpu_layers() is None
@@ -141,8 +143,8 @@ class TestEffectiveGpuLayers:
         assert "gpu layers auto" not in capsys.readouterr().out.lower()
 
     def test_unmeasurable_falls_back_quietly(self, tmp_path, capsys):
-        # On Vulkan/Metal/CPU builds VRAM is unmeasurable on EVERY load, and full
-        # offload via the display driver is the normal, working default - so the
+        # When neither VRAM path can answer (see _vram(None, None) above), full
+        # offload via the display driver is the working default - so the
         # fallback must NOT spam a per-load console notice (it goes to debug).
         b = _model(tmp_path, 8 * GB, n_gpu_layers=99, auto=True)
         with _vram(None, None):

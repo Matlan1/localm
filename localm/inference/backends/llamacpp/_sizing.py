@@ -456,8 +456,11 @@ class VramSizingMixin:
 
     def _auto_gpu_layers(self) -> Optional[int]:
         """Pick how many layers to offload to the GPU from free VRAM, or None when
-        VRAM is not measurable (no torch.cuda: Vulkan/Metal/CPU builds - the caller
-        then falls back honestly to the configured value instead of guessing a
+        VRAM is not measurable by ANY path - neither torch.cuda nor the isolated
+        native probe (_free_vram_bytes' loader.gpu_memory_isolated() fallback,
+        which answers independently of torch.cuda) can answer, e.g. no GPU is
+        present at all or its backend/daemon is unreachable - the caller then
+        falls back honestly to the configured value instead of guessing a
         precise offload it could not compute).
 
         Returns 99 ("all") when the whole model plus its KV cache and overhead fit
@@ -500,9 +503,10 @@ class VramSizingMixin:
             return self.n_gpu_layers          # explicit choice - respect it as-is
         auto = self._auto_gpu_layers()
         if auto is None:
-            # Unmeasurable VRAM (no torch.cuda: Vulkan/Metal/CPU builds) is the
-            # NORMAL case on those backends, where offload via the display driver
-            # is the right default and the model usually fits fine. Keep it a
+            # Unmeasurable VRAM (neither torch.cuda nor the isolated native probe
+            # can answer - e.g. no GPU present, or the probe daemon itself is
+            # unreachable) still needs a working default: offload via the display
+            # driver, letting the model try to fit as configured. Keep it a
             # discoverable debug line, not a per-load console notice that would
             # fire on every load and read oddly on a CPU-only build - if a full
             # offload then does not fit, the native load fails loudly with a VRAM
