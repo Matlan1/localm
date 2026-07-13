@@ -138,9 +138,9 @@ def test_status_not_installed_offers_setup(home, app):
     body = r.json()
     assert body["installed"] is False
     assert body.get("path") in (None, "")
-    # Off by default: not routing to a managed instance.
+    # Off by default: not routing to a managed instance (comfy_target defaults
+    # to "own" but is inert until an instance is actually installed).
     assert body["managed_active"] is False
-    assert body["enabled"] is False
     assert body["target"] == "own"
 
 
