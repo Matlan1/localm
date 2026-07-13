@@ -75,6 +75,17 @@ class TestValidateUpdate:
         with pytest.raises(ValueError, match="not a boolean"):
             ss.validate_update({"main_gpu_index": True})
 
+    def test_main_gpu_index_rejects_index_above_sanity_ceiling(self):
+        # LM-DA-017: main_gpu_index had min=0 but no max, unlike the sibling
+        # gpu_split_indices field - an out-of-range value sailed through to
+        # the same ctypes.c_int32 main_gpu field. Now has the same ceiling.
+        with pytest.raises(ValueError, match="above the maximum"):
+            ss.validate_update({"main_gpu_index": 500_000})
+
+    def test_main_gpu_index_allows_ceiling_boundary(self):
+        assert ss.validate_update({"main_gpu_index": ss.MAX_GPU_SPLIT_INDEX}) == \
+            {"main_gpu_index": ss.MAX_GPU_SPLIT_INDEX}
+
     # --- gpu_split_indices / gpu_split_ratios (HIDDEN list-of-number) ----- #
 
     def test_gpu_split_indices_coerces_csv_string(self):
