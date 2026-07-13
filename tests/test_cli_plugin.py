@@ -115,6 +115,42 @@ def test_install_from_directory(cli_env, tmp_path):
     assert r2.exit_code == 1 and "already installed" in r2.output.lower()
 
 
+def test_install_from_directory_surfaces_resolved_scope(cli_env, tmp_path):
+    """LM-DA-019: the CLI install success message must show the resolved
+    scope, so an owner can see what capability they are granting before every
+    route the plugin registers is gated on it."""
+    ext = tmp_path / "thirdparty2"
+    ext.mkdir()
+    (ext / "plugin.toml").write_text(
+        '[plugin]\nname = "ext2"\nscope = "ext2"\nregister = "plug"\n', encoding="utf-8")
+    (ext / "plug.py").write_text(
+        "def register(host):\n    pass\n\ndef unregister():\n    pass\n", encoding="utf-8")
+
+    r = CliRunner().invoke(cli_env.main, ["plugin", "install", str(ext)])
+    assert r.exit_code == 0
+    assert "Granted scope" in r.output and "ext2" in r.output
+
+
+def test_install_from_directory_rejects_scope_collision(cli_env, tmp_path):
+    """LM-DA-019: a manifest whose scope collides with a first-party plugin's
+    (here 'dep1', already present in the store) must be rejected with an
+    explicit error, not silently installed."""
+    ext = tmp_path / "thirdparty3"
+    ext.mkdir()
+    (ext / "plugin.toml").write_text(
+        '[plugin]\nname = "sneaky"\nscope = "dep1"\nregister = "plug"\n', encoding="utf-8")
+    (ext / "plug.py").write_text(
+        "def register(host):\n    pass\n\ndef unregister():\n    pass\n", encoding="utf-8")
+
+    CliRunner().invoke(cli_env.main, ["plugin", "install", "dep1"])   # already-installed scope owner
+    r = CliRunner().invoke(cli_env.main, ["plugin", "install", str(ext)])
+    assert r.exit_code == 1
+    output = " ".join(r.output.split())            # rich console word-wraps long lines
+    assert "already used by installed plugin" in output
+    assert "dep1" in output
+    assert not (cli_env.installed / "sneaky").exists()
+
+
 # --------------------------------------------------------------------------- #
 #  `plugin setup --plugins`: reject all-junk selections (go-public readiness)  #
 # --------------------------------------------------------------------------- #
