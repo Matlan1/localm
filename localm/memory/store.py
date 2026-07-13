@@ -48,6 +48,14 @@ EmbedFn = Callable[[list[str]], list[list[float]]]
 # stored value in _load() - the migration hook this store previously lacked
 # (LM-DA-002): _save() rewrites the whole file, so an unrecognized line that is
 # merely skipped is erased by the next write.
+#
+# LM-DA-025: also reused, unchanged, as the "v" stamp for the three correction
+# sidecars (.corrections.jsonl, .forgotten.jsonl, .corrections-dismissed.json) -
+# a SHARED counter across four independent schemas, not a per-schema one. A
+# future bump for a MemoryRecord-only change also stamps a new value onto the
+# sidecars even though their own schemas did not change; any version-gated
+# migration written against "v" must branch per-schema (which file it came
+# from), not assume the raw number alone identifies a MemoryRecord revision.
 FORMAT_VERSION = 1
 
 # ---- bounds (DoS / poisoning / bloat) ------------------------------------- #
@@ -772,8 +780,12 @@ class MemoryStore:
             if ff.is_file():
                 prior = [ln for ln in ff.read_text(encoding="utf-8").splitlines()
                          if ln.strip()]
-            new = [json.dumps({**r.to_dict(), "forgotten_at": time.time()},
-                              ensure_ascii=False) for r in records]
+            # "v": FORMAT_VERSION mirrors the main record store's stamp (LM-DA-025) -
+            # same forward-tolerant from_dict pattern, so a future schema change has a
+            # migration hook here too, not just on the primary store.
+            new = [json.dumps({"v": FORMAT_VERSION, **r.to_dict(),
+                               "forgotten_at": time.time()}, ensure_ascii=False)
+                   for r in records]
             lines = (prior + new)[-_FORGOTTEN_MAX:]
             self._atomic_write(ff, "\n".join(lines) + "\n")
             return True
@@ -782,6 +794,130 @@ class MemoryStore:
             logger.warning("memory: could not archive %d forgotten record(s): %s",
                            len(records), e)
             return False
+
+    def _load_forgotten(self) -> list[dict]:
+        """Read the ``.forgotten.jsonl`` archive sidecar as raw dicts (record fields
+        plus ``forgotten_at``, and an optional ``v`` stamp tolerated like every other
+        sidecar - see FORMAT_VERSION). A corrupt/partial line is skipped and warned
+        about, like ``_load``/``_load_corrections``; an absent file is simply empty."""
+        ff = self._forgotten_file()
+        if not ff.is_file():
+            return []
+        out: list[dict] = []
+        skipped = 0
+        try:
+            lines = ff.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+                if not isinstance(data, dict):
+                    raise ValueError("forgotten line is not a JSON object")
+                out.append(data)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                skipped += 1
+        if skipped:
+            from localm.debuglog import logger as _dbg
+            _dbg.warning(
+                "memory forgotten archive %s: skipped %d unparseable line(s) on load",
+                ff, skipped)
+        return out
+
+    def _save_forgotten(self, entries: list[dict]) -> None:
+        ff = self._forgotten_file()
+        if not entries:
+            ff.unlink(missing_ok=True)
+            return
+        body = "\n".join(json.dumps(e, ensure_ascii=False) for e in entries)
+        self._atomic_write(ff, body + "\n")
+
+    def forgotten(self) -> list[dict]:
+        """Archived (forgotten) records for THIS namespace, newest-forgotten-first,
+        each an on-disk snapshot (record fields + ``forgotten_at``). LM-DA-024: the
+        read half of ``_archive_forgotten``'s recoverable-not-deleted contract - until
+        now nothing read this sidecar back, so recovery was filesystem-only despite
+        the archive step itself being correct. Used by the recovery route to show
+        what can be restored."""
+        with _namespace_lock(self._ns_hash):
+            return list(reversed(self._load_forgotten()))
+
+    def restore_forgotten(self, mem_id: str, *,
+                          embed_fn: Optional[EmbedFn] = None) -> Optional[MemoryRecord]:
+        """Recover one archived snapshot for *mem_id* back into the live store
+        (LM-DA-024). Two archive shapes exist, both handled here:
+
+          EVICTED - no live record with this id (prune's size cap, or an accepted
+          DELETE correction fully removed it): the snapshot is re-added as a live
+          record.
+
+          SUPERSEDED - a live record with this id already exists: an accepted
+          UPDATE correction (see ``resolve_correction``) archives the PRE-CHANGE
+          snapshot under the SAME id as the record it then mutates in place, so
+          the id never actually frees up. Refusing to restore whenever the id is
+          still live (an earlier version of this method did exactly that) made
+          every such entry permanently unrestorable - listed by ``forgotten()``
+          forever, 404ing on every restore attempt - which defeats
+          ``resolve_correction``'s own "recoverable, never a silent hard delete"
+          contract for its single most common path. So this case instead REVERTS
+          the live record's text to the archived snapshot in place (undoing
+          whatever changed it), matching exactly what an accepted UPDATE
+          correction could have altered.
+
+        When a record has more than one archive entry (forgotten/superseded more
+        than once), the MOST RECENT one is applied, so repeated restores step back
+        through history one snapshot at a time - reverting a record that was
+        corrected Berlin -> Munich -> Ghent first undoes to Munich, then Berlin.
+        Returns None when no archive entry matches *mem_id* at all.
+
+        CHK-MEM-LOCK: locked and reloaded like every other mutating method, so a
+        concurrent add/delete/restore cannot race the read-decide-write sequence
+        below. The applied entry is removed from the archive on success (the
+        archive is a recovery queue, not an immutable audit log - mirrors
+        ``resolve_correction`` clearing a resolved pending entry)."""
+        with _namespace_lock(self._ns_hash):
+            self._load()
+            entries = self._load_forgotten()
+            matches = [e for e in entries if e.get("id") == mem_id]
+            if not matches:
+                return None
+            entry = matches[-1]                  # most recent (archive is append-ordered)
+            snapshot = MemoryRecord.from_dict(entry)
+            live = self.get(mem_id)
+            if live is None:
+                self._records.append(snapshot)    # EVICTED: re-add as a live record
+                record = live = snapshot
+            else:
+                # SUPERSEDED: revert in place. Only text (+ the timestamps a
+                # correction-accept itself would touch) - mirrors exactly what
+                # resolve_correction's UPDATE branch can change, nothing more.
+                live.text = snapshot.text
+                live.updated = time.time()
+                live.last_used = live.updated
+                record = live
+            self._vectors.pop(record.id, None)
+            vec = self._embed_one(record.text, embed_fn)
+            if vec is not None:
+                self._vectors[record.id] = vec
+            self._save()
+            remaining = [e for e in entries if e is not entry]
+            try:
+                self._save_forgotten(remaining)
+            except OSError as e:
+                # The restore/revert above already succeeded and is persisted; only
+                # the archive-trim cleanup failed. Must NOT surface as a restore
+                # failure (rule 5: a real success is not reported as an error) -
+                # logged so the stale archive entry is discoverable. A later restore
+                # of the same id at worst re-applies this same (already-applied)
+                # snapshot, which is idempotent.
+                from localm.debuglog import logger
+                logger.warning(
+                    "memory: restored %s but could not trim the forgotten archive: %s",
+                    mem_id, e)
+            return record
 
     def prune(self, *, now: Optional[float] = None, n_max: int = N_MAX) -> int:
         """Forget decayed, low-value memories and enforce the size cap. User- and
@@ -863,7 +999,12 @@ class MemoryStore:
         if not corrections:
             cf.unlink(missing_ok=True)
             return
-        body = "\n".join(json.dumps(c.to_dict(), ensure_ascii=False)
+        # "v": FORMAT_VERSION mirrors the main record store's stamp (LM-DA-025).
+        # PendingCorrection.from_dict already filters to known dataclass fields, so
+        # an unstamped (pre-LM-DA-025) line loads unchanged - no read-side change
+        # needed for tolerance, same as the main store's "v" rollout.
+        body = "\n".join(json.dumps({"v": FORMAT_VERSION, **c.to_dict()},
+                                    ensure_ascii=False)
                          for c in corrections)
         self._atomic_write(cf, body + "\n")
 
@@ -875,14 +1016,34 @@ class MemoryStore:
         re-proposing these, so a dismissed supersession does not reappear every pass
         while the contradicting session is still in the recent window (the reject
         route otherwise only cleared the pending entry, and the next consolidation
-        re-created it). A corrupt/absent file is treated as empty."""
+        re-created it). A corrupt/absent file is treated as empty.
+
+        LM-DA-025: current files are ``{"v": FORMAT_VERSION, "keys": [...]}``; a
+        pre-stamp file (a bare JSON array) still loads unchanged, same forward-
+        tolerant approach as the main store's "v" rollout.
+
+        Known asymmetry: this is the one sidecar of the three LM-DA-025 touches
+        whose top-level SHAPE changed (array -> object), not just an added key
+        inside an already-dict-shaped line. A build OLDER than this change reading
+        a file written by this version sees a dict, falls through its own
+        ``isinstance(data, list)`` check, and silently treats it as an empty
+        dismissed set - so a downgrade or auto-rollback (see updater.py) after a
+        dismissal was saved would re-surface corrections the user already
+        rejected. Not data loss and self-heals on the next dismissal; accepted as
+        a documented tradeoff (not hidden) rather than engineered around, since
+        old code cannot be patched retroactively and the failure mode is bounded."""
         df = self._dismissed_file()
         if not df.is_file():
             return set()
         try:
             data = json.loads(df.read_text(encoding="utf-8"))
-            if isinstance(data, list):
-                return {tuple(k) for k in data if isinstance(k, (list, tuple))}
+            if isinstance(data, dict):
+                raw = data.get("keys", [])
+            elif isinstance(data, list):
+                raw = data                       # pre-LM-DA-025: unstamped bare array
+            else:
+                return set()
+            return {tuple(k) for k in raw if isinstance(k, (list, tuple))}
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             pass
         return set()
@@ -893,7 +1054,8 @@ class MemoryStore:
         if not trimmed:
             df.unlink(missing_ok=True)
             return
-        self._atomic_write(df, json.dumps([list(k) for k in trimmed]))
+        self._atomic_write(df, json.dumps(
+            {"v": FORMAT_VERSION, "keys": [list(k) for k in trimmed]}))
 
     def propose_corrections(self, proposals: list[PendingCorrection]) -> int:
         """Append *proposals* to the pending-corrections sidecar, skipping any that

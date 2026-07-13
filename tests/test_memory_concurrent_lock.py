@@ -313,5 +313,49 @@ def test_reinforce_recall_does_not_resurrect_concurrent_delete(tmp_path):
         "reinforce's save silently resurrected a concurrently-deleted record")
 
 
+def test_concurrent_restore_forgotten_no_duplicate(tmp_path):
+    """CHK-MEM-LOCK (LM-DA-024): restore_forgotten's read-matches-then-write-once
+    sequence must not let two concurrent restores of the SAME archived id both
+    succeed - exactly one may actually apply the snapshot; the loser finds
+    nothing left to restore (the archive entry was already consumed, or by the
+    time it acquires the lock a live record with that id already exists)."""
+    seed = MemoryStore("owner", "chat", root=tmp_path)
+    for i in range(20):
+        seed.add(MemoryRecord(text=f"user fact {i}", source="user", importance=0.8,
+                              last_used=1_700_000_000.0 - i * 86400.0), save=False)
+    seed._save()
+    seed.prune(now=1_700_000_000.0, n_max=19)
+    forgotten_id = seed.forgotten()[0]["id"]
+
+    start = threading.Barrier(2)
+    errors: list = []
+    results: list = []
+    lock = threading.Lock()
+
+    def restorer():
+        try:
+            start.wait()
+            r = MemoryStore("owner", "chat", root=tmp_path).restore_forgotten(forgotten_id)
+            with lock:
+                results.append(r)
+        except Exception as e:                    # pragma: no cover
+            errors.append(e)
+
+    threads = [threading.Thread(target=restorer) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, errors
+    succeeded = [r for r in results if r is not None]
+    assert len(succeeded) == 1, (
+        f"expected exactly one concurrent restore to succeed, got {len(succeeded)}")
+    final = MemoryStore("owner", "chat", root=tmp_path)
+    assert len([r for r in final.all() if r.id == forgotten_id]) == 1, (
+        "concurrent restores produced a duplicate live record")
+    assert final.forgotten() == []
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

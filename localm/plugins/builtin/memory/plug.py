@@ -8,6 +8,8 @@ store after a turn. Owns:
 
   GET/PUT/POST/PATCH/DELETE /api/memory[...]   - the memory manager surface
   POST /api/memory/consolidate                 - manual "distil now" trigger
+  GET /api/memory/forgotten                    - list archived/forgotten records
+  POST /api/memory/forgotten/{id}/restore       - recover one back into the store
 
 This is an OPT-IN plugin (off by default): install + enable it to turn memory on.
 Disabling it removes the recall + consolidation hooks and 404s the routes, so chat
@@ -258,6 +260,13 @@ def _corrections_payload(store) -> list:
     return [_correction_item(c, by_id.get(c.target_id)) for c in corrs]
 
 
+def _forgotten_item(entry: dict) -> dict:
+    """A forgotten/archived record rendered for the recovery surface (LM-DA-024)."""
+    return {"id": entry.get("id"), "text": entry.get("text", ""),
+            "importance": entry.get("importance"), "source": entry.get("source"),
+            "kind": entry.get("kind"), "forgotten_at": entry.get("forgotten_at")}
+
+
 def _rendered_text(store) -> str:
     """The store's facts as a markdown bullet list (what the memory modal textarea
     shows). Falls back to the legacy flat file when the structured store is still
@@ -390,6 +399,30 @@ async def memory_correction_reject(cid: str, request: Request = None):
     last-confirmed staleness, and remember the dismissal so consolidation does not
     re-propose the same change on the next pass."""
     return _apply_correction(cid, False, request)
+
+
+@_router.get("/api/memory/forgotten")
+async def memory_forgotten(request: Request = None):
+    """List archived (forgotten) records for the caller's own namespace (LM-DA-024):
+    ``_archive_forgotten()`` has always written a recoverable archive, but nothing
+    read it back until now - recovery was filesystem-only. Read-only (no side
+    effect), so available in privacy mode too, matching how memory_get already
+    returns existing records regardless of mode - nothing here is a NEW trace, it is
+    what was already removed."""
+    store = _request_store(request)
+    return {"items": [_forgotten_item(e) for e in store.forgotten()]}
+
+
+@_router.post("/api/memory/forgotten/{mem_id}/restore")
+async def memory_forgotten_restore(mem_id: str, request: Request = None):
+    """Recover one archived record back into the live store (LM-DA-024)."""
+    _require_writable()
+    store = _request_store(request)
+    rec = store.restore_forgotten(mem_id, embed_fn=_embed_fn())
+    if rec is None:
+        raise HTTPException(
+            404, "No such forgotten record (or it is already restored)")
+    return {"status": "restored", "item": _item(rec)}
 
 
 def _apply_correction(cid: str, accept: bool, request):
