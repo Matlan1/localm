@@ -8,6 +8,7 @@ import json
 import re
 import shutil
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List
 from typing import NamedTuple
@@ -164,6 +165,51 @@ _SHORTCUT_SIZES: dict[str, str] = {
 }
 
 
+@dataclass(frozen=True)
+class ComfySource:
+    """A known-good HuggingFace download source for one exact ComfyUI workflow
+    model filename."""
+    spec: str            # "owner/repo:filename" - fed straight to pull_model()
+    model_type: str       # "diffusion-unet" | "text-encoder" | "vae" | "lora"
+    comfy_subfolder: str  # ComfyUI models/<subfolder> this file belongs in
+    size_bytes: int
+
+
+# filename (exact, as ComfyUI's /object_info reports it) -> curated download source
+# for a ComfyUI WORKFLOW model slot. This is a DIFFERENT keyspace from
+# MODEL_SHORTCUTS above: MODEL_SHORTCUTS is keyed by a short alias a user TYPES
+# for `localm pull <alias>`; this dict is keyed by an exact installed filename and
+# is looked up automatically when ComfyUI preflight detects that filename missing
+# from a workflow - never typed by a user directly. Each entry's HuggingFace
+# source was verified by fetching the repo's live file tree, not assumed. Curated
+# only (exact-filename lookup, no fuzzy/heuristic matching) - see
+# resolve_comfy_model_source().
+#
+# ae.safetensors is sourced from the ungated Apache-2.0 FLUX.1-schnell repo rather
+# than the gated (license-click-through) FLUX.1-dev repo: the file is
+# byte-identical in both (confirmed by matching size), and sourcing it from the
+# ungated repo avoids a HuggingFace license-gate failure for users who haven't
+# accepted the FLUX.1-dev non-commercial license.
+COMFY_MODEL_SOURCES: dict[str, ComfySource] = {
+    "flux1-dev-Q8_0.gguf": ComfySource(
+        "city96/FLUX.1-dev-gguf:flux1-dev-Q8_0.gguf",
+        "diffusion-unet", "unet", 12_708_281_504),
+    "clip_l.safetensors": ComfySource(
+        "comfyanonymous/flux_text_encoders:clip_l.safetensors",
+        "text-encoder", "clip", 246_144_152),
+    "t5xxl_fp8_e4m3fn.safetensors": ComfySource(
+        "comfyanonymous/flux_text_encoders:t5xxl_fp8_e4m3fn.safetensors",
+        "text-encoder", "clip", 4_893_934_904),
+    "ae.safetensors": ComfySource(
+        "black-forest-labs/FLUX.1-schnell:ae.safetensors",
+        "vae", "vae", 335_304_388),
+}
+
+
+def resolve_comfy_model_source(filename: str) -> Optional[ComfySource]:
+    """The curated download source for *filename*, or None when it isn't one of
+    the known-good exact-filename matches above."""
+    return COMFY_MODEL_SOURCES.get(filename)
 
 
 def resolve_spec(spec: str) -> str:
