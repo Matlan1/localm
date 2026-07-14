@@ -80,6 +80,12 @@ def _read_names(updates_dir: Path, backup_dir: Path) -> list:
                 return loaded
         except (OSError, ValueError):
             pass
+        # The manifest EXISTS but is unreadable or malformed: we can still roll back from
+        # the backup dir, but that listing lacks the brand-new top-level entries the update
+        # ADDED, so those will not be removed. Say so rather than silently doing a partial
+        # rollback (do-not-hide-problems). Stdlib-only path, so warn via stderr.
+        print("Warning: applied_names.json exists but is unreadable; new files added by "
+              "the update will not be removed by this rollback.", file=sys.stderr)
     return [p.name for p in backup_dir.iterdir()]
 
 
