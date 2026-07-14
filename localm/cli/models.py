@@ -643,6 +643,15 @@ def unload_cmd(model):
     unloaded = data.get("unloaded_models")
     if unloaded is None:
         unloaded = [data["model"]] if data.get("model") not in (None, "none") else []
+    else:
+        # unload-all's unloaded_models lists only chat engines; the shared
+        # embedding model (a separate lifecycle - see localm.inference.embedder)
+        # is reported via embedder_unloaded, so it needs naming here too or a
+        # resident embedder alone prints "Nothing was loaded" despite actually
+        # freeing VRAM.
+        unloaded = list(unloaded)
+        if data.get("embedder_unloaded"):
+            unloaded.append("embedding model")
     if not unloaded:
         console.print("[dim]Nothing was loaded.[/dim]")
     else:

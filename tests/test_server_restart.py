@@ -53,6 +53,28 @@ def test_do_restart_unloads_before_relaunch(monkeypatch):
     assert list(order[-1][2]) == http_server._restart_argv()
 
 
+def test_do_restart_releases_embedder(monkeypatch):
+    """The shared embedder (localm.inference.embedder) is a separate lifecycle
+    from _engines - it was previously never released before a restart's
+    re-exec, leaking its native VRAM/RAM allocation across the restart."""
+    from localm.inference import embedder as emb
+
+    def _fake_relaunch(exe, argv):
+        raise SystemExit(0)
+
+    calls = []
+    monkeypatch.setattr(emb, "reset_embedder", lambda: calls.append(1))
+    monkeypatch.setattr(http_server, "_engine", None)
+    monkeypatch.setattr(os, "execv", _fake_relaunch)
+
+    try:
+        http_server._do_restart()
+    except SystemExit:
+        pass
+
+    assert calls == [1]
+
+
 def test_do_restart_disarms_crash_guard_before_relaunch(monkeypatch):
     # An intentional restart must not be reported as a crash.
     disarmed = []

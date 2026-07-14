@@ -1169,7 +1169,11 @@ if (unloadAllBtn) {
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) { toast(data.detail || "Unload failed", true); return; }
-      const n = (data.unloaded_models || []).length;
+      // unloaded_models only lists chat engines; the shared embedding model
+      // (a separate lifecycle - see localm.inference.embedder) is reported
+      // via embedder_unloaded, so count it too or a resident embedder alone
+      // reports "Nothing was loaded" despite actually freeing VRAM.
+      const n = (data.unloaded_models || []).length + (data.embedder_unloaded ? 1 : 0);
       toast(n ? `Unloaded ${n} model(s)` : "Nothing was loaded");
       refreshModelsPage();
       refreshPerfEstimate();

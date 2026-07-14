@@ -82,6 +82,21 @@ def register(app: FastAPI, ctx) -> None:
             except OSError:
                 pass
             engine = _hs._engines.get(name)
+            loaded = engine.loaded if engine is not None else False
+            # A registered model can also be the shared EMBEDDING model, loaded
+            # via get_embedder() - a lifecycle entirely separate from _engines
+            # (see localm.inference.embedder's module docstring), so it never
+            # shows up above. Recognise it by resolved PATH (not name/config)
+            # so this row's "loaded" status - and its per-row Unload control,
+            # gated on this flag - actually reflect a resident embedder.
+            if not loaded:
+                from localm.inference import embedder as _embedder_mod
+                emb_path = _embedder_mod.loaded_path()
+                if emb_path is not None:
+                    try:
+                        loaded = Path(emb_path).resolve() == path.resolve()
+                    except OSError:
+                        loaded = False
             models.append({
                 "name": name,
                 "source": str(entry.get("source", "")),
@@ -91,7 +106,7 @@ def register(app: FastAPI, ctx) -> None:
                 # (loaded) without being the one currently serving requests -
                 # surfaced so the Models page can offer a per-row Unload
                 # action on ANY loaded model, not just the active one.
-                "loaded": engine.loaded if engine is not None else False,
+                "loaded": loaded,
                 "model_type": mtype,
             })
         return {"models": models, "active": current}

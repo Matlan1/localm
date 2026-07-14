@@ -128,6 +128,65 @@ def decide_media_swap(settings: dict, *,
         policy=settings.get("swap_policy", "auto"))
 
 
+def decide_embedder_swap(embedder_estimate_bytes: Optional[int], *,
+                         policy: str = "auto",
+                         read_free: Optional[Callable[[], Optional[int]]] = None) -> bool:
+    """Decide whether to unload the chat LLM before the shared embedder loads
+    (``localm.inference.embedder.get_embedder()``), reading live free VRAM.
+
+    Generalizes ``decide_media_swap`` for a caller that has no per-plugin
+    ``settings`` dict of its own - just the embedder's own estimated footprint
+    and the resolved ``model_swap_policy``. Both funnel through the same
+    ``should_swap_for_media`` decision, so the embedder gets the identical
+    auto/always/never semantics the image/music/video plugins already use."""
+    if read_free is None:
+        def read_free() -> Optional[int]:
+            from localm.discover import vram_capacity
+            return vram_capacity().get("free")
+    return should_swap_for_media(read_free(), embedder_estimate_bytes, policy=policy)
+
+
+def evict_chat_for_embedder(*, timeout_s: float = 300.0) -> str:
+    """Free every loaded chat engine so the shared embedder's own load has VRAM
+    room, through the SAME guarded path the server's "Unload all" button uses
+    (``http_server.unload_all_models``).
+
+    The embedder loads in-process (not as a background job with a self_url), so
+    unlike ``unload_chat_for_media`` this does not round-trip over HTTP: it
+    mirrors ``jobs/runner.py``'s ``_evict_shared_engine_for_media`` instead,
+    submitting the coroutine onto the server's captured event loop
+    (``http_server._server_loop``) via ``asyncio.run_coroutine_threadsafe`` and
+    blocking THIS (caller's) thread on the result. That is required, not
+    optional: ``unload_all_models`` honors the in-flight-request pin and
+    serializes with ``get_engine`` only when it runs ON the loop - a raw
+    off-loop unload would race a concurrent request the way the pin-during-
+    unload fix (BUG-9b) already had to close for the media path.
+
+    Returns the unload status ("unloaded" / "in_use" / "already_unloaded"), or
+    "skipped" when the server loop is unreachable (no live server - e.g. a bare
+    CLI embed) / "error" on a failure to complete - in which case the embedder
+    loads alongside whatever chat model is resident (degraded, logged, never a
+    crash - AGENTS.md rule 5: every degrade is surfaced, not silent)."""
+    import asyncio
+    from localm.debuglog import logger
+    from localm.inference import http_server as _hs
+
+    loop = getattr(_hs, "_server_loop", None)
+    if loop is None or not loop.is_running():
+        logger.debug("embedder: cannot reach the server loop to evict the chat "
+                     "model safely; loading the embedder alongside it (may be "
+                     "tight on VRAM)")
+        return "skipped"
+    try:
+        fut = asyncio.run_coroutine_threadsafe(_hs.unload_all_models(), loop)
+        res = fut.result(timeout=timeout_s)
+    except Exception as e:
+        logger.debug("embedder: guarded chat-model eviction did not complete "
+                     "(%s); loading the embedder without evicting", e)
+        return "error"
+    return res.get("status", "unloaded") if isinstance(res, dict) else "unloaded"
+
+
 def wait_for_vram_release(
     read_free: Callable[[], Optional[int]],
     *,

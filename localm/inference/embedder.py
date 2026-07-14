@@ -299,13 +299,65 @@ _TRIED_DOWNLOAD = False          # one-time auto-download attempt (only net_mode
 _LAST_ERROR: Optional[str] = None   # why the last load failed (for the GUI picker)
 
 
+def _maybe_swap_for_embedder(path: str, n_gpu_layers: int) -> None:
+    """Before the embedder's native load, evict a resident chat model when it
+    would not otherwise fit - the SAME VRAM-aware swap the image/music/video
+    plugins run before their own model load (see ``localm.vram.decide_media_swap``),
+    generalized here via ``decide_embedder_swap``/``evict_chat_for_embedder``.
+
+    Without this, the embedder's own capacity gate (``gpu_split_shortfall``,
+    used above in ``GGUFEmbedder.__init__``) is a no-op on an ordinary
+    single-GPU box (it only fires for a configured multi-GPU split), so a
+    resident chat model and the embedder were both asked to be resident at
+    once - VRAM/RAM pressure, most visible with a large embedding model
+    (e.g. Qwen3-Embedding-8B, ~7.5 GB) alongside a large chat model.
+
+    A CPU-only embedder load (``n_gpu_layers <= 0``) never contends for VRAM,
+    so it is skipped. Best-effort: any failure to read the file size or decide
+    the swap leaves the load path exactly as before this check existed (never
+    blocks a legitimate load - the swap is an optimization, not a
+    correctness requirement of the load itself)."""
+    if n_gpu_layers <= 0:
+        return
+    try:
+        file_size = Path(path).stat().st_size
+    except OSError:
+        return
+    if not file_size:
+        return
+    from localm.config import load_config
+    from localm.vram import decide_embedder_swap, evict_chat_for_embedder, resolve_swap_policy
+    cfg = load_config()
+    policy = resolve_swap_policy({}, cfg)
+    # Same loaded-footprint approximation GGUFEmbedder.__init__ already uses for
+    # its own gpu_split_shortfall check (weights + ~20% KV-cache/compute slop).
+    estimate = int(file_size * 1.2)
+    if not decide_embedder_swap(estimate, policy=policy):
+        return
+    evict_chat_for_embedder()
+
+
 def get_embedder() -> Optional[GGUFEmbedder]:
     """The shared embedder, loading the configured model on first use. Returns None
     when no embedding model can be resolved - callers then fall back to lexical
     retrieval. A missing model is re-checked on every call (so a mid-session
     ``localm setup-embeddings`` is picked up without a restart); only a genuine
     load FAILURE is cached. Loading holds the engine's process-global load lock so
-    it cannot race a chat-model load onto the GPU."""
+    it cannot race a chat-model load onto the GPU.
+
+    The pre-load swap check (``_maybe_swap_for_embedder``) deliberately runs
+    OUTSIDE ``_LOCK`` (double-checked locking below), not inside a single held
+    lock the way the rest of this function is structured. It can evict a
+    resident chat model via ``vram.evict_chat_for_embedder``, which submits
+    ``http_server.unload_all_models()`` onto the SERVER'S event-loop thread and
+    blocks THIS thread waiting for it - and that coroutine calls
+    ``loaded_dim()``, which itself needs ``_LOCK``. Since ``_LOCK`` is a plain
+    ``threading.RLock`` (thread-owned, not reentrant across threads), holding
+    it here while blocking on that coroutine is a genuine cross-thread
+    deadlock: this thread waits on the coroutine, the coroutine (on the event
+    loop) waits on this thread's lock. Confirmed via live reproduction
+    (2026-07-14 review) - the event loop stayed blocked for the full
+    eviction timeout before either side could proceed."""
     global _EMBEDDER, _LOAD_FAILED, _TRIED_DOWNLOAD, _LAST_ERROR
     with _LOCK:
         if _EMBEDDER is not None:
@@ -323,10 +375,26 @@ def get_embedder() -> Optional[GGUFEmbedder]:
             path = resolve_embedding_model_path()
         if not path:
             return None
+        from localm.config import load_config
+        ngl = int(load_config().get("n_gpu_layers", 99))
+
+    # OUTSIDE _LOCK (see docstring): safe to block here on the cross-thread
+    # eviction round trip. Another thread may concurrently reach this same
+    # window and run its own swap check too - harmless, since
+    # evict_chat_for_embedder()/decide_embedder_swap() are idempotent (a
+    # second call simply finds nothing left to evict, or enough VRAM already
+    # free) and the actual load below re-checks the singleton state.
+    _maybe_swap_for_embedder(path, ngl)
+
+    with _LOCK:
+        # Re-check: another thread may have completed (or failed) the load
+        # while this thread was outside the lock running the swap check.
+        if _EMBEDDER is not None:
+            return _EMBEDDER
+        if _LOAD_FAILED:
+            return None
         try:
-            from localm.config import load_config
             from localm.inference.engine import _LOAD_LOCK
-            ngl = int(load_config().get("n_gpu_layers", 99))
             with _LOAD_LOCK:
                 _EMBEDDER = GGUFEmbedder(path, n_gpu_layers=ngl)
             logger.info("embedding model ready: %s (dim=%d)", path, _EMBEDDER.dim)
@@ -353,6 +421,17 @@ def loaded_dim() -> Optional[int]:
     Does NOT trigger a load - safe for a cheap status probe (GUI picker)."""
     with _LOCK:
         return _EMBEDDER.dim if _EMBEDDER is not None else None
+
+
+def loaded_path() -> Optional[str]:
+    """Filesystem path of the currently-loaded embedder, or None if none is
+    loaded. Does NOT trigger a load. Lets a caller outside this module (the
+    Models page, the targeted unload route) recognise a registered model
+    entry as "this is the resident embedder" - it never appears in
+    ``http_server._engines``, so that is otherwise invisible - by comparing
+    against the entry's own resolved path. Pairs with ``loaded_dim()``."""
+    with _LOCK:
+        return _EMBEDDER.model_path if _EMBEDDER is not None else None
 
 
 def last_error() -> Optional[str]:

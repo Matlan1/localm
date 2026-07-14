@@ -172,6 +172,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
   read it back through search. Such files are now refused (HTTP 400) whenever
   indexing goes through the API, for every caller. Indexing your own key material
   on your own machine still works from the `localm rag add` command line.
+- **The embedding model now shares VRAM management with your chat model.**
+  Loading an embedding model (for memory/knowledge search) while a chat model was
+  already resident used to just pile both into VRAM/RAM at once instead of
+  swapping the chat model out first, the way image/music/video generation already
+  does - on a tight card this could push system memory uncomfortably high. And
+  "Unload all" on the Models page only ever freed the chat model: the embedding
+  model stayed loaded and unaccounted for, so the button under-reported how much
+  VRAM was actually released. Both are fixed: loading a large embedding model now
+  swaps the chat model out first when needed, and "Unload all" (and the Models
+  page's per-row Unload) now release the embedding model too and show it as
+  loaded when it's the one resident.
 
 ## [0.1.2] - 2026-07-10
 
