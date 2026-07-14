@@ -176,6 +176,12 @@ class JobScheduler:
         # not run a cron job twice in its matching minute: job id -> last fired
         # cron-minute epoch (floor to 60s).
         self._cron_fired: dict = {}
+        # Log-once/on-change state for a FAILING tick. A persistent tick failure
+        # (e.g. an unreadable jobs.json makes store.list() raise every tick, which
+        # silently stops ALL scheduled jobs) must be discoverable (AGENTS.md rule
+        # 5), but the ~30s poll must not spam the log. Holds the signature of the
+        # last logged failure so an identical one is not re-logged every poll.
+        self._last_tick_error: Optional[str] = None
 
     # ---- pure decision logic ----------------------------------------------
     def due(self, job: Job, now: float) -> bool:
@@ -295,6 +301,31 @@ class JobScheduler:
         return ran
 
     # ---- async loop --------------------------------------------------------
+    def _note_tick_error(self, exc: BaseException) -> None:
+        """Log a failing tick ONCE per distinct error (not every poll). A tick
+        must never kill the loop, but it must not fail SILENTLY either: an
+        unreadable jobs.json makes ``store.list()`` raise every tick and halts all
+        scheduled jobs, which was invisible behind the old ``except: pass``
+        (AGENTS.md rule 5). Log-once/on-change keeps the ~30s poll from spamming."""
+        signature = f"{type(exc).__name__}: {exc}"
+        if signature == self._last_tick_error:
+            return
+        self._last_tick_error = signature
+        from localm.debuglog import logger
+        logger.warning(
+            "jobs scheduler: tick failed - scheduled jobs will not fire until this "
+            "clears: %s", signature)
+
+    def _note_tick_ok(self) -> None:
+        """After a tick succeeds, clear the failure state (noting recovery once) so
+        a later recurrence is logged again rather than suppressed as a duplicate."""
+        if self._last_tick_error is None:
+            return
+        self._last_tick_error = None
+        from localm.debuglog import logger
+        logger.info(
+            "jobs scheduler: tick recovered; scheduled jobs are firing again")
+
     async def _loop(self) -> None:
         assert self._stop is not None
         while not self._stop.is_set():
@@ -302,8 +333,12 @@ class JobScheduler:
                 # Run the (blocking) tick off the event loop so a slow job run
                 # never stalls the loop or the server.
                 await asyncio.get_running_loop().run_in_executor(None, self.tick)
-            except Exception:
-                pass        # a tick must never kill the loop
+            except Exception as e:
+                # A tick must never kill the loop, but the failure must be
+                # surfaced, not swallowed (AGENTS.md rule 5). Log-once/on-change.
+                self._note_tick_error(e)
+            else:
+                self._note_tick_ok()
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self.poll_seconds)
             except asyncio.TimeoutError:

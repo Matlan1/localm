@@ -15,7 +15,10 @@
 // v50: pages/settings.js changed again (the managed_comfy_enabled checkbox was
 // removed - a stale-cached client would keep showing it AND get "unknown config
 // key" on save, since the server no longer accepts that field).
-const CACHE = "localm-shell-v50";
+// v51: index.html and pages/models.js changed (the ComfyUI re-scan button moved
+// out of its hidden tab-gated row into the "Add a model" card) - a stale-cached
+// client would keep the button invisible on the All/LLMs tabs.
+const CACHE = "localm-shell-v51";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).

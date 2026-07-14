@@ -170,8 +170,19 @@ def _make_self_classify(self_url: str, active_model):
                 choice = r.json()["choices"][0]["message"]["content"].strip().lower()
                 choice = choice.replace("`", "").replace(".", "")
                 return choice
-        except Exception:
-            pass
+            # Non-ok HTTP response: a real tie-break failure. self_request never
+            # raises on a non-2xx, so this path was the silent one - surface it
+            # before falling back to the heuristic label (AGENTS.md rule 5).
+            from localm.debuglog import logger
+            logger.debug("rag classify: tie-break returned HTTP %s, falling back "
+                         "to heuristic label", getattr(r, "status_code", "?"))
+        except Exception as e:
+            # Best-effort tie-break only (the caller falls back to the "text"
+            # label), but the failure should be discoverable, not silent
+            # (AGENTS.md rule 5).
+            from localm.debuglog import logger
+            logger.debug("rag classify: self-classification tie-break failed, "
+                         "falling back to heuristic label: %s", e)
         return None
     return _self_classify
 
@@ -183,37 +194,47 @@ def _make_self_describe_image(self_url: str, active_model):
         b64 = base64.b64encode(image_bytes).decode("utf-8")
         data_url = f"data:{mime_type};base64,{b64}"
         prompt = "Describe this image in detail. Extract any visible text, handwriting, diagram structure, or code verbatim."
+        r = self_request("POST", "/chat/completions",
+                         json={
+                             "model": active_model() or "localm",
+                             "messages": [{
+                                 "role": "user",
+                                 "content": [
+                                     {"type": "text", "text": prompt},
+                                     {"type": "image_url", "image_url": {"url": data_url}}
+                                 ]
+                             }],
+                             "temperature": 0.2,
+                             "max_tokens": 1000,
+                         },
+                         timeout=60, base_url=self_url)
+        if r.ok:
+            # A "" here means the model answered but with nothing - a genuine
+            # empty-but-successful description, which extract_bytes honestly
+            # reports as an empty description. That is distinct from a REQUEST
+            # failure, which propagates below.
+            return r.json()["choices"][0]["message"]["content"].strip()
+        # Not OK: surface the endpoint's REAL error so extract_bytes wraps its true
+        # cause ("Image description failed: ...") instead of masking it as an empty
+        # description (AGENTS.md rule 5). A real transport error from self_request
+        # (timeout / connection reset) likewise propagates rather than being
+        # swallowed to None - the old string-match ("vision") only re-raised the
+        # no-vision case and hid everything else as a false "empty" result.
+        err_detail = ""
         try:
-            r = self_request("POST", "/chat/completions",
-                             json={
-                                 "model": active_model() or "localm",
-                                 "messages": [{
-                                     "role": "user",
-                                     "content": [
-                                         {"type": "text", "text": prompt},
-                                         {"type": "image_url", "image_url": {"url": data_url}}
-                                     ]
-                                 }],
-                                 "temperature": 0.2,
-                                 "max_tokens": 1000,
-                             },
-                             timeout=60, base_url=self_url)
-            if r.ok:
-                return r.json()["choices"][0]["message"]["content"].strip()
-            else:
-                err_detail = ""
-                try:
-                    err_detail = r.json().get("detail") or ""
-                except Exception:
-                    pass
-                if "cannot accept image input" in err_detail or "UnsupportedInputError" in err_detail or "vision" in err_detail:
-                    raise RuntimeError("Active model does not support vision (load a vision model/projector to index images).")
-                raise RuntimeError(err_detail or f"HTTP {r.status_code}")
-        except Exception as e:
-            if "does not support vision" in str(e):
-                raise
+            err_detail = r.json().get("detail") or ""
+        except Exception:
+            # Best-effort extraction of the endpoint's error detail; safe to skip
+            # because the mandatory raise below ALWAYS surfaces the failure (it
+            # falls back to the HTTP status when no JSON detail is available).
             pass
-        return None
+        if ("cannot accept image input" in err_detail
+                or "UnsupportedInputError" in err_detail
+                or "vision" in err_detail):
+            raise RuntimeError(
+                "Active model does not support vision (load a vision "
+                "model/projector to index images).")
+        raise RuntimeError(err_detail or f"HTTP {r.status_code}")
     return _self_describe_image
 
 

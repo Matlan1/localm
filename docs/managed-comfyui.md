@@ -92,14 +92,18 @@ hand.
 ### Registering ComfyUI's models in localm
 
 To make ComfyUI's own models show up in localm's model browser, the GUI Models
-page has a **Scan ComfyUI Models** action. It walks the `models/` folders under
-your `comfy_workdir` and registers what it finds, mapping each subfolder to a
-localm model type (`unet` to `diffusion-unet`, `vae` to `vae`, and so on), leaving
-anything it cannot map as `unknown`. If a scan finds nothing it tells you why (no
-`comfy_workdir` configured, or no `models` folder under it) instead of a bare
-"Added 0", so a misconfiguration is visible rather than silent. This is separate
-from `extra_model_paths.yaml`: sharing lets the managed ComfyUI *use* your models,
-scanning lets *localm* list them.
+page's "Add a model" card has a **Re-scan ComfyUI folder** action. It walks the
+`models/` folders under your `comfy_workdir` and registers what it finds, mapping
+each subfolder to a localm model type (`unet` to `diffusion-unet`, `vae` to `vae`,
+and so on), leaving anything it cannot map as `unknown`. If a scan finds nothing it
+tells you why (no `comfy_workdir` configured, or no `models` folder under it)
+instead of a bare "Added 0", so a misconfiguration is visible rather than silent.
+This is separate from `extra_model_paths.yaml`: sharing lets the managed ComfyUI
+*use* your models, scanning lets *localm* list them.
+
+The neighboring **Import from ComfyUI…** action covers a different case: previewing
+and importing from a ComfyUI folder other than your configured `comfy_workdir` -
+a one-off install, or localm's own managed ComfyUI - without changing that setting.
 
 ## Check status and remove
 
