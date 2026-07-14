@@ -406,6 +406,25 @@ def apply(asset_id, *, signature=None, installed=None, download_opener=None,
     # ANTI-ROLLBACK - a validly SIGNED but OLDER build must not be installable.
     _refuse_downgrade(new_version)
     klass = classify(root, target, read_manifest(root))
+    # A STALE applied_names.json from a PREVIOUS update would mis-describe THIS one: the
+    # updates dir persists across updates and this file is only ever overwritten below,
+    # so a failed write would leave the prior update's names and a later rollback would
+    # then remove/restore the WRONG top-level set (stranding a file THIS build dropped -
+    # silent install data loss reported as rolled_back:True). Remove it BEFORE the swap
+    # so that, once backup/ is replaced, a stale manifest can never coexist with a fresh
+    # backup: a failed write (or a crash) then degrades to the backup-dir listing
+    # (correct for pre-existing names), never to stale data. Placed AFTER download/verify/
+    # extract so an early abort there leaves the previous update's manifest intact.
+    manifest_path = updir / "applied_names.json"
+    try:
+        manifest_path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        _apply_warn("could not remove the previous update manifest %s: %s; if recording "
+                    "the new one below also fails, a later rollback may use stale names",
+                    manifest_path, e)
+
     names = au.swap_with_backup(root, target, backup_dir)
     # Record the FULL swap set (including brand-new top-level entries, which the backup
     # dir does NOT contain because they had nothing to back up) so a later manual
@@ -413,9 +432,14 @@ def apply(asset_id, *, signature=None, installed=None, download_opener=None,
     # rollback_last() sees only backed-up (pre-existing) names and would strand new files.
     try:
         import json
-        (updir / "applied_names.json").write_text(json.dumps(sorted(names)), encoding="utf-8")
-    except OSError:
-        pass   # best-effort: rollback_last falls back to the backup-dir listing
+        manifest_path.write_text(json.dumps(sorted(names)), encoding="utf-8")
+    except OSError as e:
+        # Best-effort, but a failed write is now VISIBLE: the manifest was unlinked above,
+        # so a later rollback falls back to the backup-dir listing (correct for pre-existing
+        # names) and cannot remove brand-new top-level entries this update added. Say so.
+        _apply_warn("could not record the update manifest %s: %s; a later "
+                    "`update --rollback` will fall back to the backup listing and cannot "
+                    "remove brand-new top-level entries this update added", manifest_path, e)
 
     cmd = au.post_swap_command(klass, backend=_installed_backend())
     if cmd:
@@ -542,6 +566,17 @@ def _watchdog_warn(msg, *args) -> None:
         pass   # logging must never be the thing that raises here
 
 
+def _apply_warn(msg, *args) -> None:
+    """Best-effort WARNING for apply()/rollback bookkeeping (the manifest write/prune).
+    A failure to LOG must never itself break or mask an update; when the logger is
+    importable the real problem is surfaced through it."""
+    try:
+        from localm.debuglog import logger
+        logger.warning(msg, *args)
+    except Exception:
+        pass
+
+
 def rollback_last(*, installed=None) -> dict:
     """Restore the install from the most recent update backup. Returns
     ``{rolled_back, backup}``. Raises LocalmError when there is no backup."""
@@ -567,6 +602,14 @@ def rollback_last(*, installed=None) -> dict:
                 names = loaded
         except (OSError, ValueError):
             names = None
+        if names is None:
+            # The manifest EXISTS but is unreadable or malformed (NOT the benign
+            # never-written case): we can still roll back from the backup dir, but that
+            # listing lacks the brand-new top-level entries the update ADDED, so those
+            # will not be removed. Surface the degraded rollback rather than silently
+            # doing a partial one (we do not hide problems).
+            _apply_warn("applied_names.json at %s exists but is unreadable; new files "
+                        "added by the update will not be removed by this rollback", manifest)
     if names is None:
         names = [p.name for p in backup_dir.iterdir()]
     au.rollback(backup_dir, target, names)

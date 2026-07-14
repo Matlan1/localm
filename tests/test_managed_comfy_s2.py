@@ -333,6 +333,58 @@ def test_provision_fails_and_rolls_back_when_freeze_unreadable(home, fake_user_c
     assert not mc.managed_comfy_paths().root.exists()   # rolled back, nothing lingers
 
 
+def test_copy_custom_nodes_returns_warnings_not_silent(tmp_path, monkeypatch):
+    """A node that fails to copy is RETURNED as a warning (so the caller can route it
+    into the run log), not only streamed and forgotten (rule 5, the #622 vanished-log
+    class). Both the dir-copy and the .py-file-copy failure paths are covered."""
+    from localm.media import managed_comfy_provision as prov
+    user = tmp_path / "user"
+    (user / "custom_nodes" / "NodeDir").mkdir(parents=True)
+    (user / "custom_nodes" / "NodeDir" / "__init__.py").write_text("", encoding="utf-8")
+    (user / "custom_nodes" / "node_file.py").write_text("# a node\n", encoding="utf-8")
+    managed = tmp_path / "managed"
+    managed.mkdir()
+
+    def _boom(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(prov.shutil, "copytree", _boom)
+    monkeypatch.setattr(prov.shutil, "copy2", _boom)
+
+    count, warnings = prov._copy_custom_nodes(user, managed)
+    assert count == 0
+    assert len(warnings) == 2
+    joined = " ".join(warnings)
+    assert "NodeDir" in joined and "node_file.py" in joined
+    assert "disk full" in joined
+
+
+def test_provision_copy_node_failures_land_in_result(home, fake_user_comfy, monkeypatch):
+    """End to end: a non-fatal custom-node copy failure must SURVIVE into the result,
+    not only the live progress stream. It lands in ProvisionResult.log and its count is
+    folded into the success message (rule 5). Provisioning still succeeds - a failed
+    node only breaks the workflow needing it, not the whole install."""
+    from localm.media import managed_comfy_provision as prov
+
+    # Skip the real pip replicate (empty freeze) to keep this fast; the fresh venv is
+    # still really created so the result reads as installed. The copy path is what we
+    # exercise. Only the user's ComfyUI git clone (not copytree) provides the source.
+    monkeypatch.setattr(prov, "read_user_freeze", lambda venv_python: [])
+    cfg.save_config({**cfg.load_config(), "comfy_workdir": str(fake_user_comfy.workdir)})
+
+    def _boom(*a, **k):
+        raise OSError("simulated copy failure")
+    monkeypatch.setattr(prov.shutil, "copytree", _boom)  # NodeAlpha + NodeBeta are dirs
+
+    stack = prov.discover_user_comfy()
+    result = prov.provision_by_copy(stack, copy_custom_nodes=True)
+
+    assert result.ok, result.message                     # non-fatal
+    assert mc.is_managed_comfy_installed() is True
+    assert "could not copy custom node" in result.log     # survived into the log ...
+    assert "NodeAlpha" in result.log and "NodeBeta" in result.log
+    assert "2 custom node(s) could not be copied" in result.message  # ... and the message
+
+
 def test_read_user_freeze_none_on_failure(tmp_path):
     """pip freeze failure returns None (distinct from [] for a genuinely empty venv),
     so the caller can tell a swallowed failure from an empty venv."""

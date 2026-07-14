@@ -94,13 +94,24 @@ https://astral.sh/uv/install.ps1 | iex"` on Windows, or `curl -LsSf
 https://astral.sh/uv/install.sh | sh` on Linux/macOS).
 
 ```bash
-uv venv --python 3.12 .venv
+# Portable (default, self-contained): keeps uv's downloaded Python runtime AND
+# its wheel cache inside this clone too, so nothing is read from or written to
+# your user profile - matches setup.bat/setup.sh's own default "Portable"
+# choice. The UV_* vars only apply to this one command, never persisted.
+UV_PYTHON_INSTALL_DIR="$PWD/.python" UV_CACHE_DIR="$PWD/.cache" \
+  uv venv --python 3.12 --python-preference only-managed .venv
 uv pip install -p .venv -e ".[coder,voice]"       # base: NVIDIA / Intel / CPU (GGUF chat needs no torch)
 uv pip install -p .venv -e ".[gpu,coder,voice]"   # AMD RDNA2 ROCm ONLY - do NOT use on NVIDIA/Intel
 localm setup-llama                                 # provision the native llama.cpp backend (Vulkan/CUDA/CPU)
 ```
 
 (`voice` adds the GUI mic's Whisper speech-to-text; drop it if you do not want it.)
+
+To instead reuse a Python + package cache already on your system (faster, one
+download shared across every uv project on the machine, but no longer
+self-contained - the same tradeoff `setup.bat`/`setup.sh`'s "Shared" choice
+describes), just drop the `UV_PYTHON_INSTALL_DIR`/`UV_CACHE_DIR`/
+`--python-preference` and run the plain `uv venv --python 3.12 .venv`.
 
 The base line above works on NVIDIA, Intel, and CPU; only AMD RDNA2 users add `[gpu]` (the ROCm torch stack). `localm setup-llama` is required after a manual install to fetch the native backend (`setup.bat` does this for you). NVIDIA users who also want HuggingFace/torch models install CUDA torch separately: `uv pip install -p .venv torch torchvision --index-url https://download.pytorch.org/whl/cu126`.
 

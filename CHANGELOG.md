@@ -54,6 +54,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   in Settings > Media) opts back out if you'd rather it stay off.
 
 ### Fixed
+- **A damaged media-ownership record no longer exposes everyone's generated media.**
+  On a multi-user server, the image, music, and video galleries record which key
+  generated each file so a scoped key only ever sees its own. If that on-disk
+  ownership record became unreadable (corrupt, truncated, or momentarily locked),
+  localm used to treat every file as unowned and let any key view, download, delete,
+  move, or rename all of them. It now fails closed: a scoped key is denied until the
+  record is repaired, while the owner/admin key (and single-user open mode) keeps full
+  access so the gallery stays usable. The record is also written atomically now, so an
+  interrupted save can no longer leave it half-written in the first place.
 - **Semantic knowledge search now works on password-protected servers.** When localm
   is started with an API key saved to disk (`localm key generate`, or the launcher),
   indexing a document used to silently fall back to keyword-only search: the server
@@ -206,8 +215,24 @@ permanent public record of what shipped and are never rewritten; the in-progress
   traceback) in addition to the console notice - previously it was
   console-only, so a report filed afterward showed no sign anything had gone
   wrong.
+- A couple of status messages no longer claim success when the step was actually
+  refused or skipped. A chat-model reload after image, music, or video generation
+  now says the reload was deferred to your next message (instead of a false "Chat
+  model ready.") when the server declined it, and installing the global `localm`
+  command tells you to add its folder to your PATH by hand when it could not do so
+  itself, instead of claiming the folder "was already on PATH".
 
 ### Security
+- **Bug reports no longer leak your username in the fields you type or the issue
+  title.** When you file a bug (through the app's "Report a bug", `localm bug-report`,
+  or the standalone reporter used when localm will not start), the automatically
+  collected diagnostics were already stripped of your home-folder path - which
+  contains your account name - and of any pasted credential. The one-line summary, the
+  description, and the extra "reason" you type were not, and neither was the public
+  issue title built from them, so a home path or a key pasted into those fields could
+  reach the public tracking issue even though the preview claims it shows exactly what
+  will be sent. Those fields are now scrubbed at the point of upload too, so what is
+  filed matches the redacted preview.
 - **Disabling the private-network (SSRF) guard now requires an owner key.** The
   "Allow private/loopback targets" setting (`net_allow_private`) turns off the
   guard that blocks model-initiated requests to localhost, your LAN, and

@@ -325,16 +325,19 @@ def _install_freeze(managed_python: Path, freeze_lines: list, index_url: Optiona
     return _run(cmd, on_progress=on_progress, timeout=3600)
 
 
-def _copy_custom_nodes(user_workdir: Path, managed_root: Path,
-                       on_progress: ProgressCb) -> int:
-    """Copy the user's custom_nodes into the managed ComfyUI and return the count.
-    Only when the user opted in. Skips __pycache__ / compiled files and *.example."""
+def _copy_custom_nodes(user_workdir: Path, managed_root: Path) -> tuple[int, list]:
+    """Copy the user's custom_nodes into the managed ComfyUI, returning (copied_count,
+    warnings). Only when the user opted in. Skips __pycache__ / compiled files and
+    *.example. A node that fails to copy is not silently dropped: its warning is RETURNED
+    so the caller routes it through the run log (ProvisionResult.log), not only the live
+    progress stream (rule 5: a surfaced problem must survive into the result)."""
     src = user_workdir / "custom_nodes"
     if not src.is_dir():
-        return 0
+        return 0, []
     dst = managed_root / "custom_nodes"
     dst.mkdir(parents=True, exist_ok=True)
     count = 0
+    warnings: list = []
     for entry in sorted(src.iterdir()):
         name = entry.name
         if name == "__pycache__" or name.endswith(".example"):
@@ -350,9 +353,8 @@ def _copy_custom_nodes(user_workdir: Path, managed_root: Path,
                 shutil.copy2(str(entry), str(target))
                 count += 1
         except Exception as e:
-            # Do not silently drop a node the user asked for - surface it (rule 5).
-            _emit(on_progress, f"WARNING: could not copy custom node {name}: {e}")
-    return count
+            warnings.append(f"could not copy custom node {name}: {e}")
+    return count, warnings
 
 
 def _write_marker(managed_root: Path, stack: UserComfyStack,
@@ -458,11 +460,16 @@ def provision_by_copy(stack: UserComfyStack, cfg: Optional[dict] = None, *,
         else:
             _say("Your ComfyUI venv reported no packages - replicating it empty.")
 
-        # 4) Custom nodes - only if the user opted in (decision 3).
+        # 4) Custom nodes - only if the user opted in (decision 3). A per-node copy
+        #    failure is non-fatal but is routed through _say so it lands in the run log
+        #    (ProvisionResult.log), not only the live stream (rule 5, the #622 class).
         n_nodes = 0
+        node_warnings: list = []
         if copy_custom_nodes:
-            n_nodes = _copy_custom_nodes(stack.workdir, root, on_progress)
+            n_nodes, node_warnings = _copy_custom_nodes(stack.workdir, root)
             _say(f"Copied {n_nodes} custom node(s) from your ComfyUI.")
+            for w in node_warnings:
+                _say(f"WARNING: {w}")
         else:
             _say("Starting with a clean custom_nodes (your nodes were not copied).")
 
@@ -491,10 +498,24 @@ def provision_by_copy(stack: UserComfyStack, cfg: Optional[dict] = None, *,
                          "Provisioning finished but the managed ComfyUI does not read "
                          "as installed (main.py or venv missing).")
 
+        # Fold any non-fatal shortfalls into the success message so a caller that only
+        # reads the result (not the live stream) still learns of them (the #622
+        # vanished-log class): custom nodes that failed to copy, and localm patches that
+        # did not apply. Both are non-fatal - each only breaks the workflow that needs it
+        # - but must not be reported as a clean, complete success (rule 5). This mirrors
+        # the fresh path's node-failure fold (managed_comfy_fresh.provision_fresh).
+        msg = f"localm's managed ComfyUI is ready at {root}."
+        if node_warnings:
+            msg += (f" {len(node_warnings)} custom node(s) could not be copied; "
+                    "workflows needing them will not work until fixed.")
+        patch_failures = [o for o in patch_outcomes if not o.ok]
+        if patch_failures:
+            msg += (f" {len(patch_failures)} localm patch(es) did not apply; the "
+                    "workflow they fix (e.g. ACE-Step music) may not work.")
         return ProvisionResult(
             ok=True, status="copied", managed_root=root, commit=stack.commit,
             installed_packages=n_pkgs, custom_nodes_copied=n_nodes, log="\n".join(log),
-            message=f"localm's managed ComfyUI is ready at {root}.")
+            message=msg)
     except Exception as e:  # last-resort: roll back, never a half-claimed success
         logger.debug("provision_by_copy failed", exc_info=True)
         return _fail("error", f"Provisioning failed: {e}")
@@ -513,6 +534,10 @@ def resolve_copy_custom_nodes(flag: Optional[bool], n_nodes: int, interactive: b
     if interactive and confirm is not None:
         try:
             return bool(confirm())
-        except Exception:
+        except Exception as e:
+            # A raising confirm callback (a broken prompt) must not abort setup; default
+            # to the safe clean start (do not copy), but record WHY (rule 5).
+            logger.debug("custom-nodes confirm callback raised; defaulting to not "
+                         "copying the user's custom nodes: %s", e)
             return False
     return False

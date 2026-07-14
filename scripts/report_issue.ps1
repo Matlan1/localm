@@ -40,10 +40,17 @@ function Read-Proxy {
 
 function Scrub([string]$t) {
   if (-not $t) { return $t }
-  # Strip the account name from any Windows home path, and obvious bearer tokens.
-  $t = [regex]::Replace($t, '([A-Za-z]:[\\/]Users[\\/])[^\\/\r\n]+', '${1}<redacted>',
-        [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+  # Mirror scripts/report_issue.py scrub() / localm/bugreport.py _scrub_secrets: strip
+  # the account name from any home path AND obvious credentials, so nothing this
+  # reporter files carries a username or a pasted secret.
+  $ic = [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+  # Home-path username strip (Windows C:\Users\<name>, plus /home/ and /Users/ forms).
+  $t = [regex]::Replace($t, '([A-Za-z]:[\\/]Users[\\/]|/home/|/Users/)[^\\/\r\n]+', '${1}<redacted>', $ic)
+  # user:pass@ credentials in any URL-ish value (a comfy/searx/remote-server URL).
+  $t = [regex]::Replace($t, '(://)[^/@\s]+@', '${1}<redacted>@')
+  # Bearer tokens and OpenAI-style / localm API keys.
   $t = [regex]::Replace($t, '(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}', '${1}<redacted>')
+  $t = [regex]::Replace($t, '(?i)\b(?:sk|localm[_-]sk)-[A-Za-z0-9._\-]{12,}', '<redacted>')
   return $t
 }
 
@@ -105,7 +112,10 @@ if (-not $url) {
 
 $headers = @{ 'Content-Type' = 'application/json'; 'User-Agent' = 'localm-report-issue' }
 if ($tok) { $headers['X-Localm-Token'] = $tok }
-$payload = @{ title = $summary; body = $body } | ConvertTo-Json -Depth 4
+# Scrub the title too: it becomes a PUBLIC GitHub issue title. The body is already
+# scrubbed (above), so a raw title would leak the username/credential the preview
+# banner claims is "exactly what will be sent" (HON-03, matching report_issue.py).
+$payload = @{ title = (Scrub $summary); body = $body } | ConvertTo-Json -Depth 4
 try {
   $resp = Invoke-RestMethod -Uri $url -Method Post -Headers $headers -Body $payload -TimeoutSec 20
   Save-Local | Out-Null

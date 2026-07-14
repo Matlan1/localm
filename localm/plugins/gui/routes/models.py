@@ -17,14 +17,16 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 
 from localm import scopes
 from localm.debuglog import logger
-from localm.inference.http_server import (principal_id, require_scope,
-                                          unload_all_models, unload_one_model)
+from localm.inference.http_server import (principal_id, require_fs_host,
+                                          require_scope, unload_all_models,
+                                          unload_one_model)
 import localm.inference.http_server as _hs
 from localm.plugins.executor import get_plugin_executor
 from localm.plugins.gui.web import (AliasRequest, LoadModelRequest,
                                     PullRequest, PullTokenRedeemRequest,
-                                    RemoveModelRequest, SetTypeRequest,
-                                    UnloadModelRequest, consume_pull_grant)
+                                    RemoveModelRequest, ScanRequest,
+                                    SetTypeRequest, UnloadModelRequest,
+                                    consume_pull_grant)
 
 
 def _require_registered(model: str, registry: dict | None = None) -> dict:
@@ -97,12 +99,40 @@ def register(app: FastAPI, ctx) -> None:
         return {"models": models, "active": current}
 
     @app.post("/api/models/scan", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
-    async def gui_scan_models():
-        from localm.model_manager.scan import scan_comfy_models
+    async def gui_scan_models(request: Request, req: ScanRequest | None = None):
+        """Scan for ComfyUI models. With no `workdir` (the old button's
+        bodyless POST, or an explicit `{}`), this is unchanged: it scans
+        whatever `comfy_workdir` is configured, MODELS_WRITE-only. An explicit
+        `workdir` is a one-off scan of an arbitrary folder for the guided
+        Import-from-ComfyUI flow - never written back to config - gated on
+        `require_fs_host` (called BEFORE the try/except below, so its 403
+        propagates as-is rather than getting reported as a generic 500): that
+        capability is equivalent to the host file/folder browser
+        (/api/fs/dirs), so a MODELS_WRITE-only key that lacks host filesystem
+        access cannot use this to enumerate or register arbitrary server
+        paths it could not otherwise browse. `dry_run` previews per-type
+        counts and registers nothing."""
+        from localm.model_manager.scan import preview_comfy_models, scan_comfy_models
         import asyncio
+        from functools import partial
+        workdir = req.workdir if req else None
+        dry_run = bool(req and req.dry_run)
+        if workdir:
+            require_fs_host(request)
         loop = asyncio.get_running_loop()
         try:
-            res = await loop.run_in_executor(get_plugin_executor(), scan_comfy_models)
+            if dry_run:
+                res = await loop.run_in_executor(
+                    get_plugin_executor(), partial(preview_comfy_models, workdir=workdir))
+                return {
+                    "dry_run": True,
+                    "method": res.method,
+                    "counts": res.counts,
+                    "already_registered": res.already_registered,
+                    "total_new": sum(res.counts.values()),
+                }
+            res = await loop.run_in_executor(
+                get_plugin_executor(), partial(scan_comfy_models, workdir=workdir))
             return {
                 "added": res.added,
                 "skipped": res.skipped,

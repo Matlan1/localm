@@ -59,6 +59,20 @@ NEVER_TOUCH = frozenset({
 PRESERVE_WITHIN = ("runtime/localm_llama_runtime/lib",)
 
 
+def _debug_warn(msg, *args) -> None:
+    """Best-effort WARNING via localm's logger. This module is stdlib-only and can be
+    loaded BY FILE PATH (``scripts/rollback_update.py``) with NO importable localm
+    package, so the logger import is lazy and guarded: a logging failure must never
+    break or mask a swap. The only caller (``apply_files``) runs on the forward-apply
+    path where the full package is importable; the standalone rollback path never
+    reaches it."""
+    try:
+        from localm.debuglog import logger
+        logger.warning(msg, *args)
+    except Exception:
+        pass
+
+
 def _within_preserved(rel_posix: str) -> bool:
     """True if install-root-relative POSIX path *rel_posix* is a PRESERVE_WITHIN
     sub-tree or lies inside one."""
@@ -91,14 +105,24 @@ def _copy_into(src, dst, name) -> None:
             shutil.copy2(s, d)
 
 
-def _prune(dst, name, *, keep_src=None) -> None:
+def _prune(dst, name, *, keep_src=None) -> list:
     """Remove entries under *dst*, deepest first, SKIPPING PRESERVE_WITHIN sub-trees
     (and never deleting a non-empty dir, which protects the ancestors of a preserved
     sub-tree). With *keep_src*, remove only entries absent under keep_src (prune what
     the new build dropped - used by apply); without it, remove everything not preserved
-    (used by rollback before restoring the backup)."""
+    (used by rollback before restoring the backup).
+
+    Returns a list of human-readable strings, one per FILE that was meant to be removed
+    but could NOT be (its unlink raised - e.g. a Windows AV lock on a freshly written
+    file). Such a file is left behind STALE, so the caller must SURFACE it rather than
+    report success over it (we do not hide problems): ``rollback()`` folds these into
+    its RuntimeError, ``apply_files()`` logs them. A dir that will not rmdir is NOT
+    reported: the only dirs we attempt to remove are already-empty ones, and a
+    non-empty (or locked) dir left behind strands no functional state - keeping it is
+    the benign ancestor-protection case, not a failure."""
     dst = Path(dst)
     keep_src = Path(keep_src) if keep_src is not None else None
+    errors = []
     for d in sorted(dst.rglob("*"), key=lambda p: len(p.parts), reverse=True):
         rel = f"{name}/{d.relative_to(dst).as_posix()}"
         if _within_preserved(rel):
@@ -107,12 +131,24 @@ def _prune(dst, name, *, keep_src=None) -> None:
             continue
         try:
             if d.is_dir():
+                # rmdir ONLY an already-empty dir; a non-empty one is deliberately kept
+                # (it still holds a preserved sub-tree or its ancestors). This is the
+                # documented ancestor-protection case, not a failure.
                 if not any(d.iterdir()):
                     d.rmdir()
             else:
                 d.unlink()
-        except OSError:
-            pass
+        except FileNotFoundError:
+            continue   # already gone (a race) is the desired end state, not a failure
+        except OSError as e:
+            if d.is_dir():
+                # An empty-dir rmdir that still failed (lock/permissions) is benign for
+                # pruning - a leftover empty dir strands nothing - so keep swallowing it.
+                continue
+            # A FILE we intended to remove but could not stays behind stale: surface it
+            # so apply()/rollback() never report success over a stale file.
+            errors.append(f"remove {rel}: {e}")
+    return errors
 
 
 def verify_zip(zip_path) -> None:
@@ -227,7 +263,16 @@ def apply_files(staged_root, installed, names) -> None:
         dst = installed / name
         if _name_has_preserved(name):
             _copy_into(src, dst, name)
-            _prune(dst, name, keep_src=src)
+            prune_errs = _prune(dst, name, keep_src=src)
+            if prune_errs:
+                # A stale file the new build DROPPED could not be removed after the merge
+                # (e.g. a Windows AV lock on a freshly written file). It is left behind;
+                # that is non-fatal for the forward apply (an extra file, not a broken
+                # tree), so we LOG it rather than escalate a best-effort prune into a
+                # failed update - but we never swallow it silently (do not hide problems).
+                _debug_warn("update apply: could not remove %d stale file(s) under %r "
+                            "after merge: %s", len(prune_errs), name,
+                            "; ".join(prune_errs[:6]))
             continue
         if dst.exists():
             if dst.is_dir():
@@ -260,7 +305,11 @@ def rollback(backup_dir, installed, names) -> None:
             if dst.exists():
                 if dst.is_dir():
                     if _name_has_preserved(name):
-                        _prune(dst, name)   # strip scaffold, keep provisioned binaries
+                        # Strip the scaffold, keep provisioned binaries. Any file it
+                        # cannot remove is a real rollback failure - fold it in so the
+                        # RuntimeError below reports it (never a stale file under a
+                        # silent rolled_back:True).
+                        errors.extend(_prune(dst, name))
                     else:
                         shutil.rmtree(dst)
                 else:

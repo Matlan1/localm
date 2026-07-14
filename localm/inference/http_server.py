@@ -1585,6 +1585,19 @@ def mount_gui_surface(app) -> bool:
     return True
 
 
+def _dbg_swallow(msg: str, *, level: str = "debug") -> None:
+    """Log a swallowed best-effort failure at *level* (with the current exception's
+    traceback) without ever raising. The nested-guard pattern already used at the
+    update-watchdog site, factored out for the shutdown/restart teardown chain: a
+    swallow stays discoverable (rule 5) yet can never itself break the stop/restart
+    (the logging call is guarded too)."""
+    try:
+        from localm.debuglog import logger as _dbg
+        getattr(_dbg, level, _dbg.debug)(msg, exc_info=True)
+    except Exception:
+        pass
+
+
 def _do_shutdown() -> None:
     """SRV-4: the actual stop sequence. Unload the model FIRST so the native
     context is freed cleanly (a hard exit while it is loaded segfaults during
@@ -1596,18 +1609,24 @@ def _do_shutdown() -> None:
         try:
             engine.unload()
         except Exception:
-            pass
+            # Best-effort clean teardown before exit; a failed unload must not
+            # block the stop, but log it so a segfault-on-exit has a breadcrumb.
+            _dbg_swallow("engine unload during shutdown failed (non-fatal)")
     # Unload mocked _engine if it is set and wasn't in _engines
     if _engine is not None and _engine not in _engines.values():
         try:
             _engine.unload()
         except Exception:
-            pass
+            _dbg_swallow("engine unload during shutdown failed (non-fatal)")
     try:
         from localm import bugreport
         bugreport.disarm_crash_guard()
     except Exception:
-        pass
+        # If the crash marker is NOT cleared, this intentional stop is reported as
+        # a crash on the next boot - a false "it crashed". Log it (WARNING) so that
+        # misattribution is discoverable instead of silent.
+        _dbg_swallow("could not disarm crash guard on shutdown; next boot may "
+                     "misreport this intentional stop as a crash", level="warning")
     import os
     os._exit(0)
 
@@ -1655,25 +1674,31 @@ def _do_restart(*, update_watchdog: Optional[dict] = None) -> None:
         try:
             engine.unload()
         except Exception:
-            pass
+            # Best-effort clean teardown before re-exec; a failed unload must not
+            # block the restart, but log it (a hard re-exec while loaded can
+            # segfault, so a breadcrumb helps if that happens).
+            _dbg_swallow("engine unload during restart failed (non-fatal)")
     # Unload mocked _engine if it is set and wasn't in _engines
     if _engine is not None and _engine not in _engines.values():
         try:
             _engine.unload()
         except Exception:
-            pass
+            _dbg_swallow("engine unload during restart failed (non-fatal)")
     try:
         from localm import bugreport
         bugreport.disarm_crash_guard()
     except Exception:
-        pass
+        # Same misattribution hazard as _do_shutdown: an uncleared crash marker
+        # makes this intentional restart look like a crash next boot. Log it.
+        _dbg_swallow("could not disarm crash guard on restart; next boot may "
+                     "misreport this intentional restart as a crash", level="warning")
 
     try:
         global _audit
         if _audit is not None and hasattr(_audit, "close"):
             _audit.close()
     except Exception:
-        pass
+        _dbg_swallow("audit log close during restart failed (non-fatal)")
 
     try:
         from localm.debuglog import dump_ring_buffer, flush_log_handlers, recent_activity
@@ -1696,7 +1721,10 @@ def _do_restart(*, update_watchdog: Optional[dict] = None) -> None:
         # it creates no new trace file, so it is safe in privacy mode too.
         flush_log_handlers()
     except Exception:
-        pass
+        # Best-effort crash-recovery breadcrumbs (ring buffer + pre_restart.log)
+        # and the handler flush; a failure here must not block the restart, but it
+        # means the next boot has fewer diagnostics, so log rather than swallow.
+        _dbg_swallow("pre-restart breadcrumb dump / log flush failed (non-fatal)")
 
     import os
     import sys
@@ -1820,7 +1848,12 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
                 from localm import bugreport
                 bugreport.install_asyncio_handler(asyncio.get_running_loop())
             except Exception:
-                pass
+                # The very mechanism meant to surface silent asyncio-task failures
+                # must not itself fail silently; log it (mirrors the session-sweep
+                # guard just above) so its absence is discoverable.
+                from localm.debuglog import logger as _dbg
+                _dbg.debug("asyncio exception handler not installed (non-fatal)",
+                           exc_info=True)
         # Plugins register() before this loop existed, so loop-dependent plugin
         # work (the jobs scheduler) is queued on the manager; run it now the loop
         # is up - without this no scheduled job fired on a stock start (memory-audit

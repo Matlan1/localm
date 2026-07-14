@@ -17,6 +17,7 @@ confirmed the mechanism). Asserting the call order directly is deterministic
 and fast, unlike trying to reproduce the hang itself under pytest.
 """
 
+import logging
 import os
 
 from localm import debuglog
@@ -94,3 +95,48 @@ def test_nothing_written_is_a_clean_noop():
     with debuglog.dedup_native_stderr():
         pass
     assert debuglog.recent_activity()[before:] == []
+
+
+def test_persisted_write_failure_warns_once_and_keeps_ring_buffer(monkeypatch, caplog):
+    """Honesty audit (finding 6): if the persisted debug-log write fails, the
+    native line is NOT silently lost - it still reaches the ring buffer, and
+    exactly ONE warning is emitted. The latch suppresses further warnings so a
+    persistently-failing fd cannot spam the log (and the warning is itself
+    drained back through this same reader). Guards all three regression modes:
+    never-warns, warns-every-time (log spam), and line-dropped-on-failure.
+
+    Pre-fix, os.write(debug_fd,...) was wrapped in contextlib.suppress(OSError)
+    with no warning, so this test's warning-count assertion fails on old code."""
+    # A sentinel debug_fd that os.write always rejects. Using a fake fd number +
+    # a pass-through os.write is deterministic and platform-independent: a
+    # pre-closed real fd would get REUSED by the dup/pipe fds dedup_native_stderr
+    # allocates after native_stderr_target() is called, so its os.write would
+    # then wrongly succeed. Real os.write is used for the console/pipe elsewhere,
+    # so only the sentinel is failed; os.close(sentinel) at teardown is suppressed.
+    sentinel_fd = 987654
+    monkeypatch.setattr(debuglog, "native_stderr_target", lambda: sentinel_fd)
+    real_os_write = os.write
+
+    def failing_write(fd, data):
+        if fd == sentinel_fd:
+            raise OSError(9, "Bad file descriptor")   # simulate a dead persisted fd
+        return real_os_write(fd, data)
+
+    monkeypatch.setattr(os, "write", failing_write)
+
+    before = len(debuglog.recent_activity())
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        with debuglog.dedup_native_stderr():
+            real_os_write(2, b"native-line-alpha\n")
+            real_os_write(2, b"native-line-beta\n")   # second failure must NOT re-warn
+
+    # both distinct lines survived to the ring buffer despite the write failures
+    tail = "\n".join(debuglog.recent_activity()[before:])
+    assert "native-line-alpha" in tail
+    assert "native-line-beta" in tail
+    # exactly ONE latched warning about the persisted-log write failure
+    warns = [r for r in caplog.records
+             if r.levelno >= logging.WARNING and "persisted debug log" in r.getMessage()]
+    assert len(warns) == 1, (
+        f"expected exactly one latched warning, got {len(warns)}: "
+        f"{[w.getMessage() for w in warns]}")

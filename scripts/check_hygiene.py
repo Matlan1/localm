@@ -322,7 +322,16 @@ def _raw_accessor_violations(files: list[Path]) -> list[str]:
             try:
                 text = path.read_text(encoding="utf-8")
                 tree = ast.parse(text, filename=rel)
-            except (UnicodeDecodeError, OSError, SyntaxError):
+            except (UnicodeDecodeError, OSError, SyntaxError) as e:
+                # A tracked .py the guard cannot read or parse was NOT checked - report
+                # it rather than `continue`-ing past it, or a file that silently evades
+                # the raw-accessor guard reads as "clean" when it was never scanned
+                # (AGENTS.md rule 5). Genuine .py files in the tree all parse under the
+                # 3.12 interpreter this runs on, so this only fires on a real anomaly.
+                problems.append(
+                    f"{rel}: could not read/parse to check the raw-accessor guard "
+                    f"({type(e).__name__}: {e}) - not checked. A .py the guard cannot "
+                    "parse must not silently pass; fix the file or exclude it explicitly.")
                 continue
             # Local names this module binds the raw accessor to: the literal
             # name itself, PLUS any `from ... import <name> as <alias>` -
@@ -455,6 +464,19 @@ def main(argv: list[str]) -> int:
     if "--install-hook" in argv:
         return _install_hook()
     tracked = _tracked_files()
+    if not tracked:
+        # `git ls-files` failed or returned nothing, so the dash/disclosure/abs-path
+        # scan and the changelog gate below would run over ZERO files and this gate
+        # would print "passed" having checked nothing. A disclosure/privacy gate that
+        # reports clean without scanning anything is exactly the silent pass AGENTS.md
+        # rule 5 forbids, so fail loud instead. (check_manifest keeps its documented
+        # not-a-checkout silence as a LIBRARY; here, at the top-level gate, a checkout
+        # with no enumerable tracked files is an error, not a benign no-op.)
+        print("Hygiene check FAILED: could not enumerate tracked files via 'git ls-files' "
+              "- nothing was scanned. Run this from a git checkout; a hygiene gate must "
+              "not report clean without actually scanning the tree (AGENTS.md rule 5).",
+              file=sys.stderr)
+        return 1
     problems: list[str] = []
     for f in tracked:
         problems.extend(_scan(f))

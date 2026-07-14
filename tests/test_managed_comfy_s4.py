@@ -434,6 +434,50 @@ def test_update_rolls_back_on_failure(home, tmp_path):
 
 
 @pytest.mark.skipif(not _git_available(), reason="git not on PATH")
+def test_update_rollback_surfaces_failed_patch_reapply(home, tmp_path, monkeypatch):
+    """MEDIUM honesty fix: when a mid-update failure triggers rollback and the git
+    source IS restored but the localm patch set cannot be re-applied on it, update must
+    NOT report a clean rollback - the failed re-apply is surfaced in the returned
+    message (rule 5: a safety step that fails never claims success). Before the fix the
+    rollback's apply_patches outcomes were discarded, so the user was told the prior
+    install was restored 'exactly as it was' while it was actually left UNPATCHED (the
+    __func__ fix gone, ACE-Step music broken)."""
+    from localm.media import managed_comfy_update as upd
+    from localm.media import comfy_patches as cp
+
+    remote, c1, _c2, c3 = _build_update_remote(tmp_path)
+    root = _install_managed_from(remote, c1)
+    assert _head(root) == c1
+
+    # The forward apply (call #1, at c3) is real and succeeds; the ROLLBACK re-apply
+    # (call #2, on the restored c1 source) simulates a patch that cannot be applied.
+    real_apply = cp.apply_patches
+    calls = {"n": 0}
+
+    def _fake_apply(managed_dir, patches=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return real_apply(managed_dir, patches)
+        return [cp.PatchOutcome(cp.FUNC_PATCH.name, cp.FAILED,
+                                "simulated re-apply failure")]
+
+    monkeypatch.setattr(upd, "apply_patches", _fake_apply)
+
+    # c3 deletes main.py -> the forward update reaches the not-installed check and rolls
+    # back to c1 (the rollback trigger is NOT a patch failure, isolating this leg).
+    result = upd.update_managed_comfy(
+        comfyui_repo=str(remote), target_commit=c3, reinstall_requirements=False)
+
+    assert not result.ok
+    assert calls["n"] == 2                    # forward apply + rollback re-apply both ran
+    assert _head(root) == c1                   # the git source WAS restored ...
+    assert (root / "main.py").is_file()
+    # ... but the FAILED patch re-apply is SURFACED, not hidden behind a clean rollback.
+    assert "could not be re-applied on the restored install" in result.message
+    assert "simulated re-apply failure" in result.message
+
+
+@pytest.mark.skipif(not _git_available(), reason="git not on PATH")
 def test_update_requires_git_checkout(home):
     """A managed ComfyUI with no git history (the non-git copytree fallback) cannot
     be pin-updated; update says so honestly instead of pretending."""

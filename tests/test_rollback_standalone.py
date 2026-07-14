@@ -96,6 +96,21 @@ def test_rollback_restore_failure_exits_2_and_keeps_backup(tmp_path, monkeypatch
     assert (home / "updates" / "backup" / "existing.txt").exists()   # backup kept
 
 
+def test_read_names_warns_on_corrupt_manifest(tmp_path, capsys):
+    """A corrupt applied_names.json is surfaced (stderr), not silently collapsed to the
+    backup-dir listing, so the user knows brand-new entries will not be removed."""
+    rb = _load_rb()
+    updates = tmp_path / "updates"
+    backup = updates / "backup"
+    backup.mkdir(parents=True)
+    (backup / "existing.txt").write_text("OLD", encoding="utf-8")
+    (updates / "applied_names.json").write_text("not json {", encoding="utf-8")
+
+    names = rb._read_names(updates, backup)
+    assert names == ["existing.txt"]                 # fell back to the backup listing
+    assert "unreadable" in capsys.readouterr().err   # ... but said so
+
+
 def test_detect_home_honors_localm_home(tmp_path, monkeypatch):
     rb = _load_rb()
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path / "custom"))

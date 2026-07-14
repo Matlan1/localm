@@ -1158,6 +1158,176 @@ if (scanBtn) {
   };
 }
 
+// import-comfy: the guided "Import from ComfyUI..." flow (Add-a-model card).
+// Unlike the Scan button above (which always scans whatever comfy_workdir is
+// configured in Settings), this lets the user point at ANY ComfyUI folder for
+// a one-off import - previewing counts per category before anything registers -
+// without touching the persistent comfy_workdir setting. Friendly labels for the
+// dry-run preview breakdown; mirrors localm.model_manager.registry.MODEL_TYPES
+// (keep in sync), minus "llm"/"mmproj" which a ComfyUI scan never produces.
+export const IMPORT_TYPE_LABELS = {
+  "diffusion-unet": "Diffusion / checkpoints",
+  "text-encoder": "Text encoders",
+  vae: "VAEs",
+  lora: "LoRAs",
+  unknown: "Other",
+};
+
+// Best-effort: localm's own managed ComfyUI install path, or null if there
+// isn't one (not installed, or this key lacks config:read). Never blocks the
+// primary Browse flow - a failed/403 fetch just means the quick-fill option
+// doesn't appear.
+async function fetchManagedComfyPath() {
+  try {
+    const r = await fetch("/api/comfy/managed-status", { headers: authHeaders() });
+    if (!r.ok) return null;
+    const d = await r.json().catch(() => ({}));
+    return d && d.installed && d.path ? d.path : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// A dry-run preview response with a "none (...)" method (no folder configured /
+// found) reuses the same humanized reasons scanResultMessage already decodes for
+// the real-scan case, so the wording is never duplicated. Returns null when the
+// preview is a normal (possibly empty) result the caller should render counts for.
+export function importComfyPreviewMessage(data) {
+  const method = String((data && data.method) || "");
+  if (method.startsWith("none")) {
+    return scanResultMessage({ added: 0, skipped: 0, method });
+  }
+  return null;
+}
+
+export function openImportComfyModal() {
+  openModal("Import from ComfyUI", (body) => {
+    const wrap = el("div", "import-comfy");
+
+    const pathRow = el("div", "row");
+    const pathInput = document.createElement("input");
+    pathInput.type = "text";
+    pathInput.placeholder = "ComfyUI install folder";
+    const browseBtn = el("button", "btn-secondary", "Browse…");
+    browseBtn.type = "button";
+    browseBtn.onclick = async () => {
+      const dir = await pickDirectory("Pick a ComfyUI folder", pathInput.value.trim());
+      if (dir) pathInput.value = dir;
+    };
+    pathRow.append(pathInput, browseBtn);
+    wrap.appendChild(pathRow);
+
+    // Best-effort quick-fill for localm's OWN managed ComfyUI - hidden until the
+    // async status check resolves (or stays hidden forever if there is none).
+    const managedRow = el("div", "row");
+    managedRow.style.display = "none";
+    const managedBtn = el("button", "btn-secondary", "Use localm's own ComfyUI");
+    managedBtn.type = "button";
+    managedRow.appendChild(managedBtn);
+    wrap.appendChild(managedRow);
+    fetchManagedComfyPath().then((path) => {
+      if (!path) return;
+      managedBtn.onclick = () => { pathInput.value = path; };
+      managedRow.style.display = "flex";
+    });
+
+    const previewBox = el("div", "sub import-comfy-preview");
+    wrap.appendChild(previewBox);
+
+    const actions = el("div", "actions");
+    const previewBtn = el("button", "btn-secondary", "Preview");
+    previewBtn.type = "button";
+    const importBtn = el("button", "btn-primary", "Import");
+    importBtn.type = "button";
+    importBtn.disabled = true;
+    actions.append(previewBtn, importBtn);
+    wrap.appendChild(actions);
+    body.appendChild(wrap);
+
+    // The folder the last successful, non-empty preview covered - Import reuses
+    // it rather than re-reading the (possibly since-edited) input, so what gets
+    // imported always matches what was previewed.
+    let previewedWorkdir = null;
+
+    previewBtn.onclick = async () => {
+      const workdir = pathInput.value.trim();
+      if (!workdir) { toast("Choose a ComfyUI folder first", true); return; }
+      previewedWorkdir = null;
+      importBtn.disabled = true;
+      previewBtn.disabled = true;
+      previewBox.replaceChildren(el("span", "", "Scanning…"));
+      try {
+        const r = await fetch("/api/models/scan", {
+          method: "POST", headers: authHeaders(),
+          body: JSON.stringify({ workdir, dry_run: true }),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          previewBox.replaceChildren(el("span", "", data.detail || "Preview failed"));
+          return;
+        }
+        const errMsg = importComfyPreviewMessage(data);
+        if (errMsg) {
+          previewBox.replaceChildren(el("span", "", errMsg));
+          return;
+        }
+        previewBox.replaceChildren();
+        const counts = data.counts || {};
+        const total = data.total_new || 0;
+        if (!total) {
+          previewBox.appendChild(el("span", "", data.already_registered
+            ? `All ${data.already_registered} found model(s) are already registered.`
+            : "No models found in that folder."));
+          return;
+        }
+        previewBox.appendChild(el("div", "", `Found ${total} new model(s):`));
+        const list = el("ul", "import-comfy-counts");
+        for (const [type, n] of Object.entries(counts)) {
+          list.appendChild(el("li", "", `${IMPORT_TYPE_LABELS[type] || type}: ${n}`));
+        }
+        previewBox.appendChild(list);
+        if (data.already_registered) {
+          previewBox.appendChild(el("div", "sub",
+            `${data.already_registered} already registered (skipped).`));
+        }
+        previewedWorkdir = workdir;
+        importBtn.disabled = false;
+      } catch (e) {
+        previewBox.replaceChildren(el("span", "", "Preview failed: " + e.message));
+      } finally {
+        previewBtn.disabled = false;
+      }
+    };
+
+    importBtn.onclick = async () => {
+      if (!previewedWorkdir) return;
+      importBtn.disabled = true;
+      try {
+        const r = await fetch("/api/models/scan", {
+          method: "POST", headers: authHeaders(),
+          body: JSON.stringify({ workdir: previewedWorkdir, dry_run: false }),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          toast(data.detail || "Import failed", true);
+          importBtn.disabled = false;
+          return;
+        }
+        toast(scanResultMessage(data));
+        $("modal").style.display = "none";
+        refreshModelsPage();
+      } catch (e) {
+        toast("Import failed: " + e.message, true);
+        importBtn.disabled = false;
+      }
+    };
+  });
+}
+
+if ($("models-import-comfy-btn")) {
+  $("models-import-comfy-btn").onclick = openImportComfyModal;
+}
+
 // Bind Unload-all button click handler
 const unloadAllBtn = $("models-unload-all-btn");
 if (unloadAllBtn) {
