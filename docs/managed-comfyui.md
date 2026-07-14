@@ -92,7 +92,7 @@ hand.
 ### Registering ComfyUI's models in localm
 
 To make ComfyUI's own models show up in localm's model browser, the GUI Models
-page has a **Scan ComfyUI Models** action. It walks the `models/` folders under
+page's "Add a model" card has a **Scan ComfyUI folder** action. It walks the `models/` folders under
 your `comfy_workdir` and registers what it finds, mapping each subfolder to a
 localm model type (`unet` to `diffusion-unet`, `vae` to `vae`, and so on), leaving
 anything it cannot map as `unknown`. If a scan finds nothing it tells you why (no

@@ -40,12 +40,6 @@ export async function refreshModelsPage() {
     }
   }
 
-  // Show scan row on media model tabs
-  const scanRow = $("models-scan-row");
-  if (scanRow) {
-    scanRow.style.display = (currentTypeFilter !== "all" && currentTypeFilter !== "llm") ? "flex" : "none";
-  }
-
   const box = $("models-table");
   box.replaceChildren();
 
