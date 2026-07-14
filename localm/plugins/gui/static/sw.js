@@ -21,7 +21,10 @@
 // v52: app/helpers.js and pages/images.js/music.js/video.js changed (the
 // ComfyUI missing-model download offer) - a stale-cached client would keep
 // missing the pre-generate model check and the download confirm modal.
-const CACHE = "localm-shell-v52";
+// v53: index.html and pages/models.js changed (a new "Embedding" Model
+// Manager tab + type option) - a stale-cached client would keep lacking the
+// tab and the per-row type <select> would be missing the 'embedding' choice.
+const CACHE = "localm-shell-v53";
 const SHELL = [
   "/", "/index.html", "/style.css",
   // GUI ES-module entry + every app/* and pages/* module (the import graph).
