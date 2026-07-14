@@ -510,9 +510,21 @@ class Collection:
                 elif vectors:
                     # A non-empty vectors list that does not line up with the
                     # chunks is a stale/partial index, not "no embeddings yet".
+                    # Distinguish the two real causes instead of one blanket
+                    # "stale or partial" phrase: FEWER vectors than chunks is a
+                    # genuinely partial embed (e.g. interrupted mid-run, or a
+                    # doc added while embed_fn was broken); MORE vectors than
+                    # chunks means leftover/orphaned entries from a prior,
+                    # larger chunk set (e.g. docs removed or re-chunked without
+                    # the vector list being pruned to match) - not "in
+                    # progress". Both are fixed the same way (a full reindex
+                    # rebuilds vectors in lockstep with chunks - see
+                    # _add_paths_locked), but the diagnosis differs.
+                    kind = ("a partial embed" if len(vectors) < len(self._chunks)
+                            else "orphaned entries from a prior, larger index")
                     self._note_vector_degrade(
                         f"vectors.json has {len(vectors)} vectors for "
-                        f"{len(self._chunks)} chunks (stale or partial index); "
+                        f"{len(self._chunks)} chunks ({kind}); "
                         f"using BM25 lexical retrieval only", warn=True)
         self._bm25 = None
         # If meta.json was corrupt but chunks survived, rebuild a minimal docs

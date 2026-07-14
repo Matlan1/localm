@@ -31,7 +31,12 @@ const RAG_EXTS = [
 
 export async function refreshKnowledgePage() {
   refreshKbSelect();   // keep the chat drawer selector in sync
-  refreshEmbeddingPanel();   // embedding-model status + picker
+  // The embedding status is also what a row needs to tell "never embedded"
+  // apart from "embedding is ready now but THIS collection predates it / went
+  // stale" - only the latter is actionable via reindex, so fetch it once here
+  // and pass it into each row instead of re-deriving it from DOM text.
+  const embedStatus = await refreshEmbeddingPanel();
+  const embedReady = !!(embedStatus && embedStatus.status === "ready");
   const box = $("kb-table");
   box.replaceChildren();
   let data;
@@ -59,6 +64,11 @@ export async function refreshKnowledgePage() {
   const tbody = el("tbody");
   for (const c of data.collections) {
     const tr = el("tr");
+    // The embedding model being ready is a GLOBAL fact; a collection only picks
+    // it up when (re)indexed. BM25-while-ready means this specific collection
+    // predates the model (or its vector index went stale) and reindexing would
+    // fix it - worth flagging inline, not just in the info-modal warning.
+    const needsReindex = !c.has_vectors && embedReady;
 
     // Drag-and-drop upload directly onto the collection row
     tr.addEventListener("dragover", (e) => {
@@ -83,7 +93,16 @@ export async function refreshKnowledgePage() {
     tr.appendChild(nameTd);
     tr.appendChild(el("td", "mono", String(c.n_docs)));
     tr.appendChild(el("td", "mono", String(c.n_chunks)));
-    tr.appendChild(el("td", "mono", c.has_vectors ? "hybrid" : "BM25"));
+    const retrievalTd = el("td", "mono", c.has_vectors ? "hybrid" : "BM25");
+    if (needsReindex) {
+      const badge = el("span", "retrieval-badge", "reindex needed");
+      badge.title = "The embedding model is ready, but this collection was "
+        + "indexed before that (or its vector index went stale), so it is "
+        + "BM25/lexical-only until you click 'reindex'."
+        + (c.vector_degrade_reason ? " (" + c.vector_degrade_reason + ")" : "");
+      retrievalTd.appendChild(badge);
+    }
+    tr.appendChild(retrievalTd);
     const actions = el("td");
     actions.style.textAlign = "right";
 
@@ -91,7 +110,8 @@ export async function refreshKnowledgePage() {
     add.onclick = () => kbAddDocs(c.name);
     actions.appendChild(add);
 
-    const reindex = el("button", "", "reindex");
+    const reindex = el("button", needsReindex ? "warn" : "",
+      needsReindex ? "reindex needed" : "reindex");
     reindex.title = "Re-embed every document already in this collection - use "
       + "this after switching the embedding model in Settings, or any time "
       + "this shows BM25 for a collection you expected to be hybrid. Just "
@@ -143,7 +163,7 @@ const EMBED_LABELS = {
 export async function refreshEmbeddingPanel() {
   const statusEl = $("kb-embed-status");
   const sel = $("kb-embed-model");
-  if (!statusEl || !sel) return;
+  if (!statusEl || !sel) return null;
   let st;
   try {
     const r = await fetch("/api/rag/embedding", { headers: authHeaders() });
@@ -151,12 +171,18 @@ export async function refreshEmbeddingPanel() {
     if (!r.ok) throw new Error(st.detail || r.statusText);
   } catch (e) {
     statusEl.textContent = "Could not load embedding status: " + e.message;
-    return;
+    return null;
   }
   if (st.status === "ready") {
+    // "Ready" only covers indexing FROM NOW ON: it says nothing about a
+    // collection indexed before this model was set up, or one whose vector
+    // index went stale - those stay BM25 until reindexed (flagged per-row
+    // below), so this must not read as a blanket "you're all set".
     statusEl.textContent = st.dim
-      ? `Ready: ${st.model} (${st.dim}-dim) - semantic search is on.`
-      : `Ready: ${st.model} is installed - semantic search is on.`;
+      ? `Ready: ${st.model} (${st.dim}-dim) - semantic search is on for new `
+        + `indexing. Existing collections may need "reindex" below.`
+      : `Ready: ${st.model} is installed - semantic search is on for new `
+        + `indexing. Existing collections may need "reindex" below.`;
     statusEl.style.color = "var(--green)";
   } else {
     statusEl.textContent =
@@ -192,6 +218,7 @@ export async function refreshEmbeddingPanel() {
     if (val === st.model) o.selected = true;
     sel.appendChild(o);
   }
+  return st;
 }
 
 async function applyEmbeddingModel(model) {

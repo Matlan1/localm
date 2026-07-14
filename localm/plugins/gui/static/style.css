@@ -1320,6 +1320,13 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
   color: var(--green); font-size: 11px; border: 1px solid var(--green);
   border-radius: 5px; padding: 1px 6px; margin-left: 8px;
 }
+/* Knowledge page: a collection stuck on BM25 while the embedding model is
+   ready is actionable (reindex fixes it), so it gets a visible inline flag
+   instead of only a tooltip - same shape as .active-tag, warning color. */
+.retrieval-badge {
+  color: var(--yellow); font-size: 11px; border: 1px solid var(--yellow);
+  border-radius: 5px; padding: 1px 6px; margin-left: 8px;
+}
 .data-table button {
   background: none; border: 1px solid var(--border); color: var(--text-dim);
   border-radius: 6px; padding: 3px 10px; font-size: 12px; cursor: pointer;
@@ -1331,6 +1338,9 @@ input.auto-detected { color: var(--text-dim); font-style: italic; }
    hover, staying compact - the two-tier button vocabulary inside a dense table. */
 .data-table button.primary { color: var(--accent); border-color: var(--accent); }
 .data-table button.primary:hover { color: #fff; background: var(--accent); border-color: var(--accent); }
+/* The reindex button when it is the fix for a .retrieval-badge row. */
+.data-table button.warn { color: var(--yellow); border-color: var(--yellow); }
+.data-table button.warn:hover { color: #fff; background: var(--yellow); border-color: var(--yellow); }
 
 /* image generation */
 
