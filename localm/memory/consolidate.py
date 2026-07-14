@@ -367,18 +367,66 @@ def run_consolidation(store: MemoryStore, session_text: str, complete: Complete,
         store.prune(now=now)
         return _with_eviction_note(counts, store)
 
+    # DECIDE OFF-LOCK (REG-520): the per-candidate _decide() LLM calls (seconds to
+    # minutes on a local model) must NOT run while holding the per-namespace RLock.
+    # recall(reinforce=True) is the chat inlet, which runs ON the asyncio event-loop
+    # thread and both CONSTRUCTS a store (MemoryStore.__init__ locks) and recall()s
+    # (locks again); holding this lock across the slow decide loop froze the whole
+    # event loop for the consolidation's duration. Snapshot under a brief lock, then
+    # decide against that snapshot with NO lock held, recording deltas by record id.
     with store.lock():
         store._load()
-        return _consolidate_locked(store, candidates, complete, embed_fn=embed_fn,
-                                   now=now, counts=counts)
+        snapshot = store.all()
+    snapshot_ids = {r.id for r in snapshot}
+    working, updated_ids, proposals = _decide_changeset(
+        store, snapshot, candidates, complete, embed_fn=embed_fn, now=now,
+        counts=counts)
+    # APPLY UNDER LOCK (brief, no LLM): reload fresh and MERGE the decided deltas by
+    # id onto the CURRENT on-disk state, so a write another thread committed during
+    # the lock-free decide window survives (CHK-MEM-LOCK) instead of being clobbered
+    # by a stale-snapshot whole-namespace replace(). The lock is held only for the
+    # fast reload + merge + save, never across an LLM call.
+    with store.lock():
+        store._load()
+        merged, invalidate = _merge_changeset(
+            store.all(), working, snapshot_ids, updated_ids, now)
+        # replace() re-embeds only ids WITHOUT a vector, so an UPDATEd record would
+        # keep its old text's vector forever (memory-audit 2026-07-02 F3); the
+        # merge collects those ids in *invalidate* so replace() re-embeds the new
+        # text (applied AFTER replace()'s own reload, or the reload would restore
+        # the stale vector from disk).
+        store.replace(merged, embed_fn=embed_fn, invalidate_ids=invalidate)
+        store.prune(now=now)
+        # Persist proposed supersessions of trusted facts (deduped vs pending +
+        # already rejected) and surface the count so a contradiction is never
+        # silently swallowed ([9]). Persist AFTER prune and only for targets that
+        # SURVIVED it: prune's size cap can evict an old low-value trusted record,
+        # and a proposal against an evicted target would report a false `proposed`
+        # count and then be silently dropped by corrections(). A target lost to the
+        # cap is already surfaced via prune's user-eviction warning.
+        if proposals:
+            live_ids = {r.id for r in store.all()}
+            survivors = [p for p in proposals if p.target_id in live_ids]
+            counts["proposed"] = store.propose_corrections(survivors)
+        return _with_eviction_note(counts, store)
 
 
-def _consolidate_locked(store: MemoryStore, candidates: list, complete: Complete, *,
-                        embed_fn: Optional[EmbedFn], now: float,
-                        counts: dict) -> dict:
-    """The decide-and-write body of run_consolidation. MUST run under
-    store.lock() after a fresh store._load() (see run_consolidation)."""
-    working = store.all()
+def _decide_changeset(store: MemoryStore, snapshot: list, candidates: list,
+                      complete: Complete, *, embed_fn: Optional[EmbedFn], now: float,
+                      counts: dict) -> tuple:
+    """The DECIDE half of run_consolidation (REG-520), run OFF the namespace lock
+    against *snapshot* (= a lock-snapshot of store.all()). Holds NO lock and makes
+    NO store write; only reads store._vectors (via semantic_nearest) and mutates its
+    OWN snapshot copies.
+
+    Returns ``(working, updated_ids, proposals)``: *working* is the intended
+    post-consolidation record set derived from the snapshot (kept/NO_OP snapshot
+    objects, in-place-UPDATEd snapshot objects, minus DELETEd ones, plus new ADD
+    records); *updated_ids* the ids whose text changed; *proposals* the trusted-fact
+    supersession proposals. The caller MERGES these deltas onto a fresh reload under
+    the lock (see _merge_changeset), so a concurrent write during the lock-free
+    decide window is not lost."""
+    working = list(snapshot)
     processed: set = set()
     updated_ids: set = set()
     proposals: list[PendingCorrection] = []
@@ -447,28 +495,46 @@ def _consolidate_locked(store: MemoryStore, candidates: list, complete: Complete
         else:
             counts["noop"] += 1
 
-    # replace() re-embeds only ids WITHOUT a vector, so an UPDATEd record would
-    # keep its old text's vector forever: semantic recall then keeps pointing
-    # at the contradicted content, on exactly the records consolidation just
-    # corrected (memory-audit 2026-07-02, high; repro showed the stale vector
-    # surviving every later save). Drop the stale vectors so replace re-embeds -
-    # passed as invalidate_ids (not a separate invalidate_vectors() call) because
-    # replace() now reloads first (CHK-MEM-LOCK), and a reload after a separate
-    # invalidate call would silently restore the stale vector from disk.
-    store.replace(working, embed_fn=embed_fn, invalidate_ids=updated_ids)
-    store.prune(now=now)
-    # Persist proposed supersessions of trusted facts (deduped vs pending + already
-    # rejected) and surface the count so a contradiction is never silently swallowed
-    # ([9]). Persist AFTER prune and only for targets that SURVIVED it: prune's size
-    # cap can evict an old low-value trusted record, and a proposal against an
-    # evicted target would report a false `proposed` count and then be silently
-    # dropped by corrections(). A target lost to the cap is already surfaced via
-    # prune's user-eviction warning (_with_eviction_note).
-    if proposals:
-        live_ids = {r.id for r in store.all()}
-        survivors = [p for p in proposals if p.target_id in live_ids]
-        counts["proposed"] = store.propose_corrections(survivors)
-    return _with_eviction_note(counts, store)
+    return working, updated_ids, proposals
+
+
+def _merge_changeset(fresh: list, working: list, snapshot_ids: set,
+                     updated_ids: set, now: float) -> tuple:
+    """MERGE the decided changeset (from _decide_changeset, computed OFF the lock
+    against a snapshot) onto the FRESH under-lock state, keyed by record id
+    (REG-520 / CHK-MEM-LOCK).
+
+    Every FRESH record survives by DEFAULT, so a write another thread committed
+    during the lock-free decide window - a concurrent add, OR a last_used/uses
+    reinforce bump on a NO_OP'd record - is preserved, EXCEPT records consolidation
+    decided to DELETE (a snapshot id no longer in *working*) or UPDATE (in
+    *updated_ids*), which are applied onto the matching fresh record. New ADD
+    records (working ids not in the snapshot) are appended. A snapshot record a
+    concurrent writer already deleted is simply absent from *fresh*, so a decided
+    UPDATE/DELETE on it is a no-op (never a resurrection).
+
+    Returns ``(merged_records, invalidate_ids)`` - *invalidate_ids* are the UPDATEd
+    ids still present, whose stale vector replace() must drop so it re-embeds the
+    new text."""
+    working_by_id = {r.id: r for r in working}
+    add_records = [r for r in working if r.id not in snapshot_ids]
+    deleted_ids = snapshot_ids - set(working_by_id)
+    updates = {rid: working_by_id[rid]
+               for rid in updated_ids if rid in snapshot_ids and rid in working_by_id}
+    merged: list = []
+    invalidate: set = set()
+    for fr in fresh:
+        if fr.id in deleted_ids:
+            continue                              # consolidation deleted it
+        upd = updates.get(fr.id)
+        if upd is not None:                       # consolidation updated it: apply onto fresh
+            fr.text = (upd.text or "")[:MAX_TEXT_LEN]
+            fr.updated = now
+            fr.importance = min(SYNTH_IMP_CAP, max(fr.importance, upd.importance))
+            invalidate.add(fr.id)
+        merged.append(fr)
+    merged.extend(add_records)                    # new ADDs (ids not in the snapshot)
+    return merged, invalidate
 
 
 def _with_eviction_note(counts: dict, store: MemoryStore) -> dict:
